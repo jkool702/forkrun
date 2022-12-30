@@ -69,7 +69,6 @@ forkrun() {
     
     for kk in ${!inArgs[@]}; do
         "${parFunc}" "${inArgs[${kk}]}" | printf '%s %q\n' "${kk}" "$(</dev/stdin)" &
-        sleep 0.001s
         numActiveJobs=$(jobs -rp | wc -l)
         (( ${numActiveJobs} >= ${maxParallelThreads} )) && wait -nf 
         ${verboseFlag} && echo "$(( ${kk} +1 )) started jobs; $(( ${kk} + 1 - ${numActiveJobs} )) finished jobs; ${numActiveJobs} active jobs" >&2
