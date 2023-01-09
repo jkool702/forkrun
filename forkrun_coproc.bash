@@ -81,7 +81,7 @@ for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 source <(cat<<EOF
 { coproc p${kk} {
 while true; do
-    read -d ''
+    read -r -d ''
     [[ -z \$REPLY ]] && break
     ${parFunc} "\$REPLY" >&4
     printf '%s\0' "${kk}" >&\${fd_coreInd}
