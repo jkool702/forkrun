@@ -51,7 +51,7 @@ exec {fd_coreInd}<>"${tmpPipe}"
 rm -f "${tmpPipe}"
 
 # parse inputs for function name and nProcs
-# any initial arguments are rolled into variabke $parFunc
+# any initial arguments are rolled into variable $parFunc
 nProcs=0
 if [[ "${1,,}" =~ -+[jp]$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
     nProcs="${2}"
@@ -96,7 +96,7 @@ EOF
     local +n pCur
     local -n pCur_PID=p${kk}_PID
     pidA+=("$pCur_PID")
-    local +n pCur
+    local +n pCur_PID
 
 done
 
