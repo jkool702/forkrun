@@ -1,165 +1,139 @@
-#!/bin/bash 
+#!/bin/bash
 
 forkrun() {
-## RUNS ALL GIVEN INPUTS THROUGH A SPECIFIED FUNCTION/SCRIPT IN PARALLEL BY FORKING THEM OFF IN A LOOP
+## Efficiently runs many tasks in parallel using coprocs
 #
-# USAGE: forkrun [-v|--verbose] [-d|--debug] [-P <#>|--parallel[-threads]=<#>] [--] funcName in1 in2 in3 ...
-#        forkrun [-v|--verbose] [-d|--debug] [-P <#>|--parallel[-threads]=<#>] (-f funcName|--function[-name]=funcName) [--] in1 in2 in3 ...
-#        forkrun  in1 in2 in3 ... [-v|--verbose] [-d|--debug] [-P <#>|--parallel[-threads]=<#>] (-f funcName|--function[-name]=funcName)
+# USAGE is the same as the running a loop in parallel using xargs -P /  parallel.
+# source this file, then pass inputs to parallelize over on stdin, 
+# and pass function name and initial arguments as function inputs. 
 #
-# OPTIONS:
-#
-# -f <...> | --function[-name]=<...> : sets the name/path of the function/script to run in parallel using different input args
-#                                      if omitted, it is assumed that the 1st non-forkrun-option argument is the function/script name:
-#                                      The following will be used (in decreasing prefferance) to ID the scpeified function/script:
-#                                      1. declare -f <...>      2. which <...>      3. [[ -f <...> ]] && file <...> | grep executable
-#                                      
-#
-# -P <#> | --parallel[-threads]=<#> :  sets the number of simultanious forks to use. if omitted, use the number of logical processor cores (nproc)
-#                                      if set to '0', use the number of logical processor cores and force each task to run only on a single core via taskset
-#
-# -v | --verbose : increase verbosity
-#
-# -d | --debug   : increase verbosity even more and slow down execution by adding a "sleep 0.1s" before each command (via a debug trap). Implies -v.
-#
-# -- : all inputs after the '--' will be treated as function inputs to parallelize over. They wont be analysed, and wont set forkrun options even if they match one of the above options.
-#      note: if you have A LOT of inputs to parallelize over then using '--' might significantly speed up the "options processing" part of this function.
-#
-# NOTE: options will attempt to be matched with somewhat "fuzzy" matching. They are case insensitive, and both short and long options can use the others notation. 
-#       example: '--p=<#>' and '-PaRaLlEl <#>' both will set the '-P' paramater described above.
+# printf '%s\n' "${inArgs}" | forkrun_coproc [(-j|-P) <#>] functionName (initialArgs)
+# example :    find ./ -type f | forkrun_coproc sha256sum
+# 
+# use -j or -P to specify the number of simultanious processes to use at a given time
+# default if not given is to use the number of logical cpou cores $(nproc)
+# 
+# For each simultanious porocess requested, a coproc is forked off. Data are then piped in/out of these coprocs.
+# Importantly, this means that you dont need to fork anything after the initial coprocs are set up.
+# This makes this parallelization method MUCH faster than forking (especially for tasks with many short/quick tasks).
+# In my testing it was also a considerable amount faster than xargs -P or parallel.
 
-    # declare local variables
-    
-    local nn
-    local -i kk
-    local -i maxParallelThreads
-    local -i numActiveJobs
-    local -a inArgs
-    local verboseFlag
-    local tasksetFlag
-    local parser_rmNextFlag
-    local parFunc
-    local fifoPipe
-    local debugFlag
-    local nArgs
-  
-      
-    # load all inputs into a bash array
-    for nn in "${@}"; do
-        inArgs[${#inArgs[@]}]="${nn}"
-    done
+# enable job control
+set -m
 
-    # parse inputs
-    verboseFlag=false
-    debugFlag=false
-    parser_rmNextFlag=false
-    for kk in ${!inArgs[@]}; do
-        if { [[ -z "${inArgs[${kk}]}" ]] || ${parser_rmNextFlag}; }; then
-            unset "inArgs[${kk}]"
-            parser_rmNextFlag=false
-        elif [[ "${inArgs[${kk}],,}" =~ ^-+f(unc)?(\-?n(ame)?)?=.+$ ]]; then
-            parFunc="${inArgs[${kk}]##*=}"
-            unset "inArgs[${kk}]"
-        elif { [[ "${inArgs[${kk}],,}" =~ ^-+f(unc)?(\-?n(ame)?)?$ ]] && [[ ${inArgs[$(( ${kk} + 1 ))],,} =~ ^.+$ ]]; }; then
-            parFunc="${inArgs[$(( ${kk} + 1 ))]}"
-            unset "inArgs[${kk}]"
-            parser_rmNextFlag=true
-        elif [[ "${inArgs[${kk}],,}" =~ ^-+p(ar(allel)?)?(\-?t(hreads)?)?=[0-9]+$ ]]; then
-            maxParallelThreads=${inArgs[${kk}]##*=}
-            unset "inArgs[${kk}]"
-        elif { [[ "${inArgs[${kk}],,}" =~ ^-+p(ar(allel)?)?(\-?t(hreads)?)?$ ]] && [[ ${inArgs[$(( ${kk} + 1 ))]} =~ ^[0-9]+$ ]]; }; then
-            maxParallelThreads=${inArgs[$(( ${kk} + 1 ))]}
-            unset "inArgs[${kk}]"
-            parser_rmNextFlag=true
-        elif [[ "${inArgs[${kk}],,}" =~ ^-+v(erbose)?$ ]]; then
-            verboseFlag=true
-            unset "inArgs[${kk}]"
-        elif [[ "${inArgs[${kk}],,}" =~ ^-+d(ebug)?$ ]]; then
-            debugFlag=true
-            unset "inArgs[${kk}]"
-        elif [[ "${inArgs[${kk}]}" == '--' ]]; then
-            unset "inArgs[${kk}]"
-            break
-        fi
-    done
-    
-	# setup debug flag
-    ${debugFlag} && set -x && trap 'sleep 0.1s' DEBUG
-    ${debugFlag} && verboseFlag=true 
+# set exit trap to clean up
+exitTrap() (
+    exec {fd_coreInd}>&-
+    jobs -rp | xargs -r kill
+    trap - EXIT ERR HUP TERM INT RETURN 
+)
+trap 'exitTrap' EXIT ERR HUP TERM INT RETURN 
 
-    # squeeze out emptry indicies in inArgs
-    mapfile -t inArgs < <(printf '%s\n' "${inArgs[@]}" | grep -E '^.+$')
+# make variables local
+local -a FD_in
+local -a FD_out
+local -a pidA
+local tmpPipe
+local parFunc
+local nArgs
+local nProcs
+local nSent
+local nDone
+local fd_coreInd
+local inArgCur
+local stdinReadFlag
 
-    # set funcName to 1st element in inArgs if not yet set, than validate it
-    [[ -z ${parFunc} ]] && (( $# > 0 )) && parFunc="${inArgs[0]}" && inArgs[0]='' && mapfile -t inArgs < <(printf '%s\n' "${inArgs[@]}" | grep -E '^.+$')
-    if declare -F "${parFunc}"; then
-        parFunc="$(declare -F "${parFunc}")"
-    elif which "${parFunc}" 2>/dev/null 1>/dev/null; then
-        parFunc="$(which "${parFunc}")"
-    elif [[ -f "${parFunc}" ]] && file "${parFunc}" | grep -qi 'executable'; then
-        parFunc="$(realpath "${parFunc}")"
+# open anonymous pipe. 
+# This is used by the coprocs to indicate that they are done with a task and ready for another.
+tmpPipe="$(mktemp -u)"
+mkfifo "${tmpPipe}"
+exec {fd_coreInd}<>"${tmpPipe}"
+rm -f "${tmpPipe}"
+
+# parse inputs for function name and nProcs
+# any initial arguments are rolled into variable $parFunc
+nProcs=0
+if [[ "${1,,}" =~ -+[jp]$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
+    nProcs="${2}"
+    shift 2
+    parFunc="${*}"
+elif [[ "${1,,}" =~ -+[jp]=?[0-9]+$ ]]; then
+    nProcs="${1#*[jp]}"
+    nProcs="${nProcs#=}"
+    shift 1
+    parFunc="${*}"
+else
+    parFunc="${*}"
+fi
+(( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
+
+# return if we dont have anything to parallelize over
+[[ -z ${parFunc} ]] && echo 'no function specified. aborting' >&2 && return 1
+[[ -t 0 ]] && echo 'no input arguments given on stdin. aborting' >&2 && return 2
+
+# fork off $nProcs coprocs and record FDs / PIDs for them
+# unfortunately this requires a source <(...) [or eval <...>] call to do dynamically...
+# without this the coproc index "$kk" doesnt get properly applied in the loop.
+# after each worker finishes its current task, it sends its index to pipe {fd_coreInd} to recieve another task
+# when finished it will be send a null input, causing it to break its 'while true' loop and terminate
+for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
+
+source <(cat<<EOF
+{ coproc p${kk} {
+while true; do
+    read -r -d ''
+    [[ -z \$REPLY ]] && break
+    ${parFunc} "\$REPLY" >&4
+    printf '%s\0' "${kk}" >&\${fd_coreInd}
+done
+}
+} 4>&1
+EOF
+)
+    local -n pCur=p${kk}
+    FD_in+=("${pCur[1]}")
+    FD_out+=("${pCur[0]}")
+    local +n pCur
+    local -n pCur_PID=p${kk}_PID
+    pidA+=("$pCur_PID")
+    local +n pCur_PID
+
+done
+
+# set initial vlues for the loop
+nSent=0
+nDone=0
+stdinReadFlag=true
+
+# populate pipe {fd_coreInd} with $nprocs initial indicies - 1 for each coproc
+printf '%s\0' "${!FD_in[@]}" >&${fd_coreInd}
+
+# begin parallelization loop
+while { ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); }; do
+    if ${stdinReadFlag}; then
+		# read all inputs that we can from stdin
+		# the first $nProcs get sent to the workers
+		# after this, each time a worker finishes they send their index 
+		# back to {fd_coreInd} and are given another input to process
+        while read -r inArgCur </dev/stdin; do
+            read -d '' <&${fd_coreInd}
+            printf '%s\0' "${inArgCur}" >&${FD_in[$REPLY]}
+            ((nSent++))
+            (( ${nSent} > ${nProcs} )) && ((nDone++))
+           done
+		   
+		   # we have read all of stdin. We now know how many total inputs there are
+		   # all tasks have been sent out, but there are still $nProcs tasks processing - 1 for each coproc
+           nArgs=${nSent}
+           stdinReadFlag=false
     else
-        echo "could not find ${parFunc} - it is not a declared function or along your current path. Aborting" >&2 && return 1
+		# as we recieve the last $nProcs tasks, send a null input to the now finished coproc, causing it to terminate
+        read -d '' <&${fd_coreInd}
+        printf '\0' >&${FD_in[$REPLY]}
+        ((nDone++))
     fi
-    
-    ${verboseFlag} && echo "Function to run in parallel: ${parFunc}" >&2 && sleep 1
-    nArgs=${#inArgs[@]}
-   
-    # set maxParallelThreads and determine if using taskset
-    (( ${maxParallelThreads} == 0 )) && tasksetFlag=true || tasksetFlag=false
-    { [[ -z ${maxParallelThreads} ]] || (( ${maxParallelThreads} == 0 )); } && maxParallelThreads=$(which nproc 2>/dev/null && nproc || grep -cE '^processor.* [0-9]+$' /proc/cpuinfo)
-    ${verboseFlag} && echo "Number of simultanious forked processees: ${maxParallelThreads} ($(${tasksetFlag} || echo 'no ')taskset)" >&2 && sleep 1
-    
-    if ${tasksetFlag}; then
-    
-        # setup for using taskset
-    
-        # open anonymous pipe to pipe "free" CPU ID's from (finished) forked process back to forking loop
-        fifoPipe='/tmp/.forkrun.fifo.pipe'
-        [[ -p "${fifoPipe}" ]] || mkfifo "${fifoPipe}"    
-        exec 3<>"${fifoPipe}"
-        rm "${fifoPipe}"
-        
-        # setup function wrapper to run funcName with the taskset CPU depetmined by reading from the pipe and a trap that pipes back the CPU number when finished
-        # this allows each taskset forked process to select a not-currently-in-use (by forkrun) CPU to use
-        runParFunc() {
-            read CPU <&3
-            trap 'echo '"${CPU}"' >&3; trap - RETURN ERR' RETURN ERR
-            ${verboseFlag} && echo "running job on CPU #${CPU}" >&2
-            taskset -c "${CPU}" "${parFunc}" "${inArgs[${1}]}" | printf '%s %q\n' "${1}" "$(</dev/stdin)"
-        }
-    
-        # prime the pipe with $maxParallelThreads processor ID's to use
-        printf '%d\n' $(seq 0 $(( ${maxParallelThreads} - 1 ))) >&3
-        
-    fi    
-     
-    # Loop over inputs
-    
-    for kk in ${!inArgs[@]}; do
-    # run function forked. Use printf to squash iots output into 1 line and prepend the input index
-        if ${tasksetFlag}; then
-            runParFunc ${kk} &
-        else
-            "${parFunc}" "${inArgs[${kk}]}" | printf '%s %q\n' "${kk}" "$(</dev/stdin)" &
-        fi
-        
-        # get number of current active jobs and wait for 1 to finish if it is >= ${maxParallelThreads}
-        numActiveJobs=$(jobs -rp | wc -l)
-        (( ${numActiveJobs} >= ${maxParallelThreads} )) && wait -nf 
-        
-        # add status indicator outpout to stderr if in verbose mode
-        ${verboseFlag} && echo "$(( ${kk} +1 )) started jobs; $(( ${kk} + 1 - ${numActiveJobs} )) finished jobs; ${numActiveJobs} active jobs" >&2
-        
-        # on last loop iteration wait for all remaining processes to finish
-        (( ${kk} == ( ${nArgs} - 1 ) )) && { ${verboseFlag} && echo "waiting for final jobs to finish" >&2 || true; } && wait -f 
-        
-        # finish loop. Take combined output and sort it by the prepended order index, then remove this and expand it back to its original form. This ensures that the output ordering is the same as the input ordering
-    done  | sort -V -i -k 1 | sed -E s/'^[0-9]+ '// | sed -E s/'\$'"'"'\\t'"'"/'\\t'/g | printf '%b\n' "$(</dev/stdin)" | sed -E s/'\\(.)'/'\1'/g
-    
-    # clean up, if needed
-    ${tasksetFlag} && 3>&-
-    ${debugFlag} && set +x && trap - DEBUG
-    
-    return 0
- }  
+done
+
+}
+
+# Note: this is the same as forkrun_coproc.bash except the funbction name is shortened to just 'forkrun'
