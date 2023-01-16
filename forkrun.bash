@@ -34,15 +34,12 @@ forkrun() {
 set -m
 
 # set exit trap to clean up
-exitTrap() (
-    source <(find /proc/{$$,self}/fd | xargs -l1 basename | grep -E '^[0-9]+$' | sort -u | grep -vE '^((0)|(1)|(2)|(3)|(255))$' | awk '{ printf "exec %s>&-\n",$0 }')
+exitTrap() {
+    source <(find /proc/{$$,self}/fd ! -type d | xargs -l1 basename | grep -E '^[0-9]+$' | sort -u | grep -vE '^((0)|(1)|(2)|(3)|(255))$' | awk '{ printf "exec %s>&-\n",$0 }')
     jobs -rp | xargs -r kill
-    exec {fd_coreInd}>&-
-    trap - EXIT HUP TERM INT RETURN 
-    kill $$
-    return
-)
-trap 'exitTrap' EXIT HUP TERM INT RETURN 
+    trap - EXIT HUP TERM INT  
+}
+trap 'exitTrap' EXIT HUP TERM INT  
 
 # make variables local
 local -a FD_in
@@ -127,12 +124,12 @@ if ${exportOrderFlag}; then
 
 source <(cat<<EOF
 { coproc p${kk} {
-    local outCur
+local outCur
 while true; do
     read -r -d '' 
     [[ -z \$REPLY ]] && break
     
-        outCur="\$(printf '%s\t' "\${REPLY%%,*}"; ${parFunc} "\${REPLY#*,}")"
+        outCur="\$(printf  '%d\t' "\${REPLY%%,*}"; ${parFunc} "\${REPLY#*,}")"
         printf '%s\n' "\${outCur//$'\n'/\\n}" >&4
     
     printf '%d\0' "${kk}" >&\${fd_coreInd}
