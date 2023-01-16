@@ -12,22 +12,32 @@ forkrun() {
 #
 # For each simultanious porocess requested, a coproc is forked off. Data are then piped in/out of these coprocs.
 # Importantly, this means that you dont need to fork anything after the initial coprocs are set up.
-# This makes this parallelization method MUCH faster than forking (especially for tasks with many short/quick tasks).
-# In my testing it was also a considerable amount faster than xargs -P or parallel.
+# This makes this parallelization method MUCH faster than forking (for tasks with many short/quick tasks and on x86_64 machines
+# with many cores speedup can be >100x).# In my testing it was also a considerable amount faster than 'parallel' (5-10x) and
+# (depending on the machine) between "roughly the same speed" and 4x faster than 'xargs -P'
 #
 # FLAGS
 #
 # -j or -P  use either of these flags to specify the number of simultanious processes to use at a given time
-# 			The default if not given is to use the number of logical cpou cores $(nproc)
+#           The default if not given is to use the number of logical cpou cores $(nproc)
 #
-#   -k 		use this flag to force the output to be given in the same order as arguments were given on stdin.
+#    -k     use this flag to force the output to be given in the same order as arguments were given on stdin.
 #           the "cost" of this is a) you wont get any output as the code runs - it will all come at one at the end 
-# 			and b) the code runs slightly slower (5-10%).  This internally uses an additional "hidden" flag: -0.
+#           and b) the code runs slightly slower (10-20%).  This re-calls forkrun with the '-0' flag and then sorts the output
 #
-#   -- 		Use this flag to indicate that all remaining arguments are the 'functionName' and 'initialArgs'. 
-# 			This could be used to ensure a functionName of, say, '-k' is parsed as the functionName, not as a forkrun option flag.
+#    -0     use this flag to force the output for each input to be printed on 1 line (newlines are replaced by '\n')
+#           and pre-pended with "<#> $'\t'", where <#> reprenenst the order of the input that generated that result.
+#           THis is used by the '-k' flag to re-order the output to the same order as the inputs
+#
+#    --     use this flag to indicate that all remaining arguments are the 'functionName' and 'initialArgs'. 
+#           This could be used to ensure a functionName of, say, '-k' is parsed as the functionName, not as a forkrun option flag.
 # 
 # NOTE: Flags are not case sensitive and can be given in any order, but must all be given before the "functionName" input
+#
+# DEPENDENCIES:
+# if used without '-k' and with '(-j | -P) <(#>0)>': none. The code uses 100% bash builtins
+# if used without '(-j | -P)' or with '(-j | -P) 0': either 'nproc' OR 'grep' + procfs to determine logical core count
+# if used with '-k': 'sort' and 'cut' to reorder the output
 
 
 # enable job control
@@ -35,11 +45,18 @@ set -m
 
 # set exit trap to clean up
 exitTrap() {
-    source <(find /proc/{$$,self}/fd ! -type d | xargs -l1 basename | grep -E '^[0-9]+$' | sort -u | grep -vE '^((0)|(1)|(2)|(3)|(255))$' | awk '{ printf "exec %s>&-\n",$0 }')
-    jobs -rp | xargs -r kill
+    local FD
+    local fd_coreInd
+    fd_coreInd="$1"
+    shift 1
+    for FD in "${@}"; do
+        [[ -e /proc/$$/fd/${FD} ]] && printf '\0' >&${FD}
+    done
+    jobs -rp | xargs -r kill 2>/dev/null
+    [[ -e /proc/$$/"${fd_coreInd}" ]] && exec{fd_coreInd}>&-
     trap - EXIT HUP TERM INT  
 }
-trap 'exitTrap' EXIT HUP TERM INT  
+trap 'exitTrap "${fd_coreInd}" "${FD_in[@]}"' EXIT HUP TERM INT  
 
 # make variables local
 local -a FD_in
@@ -76,15 +93,15 @@ while [[ "${1}" =~ ^-+[jpk0\-].*$ ]]; do
         nProcs="${nProcs#=}"
         shift 1
     elif [[ "${1,,}" =~ ^-+k$ ]]; then
-		# user requested ordered output
+        # user requested ordered output
         orderedOutFlag=true
         shift 1    
     elif [[ "${1}" =~ ^-+0$ ]]; then
-		# sore will output sorting order with output to allow for auto output re-sorting
+        # sore will output sorting order with output to allow for auto output re-sorting
         exportOrderFlag=true
         shift 1    
     elif [[ "${1}" == '--' ]]; then
-		# stop processing forkrun options
+        # stop processing forkrun options
         shift 1
         break
     fi
@@ -183,7 +200,7 @@ while { ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); }; do
         # the first $nProcs get sent to the workers
         # after this, each time a worker finishes they send their index 
         # back to {fd_coreInd} and are given another input to process
-		# pre-pend the input order index (nSent) to each input sent to the workers
+        # pre-pend the input order index (nSent) to each input sent to the workers
         while read -r inArgCur </dev/stdin; do
             read -d '' <&${fd_coreInd}
             printf '%d,%s\0' "${nSent}" "${inArgCur}" >&${FD_in[$REPLY]}
@@ -208,23 +225,23 @@ else
 # no ordered output
 while { ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); }; do
     if ${stdinReadFlag}; then
-		# read all inputs that we can from stdin
-		# the first $nProcs get sent to the workers
-		# after this, each time a worker finishes they send their index 
-		# back to {fd_coreInd} and are given another input to process
+        # read all inputs that we can from stdin
+        # the first $nProcs get sent to the workers
+        # after this, each time a worker finishes they send their index 
+        # back to {fd_coreInd} and are given another input to process
         while read -r inArgCur </dev/stdin; do
             read -d '' <&${fd_coreInd}
             printf '%s\0' "${inArgCur}" >&${FD_in[$REPLY]}
             ((nSent++))
             (( ${nSent} > ${nProcs} )) && ((nDone++))
         done
-		   
-		   # we have read all of stdin. We now know how many total inputs there are
-		   # all tasks have been sent out, but there are still $nProcs tasks processing - 1 for each coproc
+           
+           # we have read all of stdin. We now know how many total inputs there are
+           # all tasks have been sent out, but there are still $nProcs tasks processing - 1 for each coproc
            nArgs=${nSent}
            stdinReadFlag=false
     else
-		# as we recieve the last $nProcs tasks, send a null input to the now finished coproc, causing it to terminate
+        # as we recieve the last $nProcs tasks, send a null input to the now finished coproc, causing it to terminate
         read -d '' <&${fd_coreInd}
         printf '\0' >&${FD_in[$REPLY]}
         ((nDone++))
