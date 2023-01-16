@@ -105,7 +105,7 @@ parFunc="${*}"
 # a) results for a given input have newlines replaced with '\n' (so each result takes 1 line), and 
 # b) each result line is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag}; then
-    forkrun -j"$(( ${nProcs} - 1 ))" -0 "${parFunc}" | sort -n -k 1 -t $'\t' | printf '%b' "$(</dev/stdin)" | cut -d $'\t' -f 2- 
+    forkrun -j"${nProcs}" -0 -- "${parFunc}" | sort -n -k 1 -t $'\t' | printf '%b' "$(</dev/stdin)" | cut -d $'\t' -f 2- 
     return
 fi
 
