@@ -12,9 +12,8 @@ forkrun() {
 #
 # For each simultanious porocess requested, a coproc is forked off. Data are then piped in/out of these coprocs.
 # Importantly, this means that you dont need to fork anything after the initial coprocs are set up.
-# This makes this parallelization method MUCH faster than forking (for tasks with many short/quick tasks and on x86_64 machines
-# with many cores speedup can be >100x).# In my testing it was also a considerable amount faster than 'parallel' (5-10x) and
-# (depending on the machine) between "roughly the same speed" and 4x faster than 'xargs -P'
+# This makes this parallelization method MUCH faster than forking (especially for tasks with many short/quick tasks).
+# In my testing it was also a considerable amount faster than xargs -P or parallel.
 #
 # FLAGS
 #
@@ -52,8 +51,9 @@ exitTrap() {
     for FD in "${@}"; do
         [[ -e /proc/$$/fd/${FD} ]] && printf '\0' >&${FD}
     done
-    jobs -rp | xargs -r kill 2>/dev/null
-    [[ -e /proc/$$/"${fd_coreInd}" ]] && exec{fd_coreInd}>&-
+    #source <(find /proc/{$$,self}/fd ! -type d | xargs -l1 basename | grep -E '^[0-9]+$' | sort -u | grep -vE '^((0)|(1)|(2)|(3)|(255))$' | awk '{ printf "exec %s>&-\n",$0 }')
+    jobs -rp | xargs -r kill
+	[[ -e /proc/$$/"${fd_coreInd}" ]] && exec{fd_coreInd}>&-
     trap - EXIT HUP TERM INT  
 }
 trap 'exitTrap "${fd_coreInd}" "${FD_in[@]}"' EXIT HUP TERM INT  
