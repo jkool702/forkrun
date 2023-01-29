@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 
 forkrun() {
 ## Efficiently runs many tasks in parallel using coprocs
