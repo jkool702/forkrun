@@ -263,8 +263,4 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
     fi
 done
 
-exec {fd_coreInd}>&-
-
 }
-
-# Note: this is the same as forkrun_coproc.bash except the funbction name is shortened to just 'forkrun'
