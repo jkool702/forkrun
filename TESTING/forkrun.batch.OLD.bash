@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 
 forkrun() {
 ## Efficiently runs many tasks in parallel using coprocs
@@ -46,80 +46,55 @@ set -m
 # set exit trap to clean up
 exitTrap() {
     local FD
-    local fd_index
-    local fd_stdin
-    local fd_stdout
-    local fd_read
-    local PID0
-
-    # get main process PID
-    PID0="${1}"
+    local fd_coreInd
     
     # restore IFS
-    export IFS="${2}"
+    export IFS="${IFS0}"
+    shift 1    
 
-    # get pipe fd's
-    fd_index="${3}"
-    fd_stdin="${4}"
-    fd_stdout="${5}"
-    fd_read="${6}"
-    
+    fd_coreInd="$1"
+    shift 1
 
     # shutdown all coprocs
-    [[ -e /proc/"${PID0}"/fd/"${fd_read}" ]] && printf '%d\0' '0' >&${fd_read}
-    for FD in "${FD_in[@]}" "${FD_out[@]}"; do
-        [[ -e /proc/"${PID0}"/fd/${FD} ]] && printf '\0' >&${FD}
+    for FD in "${@}"; do
+        [[ -e /proc/$$/fd/${FD} ]] && printf '\0' >&${FD}
     done
     jobs -rp | xargs -r kill
 
-    # close pipes
-    [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] && exec {fd_index}>&-
-    [[ -e /proc/"${PID0}"/fd/"${fd_stdin}" ]] && exec {fd_stdin}>&-
-    [[ -e /proc/"${PID0}"/fd/"${fd_stdout}" ]] && exec {fd_stdout}>&-
-    [[ -e /proc/"${PID0}"/fd/"${fd_read}" ]] && exec {fd_read}>&-
+    # close coreInd return pipe
+	[[ -e /proc/$$/"${fd_coreInd}" ]] && exec {fd_coreInd}>&-
 
     # unset traps
     trap - EXIT HUP TERM INT 
 }
-trap 'exitTrap "${PID0}" "${IFS0}" "${fd_index}" "${fd_stdin}" "${fd_stdout}" "${fd_read}"' EXIT HUP TERM INT  
+trap 'exitTrap "${IFS0}" "${fd_coreInd}" "${FD_in[@]}"' EXIT HUP TERM INT  
 
 # make variables local
 local -a FD_in
 local -a FD_out
 local -a pidA
-local -a inArgs
 local parFunc
-local -i nArgs
-local -i nProcs
-local -i nSent
-local -i nFinal
-local -i nBatch
-local fd_index
-local fd_stdin
-local fd_stdout
-local fd_read
-local -i coreInd
-local -i orderInd
-local outCur
-local PID0
+local nArgs
+local nProcs
+local nSent
+local nDone
+local nBatch
+local nBatchCur
+local fd_coreInd
+local coreInd
 local pCur
 local pCur_PID
 local stdinReadFlag
 local orderedOutFlag
 local exportOrderFlag
 local IFS0
-
-PID0=$$
+local outCur
 
 IFS0="${IFS}"
-export IFS=$'\n'
 
 # open anonymous pipe. 
 # This is used by the coprocs to indicate that they are done with a task and ready for another.
-exec {fd_index}<><(:)
-exec {fd_stdin}<><(:)
-exec {fd_stdout}<><(:)
-exec {fd_read}<><(:)
+exec {fd_coreInd}<><(:)
 
 # parse inputs for function name and nProcs
 # any initial arguments are rolled into variable $parFuncnProcs=0
@@ -162,6 +137,7 @@ parFunc="${*}"
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
 
+
 # return if we dont have anything to parallelize over
 [[ -z ${parFunc} ]] && echo 'NO FUNCTION SPECIFIED. ABORTING' >&2 && return 1
 [[ -t 0 ]] && echo 'NO INPUT ARGUMENTS GIVEN ON STDIN. ABORTING' >&2 && return 2
@@ -175,100 +151,120 @@ if ${orderedOutFlag}; then
     return
 fi
 
-#{ coproc pMain 
-{
-
 # fork off $nProcs coprocs and record FDs / PIDs for them
 #
 # unfortunately this requires a source <(...) [or eval <...>] call to do dynamically...
 # without this the coproc index "$kk" doesnt get properly applied in the loop.
-# after each worker finishes its current task, it sends its index to pipe {fd_index} to recieve another task
+# after each worker finishes its current task, it sends its index to pipe {fd_coreInd} to recieve another task
 # when finished it will be send a null input, causing it to break its 'while true' loop and terminate
 #
 # if ordered output is requested, the input order inde is prepended to the argument piped to the worker, 
 # where it is removed and then pre-pended onto the result from running the argument through the function
-    for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
+for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 
-source <(cat<<EOI0
+source <(cat<<EOF
 { coproc p${kk} {
-trap - EXIT HUP TERM INT 
 export IFS=$'\n'
 while true; do
-    read -d '' orderInd
-    mapfile -t -n ${nBatch} inArgs <&\${fd_stdin}
-    if [[ \${#inArgs[@]} == 0 ]]; then
-        printf '%d\0' '0' >&\${fd_read}
-        break
-    else
-        printf '%d\0' '1' >&\${fd_read}
-    fi
+    read -r -s -d '' 
+    [[ -z \$REPLY ]] && break
     
 $(if ${exportOrderFlag}; then
-cat<<EOI1 
-    outCur="\$(${parFunc} "\${inArgs[@]}")"
-    printf '%s\t%s\n\0' "\${orderInd}" "\${outCur//\$'\n'/\\n}" >&4
+cat<<EOI1
+    outCur="\$(printf '\t%s\t' "\${REPLY%%\$'\t'*}"; ${parFunc} \${REPLY#*\$'\t'})"
+    printf '%s\n\0' "\${outCur//\$'\n'/\\n}" >&4
 EOI1
 else
 cat<<EOI2
-    ${parFunc} "\${inArgs[@]}" >&4
+    ${parFunc} \${REPLY} >&4
 EOI2
 fi)
-    printf '${kk}\0' >&\${fd_index}
+    printf '${kk}\0' >&\${fd_coreInd}
 done
 } 
-} 4>&\${fd_stdout}
-EOI0
+} 4>&1
+EOF
 )
 
-    local -n pCur="p${kk}"
-    FD_in[$kk]="${pCur[1]}"
-    FD_out[$kk]="${pCur[0]}"
+    local -n pCur=p${kk}
+    FD_in+=("${pCur[1]}")
+    FD_out+=("${pCur[0]}")
     local +n pCur
-    local -n pCur_PID="p${kk}_PID"
-    pidA[$kk]="$pCur_PID"
+    local -n pCur_PID=p${kk}_PID
+    pidA+=("$pCur_PID")
     local +n pCur_PID
 
 done
 
-# begin parallelization loop
-# user requested ordered output
-
 # set initial vlues for the loop
 nSent=0
-nFinal=0
+nDone=0
+nBatchCur=0 
 stdinReadFlag=true
 
-# populate pipe {fd_index} with $nprocs initial indicies - 1 for each coproc
-printf '%d\0' "${!FD_in[@]}" >&${fd_index}   # read 1st input before loop, then during every iteration read what will be the next input
- 
-while ${stdinReadFlag} || (( ${nFinal} < ${nProcs} )); do
+# populate pipe {fd_coreInd} with $nprocs initial indicies - 1 for each coproc
+printf '%d\0' "${!FD_in[@]}" >&${fd_coreInd}
 
-    # read {fd_index} to trigger sending the next input
-    read -d '' coreInd <&${fd_index}            
-    (( ${nSent} < ${nProcs} )) || ((nFinal++))
+# begin parallelization loop
+# user requested ordered output
+while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
+    if ${stdinReadFlag}; then
+        # read all inputs that we can from stdin and group into NULL-seperated groups of $nBatch lines
+        # each time a worker finishes they send their index back to {fd_coreInd} and are given another input to process
+        # if ordering output, pre-pend the input order index (nSent) to each input group sent to the workers
+        
+        read -d '' coreInd <&${fd_coreInd}
+        (( ${nSent} < ${nProcs} )) || ((nDone++))
+        
+        if [[ ${nBatch} == 1 ]]; then
+            
+            read -r -s </dev/stdin || { nArgs=${nSent}; stdinReadFlag=false; }
+            printf '%s\0' "${REPLY}" >&${FD_in[${coreInd}]}
+            ((nSent++))
 
-    # signal the worker to read the next input
-    printf '%d\0' "${nSent}" >&${FD_in[${coreInd}]}
-      
-    # wait for confirmation that the read is complete
-    read -d '' <&${fd_read}
-    [[ "$REPLY" == '0' ]] && ((nFinal++)) && stdinReadFlag=false || ((nSent++))
+        else
 
+            nBatchCur=0  
+            until [[ ${nBatchCur} == "${nBatch}" ]]; do
+                read -r -s </dev/stdin || { { nArgs=${nSent};
+                    stdinReadFlag=false;
+                        [[ ${nBatch} == 0 ]] || ((nSent++)); 
+                    }
+                    nArgs=${nSent};
+                    stdinReadFlag=false; 
+                    break;
+                }
+
+                if [[ ${nBatchCur} == 0 ]]; then
+                    ${exportOrderFlag} && printf '%s\t%s' "${nSent}" "${REPLY}" >&${FD_in[${coreInd}]} || printf '%s' "${REPLY}" >&${FD_in[${coreInd}]} 
+                else
+                    printf '\n%s' "${REPLY}" >&${FD_in[${coreInd}]} 
+                fi
+            
+                ((nBatchCur++))
+            done
+
+            # indicate all lines of current input group has been sent --> null seperated parsing will group inputs for us
+            [[ ${nBatchCur} == 0 ]] || {
+                # indicate end of current input batch
+                printf '\0' >&${FD_in[${coreInd}]} 
+            
+                # iterate sent counter
+                ((nSent++))
+            }
+
+        fi
+
+    else
+        # as we recieve the last $nProcs tasks, send a null input to the now finished coproc, causing it to terminate
+        read -d '' coreInd <&${fd_coreInd}
+        printf '\0' >&${FD_in[$coreInd]}
+        ((nDone++))
+    fi
 done
 
-
-} {fd_stdin}<&0 {fd_stdout}>&1
-
-
-#}  5<&0 6>&1
-
-# preprocess stdin with printf to add NULL character between every $nBatch lines
-#IFS=$'\n' printf "$(printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(</dev/stdin) >&${fd_stdin}
-#printf "$(printf '\\0=%.0s' $(seq 1 ${nProcs}) | tr -d '=')" >&${fd_stdin}
-
-#exec 0>&${fd_stdin}
-#printf '%d\0' '1' >&${pMain[1]}
-
-#wait ${pMain_PID}
+exec {fd_coreInd}>&-
 
 }
+
+# Note: this is the same as forkrun_coproc.bash except the funbction name is shortened to just 'forkrun'
