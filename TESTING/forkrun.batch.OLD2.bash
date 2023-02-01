@@ -46,9 +46,11 @@ set -m
 # set exit trap to clean up
 exitTrap() {
     local FD
-    local PID0
     local fd_index
-#    local fd_stdout
+    local fd_stdin
+    local fd_stdout
+    local fd_read
+    local PID0
 
     # get main process PID
     PID0="${1}"
@@ -58,10 +60,13 @@ exitTrap() {
 
     # get pipe fd's
     fd_index="${3}"
-#    fd_stdout="${4}"
+    fd_stdin="${4}"
+    fd_stdout="${5}"
+    fd_read="${6}"
     
 
     # shutdown all coprocs
+    [[ -e /proc/"${PID0}"/fd/"${fd_read}" ]] && printf '%d\0' '0' >&${fd_read}
     for FD in "${FD_in[@]}" "${FD_out[@]}"; do
         [[ -e /proc/"${PID0}"/fd/${FD} ]] && printf '\0' >&${FD}
     done
@@ -69,25 +74,32 @@ exitTrap() {
 
     # close pipes
     [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] && exec {fd_index}>&-
-#    [[ -e /proc/"${PID0}"/fd/"${fd_stdout}" ]] && exec {fd_stdout}>&-
+    [[ -e /proc/"${PID0}"/fd/"${fd_stdin}" ]] && exec {fd_stdin}>&-
+    [[ -e /proc/"${PID0}"/fd/"${fd_stdout}" ]] && exec {fd_stdout}>&-
+    [[ -e /proc/"${PID0}"/fd/"${fd_read}" ]] && exec {fd_read}>&-
 
     # unset traps
     trap - EXIT HUP TERM INT 
 }
-trap 'exitTrap "${PID0}" "${IFS0}" "${fd_index}"' EXIT HUP TERM INT  
+trap 'exitTrap "${PID0}" "${IFS0}" "${fd_index}" "${fd_stdin}" "${fd_stdout}" "${fd_read}"' EXIT HUP TERM INT  
 
 # make variables local
 local -a FD_in
 local -a FD_out
 local -a pidA
+local -a inArgs
 local parFunc
 local -i nArgs
-local -i nSent
-local -i nDone
 local -i nProcs
+local -i nSent
+local -i nFinal
 local -i nBatch
 local fd_index
-local -i workerIndex
+local fd_stdin
+local fd_stdout
+local fd_read
+local -i coreInd
+local -i orderInd
 local outCur
 local PID0
 local pCur
@@ -105,7 +117,9 @@ export IFS=$'\n'
 # open anonymous pipe. 
 # This is used by the coprocs to indicate that they are done with a task and ready for another.
 exec {fd_index}<><(:)
-#exec {fd_stdout}<><(:)
+exec {fd_stdin}<><(:)
+exec {fd_stdout}<><(:)
+exec {fd_read}<><(:)
 
 # parse inputs for function name and nProcs
 # any initial arguments are rolled into variable $parFuncnProcs=0
@@ -121,10 +135,10 @@ while [[ "${1}" =~ ^-+[jpkl0\-].*$ ]]; do
         nProcs="${1#*[jp]}"
         nProcs="${nProcs#=}"
         shift 1
-    elif [[ "${1,,}" =~ ^-+l$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
+    elif [[ "${1,,}" =~ ^-+l$ ]] && [[ "${2}" =~ ^(([0-9]+)|(auto([_\-]?strict)?))$ ]]; then
         nBatch="${2}"
         shift 2
-    elif [[ "${1,,}" =~ ^-+l=?[0-9]+$ ]]; then
+    elif [[ "${1,,}" =~ ^-+l=?(([0-9]+)|(auto([_\-]?strict)?))$ ]]; then
         nBatch="${1#*l}"
         nBatch="${nBatch#=}"
         shift 1
@@ -149,8 +163,8 @@ parFunc="${*}"
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
 
 # return if we dont have anything to parallelize over
-[[ -z ${parFunc} ]] && echo 'ERROR: NO FUNCTION SPECIFIED. ABORTING' >&2 && return 1
-[[ -t 0 ]] && echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
+[[ -z ${parFunc} ]] && echo 'NO FUNCTION SPECIFIED. ABORTING' >&2 && return 1
+[[ -t 0 ]] && echo 'NO INPUT ARGUMENTS GIVEN ON STDIN. ABORTING' >&2 && return 2
 
 # if user requested ordered output, re-run the forkrun call trading flag '-k' for flag '-0',
 # then sort the output and remove the ordering index. Flag '-0' causes forkrun to do 2 things: 
@@ -162,16 +176,8 @@ if ${orderedOutFlag}; then
 fi
 
 #{ coproc pMain 
+{
 
-{ 
-    export IFS=$'\n' && printf "$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(cat <&4) >&5 &
-} 4<&0 5>&1  | {
-
-#{
-#    export IFS=$'\n' && printf '%s'"$( export IFS=$'\n' &&  printf '%%s\\n=%.0s' $(seq 2 ${nBatch}) | tr -d '=')"'\0' $(</dev/stdin) >&4 &
-#   # export IFS=$'\n' && printf "${batchFlag:+'%s'}$( export IFS=$'\n' &&  printf '%%s\\n=%.0s' $(seq $1 ${nBatch}) | tr -d '='0)"'\0' $(</dev/stdin) >&4 &
-#} 4>&1 | {
-#{ export IFS=$'\n' && printf '%s'"$( export IFS=$'\n' &&  printf '%%s\\n=%.0s' $(seq 2 ${nBatch}) | tr -d '=')"'\0' $(</dev/stdin); } | {
 # fork off $nProcs coprocs and record FDs / PIDs for them
 #
 # unfortunately this requires a source <(...) [or eval <...>] call to do dynamically...
@@ -181,7 +187,6 @@ fi
 #
 # if ordered output is requested, the input order inde is prepended to the argument piped to the worker, 
 # where it is removed and then pre-pended onto the result from running the argument through the function
-
     for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 
 source <(cat<<EOI0
@@ -189,25 +194,29 @@ source <(cat<<EOI0
 trap - EXIT HUP TERM INT 
 export IFS=$'\n'
 while true; do
-    read -r -d '' -u 7
-	[[ -z \${REPLY} ]] && break
+    read -d '' orderInd
+    mapfile -t -n ${nBatch} inArgs <&\${fd_stdin}
+    if [[ \${#inArgs[@]} == 0 ]]; then
+        printf '%d\0' '0' >&\${fd_read}
+        break
+    else
+        printf '%d\0' '1' >&\${fd_read}
+    fi
     
 $(if ${exportOrderFlag}; then
 cat<<EOI1 
-    outCur="\$(export IFS=\$'\n' && ${parFunc} \${REPLY#*\$'\t'})"
-    printf '%d\t%s\n\0' "\${REPLY%%\$'\t'*}" "\${outCur//\$'\n'/\\n}" >&8
+    outCur="\$(${parFunc} "\${inArgs[@]}")"
+    printf '%s\t%s\n\0' "\${orderInd}" "\${outCur//\$'\n'/\\n}" >&4
 EOI1
 else
 cat<<EOI2
-    { 
-        export IFS=\$'\n' && ${parFunc} \${REPLY}
-    } >&8
+    ${parFunc} "\${inArgs[@]}" >&4
 EOI2
 fi)
-    printf '%d\0' ${kk} >&\${fd_index}
+    printf '${kk}\0' >&\${fd_index}
 done
-} 7<&0
-} 8>&9
+} 
+} 4>&\${fd_stdout}
 EOI0
 )
 
@@ -226,46 +235,29 @@ done
 
 # set initial vlues for the loop
 nSent=0
-nDone=0
+nFinal=0
 stdinReadFlag=true
 
 # populate pipe {fd_index} with $nprocs initial indicies - 1 for each coproc
 printf '%d\0' "${!FD_in[@]}" >&${fd_index}   # read 1st input before loop, then during every iteration read what will be the next input
-
-
-#read -r -d '' -u 5 || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
-  
-
-    
-read -r -d '' -u 6 && [[ -n "${REPLY}" ]] || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
-while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
+ 
+while ${stdinReadFlag} || (( ${nFinal} < ${nProcs} )); do
 
     # read {fd_index} to trigger sending the next input
-    read -d '' workerIndex <&${fd_index}            
-    (( ${nSent} < ${nProcs} )) || ((nDone++))
-	
-	if ${stdinReadFlag}; then
+    read -d '' coreInd <&${fd_index}            
+    (( ${nSent} < ${nProcs} )) || ((nFinal++))
 
-		# send already-read input to workers
-		if ${exportOrderFlag}; then
-			printf '%d\t%s\0' "${nSent}" "${REPLY}" >&${FD_in[${workerIndex}]}
-		else
-			printf '%s\0' "${REPLY}" >&${FD_in[${workerIndex}]}
-		fi
-		((nSent++))
+    # signal the worker to read the next input
+    printf '%d\0' "${nSent}" >&${FD_in[${coreInd}]}
+      
+    # wait for confirmation that the read is complete
+    read -d '' <&${fd_read}
+    [[ "$REPLY" == '0' ]] && ((nFinal++)) && stdinReadFlag=false || ((nSent++))
 
-		# read next input to send to next worker
-		read -r -d '' -u 6 && [[ -n ${REPLY} ]] || { nArgs=${nSent}; stdinReadFlag=false; }
-		
-	else
-	
-	    printf '\0' >&${FD_in[${workerIndex}]}
-		
-	fi
-		
 done
 
-} 6<&0 9>&1
+
+} {fd_stdin}<&0 {fd_stdout}>&1
 
 
 #}  5<&0 6>&1
