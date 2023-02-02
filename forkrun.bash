@@ -16,16 +16,15 @@ forkrun() {
 # with many cores speedup can be >100x).# In my testing it was also a considerable amount faster than 'parallel' (5-10x) and
 # (depending on the machine) between "roughly the same speed" and 4x faster than 'xargs -P'
 #
-# FLAGS
+# # # # # FLAGS # # # # #
 #
 # (-j|-P) <#>  use either of these flags to specify the number of simultanious processes to use at a given time
 #              The default if not given is to use the number of logical cpou cores $(nproc). The ' ' can be removed or replaced with '='.
 #              i.e., the following all work: '-j <#>', '-P <#>', '-j<#>', '-P<#>, '-j=<#>', '-P=<#>'
 #
-#   -l <#>     use this flag to define the number of inputs to group together and pass to the worker coprocs.
-#              sending multiple inputs at once typicallly is faster, since it reduces the number of individual 'parFunc' calls,
-#              but not all functions support multiple inputs at once. Default is 1, which will always work but may be slower than ideal.
-#              set this to '0' to have *all* the inputs given on stdin split up equally and sent to worker coprocs immediately.
+#   -l <#>     use this flag to define the number of inputs to group together and pass to the worker coprocs. Default is 1.
+#              sending multiple inputs at once typicallly is faster, since it reduces the number of individual 'parFunc' calls, but not all 
+#              functions support multiple inputs at once. NOTE: this should not be set higher than ( # lines input on stdin ) / ( # worker coprocs )
 #
 #    -k        use this flag to force the output to be given in the same order as arguments were given on stdin.
 #              the "cost" of this is a) you wont get any output as the code runs - it will all come at one at the end 
@@ -40,10 +39,11 @@ forkrun() {
 # 
 # NOTE: Flags are not case sensitive and can be given in any order, but must all be given before the "functionName" input
 #
-# DEPENDENCIES:
+# # # # # DEPENDENCIES # # # # # 
 # if used without '-k' and with '(-j | -P) <(#>0)>': none. The code uses 100% bash builtins
 # if used without '(-j | -P)' or with '(-j | -P) 0': either 'nproc' OR 'grep' + procfs to determine logical core count
 # if used with '-k': 'sort' and 'cut' to reorder the output
+# if used with '-l' > 1: 'tr' is used in generative the stdin pre-filter
 
 # enable job control
 set -m
@@ -63,7 +63,6 @@ exitTrap() {
     # get pipe fd's
     fd_index="${3}"
     
-
     # shutdown all coprocs
     for FD in "${FD_in[@]}" "${FD_out[@]}"; do
         [[ -e /proc/"${PID0}"/fd/${FD} ]] && printf '\0' >&${FD}
@@ -153,7 +152,7 @@ while [[ "${1,,}" =~ ^-+[jpkl0\-].*$ ]]; do
     fi
 done
 # all remaining inputs are functionName / initialArgs
-parFunc="${*}"
+parFunc="${@}"
 
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
@@ -206,7 +205,7 @@ while true; do
 $(if ${exportOrderFlag}; then
 cat<<EOI1 
     outCur="\$(export IFS=\$'\n' && ${parFunc} \${REPLY#*\$'\t'})"
-    printf '%d\t%s\n\0' "\${REPLY%%\$'\t'*}" "\${outCur//\$'\n'/\\n}" >&8
+    printf '%d\t%s\n\0' "\${REPLY%%\$'\t*}" "\${outCur//\$'\n'/\\n}" >&8
 EOI1
 else
 cat<<EOI2
@@ -276,7 +275,5 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
 done
 
 } 6<&0 9>&1
-
-
 
 }
