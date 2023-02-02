@@ -204,7 +204,7 @@ while true; do
 $(if ${exportOrderFlag}; then
 cat<<EOI1
     outCur="\$(export IFS=\$'\n' && ${parFunc} \${REPLY#*\$'\t'})"
-    printf '%d\t%s\n\0' "\${REPLY%%\$'\t*}" "\${outCur//\$'\n'/\\n}" >&8
+    printf '%d\t%s\n\0' "\${REPLY%%\$'\t'*}" "\${outCur//\$'\n'/\\n}" >&8
 EOI1
 else
 cat<<EOI2
