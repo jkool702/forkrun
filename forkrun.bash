@@ -7,8 +7,8 @@ forkrun() {
 # EXAMPLE:    find ./ -type f | forkrun_coproc sha256sum
 #
 # Usage is the same as the running a loop in parallel using xargs -P /  parallel.
-# source this file, then pass inputs to parallelize over on stdin, 
-# and pass function name and initial arguments as function inputs. 
+# source this file, then pass inputs to parallelize over on stdin,
+# and pass function name and initial arguments as function inputs.
 #
 # For each simultanious porocess requested, a coproc is forked off. Data are then piped in/out of these coprocs.
 # Importantly, this means that you dont need to fork anything after the initial coprocs are set up.
@@ -23,23 +23,23 @@ forkrun() {
 #              i.e., the following all work: '-j <#>', '-P <#>', '-j<#>', '-P<#>, '-j=<#>', '-P=<#>'
 #
 #   -l <#>     use this flag to define the number of inputs to group together and pass to the worker coprocs. Default is 1.
-#              sending multiple inputs at once typicallly is faster, since it reduces the number of individual 'parFunc' calls, but not all 
+#              sending multiple inputs at once typicallly is faster, since it reduces the number of individual 'parFunc' calls, but not all
 #              functions support multiple inputs at once. NOTE: this should not be set higher than ( # lines input on stdin ) / ( # worker coprocs )
 #
 #    -k        use this flag to force the output to be given in the same order as arguments were given on stdin.
-#              the "cost" of this is a) you wont get any output as the code runs - it will all come at one at the end 
+#              the "cost" of this is a) you wont get any output as the code runs - it will all come at one at the end
 #              and b) the code runs slightly slower (10-20%).  This re-calls forkrun with the '-0' flag and then sorts the output
 #
 #    -0        use this flag to force the output for each input to be printed on 1 line (newlines are replaced by '\n')
 #              and pre-pended with "<#> $'\t'", where <#> reprenenst the order of the input that generated that result.
 #              This is used by the '-k' flag to re-order the output to the same order as the inputs
 #
-#    --     use this flag to indicate that all remaining arguments are the 'functionName' and 'initialArgs'. 
+#    --     use this flag to indicate that all remaining arguments are the 'functionName' and 'initialArgs'.
 #           This could be used to ensure a functionName of, say, '-k' is parsed as the functionName, not as a forkrun option flag.
-# 
+#
 # NOTE: Flags are not case sensitive and can be given in any order, but must all be given before the "functionName" input
 #
-# # # # # DEPENDENCIES # # # # # 
+# # # # # DEPENDENCIES # # # # #
 # if used without '-k' and with '(-j | -P) <(#>0)>': none. The code uses 100% bash builtins
 # if used without '(-j | -P)' or with '(-j | -P) 0': either 'nproc' OR 'grep' + procfs to determine logical core count
 # if used with '-k': 'sort' and 'cut' to reorder the output
@@ -56,13 +56,13 @@ exitTrap() {
 
     # get main process PID
     PID0="${1}"
-    
+
     # restore IFS
     export IFS="${2}"
 
     # get pipe fd's
     fd_index="${3}"
-    
+
     # shutdown all coprocs
     for FD in "${FD_in[@]}" "${FD_out[@]}"; do
         [[ -e /proc/"${PID0}"/fd/${FD} ]] && printf '\0' >&${FD}
@@ -75,9 +75,9 @@ exitTrap() {
     [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] && exec {fd_index}>&-
 
     # unset traps
-    trap - EXIT HUP TERM INT 
+    trap - EXIT HUP TERM INT
 }
-trap 'exitTrap "${PID0}" "${IFS0}" "${fd_index}"' EXIT HUP TERM INT  
+trap 'exitTrap "${PID0}" "${IFS0}" "${fd_index}"' EXIT HUP TERM INT
 
 # make variables local
 local -a FD_in
@@ -108,7 +108,7 @@ PID0=$$
 IFS0="${IFS}"
 export IFS=$'\n'
 
-# open anonymous pipe. 
+# open anonymous pipe.
 # This is used by the coprocs to indicate that they are done with a task and ready for another.
 exec {fd_index}<><(:)
 
@@ -140,11 +140,11 @@ while [[ "${1,,}" =~ ^-+[jpkl0\-].*$ ]]; do
     elif [[ "${1,,}" =~ ^-+k$ ]]; then
         # user requested ordered output
         orderedOutFlag=true
-        shift 1    
+        shift 1
     elif [[ "${1}" =~ ^-+0$ ]]; then
         # make output include input sorting order. Used internally with -k to allow for auto output re-sorting
         exportOrderFlag=true
-        shift 1    
+        shift 1
     elif [[ "${1}" == '--' ]]; then
         # stop processing forkrun options
         shift 1
@@ -165,11 +165,11 @@ parFunc="${@}"
 [[ -t 0 ]] && echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
 
 # if user requested ordered output, re-run the forkrun call trading flag '-k' for flag '-0',
-# then sort the output and remove the ordering index. Flag '-0' causes forkrun to do 2 things: 
-# a) results for a given input have newlines replaced with '\n' (so each result takes 1 line), and 
+# then sort the output and remove the ordering index. Flag '-0' causes forkrun to do 2 things:
+# a) results for a given input have newlines replaced with '\n' (so each result takes 1 line), and
 # b) each result line is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag}; then
-    forkrun -j"${nProcs}" -l"${nBatch}" -0 -- "${parFunc}" | sort -s -z -n -k 1 -t$'\t' | printf '%b' "$(</dev/stdin)" | cut -d $'\t' -f 2- 
+    forkrun -j"${nProcs}" -l"${nBatch}" -0 -- "${parFunc}" | sort -s -z -n -k 1 -t$'\t' | printf '%b' "$(</dev/stdin)" | cut -d $'\t' -f 2-
     return
 fi
 
@@ -189,27 +189,27 @@ fi
 # after each worker finishes its current task, it sends its index to pipe {fd_index} to recieve another task
 # when finished it will be send a null input, causing it to break its 'while true' loop and terminate
 #
-# if ordered output is requested, the input order inde is prepended to the argument piped to the worker, 
+# if ordered output is requested, the input order inde is prepended to the argument piped to the worker,
 # where it is removed and then pre-pended onto the result from running the argument through the function
 
     for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 
 source <(cat<<EOI0
 { coproc p${kk} {
-trap - EXIT HUP TERM INT 
+trap - EXIT HUP TERM INT
 export IFS=$'\n'
 while true; do
     read -r -d '' -u 7
     [[ -z \${REPLY} ]] && break
-    
+
 $(if ${exportOrderFlag}; then
-cat<<EOI1 
+cat<<EOI1
     outCur="\$(export IFS=\$'\n' && ${parFunc} \${REPLY#*\$'\t'})"
     printf '%d\t%s\n\0' "\${REPLY%%\$'\t*}" "\${outCur//\$'\n'/\\n}" >&8
 EOI1
 else
 cat<<EOI2
-    { 
+    {
         export IFS=\$'\n' && ${parFunc} \${REPLY}
     } >&8
 EOI2
@@ -239,7 +239,7 @@ nDone=0
 stdinReadFlag=true
 
 # populate pipe {fd_index} with $nprocs initial indicies - 1 for each coproc
-printf '%d\0' "${!FD_in[@]}" >&${fd_index}   # read 1st input before loop, then during every iteration read what will be the next input  
+printf '%d\0' "${!FD_in[@]}" >&${fd_index}   # read 1st input before loop, then during every iteration read what will be the next input
 
 # read 1st input group. note that each input read will be for sending to a worker coproc the following iteration
 # this potentially allows for faster response since the main thread doesnt have to wait to read an input before sending it to the worker coproc
@@ -247,9 +247,9 @@ read -r ${extraReadStdinArgs} -u 6 && [[ -n "${REPLY}" ]] || { echo 'ERROR: NO I
 while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
 
     # read {fd_index} to trigger sending the next input
-    read -d '' workerIndex <&${fd_index}            
+    read -d '' workerIndex <&${fd_index}
     (( ${nSent} < ${nProcs} )) || ((nDone++))
-    
+
     if ${stdinReadFlag}; then
 	# reading stdin
 
@@ -265,13 +265,13 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
 
         # read next input. this will be send to a worker next iteration
         read -r ${extraReadStdinArgs} -u 6 && [[ -n ${REPLY} ]] || { nArgs=${nSent}; stdinReadFlag=false; }
-        
+
     else
 		# we are done reading inputs from stdin. as each worker coproc finishes running its last task, send it '\0' to cause it to shutdown
         printf '\0' >&${FD_in[${workerIndex}]}
-        
+
     fi
-        
+
 done
 
 } 6<&0 9>&1
