@@ -18,16 +18,22 @@ forkrun() {
 #
 # FLAGS
 #
-# -j or -P  use either of these flags to specify the number of simultanious processes to use at a given time
-#           The default if not given is to use the number of logical cpou cores $(nproc)
+# (-j|-P) <#>  use either of these flags to specify the number of simultanious processes to use at a given time
+#              The default if not given is to use the number of logical cpou cores $(nproc). The ' ' can be removed or replaced with '='.
+#              i.e., the following all work: '-j <#>', '-P <#>', '-j<#>', '-P<#>, '-j=<#>', '-P=<#>'
 #
-#    -k     use this flag to force the output to be given in the same order as arguments were given on stdin.
-#           the "cost" of this is a) you wont get any output as the code runs - it will all come at one at the end 
-#           and b) the code runs slightly slower (10-20%).  This re-calls forkrun with the '-0' flag and then sorts the output
+#   -l <#>     use this flag to define the number of inputs to group together and pass to the worker coprocs.
+#              sending multiple inputs at once typicallly is faster, since it reduces the number of individual 'parFunc' calls,
+#              but not all functions support multiple inputs at once. Default is 1, which will always work but may be slower than ideal.
+#              set this to '0' to have *all* the inputs given on stdin split up equally and sent to worker coprocs immediately.
 #
-#    -0     use this flag to force the output for each input to be printed on 1 line (newlines are replaced by '\n')
-#           and pre-pended with "<#> $'\t'", where <#> reprenenst the order of the input that generated that result.
-#           THis is used by the '-k' flag to re-order the output to the same order as the inputs
+#    -k        use this flag to force the output to be given in the same order as arguments were given on stdin.
+#              the "cost" of this is a) you wont get any output as the code runs - it will all come at one at the end 
+#              and b) the code runs slightly slower (10-20%).  This re-calls forkrun with the '-0' flag and then sorts the output
+#
+#    -0        use this flag to force the output for each input to be printed on 1 line (newlines are replaced by '\n')
+#              and pre-pended with "<#> $'\t'", where <#> reprenenst the order of the input that generated that result.
+#              This is used by the '-k' flag to re-order the output to the same order as the inputs
 #
 #    --     use this flag to indicate that all remaining arguments are the 'functionName' and 'initialArgs'. 
 #           This could be used to ensure a functionName of, say, '-k' is parsed as the functionName, not as a forkrun option flag.
@@ -39,7 +45,6 @@ forkrun() {
 # if used without '(-j | -P)' or with '(-j | -P) 0': either 'nproc' OR 'grep' + procfs to determine logical core count
 # if used with '-k': 'sort' and 'cut' to reorder the output
 
-
 # enable job control
 set -m
 
@@ -48,7 +53,6 @@ exitTrap() {
     local FD
     local PID0
     local fd_index
-#    local fd_stdout
 
     # get main process PID
     PID0="${1}"
@@ -58,18 +62,18 @@ exitTrap() {
 
     # get pipe fd's
     fd_index="${3}"
-#    fd_stdout="${4}"
     
 
     # shutdown all coprocs
     for FD in "${FD_in[@]}" "${FD_out[@]}"; do
         [[ -e /proc/"${PID0}"/fd/${FD} ]] && printf '\0' >&${FD}
     done
+	
+	# kill all background jobs
     jobs -rp | xargs -r kill
 
     # close pipes
     [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] && exec {fd_index}>&-
-#    [[ -e /proc/"${PID0}"/fd/"${fd_stdout}" ]] && exec {fd_stdout}>&-
 
     # unset traps
     trap - EXIT HUP TERM INT 
@@ -95,37 +99,43 @@ local pCur_PID
 local stdinReadFlag
 local orderedOutFlag
 local exportOrderFlag
+local extraReadStdinArgs
 local IFS0
 
+# record main process PID
 PID0=$$
 
+# record IFS, so we can change it back to what itnoriginally was in the exit trap
 IFS0="${IFS}"
 export IFS=$'\n'
 
 # open anonymous pipe. 
 # This is used by the coprocs to indicate that they are done with a task and ready for another.
 exec {fd_index}<><(:)
-#exec {fd_stdout}<><(:)
 
 # parse inputs for function name and nProcs
-# any initial arguments are rolled into variable $parFuncnProcs=0
+# any initial arguments are rolled into variable $parFunc
 orderedOutFlag=false
 exportOrderFlag=false
 nProcs=0
 nBatch=1
-while [[ "${1}" =~ ^-+[jpkl0\-].*$ ]]; do
+while [[ "${1,,}" =~ ^-+[jpkl0\-].*$ ]]; do
     if [[ "${1,,}" =~ ^-+[jp]$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
+		# set number of worker coprocs
         nProcs="${2}"
         shift 2
     elif [[ "${1,,}" =~ ^-+[jp]=?[0-9]+$ ]]; then
-        nProcs="${1#*[jp]}"
+		# set number of worker coprocs
+        nProcs="${1#*[jpJP]}"
         nProcs="${nProcs#=}"
         shift 1
     elif [[ "${1,,}" =~ ^-+l$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
+		# set number of inputs to use for each parFunc call
         nBatch="${2}"
         shift 2
     elif [[ "${1,,}" =~ ^-+l=?[0-9]+$ ]]; then
-        nBatch="${1#*l}"
+		# set number of inputs to use for each parFunc call
+        nBatch="${1#*[lL]}"
         nBatch="${nBatch#=}"
         shift 1
     elif [[ "${1,,}" =~ ^-+k$ ]]; then
@@ -133,7 +143,7 @@ while [[ "${1}" =~ ^-+[jpkl0\-].*$ ]]; do
         orderedOutFlag=true
         shift 1    
     elif [[ "${1}" =~ ^-+0$ ]]; then
-        # sore will output sorting order with output to allow for auto output re-sorting
+        # make output include input sorting order. Used internally with -k to allow for auto output re-sorting
         exportOrderFlag=true
         shift 1    
     elif [[ "${1}" == '--' ]]; then
@@ -148,6 +158,9 @@ parFunc="${*}"
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
 
+# if nBatch > 1 --> using stdin prefilter, make read use null delimiter instear of newline delimiter
+(( ${nBatch} > 1 )) && extraReadStdinArgs="-d ''"
+
 # return if we dont have anything to parallelize over
 [[ -z ${parFunc} ]] && echo 'ERROR: NO FUNCTION SPECIFIED. ABORTING' >&2 && return 1
 [[ -t 0 ]] && echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
@@ -157,21 +170,19 @@ parFunc="${*}"
 # a) results for a given input have newlines replaced with '\n' (so each result takes 1 line), and 
 # b) each result line is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag}; then
-    forkrun -j"${nProcs}" -0 -- "${parFunc}" | sort -s -z -n -k 1 -t$'\t' | printf '%b' "$(</dev/stdin)" | cut -d $'\t' -f 2- 
+    forkrun -j"${nProcs}" -l"${nBatch}" -0 -- "${parFunc}" | sort -s -z -n -k 1 -t$'\t' | printf '%b' "$(</dev/stdin)" | cut -d $'\t' -f 2- 
     return
 fi
 
-#{ coproc pMain 
-
-{ 
+# if nBatch > 1 --> pre-process stdin and add NULL characters every $nBatch lines
+# this allows for easier (loop-free) reading of individual batches of input lines via read -r -d ''
+{ if (( ${nBatch} > 1 )); then
     export IFS=$'\n' && printf "$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(cat <&4) >&5 &
+else
+    cat  <&4 >&5
+fi
 } 4<&0 5>&1  | {
 
-#{
-#    export IFS=$'\n' && printf '%s'"$( export IFS=$'\n' &&  printf '%%s\\n=%.0s' $(seq 2 ${nBatch}) | tr -d '=')"'\0' $(</dev/stdin) >&4 &
-#   # export IFS=$'\n' && printf "${batchFlag:+'%s'}$( export IFS=$'\n' &&  printf '%%s\\n=%.0s' $(seq $1 ${nBatch}) | tr -d '='0)"'\0' $(</dev/stdin) >&4 &
-#} 4>&1 | {
-#{ export IFS=$'\n' && printf '%s'"$( export IFS=$'\n' &&  printf '%%s\\n=%.0s' $(seq 2 ${nBatch}) | tr -d '=')"'\0' $(</dev/stdin); } | {
 # fork off $nProcs coprocs and record FDs / PIDs for them
 #
 # unfortunately this requires a source <(...) [or eval <...>] call to do dynamically...
@@ -190,7 +201,7 @@ trap - EXIT HUP TERM INT
 export IFS=$'\n'
 while true; do
     read -r -d '' -u 7
-	[[ -z \${REPLY} ]] && break
+    [[ -z \${REPLY} ]] && break
     
 $(if ${exportOrderFlag}; then
 cat<<EOI1 
@@ -210,7 +221,7 @@ done
 } 8>&9
 EOI0
 )
-
+	# record PIDs and i/o file descriptors in indexed arrays
     local -n pCur="p${kk}"
     FD_in[$kk]="${pCur[1]}"
     FD_out[$kk]="${pCur[0]}"
@@ -221,8 +232,7 @@ EOI0
 
 done
 
-# begin parallelization loop
-# user requested ordered output
+# begin main parallelization loop
 
 # set initial vlues for the loop
 nSent=0
@@ -230,53 +240,43 @@ nDone=0
 stdinReadFlag=true
 
 # populate pipe {fd_index} with $nprocs initial indicies - 1 for each coproc
-printf '%d\0' "${!FD_in[@]}" >&${fd_index}   # read 1st input before loop, then during every iteration read what will be the next input
+printf '%d\0' "${!FD_in[@]}" >&${fd_index}   # read 1st input before loop, then during every iteration read what will be the next input  
 
-
-#read -r -d '' -u 5 || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
-  
-
-    
-read -r -d '' -u 6 && [[ -n "${REPLY}" ]] || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
+# read 1st input group. note that each input read will be for sending to a worker coproc the following iteration
+# this potentially allows for faster response since the main thread doesnt have to wait to read an input before sending it to the worker coproc
+read -r ${extraReadStdinArgs} -u 6 && [[ -n "${REPLY}" ]] || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
 while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
 
     # read {fd_index} to trigger sending the next input
     read -d '' workerIndex <&${fd_index}            
     (( ${nSent} < ${nProcs} )) || ((nDone++))
-	
-	if ${stdinReadFlag}; then
+    
+    if ${stdinReadFlag}; then
+	# reading stdin
 
-		# send already-read input to workers
-		if ${exportOrderFlag}; then
-			printf '%d\t%s\0' "${nSent}" "${REPLY}" >&${FD_in[${workerIndex}]}
-		else
-			printf '%s\0' "${REPLY}" >&${FD_in[${workerIndex}]}
-		fi
-		((nSent++))
+        # send already-read input to workers
+        if ${exportOrderFlag}; then
+		# soting output. pre-pend data sent with index describing position in input list
+            printf '%d\t%s\0' "${nSent}" "${REPLY}" >&${FD_in[${workerIndex}]}
+        else
+		# not sorting output. Just send input lines as-is
+            printf '%s\0' "${REPLY}" >&${FD_in[${workerIndex}]}
+        fi
+        ((nSent++))
 
-		# read next input to send to next worker
-		read -r -d '' -u 6 && [[ -n ${REPLY} ]] || { nArgs=${nSent}; stdinReadFlag=false; }
-		
-	else
-	
-	    printf '\0' >&${FD_in[${workerIndex}]}
-		
-	fi
-		
+        # read next input. this will be send to a worker next iteration
+        read -r ${extraReadStdinArgs} -u 6 && [[ -n ${REPLY} ]] || { nArgs=${nSent}; stdinReadFlag=false; }
+        
+    else
+		# we are done reading inputs from stdin. as each worker coproc finishes running its last task, send it '\0' to cause it to shutdown
+        printf '\0' >&${FD_in[${workerIndex}]}
+        
+    fi
+        
 done
 
 } 6<&0 9>&1
 
 
-#}  5<&0 6>&1
-
-# preprocess stdin with printf to add NULL character between every $nBatch lines
-#IFS=$'\n' printf "$(printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(</dev/stdin) >&${fd_stdin}
-#printf "$(printf '\\0=%.0s' $(seq 1 ${nProcs}) | tr -d '=')" >&${fd_stdin}
-
-#exec 0>&${fd_stdin}
-#printf '%d\0' '1' >&${pMain[1]}
-
-#wait ${pMain_PID}
 
 }
