@@ -152,7 +152,7 @@ while [[ "${1,,}" =~ ^-+[jpkl0\-].*$ ]]; do
     fi
 done
 # all remaining inputs are functionName / initialArgs
-parFunc="${@}"
+parFunc="${*}"
 
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
