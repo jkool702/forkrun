@@ -156,6 +156,9 @@ parFunc="${*}"
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
 
+# if nBatch > 1 --> using stdin prefilter, make read use null delimiter instear of newline delimiter
+(( ${nBatch} > 1 )) && extraReadStdinArgs=true || extraReadStdinArgs=false
+
 # return if we dont have anything to parallelize over
 [[ -z ${parFunc} ]] && echo 'ERROR: NO FUNCTION SPECIFIED. ABORTING' >&2 && return 1
 [[ -t 0 ]] && echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
@@ -169,11 +172,13 @@ if ${orderedOutFlag}; then
     return
 fi
 
-# pre-process stdin and add NULL characters every $nBatch lines
+# if nBatch > 1 --> pre-process stdin and add NULL characters every $nBatch lines
 # this allows for easier (loop-free) reading of individual batches of input lines via read -r -d ''
-{
-   export IFS=$'\n' && printf "$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(</dev/fd/4) >&5 &
-} 4<&0 5>&1 | {
+{ if (( ${nBatch} > 1 )); then
+    export IFS=$'\n' && printf "$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(</dev/fd/4) >&5 &
+else
+    cat <&4 >&5 
+fi; } 4<&0 5>&1 | {
 
 # fork off $nProcs coprocs and record FDs / PIDs for them
 #
@@ -236,7 +241,11 @@ printf '%d\0' "${!FD_in[@]}" >&${fd_index}
 
 # read 1st input group. note that each input read will be for sending to a worker coproc the following iteration
 # this potentially allows for faster response since the main thread doesnt have to wait to read an input before sending it to the worker coproc
-read -r -d '' -u 6 && [[ -n "${REPLY}" ]] || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
+if ${extraReadStdinArgs}; then 
+    read -r -d '' -u 6; 
+else 
+    read -r -u 6; 
+fi && [[ -n "${REPLY}" ]] || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
 
 while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
 
@@ -258,7 +267,11 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
         ((nSent++))
 
         # read next input. this will be send to a worker next iteration
-        read -r -d '' -u 6 && [[ -n ${REPLY} ]] || { nArgs=${nSent}; stdinReadFlag=false; }
+        if ${extraReadStdinArgs}; then 
+            read -r -d '' -u 6; 
+        else 
+            read -r -u 6; 
+        fi && [[ -n ${REPLY} ]] || { nArgs=${nSent}; stdinReadFlag=false; }
         
     else
         # we are done reading inputs from stdin. as each worker coproc finishes running its last task, send it '\0' to cause it to shutdown   
