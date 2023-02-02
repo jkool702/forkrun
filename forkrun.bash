@@ -13,8 +13,7 @@ forkrun() {
 # For each simultanious porocess requested, a coproc is forked off. Data are then piped in/out of these coprocs.
 # Importantly, this means that you dont need to fork anything after the initial coprocs are set up.
 # This makes this parallelization method MUCH faster than forking (for tasks with many short/quick tasks and on x86_64 machines
-# with many cores speedup can be >100x).# In my testing it was also a considerable amount faster than 'parallel' (5-10x) and
-# (depending on the machine) between "roughly the same speed" and 4x faster than 'xargs -P'
+# with many cores speedup can be >100x). In my testing it was also comparable to, if not faster than, 'xargs -P' and 'parallel'
 #
 # # # # # FLAGS # # # # #
 #
