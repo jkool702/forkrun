@@ -15,6 +15,10 @@ forkrun() {
 # This makes this parallelization method MUCH faster than forking (for tasks with many short/quick tasks and on x86_64 machines
 # with many cores speedup can be >100x). In my testing it was also comparable to, if not faster than, 'xargs -P' and 'parallel'
 #
+# ALT VERSION: this version omits the stdin prefilter (which inserts NULL characters in stdin every nBatch lines if `-l 1`) and instead
+#              reads stdin newline delimited. This comes at the cost of an extra check and code path while reading stdin in the main loop.
+#              The end result is that the `-l 1` case (which is the defaul) is 2-3% faster, but setting `l <N>` for N>1 is 2-3% slower. 
+#
 # # # # # FLAGS # # # # #
 #
 # (-j|-P) <#>  use either of these flags to specify the number of simultanious processes to use at a given time
@@ -98,6 +102,7 @@ local pCur_PID
 local stdinReadFlag
 local orderedOutFlag
 local exportOrderFlag
+local extraReadStdinArgs
 local IFS0
 
 # record main process PID
@@ -168,7 +173,7 @@ parFunc="${*}"
 # a) results for a given input have newlines replaced with '\n' (so each result takes 1 line), and 
 # b) each result line is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag}; then
-    forkrun -j"${nProcs}" -0 -- "${parFunc}" | sort -s -z -n -k 1 -t$'\t' | printf '%b' "$(</dev/stdin)" | cut -d $'\t' -f 2- 
+    forkrun -j"${nProcs}" -l"${nBatch}" -0 -- "${parFunc}" | sort -z -n -k1 -t$'\t' | cut -z -d $'\t' -f 2- 
     return
 fi
 
@@ -192,27 +197,26 @@ fi; } 4<&0 5>&1 | {
 
     for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 
-source <(cat<<EOI0
+source <(cat<<EOI0 
 { coproc p${kk} {
 trap - EXIT HUP TERM INT 
-export IFS=\$'\n'
-while true; do
+export IFS=\$'\\n'
+while true; do 
     read -r -d '' -u 7
     [[ -z \${REPLY} ]] && break
     
 $(if ${exportOrderFlag}; then
 cat<<EOI1 
-    outCur="\$(export IFS=\$'\n' && ${parFunc} \${REPLY#*\$'\t'})"
-    printf '%d\t%s\n\0' "\${REPLY%%\$'\t'*}" "\${outCur//\$'\n'/\\n}" >&8
+    printf '%d\\t%s\\n\\0' "\${REPLY%%\$'\\t'*}" "\$(export IFS=\$'\\n' && ${parFunc} \${REPLY#*\$'\\t'})" >&8
 EOI1
 else
 cat<<EOI2
     { 
-        export IFS=\$'\n' && ${parFunc} \${REPLY}
+        export IFS=\$'\\n' && ${parFunc} \${REPLY}
     } >&8
 EOI2
 fi)
-    printf '%d\0' ${kk} >&\${fd_index}
+    printf '%d\\0' ${kk} >&\${fd_index}
 done
 } 7<&0
 } 8>&9

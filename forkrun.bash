@@ -165,14 +165,14 @@ parFunc="${*}"
 # a) results for a given input have newlines replaced with '\n' (so each result takes 1 line), and 
 # b) each result line is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag}; then
-    forkrun -j"${nProcs}" -0 -- "${parFunc}" | sort -s -z -n -k 1 -t$'\t' | printf '%b' "$(</dev/stdin)" | cut -d $'\t' -f 2- 
+    forkrun -j"${nProcs}" -l"${nBatch}" -0 -- "${parFunc}" | sort -z -n -k1 -t$'\t' | cut -z -d $'\t' -f 2- 
     return
 fi
 
-# pre-process stdin and add NULL characters every $nBatch lines
+# if nBatch > 1 --> pre-process stdin and add NULL characters every $nBatch lines
 # this allows for easier (loop-free) reading of individual batches of input lines via read -r -d ''
 {
-   export IFS=$'\n' && printf "$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(</dev/fd/4) >&5 &
+    export IFS=$'\n' && printf "$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(</dev/fd/4) >&5 &
 } 4<&0 5>&1 | {
 
 # fork off $nProcs coprocs and record FDs / PIDs for them
@@ -187,27 +187,26 @@ fi
 
     for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 
-source <(cat<<EOI0
+source <(cat<<EOI0 
 { coproc p${kk} {
 trap - EXIT HUP TERM INT 
-export IFS=\$'\n'
-while true; do
+export IFS=\$'\\n'
+while true; do 
     read -r -d '' -u 7
     [[ -z \${REPLY} ]] && break
     
 $(if ${exportOrderFlag}; then
 cat<<EOI1 
-    outCur="\$(export IFS=\$'\n' && ${parFunc} \${REPLY#*\$'\t'})"
-    printf '%d\t%s\n\0' "\${REPLY%%\$'\t'*}" "\${outCur//\$'\n'/\\n}" >&8
+    printf '%d\\t%s\\n\\0' "\${REPLY%%\$'\\t'*}" "\$(export IFS=\$'\\n' && ${parFunc} \${REPLY#*\$'\\t'})" >&8
 EOI1
 else
 cat<<EOI2
     { 
-        export IFS=\$'\n' && ${parFunc} \${REPLY}
+        export IFS=\$'\\n' && ${parFunc} \${REPLY}
     } >&8
 EOI2
 fi)
-    printf '%d\0' ${kk} >&\${fd_index}
+    printf '%d\\0' ${kk} >&\${fd_index}
 done
 } 7<&0
 } 8>&9
@@ -236,7 +235,7 @@ printf '%d\0' "${!FD_in[@]}" >&${fd_index}
 
 # read 1st input group. note that each input read will be for sending to a worker coproc the following iteration
 # this potentially allows for faster response since the main thread doesnt have to wait to read an input before sending it to the worker coproc
-read -r -d '' -u 6 && [[ -n "${REPLY}" ]] || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
+read -r -d '' -u 6 && [[ -n $REPLY ]] || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
 
 while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
 
