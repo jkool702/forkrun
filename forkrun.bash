@@ -172,7 +172,7 @@ fi
 # if nBatch > 1 --> pre-process stdin and add NULL characters every $nBatch lines
 # this allows for easier (loop-free) reading of individual batches of input lines via read -r -d ''
 {
-    export IFS=$'\n' && printf "$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(</dev/fd/4) >&5 &
+    export IFS=$'\n' && printf "$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')"'\0' $(cat <&4) >&5 &
 } 4<&0 5>&1 | {
 
 # fork off $nProcs coprocs and record FDs / PIDs for them
