@@ -46,7 +46,7 @@ forkrun() {
 #              [ 'success'  | 1 ] : remove the temporary directory if 'forkrun' finishes normally. This is the DEFAULT.
 #              [  'always'  | 2 ] : remove the temporary directory in all situations, even if 'forkrun' did not finish running normally
 #              [ 'realtime' | 3 ] : same as [ 'always' | 2 ], but also removes the individual tmp files containing lines from stdin as they are reead and no longer needed
-#                                   this lowers memory use (especially if stdin is *really* large) at the cost of increasing (wall-clock) run-time by up to ~55555%
+#                                   this lowers memory use (especially if stdin is *really* large) at the cost of increasing (wall-clock) run-time by up to ~5-10%
 #
 # NOTE: Flags are not case sensitive and can be given in any order, but must all be given before the "functionName" input
 #
@@ -56,7 +56,7 @@ forkrun() {
 # if used without '(-j | -P)' or with '(-j | -P) 0': either 'nproc' OR 'grep' + procfs to determine logical core count
 # if used with '-k': 'sort' and 'cut' to reorder the output
 #
-# For all scenarios: either 'split' or { 'tr' and 'sed' }
+# For all scenarios: either 'split' or { 'tr' and 'sed' }. 'split' is preffered.
 #         If 'split' is available, it will be used in splitting the input into batches to send to the worker coprocs.
 #         If 'split' is not available, a somewhat slower and less reliable splitting based on 'printf' and 'source' will be used
 # 
@@ -124,7 +124,7 @@ local exportOrderFlag
 local haveSplitFlag
 local -i rmTmpDirFlag
 local -f getNextInputFileName
-local inAll
+local -a inAll
 
 # record main process PID
 PID0=$$
@@ -211,8 +211,6 @@ parFunc="${*}"
 # a) results for a given input have newlines replaced with '\n' (so each result takes 1 line), and 
 # b) each result line is pre-pended with the index/order that it was recieved in from stdin.
 
-#${orderedOutFlag && exec {fd_sort}<><(:)
-
 if ${orderedOutFlag}; then
     forkrun ${inAll[@]//'-k'/'-0'} | sort -z -n -k1 -t$'\t' | cut -z -d $'\t' -f 2-
     return
@@ -220,7 +218,7 @@ fi
 
 # begin main function
 {
-#nArgs=$(
+
 # prepare temp directory to store split stdin
 mkdir -p "${tmpDirRoot}"
 tmpDir="$(mktemp -d -p "${tmpDirRoot%/}" -t '.forkrun.XXXXXXXXX')"
@@ -265,11 +263,7 @@ getNextInputFileName() {
     printf 'x%s\n' "${@}"
 }
 
-#find "${tmpDir}" | wc -l
-
 fi
-
-#)
 
 # fork off $nProcs coprocs and record FDs / PIDs for them
 #
@@ -361,6 +355,7 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
         # get next file name to send based on nSent
         sendNext="$(getNextInputFileName "${nSent}")"
 
+        # if there isnt another file to read trigger stop condition
         [[ -f "${tmpDir}/${sendNext}" ]] || { 
             stdinReadFlag=false
             nArgs=${nSent}
@@ -374,10 +369,7 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
 
 done
 
-#exec {fd_sort}>&-
-
 } 6<&0 9>&1
-
 
 (( ${rmTmpDirFlag} >= 1 )) && [[ -n ${tmpDir} ]] && [[ -d "${tmpDir}" ]] && rm -rf "${tmpDir}"
 
