@@ -222,7 +222,7 @@ parFunc="${*}"
 # return if we dont have anything to parallelize over
 [[ -z ${parFunc} ]] && echo 'ERROR: NO FUNCTION SPECIFIED. ABORTING' >&2 && return 1
 { which "${parFunc}" 1>/dev/null 2>/dev/null || declare -F "${parFunc}" 2>/dev/null; } || { echo 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' >&2 && return 2; }
-[[ -t 0 ]] && echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
+[[ -t 0 ]] && echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 3
 
 # if user requested ordered output, re-run the forkrun call trading flag '-k' for flag '-n',
 # then sort the output and remove the ordering index. Flag '-n' causes forkrun to do 2 things: 
