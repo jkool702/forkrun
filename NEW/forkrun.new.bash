@@ -119,6 +119,7 @@ local parFunc
 local IFS0
 local sendNext
 local splitAgainPrefix
+local splitAgainFileNames
 local REPLY
 local PID0
 local pCur
@@ -378,18 +379,11 @@ if ${autoBatchFlag}; then
         nSent0=${nSent}
         nSent1=0
         splitAgainPrefix="$(getNextInputFileName 'x' "${nSent0}")"'_x'
-        nSent="$( { {
-        for nn in $( getNextInputFileName 'x' $( seq ${nSent} $(( ${nSent} + ${nProcs} - 1 )) ) ); do
-            if [[ -f "${tmpDir}/${nn}" ]]; then
-                cat "${tmpDir}/${nn}"
-                ((nSent++))
-            else
-                break
-            fi
-        done
-        echo "${nSent}" >&4
-        } | split -l $(( 1 + ( ( ${nBatch} * ( ${nSent} - ${nSent0} - 1 ) ) / ${nProcs} ) )) "$(${nullDelimiterFlag} && echo '-t '"'"'\0'"'")" -d - "${tmpDir}/${splitAgainPrefix}"
-        } 4>&1 )"
+        splitAgainFileNames="$(for nn in $( getNextInputFileName 'x' $( seq ${nSent} $(( ${nSent} + ${nProcs} - 1 )) ) ); do
+            [[ -f "${tmpDir}/${nn}" ]] && printf '%s\n' "${tmpDir}/${nn}" || break
+			done)"
+		nBatchCur=$(( 1 + ( ( ${nBatch} * ( $(echo "${splitAgainFileNames}" | wc -l) - 1 ) ) / ${nProcs} ) )) 
+        { export IFS=$'\n' && cat ${splitAgainFileNames}; } | split -l "${nBatchCur}" "$(${nullDelimiterFlag} && echo '-t '"'"'\0'"'")" -d - "${tmpDir}/${splitAgainPrefix}"
         sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSent1}")"
         ((nSent1++))
     fi
@@ -442,26 +436,20 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
                 nSent0=${nSent}
                 nSent1=0
                 splitAgainPrefix="$(getNextInputFileName 'x' "${nSent0}")"'_x'
-                nSent="$( { {
-                for nn in $( getNextInputFileName 'x' $( seq ${nSent} $(( ${nSent} + ${nProcs} - 1 )) ) ); do
-                    if [[ -f "${tmpDir}/${nn}" ]]; then
-                        cat "${tmpDir}/${nn}"
-                        ((nSent++))
-                    else
-                        break
-                    fi
-                done
-                echo "${nSent}" >&4
-                } | split -l $(( 1 + ( ( ${nBatch} * ( ${nSent} - ${nSent0} - 1 ) ) / ${nProcs} ) )) "$(${nullDelimiterFlag} && echo '-t '"'"'\0'"'")" -d - "${tmpDir}/${splitAgainPrefix}"
-                } 4>&1 )"
+                splitAgainFileNames="$(for nn in $( getNextInputFileName 'x' $( seq ${nSent} $(( ${nSent} + ${nProcs} - 1 )) ) ); do
+                    [[ -f "${tmpDir}/${nn}" ]] && printf '%s\n' "${tmpDir}/${nn}" || break
+        			done)"
+        		nBatchCur=$(( 1 + ( ( ${nBatch} * ( $(echo "${splitAgainFileNames}" | wc -l) - 1 ) ) / ${nProcs} ) )) 
+                { export IFS=$'\n' && cat ${splitAgainFileNames}; } | split -l "${nBatchCur}" "$(${nullDelimiterFlag} && echo '-t '"'"'\0'"'")" -d - "${tmpDir}/${splitAgainPrefix}"
                 sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSent1}")"
+                ((nSent1++))
             fi
           
         else
           
               sendNext="$(getNextInputFileName 'x' "${nSent}")"
         
-            # if there isnt another file to read trigger stop condition
+            # if there isnt another file to read then trigger stop condition
             [[ -f "${tmpDir}/${sendNext}" ]] || { 
                 stdinReadFlag=false
                 nArgs=${nSent}
