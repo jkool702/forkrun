@@ -19,12 +19,12 @@ forkrun() {
 #
 # (-j|-P) <#>  use either of these flags to specify the number of simultanious processes to use at a given time
 #              The default if not given is to use the number of logical cpou cores $(nproc). The ' ' can be removed or replaced with '='.
-#              i.e., the following all work: '-j <#>', '-P <#>', '-j<#>', '-P<#>, '-j=<#>', '-P=<#>'
+#              i.e., the following all work: '-j' '<#>', '-P' '<#>', '-j<#>', '-P<#>, '-j=<#>', '-P=<#>'. This is also true for the '-l' and '-t' flags.
 #
 #   -L <#>    use this flag to define the number of inputs to group together and pass to the worker coprocs. Sending multiple inputs at once 
 #              typicallly is faster, though setting this higher than 512 or higher than ( # lines in stdin ) / (# worker coprocs ) tends to make 
 #              forkrun slower, not faster. Set this to 0 to have forkrun automatically set and adjust this parameter for you (this is the DEFAULT). 
-#              NOTE:  not all functions (e.g., basename) support running multiple inputs at once. To use these fuctions with forkrun you MUST call forkrun with `-L 0`
+#              NOTE:  not all functions (e.g., basename) support running multiple inputs at once. To use these fuctions with forkrun you MUST call forkrun with `-l 0`
 #
 #  -t <path>   use this flag to set the base directory where tmp files containing groups of lines from stdin will be kept. Default is '\tmp'.
 #              To speed up parsing stdin, forkrun splits up stdin into groups of $nBatch and saves them to [ram]disk. This path should not include whitespace characters.
@@ -358,8 +358,6 @@ EOI0
 
 done
 
-
-
 # begin parallelization loop
 
 # set initial vlues for the loop
@@ -378,9 +376,12 @@ if ${autoBatchFlag}; then
 
     if [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( $nProcs - 1 )))" ]]; then
         sendNext="x00"
+        autoBatchFlag=false
         
     else
-        [[ -f "${tmpDir}/x00" ]] || inotifywait "${tmpDir}/x00"
+        [[ -f "${tmpDir}/x00" ]] || {
+            which inotifywait 1>/dev/null 2>/dev/null && inotifywait "${tmpDir}/x00" || until [[ -f "${tmpDir}/x00" ]]; do sleep 0.0001s; done
+        }
         splitAgainFlag=true
         nSentCur=0
         splitAgainPrefix='x00_x'
@@ -402,7 +403,9 @@ if ${autoBatchFlag}; then
     fi
           
 else
-    [ -f "${tmpDir}/x00" ]] || inotifywait "${tmpDir}/x00"
+    [[ -f "${tmpDir}/x00" ]] || {
+        which inotifywait 1>/dev/null 2>/dev/null && inotifywait "${tmpDir}/x00" || until [[ -f "${tmpDir}/x00" ]]; do sleep 0.0001s; done
+    }
     sendNext="x00"   
 fi
 
@@ -438,8 +441,9 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
             if ${splitAgainFlag}; then
                 sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSentCur}")"
 
-            elif [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( $nSent0 + $nProcs - 1 )))" ]]; then
+            elif [[ -f "${tmpDir}/$( getNextInputFileName 'x' $(( $nSent0 + $nProcs - 1 )) )" ]]; then
                 sendNext="$(getNextInputFileName 'x' "${nSent0}")"
+                autoBatchFlag=false
                 
             elif ! [[ -f "${tmpDir}/$(getNextInputFileName 'x' "${nSent0}")" ]]; then
                 stdinReadFlag=false
@@ -467,8 +471,6 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
                 sendNext="$( getNextInputFileName "${splitAgainPrefix}" "${nSentCur}" )"
             fi
 
-            (( ${nSent0} >= ${nProcs} )) && autoBatchFlag=false
-          
         else
           
             sendNext="$(getNextInputFileName 'x' "${nSent}")"
