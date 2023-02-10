@@ -109,10 +109,12 @@ local -a inAll
 local -i nArgs
 local -i nSent
 local -i nSent0
-local -i nSent1
+local -i nSentCur
+local -i splitAgainNSent
 local -i nDone
 local -i nProcs
 local -i nBatch
+local -i nBatchCur
 local -i workerIndex
 local fd_index
 local parFunc
@@ -244,10 +246,21 @@ which split 1>/dev/null 2>/dev/null && haveSplitFlag=true || haveSplitFlag=false
 
 # split up input into files, each of which contains $nBatch lines
 # and define function for getting the next file name
+{
 if ${haveSplitFlag}; then
     # split into files, each containing a batch of $nBatch lines from stdin, using 'split'
-    split -l "${nBatch}" "$(${nullDelimiterFlag} && echo '-t '"'"'\0'"'")" -d - "${tmpDir}"/x </dev/stdin &
-     #split -l "${nBatch}" -d - "${tmpDir}"/x </dev/stdin --verbose | wc -l &
+    {
+    if ${nullDelimiterFlag}; then 
+        {
+            split -t '\0' -d -l "${nBatch}" - "${tmpDir}"'/x' <&4  
+        } 4<&5 &
+    else 
+        {
+            split -d -l "${nBatch}" - "${tmpDir}"'/x' <&4 
+        } 4<&5 &
+    fi
+    } 5<&6
+#split -l "${nBatch}" -d - "${tmpDir}"/x </dev/stdin --verbose | wc -l &
 
 getNextInputFileName() {
     # 'split' names the output files in a really annoying way. it goes
@@ -277,9 +290,9 @@ else
     # use printf + sed to transform input into repeated blocks of the following form: printf '%s\n' ''' ${in1//'/'"'"'} ... ${inN//'/'"'"'} ''' > ${tmpDir}/in${kk}; ((kk++))
     # then use 'source' to execute this entire input, which will issue the commands needed to write each batch of N inputs to $tmpDir
     # Note: using ''' <...> ''' + encasing all single quotes in stdin by double quotes ('"'"') *should* prevent any of the file names from being executed as code unintentionally in normal usage, but might be exploitable. If you dont have `split` perhaps dont run forkrun as root...
-
+    {
     source <(export IFS=$'\n' && printf 'printf '"'"'%%s'"'"' '"\'\'\'"'\n'"$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')\'\'\'"' > ${tmpDir}/x${kk}\n((kk++))\n' $(sed -E s/"'"/"'"'"'"'"'"'"'"/g </dev/stdin) ) &
-
+    } 0<&6
 getNextInputFileName() {
     # files with stdin  batches are named sensibly. Add prefix 'x' and printf it out
     local x
@@ -287,6 +300,7 @@ getNextInputFileName() {
 }
 
 fi
+} 6<&0
 
 # fork off $nProcs coprocs and record FDs / PIDs for them
 #
@@ -351,52 +365,48 @@ done
 # set initial vlues for the loop
 nSent=0
 nDone=0
+nSent0=0
+nSentCur=0
 stdinReadFlag=true
 splitAgainFlag=false
-nSent0=0
-nSent1=0
 
 # populate pipe {fd_index} with $nprocs initial indicies - 1 for each coproc
 printf '%d\0' "${!FD_in[@]}" >&${fd_index}  
 
+# get next file name to send based on nSent
 if ${autoBatchFlag}; then
 
-    if ${splitAgainFlag}; then
-        sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSent1}")"
-        ((nSent1++))
-        if (( ${nSent1} == ${nProcs} )); then
-            ((nSent--))   # keep nSent count correct
-            nSent0=''
-            nSent1=''
-            splitAgainPrefix=''
-            splitAgainFlag=false
-        fi
-            
-    elif [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( $nSent + $nProcs )))" ]]; then
-        sendNext="$(getNextInputFileName 'x' "${nSent}")"
+    if [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( $nProcs - 1 )))" ]]; then
+        sendNext="x00"
+        
     else
+        [[ -f "${tmpDir}/x00" ]] || inotifywait "${tmpDir}/x00"
         splitAgainFlag=true
-        nSent0=${nSent}
-        nSent1=0
-        splitAgainPrefix="$(getNextInputFileName 'x' "${nSent0}")"'_x'
-        splitAgainFileNames="$(for nn in $( getNextInputFileName 'x' $( seq ${nSent} $(( ${nSent} + ${nProcs} - 1 )) ) ); do
+        nSentCur=0
+        splitAgainPrefix='x00_x'
+        splitAgainFileNames="$(for nn in $( getNextInputFileName 'x' $( seq 0 $(( ${nProcs} - 1 )) ) ); do
             [[ -f "${tmpDir}/${nn}" ]] && printf '%s\n' "${tmpDir}/${nn}" || break
-			done)"
-		nBatchCur=$(( 1 + ( ( ${nBatch} * ( $(echo "${splitAgainFileNames}" | wc -l) - 1 ) ) / ${nProcs} ) )) 
-        { export IFS=$'\n' && cat ${splitAgainFileNames}; } | split -l "${nBatchCur}" "$(${nullDelimiterFlag} && echo '-t '"'"'\0'"'")" -d - "${tmpDir}/${splitAgainPrefix}"
-        sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSent1}")"
-        ((nSent1++))
+        done)"
+        splitAgainNSent="$(echo "${splitAgainFileNames}" | wc -l)"
+        nBatchCur=$(( 1 + ( ( $(IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l) - 1 ) / ${nProcs} ) )) 
+        { 
+            export IFS=$'\n' && cat -s ${splitAgainFileNames}
+        } | {
+            if ${nullDelimiterFlag}; then
+        split -l "${nBatchCur}" -t '\0' -d - "${tmpDir}/${splitAgainPrefix}"
+            else
+        split -l "${nBatchCur}" -d - "${tmpDir}/${splitAgainPrefix}"    
+            fi
+        }
+        sendNext="$( getNextInputFileName "${splitAgainPrefix}" "${nSentCur}" )"
     fi
-
+          
 else
-
-    sendNext="$(getNextInputFileName 'x' "${nSent}")"
-    
+    [ -f "${tmpDir}/x00" ]] || inotifywait "${tmpDir}/x00"
+    sendNext="x00"   
 fi
 
-# determine 1st input group file name. note that each input file name determined will be for sending to a worker coproc the following iteration
-# this potentially allows for faster response since the main thread doesnt have to wait to determine an input before sending it to the worker coproc
-sendNext="$(getNextInputFileName 'x' "${nSent}")"
+
 
 # begin main loop. Listin on pipe {fd_index} for workers to send their unique ID, indicating they are free. 
 # Respond with the file name of the file containing $nBatch lines from stdin. Repeat until all of stdin has been processed.
@@ -405,49 +415,63 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
     # read {fd_index} (sent by worker coprocs) to trigger sending the next input
     read -r -d '' workerIndex <&${fd_index}            
     (( ${nSent} < ${nProcs} )) || ((nDone++))
-    
+
     if ${stdinReadFlag}; then
         # still distributing stdin - send next file name (containing next group of inputs) to worker coproc
         printf '%s\0' "${sendNext}" >&${FD_in[${workerIndex}]}
-        ${splitAgainFlag} && (( nSent1++)) || ((nSent++))
+        ((nSent++))
+        ${splitAgainFlag} && ((nSentCur++)) || ((nSent0++))
 
         # get next file name to send based on nSent
-          
         if ${autoBatchFlag}; then
           
-            if ${splitAgainFlag}; then
-                  sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSent1}")"
-                  if (( ${nSent1} == ${nProcs} )); then
-                      nSent0=''
-                      nSent1=''
-                      splitAgainPrefix=''
-                      splitAgainFlag=false
-                  fi
+            if ${splitAgainFlag} && (( ${nSentCur} == ${nProcs} )); then
+                nSentCur=''
+                splitAgainPrefix=''
+                splitAgainFileNames=''
+                nBatchCur=''
+                splitAgainFlag=false
+                nSent0=$(( ${nSent0} + ${splitAgainNSent} ))
+                splitAgainNSent=''
+            fi
                       
-            elif [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( $nSent + $nProcs - 1 )))" ]]; then
-                  sendNext="$(getNextInputFileName 'x' "${nSent}")"
+            if ${splitAgainFlag}; then
+                sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSentCur}")"
+
+            elif [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( $nSent0 + $nProcs - 1 )))" ]]; then
+                sendNext="$(getNextInputFileName 'x' "${nSent0}")"
                 
-            elif ! [[ -f "${tmpDir}/$(getNextInputFileName 'x' "${nSent}")" ]]; then
+            elif ! [[ -f "${tmpDir}/$(getNextInputFileName 'x' "${nSent0}")" ]]; then
                 stdinReadFlag=false
                 nArgs=${nSent}
             
             else
                 splitAgainFlag=true
-                nSent0=${nSent}
-                nSent1=0
+                nSentCur=0
                 splitAgainPrefix="$(getNextInputFileName 'x' "${nSent0}")"'_x'
-                splitAgainFileNames="$(for nn in $( getNextInputFileName 'x' $( seq ${nSent} $(( ${nSent} + ${nProcs} - 1 )) ) ); do
+                splitAgainFileNames="$(for nn in $( getNextInputFileName 'x' $( seq ${nSent0} $(( ${nSent0} + ${nProcs} - 1 )) ) ); do
                     [[ -f "${tmpDir}/${nn}" ]] && printf '%s\n' "${tmpDir}/${nn}" || break
-        			done)"
-        		nBatchCur=$(( 1 + ( ( ${nBatch} * ( $(echo "${splitAgainFileNames}" | wc -l) - 1 ) ) / ${nProcs} ) )) 
-                { export IFS=$'\n' && cat ${splitAgainFileNames}; } | split -l "${nBatchCur}" "$(${nullDelimiterFlag} && echo '-t '"'"'\0'"'")" -d - "${tmpDir}/${splitAgainPrefix}"
-                sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSent1}")"
-                ((nSent1++))
+                done)"
+                splitAgainNSent="$(echo "${splitAgainFileNames}" | wc -l)"
+                 nBatchCur=$(( 1 + ( ( $(IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l) - 1 ) / ${nProcs} ) )) 
+                { 
+                    export IFS=$'\n' && cat -s ${splitAgainFileNames}
+                } | {
+                    if ${nullDelimiterFlag}; then
+                        split -l "${nBatchCur}" -t '\0' -d - "${tmpDir}/${splitAgainPrefix}"
+                    else
+                        split -l "${nBatchCur}" -d - "${tmpDir}/${splitAgainPrefix}"            
+                    fi
+                }
+
+                sendNext="$( getNextInputFileName "${splitAgainPrefix}" "${nSentCur}" )"
             fi
+
+            (( ${nSent0} >= ${nProcs} )) && autoBatchFlag=false
           
         else
           
-              sendNext="$(getNextInputFileName 'x' "${nSent}")"
+            sendNext="$(getNextInputFileName 'x' "${nSent}")"
         
             # if there isnt another file to read then trigger stop condition
             [[ -f "${tmpDir}/${sendNext}" ]] || { 
