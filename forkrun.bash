@@ -53,6 +53,9 @@ forkrun() {
 #
 #   (-0|-z)    Assume that individual inputs passed on stdin are delimited by NULL's instead of by newlines. Note: that NULL-seperted inputs will be passed as-is to the function
 #              being parallelized, so ensure that it supports and expects NULL-seperated inputs, not newline seperated ones. this note does not apply if you pass forkrun `-l 1`.  
+#              Notes: 1) 'split' must be available to use this flag. 2) this flag doesnt work if `-l 1` is set. 3) To avoid command substitution removing the null bytes,
+#              when this flag is used the inputs will be passed to the function being parallelized via stdin, not via function inputs. i.e.,:
+#              forkrun without (-z|-0) does `${parFunc} $(<fileWithlinesFromStdin)`; but forkrun with (-z|-0) does `${parFunc} <fileWithLinesFromStdin`
 #
 # (-h|-?|--help) display this help.
 #
@@ -60,7 +63,7 @@ forkrun() {
 #              is the function name and all remaining arguments are its initialArgs. Using '--' would allow you to parallelize a function that has a '-' as its first character.
 #
 #
-# NOTE: Flags are NOT case sensitive and can be given in any order, but must all be given before the "functionName" input. For options that require an argument ( -[jptd] ),
+# NOTE: Flags are NOT case sensitive and can be given in any order, but must all be given before the "functionName" input. For options that require an argument ( -[jpltd] ),
 #       The ' ' can be removed or replaced with '='. e.g., to set -j|-p, the following all work: '-j' '<#>', '-p' '<#>', '-j<#>', '-p<#>, '-j=<#>', '-p=<#>' 
 #       Any of the above with an upper-case (-j|-p) will work al well. However, quoting 2 inputs together with a space in between (e.g., '-j <#>') will not work.
 #
@@ -85,36 +88,26 @@ forkrun() {
 # (*) split
 # cat
 # mktemp
+# inotifywait --OR-- sleep
 # NOTE: if (*) split is unavailable, there is an alternate code path. This alternate path depends on: tr, seq, and (*) sed. 
 #       However, it is slower and neither automatic batching (-l=0) nor NULL-seperated input processing (-0|-z) will work.
-# 
-#
-# # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #
 
+# # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #
 
 # enable job control
 set -m
 
 # set exit trap to clean up
 exitTrap() {
-    local FD
-    local PID0
-    local fd_index
 
-    # get main process PID
-    PID0="${1}"
-    
     # restore IFS
-    export IFS="${2}"
-
-    # get pipe fd's
-    fd_index="${3}"
+    export IFS="${IFS0}"
 
     # remove tmpDir if specified
-    [[ -n "${4}" ]] && [[ -d "${4]}" ]] && rm -rf "${4}"
+    (( ${rmTmpDirFlag} >= 2 )) && [[ -d "${tmpDir}" ]] && rm -rf "${tmpDir}"
 
     # shutdown all coprocs
-    for FD in "${FD_in[@]}" "${FD_out[@]}"; do
+    for FD in "${FD_in[@]}"; do
         [[ -e /proc/"${PID0}"/fd/${FD} ]] && printf '\0' >&${FD}
     done
  
@@ -122,17 +115,19 @@ exitTrap() {
     jobs -rp | xargs -r kill
 
     # close pipes
-    [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] && exec {fd_index}>&-
+    [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] && exec {fd_index}>&- || :
 
     # unset traps
-    trap - EXIT HUP TERM INT 
+    trap - EXIT HUP TERM INT QUIT
+
+    return
 }
-trap 'exitTrap "${PID0}" "${IFS0}" "${fd_index}" "$( (( ${rmTmpDirFlag} >= 2 ))  && echo "${tmpDir}" || : )"' EXIT HUP TERM INT  
+trap 'exitTrap' EXIT HUP TERM INT QUIT
 
 # make variables local
 local -a FD_in
-local -a FD_out
-local -a pidA
+#local -a FD_out
+#local -a pidA
 local -a inAll
 local -i nArgs
 local -i nSent
@@ -153,8 +148,8 @@ local splitAgainFileNames
 local REPLY
 local REPLYstr
 local PID0
-local pCur
-local pCur_PID
+#local pCur
+#local pCur_PID
 local tmpDir
 local tmpDirRoot
 local stdinReadFlag
@@ -165,6 +160,7 @@ local nullDelimiterFlag
 local autoBatchFlag
 local splitAgainFlag
 local substituteStringFlag
+local batchFlag
 local -i rmTmpDirFlag
 local -f getNextInputFileName
 
@@ -253,6 +249,9 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
         # stop processing forkrun options
         shift 1
         break
+    else
+        echo "WARNING: INPUT '${1}' NOT RECOGNIZED AS A FORKRUN OPTION. IGNORING THIS INPUT." >&2
+        shift 1
     fi
 done
 # all remaining inputs are functionName / initialArgs
@@ -263,17 +262,27 @@ parFunc="$(printf '%s ' "${@}")"
 
 # check if we are automatically setting nBatch
 (( ${nBatch} == 0 )) && { nBatch=512; autoBatchFlag=true; } || autoBatchFlag=false
+(( ${nBatch} == 1 )) && { batchFlag=false; rmTmpDirFlag=0; nullDelimiterFlag=false; } || batchFlag=true
+
+# check if we have split
+which split 1>/dev/null 2>/dev/null && haveSplitFlag=true || haveSplitFlag=false
+${haveSplitFlag} || { autoBatchFlag=false; nullDelimiterFlag=false; }
+
+# check that we dont have both -n and -k. If so, -k supercedes -n
+if ${orderedOutFlag} && ${exportOrderFlag}; then
+    exportOrderFlag=false
+    printf '%s\n' "WARNING: BOTH '-k' and '-n' FLAGS WERE PASSED TO FORKRUN. THESE FLAGS ARE MUTUALLY EXCLUSIVE." "'-k' SUPERCEDES '-n'. IGNORING '-n' FLAG." >&2
+fi
 
 # return if we dont have anything to parallelize over
-[[ -z ${parFunc} ]] && echo 'ERROR: NO FUNCTION SPECIFIED. ABORTING' >&2 && return 1
-{ which "${parFunc%% *}" 1>/dev/null 2>/dev/null || declare -F "${parFunc}" 2>/dev/null; } || { printf '%s\n%s\n' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' 'FUNCTION SPECIFIED: '"${parFunc}" >&2 && return 2; }
+[[ -z ${parFunc%% *} ]] && echo 'ERROR: NO FUNCTION SPECIFIED. ABORTING' >&2 && return 1
+{ which "${parFunc%% *}" 1>/dev/null 2>/dev/null || declare -F "${parFunc}" 2>/dev/null; } || { printf '%s\n' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' 'FUNCTION SPECIFIED: '"${parFunc}" >&2 && return 2; }
 [[ -t 0 ]] && echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 3
 
 # if user requested ordered output, re-run the forkrun call trading flag '-k' for flag '-n',
 # then sort the output and remove the ordering index. Flag '-n' causes forkrun to do 2 things: 
 # a) each "result group" (fron a particular batch of nBatch input lines) is NULL seperated
 # b) each result group is pre-pended with the index/order that it was recieved in from stdin.
-
 if ${orderedOutFlag}; then
     forkrun "${inAll[@]//'-k'/'-n'}" | sort -z -n -k1 -t$'\t' | cut -z -d $'\t' -f 2-
     return
@@ -281,60 +290,55 @@ fi
 
 # incorporate string to get input into the function string
 ${substituteStringFlag} && ! [[ "${parFunc}" == *{}* ]] && substituteStringFlag=false && echo 'WARNING: {} NOT FOUND IN FUNCTION STRING OR ARGS. TURNING OFF '"'"'-i'"'"' FLAG'
-#${substituteStringFlag} && parFunc='export IFS=\$'"'"'\n'"'"' && '"${parFunc//'{}'/'\$(<"${tmpDir}/\${REPLY}")'}" || parFunc='export IFS=\$'"'"'\n'"'"' && '"${parFunc}"' '
 
-# begin main function
+# # # # # BEGIN MAIN FUNCTION # # # # #
 {
 
-
-# split up input into files, each of which contains $nBatch lines
-# and define function for getting the next file name
-(( ${nBatch} > 1 )) && {
-
+# if (( nBatch > 1 )) then split up input into files undert $tmpDir, each of which contains $nBatch lines and define a function for getting the next file name
+${batchFlag} && {
 
 # prepare temp directory to store split stdin
 mkdir -p "${tmpDirRoot}"
 tmpDir="$(mktemp -d -p "${tmpDirRoot%/}" -t '.forkrun.XXXXXXXXX')"
-which split 1>/dev/null 2>/dev/null && haveSplitFlag=true || haveSplitFlag=false
-${haveSplitFlag} || autoBatchFlag=false  
 
 if ${haveSplitFlag}; then
     # split into files, each containing a batch of $nBatch lines from stdin, using 'split'
     {
     if ${nullDelimiterFlag}; then 
         {
+            # split NULL-seperated stdin
             split -t '\0' -d -l "${nBatch}" - "${tmpDir}"'/x' <&4  
         } 4<&5 &
     else 
         {
+            # split newline-seperated stdin
             split -d -l "${nBatch}" - "${tmpDir}"'/x' <&4 
         } 4<&5 &
     fi
     } 5<&6
-#split -l "${nBatch}" -d - "${tmpDir}"/x </dev/stdin --verbose | wc -l &
 
 getNextInputFileName() {
-    # 'split' names the output files in a really annoying way. it goes
+    # 'split' names the output files in a somewhat annoying way (to try and ensure output will always sort correctly). it goes (with '-d' flag):
     # x00 --> x89 (90 vals), then x9000 --> x9899 (900 vals), then x990000 -->998999 (9000 vals), etc
-    # this function transforms a simple count (0, 1, 2, 3, ...) into thew `x___` names used by split
+    # this function transforms a simple count (0, 1, 2, 3, ...) into the `x___` names used by split
  
     local x; 
     local x0; 
     local exp;
     local prefix;
     
-    prefix="$1"
+    prefix="${1}"
     shift 1
     
-    for x0 in "$@"; do 
-        x=$x0; 
+    for x0 in "${@}"; do 
+        x=${x0}; 
         exp=1;  
         printf '%s' "${prefix}"
         while true; do
-            (( x >= ( 9 * ( 10 ** exp ) )  )) && { x=$(( x - ( 9 * ( 10 ** exp ) ) )) && ((exp++)) && printf '%d' '9'; } || { printf '%0.'$(( 1 + exp ))'d\n' "$x" && break; }
+            (( ${x} >= ( 9 * ( 10 ** ${exp} ) )  )) && { x=$(( ${x} - ( 9 * ( 10 ** ${exp} ) ) )) && ((exp++)) && printf '%d' '9'; } || { printf '%0.'$(( 1 + ${exp} ))'d\n' "${x}" && break; }
         done
     done
-}
+    }
 
 else
     # split into files by using printf + sed + source.
@@ -348,7 +352,7 @@ getNextInputFileName() {
     # files with stdin  batches are named sensibly. Add prefix 'x' and printf it out
     local x
     printf 'x%s\n' "${@}"
-}
+    }
 
 fi
 } 6<&0
@@ -364,14 +368,26 @@ fi
 # if ordered output is requested, the input order inde is prepended to the argument piped to the worker, 
 # where it is removed and then pre-pended onto the result from running the argument through the function
 
-if (( $nBatch != 1 )); then
-    REPLYstr='$(<"'"${tmpDir}"'/${REPLY}")'
-elif ${exportOrderFlag};then
-    REPLYstr='${REPLY#*$'"'"'\t'"'"'}'
+# set a a string for how we will pass inputs to the function we are parallelizing. This string will be used in the coproc code that is generated and sourced below
+if ${batchFlag}; then
+    # REPLY is file name in $tmpDir containing lines from stdin. cat the file using $(<file)
+    if ${nullDelimiterFlag}; then 
+        REPLYstr='<"'"${tmpDir}"'/${REPLY}"'
+    else        
+        REPLYstr='$(<"'"${tmpDir}"'/${REPLY}")'
+    fi
 else
-    REPLYstr='${REPLY}'
+    # not using batching --> REPLY is a line from stdin
+    if ${exportOrderFlag}; then
+        # REPLY has been pre-pended with input order index. Remove it
+        REPLYstr='${REPLY#*$'"'"'\t'"'"'}'
+    else
+        # REPLY contains just a line from stdin. Use it as-is
+        REPLYstr='${REPLY}'
+    fi
 fi
 
+# generate source code (to be sourced) for coproc workers
 for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 
 source <(cat<<EOI0 
@@ -418,16 +434,17 @@ EOI5
 done
 } 7<&0
 } 8>&9
+FD_in[${kk}]="\${p${kk}[1]}"
 EOI0
 )
-    # record PIDs and i/o pipe file descriptors in indexed arrays
-    local -n pCur="p${kk}"
-    FD_in[${kk}]="${pCur[1]}"
-    FD_out[${kk}]="${pCur[0]}"
-    local +n pCur
-    local -n pCur_PID="p${kk}_PID"
-    pidA[${kk}]="$pCur_PID"
-    local +n pCur_PID
+    # record PIDs and i/o pipe file descriptors in indexed arrays (OLD)
+    #local -n pCur="p${kk}"
+    #FD_in[${kk}]="${pCur[1]}"
+    #FD_out[${kk}]="${pCur[0]}"
+    #local +n pCur
+    #local -n pCur_PID="p${kk}_PID"
+    #pidA[${kk}]="$pCur_PID"
+    #local +n pCur_PID
 
 done
 
@@ -446,46 +463,65 @@ printf '%d\0' "${!FD_in[@]}" >&${fd_index}
 
 # get next file name to send based on nSent
 if ${autoBatchFlag}; then
+    # when forkrun starts: automatically re-split available input files into $nProcs equal files if there arent enough to fully saturate $nProcs coprocs with 1+ round of $nBatch inputs
 
-    if [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( $nProcs - 1 )))" ]]; then
+    if [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( ${nProcs} - 1 )))" ]]; then
+        # Check if there are $nProcs not-yet-read stdin files generated by split available. 
+        # If so then we have at least enough inputs to do 1+ set of $nBatch inputs on each coproc worker, 
+        # so we dont need to adjust nBatch anymore --> turn off autoBatchFlag
         sendNext="x00"
         autoBatchFlag=false
         
     else
+        # we dont (yet) have $nProcs files containing stdin ready to go. This indicates either we dont have that many inputs, or they are comming in on stdin slowly.
+        # take the inputs we do already have saved in files and re-split them into $nProcs new files. A flag gets set to indicate we must deal with these before going back to normal operation.
+
+        # ensure we have at least the 1st file (x00) before continuing
         [[ -f "${tmpDir}/x00" ]] || {
             which inotifywait 1>/dev/null 2>/dev/null && inotifywait "${tmpDir}/x00" || until [[ -f "${tmpDir}/x00" ]]; do sleep 0.0001s; done
         }
+
+        # set flag and initial [aramaters for dealing with the re-split files
         splitAgainFlag=true
         nSentCur=0
         splitAgainPrefix='x00_x'
-        splitAgainFileNames="$(for nn in $( getNextInputFileName 'x' $( seq 0 $(( ${nProcs} - 1 )) ) ); do
+
+        # determine how many files we actually have available. Should be somewhere between 1 and $(( $nProcs - 1 ))
+        splitAgainFileNames="$(for nn in $(getNextInputFileName 'x' $(seq 0 $(( ${nProcs} - 1 )))); do
             [[ -f "${tmpDir}/${nn}" ]] && printf '%s\n' "${tmpDir}/${nn}" || break
         done)"
+
+        # record how many files we will be re-combining and re-splitting to figure out how many lines to put in each resplit file to split them evenly.
         splitAgainNSent="$(echo "${splitAgainFileNames}" | wc -l)"
         nBatchCur=$(( 1 + ( ( $(IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l) - 1 ) / ${nProcs} ) )) 
+
+        # recombine (with cat -s to suppress long series of blanks) and then re-split into files with equal number of lines
         { 
             export IFS=$'\n' && cat -s ${splitAgainFileNames}
         } | {
             if ${nullDelimiterFlag}; then
+                # split NULL-seperated
         split -l "${nBatchCur}" -t '\0' -d - "${tmpDir}/${splitAgainPrefix}"
             else
+                # split newline-seperated
         split -l "${nBatchCur}" -d - "${tmpDir}/${splitAgainPrefix}"    
             fi
         }
-        sendNext="$( getNextInputFileName "${splitAgainPrefix}" "${nSentCur}" )"
+        sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSentCur}")"
     fi
           
-elif (( ${nBatch} != 1 )); then
+elif ${batchFlag}; then
+    # using batching but not re-splitting. wait for 1st file (x00) to appear then continue
     [[ -f "${tmpDir}/x00" ]] || {
         which inotifywait 1>/dev/null 2>/dev/null && inotifywait "${tmpDir}/x00" || until [[ -f "${tmpDir}/x00" ]]; do sleep 0.0001s; done
     }
     sendNext="x00"   
 
 else
+    # not using batching. reasd 1 line from stdion and store it
     read -r sendNext
     [[ -n "${sendNext}" ]] || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
 fi
-
 
 
 # begin main loop. Listin on pipe {fd_index} for workers to send their unique ID, indicating they are free. 
@@ -498,8 +534,11 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
 
     if ${stdinReadFlag}; then
         # still distributing stdin - send next file name (containing next group of inputs) to worker coproc
-        if [[ "${nBatch}" != '1' ]]; then
+
+        if ${batchFlag}; then
+            # using batching. Deal with file names in $tmpDir
             
+            # send filename to worker and iterate counters
             printf '%s\0' "${sendNext}" >&${FD_in[${workerIndex}]}
             ((nSent++))
             ${splitAgainFlag} && ((nSentCur++)) || ((nSent0++))
@@ -508,6 +547,8 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
             if ${autoBatchFlag}; then
               
                 if ${splitAgainFlag} && (( ${nSentCur} == ${nProcs} )); then
+                    # we just sent to last file from a re-split group. Turn off splitAgainFlag, clear splitAgain parameters
+                    # and advance nSent0 by number of files that originally went in to the resplit data
                     nSentCur=''
                     splitAgainPrefix=''
                     splitAgainFileNames=''
@@ -518,40 +559,56 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
                 fi
                           
                 if ${splitAgainFlag}; then
+                    # we are still working through the current set of re-split files. next file name is in re-split file group
                     sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSentCur}")"
     
-                elif [[ -f "${tmpDir}/$( getNextInputFileName 'x' $(( $nSent0 + $nProcs - 1 )) )" ]]; then
+                elif [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( ${nSent0} + ${nProcs} - 1 )))" ]]; then
+                    # Check if there are $nProcs not-yet-read stdin files generated by split available. 
+                    # If so then we have at least enough inputs to do 1+ set of $nBatch inputs on each coproc worker, 
+                    # so we dont need to adjust nBatch anymore --> turn off autoBatchFlag
                     sendNext="$(getNextInputFileName 'x' "${nSent0}")"
                     autoBatchFlag=false
                     
                 elif ! [[ -f "${tmpDir}/$(getNextInputFileName 'x' "${nSent0}")" ]]; then
+                    # the next file with stdin lines doesnt exist. trigger stop condition
                     stdinReadFlag=false
                     nArgs=${nSent}
                 
                 else
+                    # we have >1 but <$nProcs available files with lines from stdin under $tmpDir. Re-split them into $nProcs files.
+                    # set flag and initial [aramaters for dealing with the re-split files
+        
                     splitAgainFlag=true
                     nSentCur=0
+
+                    # determine how many files we actually have available. Should be somewhere between 1 and $(( $nProcs - 1 ))
                     splitAgainPrefix="$(getNextInputFileName 'x' "${nSent0}")"'_x'
-                    splitAgainFileNames="$(for nn in $( getNextInputFileName 'x' $( seq ${nSent0} $(( ${nSent0} + ${nProcs} - 1 )) ) ); do
+                    splitAgainFileNames="$(for nn in $(getNextInputFileName 'x' $(seq ${nSent0} $(( ${nSent0} + ${nProcs} - 1 )))); do
                         [[ -f "${tmpDir}/${nn}" ]] && printf '%s\n' "${tmpDir}/${nn}" || break
                     done)"
+
+                    # record how many files we will be re-combining and re-splitting to figure out how many lines to put iun each resplit file to split them evenly.
                     splitAgainNSent="$(echo "${splitAgainFileNames}" | wc -l)"
                     nBatchCur=$(( 1 + ( ( $(IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l) - 1 ) / ${nProcs} ) )) 
+
+                    # recombine (with cat -s to suppress long series of blanks) and then re-split into files with equal number of lines
                     { 
                         export IFS=$'\n' && cat -s ${splitAgainFileNames}
                     } | {
                         if ${nullDelimiterFlag}; then
+                            # split NULL-seperated
                             split -l "${nBatchCur}" -t '\0' -d - "${tmpDir}/${splitAgainPrefix}"
                         else
+                            # split newline-seperated
                             split -l "${nBatchCur}" -d - "${tmpDir}/${splitAgainPrefix}"            
                         fi
                     }
     
-                    sendNext="$( getNextInputFileName "${splitAgainPrefix}" "${nSentCur}" )"
+                    sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSentCur}")"
                 fi
     
             else
-              
+                # dont check how many files we have since we arent re-splitting. Just get the next file name to send.
                 sendNext="$(getNextInputFileName 'x' "${nSent}")"
             
                 # if there isnt another file to read then trigger stop condition
@@ -562,7 +619,7 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
             fi
            
         else 
-            # nBatch=1 mode below
+            # not using batching. send lines from stdin. pre-pend $nSent (which gives input ordering) if exportOrderFLag is set
             
             if ${exportOrderFlag}; then
                 # sorting output. pre-pend data sent with index describing position in input list
@@ -574,7 +631,8 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
             fi
             ((nSent++))
 
-            read -r sendNext && [[ -n ${sendNext} ]] || { 
+            # read next line from stdin to send. If read fails or is empty trigger stop contition
+            read -r -u 6 sendNext && [[ -n ${sendNext} ]] || { 
                 nArgs=${nSent}; 
                 stdinReadFlag=false; 
             }
@@ -593,6 +651,10 @@ done
 
 } 6<&0 9>&1
 
-(( ${rmTmpDirFlag} >= 1 )) && [[ -n ${tmpDir} ]] && [[ -d "${tmpDir}" ]] && rm -rf "${tmpDir}"
-
+# remove tmpDir, unless (( rmTmpDirFlag == 0 ))
+if (( ${rmTmpDirFlag} >= 1 )); then
+    [[ -n ${tmpDir} ]] && [[ -d "${tmpDir}" ]] && rm -rf "${tmpDir}"
+elif ${batchFlag}; then
+    printf '\n%s\n%s\n\n' "TEMP DIR CONTAINING INPUTS HAS NOT BEEN REMOVED" "PATH: ${tmpDir}" >&2
+fi
 }
