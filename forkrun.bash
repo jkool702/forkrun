@@ -21,41 +21,45 @@ forkrun() {
 # Most of the xargs functionality and much of the "standard" parallel functionality has been implemented in forkrun. Where possible, flags are the same as the analagous xargs / parallel flags.
 #
 # (-j|-p) <#>  Use either of these flags to specify the number of simultanious processes to use at a given time
-#              The default if not given is to use the number of logical cpu cores $(nproc). 
+# --procs=<#>  The default if not given is to use the number of logical cpu cores $(nproc). 
 #
 #   -l <#>     Use this flag to define the number of inputs to group together and pass to the worker coprocs. Sending multiple inputs at once 
-#              typicallly is faster, though setting this higher than 512 or higher than ( # lines in stdin ) / ( # worker coprocs ) tends to make 
+# --lines=#>  typicallly is faster, though setting this higher than 512 or higher than ( # lines in stdin ) / ( # worker coprocs ) tends to make 
 #              forkrun slower, not faster. Set this to 0 (or dont set it at all) to have forkrun automatically set and adjust this parameter for you (this is the DEFAULT). 
 #              NOTE:  not all functions (e.g., basename) support running multiple inputs at once. To use these fuctions with forkrun you MUST call forkrun with `-l 1`. Otherwise, use the default.
 #
 #      -i      Use this flag to insert the argument passed via stdin in a specific spot in the function call indicated by '{}'. '{}' will be replaced with the current input wherever it appears.
-#              Example: the standard forkrun usage, where the input is tacked on to the end of the function + args string, is the same as `echo inputs | forkrun -I -- func arg1 ... arg N '{}'`
+#   --insert   Example: the standard forkrun usage, where the input is tacked on to the end of the function + args string, is the same as `echo inputs | forkrun -I -- func arg1 ... arg N '{}'`
 #              Note: the entire group of inputs will be inserted at every {}. You may need to use `-l 1` to make this work right.
 #
 #      -k      Use this flag to force the output to be given in the same order as arguments were given on stdin. The "cost" of this is 
-#              a) you wont get any output as the code runs - it will all come at one at the endand b) the code runs slightly slower (~10%).  This re-calls forkrun with the 
-#              '-n' flag and then sorts the output. NOTE: if you use the `-k` (or `-n`) flags, the function you are parallelizing can NOT produces any NULL characters in its output.
+#    --keep    a) you wont get any output as the code runs - it will all come at one at the endand b) the code runs slightly slower (~10%).  This re-calls forkrun with the 
+# --keep-order '-n' flag and then sorts the output. NOTE: if you use the `-k` (or `-n`) flags, the function you are parallelizing can NOT produces any NULL characters in its output.
 #
 #      -n      Use this flag to force the output for each input batch to get pre-pended with "<#> $'\t'", where <#> reprenents where that result's input(s) were in 
-#              the input queue.  This will be pre-pended once per output group, and output groups will be seperated by NULL characters, allowing the original input order
-#              to be recreated easily using null-delimited parsing (e.g., with 'sort -z' and 'cut -z').  This is used by the '-k' flag to re-order the output to the same order as the inputs
+#  --number    the input queue.  This will be pre-pended once per output group, and output groups will be seperated by NULL characters, allowing the original input order
+#--line-number to be recreated easily using null-delimited parsing (e.g., with 'sort -z' and 'cut -z').  This is used by the '-k' flag to re-order the output to the same order as the inputs
 #
 #  -t <path>   Use this flag to set the base directory where tmp files containing groups of lines from stdin will be kept. Default is '\tmp'.
-#              To speed up parsing stdin, forkrun splits up stdin into groups of $nBatch and saves them to [ram]disk. This path should not include whitespace characters.
+# --tmp=<path> To speed up parsing stdin, forkrun splits up stdin into groups of $nBatch and saves them to [ram]disk. This path should not include whitespace characters.
 #              These temp input files are then deleted according to `--remove-tmp-dir` policy set (see below). Highly reccomend that these be on a tmpfs/ramdisk.
 #
 #   -d <#>     Specify behavior for deleting the temporary directory used to store stdin input batches. <#> must be 0, 1, 2, or 3. These respesent:
-#              [ 0 ] : never remove the temporary directory
+# --delete=<#> [ 0 ] : never remove the temporary directory
 #              [ 1 ] : remove the temporary directory if 'forkrun' finishes normally. This is the DEFAULT.
 #              [ 2 ] : remove the temporary directory in all situations, even if 'forkrun' did not finish running normally
 #              [ 3 ] : same as [ 'always' | 2 ], but also removes the individual tmp files containing lines from stdin as they are reead and no longer needed
 #                      This lowers memory use (especially if stdin is *really* large) at the cost of increasing (wall-clock) run-time by ~5-10%
 #
 #   (-0|-z)    Assume that individual inputs passed on stdin are delimited by NULL's instead of by newlines. Note: that NULL-seperted inputs will be passed as-is to the function
-#              being parallelized, so ensure that it supports and expects NULL-seperated inputs, not newline seperated ones. this note does not apply if you pass forkrun `-l 1`.  
+#    --null    being parallelized, so ensure that it supports and expects NULL-seperated inputs, not newline seperated ones. this note does not apply if you pass forkrun `-l 1`.  
 #              Notes: 1) 'split' must be available to use this flag. 2) this flag doesnt work if `-l 1` is set. 3) To avoid command substitution removing the null bytes,
-#              when this flag is used the inputs will be passed to the function being parallelized via stdin, not via function inputs. i.e.,:
-#              forkrun without (-z|-0) does `${parFunc} $(<fileWithlinesFromStdin)`; but forkrun with (-z|-0) does `${parFunc} <fileWithLinesFromStdin`
+#              when this flag is used the inputs will be passed to the function being parallelized via stdin, not via function inputs. i.e., this implies flag '-s'
+#              
+#
+# (-s|--stdin) Input will be passed to the function being pasrallelized (parFunc) via stdin instead of via function arguments. Normally, forkrun passes inputs to parFunc via
+#    --pipe    export IFS=$'\n' && ${parFunc} $(<filePath)  --OR--   ${parfunc} ${lineFromStdin}.      When '-s' is specified, inputs are instead passed via stdin. i.e.,
+#              export IFS=$'\n' && ${parFunc} <filePath     --OR--   ${parfunc} <(echo ${lineFromStdin})
 #
 # (-h|-?|--help) display this help.
 #
@@ -64,8 +68,9 @@ forkrun() {
 #
 #
 # NOTE: Flags are NOT case sensitive and can be given in any order, but must all be given before the "functionName" input. For options that require an argument ( -[jpltd] ),
-#       The ' ' can be removed or replaced with '='. e.g., to set -j|-p, the following all work: '-j' '<#>', '-p' '<#>', '-j<#>', '-p<#>, '-j=<#>', '-p=<#>' 
+#       For short versions of flags: the ' ' can be removed or replaced with '='. e.g., to set -j|-p, the following all work: '-j' '<#>', '-p' '<#>', '-j<#>', '-p<#>, '-j=<#>', '-p=<#>' 
 #       Any of the above with an upper-case (-j|-p) will work al well. However, quoting 2 inputs together with a space in between (e.g., '-j <#>') will not work.
+#       For long versions of flags: the '=' is required. e.g., '--lines=0' works but neither '--lines0' nor '--lines' '0' will work
 #
 #
 # # # # # # # # # # DEPENDENCIES # # # # # # # # # #
@@ -122,7 +127,7 @@ exitTrap() {
 
     return
 }
-trap 'exitTrap' EXIT HUP TERM INT QUIT
+trap 'exitTrap; return' EXIT HUP TERM INT QUIT
 
 # make variables local
 local -a FD_in
@@ -161,6 +166,7 @@ local autoBatchFlag
 local splitAgainFlag
 local substituteStringFlag
 local batchFlag
+local pipeFlag
 local -i rmTmpDirFlag
 local -f getNextInputFileName
 
@@ -181,61 +187,67 @@ orderedOutFlag=false
 exportOrderFlag=false
 nullDelimiterFlag=false
 substituteStringFlag=false
+pipeFlag=false
 tmpDirRoot='/tmp'
 nProcs=0
 nBatch=0
 rmTmpDirFlag=1
 inAll=("${@}")
 while [[ "${1,,}" =~ ^-+.+$ ]]; do
-    if [[ "${1,,}" =~ ^-+[jp]$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
+    if [[ "${1,,}" =~ ^-+((j)|(p(rocs)?))$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
         # set number of worker coprocs
         nProcs="${2}"
         shift 2
-    elif [[ "${1,,}" =~ ^-+[jp]=?[0-9]+$ ]]; then
+    elif [[ "${1,,}" =~ ^-+((j)|(p(rocs)?))=?[0-9]+$ ]]; then
         # set number of worker coprocs
         nProcs="${1#*[jpJP]}"
         nProcs="${nProcs#*=}"
         shift 1
-    elif [[ "${1,,}" =~ ^-+l$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
+    elif [[ "${1,,}" =~ ^-+l(ines)?$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
         # set number of inputs to use for each parFunc call
         nBatch="${2}"
         shift 2
-    elif [[ "${1,,}" =~ ^-+l=?[0-9]+$ ]]; then
+    elif [[ "${1,,}" =~ ^-+l(ines)?=?[0-9]+$ ]]; then
         # set number of inputs to use for each parFunc call
         nBatch="${1#*[lL]}"
         nBatch="${nBatch#*=}"
         shift 1
-    elif [[ "${1,,}" =~ ^-+i$ ]]; then
+    elif [[ "${1,,}" =~ ^-+i(nsert)?$ ]]; then
         # specify location to insert inputs with {} 
         substituteStringFlag=true
         shift 1
-    elif [[ "${1,,}" =~ ^-+k$ ]]; then
+    elif [[ "${1,,}" =~ ^-+k(eep(-?order)?)?$ ]]; then
         # user requested ordered output
         orderedOutFlag=true
         shift 1    
-    elif [[ "${1,,}" =~ ^-+n$ ]]; then
+    elif [[ "${1,,}" =~ ^-+n(umber(-?lines)?)?$ ]]; then
         # make output include input sorting order, but dont actually re-sort it. 
         # used internally with -k to allow for auto output re-sorting
         exportOrderFlag=true
         shift 1    
-    elif [[ "${1,,}" =~ ^-+[0z]$ ]]; then
+    elif [[ "${1,,}" =~ ^-+(([0z])|(null))$ ]]; then
         # items in stdin are seperated by NULLS, not newlines
         nullDelimiterFlag=true
+		pipeFlag=true
+        shift 1      
+	elif [[ "${1,,}" =~ ^-+((s(tdin)?)|(pipe))$ ]]; then
+        # items in stdin are seperated by NULLS, not newlines
+        pipeFlag=true
         shift 1    
-    elif [[ "${1,,}" =~ ^-+t$ ]] && [[ "${2}" =~ ^.+$ ]]; then
+    elif [[ "${1,,}" =~ ^-+t(mp)?$ ]] && [[ "${2}" =~ ^.+$ ]]; then
         # set tmpDir root path
         tmpDirRoot="${2}"
         shift 2
-    elif [[ "${1,,}" =~ ^-+t=?.+$ ]]; then
+    elif [[ "${1,,}" =~ ^-+t(mp)?=?.+$ ]]; then
         # set tmpDir root path
         tmpDirRoot="${1#*[tT]}"
         tmpDirRoot="${tmpDirRoot#*=}"
         shift 1
-    elif [[ "${1,,}" =~ ^-+d$ ]] && [[ "${2}" =~ ^[0-3]$ ]]; then
+    elif [[ "${1,,}" =~ ^-+d(elete)?$ ]] && [[ "${2}" =~ ^[0-3]$ ]]; then
         # set policy to remove temp files containing data from stdin
          rmTmpDirFlag="${2}"
         shift 2
-    elif [[ "${1,,}" =~ ^-+d=?[0-3]$ ]]; then
+    elif [[ "${1,,}" =~ ^-+d(elete)?=?[0-3]$ ]]; then
         # set policy to remove temp files containing data from stdin
         rmTmpDirFlag="${1#**[dD]}"
         rmTmpDirFlag="${1#*=}"
@@ -371,7 +383,7 @@ fi
 # set a a string for how we will pass inputs to the function we are parallelizing. This string will be used in the coproc code that is generated and sourced below
 if ${batchFlag}; then
     # REPLY is file name in $tmpDir containing lines from stdin. cat the file using $(<file)
-    if ${nullDelimiterFlag}; then 
+    if ${pipeFlag}; then 
         REPLYstr='<"'"${tmpDir}"'/${REPLY}"'
     else        
         REPLYstr='$(<"'"${tmpDir}"'/${REPLY}")'
@@ -385,6 +397,7 @@ else
         # REPLY contains just a line from stdin. Use it as-is
         REPLYstr='${REPLY}'
     fi
+	${pipeFlag} && REPLYstr='<(echo '"${REPLYstr}"')'
 fi
 
 # generate source code (to be sourced) for coproc workers
