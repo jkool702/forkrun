@@ -1,6 +1,6 @@
 # forkrun
 
-`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs -P` or `parallel` does, only faster. In my testing, `forkrun` was anywhere from 10-80% faster than `xargs -P $(nproc)` and 100-150% faster than `parallel -m -j $(nproc)`. To be clear, these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as parallel.
+`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs -P` or `parallel` does, only faster. In my testing, `forkrun` was anywhere from 10-80% faster than `xargs -P $(nproc)` and 100-150% faster than `parallel -m -j $(nproc)`. To be clear, these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
 
 `forkrun` in invoked in much the same way as `xargs`:
 
@@ -11,7 +11,9 @@
 
 # # # # # How it Works # # # # #
 
-`forkrun` parallelizes loops by running multiple inputs through a script/function in parallel using bash coprocs. `forkrun` is fundementally different than most existing loop parallelization methods in the sense that individual function evaluations are not forked. Rather, initially a number of persistent bash coprocs are forked, and then inputs (passed on stdin) are distributed to these coprocs without any additional forking.
+`forkrun` parallelizes loops by running multiple inputs through a script/function in parallel using bash coprocs. `forkrun` is fundementally different than most existing loop parallelization codes in the sense that individual function evaluations are not forked. Rather, initially a number of persistent bash coprocs are forked, and then inputs (passed on stdin) are distributed to these coprocs without any additional forking (or reopening pipes/fd's, or...). This,  combined with the exclusive* use of bash builtins (all of main loop, most of the rest of the code) (these avoid subshell generation, and their associated increase in eecution time), is what makes `forkrun` so fast. 
+
+*(except for the occasional call to an external but highly optimized binary (e.g. sort))
 
 
 # # # # # Supported Options / Flags # # # # #
