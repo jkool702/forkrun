@@ -31,12 +31,12 @@ echo "inArgs" | forkrun [flags] -- parFunc initialArgs
 
 # # # # # Dependencies # # # # #
 
-Where possible, `forkrun` uses bash builtins, making the dependency list quite small. To get full functionality, the following are required. Note: items prefaced with (*)  require the "full" [GNU coreutils] version. Items without this symbol will work with the busybox version
+Where possible, `forkrun` uses bash builtins, making the dependency list quite small. To get full functionality, the following are required. Note: items prefaced with (\*)  require the "full" [GNU coreutils] version. Items without this symbol will work with the busybox version
 
-(*) bash 4.0+
-(*) split
-(*) sort
-(*) cut
+(\*) bash 4.0+
+(\*) split
+(\*) sort
+(\*) cut
 which
 cat
 mktemp
