@@ -27,7 +27,7 @@
     -t          : set the root directory where the temp files containing lines from stdin will be kept (when -l != 1)
     -d          : specify behavior for deleting these temp files containing stdin when we are done with them / when forkrun exits
     (-0|-z)     : stdin is NULL-seperated, not newline seperated. Implies -s. Incompatable with -l=1.
-    -s          : pass stdin to the function being parallelized via stin instead of via function inputs
+    -s          : pass stdin to the function being parallelized via stdin ( $parFunc < fileWithLinesFromStdin ) instead of via function inputs  ( $parFunc $(< fileWithLinesFromStdin) )
     --          : indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs
     (-h|-?)     : display detailed help text
     
