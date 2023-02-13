@@ -17,15 +17,25 @@ echo "inArgs" | forkrun [flags] -- parFunc initialArgs
 `forkrun` supports most of the same flags as `xargs` (with the exception of options intended for interactive use), plus a few additional options that are present in `parallel` but not `xargs`. A quick summary will be provided here - for more info refer to the comment block at the top of the forkrun function, or source forkrun and then run `forkrun --help`. The following flags are supported:
 
 (-j|-p) <#> : set number of worker coprocs
+
 -l <#>      : set number of lines to pass to the function on each function call. if -l=1 then lines from stdin are piped to the function, otherwise `split` groups lines and saves them to a tempo directory on a [ram]disk
+
 -i          : replace {} with the inputs passed on stdin (instead of placing them at the end)
+
 -k          : keep input ordering in output. The 1st output will correspoind to the 1st input, 2nd output to 2nd input, etc.
+
 -n          : pre-pend each (NULL-seperated) output group with an index describing its input order. This is used by the -k flag codepath to sort the output.
+
 -t          : set the root directory where the temp files containing lines from stdin will be kept (when -l != 1)
+
 -d          : specify behavior for deleting these temp files containing stdin when we are done with them / when forkrun exits
+
 (-0|-z)     : stdin is NULL-seperated, not newline seperated. Implies -s. Incompatable with -l=1.
+
 -s          : pass stdin to the function being parallelized via stin instead of via function inputs
+
 --          : indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs
+
 (-h|-?)     : display detailed help text
 
 
@@ -34,10 +44,17 @@ echo "inArgs" | forkrun [flags] -- parFunc initialArgs
 Where possible, `forkrun` uses bash builtins, making the dependency list quite small. To get full functionality, the following are required. Note: items prefaced with (\*)  require the "full" [GNU coreutils] version. Items without this symbol will work with the busybox version
 
 (\*) bash 4.0+
+
 (\*) split
+
 (\*) sort
+
 (\*) cut
+
 which
+
 cat
+
 mktemp
+
 inotifywait || sleep
