@@ -10,8 +10,11 @@ for nn in $(seq 1 $(( 10 * $(nproc) + 1 ))); do
 done
 
 echo \[\[\ \$\(seq\ 1\ $(( $(nproc) - 2 ))\ \|\ forkrun\ {,-k\ ,-n\ }{,-l1\ }{,-j$(( $(nproc) - 1 ))\ }{,-t\ /tmp\ }{,-d\ 3\ }{,--\ }{sha1sum,sha256sum,echo,printf\ '"'"'"'%s\n'"'"'"'}\ \|\ wc\ -l\)\ ==\ $(( $(nproc) - 2 ))\ \]\]\ \&\&\ echo\ \"SUCCESS\"\ \|\|\ echo\ \"FAILURE\ \<-----\"$'\n' | sed -E s/^'(.*forkrun )(.*)( \| wc -l.*)$'/'\{ echo -n "forkrun \2 : "; \1\2\3; \} \| tee -a .\/forkrun.unit-tests.log'/
+echo 'echo "TESTING IS 25% COMPLETE"'
 echo \[\[\ \$\(seq\ 1\ $(( 10 * $(nproc) + 1 ))\ \|\ forkrun\ {,-k\ ,-n\ }{,-l1\ }{,-j$(( $(nproc) - 1 ))\ }{,-t\ /tmp\ }{,-d\ 3\ }{,--\ }{sha1sum,sha256sum,echo,printf\ '"'"'"'%s\n'"'"'"'}\ \|\ wc\ -l\)\ ==\ $(( 10 * $(nproc) + 1 ))\ \]\]\ \&\&\ echo\ \"SUCCESS\"\ \|\|\ echo\ \"FAILURE\ \<-----\"$'\n' | sed -E s/^'(.*forkrun )(.*)( \| wc -l.*)$'/'\{ echo -n "forkrun \2 : "; \1\2\3; \} \| tee -a .\/forkrun.unit-tests.log'/
+echo 'echo "TESTING IS 50% COMPLETE"'
 echo \[\[\ \$\(seq\ 1\ $(( $(nproc) - 2 ))\ \|\ forkrun\ -i\ {,-k\ ,-n\ }{,-l1\ }{,-j$(( $(nproc) - 1 ))\ }{,-t\ /tmp\ }{,-d\ 3\ }{,--\ }{sha1sum,sha256sum,echo,printf\ '"'"'"'%s\n'"'"'"'}\ {}\ \|\ wc\ -l\)\ ==\ $(( $(nproc) - 2 ))\ \]\]\ \&\&\ echo\ \"SUCCESS\"\ \|\|\ echo\ \"FAILURE\ \<-----\"$'\n' | sed -E s/^'(.*forkrun )(.*)( \| wc -l.*)$'/'\{ echo -n "forkrun \2 : "; \1\2\3; \} \| tee -a .\/forkrun.unit-tests.log'/
+echo 'echo "TESTING IS 75% COMPLETE"'
 echo \[\[\ \$\(seq\ 1\ $(( 10 * $(nproc) + 1 ))\ \|\ forkrun\ -i\ {,-k\ ,-n\ }{,-l1\ }{,-j$(( $(nproc) - 1 ))\ }{,-t\ /tmp\ }{,-d\ 3\ }{,--\ }{sha1sum,sha256sum,echo,printf\ '"'"'"'%s\n'"'"'"'}\ {}| \|\ wc\ -l\)\ ==\ $(( 10 * $(nproc) + 1 ))\ \]\]\ \&\&\ echo\ \"SUCCESS\"\ \|\|\ echo\ \"FAILURE\ \<-----\"$'\n' | sed -E s/^'(.*forkrun )(.*)( \| wc -l.*)$'/'\{ echo -n "forkrun \2 : "; \1\2\3; \} \| tee -a .\/forkrun.unit-tests.log'/
 
 } > "${testPath}/forkrun.run-unit-tests.bash"

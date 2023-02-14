@@ -279,7 +279,7 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
     fi
 done
 # all remaining inputs are functionName / initialArgs
-${substituteStringFlag} && parFunc="$(printf '%s ' "${@}")" || parFunc="$(printf '%s ' "${@}" '{}')" 
+parFunc="$(printf '%s ' "${@}")"
 
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
@@ -312,7 +312,7 @@ if ${orderedOutFlag}; then
 fi
 
 # incorporate string to get input into the function string
-${substituteStringFlag} && ! [[ "${parFunc}" == *{}* ]] && substituteStringFlag=false && printf '%s\n' "WARNING: {} NOT FOUND IN FUNCTION STRING OR ARGS. TURNING OFF '-i' FLAG" &&  parFunc="$(printf '%s ' "${@}" '{}')" 
+${substituteStringFlag} && ! [[ "${parFunc}" == *{}* ]] && substituteStringFlag=false && printf '%s\n' "WARNING: {} NOT FOUND IN FUNCTION STRING OR ARGS. TURNING OFF '-i' FLAG" 
 
 # if verboseFlag is set, print theparameters we just parsed to srderr
 ${verboseFlag} && {
@@ -416,7 +416,7 @@ else
     ${pipeFlag} && REPLYstr='<(printf '%s' '"${REPLYstr}"')'
 fi
 
-parFunc="${parFunc//'{}'/"${REPLYstr}"}"
+${substituteStringFlag} && parFunc="${parFunc//'{}'/"${REPLYstr}"}"
 
 
 # fork off $nProcs coprocs and record FDs / PIDs for them
