@@ -61,7 +61,9 @@ forkrun() {
 #    --pipe    export IFS=$'\n' && ${parFunc} $(<filePath)  --OR--   ${parfunc} ${lineFromStdin}.      When '-s' is specified, inputs are instead passed via stdin. i.e.,
 #              export IFS=$'\n' && ${parFunc} <filePath     --OR--   ${parfunc} <(echo ${lineFromStdin})
 #
-# (-h|-?|--help) display this help.
+# (-v|--verbose) Increase verbosity. Currently, the only effect this has is that after parsing the forkrun options all the variables associated with forkrun options are printed to stderr.
+#
+# (-h|-?|--help) Display this help.
 #
 #      --      Use this flag to indicate that all remaining arguments are the 'functionName' and 'initialArgs'. Forkrun, by default, assumes the 1st rgument that does not begin with '-' 
 #              is the function name and all remaining arguments are its initialArgs. Using '--' would allow you to parallelize a function that has a '-' as its first character.
@@ -70,30 +72,31 @@ forkrun() {
 # NOTE: Flags are NOT case sensitive and can be given in any order, but must all be given before the "functionName" input. For options that require an argument ( -[jpltd] ),
 #       For short versions of flags: the ' ' can be removed or replaced with '='. e.g., to set -j|-p, the following all work: '-j' '<#>', '-p' '<#>', '-j<#>', '-p<#>, '-j=<#>', '-p=<#>' 
 #       Any of the above with an upper-case (-j|-p) will work al well. However, quoting 2 inputs together with a space in between (e.g., '-j <#>') will not work.
-#       For long versions of flags: the '=' is required. e.g., '--lines=0' works but neither '--lines0' nor '--lines' '0' will work
+#       For long versions of flags: either the '=' or 2 seperate arguments is required. e.g., '--lines=0' and '--lines' '0' work, but '--lines0' will NOT will work
 #
 #
 # # # # # # # # # # DEPENDENCIES # # # # # # # # # #
 #
-# Where possible, forkrun uses bash builtins, making it have minimal dependencies. There are, however a handful of required software packages.
-# NOTE: Items prefaced with '(*)' require the "full" [GNU coreutils] version....The busybox version is insufficient. On items without (*) busybox version will work.
+# Where possible, forkrun uses bash builtins, making it have minimal dependencies. There are, however a handful of required external software packages.
+# NOTE: Items prefaced with '(*)' require the "full" [GNU coreutils] version....The busybox version is insufficient. On items prefaced with (x) either the full or busybox version will work.
 #
 # # # GENERAL DEPOENDENCIES # # #
 # (*) Bash 4.0+ (this is when coprocs were introduced)
-# which
+# (x) which  (for determining available binaries and chjoosing which code paths to take)
 #
-# # # FOR ORDERED OUTPUT # # #
+# # # FOR ORDERED OUTPUT (-k) # # #
 # (*) sort
 # (*) cut
 #
-# # # FOR DETERMINING CORE COUNT WHEN (-j|-p) NOT GIVEN # # #
-# nproc --OR-- grep + access to procfs
+# # # WHEN (-j|-p) NOT GIVEN # # #
+# (x) nproc --OR-- (x) grep + access to procfs (for determining number of logical CPU cores)
 #
 # # # FOR BATCH SIZE (-l) GREATER THAN 1 # # #
 # (*) split
-# cat
-# mktemp
-# inotifywait --OR-- sleep
+# (x) cat
+# (x) mktemp
+# (*) inotifywait --OR-- (x) sleep
+#
 # NOTE: if (*) split is unavailable, there is an alternate code path. This alternate path depends on: tr, seq, and (*) sed. 
 #       However, it is slower and neither automatic batching (-l=0) nor NULL-seperated input processing (-0|-z) will work.
 
@@ -140,6 +143,7 @@ local -i nSent0
 local -i nSentCur
 local -i splitAgainNSent
 local -i nDone
+local -i nFinal
 local -i nProcs
 local -i nBatch
 local -i nBatchCur
@@ -167,6 +171,7 @@ local splitAgainFlag
 local substituteStringFlag
 local batchFlag
 local pipeFlag
+local verboseFlag
 local -i rmTmpDirFlag
 local -f getNextInputFileName
 
@@ -188,6 +193,7 @@ exportOrderFlag=false
 nullDelimiterFlag=false
 substituteStringFlag=false
 pipeFlag=false
+verboseFlag=false
 tmpDirRoot='/tmp'
 nProcs=0
 nBatch=0
@@ -228,9 +234,9 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
     elif [[ "${1,,}" =~ ^-+(([0z])|(null))$ ]]; then
         # items in stdin are seperated by NULLS, not newlines
         nullDelimiterFlag=true
-		pipeFlag=true
+        pipeFlag=true
         shift 1      
-	elif [[ "${1,,}" =~ ^-+((s(tdin)?)|(pipe))$ ]]; then
+    elif [[ "${1,,}" =~ ^-+((s(tdin)?)|(pipe))$ ]]; then
         # items in stdin are seperated by NULLS, not newlines
         pipeFlag=true
         shift 1    
@@ -253,16 +259,22 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
         rmTmpDirFlag="${1#*=}"
         shift 1    
     elif [[ "${1,,}" =~ ^-+[\?h](elp)?$ ]]; then
+        # display help
         local helpText
         helpText="$(<"${BASH_SOURCE[0]}")"
-        echo "${helpText%%'# # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #'*}"
-        return
+        printf '%s\n' "${helpText%%'# # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #'*}"
+        return    
+    elif [[ "${1,,}" =~ ^-+v(erbose)?$ ]]; then
+        # increase verbosity
+        verboseFlag=true
+        shift 1
     elif [[ "${1}" == '--' ]]; then
         # stop processing forkrun options
         shift 1
         break
     else
-        echo "WARNING: INPUT '${1}' NOT RECOGNIZED AS A FORKRUN OPTION. IGNORING THIS INPUT." >&2
+        # ignore unrecognized input
+        printf '%s\n' "WARNING: INPUT '${1}' NOT RECOGNIZED AS A FORKRUN OPTION. IGNORING THIS INPUT." >&2
         shift 1
     fi
 done
@@ -287,9 +299,8 @@ if ${orderedOutFlag} && ${exportOrderFlag}; then
 fi
 
 # return if we dont have anything to parallelize over
-[[ -z ${parFunc%% *} ]] && echo 'ERROR: NO FUNCTION SPECIFIED. ABORTING' >&2 && return 1
-{ which "${parFunc%% *}" 1>/dev/null 2>/dev/null || declare -F "${parFunc}" 2>/dev/null; } || { printf '%s\n' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' 'FUNCTION SPECIFIED: '"${parFunc}" >&2 && return 2; }
-[[ -t 0 ]] && echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 3
+[[ -z ${parFunc%% *} ]] && printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2 || { which "${parFunc%% *}" 1>/dev/null 2>/dev/null || declare -F "${parFunc}" 2>/dev/null; } || { printf '%s\n' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' 'FUNCTION SPECIFIED: '"${parFunc}" >&2 && return 1; }
+[[ -t 0 ]] && printf '%s\n' 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
 
 # if user requested ordered output, re-run the forkrun call trading flag '-k' for flag '-n',
 # then sort the output and remove the ordering index. Flag '-n' causes forkrun to do 2 things: 
@@ -301,7 +312,23 @@ if ${orderedOutFlag}; then
 fi
 
 # incorporate string to get input into the function string
-${substituteStringFlag} && ! [[ "${parFunc}" == *{}* ]] && substituteStringFlag=false && echo 'WARNING: {} NOT FOUND IN FUNCTION STRING OR ARGS. TURNING OFF '"'"'-i'"'"' FLAG'
+${substituteStringFlag} && ! [[ "${parFunc}" == *{}* ]] && substituteStringFlag=false && printf '%s\n' "WARNING: {} NOT FOUND IN FUNCTION STRING OR ARGS. TURNING OFF '-i' FLAG"
+
+# if verboseFlag is set, print theparameters we just parsed to srderr
+${verboseFlag} && {
+printf '%s\n' '' "DONE PARSING INPUTS! Selected forkrun options:" ''
+printf '%s\n' "nProcs = ${nProcs}" "nBatch = ${nBatch}" "parFunc = ${parFunc}" "tmpDir = ${tmpDir}" "rmTmpDirFlag = ${rmTmpDirFlag}"
+${orderedOutFlag} && printf '%s\n' "orderedOutFlag = true" || printf '%s\n' "orderedOutFlag = false"
+${exportOrderFlag} && printf '%s\n' "exportOrderFlag = true" || printf '%s\n' "exportOrderFlag = false"
+${haveSplitFlag} && printf '%s\n' "haveSplitFlag = true" || printf '%s\n' "haveSplitFlag = false"
+${nullDelimiterFlag} && printf '%s\n' "nullDelimiterFlag = true" || printf '%s\n' "nullDelimiterFlag = false"
+${autoBatchFlag} && printf '%s\n' "autoBatchFlag = true" || printf '%s\n' "autoBatchFlag = false"
+${substituteStringFlag} && printf '%s\n' "substituteStringFlag = true" || printf '%s\n' "substituteStringFlag = false"
+${batchFlag} && printf '%s\n' "batchFlag = true" || printf '%s\n' "batchFlag = false"
+${pipeFlag} && printf '%s\n' "pipeFlag = true" || printf '%s\n' "pipeFlag = false"
+${veboseFlag} && printf '%s\n' "veboseFlag = true" || printf '%s\n' "veboseFlag = false"
+printf '\n'
+} >&2
 
 # # # # # BEGIN MAIN FUNCTION # # # # #
 {
@@ -397,7 +424,7 @@ else
         # REPLY contains just a line from stdin. Use it as-is
         REPLYstr='${REPLY}'
     fi
-	${pipeFlag} && REPLYstr='<(echo '"${REPLYstr}"')'
+    ${pipeFlag} && REPLYstr='<(printf '%s' '"${REPLYstr}"')'
 fi
 
 # generate source code (to be sourced) for coproc workers
@@ -416,13 +443,13 @@ $(if ${exportOrderFlag}; then
     if ${substituteStringFlag}; then
 cat<<EOI1
     {
-        printf '%s\\t%s\\n\\0' "\${REPLY$( (( ${nBatch} == 1 )) && echo '%%$'"'"'\t'"'"'*' || echo '#x' )}" "\$(export IFS=\$'\\n' && ${parFunc//'{}'/"${REPLYstr}"})" 
+        printf '%s\\t%s\\n\\0' "\${REPLY$( (( ${nBatch} == 1 )) && printf '%s' '%%$'"'"'\t'"'"'*' || printf '%s' '#x' )}" "\$(export IFS=\$'\\n' && ${parFunc//'{}'/"${REPLYstr}"})" 
     } >&8
 EOI1
     else
 cat<<EOI2
     {
-        printf '%s\\t%s\\n\\0' "\${REPLY$( (( ${nBatch} == 1 )) && echo '%%$'"'"'\t'"'"'*' || echo '#x' )}" "\$(export IFS=\$'\\n' && ${parFunc} ${REPLYstr})"
+        printf '%s\\t%s\\n\\0' "\${REPLY$( (( ${nBatch} == 1 )) && printf '%s' '%%$'"'"'\t'"'"'*' || printf '%s' '#x' )}" "\$(export IFS=\$'\\n' && ${parFunc} ${REPLYstr})"
     } >&8
 EOI2
     fi
@@ -468,6 +495,7 @@ nSent=0
 nDone=0
 nSent0=0
 nSentCur=0
+nFinal=${nProcs}
 stdinReadFlag=true
 splitAgainFlag=false
 
@@ -505,7 +533,7 @@ if ${autoBatchFlag}; then
         done)"
 
         # record how many files we will be re-combining and re-splitting to figure out how many lines to put in each resplit file to split them evenly.
-        splitAgainNSent="$(echo "${splitAgainFileNames}" | wc -l)"
+        splitAgainNSent="$(printf '%s\n' "${splitAgainFileNames}" | wc -l)"
         nBatchCur=$(( 1 + ( ( $(IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l) - 1 ) / ${nProcs} ) )) 
 
         # recombine (with cat -s to suppress long series of blanks) and then re-split into files with equal number of lines
@@ -533,13 +561,13 @@ elif ${batchFlag}; then
 else
     # not using batching. reasd 1 line from stdion and store it
     read -r sendNext
-    [[ -n "${sendNext}" ]] || { echo 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
+    [[ -n "${sendNext}" ]] || { printf '%s\n' 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
 fi
 
 
 # begin main loop. Listin on pipe {fd_index} for workers to send their unique ID, indicating they are free. 
 # Respond with the file name of the file containing $nBatch lines from stdin. Repeat until all of stdin has been processed.
-while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
+while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); }; do
 
     # read {fd_index} (sent by worker coprocs) to trigger sending the next input
     read -r -d '' workerIndex <&${fd_index}            
@@ -561,14 +589,14 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
               
                 if ${splitAgainFlag} && (( ${nSentCur} == ${nProcs} )); then
                     # we just sent to last file from a re-split group. Turn off splitAgainFlag, clear splitAgain parameters
-                    # and advance nSent0 by number of files that originally went in to the resplit data
-                    nSentCur=''
+                    # and advance nSent0 by number of files that originally went in to the resplit d
+                    nSentCur=0
                     splitAgainPrefix=''
                     splitAgainFileNames=''
-                    nBatchCur=''
+                    nBatchCur=0
                     splitAgainFlag=false
                     nSent0=$(( ${nSent0} + ${splitAgainNSent} ))
-                    splitAgainNSent=''
+                    splitAgainNSent=0
                 fi
                           
                 if ${splitAgainFlag}; then
@@ -601,7 +629,7 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
                     done)"
 
                     # record how many files we will be re-combining and re-splitting to figure out how many lines to put iun each resplit file to split them evenly.
-                    splitAgainNSent="$(echo "${splitAgainFileNames}" | wc -l)"
+                    splitAgainNSent="$(printf '%s\n' "${splitAgainFileNames}" | wc -l)"
                     nBatchCur=$(( 1 + ( ( $(IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l) - 1 ) / ${nProcs} ) )) 
 
                     # recombine (with cat -s to suppress long series of blanks) and then re-split into files with equal number of lines
@@ -623,13 +651,14 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
             else
                 # dont check how many files we have since we arent re-splitting. Just get the next file name to send.
                 sendNext="$(getNextInputFileName 'x' "${nSent}")"
-            
-                # if there isnt another file to read then trigger stop condition
-                [[ -f "${tmpDir}/${sendNext}" ]] || { 
-                    stdinReadFlag=false
-                    nArgs=${nSent}
-                }
+
             fi
+                        
+            # if there isnt another file to read then trigger stop condition
+            [[ -f "${tmpDir}/${sendNext}" ]] || { 
+                stdinReadFlag=false
+                nArgs=${nSent}
+            }
            
         else 
             # not using batching. send lines from stdin. pre-pend $nSent (which gives input ordering) if exportOrderFLag is set
@@ -643,8 +672,8 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
                 printf '%s\0' "${sendNext}" >&${FD_in[${workerIndex}]}
             fi
             ((nSent++))
-
-            # read next line from stdin to send. If read fails or is empty trigger stop contition
+			
+			# read next line from stdin to send. If read fails or is empty trigger stop contition
             read -r -u 6 sendNext && [[ -n ${sendNext} ]] || { 
                 nArgs=${nSent}; 
                 stdinReadFlag=false; 
@@ -653,7 +682,9 @@ while ${stdinReadFlag} || (( ${nDone} < ${nArgs} )); do
         fi
         
     else              
-
+        (( ${nSent} < ${nProcs} )) && ((nDone++))
+        ((nFinal--))
+		
         # we are done reading input files containing batches of lines from stdin. as each worker coproc finishes running its last task, send it '\0' to cause it to shutdown   
         printf '\0' >&${FD_in[${workerIndex}]}
         
@@ -668,6 +699,6 @@ done
 if (( ${rmTmpDirFlag} >= 1 )); then
     [[ -n ${tmpDir} ]] && [[ -d "${tmpDir}" ]] && rm -rf "${tmpDir}"
 elif ${batchFlag}; then
-    printf '\n%s\n%s\n\n' "TEMP DIR CONTAINING INPUTS HAS NOT BEEN REMOVED" "PATH: ${tmpDir}" >&2
+    printf 's\n' '' "TEMP DIR CONTAINING INPUTS HAS NOT BEEN REMOVED" "PATH: ${tmpDir}" '' >&2
 fi
 }
