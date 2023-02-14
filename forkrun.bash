@@ -279,7 +279,7 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
     fi
 done
 # all remaining inputs are functionName / initialArgs
-parFunc="$(printf '%s ' "${@}")"
+parFunc="${*}"
 
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
@@ -317,7 +317,7 @@ ${substituteStringFlag} && ! [[ "${parFunc}" == *{}* ]] && substituteStringFlag=
 # if verboseFlag is set, print theparameters we just parsed to srderr
 ${verboseFlag} && {
 printf '%s\n' '' "DONE PARSING INPUTS! Selected forkrun options:" ''
-printf '%s\n' "nProcs = ${nProcs}" "nBatch = ${nBatch}" "parFunc = ${parFunc}" "tmpDir = ${tmpDir}" "rmTmpDirFlag = ${rmTmpDirFlag}"
+printf '%s\n' "parFunc = ${parFunc}" "nProcs = ${nProcs}" "nBatch = ${nBatch}" "parFunc = ${parFunc}" "tmpDir = ${tmpDir}" "rmTmpDirFlag = ${rmTmpDirFlag}"
 ${orderedOutFlag} && printf '%s\n' "orderedOutFlag = true" || printf '%s\n' "orderedOutFlag = false"
 ${exportOrderFlag} && printf '%s\n' "exportOrderFlag = true" || printf '%s\n' "exportOrderFlag = false"
 ${haveSplitFlag} && printf '%s\n' "haveSplitFlag = true" || printf '%s\n' "haveSplitFlag = false"
