@@ -279,7 +279,7 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
     fi
 done
 # all remaining inputs are functionName / initialArgs
-parFunc="${*}"
+parFunc="$(printf '%s ' "${@}")"
 
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
@@ -312,12 +312,12 @@ if ${orderedOutFlag}; then
 fi
 
 # incorporate string to get input into the function string
-${substituteStringFlag} && ! [[ "${parFunc}" == *{}* ]] && substituteStringFlag=false && printf '%s\n' "WARNING: {} NOT FOUND IN FUNCTION STRING OR ARGS. TURNING OFF '-i' FLAG" 
+${substituteStringFlag} && ! [[ "${parFunc}" == *{}* ]] && substituteStringFlag=false && printf '%s\n' "WARNING: {} NOT FOUND IN FUNCTION STRING OR ARGS. TURNING OFF '-i' FLAG"
 
 # if verboseFlag is set, print theparameters we just parsed to srderr
 ${verboseFlag} && {
 printf '%s\n' '' "DONE PARSING INPUTS! Selected forkrun options:" ''
-printf '%s\n' "parFunc = ${parFunc}" "nProcs = ${nProcs}" "nBatch = ${nBatch}" "parFunc = ${parFunc}" "tmpDir = ${tmpDir}" "rmTmpDirFlag = ${rmTmpDirFlag}"
+printf '%s\n' "nProcs = ${nProcs}" "nBatch = ${nBatch}" "parFunc = ${parFunc}" "tmpDir = ${tmpDir}" "rmTmpDirFlag = ${rmTmpDirFlag}"
 ${orderedOutFlag} && printf '%s\n' "orderedOutFlag = true" || printf '%s\n' "orderedOutFlag = false"
 ${exportOrderFlag} && printf '%s\n' "exportOrderFlag = true" || printf '%s\n' "exportOrderFlag = false"
 ${haveSplitFlag} && printf '%s\n' "haveSplitFlag = true" || printf '%s\n' "haveSplitFlag = false"
@@ -396,6 +396,17 @@ getNextInputFileName() {
 fi
 } 6<&0
 
+# fork off $nProcs coprocs and record FDs / PIDs for them
+#
+# unfortunately this requires a source <(...) [or eval <...>] call to do dynamically...
+# without this the coproc index "$kk" doesnt get properly applied in the loop.
+# after each worker finishes its current task, it sends its index to pipe {fd_index} to recieve another task
+# specifically, the coproc will recieve the file name of the file (under $tmpDir) to read to get the next batch of lines from stdin.
+# when finished it will be send a null input, causing it to break its 'while true' loop and terminate
+#
+# if ordered output is requested, the input order inde is prepended to the argument piped to the worker, 
+# where it is removed and then pre-pended onto the result from running the argument through the function
+
 # set a a string for how we will pass inputs to the function we are parallelizing. This string will be used in the coproc code that is generated and sourced below
 if ${batchFlag}; then
     # REPLY is file name in $tmpDir containing lines from stdin. cat the file using $(<file)
@@ -416,20 +427,6 @@ else
     ${pipeFlag} && REPLYstr='<(printf '%s' '"${REPLYstr}"')'
 fi
 
-${substituteStringFlag} && parFunc="${parFunc//'{}'/"${REPLYstr}"}" || parFunc="${parFunc} ${REPLYstr}"
-
-
-# fork off $nProcs coprocs and record FDs / PIDs for them
-#
-# unfortunately this requires a source <(...) [or eval <...>] call to do dynamically...
-# without this the coproc index "$kk" doesnt get properly applied in the loop.
-# after each worker finishes its current task, it sends its index to pipe {fd_index} to recieve another task
-# specifically, the coproc will recieve the file name of the file (under $tmpDir) to read to get the next batch of lines from stdin.
-# when finished it will be send a null input, causing it to break its 'while true' loop and terminate
-#
-# if ordered output is requested, the input order inde is prepended to the argument piped to the worker, 
-# where it is removed and then pre-pended onto the result from running the argument through the function
-
 # generate source code (to be sourced) for coproc workers
 for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 
@@ -443,22 +440,36 @@ while true; do
     [[ -z \${REPLY} ]] && break
     
 $(if ${exportOrderFlag}; then
+    if ${substituteStringFlag}; then
 cat<<EOI1
     {
-        printf '%s\\t%s\\n\\0' "\${REPLY$( (( ${nBatch} == 1 )) && printf '%s' '%%$'"'"'\t'"'"'*' || printf '%s' '#x' )}" "\$(export IFS=\$'\\n' && ${parFunc})"
+        printf '%s\\t%s\\n\\0' "\${REPLY$( (( ${nBatch} == 1 )) && printf '%s' '%%$'"'"'\t'"'"'*' || printf '%s' '#x' )}" "\$(export IFS=\$'\\n' && ${parFunc//'{}'/"${REPLYstr}"})" 
     } >&8
 EOI1
-else
+    else
 cat<<EOI2
-    { 
-        export IFS=\$'\\n' && ${parFunc}
+    {
+        printf '%s\\t%s\\n\\0' "\${REPLY$( (( ${nBatch} == 1 )) && printf '%s' '%%$'"'"'\t'"'"'*' || printf '%s' '#x' )}" "\$(export IFS=\$'\\n' && ${parFunc} ${REPLYstr})"
     } >&8
 EOI2
+    fi
+elif ${substituteStringFlag}; then
+cat<<EOI3
+    { 
+        export IFS=\$'\\n' && ${parFunc//'{}'/"${REPLYstr}"}
+    } >&8
+EOI3
+else
+cat<<EOI4
+    { 
+        export IFS=\$'\\n' && ${parFunc} ${REPLYstr}
+    } >&8
+EOI4
 fi)
     printf '%s\\0' ${kk} >&\${fd_index}
-$( (( ${rmTmpDirFlag} >= 3 )) && cat<<EOI3
+$( (( ${rmTmpDirFlag} >= 3 )) && cat<<EOI5
 rm -rf "${tmpDir}/\${REPLY}"
-EOI3
+EOI5
 )
 done
 } 7<&0
