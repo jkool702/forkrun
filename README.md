@@ -31,20 +31,21 @@
     (-0|-z)     : stdin is NULL-seperated, not newline seperated. Implies -s. Incompatable with -l=1.
     -s          : pass stdin to the function being parallelized via stdin ( $parFunc < fileWithLinesFromStdin ) instead of via function inputs  ( $parFunc $(< fileWithLinesFromStdin) )
     --          : indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs
+    -v          : increase verbosity. Currently, thie only thing this does is print a summary of forkrun options to stderr after all the inputs have been parsed.
     (-h|-?)     : display detailed help text
     
     
 
 # # # # # Dependencies # # # # #
 
-Where possible, `forkrun` uses bash builtins, making the dependency list quite small. To get full functionality, the following are required. Note: items prefaced with (\*)  require the "full" [GNU coreutils] version. Items without this symbol will work with the busybox version
+Where possible, `forkrun` uses bash builtins, making the dependency list quite small. To get full functionality, the following are required. Note: items prefaced with (\*)  require the "full" [GNU coreutils] version. Items prefaced with (x) will work with the full version or the busybox version
 
     (*) bash 4.0+
     (*) split
     (*) sort (only for '-k' flag)
     (*) cut  (only for '-k' flag)
-    which
-    cat
-    mktemp
-    inotifywait || sleep
+    (x) which
+    (x) cat
+    (x) mktemp
+    (*) inotifywait || (x) sleep
     
