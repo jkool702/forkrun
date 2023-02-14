@@ -279,7 +279,7 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
     fi
 done
 # all remaining inputs are functionName / initialArgs
-parFunc="$(printf '%s ' "${@}")"
+parFunc="${*}"
 
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
@@ -416,7 +416,7 @@ else
     ${pipeFlag} && REPLYstr='<(printf '%s' '"${REPLYstr}"')'
 fi
 
-${substituteStringFlag} && parFunc="${parFunc//'{}'/"${REPLYstr}"}"
+${substituteStringFlag} && parFunc="${parFunc//'{}'/"${REPLYstr}"}" || parFunc="${parFunc} ${REPLYstr}"
 
 
 # fork off $nProcs coprocs and record FDs / PIDs for them
