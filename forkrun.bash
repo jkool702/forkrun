@@ -87,6 +87,7 @@ forkrun() {
 # # # FOR ORDERED OUTPUT (-k) # # #
 # (*) sort
 # (*) cut
+# (*) sed
 #
 # # # WHEN (-j|-p) NOT GIVEN # # #
 # (x) nproc --OR-- (x) grep + access to procfs (for determining number of logical CPU cores)
@@ -310,7 +311,8 @@ fi
 # a) each "result group" (fron a particular batch of nBatch input lines) is NULL seperated
 # b) each result group is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag}; then
-    forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -n -k2 -t"$(printf '\004')" | cut -d "$(printf '\004')" -f 3-
+    forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -n -k2 -t"$(printf '\004')" | cut -d "$(printf '\004')" -f 3-   | sed -zE s/'(([\0\t\n'$(printf '\004')']*)|([^[[:print:]]]*))$'//
+    printf '\n'
     return
 fi
 
