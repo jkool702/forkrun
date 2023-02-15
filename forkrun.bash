@@ -156,6 +156,7 @@ local splitAgainPrefix
 local splitAgainFileNames
 local REPLY
 local REPLYstr
+local REPLYindexStr
 local PID0
 #local pCur
 #local pCur_PID
@@ -279,7 +280,9 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
     fi
 done
 # all remaining inputs are functionName / initialArgs
-parFunc=$(echo ${*})
+#${substituteStringFlag} && parFunc="$(echo ${*})" || parFunc="$(echo $(printf '%q ' "${@}"))"
+parFunc="$(printf '%s ' "${@}")"
+parFunc="${parFunc% }"
 
 # default nProcs is # logical cpu cores
 (( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
@@ -299,7 +302,7 @@ if ${orderedOutFlag} && ${exportOrderFlag}; then
 fi
 
 # return if we dont have anything to parallelize over
-[[ -z ${parFunc%% *} ]] && printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2 || { which "${parFunc%% *}" 1>/dev/null 2>/dev/null || declare -F "${parFunc}" 2>/dev/null; } || { printf '%s\n' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' 'FUNCTION SPECIFIED: '"${parFunc}" >&2 && return 1; }
+(( ${#} == 0 )) && printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2 || { which "${parFunc%% *}" 1>/dev/null 2>/dev/null || declare -F "${parFunc%% *}" 2>/dev/null; } || { printf '%s\n' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' 'FUNCTION SPECIFIED: '"${parFunc//$'\n'/ }" >&2 && return 1; }
 [[ -t 0 ]] && printf '%s\n' 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
 
 # if user requested ordered output, re-run the forkrun call trading flag '-k' for flag '-n',
@@ -307,7 +310,7 @@ fi
 # a) each "result group" (fron a particular batch of nBatch input lines) is NULL seperated
 # b) each result group is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag}; then
-    forkrun "${inAll[@]//'-k'/'-n'}" | sort -z -n -k1 -t$'\t' | cut -z -d $'\t' -f 2-
+    forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -n -k2 -t"$(printf '\004')" | cut -d "$(printf '\004')" -f 3-
     return
 fi
 
@@ -317,7 +320,7 @@ ${substituteStringFlag} && ! [[ "${parFunc}" == *{}* ]] && substituteStringFlag=
 # if verboseFlag is set, print theparameters we just parsed to srderr
 ${verboseFlag} && {
 printf '%s\n' '' "DONE PARSING INPUTS! Selected forkrun options:" ''
-printf '%s\n' "parFunc = ${parFunc}" "nProcs = ${nProcs}" "nBatch = ${nBatch}" "parFunc = ${parFunc}" "tmpDir = ${tmpDir}" "rmTmpDirFlag = ${rmTmpDirFlag}"
+printf '%s\n' "parFunc = ${parFunc}" "nProcs = ${nProcs}" "nBatch = ${nBatch}" "parFunc = ${parFunc}" "tmpDirRoot = ${tmpDirRoot}" "rmTmpDirFlag = ${rmTmpDirFlag}"
 ${orderedOutFlag} && printf '%s\n' "orderedOutFlag = true" || printf '%s\n' "orderedOutFlag = false"
 ${exportOrderFlag} && printf '%s\n' "exportOrderFlag = true" || printf '%s\n' "exportOrderFlag = false"
 ${haveSplitFlag} && printf '%s\n' "haveSplitFlag = true" || printf '%s\n' "haveSplitFlag = false"
@@ -326,7 +329,7 @@ ${autoBatchFlag} && printf '%s\n' "autoBatchFlag = true" || printf '%s\n' "autoB
 ${substituteStringFlag} && printf '%s\n' "substituteStringFlag = true" || printf '%s\n' "substituteStringFlag = false"
 ${batchFlag} && printf '%s\n' "batchFlag = true" || printf '%s\n' "batchFlag = false"
 ${pipeFlag} && printf '%s\n' "pipeFlag = true" || printf '%s\n' "pipeFlag = false"
-${veboseFlag} && printf '%s\n' "veboseFlag = true" || printf '%s\n' "veboseFlag = false"
+${verboseFlag} && printf '%s\n' "veboseFlag = true" || printf '%s\n' "veboseFlag = false"
 printf '\n'
 } >&2
 
@@ -424,8 +427,16 @@ else
         # REPLY contains just a line from stdin. Use it as-is
         REPLYstr='${REPLY}'
     fi
-    ${pipeFlag} && REPLYstr='<(printf '%s' '"${REPLYstr}"')'
+    ${pipeFlag} && REPLYstr='<('"${REPLYstr}"')'
 fi
+
+if ${exportOrderFlag}; then
+    ${batchFlag} && REPLYindexStr='${REPLY#x}' || REPLYindexStr='${REPLY%%$'"'"'\t'"'"'*}'
+fi
+
+#${substituteStringFlag} && parFunc="${parFunc//'{}'/"${REPLYstr}"}"
+
+#parFunc="$(printf '%q\n' "${parFunc}")"
 
 # generate source code (to be sourced) for coproc workers
 for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
@@ -443,13 +454,13 @@ $(if ${exportOrderFlag}; then
     if ${substituteStringFlag}; then
 cat<<EOI1
     {
-        printf '%s\\t%s\\n\\0' "\${REPLY$( (( ${nBatch} == 1 )) && printf '%s' '%%$'"'"'\t'"'"'*' || printf '%s' '#x' )}" "\$(export IFS=\$'\\n' && ${parFunc//'{}'/"${REPLYstr}"})" 
+        printf '%s\\n\\0' " \$(printf '\004')${REPLYindexStr}\$(printf '\004')\$(export IFS=\$'\\n' && ${parFunc//'{}'/${REPLYstr}}) "
     } >&8
 EOI1
     else
 cat<<EOI2
     {
-        printf '%s\\t%s\\n\\0' "\${REPLY$( (( ${nBatch} == 1 )) && printf '%s' '%%$'"'"'\t'"'"'*' || printf '%s' '#x' )}" "\$(export IFS=\$'\\n' && ${parFunc} ${REPLYstr})"
+       printf '%s\\n\\0' " \$(printf '\004')${REPLYindexStr}\$(printf '\004')\$(export IFS=\$'\\n' && ${parFunc} ${REPLYstr}) "
     } >&8
 EOI2
     fi
@@ -462,7 +473,7 @@ EOI3
 else
 cat<<EOI4
     { 
-        export IFS=\$'\\n' && ${parFunc} ${REPLYstr}
+       export IFS=\$'\n' && ${parFunc} ${REPLYstr}
     } >&8
 EOI4
 fi)
@@ -672,8 +683,8 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
                 printf '%s\0' "${sendNext}" >&${FD_in[${workerIndex}]}
             fi
             ((nSent++))
-			
-			# read next line from stdin to send. If read fails or is empty trigger stop contition
+            
+            # read next line from stdin to send. If read fails or is empty trigger stop contition
             read -r -u 6 sendNext && [[ -n ${sendNext} ]] || { 
                 nArgs=${nSent}; 
                 stdinReadFlag=false; 
@@ -684,7 +695,7 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
     else              
         (( ${nSent} < ${nProcs} )) && ((nDone++))
         ((nFinal--))
-		
+        
         # we are done reading input files containing batches of lines from stdin. as each worker coproc finishes running its last task, send it '\0' to cause it to shutdown   
         printf '\0' >&${FD_in[${workerIndex}]}
         
@@ -699,6 +710,6 @@ done
 if (( ${rmTmpDirFlag} >= 1 )); then
     [[ -n ${tmpDir} ]] && [[ -d "${tmpDir}" ]] && rm -rf "${tmpDir}"
 elif ${batchFlag}; then
-    printf 's\n' '' "TEMP DIR CONTAINING INPUTS HAS NOT BEEN REMOVED" "PATH: ${tmpDir}" '' >&2
+    printf '%s\n' '' "TEMP DIR CONTAINING INPUTS HAS NOT BEEN REMOVED" "PATH: ${tmpDir}" '' >&2
 fi
 }
