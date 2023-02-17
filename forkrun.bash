@@ -29,8 +29,15 @@ forkrun() {
 #              NOTE:  not all functions (e.g., basename) support running multiple inputs at once. To use these fuctions with forkrun you MUST call forkrun with `-l 1`. Otherwise, use the default.
 #
 #      -i      Use this flag to insert the argument passed via stdin in a specific spot in the function call indicated by '{}'. '{}' will be replaced with the current input wherever it appears.
-#   --insert   Example: the standard forkrun usage, where the input is tacked on to the end of the function + args string, is the same as `echo inputs | forkrun -I -- func arg1 ... arg N '{}'`
+#   --insert   Example: the standard forkrun usage, where the input is tacked on to the end of the function + args string, is roughly the same as `echo inputs | forkrun -I -- func arg1 ... arg N '{}'`
 #              Note: the entire group of inputs will be inserted at every {}. You may need to use `-l 1` to make this work right.
+#
+#      -id     In addition to what flag `'-i' does (replacing {} with stdin), 2 additional changes are made by flag -id: (note: flag '-i' is implied and automatically set by flag '-id')
+# --insert-id  1) if '{ID}' is present in the fuction "$initiaArgs" given in forkrun function inputs, it will be substituted for the unique ID of the coproc worker that is currently running.
+#              2) forkrun typically shell-quotes any initial function args given in forkrun function inputs so that they are interpreted as strings/characters. 
+#                 with flag -id, this shell quoting is *not* done for pipes and reirects: '<', '|', or '>' will be used to redirect/pipe the function call being run in the coproc. 
+#                 NOTE: the shell interprets unquoted/unescaped pipes/redirects and forkrun never sees it. if quoted+escaped ('\<', '\>', '\|') then they are treated as literal '<', '>', or '|' chars
+#              The intent of these changes is to allow one to send each coproc worker's output to different places. EXAMPLE:  seq 1 1000 | forkrun -id -- printf '%s\n' {}  '>>.out.{ID}'
 #
 #      -k      Use this flag to force the output to be given in the same order as arguments were given on stdin. The "cost" of this is 
 #    --keep    a) you wont get any output as the code runs - it will all come at one at the endand b) the code runs slightly slower (~10%).  This re-calls forkrun with the 
@@ -182,6 +189,7 @@ local nullDelimiterFlag
 local autoBatchFlag
 local splitAgainFlag
 local substituteStringFlag
+local substituteStringIDFlag
 local batchFlag
 local pipeFlag
 local verboseFlag
@@ -238,6 +246,11 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
     elif [[ "${1,,}" =~ ^-+i(nsert)?$ ]]; then
         # specify location to insert inputs with {} 
         substituteStringFlag=true
+        shift 1    
+	elif [[ "${1,,}" =~ ^-+i(nsert-?i)?d?$ ]]; then
+        # specify location to insert inputs with {} 
+        substituteStringFlag=true
+        substituteStringIDFlag=true
         shift 1
     elif [[ "${1,,}" =~ ^-+k(eep(-?order)?)?$ ]]; then
         # user requested ordered output
@@ -334,13 +347,14 @@ ${substituteStringFlag} && ! [[ "${*}" == *{}* ]] && substituteStringFlag=false 
 # if verboseFlag is set, print theparameters we just parsed to srderr
 ${verboseFlag} && {
 printf '%s\n' '' "DONE PARSING INPUTS! Selected forkrun options:" ''
-printf '%s\n' "parFunc = ${*}" "nProcs = ${nProcs}" "nBatch = ${nBatch}" "tmpDirRoot = ${tmpDirRoot}" "rmTmpDirFlag = ${rmTmpDirFlag}"
+printf '%s\n' "parFunc = $(printf '%s ' ${*//$'\n'/' '})" "nProcs = ${nProcs}" "nBatch = ${nBatch}" "tmpDirRoot = ${tmpDirRoot}" "rmTmpDirFlag = ${rmTmpDirFlag}"
 ${orderedOutFlag} && printf '%s\n' "orderedOutFlag = true" || printf '%s\n' "orderedOutFlag = false"
 ${exportOrderFlag} && printf '%s\n' "exportOrderFlag = true" || printf '%s\n' "exportOrderFlag = false"
 ${haveSplitFlag} && printf '%s\n' "haveSplitFlag = true" || printf '%s\n' "haveSplitFlag = false"
 ${nullDelimiterFlag} && printf '%s\n' "nullDelimiterFlag = true" || printf '%s\n' "nullDelimiterFlag = false"
 ${autoBatchFlag} && printf '%s\n' "autoBatchFlag = true" || printf '%s\n' "autoBatchFlag = false"
 ${substituteStringFlag} && printf '%s\n' "substituteStringFlag = true" || printf '%s\n' "substituteStringFlag = false"
+${substituteStringIDFlag} && printf '%s\n' "substituteStringIDFlag = true" || printf '%s\n' "substituteStringIDFlag = false"
 ${batchFlag} && printf '%s\n' "batchFlag = true" || printf '%s\n' "batchFlag = false"
 ${pipeFlag} && printf '%s\n' "pipeFlag = true" || printf '%s\n' "pipeFlag = false"
 #${verboseFlag} && printf '%s\n' "veboseFlag = true" || printf '%s\n' "veboseFlag = false"
@@ -458,7 +472,15 @@ if ${exportOrderFlag}; then
 fi
 
 # The function + initial args given as forkrun function inputs need to be `printf '%q'` quoted, but the command that gets the lines from stdin out of the file grnerated by split needs to be unquoted
-${substituteStringFlag} && mapfile -t parFunc < <(printf '%q\n' "${@}") && mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{\}'/'{}'}")
+${substituteStringFlag} && {
+    mapfile -t parFunc < <(printf '%q\n' "${@}") 
+	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{\}'/'{}'}") 
+} && ${substituteStringIDFlag} && { 
+    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{ID\}'/'${kk}'}") 
+	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\>'/'>'}") 
+	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\<'/'<0'}") 
+	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\\|'/'|'}")
+}
 
 # generate source code (to be sourced) for coproc workers. Note that:
 # 1) the "structure of" / "template used to generate" the coprocs will vary between several possibilities depending on which forkrun options/flags are set
