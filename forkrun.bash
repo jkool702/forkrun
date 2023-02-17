@@ -478,8 +478,8 @@ ${substituteStringFlag} && {
 } && ${substituteStringIDFlag} && { 
     mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{ID\}'/'${kk}'}") 
 	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\>'/'>'}") 
-	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\<'/'<0'}") 
-	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\\|'/'|'}")
+	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\<'/'<'}") 
+	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\|'/'|'}")
 }
 
 # generate source code (to be sourced) for coproc workers. Note that:
