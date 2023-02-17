@@ -42,6 +42,7 @@ Where possible, `forkrun` uses bash builtins, making the dependency list quite s
 
     (*) bash 4.0+
     (*) split
+    (*) grep
     (*) sort (only for '-k' flag)
     (*) cut  (only for '-k' flag)
     (x) wc
