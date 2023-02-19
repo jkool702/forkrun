@@ -391,7 +391,7 @@ getNextInputFileName() {
     ## transform simple count of sent files into file names used by `split -d`
     # `split -d` names the output files in a somewhat annoying way (to try and ensure output will always sort correctly). it goes:
     # x00 --> x89 (90 vals), then x9000 --> x9899 (900 vals), then x990000 -->998999 (9000 vals), etc
-	#
+    #
     # this function transforms a simple count (0, 1, 2, 3, ...) into the `x___` names used by split
  
     local x; 
@@ -462,24 +462,25 @@ else
         # REPLY contains just a line from stdin. Use it as-is
         REPLYstr='${REPLY}'
     fi
-	# if pipeFlag is set pass this to stdin instead of giving it as a function input
+    # if pipeFlag is set pass this to stdin instead of giving it as a function input
     ${pipeFlag} && REPLYstr='<('"${REPLYstr}"')'
 fi
 
 if ${exportOrderFlag}; then
-	# define string that will generate index representing input order
+    # define string that will generate index representing input order
     ${batchFlag} && REPLYindexStr='${REPLY#x}' || REPLYindexStr='${REPLY%%$'"'"'\t'"'"'*}'
 fi
 
 # The function + initial args given as forkrun function inputs need to be `printf '%q'` quoted, but the command that gets the lines from stdin out of the file grnerated by split needs to be unquoted
 ${substituteStringFlag} && {
     mapfile -t parFunc < <(printf '%q\n' "${@}") 
-	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{\}'/'{}'}") 
+    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{\}'/'{}'}") 
 } && ${substituteStringIDFlag} && { 
     mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{ID\}'/'${kk}'}") 
-	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\>'/'>'}") 
-	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\<'/'<'}") 
-	mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\|'/'|'}")
+    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\>'/'>'}") 
+    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\<'/'<'}") 
+    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\|'/'|'}")
+    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\&\&'/'&&'}")
 }
 
 # generate source code (to be sourced) for coproc workers. Note that:
@@ -500,13 +501,13 @@ $(if ${exportOrderFlag}; then
     if ${substituteStringFlag}; then
 cat<<EOI1
     {
-        printf '%s\\n\\0' " \$(printf '\004')${REPLYindexStr}\$(printf '\004')\$(export IFS=\$'\\n' && $(printf '%s ' "${parFunc[@]//'{}'/"${REPLYstr}"}")) "
+        printf '%s\\n\\0' " \$(printf '\\004')${REPLYindexStr}\$(printf '\\004')\$(export IFS=\$'\\n' && $(printf '%s ' "${parFunc[@]//'{}'/"${REPLYstr}"}")) "
     } >&8
 EOI1
     else
 cat<<EOI2
     {
-       printf '%s\\n\\0' " \$(printf '\004')${REPLYindexStr}\$(printf '\004')\$(export IFS=\$'\\n' && $(printf '%q ' "${@}") ${REPLYstr}) "
+       printf '%s\\n\\0' " \$(printf '\\004')${REPLYindexStr}\$(printf '\\004')\$(export IFS=\$'\\n' && $(printf '%q ' "${@}") ${REPLYstr}) "
     } >&8
 EOI2
     fi
@@ -519,13 +520,13 @@ EOI3
 else
 cat<<EOI4
     { 
-       export IFS=\$'\n' && $(printf '%q ' "${@}") ${REPLYstr}
+       export IFS=\$'\\n' && $(printf '%q ' "${@}") ${REPLYstr}
     } >&8
 EOI4
 fi)
     printf '%s\\0' ${kk} >&\${fd_index}
 $( (( ${rmTmpDirFlag} >= 3 )) && cat<<EOI5
-rm -rf "${tmpDir}/\${REPLY}"
+    rm -rf "${tmpDir}/\${REPLY}"
 EOI5
 )
 done
@@ -658,8 +659,8 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
                           
                 if ${splitAgainFlag}; then
                     # we are still working through the current set of re-split files. next file name is in re-split file group
-					# naming convention for resplit file group is: x$(indexOfFirstFileThatWentINtoResplitGroup}_x${indexInResplitGroup}
-					# e.g., the 1st group of resplit files will have names x00_x00, x00_x01, ..., x00_x$(getNextInputFileName '' ${nProcs})
+                    # naming convention for resplit file group is: x$(indexOfFirstFileThatWentINtoResplitGroup}_x${indexInResplitGroup}
+                    # e.g., the 1st group of resplit files will have names x00_x00, x00_x01, ..., x00_x$(getNextInputFileName '' ${nProcs})
                     sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${nSentCur}")"
     
                 elif [[ -f "${tmpDir}/$(getNextInputFileName 'x' $(( ${nSent0} + ${nProcs} - 1 )))" ]]; then
@@ -703,7 +704,7 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
                         fi
                     }
     
-					# generate name of 1st file in current group
+                    # generate name of 1st file in current group
                     sendNext="${splitAgainPrefix}_x00" 
                 fi
     
@@ -740,9 +741,9 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
         fi
         
     else              
-	    # all of stdin has been sent off to workers. As each worker coproc finishes its final task, send it a NULL to cause it to break its 'while true' loop and terminate.
+        # all of stdin has been sent off to workers. As each worker coproc finishes its final task, send it a NULL to cause it to break its 'while true' loop and terminate.
 		
-		# iterate counters
+        # iterate counters
         (( ${nSent} < ${nProcs} )) && ((nDone++))
         ((nFinal--))
         
