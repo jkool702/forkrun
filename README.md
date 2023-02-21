@@ -23,7 +23,8 @@
     
     (-j|-p) <#> : set number of worker coprocs
     -l <#>      : set number of lines to pass to the function on each function call. if -l=1 then lines from stdin are piped to the function, otherwise `split` groups lines and saves them to a tempo directory on a [ram]disk
-    -i          : replace {} with the inputs passed on stdin (instead of placing them at the end)
+    -i          : replace `{}` with the inputs passed on stdin (instead of placing them at the end)
+    -id         : enables -i and also replaces `{id}` with a index (0, 1, ...) describing which coproc the process ran on. Also un-escapes `<` `>` and `|` characters to allow for piping and redirecting output based on which coproc it ran on.
     -k          : keep input ordering in output. The 1st output will correspoind to the 1st input, 2nd output to 2nd input, etc.
     -n          : pre-pend each (NULL-seperated) output group with an index describing its input order. This is used by the -k flag codepath to sort the output.
     -t          : set the root directory where the temp files containing lines from stdin will be kept (when -l != 1)
@@ -34,6 +35,7 @@
     -v          : increase verbosity. Currently, thie only thing this does is print a summary of forkrun options to stderr after all the inputs have been parsed.
     (-h|-?)     : display detailed help text
     
+Note: flags are not case sensitive, but must be given seperately (`-k -v`, not `-kv`) and must be given before the name of the function being parallelized (any flags given after the function name will be assumed to be initial arguments for the function, not forkrun options)
     
 
 # # # # # Dependencies # # # # #
@@ -42,7 +44,7 @@ Where possible, `forkrun` uses bash builtins, making the dependency list quite s
 
     (*) bash 4.0+
     (*) split
-    (*) grep
+    (*) grep (only for '-k' flag)
     (*) sort (only for '-k' flag)
     (*) cut  (only for '-k' flag)
     (x) wc
