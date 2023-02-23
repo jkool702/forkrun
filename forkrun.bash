@@ -1,9 +1,9 @@
 #!/bin/bash
 
 forkrun() {
-## Efficiently runs many tasks in parallel using coprocs
+## Efficiently parallelize a loop / run many tasks in parallel using bash coprocs
 #
-# USAGE: printf '%s\n' "${inArgs}" | forkrun [(-j|-p) <#>] [-l <#>] [-i] [-k] [-n] [(-z|-0)] [-t <path>] [-d (0|1|2|3)] functionName [functionInitialArgs]
+# USAGE: printf '%s\n' "${args}" | forkrun [(-j|-p) <#>] [flags] [--] parFunc [args0]
 # EXAMPLE:    find ./ -type f | forkrun sha256sum
 #
 # Usage is the same as the running a loop in parallel using xargs -P /  parallel.
@@ -20,21 +20,21 @@ forkrun() {
 #
 # Most of the xargs functionality and much of the "standard" parallel functionality has been implemented in forkrun. Where possible, flags are the same as the analagous xargs / parallel flags.
 #
-# (-j|-p) <#>  Use either of these flags to specify the number of simultanious processes to use at a given time
-# --procs=<#>  The default if not given is to use the number of logical cpu cores $(nproc). 
+# (-j|-p) <#>  Use either of these flags to specify the number of simultanious processes to use at a given time. The DEFAULT is to use the number of logical cpu cores
+# --procs=<#>  (requires either `nproc` or grep + access to procfs). If logic core count can not be determined, the DEFAULT is 8.
 #
-#   -l <#>     Use this flag to define the number of inputs to group together and pass to the worker coprocs. Sending multiple inputs at once 
-# --lines=#>  typicallly is faster, though setting this higher than 512 or higher than ( # lines in stdin ) / ( # worker coprocs ) tends to make 
+#    -l <#>    Use this flag to define the number of inputs to group together and pass to the worker coprocs. Sending multiple inputs at once 
+# --lines=#>   typicallly is faster, though setting this higher than 512 or higher than ( # lines in stdin ) / ( # worker coprocs ) tends to make 
 #              forkrun slower, not faster. Set this to 0 (or dont set it at all) to have forkrun automatically set and adjust this parameter for you (this is the DEFAULT). 
 #              NOTE:  not all functions (e.g., basename) support running multiple inputs at once. To use these fuctions with forkrun you MUST call forkrun with `-l 1`. Otherwise, use the default.
 #
 #      -i      Use this flag to insert the argument passed via stdin in a specific spot in the function call indicated by '{}'. '{}' will be replaced with the current input wherever it appears.
 #   --insert   Example: the standard forkrun usage, where the input is tacked on to the end of the function + args string, is roughly the same as `echo inputs | forkrun -I -- func arg1 ... arg N '{}'`
-#              Note: the entire group of inputs will be inserted at every {}. You may need to use `-l 1` to make this work right.
+#              Note: the entire group of inputs will be inserted at every {}. Depending on your specific usage, you may need to use `-l 1` to make this work right.
 #
-#      -id     In addition to what flag `'-i' does (replacing {} with stdin), 2 additional changes are made by flag -id: (note: flag '-i' is implied and automatically set by flag '-id')
-# --insert-id  1) if '{ID}' is present in the fuction "$initiaArgs" given in forkrun function inputs, it will be substituted for the unique ID of the coproc worker that is currently running.
-#              2) forkrun typically shell-quotes any initial function args given in forkrun function inputs so that they are interpreted as strings/characters. 
+#     -id      In addition to what flag `'-i' does (replacing {} with stdin), 2 additional changes are made by flag -id: (note: flag '-i' is implied and automatically set by flag '-id')
+# --insert-id  1) If '{ID}' is present in the fuction "$initiaArgs" given in forkrun function inputs, it will be substituted for the unique ID of the coproc worker that is currently running.
+#              2) Forkrun typically shell-quotes any initial function args given in forkrun function inputs so that they are interpreted as strings/characters. 
 #                 with flag -id, this shell quoting is *not* done for pipes and reirects: '<', '|', or '>' will be used to redirect/pipe the function call being run in the coproc. 
 #                 NOTE: the shell interprets unquoted/unescaped pipes/redirects and forkrun never sees it. if quoted+escaped ('\<', '\>', '\|') then they are treated as literal '<', '>', or '|' chars
 #              The intent of these changes is to allow one to send each coproc worker's output to different places. EXAMPLE:  seq 1 1000 | forkrun -id -- printf '%s\n' {}  '>>.out.{ID}'
@@ -49,14 +49,15 @@ forkrun() {
 #
 #  -t <path>   Use this flag to set the base directory where tmp files containing groups of lines from stdin will be kept. Default is '\tmp'.
 # --tmp=<path> To speed up parsing stdin, forkrun splits up stdin into groups of $nBatch and saves them to [ram]disk. This path should not include whitespace characters.
-#              These temp input files are then deleted according to `--remove-tmp-dir` policy set (see below). Highly reccomend that these be on a tmpfs/ramdisk.
+#              These temp input files are then deleted according to `--remove-tmp-dir` policy set (see below). Highly reccomend that this dir be on a tmpfs/ramdisk.
 #
 #   -d <#>     Specify behavior for deleting the temporary directory used to store stdin input batches. <#> must be 0, 1, 2, or 3. These respesent:
-# --delete=<#> [ 0 ] : never remove the temporary directory
-#              [ 1 ] : remove the temporary directory if 'forkrun' finishes normally. This is the DEFAULT.
-#              [ 2 ] : remove the temporary directory in all situations, even if 'forkrun' did not finish running normally
-#              [ 3 ] : same as [ 'always' | 2 ], but also removes the individual tmp files containing lines from stdin as they are reead and no longer needed
-#                      This lowers memory use (especially if stdin is *really* large) at the cost of increasing (wall-clock) run-time by ~5-10%
+# --delete=<#> [ 0 ] : Never remove the temporary directory
+#              [ 1 ] : Remove the temporary directory if 'forkrun' finishes normally. This is normally the DEFAULT.
+#              [ 2 ] : Remove the temporary directory in all situations, even if 'forkrun' did not finish running normally.
+#              [ 3 ] : Same as [ 'always' | 2 ], but also removes the individual tmp files containing lines from stdin as they are reead and no longer needed.
+#                      This lowers memory use (especially if stdin is *really* large) at the cost of increasing (wall-clock) run-time by ~5-10%.
+#                      This is the DEFAULT if forkrun is able to detect that the system has (in total) less than 8 gb of memory/RAM.
 #
 #   (-0|-z)    Assume that individual inputs passed on stdin are delimited by NULL's instead of by newlines. Note: that NULL-seperted inputs will be passed as-is to the function
 #    --null    being parallelized, so ensure that it supports and expects NULL-seperated inputs, not newline seperated ones. this note does not apply if you pass forkrun `-l 1`.  
@@ -76,10 +77,10 @@ forkrun() {
 #              is the function name and all remaining arguments are its initialArgs. Using '--' would allow you to parallelize a function that has a '-' as its first character.
 #
 #
-# NOTE: Flags are NOT case sensitive and can be given in any order, but must all be given before the "functionName" input. For options that require an argument ( -[jpltd] ),
-#       For short versions of flags: the ' ' can be removed or replaced with '='. e.g., to set -j|-p, the following all work: '-j' '<#>', '-p' '<#>', '-j<#>', '-p<#>, '-j=<#>', '-p=<#>' 
-#       Any of the above with an upper-case (-j|-p) will work al well. However, quoting 2 inputs together with a space in between (e.g., '-j <#>') will not work.
-#       For long versions of flags: either the '=' or 2 seperate arguments is required. e.g., '--lines=0' and '--lines' '0' work, but '--lines0' will NOT will work
+# NOTES: Flags must be given seperately ('-i -s', not '-is'). Flags are NOT case sensitive and can be given in any order, but must all be given before the "functionName" input. 
+#        For options that require an argument ( -[jpltd] ): in "short" versionsm, the ' ' can be removed or replaced with '='. e.g., to set -j|-p, the following all work: '-j' '<#>', '-p' '<#>', '-j<#>', '-p<#>, '-j=<#>', '-p=<#>' 
+#        Any of the above with an upper-case (-j|-p) will work as well. However, quoting 2 inputs together with a space in between (e.g., '-j <#>') will NOT work.
+#        For long versions of flags: either the '=' or 2 seperate arguments is required. e.g., '--lines=0' and '--lines' '0' work, but '--lines0' will NOT will work
 #
 #
 # # # # # # # # # # DEPENDENCIES # # # # # # # # # #
@@ -97,8 +98,8 @@ forkrun() {
 # (*) cut
 # (*) grep
 #
-# # # WHEN (-j|-p) NOT GIVEN # # #
-# (x) nproc --OR-- (x) grep + access to procfs (for determining number of logical CPU cores)
+# # # FOR DETERMINING LOGICAL CORE COUNT # # #
+# (x) nproc --OR-- (x) grep + access to procfs (also for determining total system memory)
 #
 # # # FOR BATCH SIZE (-l) GREATER THAN 1 # # #
 # (*) split
@@ -153,7 +154,7 @@ exitTrap() {
 
     return
 }
-trap 'exitTrap; return' EXIT HUP TERM INT QUIT
+trap 'exitTrap; return' EXIT HUP TERM INT QUIT 
 
 # make variables local
 local -a FD_in
@@ -211,8 +212,8 @@ export IFS=$'\n'
 # This is used by the coprocs to indicate that they are done with a task and ready for another.
 exec {fd_index}<><(:)
 
-# parse inputs for function name and nProcs
-# any initial arguments are rolled into variable $parFunc
+# parse inputs, set forkrun flags and options (using defaults when needed)
+# note: any initial arguments (args0) are rolled into variable $parFunc
 orderedOutFlag=false
 exportOrderFlag=false
 nullDelimiterFlag=false
@@ -222,8 +223,9 @@ verboseFlag=false
 tmpDirRoot='/tmp'
 nProcs=0
 nBatch=0
-rmTmpDirFlag=1
+which grep 1>/dev/null 2>/dev/null && [[ -f /proc/meminfo ]] && (( $(cat /proc/meminfo | grep MemTotal | grep -oE '[0-9]+') < 8388608 )) && rmTmpDirFlag=3 || rmTmpDirFlag=1
 inAll=("${@}")
+
 while [[ "${1,,}" =~ ^-+.+$ ]]; do
     if [[ "${1,,}" =~ ^-+((j)|(p(rocs)?))$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
         # set number of worker coprocs
@@ -311,7 +313,7 @@ done
 # all remaining inputs are functionName / initialArgs
 
 # default nProcs is number of logical cpu cores
-(( ${nProcs} == 0 )) && nProcs=$(which nproc 2>/dev/null 1>/dev/null && nproc || grep -cE '^processor.*: ' /proc/cpuinfo)
+(( ${nProcs} == 0 )) && nProcs=$({ which nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '8')
 
 # check if we are automatically setting nBatch
 (( ${nBatch} == 0 )) && { nBatch=512; autoBatchFlag=true; } || autoBatchFlag=false
@@ -443,7 +445,6 @@ fi
 # 
 # after each worker finishes its current task, it sends its index to pipe {fd_index} to recieve another task. 
 # when all tasks are finished (i.e., everything has been run), each coproc worker will be send a null input, causing it to break its 'while true' loop and terminate
-#
 
 # set a a string for how we will pass inputs to the function we are parallelizing. This string will be used in the coproc code that is generated and sourced below
 if ${batchFlag}; then
@@ -526,7 +527,7 @@ EOI4
 fi)
     printf '%s\\0' ${kk} >&\${fd_index}
 $( (( ${rmTmpDirFlag} >= 3 )) && cat<<EOI5
-    rm -rf "${tmpDir}/\${REPLY}"
+    rm -f "${tmpDir}/\${REPLY}"
 EOI5
 )
 done
@@ -535,7 +536,7 @@ done
 FD_in[${kk}]="\${p${kk}[1]}"
 EOI0
 )
-    # record PIDs and i/o pipe file descriptors in indexed arrays (OLD)
+    # record PIDs and i/o pipe file descriptors in indexed arrays (OLD -- NOT USED)
     #local -n pCur="p${kk}"
     #FD_in[${kk}]="${pCur[1]}"
     #FD_out[${kk}]="${pCur[0]}"
@@ -546,7 +547,7 @@ EOI0
 
 done
 
-# begin parallelization loop
+# begin main parallelization loop
 
 # set initial vlues for the loop
 nSent=0
@@ -580,7 +581,7 @@ if ${autoBatchFlag}; then
             which inotifywait 1>/dev/null 2>/dev/null && inotifywait "${tmpDir}/x00" || until [[ -f "${tmpDir}/x00" ]]; do sleep 0.0001s; done
         }
 
-        # set flag and initial [aramaters for dealing with the re-split files
+        # set flag and initial paramaters for dealing with the re-split files
         splitAgainFlag=true
         nSentCur=0
         splitAgainPrefix='x00_x'
@@ -590,7 +591,7 @@ if ${autoBatchFlag}; then
             [[ -f "${tmpDir}/${nn}" ]] && printf '%s\n' "${tmpDir}/${nn}" || break
         done)"
 
-        # record how many files we will be re-combining and re-splitting to figure out how many lines to put in each resplit file to split them evenly.
+        # record how many files we will be re-combining and re-splitting to figure out how many lines to put in each re-split file to split them evenly.
         splitAgainNSent="$(printf '%s\n' "${splitAgainFileNames}" | wc -l)"
         nBatchCur=$(( 1 + ( ( $(IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l) - 1 ) / ${nProcs} ) )) 
 
@@ -676,8 +677,8 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
                     nArgs=${nSent}
                 
                 else
-                    # we have >1 but <$nProcs available files with lines from stdin under $tmpDir. Re-split them into $nProcs files.
-                    # set flag and initial [aramaters for dealing with the re-split files
+                    # we have more than 1 but less than $nProcs available files with lines from stdin in $tmpDir. Re-split them into $nProcs files.
+                    # set flag and initial paramaters for dealing with the re-split files
                     splitAgainFlag=true
                     nSentCur=0
 
@@ -687,7 +688,7 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
                         [[ -f "${tmpDir}/${nn}" ]] && printf '%s\n' "${tmpDir}/${nn}" || break
                     done)"
 
-                    # record how many files we will be re-combining and re-splitting to figure out how many lines to put in each resplit file to split them up evenly.
+                    # record how many files we will be re-combining and re-splitting to figure out how many lines to put in each re-split file to split them up evenly.
                     splitAgainNSent="$(printf '%s\n' "${splitAgainFileNames}" | wc -l)"
                     nBatchCur=$(( 1 + ( ( $(IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l) - 1 ) / ${nProcs} ) )) 
 
