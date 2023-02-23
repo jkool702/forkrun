@@ -144,10 +144,12 @@ exitTrap() {
     done
  
     # kill all background jobs
-    jobs -rp | xargs -r kill
+    jobs -rp | while read -r pidK; do
+        kill "${pidK}" 2>/dev/null
+    done
 
     # close pipes
-    [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] && exec {fd_index}>&- || :
+    ! [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] || exec {fd_index}>&-
 
     # unset traps
     trap - EXIT HUP TERM INT QUIT
