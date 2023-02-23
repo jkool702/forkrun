@@ -112,8 +112,8 @@ forkrun() {
 # (x) mktemp
 # (x) sleep
 #
-# NOTE: if (*) split is unavailable, there is an alternate code path. This alternate path depends on: tr, seq, and (*) sed. 
-#       However, it is slower and neither automatic batching (-l=0) nor NULL-seperated input processing (-0|-z) will work.
+# NOTE: if (*) split is unavailable, there is an alternate code path based on transforming stdin with printf and sourcing it. This alternate path depends on: (x) seq and (*) sed. 
+#       However, it is slower, riskier (since stdin is sourced) and neither automatic batching (-l=0) nor NULL-seperated input processing (-0|-z) will work.
 # 
 #
 # # # # # # # # # # KNOWN ISSUES / BUGS # # # # # # # # # #
@@ -434,7 +434,7 @@ else
     # then use 'source' to execute this entire input, which will issue the commands needed to write each batch of N inputs to $tmpDir
     # Note: using ''' <...> ''' + encasing all single quotes in stdin by double quotes ('"'"') *should* prevent any of the file names from being executed as code unintentionally in normal usage, but might be exploitable. If you dont have `split` perhaps dont run forkrun as root...
     {
-    source <(export IFS=$'\n' && printf 'printf '"'"'%%s'"'"' '"\'\'\'"'\n'"$(export IFS=$'\n' && printf '%%s\\n=%.0s' $(seq 1 ${nBatch}) | tr -d '=')\'\'\'"' > ${tmpDir}/x${kk}\n((kk++))\n' $(sed -E s/"'"/"'"'"'"'"'"'"'"/g </dev/stdin) ) &
+    source <(printf '%s\n' 'kk=0'; export IFS=$'\n' && printf 'printf '"'"'%%s'"'"' '"\'\'\'"'\n'"$(export IFS=$'\n' && printf '%%s\\n%.0s' $(seq 1 ${nBatch}))\'\'\'"' > ${tmpDir}/x${kk}\n((kk++))\n' $(sed -E s/"'"/"'"'"'"'"'"'"'"/g </dev/stdin) ) &
     } 0<&6
 getNextInputFileName() {
     # files with stdin  batches are named sensibly. Add prefix 'x' and printf it out
