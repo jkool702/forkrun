@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 
 forkrun() {
 ## Efficiently parallelize a loop / run many tasks in parallel using bash coprocs
@@ -71,8 +71,8 @@ forkrun() {
 #              
 #
 # (-s|--stdin) Input will be passed to the function being pasrallelized (parFunc) via stdin instead of via function arguments. Normally, forkrun passes inputs to parFunc via
-#    --pipe    export IFS=$'\n' && ${parFunc} $(<filePath)  --OR--   ${parfunc} ${lineFromStdin}.      When '-s' is specified, inputs are instead passed via stdin. i.e.,
-#              export IFS=$'\n' && ${parFunc} <filePath     --OR--   ${parfunc} <(echo ${lineFromStdin})
+#    --pipe    export IFS=$'\n' && ${parFunc} $(<filePath)  --OR--   ${parFunc} ${lineFromStdin}.      When '-s' is specified, inputs are instead passed via stdin. i.e.,
+#              export IFS=$'\n' && ${parFunc} <filePath     --OR--   ${parFunc} <(echo ${lineFromStdin})
 #
 # (-v|--verbose) Increase verbosity. Currently, the only effect this has is that after parsing the forkrun options all the variables associated with forkrun options are printed to stderr.
 #
@@ -127,6 +127,12 @@ forkrun() {
 #        results in everything on the same line and space seperated (instead of everything newline-seperated on its own line)
 #
 # WORKAROUND: use <...> | forkrun printf '%s\n' 
+#
+# ISSUE: when no function is provided, lines are split up by space characters. e.g., paths with soace characters will be interpreted as 2 paths.
+#
+# CAUSE: TBD
+#
+# WORKAROUND: TBD
 
 
 # # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #
@@ -135,6 +141,12 @@ forkrun() {
 set -m
 
 # set exit trap to clean up
+trap 'exitTrap; return' EXIT HUP TERM QUIT 
+
+# enable line-by-line time profiling
+[[ -n ${timeProfileFlag} ]] && ${timeProfileFlag} && { [[ -f /usr/local/bin/addTimeProfile ]] || source <(curl https://raw.githubusercontent.com/jkool702/timeprofile/main/setup.bash); } && source /usr/local/bin/addTimeProfile
+
+# define exitTrap
 exitTrap() {
 
     # restore IFS
@@ -157,11 +169,15 @@ exitTrap() {
     ! [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] || exec {fd_index}>&-
 
     # unset traps
-    trap - EXIT HUP TERM INT QUIT
+    trap - EXIT HUP TERM INT QUIT DEBUG
+
+    #trap - DEBUG
+    #kill ${pTime_PID}dd
 
     return
 }
-trap 'exitTrap; return' EXIT HUP TERM INT QUIT 
+
+#trap '[[ -n ${BASH_COMMAND} ]] & ! [[ ${BASH_COMMAND} == '"'"'IFS='"'"'* ]] && echo "(line ${LINENO}): ${BASH_COMMAND}" >&${pTime[1]} || :' DEBUG
 
 # make variables local
 local -a FD_in
@@ -203,6 +219,7 @@ local batchFlag
 local pipeFlag
 local verboseFlag
 local waitFlag
+local noFuncFlag
 local -i rmTmpDirFlag
 local -f getNextInputFileName
 #local -a FD_out
@@ -230,10 +247,11 @@ substituteStringFlag=false
 pipeFlag=false
 verboseFlag=false
 waitFlag=false
+noFuncFlag=false
 tmpDirRoot='/tmp'
 nProcs=0
 nBatch=0
-which grep 1>/dev/null 2>/dev/null && [[ -f /proc/meminfo ]] && (( $(cat /proc/meminfo | grep MemTotal | grep -oE '[0-9]+') < 8388608 )) && rmTmpDirFlag=3 || rmTmpDirFlag=1
+[[ -f /proc/meminfo ]] && (( $(grep 'MemTotal' /proc/meminfo | grep -oE '[0-9]+') < 8388608 )) && rmTmpDirFlag=3 || rmTmpDirFlag=1
 inAll=("${@}")
 
 while [[ "${1,,}" =~ ^-+.+$ ]]; do
@@ -259,7 +277,7 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
         # specify location to insert inputs with {} 
         substituteStringFlag=true
         shift 1    
-	elif [[ "${1,,}" =~ ^-+i(nsert-?i)?d?$ ]]; then
+    elif [[ "${1,,}" =~ ^-+i(nsert-?i)?d?$ ]]; then
         # specify location to insert inputs with {} 
         substituteStringFlag=true
         substituteStringIDFlag=true
@@ -326,25 +344,15 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
 done
 # all remaining inputs are functionName / initialArgs
 
-# default nProcs is number of logical cpu cores
-(( ${nProcs} == 0 )) && nProcs=$({ which nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '8')
-
-# check if we are automatically setting nBatch
-(( ${nBatch} == 0 )) && { nBatch=512; autoBatchFlag=true; } || autoBatchFlag=false
-(( ${nBatch} == 1 )) && { batchFlag=false; rmTmpDirFlag=0; nullDelimiterFlag=false; waitFlag=false; } || batchFlag=true
-
-# check if we have split
-which split 1>/dev/null 2>/dev/null && haveSplitFlag=true || haveSplitFlag=false
-${haveSplitFlag} || { autoBatchFlag=false; nullDelimiterFlag=false; }
-
 # check that we dont have both -n and -k. If so, -k supercedes -n
 if ${orderedOutFlag} && ${exportOrderFlag}; then
     exportOrderFlag=false
+    inAll=("${inAll[@]//'-n'/}")
     printf '%s\n' "WARNING: BOTH '-k' and '-n' FLAGS WERE PASSED TO FORKRUN. THESE FLAGS ARE MUTUALLY EXCLUSIVE." "'-k' SUPERCEDES '-n'. IGNORING '-n' FLAG." >&2
 fi
 
 # return if we dont have anything to parallelize over
-(( ${#} == 0 )) && printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2 || { which "${1%%[ $'\n'$'\t']*}" 1>/dev/null 2>/dev/null || declare -F "${1%%[ $'\n'$'\t']*}" 2>/dev/null; } || { printf '%s\n' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' 'FUNCTION SPECIFIED: '"${*}" >&2 && return 1; }
+(( ${#} == 0 )) && { printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2; noFuncFlag=true; } || { which "${1%%[ $'\n'$'\t']*}" 1>/dev/null 2>/dev/null || declare -F "${1%%[ $'\n'$'\t']*}" 2>/dev/null; } || { printf '%s\n' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' 'FUNCTION SPECIFIED: '"${*}" >&2 && return 1; }
 [[ -t 0 ]] && printf '%s\n' 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
 
 # if user requested ordered output, re-run the forkrun call trading flag '-k' for flag '-n',
@@ -357,13 +365,46 @@ if ${orderedOutFlag}; then
     return
 fi
 
+# finish parsing args
+
+# default nProcs is number of logical cpu cores
+(( ${nProcs} == 0 )) && nProcs=$({ which nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '8')
+
+# check if we are automatically setting nBatch
+(( ${nBatch} == 0 )) && { nBatch=512; autoBatchFlag=true; } || autoBatchFlag=false
+(( ${nBatch} == 1 )) && { batchFlag=false; rmTmpDirFlag=0; nullDelimiterFlag=false; waitFlag=false; } || batchFlag=true
+
+# check if we have split
+which split 1>/dev/null 2>/dev/null && haveSplitFlag=true || haveSplitFlag=false
+${haveSplitFlag} || { autoBatchFlag=false; nullDelimiterFlag=false; }
+
 # incorporate string to get input into the function string
 ${substituteStringFlag} && ! [[ "${*}" == *{}* ]] && substituteStringFlag=false && printf '%s\n' "WARNING: {} NOT FOUND IN FUNCTION STRING OR ARGS. TURNING OFF '-i' FLAG"
+
+# generate strings that will be used by the coprocs (when they are sourced later on) to actually call the function being parallelized with $nBatch input lines from stdin
+# The function + initial args given as forkrun function inputs need to be `printf '%q'` quoted, but the command that gets the lines from stdin out of the file grnerated by split needs to be unquoted
+if ${noFuncFlag}; then
+    ${batchFlag} || { batchFlag=true; nBatch=512; printf '%s\n' 'WARNING: ONE-LINE-AT-A-TIME MODE (-l 1) IS NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THIS FLAG.' '(IN THIS USE CASE IT REALLY GIVES NO BENEFIT AND SLOWS THINGS DOWN ANYWAYS)' >&2; }
+	mapfile -t parFunc < <(printf '%q\n' "source")
+    ! { {substituteStringFlag} || ${substituteStringIDFlag}; } || { substituteStringFlag=false; substituteStringIDFlag=false; printf '%s\n' 'WARNING: STRING SUBSTITUTION (-i | -id) NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THESE FLAGS.' >&2; }
+    ! ${pipeFlag} || { pipeFlag=false; printf '%s\n' 'WARNING: INPUT PIPING (-s) NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THIS FLAG.' >&2; }    
+else
+    mapfile -t parFunc < <(printf '%q\n' "${@}")
+    ${substituteStringFlag} && {     
+        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{\}'/'{}'}") 
+    } && ${substituteStringIDFlag} && { 
+        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{ID\}'/'${kk}'}") 
+        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\>'/'>'}") 
+        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\<'/'<'}") 
+        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\|'/'|'}")
+        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\&\&'/'&&'}")
+    }
+fi
 
 # if verboseFlag is set, print theparameters we just parsed to srderr
 ${verboseFlag} && {
 printf '%s\n' '' "DONE PARSING INPUTS! Selected forkrun options:" ''
-printf '%s\n' "parFunc = $(printf '%s ' "${@//$'\n'/' '}")" "nProcs = ${nProcs}" "nBatch = ${nBatch}" "tmpDirRoot = ${tmpDirRoot}" "rmTmpDirFlag = ${rmTmpDirFlag}"
+printf '%s\n' "parFunc = $(printf '%s ' "${parFunc[@]}")" "nProcs = ${nProcs}" "nBatch = ${nBatch}" "tmpDirRoot = ${tmpDirRoot}" "rmTmpDirFlag = ${rmTmpDirFlag}"
 ${orderedOutFlag} && printf '%s\n' "orderedOutFlag = true" || printf '%s\n' "orderedOutFlag = false"
 ${exportOrderFlag} && printf '%s\n' "exportOrderFlag = true" || printf '%s\n' "exportOrderFlag = false"
 ${haveSplitFlag} && printf '%s\n' "haveSplitFlag = true" || printf '%s\n' "haveSplitFlag = false"
@@ -385,7 +426,7 @@ ${batchFlag} && {
 
 # prepare temp directory to store split stdin
 mkdir -p "${tmpDirRoot}"
-tmpDir="$(mktemp -d -p "${tmpDirRoot%/}" -t '.forkrun.XXXXXXXXX')"
+tmpDir="$(mktemp -d -p "${tmpDirRoot%/}" -t '.forkrun.XXXXXX')"
 
 if ${haveSplitFlag}; then
     # split into files, each containing a batch of $nBatch lines from stdin, using 'split'
@@ -463,7 +504,9 @@ fi
 # set a a string for how we will pass inputs to the function we are parallelizing. This string will be used in the coproc code that is generated and sourced below
 if ${batchFlag}; then
     # REPLY is file name in $tmpDir containing lines from stdin. cat the file using '$(<file)' or (if pipeFlag is set) pass it directly using '<file'
-    if ${pipeFlag}; then 
+    if ${noFuncFlag}; then
+        REPLYstr='"'"${tmpDir}"'/${REPLY}"'
+    elif ${pipeFlag}; then 
         REPLYstr='<"'"${tmpDir}"'/${REPLY}"'
     else        
         REPLYstr='$(<"'"${tmpDir}"'/${REPLY}")'
@@ -486,24 +529,14 @@ if ${exportOrderFlag}; then
     ${batchFlag} && REPLYindexStr='${REPLY#x}' || REPLYindexStr='${REPLY%%$'"'"'\t'"'"'*}'
 fi
 
-# The function + initial args given as forkrun function inputs need to be `printf '%q'` quoted, but the command that gets the lines from stdin out of the file grnerated by split needs to be unquoted
-${substituteStringFlag} && {
-    mapfile -t parFunc < <(printf '%q\n' "${@}") 
-    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{\}'/'{}'}") 
-} && ${substituteStringIDFlag} && { 
-    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{ID\}'/'${kk}'}") 
-    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\>'/'>'}") 
-    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\<'/'<'}") 
-    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\|'/'|'}")
-    mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\&\&'/'&&'}")
-}
+${substituteStringFlag} && parFunc=("${parFunc[@]//'{}'/"${REPLYstr}"}") || parFunc+=("${REPLYstr}")
 
 # generate source code (to be sourced) for coproc workers. Note that:
 # 1) the "structure of" / "template used to generate" the coprocs will vary between several possibilities depending on which forkrun options/flags are set
 # 2) the function + initial args (passed as forkrun function inputs) will be "hard-coded" in the code for each coproc
 for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 
-source <(cat<<EOI0 
+source <(cat<<EOI0
 { coproc p${kk} {
 trap - EXIT HUP TERM INT 
 export IFS=\$'\\n'
@@ -511,38 +544,24 @@ export IFS=\$'\\n'
 while true; do 
     read -r -d '' -u 7
     [[ -z \${REPLY} ]] && break
-    
+
 $(if ${exportOrderFlag}; then
-    if ${substituteStringFlag}; then
 cat<<EOI1
     {
-        printf '%s\\n\\0' " \$(printf '\\004')${REPLYindexStr}\$(printf '\\004')\$(export IFS=\$'\\n' && $(printf '%s ' "${parFunc[@]//'{}'/"${REPLYstr}"}")) "
+        printf '%s\\n\\0' " \$(printf '\\004')${REPLYindexStr}\$(printf '\\004')\$(export IFS=\$'\\n' && $(printf '%s ' "${parFunc[@]}")) "
     } >&8
 EOI1
-    else
+else
 cat<<EOI2
-    {
-       printf '%s\\n\\0' " \$(printf '\\004')${REPLYindexStr}\$(printf '\\004')\$(export IFS=\$'\\n' && $(printf '%q ' "${@}") ${REPLYstr}) "
+    { 
+        export IFS=\$'\\n' && $(printf '%s ' "${parFunc[@]}")
     } >&8
 EOI2
-    fi
-elif ${substituteStringFlag}; then
-cat<<EOI3
-    { 
-        export IFS=\$'\\n' && $(printf '%s ' "${parFunc[@]//'{}'/"${REPLYstr}"}")
-    } >&8
-EOI3
-else
-cat<<EOI4
-    { 
-       export IFS=\$'\\n' && $(printf '%q ' "${@}") ${REPLYstr}
-    } >&8
-EOI4
 fi)
     printf '%s\\0' ${kk} >&\${fd_index}
-$( (( ${rmTmpDirFlag} >= 3 )) && cat<<EOI5
+$( (( ${rmTmpDirFlag} >= 3 )) && cat<<EOI3
     rm -f "${tmpDir}/\${REPLY}"
-EOI5
+EOI3
 )
 done
 } 7<&0
@@ -595,13 +614,13 @@ if ${autoBatchFlag}; then
             ${waitFlag} || timeoutCount=4096
             until [[ -f "${tmpDir}/x00" ]]; do 
                 sleep 0.001s
-	        if ! ${waitFlag}; then
+            if ! ${waitFlag}; then
                     ((timeoutCount--))
                     (( ${timeoutCount} == 0 )) && printf '%s\n' 'ERROR: NO FILES CONTAINING LINES FROM STDIN HAVE APPEARED ON '"$tmpDir" 'THIS LIKELY MEANS THERE WAS AN ERROR SOMEWHERE IN THE PIPE FEEDING FORKRUN' 'ABORTING TO AVOID GETTING STUCK IN AN INFINITE WAIT LOOP' && return 3
                 fi
             done
         }
-	
+    
         # set flag and initial paramaters for dealing with the re-split files
         splitAgainFlag=true
         nSentCur=0
@@ -637,7 +656,7 @@ elif ${batchFlag}; then
         ${waitFlag} || timeoutCount=4096
         until [[ -f "${tmpDir}/x00" ]]; do 
             sleep 0.001s
-	    if ! ${waitFlag}; then
+        if ! ${waitFlag}; then
                 ((timeoutCount--))
                 (( ${timeoutCount} == 0 )) && printf '%s\n' 'ERROR: NO FILES CONTAINING LINES FROM STDIN HAVE APPEARED ON '"$tmpDir" 'THIS LIKELY MEANS THERE WAS AN ERROR SOMEWHERE IN THE PIPE FEEDING FORKRUN' 'ABORTING TO AVOID GETTING STUCK IN AN INFINITE WAIT LOOP' && return 3
             fi
@@ -771,7 +790,7 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
         
     else              
         # all of stdin has been sent off to workers. As each worker coproc finishes its final task, send it a NULL to cause it to break its 'while true' loop and terminate.
-		
+        
         # iterate counters
         (( ${nSent} < ${nProcs} )) && ((nDone++))
         ((nFinal--))
