@@ -3,55 +3,68 @@
 forkrun() {
 ## Efficiently parallelize a loop / run many tasks in parallel using bash coprocs
 #
-# USAGE: printf '%s\n' "${args}" | forkrun [(-j|-p) <#>] [flags] [--] parFunc [args0]
-# EXAMPLE:    find ./ -type f | forkrun sha256sum
+# USAGE:   printf '%s\n' "${args}" | forkrun [(-j|-p) <#>] [flags] [--] parFunc [args0]
+# 
+# RESULT:  forkrun will run `$parFunc $args0 ${individual line from $args) in parallel for each line in $args
 #
-# Usage is the same as the running a loop in parallel using xargs -P /  parallel.
-# source this file, then pass inputs to parallelize over on stdin,
-# and pass function name and initial arguments as function inputs.
+# EXAMPLE: find ./ -type f | forkrun sha256sum
 #
-# For each simultanious porocess requested, a coproc is forked off. Data are then piped in/out of these coprocs.
-# Importantly, this means that you dont need to fork anything after the initial coprocs are set up.
+# Usage is the same as the running a loop in parallel using xargs -P or  parallel (using stdin).
+# source this file, then pass inputs to parallelize over on stdin and pass function name and initial arguments as function inputs.
+#
+# HOW IT WORKS: For each simultanious porocess requested, a coproc is forked off. Data are then piped in/out of these coprocs.
+# Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are piped new data instead.
 # This makes this parallelization method MUCH faster than forking (for tasks with many short/quick tasks and on x86_64 machines
-# with many cores speedup can be >100x). In my testing it was also comparable to, if not faster than, 'xargs -P' and 'parallel'
+# with many cores speedup can be >100x). In my testing / on my hardware it is also faster than both 'xargs -P' and 'parallel -m'
+#
+# NO FUNCTION MODE: forkrun supports an additional mode of operation where "parFunc" and "args0" are not given as function inputs, but instead are integrated into each line of "$args".
+#                   In this mode, each line passed on stin will be run as-is (by saving groups of 512 lines to tmp files and then sourcing them). This allows you to easily run multiple 
+#                   different functions in paralel and still utalize forkrun's very quick and efficient parallelization method. This mode has a few limitations/considerations:
+#                       1. The following flags are not supported and, if given, will be ignored: '-i', '-id', '-s' and '-l 1'
+#                       2. Lines from stdin will be "space-split" when run. Typically, forkrun splits stdin on newlines (or nulls, if -0z flag is given), allowing (for example)
+#                          paths that include a space (' ') character to work without needing any quoting. in "no function" mode however, the function and initial args are included in 
+#                          each line on stdin, so they must be space-split to run. Solution is to either quote things containing spaces or easpace the space characters ('\ '). Example:
+#
+#                   printf '%s\n' 'sha256sum "/some/path/with space character"' 'sha512sum "/some/other/path/with space characters"' | forkrun
 #
 #
 # # # # # # # # # # FLAGS # # # # # # # # # #
 #
-# Most of the xargs functionality and much of the "standard" parallel functionality has been implemented in forkrun. Where possible, flags are the same as the analagous xargs / parallel flags.
+# Most of the xargs functionality and much of the "standard" parallel functionality (including some functionality not present in xargs) 
+# has been implemented in forkrun. Where possible, flags are the same as the analagous xargs / parallel flags, or as "common" shell flags.
 #
-# (-j|-p) <#>  Use either of these flags to specify the number of simultanious processes to use at a given time. The DEFAULT is to use the number of logical cpu cores
+# (-j|-p) <#>  Num Cores. Use either of these flags to specify the number of simultanious processes to use at a given time. The DEFAULT is to use the number of logical cpu cores
 # --procs=<#>  (requires either `nproc` or grep + access to procfs). If logic core count can not be determined, the DEFAULT is 8.
 #
-#    -l <#>    Use this flag to define the number of inputs to group together and pass to the worker coprocs. Sending multiple inputs at once 
-# --lines=#>   typicallly is faster, though setting this higher than 512 or higher than ( # lines in stdin ) / ( # worker coprocs ) tends to make 
-#              forkrun slower, not faster. Set this to 0 (or dont set it at all) to have forkrun automatically set and adjust this parameter for you (this is the DEFAULT). 
+#    -l <#>    Num lines (from stdin) per function call. Use this flag to define the number of inputs to group together and pass to the worker coprocs.
+# --lines=#>   Sending multiple inputs at once typicallly is faster, though setting this higher than 512 or higher than ( # lines in stdin ) / ( # worker coprocs )
+#              tends to make forkrun slower, not faster. Set this to 0 (or dont set it at all) to have forkrun automatically set and adjust this parameter for you (DEFAULT). 
 #              NOTE:  not all functions (e.g., basename) support running multiple inputs at once. To use these fuctions with forkrun you MUST call forkrun with `-l 1`. Otherwise, use the default.
 #
-#      -i      Use this flag to insert the argument passed via stdin in a specific spot in the function call indicated by '{}'. '{}' will be replaced with the current input wherever it appears.
+#      -i      Substitute {}. Use this flag to insert the argument passed via stdin in a specific spot in the function call indicated by '{}'. '{}' will be replaced with the current input anywhere it appears.
 #   --insert   Example: the standard forkrun usage, where the input is tacked on to the end of the function + args string, is roughly the same as `echo inputs | forkrun -I -- func arg1 ... arg N '{}'`
 #              Note: the entire group of inputs will be inserted at every {}. Depending on your specific usage, you may need to use `-l 1` to make this work right.
 #
-#     -id      In addition to what flag `'-i' does (replacing {} with stdin), 2 additional changes are made by flag -id: (note: flag '-i' is implied and automatically set by flag '-id')
+#     -id      Substitute {id}. In addition to what flag `'-i' does (replacing {} with stdin), 2 additional changes are made by flag -id: (note: flag '-i' is implied and automatically set by flag '-id')
 # --insert-id  1) If '{ID}' is present in the fuction "$initiaArgs" given in forkrun function inputs, it will be substituted for the unique ID of the coproc worker that is currently running.
 #              2) Forkrun typically shell-quotes any initial function args given in forkrun function inputs so that they are interpreted as strings/characters. 
 #                 with flag -id, this shell quoting is *not* done for pipes and reirects: '<', '|', or '>' will be used to redirect/pipe the function call being run in the coproc. 
 #                 NOTE: the shell interprets unquoted/unescaped pipes/redirects and forkrun never sees it. if quoted+escaped ('\<', '\>', '\|') then they are treated as literal '<', '>', or '|' chars
 #              The intent of these changes is to allow one to send each coproc worker's output to different places. EXAMPLE:  seq 1 1000 | forkrun -id -- printf '%s\n' {}  '>>.out.{ID}'
 #
-#      -k      Use this flag to force the output to be given in the same order as arguments were given on stdin. The "cost" of this is 
-#    --keep    a) you wont get any output as the code runs - it will all come at one at the endand b) the code runs slightly slower (~10%).  This re-calls forkrun with the 
+#      -k      Sorted output. Use this flag to force the output to be given in the same order as arguments were given on stdin. The "cost" of this is 
+#    --keep    a) you wont get any output as the code runs - it will all come at one at the endand b) the code runs slightly slower (typically 5-10%).  This re-calls forkrun with the 
 # --keep-order '-n' flag and then sorts the output. NOTE: if you use the `-k` (or `-n`) flags, the function you are parallelizing can NOT produces any NULL characters in its output.
 #
-#      -n      Use this flag to force the output for each input batch to get pre-pended with "<#> $'\t'", where <#> reprenents where that result's input(s) were in 
+#      -n      Output with ordering info. Use this flag to force the output for each input batch to get pre-pended with "<#> $'\t'", where <#> reprenents where that result's input(s) were in 
 #  --number    the input queue.  This will be pre-pended once per output group, and output groups will be seperated by NULL characters, allowing the original input order
 #--line-number to be recreated easily using null-delimited parsing (e.g., with 'sort -z' and 'cut -z').  This is used by the '-k' flag to re-order the output to the same order as the inputs
 #
-#  -t <path>   Use this flag to set the base directory where tmp files containing groups of lines from stdin will be kept. Default is '\tmp'.
+#  -t <path>   Set tmpdir root. Use this flag to set the base directory where tmp files containing groups of lines from stdin will be kept. Default is '\tmp'.
 # --tmp=<path> To speed up parsing stdin, forkrun splits up stdin into groups of $nBatch and saves them to [ram]disk. This path should not include whitespace characters.
 #              These temp input files are then deleted according to `--remove-tmp-dir` policy set (see below). Highly reccomend that this dir be on a tmpfs/ramdisk.
 #
-#   -d <#>     Specify behavior for deleting the temporary directory used to store stdin input batches. <#> must be 0, 1, 2, or 3. These respesent:
+#   -d <#>     Set tmpdir deletion behavior. Specify behavior for deleting the temporary directory used to store stdin input batches. <#> must be 0, 1, 2, or 3. These respesent:
 # --delete=<#> [ 0 ] : Never remove the temporary directory
 #              [ 1 ] : Remove the temporary directory if 'forkrun' finishes normally. This is normally the DEFAULT.
 #              [ 2 ] : Remove the temporary directory in all situations, even if 'forkrun' did not finish running normally.
@@ -59,18 +72,18 @@ forkrun() {
 #                      This lowers memory use (especially if stdin is *really* large) at the cost of increasing (wall-clock) run-time by ~5-10%.
 #                      This is the DEFAULT if forkrun is able to detect that the system has (in total) less than 8 gb of memory/RAM.
 #
-#     -w       wait indefinately for the files generated by split (containing lines from stdin) to appear in $tmpDir. Normally, forkrun will wait ~5 seconds (4096 `sleep 0.001` calls)
+#     -w       Wait for slow stdin. wait indefinately for the files generated by split (containing lines from stdin) to appear in $tmpDir. Normally, forkrun will wait ~5-10 seconds (up to 4096 `sleep 0.001` calls)
 #   --wait     for `split` to output its first file. This is done to avoid a situation wherethere is an error somewhere in the pipe feeding forkrun (perhaps die to a typo), which causes forkrun
 #              to stall and become unresponsive while waiting for input on stdin. However, if the pipe feeding forkrun is giving data slowly and during this period has not provided 512 inputs (or EOF)
 #              to split this could cause forkrun to exit prematurely. give the `-w` flag to prevent this and have forkrun wait indefinately for the 1st split file. Note: has no effect if `-l=1`
 #
-#   (-0|-z)    Assume that individual inputs passed on stdin are delimited by NULL's instead of by newlines. Note: that NULL-seperted inputs will be passed as-is to the function
+#   (-0|-z)    Null seperated stdin. Assume that individual inputs passed on stdin are delimited by NULL's instead of by newlines. Note: that NULL-seperted inputs will be passed as-is to the function
 #    --null    being parallelized, so ensure that it supports and expects NULL-seperated inputs, not newline seperated ones. this note does not apply if you pass forkrun `-l 1`.  
 #              Notes: 1) 'split' must be available to use this flag. 2) this flag doesnt work if `-l 1` is set. 3) To avoid command substitution removing the null bytes,
 #              when this flag is used the inputs will be passed to the function being parallelized via stdin, not via function inputs. i.e., this implies flag '-s'
 #              
 #
-# (-s|--stdin) Input will be passed to the function being pasrallelized (parFunc) via stdin instead of via function arguments. Normally, forkrun passes inputs to parFunc via
+# (-s|--stdin) Pipe inputs to parFunc stdin. Input will be passed to the function being parallelized (parFunc) via stdin instead of via function arguments. Normally, forkrun passes inputs to parFunc via
 #    --pipe    export IFS=$'\n' && ${parFunc} $(<filePath)  --OR--   ${parFunc} ${lineFromStdin}.      When '-s' is specified, inputs are instead passed via stdin. i.e.,
 #              export IFS=$'\n' && ${parFunc} <filePath     --OR--   ${parFunc} <(echo ${lineFromStdin})
 #
@@ -78,14 +91,14 @@ forkrun() {
 #
 # (-h|-?|--help) Display this help.
 #
-#      --      Use this flag to indicate that all remaining arguments are the 'functionName' and 'initialArgs'. Forkrun, by default, assumes the 1st rgument that does not begin with '-' 
-#              is the function name and all remaining arguments are its initialArgs. Using '--' would allow you to parallelize a function that has a '-' as its first character.
+#      --      Denote last forkrun option. Use this flag to indicate that all remaining arguments are the 'functionName' and 'initialArgs'. Forkrun, by default, assumes "parFunc" is the 1st argument that
+#               does not begin with '-' is the function name and all remaining arguments are its initialArgs. Using '--' would allow you to parallelize a function that has a '-' as its first character.
 #
 #
-# NOTES: Flags must be given seperately ('-i -s', not '-is'). Flags are NOT case sensitive and can be given in any order, but must all be given before the "functionName" input. 
+# NOTES: Flags must be given seperately ('-i' '-s', not '-is'). Flags are NOT case sensitive and can be given in any order, but must all be given before the "functionName" input. 
 #        For options that require an argument ( -[jpltd] ): in "short" versionsm, the ' ' can be removed or replaced with '='. e.g., to set -j|-p, the following all work: '-j' '<#>', '-p' '<#>', '-j<#>', '-p<#>, '-j=<#>', '-p=<#>' 
-#        Any of the above with an upper-case (-j|-p) will work as well. However, quoting 2 inputs together with a space in between (e.g., '-j <#>') will NOT work.
-#        For long versions of flags: either the '=' or 2 seperate arguments is required. e.g., '--lines=0' and '--lines' '0' work, but '--lines0' will NOT will work
+#        Any of the above with an upper-case flag (-J|-P) will work as well. However, quoting 2 inputs/flags together with a space in between (e.g., '-j <#>') will NOT work.
+#        For long versions of flags: either the '=' or 2 seperate arguments is required. e.g., '--lines=0' and '--lines' '0' work, but '--lines0' will NOT will work (even though '-L0' works)
 #
 #
 # # # # # # # # # # DEPENDENCIES # # # # # # # # # #
@@ -95,7 +108,7 @@ forkrun() {
 #
 # # # GENERAL DEPOENDENCIES # # #
 # (*) Bash 4.0+ (this is when coprocs were introduced)
-# (x) which  (for determining available binaries and chjoosing which code paths to take)
+# (x) which  (for determining available binaries and choosing which code paths to take)
 # (x) wc
 #
 # # # FOR ORDERED OUTPUT (-k) # # #
@@ -116,7 +129,7 @@ forkrun() {
 #       However, it is slower, riskier (since stdin is sourced) and neither automatic batching (-l=0) nor NULL-seperated input processing (-0|-z) will work.
 # 
 #
-# # # # # # # # # # KNOWN ISSUES / BUGS # # # # # # # # # #
+# # # # # # # # # # KNOWN ISSUES / BUGS / UNEXPECTED BEHAVIOR # # # # # # # # # #
 #
 # ISSUE: when running <...> | fokrun echo, forkrun does not produce output like what `seq 1 12` would give (1 value per line). Instead, you will get something like:
 #        1 2 3 4 
@@ -127,15 +140,16 @@ forkrun() {
 #        results in everything on the same line and space seperated (instead of everything newline-seperated on its own line)
 #
 # WORKAROUND: use <...> | forkrun printf '%s\n' 
-#
-# ISSUE: when no function is provided, lines are split up by space characters. e.g., paths with soace characters will be interpreted as 2 paths.
-#
-# CAUSE: TBD
-#
-# WORKAROUND: TBD
 
 
+######################################################
 # # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #
+######################################################
+
+
+##########################################################################################################
+# # # # # # # # # # SECTION 1 -- DEFINE: LOCAL VARIABLES, SET OPTIONS, EXIT TRAPS, ... # # # # # # # # # #
+##########################################################################################################
 
 # enable job control
 set -m
@@ -144,7 +158,8 @@ set -m
 trap 'exitTrap; return' EXIT HUP TERM QUIT 
 
 # enable line-by-line time profiling
-[[ -n ${timeProfileFlag} ]] && ${timeProfileFlag} && { [[ -f /usr/local/bin/addTimeProfile ]] || source <(curl https://raw.githubusercontent.com/jkool702/timeprofile/main/setup.bash); } && source /usr/local/bin/addTimeProfile
+# timeProfileFlag=true
+#[[ -n ${timeProfileFlag} ]] && ${timeProfileFlag} && { [[ -f /usr/local/bin/addTimeProfile ]] || source <(curl https://raw.githubusercontent.com/jkool702/timeprofile/main/setup.bash); } && source /usr/local/bin/addTimeProfile
 
 # define exitTrap
 exitTrap() {
@@ -169,15 +184,9 @@ exitTrap() {
     ! [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] || exec {fd_index}>&-
 
     # unset traps
-    trap - EXIT HUP TERM INT QUIT DEBUG
-
-    #trap - DEBUG
-    #kill ${pTime_PID}dd
-
+    trap - EXIT HUP TERM QUIT DEBUG
     return
 }
-
-#trap '[[ -n ${BASH_COMMAND} ]] & ! [[ ${BASH_COMMAND} == '"'"'IFS='"'"'* ]] && echo "(line ${LINENO}): ${BASH_COMMAND}" >&${pTime[1]} || :' DEBUG
 
 # make variables local
 local -a FD_in
@@ -206,20 +215,20 @@ local PID0
 local tmpDir
 local tmpDirRoot
 local timeoutCount
-local stdinReadFlag
 local orderedOutFlag
 local exportOrderFlag
-local haveSplitFlag
 local nullDelimiterFlag
-local autoBatchFlag
-local splitAgainFlag
 local substituteStringFlag
 local substituteStringIDFlag
-local batchFlag
 local pipeFlag
 local verboseFlag
 local waitFlag
 local noFuncFlag
+local haveSplitFlag
+local batchFlag
+local stdinReadFlag
+local autoBatchFlag
+local splitAgainFlag
 local -i rmTmpDirFlag
 local -f getNextInputFileName
 #local -a FD_out
@@ -230,7 +239,7 @@ local -f getNextInputFileName
 # record main process PID
 PID0=$$
 
-# record IFS, so we can change it back to what itnoriginally was in the exit trap
+# record IFS, so we can change it back to what it originally was in the exit trap
 IFS0="${IFS}"
 export IFS=$'\n'
 
@@ -238,12 +247,18 @@ export IFS=$'\n'
 # This is used by the coprocs to indicate that they are done with a task and ready for another.
 exec {fd_index}<><(:)
 
+
+################################################################################
+# # # # # # # # # # SECTION 2 -- PARSE FORKRUN FLAGS/OPTIONS # # # # # # # # # #
+################################################################################
+
 # parse inputs, set forkrun flags and options (using defaults when needed)
 # note: any initial arguments (args0) are rolled into variable $parFunc
 orderedOutFlag=false
 exportOrderFlag=false
 nullDelimiterFlag=false
 substituteStringFlag=false
+substituteStringIDFlag=false
 pipeFlag=false
 verboseFlag=false
 waitFlag=false
@@ -352,7 +367,7 @@ if ${orderedOutFlag} && ${exportOrderFlag}; then
 fi
 
 # return if we dont have anything to parallelize over
-(( ${#} == 0 )) && { printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2; noFuncFlag=true; } || { which "${1%%[ $'\n'$'\t']*}" 1>/dev/null 2>/dev/null || declare -F "${1%%[ $'\n'$'\t']*}" 2>/dev/null; } || { printf '%s\n' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' 'FUNCTION SPECIFIED: '"${*}" >&2 && return 1; }
+(( ${#} == 0 )) && { printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2; noFuncFlag=true; } || { which "${1%%[ $'\n'$'\t']*}" 1>/dev/null 2>/dev/null || declare -F "${1%%[ $'\n'$'\t']*}" 2>/dev/null; } || { printf '%s ' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' $'\n''FUNCTION SPECIFIED: ' "${@}" $'\n' >&2 && return 1; }
 [[ -t 0 ]] && printf '%s\n' 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
 
 # if user requested ordered output, re-run the forkrun call trading flag '-k' for flag '-n',
@@ -382,11 +397,11 @@ ${haveSplitFlag} || { autoBatchFlag=false; nullDelimiterFlag=false; }
 ${substituteStringFlag} && ! [[ "${*}" == *{}* ]] && substituteStringFlag=false && printf '%s\n' "WARNING: {} NOT FOUND IN FUNCTION STRING OR ARGS. TURNING OFF '-i' FLAG"
 
 # generate strings that will be used by the coprocs (when they are sourced later on) to actually call the function being parallelized with $nBatch input lines from stdin
-# The function + initial args given as forkrun function inputs need to be `printf '%q'` quoted, but the command that gets the lines from stdin out of the file grnerated by split needs to be unquoted
+# The function + initial args given as forkrun function inputs need to be `printf '%q'` quoted, but the command that gets the lines from stdin out of the file generated by split needs to be unquoted
 if ${noFuncFlag}; then
     ${batchFlag} || { batchFlag=true; nBatch=512; printf '%s\n' 'WARNING: ONE-LINE-AT-A-TIME MODE (-l 1) IS NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THIS FLAG.' '(IN THIS USE CASE IT REALLY GIVES NO BENEFIT AND SLOWS THINGS DOWN ANYWAYS)' >&2; }
 	mapfile -t parFunc < <(printf '%q\n' "source")
-    ! { {substituteStringFlag} || ${substituteStringIDFlag}; } || { substituteStringFlag=false; substituteStringIDFlag=false; printf '%s\n' 'WARNING: STRING SUBSTITUTION (-i | -id) NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THESE FLAGS.' >&2; }
+    ! ${substituteStringFlag} && ! ${substituteStringIDFlag} || { substituteStringFlag=false; substituteStringIDFlag=false; printf '%s\n' 'WARNING: STRING SUBSTITUTION (-i | -id) NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THESE FLAGS.' >&2; }
     ! ${pipeFlag} || { pipeFlag=false; printf '%s\n' 'WARNING: INPUT PIPING (-s) NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THIS FLAG.' >&2; }    
 else
     mapfile -t parFunc < <(printf '%q\n' "${@}")
@@ -418,7 +433,11 @@ ${pipeFlag} && printf '%s\n' "pipeFlag = true" || printf '%s\n' "pipeFlag = fals
 printf '\n'
 } >&2
 
-# # # # # BEGIN MAIN FUNCTION # # # # #
+
+################################################################################
+# # # # # # # # # # SECTION 3 -- DEFINE SUPPORTING FUNCTIONS # # # # # # # # # #
+################################################################################
+
 {
 
 # if (( nBatch > 1 )) then split up input into files undert $tmpDir, each of which contains $nBatch lines and define a function for getting the next file name
@@ -485,6 +504,11 @@ getNextInputFileName() {
 
 fi
 } 6<&0
+
+
+#################################################################
+# # # # # # # # # # SECTION 4 -- FORK COPROCS # # # # # # # # # #
+#################################################################
 
 # fork off $nProcs coprocs and record FDs / PIDs for them
 #
@@ -580,7 +604,10 @@ EOI0
 
 done
 
-# begin main parallelization loop
+
+##############################################################################
+# # # # # # # # # # SECTION 5 -- MAIN PARALLELIZATION LOOP # # # # # # # # # #
+##############################################################################
 
 # set initial vlues for the loop
 nSent=0
@@ -658,7 +685,7 @@ elif ${batchFlag}; then
             sleep 0.001s
         if ! ${waitFlag}; then
                 ((timeoutCount--))
-                (( ${timeoutCount} == 0 )) && printf '%s\n' 'ERROR: NO FILES CONTAINING LINES FROM STDIN HAVE APPEARED ON '"$tmpDir" 'THIS LIKELY MEANS THERE WAS AN ERROR SOMEWHERE IN THE PIPE FEEDING FORKRUN' 'ABORTING TO AVOID GETTING STUCK IN AN INFINITE WAIT LOOP' && return 3
+                (( ${timeoutCount} == 0 )) && printf '%s\n' 'ERROR: NO FILES CONTAINING LINES FROM STDIN HAVE APPEARED ON '"$tmpDir" 'THIS LIKELY MEANS THERE WAS AN ERROR SOMEWHERE IN THE PIPE FEEDING FORKRUN' 'ABORTING TO AVOID GETTING STUCK IN AN INFINITE WAIT LOOP' 'TO FORCE FORKRUN TO WAIT INDEFINATELY FOR AN INPUT, PASS IT FLAG '"'"'-w'"'" && return 3
             fi
         done
     }
