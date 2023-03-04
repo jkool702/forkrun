@@ -22,10 +22,10 @@ Alternately, if you dont have forkrun.bash` saved locally but have internet acce
 NO FUNCTION MODE: forkrun supports an additional mode of operation where "parFunc" and "args0" are not given as function inputs, but instead are integrated into each line of "$args". In this mode, each line passed on stin will be run as-is (by saving groups of 512 lines to tmp files and then sourcing them). This allows you to easily run multiple different functions in paralel and still utalize forkrun's very quick and efficient parallelization method. This mode has a few limitations/considerations:
 
 1. The following flags are not supported and, if given, will be ignored: '-i', '-id', '-s' and '-l 1'
-
 2. Lines from stdin will be "space-split" when run. Typically, forkrun splits stdin on newlines (or nulls, if -0z flag is given), allowing (for example)paths that include a space (' ') character to work without needing any quoting. in "no function" mode however, the function and initial args are included in each line on stdin, so they must be space-split to run. Solution is to either quote things containing spaces or easpace the space characters ('\ '). Example:
 
-    printf '%s\n' 'sha256sum "/some/path/with space character"' 'sha512sum "/some/other/path/with space characters"' | forkrun
+
+     `printf '%s\n' 'sha256sum "/some/path/with space character"' 'sha512sum "/some/other/path/with space characters"' | forkrun`
 
 
 # # # # # HOW IT WORKS # # # # #
