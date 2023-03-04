@@ -336,8 +336,9 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
     elif [[ "${1,,}" =~ ^-+[\?h](elp)?$ ]]; then
         # display help
         local helpText
-        helpText="$(<"${BASH_SOURCE[0]}")"
-        printf '%s\n' "${helpText%%'# # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #'*}"
+        helpText="$(<"${BASH_SOURCE[0]}")" || helpText="$(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)"
+	helpText="${helpText%%'# # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #'*}"
+        printf '%s\n' "${helpTex//$'\n''#'/}"
         return    
     elif [[ "${1,,}" =~ ^-+v(erbose)?$ ]]; then
         # increase verbosity
