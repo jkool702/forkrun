@@ -106,7 +106,7 @@ forkrun() {
 # Where possible, forkrun uses bash builtins, making it have minimal dependencies. There are, however a handful of required external software packages.
 # NOTE: Items prefaced with '(*)' require the "full" [GNU coreutils] version....The busybox version is insufficient. On items prefaced with (x) either the full or busybox version will work.
 #
-# # # GENERAL DEPOENDENCIES # # #
+# # # GENERAL DEPENDENCIES # # #
 # (*) Bash 4.0+ (this is when coprocs were introduced)
 # (x) which  (for determining available binaries and choosing which code paths to take)
 # (x) wc
@@ -338,7 +338,7 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
         local helpText
         helpText="$(<"${BASH_SOURCE[0]}")" || helpText="$(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)"
 	helpText="${helpText%%'# # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #'*}"
-        printf '%s\n' "${helpTex//$'\n''#'/}"
+        printf '%s\n' "${helpText//$'\n''#'/$'\n'}"
         return    
     elif [[ "${1,,}" =~ ^-+v(erbose)?$ ]]; then
         # increase verbosity
