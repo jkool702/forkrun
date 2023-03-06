@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 
 forkrun() {
 ## Efficiently parallelize a loop / run many tasks in parallel using bash coprocs
@@ -711,8 +711,10 @@ if ${autoBatchFlag}; then
 
         # record how many files we will be re-combining and re-splitting to figure out how many lines to put in each re-split file to split them evenly.
         splitAgainNSent="$(printf '%s\n' "${splitAgainFileNames}" | wc -l)"
-        nBatchCur=$(( 1 + ( ( $(export IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l) - 1 ) / ${nProcs} ) )) 
-
+        splitAgainNLines="$(export IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l)"
+        (( ${splitAgainNLines} < ${nProcs} )) && splitAgainNFiles="${splitAgainNLines}" || splitAgainNFiles="${nProcs}"
+        nBatchCur=$(( 1 + ( ( ${splitAgainNLines} - 1 ) / ${nProcs} ) )) 
+	
         # recombine (with cat -s to suppress long series of blanks) and then re-split into files with equal number of lines
         { 
             export IFS=$'\n' && cat -s ${splitAgainFileNames}
