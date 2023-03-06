@@ -200,6 +200,8 @@ local -i nSent
 local -i nSent0
 local -i nSentCur
 local -i splitAgainNSent
+local -i splitAgainNLines
+local -i splitAgainNFiles
 local -i nDone
 local -i nFinal
 local -i nProcs
@@ -234,8 +236,8 @@ local stdinReadFlag
 local autoBatchFlag
 local splitAgainFlag
 local -i rmTmpDirFlag
-local -f getInputFileName
-local -f getNextInputFileName
+local getInputFileName
+local getNextInputFileName
 #local -a FD_out
 #local -a pidA
 #local pCur
@@ -772,7 +774,7 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
             # get next file name to send based on $nSent0 (and, if working of a batch of re-split files, on $nSentCur)
             if ${autoBatchFlag}; then
               
-                if ${splitAgainFlag} && (( ${nSentCur} == ${nProcs} )); then
+                if ${splitAgainFlag} && (( ${nSentCur} == ${splitAgainNFiles} )); then
                     # we just sent to last file from a re-split group. Turn off splitAgainFlag, clear splitAgain parameters
                     # and advance nSent0 by number of (split-generated) files that originally went in to the resplit group of files
                     nSentCur=0
@@ -782,6 +784,8 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
                     splitAgainFlag=false
                     nSent0=$(( ${nSent0} + ${splitAgainNSent} ))
                     splitAgainNSent=0
+					splitAgainNLines=0
+					splitAgainNFiles=0
                     sendNext="${sendNext0}"    
                 fi
                           
@@ -815,7 +819,6 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
                     sendNext0="${sendNext}"
                     splitAgainPrefix="${sendNext0}_x"
 
-
                     # determine how many files we actually have available. Should be somewhere between 1 and $(( $nProcs - 1 ))
                         splitAgainFileNames="$(kk=1; while [[ -f "${tmpDir}/${sendNext0}" ]] && (( ${kk} < ${nProcs} )); do
                             printf '%s\n' "${tmpDir}/${sendNext0}" 
@@ -824,6 +827,13 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
                         done)"
                         sendNext0="${splitAgainFileNames##*$'\n'}"
                         sendNext0="${sendNext0##*/}"
+						
+					# record how many files we will be re-combining and re-splitting to figure out how many lines to put in each re-split file to split them evenly.
+					splitAgainNSent="$(printf '%s\n' "${splitAgainFileNames}" | wc -l)"
+					splitAgainNLines="$(export IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l)"
+					(( ${splitAgainNLines} < ${nProcs} )) && splitAgainNFiles="${splitAgainNLines}" || splitAgainNFiles="${nProcs}"
+					
+					nBatchCur=$(( 1 + ( ( ${splitAgainNLines} - 1 ) / ${nProcs} ) )) 
 
                         # recombine (with cat -s to suppress long series of blanks) and then re-split into files with equal number of lines
                     { 
