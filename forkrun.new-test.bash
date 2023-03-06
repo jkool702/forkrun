@@ -154,6 +154,9 @@ forkrun() {
 # enable job control
 set -m
 
+# enable extglob
+shopt -s extglob
+
 # set exit trap to clean up
 trap 'exitTrap; return' EXIT HUP TERM QUIT 
 
@@ -478,13 +481,14 @@ getNextInputFileName() {
 
     x_prefix="${1}"
     x="${2}"
-    x_halfLen0=$(( 1 + ( ( ${#x} - ${#x_prefix} ) / 2 ) ))
-    x_halfLen=$(( ${x_halfLen0} + ${#x_prefix} - 2 ))
+    x_halfLen0=$(( 2 + ( ( ${#x} - ${#x_prefix} ) / 2 ) ))
+    x_halfLen=$(( ${x_halfLen0} + ${#x_prefix} - 3 ))
 
     if [[ "${x:${x_halfLen}}" =~ ^89+$ ]]; then
-        printf '%s' "${x:0:${x_halfLen}}9$(kk=0; while (( ${kk} < ${x_halfLen0} )); do printf '0'; ((kk++)); done)"
+        printf '%s' "${x:0:${x_halfLen}}9$(printf '%0.'"${x_halfLen0}"'d' '0')"
     else
-        printf '%s%0.'"$(( ${#x} - ${#x_prefix} ))"'d' "${x_prefix}" "$(( ${x:${#x_prefix}} + 1 ))"
+        x="${x:${#x_prefix}}"
+	printf '%s%0.'"${#x}"'d' "${x_prefix}" "$(( ${x##*(0)} + 1 ))"
     fi
 }
 
