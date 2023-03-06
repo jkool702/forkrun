@@ -381,7 +381,7 @@ fi
 # a) each "result group" (fron a particular batch of nBatch input lines) is NULL seperated
 # b) each result group is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag}; then
-    forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -n -k2 -t"$(printf '\004')" | cut -d "$(printf '\004')" -f 3- | grep -zoE '^.*[^[:space:]]'
+    echo "$(forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -n -k2 -t"$(printf '\004')" | cut -d "$(printf '\004')" -f 3-)" | grep -zoE '^.*[^[:space:]]'
     printf '\n'
     return
 fi
@@ -724,7 +724,7 @@ if ${autoBatchFlag}; then
             fi
         }
         sendNext="x00_x00"
-	
+    
         (( ${rmTmpDirFlag} == 3 )) && {
             export IFS=$'\n' && rm -f ${splitAgainFileNames}
         }
@@ -837,7 +837,7 @@ while ${stdinReadFlag} || { (( ${nFinal} > 0 )) && (( ${nDone} < ${nArgs} )); };
                             split -l "${nBatchCur}" -d - "${tmpDir}/${splitAgainPrefix}"            
                         fi
                     }
-		    
+            
                     # generate name of 1st file in current group
                     sendNext="${splitAgainPrefix}00" 
 
