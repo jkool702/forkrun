@@ -475,20 +475,25 @@ getNextInputFileName() {
     # this is faster than the (more general) getInputFileName, but only will provide the immediate next file name.
     
     local x
+    local x0
+    local x1
     local x_prefix
     local x_halfLen0
     local x_halfLen
 
     x_prefix="${1}"
     x="${2}"
+    
     x_halfLen0=$(( 2 + ( ( ${#x} - ${#x_prefix} ) / 2 ) ))
     x_halfLen=$(( ${x_halfLen0} + ${#x_prefix} - 3 ))
 
-    if [[ "${x:${x_halfLen}}" =~ ^89+$ ]]; then
-        printf '%s' "${x:0:${x_halfLen}}9$(printf '%0.'"${x_halfLen0}"'d' '0')"
+    x0="${x:0:${x_halfLen}}"
+    x1="${x:${x_halfLen}}"
+
+    if [[ "${x1}" =~ ^89+$ ]]; then
+        printf '%s' "${x0}9$(printf '%0.'"${x_halfLen0}"'d' '0')"
     else
-        x="${x:${#x_prefix}}"
-	printf '%s%0.'"${#x}"'d' "${x_prefix}" "$(( ${x#*(0)} + 1 ))"
+        printf '%s%0.'"${#x1}"'d' "${x0}" "$(( ${x1##*(0)} + 1 ))"
     fi
 }
 
