@@ -1,0 +1,32 @@
+# time find /mnt/ramdisk/ -type f | wc -l
+197061
+
+real    0m0.362s
+user    0m0.151s
+sys     0m0.232s
+
+
+# time find /mnt/ramdisk/ -type f | forkrun sha256sum | wc -l
+197061
+
+real    0m2.597s
+user    0m22.756s
+sys     0m3.971s
+
+
+# time find /mnt/ramdisk/ -type f -print0 | xargs -0 -P$(nproc) sha256sum | wc -l
+197061
+
+real    0m4.661s
+user    0m18.445s
+sys     0m3.047s
+
+
+# time find /mnt/ramdisk/ -type f | parallel -m -j $(nproc) sha256sum | wc -l
+197061
+
+real    0m6.583s
+user    0m20.742s
+sys     0m4.077s
+
+
