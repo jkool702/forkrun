@@ -10,11 +10,9 @@ for nn in $(seq 1 $(( 10 * $(nproc) + 1 ))); do
 done
 
 for np in $(( $(nproc) - 2 )) $(( 10 * $(nproc) + 1 )); do
-	echo $'\n'seq\ 1\ ${np}\ \|\ forkrun\ {,-k\ ,-n\ }{,-l1\ }{,-j$(( $(nproc) - 1 ))\ }{,-t\ /tmp\ }{,-d\ 3\ }{,--\ }{sha1sum,sha256sum,echo,printf\ '"'"'"'%s\n'"'"'"'}\ \|\ wc\ -l\ \|\ grep\ -qx\ ${np}\ \&\&\ echo\ \"PASS\"\ \|\|\ echo\ \"FAIL\ \<-----\"$'\n' | sed -E s/^'(.*)( \| wc -l.*)$'/'\{ echo -n "\1 : "; \1\2; \} \| tee -a .\/forkrun.unit-tests.log'/ 
-	wait
-        echo $'\n'seq\ 1\ ${np}\ \|\ forkrun\ -i\ {,-k\ ,-n\ }{,-l1\ }{,-j$(( $(nproc) - 1 ))\ }{,-t\ /tmp\ }{,-d\ 3\ }{,--\ }{sha1sum,sha256sum,echo,printf\ \"\'\"\'%s\\n\'\"\'\"}\ \{\}\ \|\ wc\ -l\ \|\ grep\ -qx\ ${np}\ \&\&\ echo\ \"PASS\"\ \|\|\ echo\ \"FAIL \<-----\"$'\n' | sed -E s/^'(.*)( \| wc -l.*)$'/'\{ echo -n "\1 : "; \1\2; \} \| tee -a .\/forkrun.unit-tests.log'/
-	wait
-done | grep -E '[a-ZA-Z0-9]+'
+	echo $'\n'seq\ 1\ ${np}\ \|\ forkrun\ {,-k\ ,-n\ }{,-l1\ }{,-j$(( $(nproc) - 1 ))\ }{,-t\ /tmp\ }{,-d\ 3\ }{,--\ }{sha1sum,sha256sum,echo,printf\ "'"'%s\n'"'"}\ \|\ wc\ -l\ \|\ grep\ -qx\ ${np}\ \&\&\ echo\ \"PASS\"\ \|\|\ echo\ \"FAIL\ \<-----\"$'\n' | sed -E s/^'(.*)( \| wc -l.*)$'/'\{ echo -n "\1 : "; \1\2; \} \| tee -a .\/forkrun.unit-tests.log'/ 
+        echo $'\n'seq\ 1\ ${np}\ \|\ forkrun\ -i\ {,-k\ ,-n\ }{,-l1\ }{,-j$(( $(nproc) - 1 ))\ }{,-t\ /tmp\ }{,-d\ 3\ }{,--\ }{sha1sum,sha256sum,echo,printf\ "'"'%s\n'"'"}\ \{\}\ \|\ wc\ -l\ \|\ grep\ -qx\ ${np}\ \&\&\ echo\ \"PASS\"\ \|\|\ echo\ \"FAIL \<-----\"$'\n' | sed -E s/^'(.*)( \| wc -l.*)$'/'\{ echo -n "\1 : "; \1\2; \} \| tee -a .\/forkrun.unit-tests.log'/
+done | grep -E '[^[:space:]]+'
 } > "${testPath}/forkrun.run-unit-tests.bash"
 
 
