@@ -878,12 +878,12 @@ while ${stdinReadFlag} || (( ${nFinal} > 0 )); do
 
             if ${exportOrderFlag}; then
                 # sorting output. pre-pend data sent with index describing input ordering to the line from stdin that is being sent
-                printf '%d\t%s\0' "${nSent}" "${sendNext}" >&${FD_in[${workerIndex}]}
+                printf '%d\t%s\0' "${nSent0}" "${sendNext}" >&${FD_in[${workerIndex}]}
             else
                 # not sorting output. Just send input lines as-is
                 printf '%s\0' "${sendNext}" >&${FD_in[${workerIndex}]}
             fi
-            #((nSent++))
+            ((nSent0++))
 
             # read next line from stdin to send. If read fails or is empty trigger stop contition
             read -r -u 6 sendNext && [[ -n ${sendNext} ]] || { 
