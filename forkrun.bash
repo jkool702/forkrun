@@ -395,7 +395,8 @@ fi
 # b) each result group is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag}; then
     local outAll
-    printf '%s' "$(forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -n -k2 -t$'\034' | cut -d$'\034' --output-delimiter=$'\n' -f 3-)" | sed -E s/'[^[:print:]]+'/'\n'/
+    #printf '%s' "$(forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -n -k2 -t$'\034' | cut -d$'\034' --output-delimiter=$'\n' -f 3-)" | sed -E s/'[^[:print:]]+'/'\n'/
+    forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -d -k2 -t$'\034' | cut -f 3- --output-delimiter=$'\n' -d$'\034' -z
     return
 fi
 
