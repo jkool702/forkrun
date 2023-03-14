@@ -44,7 +44,8 @@ NO FUNCTION MODE: forkrun supports an additional mode of operation where "parFun
     -l <#>      : set number of lines. to pass to the function on each function call. if -l=1 then lines from stdin are piped to the function, otherwise `split` groups lines and saves them to a temp directory on a [ram]disk.
     -i          : replace `{}` with the inputs passed on stdin (instead of placing them at the end)
     -id         : enables -i and also replaces `{id}` with a index (0, 1, ...) describing which coproc the process ran on. Also un-escapes `<` `>` and `|` characters to allow for piping and redirecting output based on which coproc it ran on.
-    -k          : keep input ordering in output. The 1st output will correspoind to the 1st input, 2nd output to 2nd input, etc.
+    -k          : keep input ordering in output. The 1st output will correspoind to the 1st input, 2nd output to 2nd input, etc. 
+                  Note: sorting is "close but not guaranteed" if flag -l=1 is also given. To guarantee sorting with -l=1 use flag '-ks' instead of '-k', which gives correct ordering but is slower.
     -n          : pre-pend each (NULL-seperated) output group with an index describing its input order. This is used by the -k flag codepath to sort the output.
     -t          : set the root directory where the temp files containing lines from stdin will be kept (when -l != 1)
     -d          : specify behavior for deleting these temp files containing stdin when we are done with them / when forkrun exits
