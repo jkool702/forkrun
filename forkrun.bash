@@ -121,7 +121,6 @@ forkrun() {
 #
 # # # GENERAL DEPENDENCIES # # #
 # (*) Bash 4.0+ (this is when coprocs were introduced)
-# (x) which  (for determining available binaries and choosing which code paths to take)
 # (x) wc
 #
 # # # FOR BATCH SIZE (-l) GREATER THAN 1 # # #
@@ -209,52 +208,10 @@ exitTrap() {
 }
 
 # make variables local
-local -a FD_in
-local -a inAll
-local -a parFunc
-local -i nSent0
-local -i nSentCur
-local -i splitAgainNSent
-local -i splitAgainNLines
-local -i splitAgainNFiles
-local -i nFinal
-local -i nProcs
-local -i nBatch
-local -i nBatchCur
-local -i workerIndex
-local -i rmTmpDirFlag
-local fd_index
-local IFS0
-local sendNext
-local sendNext0
-local indexNext
-local splitAgainPrefix
-local splitAgainFileNames
-local REPLY
-local REPLYstr
-local REPLYindexStr
-local PID0
-local tmpDir
-local tmpDirRoot
-local timeoutCount
-local orderedOutFlag
-local strictOrderedOutFlag
-local exportOrderFlag
-local nullDelimiterFlag
-local substituteStringFlag
-local substituteStringIDFlag
-local pipeFlag
-local verboseFlag
-local waitFlag
-local noFuncFlag
-local haveSplitFlag
-local batchFlag
-local stdinReadFlag
-local autoBatchFlag
-local splitAgainFlag
-local unescapeFlag
-local getInputFileName
-local getNextInputFileName
+local -a FD_in inAll parFunc
+local -i nSent0 nSentCur splitAgainNSent splitAgainNLines splitAgainNFiles nFinal nProcs nBatch nBatchCur workerIndex rmTmpDirFlag
+local fd_index IFS0 sendNext sendNext0 indexNext splitAgainPrefix splitAgainFileNames REPLY REPLYstr REPLYindexStr PID0 tmpDir tmpDirRoot timeoutCount orderedOutFlag strictOrderedOutFlag exportOrderFlag nullDelimiterFlag substituteStringFlag substituteStringIDFlag pipeFlag verboseFlag waitFlag noFuncFlag haveSplitFlag batchFlag stdinReadFlag autoBatchFlag splitAgainFlag unescapeFlag getInputFileName getNextInputFileName
+
 #local -i nArgs
 #local -i nSent
 #local -i nDone
@@ -404,7 +361,7 @@ if ${orderedOutFlag} && ${exportOrderFlag}; then
 fi
 
 # return if we dont have anything to parallelize over
-(( ${#} == 0 )) && { printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2; noFuncFlag=true; } || { which "${1%%[ $'\n'$'\t']*}" 1>/dev/null 2>/dev/null || declare -F "${1%%[ $'\n'$'\t']*}" 2>/dev/null; } || { printf '%s ' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' $'\n''FUNCTION SPECIFIED: ' "${@}" $'\n' >&2 && return 1; }
+(( ${#} == 0 )) && { printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2; noFuncFlag=true; } || { type -a "${1%%[ $'\n'$'\t']*}" 1>/dev/null 2>/dev/null || declare -F "${1%%[ $'\n'$'\t']*}" 2>/dev/null; } || { printf '%s ' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' $'\n''FUNCTION SPECIFIED: ' "${@}" $'\n' >&2 && return 1; }
 [[ -t 0 ]] && printf '%s\n' 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
 
 # check if we are automatically setting nBatch
@@ -418,7 +375,7 @@ ${orderedOutFlag} && ! ${batchFlag} && printf '%s\n' '' 'WARNING: SORTED OUTPUT 
 # a) each "result group" (fron a particular batch of nBatch input lines) is NULL seperated
 # b) each result group is pre-pended with the index/order that it was recieved in from stdin.
 if ${orderedOutFlag} && ! ${batchFlag}; then
-    local outAll
+    #local outAll
     #printf '%s' "$(forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -n -k2 -t$'\034' | cut -d$'\034' --output-delimiter=$'\n' -f 3-)" | sed -E s/'[^[:print:]]+'/'\n'/
     printf '%s\n' "$(forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -d -k2 -t$'\034' | cut -f 3- --output-delimiter=$'\n' -d$'\034' -z)"
     return
@@ -427,11 +384,43 @@ fi
 # finish parsing args
 
 # default nProcs is number of logical cpu cores
-(( ${nProcs} == 0 )) && nProcs=$({ which nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '8')
+(( ${nProcs} == 0 )) && nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '8')
 
 # check if we have split
-which split 1>/dev/null 2>/dev/null && haveSplitFlag=true || haveSplitFlag=false
+type -a split 1>/dev/null 2>/dev/null && haveSplitFlag=true || { haveSplitFlag=false; batchFlag=false; }
 ${haveSplitFlag} || { autoBatchFlag=false; nullDelimiterFlag=false; }
+
+${noFuncFlag} && { ${batchFlag} || { batchFlag=true; nBatch=512; printf '%s\n' 'WARNING: ONE-LINE-AT-A-TIME MODE (-l 1) IS NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THIS FLAG.' '(IN THIS USE CASE IT REALLY GIVES NO BENEFIT AND SLOWS THINGS DOWN ANYWAYS)' >&2; }; }
+
+# prepare temp directory to store split stdin
+mkdir -p "${tmpDirRoot}"
+tmpDir="$(mktemp -d -p "${tmpDirRoot%/}" -t '.forkrun.XXXXXX')"
+touch "${tmpDir}"/xAll
+
+# if (( nBatch > 1 )) then split up input into files undert $tmpDir, each of which contains $nBatch lines and define a function for getting the next file name
+# do this as early as possible so it can work in the background while the script sets itself up
+#${batchFlag} && ${haveSplitFlag} && {
+if ${batchFlag}; then
+    # split into files, each containing a batch of $nBatch lines from stdin, using 'split'
+
+    if ${nullDelimiterFlag}; then 
+        {
+            # split NULL-seperated stdin
+            split -t '\0' -d -l "${nBatch}" - "${tmpDir}"'/x' <&4  
+        } 4<&0 &
+    else 
+        {
+            # split newline-seperated stdin
+            split -d -l "${nBatch}" - "${tmpDir}"'/x' <&4 
+        } 4<&0 &
+    fi
+ 
+else
+    # not batching. Save stdin to a tmpfile
+    {
+        cat <&4 >"${tmpDir}"/xAll
+    } 4<&0 &
+fi
 
 # incorporate string to get input into the function string
 ${substituteStringFlag} && ! [[ "${*}" == *'{}'* ]] && printf '%s\n' "WARNING: {} NOT FOUND IN FUNCTION STRING OR INITIAL ARGS. LINES FROM STDIN WILL NOT BE PASSED TO THE FUNCTION' 'THE FUNCTION AND ANY INITIAL ARGS WILL BE RUN (WITHOUT ANY OF THE ARGS FROM STDIN) ONCE FOR EACH LINE IN STDIN' 'IF THIS BEHAVIOR IS UNDESIRED, RE-RUN FORKRUN WITHOUT THE '-i' FLAG" >&2
@@ -439,7 +428,6 @@ ${substituteStringFlag} && ! [[ "${*}" == *'{}'* ]] && printf '%s\n' "WARNING: {
 # generate strings that will be used by the coprocs (when they are sourced later on) to actually call the function being parallelized with $nBatch input lines from stdin
 # The function + initial args given as forkrun function inputs need to be `printf '%q'` quoted, but the command that gets the lines from stdin out of the file generated by split needs to be unquoted
 if ${noFuncFlag}; then
-    ${batchFlag} || { batchFlag=true; nBatch=512; printf '%s\n' 'WARNING: ONE-LINE-AT-A-TIME MODE (-l 1) IS NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THIS FLAG.' '(IN THIS USE CASE IT REALLY GIVES NO BENEFIT AND SLOWS THINGS DOWN ANYWAYS)' >&2; }
     mapfile -t parFunc < <(printf '%q\n' "source")
     ! ${substituteStringFlag} && ! ${substituteStringIDFlag} || { substituteStringFlag=false; substituteStringIDFlag=false; printf '%s\n' 'WARNING: STRING SUBSTITUTION (-i | -id) NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THESE FLAGS.' >&2; }
     ! ${pipeFlag} || { pipeFlag=false; printf '%s\n' 'WARNING: INPUT PIPING (-s) NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THIS FLAG.' >&2; }    
@@ -480,32 +468,9 @@ printf '\n'
 ################################################################################
 # # # # # # # # # # SECTION 3 -- DEFINE SUPPORTING FUNCTIONS # # # # # # # # # #
 ################################################################################
-
 {
-# if (( nBatch > 1 )) then split up input into files undert $tmpDir, each of which contains $nBatch lines and define a function for getting the next file name
-${batchFlag} && {
 
-# prepare temp directory to store split stdin
-mkdir -p "${tmpDirRoot}"
-tmpDir="$(mktemp -d -p "${tmpDirRoot%/}" -t '.forkrun.XXXXXX')"
 
-if ${haveSplitFlag}; then
-    # split into files, each containing a batch of $nBatch lines from stdin, using 'split'
-    {
-    if ${nullDelimiterFlag}; then 
-        {
-            # split NULL-seperated stdin
-            split -t '\0' -d -l "${nBatch}" - "${tmpDir}"'/x' <&4  
-        } 4<&5 &
-    else 
-        {
-            # split newline-seperated stdin
-            split -d -l "${nBatch}" - "${tmpDir}"'/x' <&4 
-        } 4<&5 &
-    fi
-    } 5<&6
-fi
-} 6<&0
 #else
  # use printf + sed to transform input into repeated blocks of the following form: printf '%s\n' ''' ${in1//'/'"'"'} ... ${inN//'/'"'"'} ''' > ${tmpDir}/in${kk}; ((kk++))
     # then use 'source' to execute this entire input, which will issue the commands needed to write each batch of N inputs to $tmpDir
@@ -521,26 +486,23 @@ getNextInputFileName() {
     # this is faster than the (more general) getInputFileName, but only will provide the immediate next file name.
 
     local x
-    local x0
-    local x1
     local x_prefix
-    local x_halfLen0
-    local x_halfLen
 
     x_prefix="${1}"
-    x="${2}"
+    [[ ${2:${#x_prefix}:1} == 0 ]] && x_prefix+='0'
+    
+    x="${2:${#x_prefix}}"
+    
+    [[ "$x" == '9' ]] && x_prefix="${x_prefix:0:-1}"
 
-    x_halfLen0=$(( 2 + ( ( ${#x} - ${#x_prefix} ) / 2 ) ))
-    x_halfLen=$(( ${x_halfLen0} + ${#x_prefix} - 3 ))
-
-    x0="${x:0:${x_halfLen}}"
-    x1="${x:${x_halfLen}}"
-
-    if [[ "${x1}" =~ ^89+$ ]]; then
-        printf '%s' "${x0}9$(printf '%0.'"${x_halfLen0}"'d' '0')"
+    if [[ "${x}" =~ ^9*89+$ ]]; then
+        ((x++))
+        x+='00'
     else
-        printf '%s%0.'"${#x1}"'d' "${x0}" "$(( ${x1##*(0)} + 1 ))"
+        ((x++))
     fi
+
+    printf '%s%s' "${x_prefix}" "${x}"
 }
 
 getInputFileName() {
@@ -774,7 +736,7 @@ elif ${batchFlag}; then
 else
     # not using batching. read 1 line from stdion and store it
     indexNext='x00'
-    read -r sendNext
+    read -r -u 6 sendNext
     [[ -n "${sendNext}" ]] || { printf '%s\n' 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
 fi
 
@@ -934,7 +896,7 @@ while ${stdinReadFlag} || (( ${nFinal} > 0 )); do
 done
 
 
-} 6<&0 9>&1
+} 6<"${tmpDir}"/xAll 9>&1
 
 ${orderedOutFlag} && ${batchFlag} && cat "${tmpDir}"/x*
 
