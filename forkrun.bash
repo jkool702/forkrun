@@ -590,6 +590,7 @@ for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
 source <(cat<<EOI0
 { coproc p${kk} {
 trap - EXIT HUP TERM INT 
+set -f +B
 $([[ -n ${DEBUG} ]] && printf '%s\n' 'set '"${DEBUG}")
 export IFS=\$'\\n'
 
