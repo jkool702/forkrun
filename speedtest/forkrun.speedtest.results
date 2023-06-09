@@ -1,32 +1,90 @@
-# time find /mnt/ramdisk/ -type f | wc -l
-197061
 
-real    0m0.362s
-user    0m0.151s
-sys     0m0.232s
+# # # # # time finding all files under /usr and get file count (~430k)# # # # #
+time { find /usr -type f | wc -l; }
+
+    430425
+    real    0m1.285s
+    user    0m0.296s
+    sys     0m1.038s
+
+# # # # # speedtest - sha256sum (many lines at a time, everything undert /usr --> ~430k lines) # # # # #
+
+# # # forkrun
+time { find /usr -type f | forkrun sha256sum 2>/dev/null | wc -l; } 
+
+    430425
+    real    0m4.716s
+    user    0m58.405s
+    sys     0m25.697s
+
+# # # xargs
+time { find /usr -type f | xargs -P $(nproc) -d $'\n' sha256sum 2>/dev/null | wc -l; } 
+
+    430425
+    real    0m6.757s
+    user    0m47.084s
+    sys     0m21.144s
+
+# # # parallel
+time { find /usr -type f | parallel -m sha256sum 2>/dev/null | wc -l; }
+
+    430425
+    real    0m12.306s
+    user    0m47.375s
+    sys     0m21.478s
+
+# # # # # speedtest - sha1sum (many lines at a time, everything undert /usr --> ~430k lines) # # # # #
+
+# # # forkrun
+time { find /usr -type f | forkrun sha1sum 2>/dev/null | wc -l; } 
+
+    430425
+    real    0m3.378s
+    user    0m28.837s
+    sys     0m26.120s
+
+# # # xargs
+time { find /usr -type f | xargs -P $(nproc) -d $'\n' sha1sum 2>/dev/null | wc -l; }
+
+    430425
+    real    0m4.633s
+    user    0m21.349s
+    sys     0m20.281s
+
+# # # parallel
+time { find /usr -type f | parallel -m sha1sum 2>/dev/null | wc -l; }
+
+    430425
+    real    0m10.947s
+    user    0m29.195s
+    sys     0m21.663s
 
 
-# time find /mnt/ramdisk/ -type f | forkrun sha256sum | wc -l
-197061
+# # # # # speedtest - sha1sum (one line at a time, 10000 lines) # # # # #
 
-real    0m2.597s
-user    0m22.756s
-sys     0m3.971s
+# # # forkrun
+time { find /usr -type f | head -n 10000 | forkrun -l1 sha1sum 2>/dev/null | wc -l; } 
 
+    10000
+    real    0m1.846s
+    user    0m8.741s
+    sys     0m21.851s
 
-# time find /mnt/ramdisk/ -type f -print0 | xargs -0 -P$(nproc) sha256sum | wc -l
-197061
+# # # xargs
+time { find /usr -type f | head -n 10000 | xargs -P $(nproc) -d $'\n' -l sha1sum 2>/dev/null | wc -l; } 
 
-real    0m4.661s
-user    0m18.445s
-sys     0m3.047s
+    10000
+    real    0m13.125s
+    user    0m11.001s
+    sys     0m34.170s
 
+# # # parallel
+time { find /usr -type f | head -n 10000 | parallel sha1sum 2>/dev/null | wc -l; } 
 
-# time find /mnt/ramdisk/ -type f | parallel -m -j $(nproc) sha256sum | wc -l
-197061
-
-real    0m6.583s
-user    0m20.742s
-sys     0m4.077s
-
-
+    10000
+    real    0m27.562s
+    user    0m40.255s
+    sys     1m9.270s
+		
+# Note: In both of the many-lines-at-a-time tests, forkrun had the lowest wall clock time, though it also has slightly higher total CPU time.
+# In the one-line-at-a-time test it had (dramaticaly) lower wall-clock time, but also had lower overall CPU time.
