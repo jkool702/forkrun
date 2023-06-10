@@ -2,9 +2,9 @@
 
 mySplit() {
 ## Splits up stdin into groups of ${1} lines using ${2} bash coprocs
-set -b
+
     local tmpDir fPath nLines nProcs kk
-    local -a A
+    local -a A p_PID
 
     tmpDir=/tmp/"$(mktemp -d .forkrun.XXXXXXXXX)"
     fPath="${tmpDir}"/.stdin
@@ -21,6 +21,9 @@ set -b
     } {fd_write}>>"${fPath}" {fd_stdin}<&0
 
     exec {fd_continue}<><(:)
+    
+    trap 'exec {fd_continue}>&-' EXIT
+    
     printf '1' >&${fd_continue}
     initFlag=true
     
@@ -33,18 +36,21 @@ while true; do
     # [[ \$REPLY == 0 ]] && echo '0' >&${fd_continue} && break
     mapfile -t -n ${nLines} -u ${fd_read} A
     printf '1' >&${fd_continue}
-    [[ \${#A[@]} == 0 ]] && { \${initFlag} && continue || break; }
+    [[ \${#A[@]} == 0 ]] && { { \${initFlag}  && ! [[ -f "${tmpDir}"/.nLinesStdin ]]; } && continue || break; }
     \${initFlag} && initFlag=false
     printf '%s\\n' "\${A[@]}" >&${fd_stdout}
 done
 }
 }
+p_PID+=(\${p${kk}_PID})
 EOF
 )
         done
     } {fd_read}<"${fPath}" {fd_stdout}>&1
     
-    wait $p0_PID $p1_PID $p2_PID $p3_PID
+    wait ${p_PID[@]}
+    
+    rm -rf "${tmpDir}"
 
 } 
 
