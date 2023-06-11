@@ -106,3 +106,20 @@ LINE BATCH SIZE = 256           real    0m0.111s        user    0m0.244s        
 LINE BATCH SIZE = 512           real    0m0.117s        user    0m0.285s        sys     0m0.076s
 
 '''
+
+
+source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/mySplit.bash)
+
+A="$(printf '%.0s'"$(echo $(dd if=/dev/urandom bs=4096 count=1 | hexdump) | sed -E s/'^(.{4096}).*$'/'\1'/)"'\n' {1..10000})"
+
+for nChars in {1..4096}; do
+
+a="$(echo "${A}" | sed -E s/'^(.{'${nChars}'}).*$'/'\1'/)"
+
+printf '\n\n %s byte/line (mySplit)  \t' "${nChars}"
+{ time { echo "$a" | mySplit 1 2>/dev/null | wc -l; } >/dev/null; } 2>&1 | tr $'\n' $'\t' | sed -E s/'^[ \t]*'//; 
+
+printf '\n %s byte/line (std. read)\t' "${nChars}"
+{ time { echo "$a" | while read -r; do echo "$REPLY"; done | wc -l; } >/dev/null; } 2>&1 | tr $'\n' $'\t' | sed -E s/'^[ \t]*'//; 
+
+done
