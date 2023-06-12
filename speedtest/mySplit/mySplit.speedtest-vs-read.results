@@ -1,0 +1,871 @@
+
+
+ STANDARD READ : 1 bytes/line (1 byte/read)   	real	0m0.009s	user	0m0.000s	sys	0m0.015s	
+ mySplit-1P-1L : 1 bytes/line (1 bytes/read)  	real	0m0.052s	user	0m0.009s	sys	0m0.072s	
+ mySplit-4P-1L : 1 bytes/line (1 bytes/read)  	real	0m0.079s	user	0m0.015s	sys	0m0.103s	
+ mySplit-1P-32L: 1 bytes/line (32 bytes/read) 	real	0m0.054s	user	0m0.013s	sys	0m0.071s	
+ mySplit-4P-32L: 1 bytes/line (32 bytes/read) 	real	0m0.080s	user	0m0.012s	sys	0m0.109s	
+
+ STANDARD READ : 2 bytes/line (1 byte/read)   	real	0m0.083s	user	0m0.061s	sys	0m0.062s	
+ mySplit-1P-1L : 2 bytes/line (2 bytes/read)  	real	0m0.341s	user	0m0.245s	sys	0m0.205s	
+ mySplit-4P-1L : 2 bytes/line (2 bytes/read)  	real	0m0.428s	user	0m0.635s	sys	0m0.431s	
+ mySplit-1P-32L: 2 bytes/line (64 bytes/read) 	real	0m0.089s	user	0m0.039s	sys	0m0.096s	
+ mySplit-4P-32L: 2 bytes/line (64 bytes/read) 	real	0m0.072s	user	0m0.057s	sys	0m0.129s	
+
+ STANDARD READ : 3 bytes/line (1 byte/read)   	real	0m0.093s	user	0m0.061s	sys	0m0.079s	
+ mySplit-1P-1L : 3 bytes/line (3 bytes/read)  	real	0m0.336s	user	0m0.247s	sys	0m0.198s	
+ mySplit-4P-1L : 3 bytes/line (3 bytes/read)  	real	0m0.444s	user	0m0.628s	sys	0m0.471s	
+ mySplit-1P-32L: 3 bytes/line (96 bytes/read) 	real	0m0.094s	user	0m0.048s	sys	0m0.096s	
+ mySplit-4P-32L: 3 bytes/line (96 bytes/read) 	real	0m0.081s	user	0m0.052s	sys	0m0.146s	
+
+ STANDARD READ : 4 bytes/line (1 byte/read)    	real	0m0.093s	user	0m0.063s	sys	0m0.076s	
+ mySplit-1P-1L : 4 bytes/line (4 bytes/read)   	real	0m0.353s	user	0m0.230s	sys	0m0.240s	
+ mySplit-4P-1L : 4 bytes/line (4 bytes/read)   	real	0m0.417s	user	0m0.571s	sys	0m0.460s	
+ mySplit-1P-32L: 4 bytes/line (128 bytes/read) 	real	0m0.090s	user	0m0.046s	sys	0m0.094s	
+ mySplit-4P-32L: 4 bytes/line (128 bytes/read) 	real	0m0.075s	user	0m0.050s	sys	0m0.137s	
+
+ STANDARD READ : 5 bytes/line (1 byte/read)    	real	0m0.109s	user	0m0.068s	sys	0m0.089s	
+ mySplit-1P-1L : 5 bytes/line (5 bytes/read)   	real	0m0.345s	user	0m0.232s	sys	0m0.226s	
+ mySplit-4P-1L : 5 bytes/line (5 bytes/read)   	real	0m0.434s	user	0m0.662s	sys	0m0.426s	
+ mySplit-1P-32L: 5 bytes/line (160 bytes/read) 	real	0m0.095s	user	0m0.044s	sys	0m0.104s	
+ mySplit-4P-32L: 5 bytes/line (160 bytes/read) 	real	0m0.080s	user	0m0.055s	sys	0m0.144s	
+
+ STANDARD READ : 6 bytes/line (1 byte/read)    	real	0m0.117s	user	0m0.075s	sys	0m0.091s	
+ mySplit-1P-1L : 6 bytes/line (6 bytes/read)   	real	0m0.346s	user	0m0.247s	sys	0m0.215s	
+ mySplit-4P-1L : 6 bytes/line (6 bytes/read)   	real	0m0.432s	user	0m0.624s	sys	0m0.451s	
+ mySplit-1P-32L: 6 bytes/line (192 bytes/read) 	real	0m0.094s	user	0m0.042s	sys	0m0.103s	
+ mySplit-4P-32L: 6 bytes/line (192 bytes/read) 	real	0m0.086s	user	0m0.064s	sys	0m0.142s	
+
+ STANDARD READ : 7 bytes/line (1 byte/read)    	real	0m0.126s	user	0m0.092s	sys	0m0.095s	
+ mySplit-1P-1L : 7 bytes/line (7 bytes/read)   	real	0m0.351s	user	0m0.223s	sys	0m0.244s	
+ mySplit-4P-1L : 7 bytes/line (7 bytes/read)   	real	0m0.479s	user	0m0.688s	sys	0m0.505s	
+ mySplit-1P-32L: 7 bytes/line (224 bytes/read) 	real	0m0.090s	user	0m0.048s	sys	0m0.093s	
+ mySplit-4P-32L: 7 bytes/line (224 bytes/read) 	real	0m0.081s	user	0m0.062s	sys	0m0.135s	
+
+ STANDARD READ : 8 bytes/line (1 byte/read)    	real	0m0.134s	user	0m0.089s	sys	0m0.112s	
+ mySplit-1P-1L : 8 bytes/line (8 bytes/read)   	real	0m0.348s	user	0m0.249s	sys	0m0.215s	
+ mySplit-4P-1L : 8 bytes/line (8 bytes/read)   	real	0m0.438s	user	0m0.654s	sys	0m0.451s	
+ mySplit-1P-32L: 8 bytes/line (256 bytes/read) 	real	0m0.093s	user	0m0.045s	sys	0m0.101s	
+ mySplit-4P-32L: 8 bytes/line (256 bytes/read) 	real	0m0.079s	user	0m0.065s	sys	0m0.131s	
+
+ STANDARD READ : 9 bytes/line (1 byte/read)    	real	0m0.151s	user	0m0.095s	sys	0m0.144s	
+ mySplit-1P-1L : 9 bytes/line (9 bytes/read)   	real	0m0.351s	user	0m0.234s	sys	0m0.235s	
+ mySplit-4P-1L : 9 bytes/line (9 bytes/read)   	real	0m0.456s	user	0m0.662s	sys	0m0.471s	
+ mySplit-1P-32L: 9 bytes/line (288 bytes/read) 	real	0m0.093s	user	0m0.049s	sys	0m0.099s	
+ mySplit-4P-32L: 9 bytes/line (288 bytes/read) 	real	0m0.084s	user	0m0.072s	sys	0m0.133s	
+
+ STANDARD READ : 10 bytes/line (1 byte/read)    	real	0m0.161s	user	0m0.099s	sys	0m0.148s	
+ mySplit-1P-1L : 10 bytes/line (10 bytes/read)   	real	0m0.348s	user	0m0.246s	sys	0m0.220s	
+ mySplit-4P-1L : 10 bytes/line (10 bytes/read)   	real	0m0.457s	user	0m0.654s	sys	0m0.480s	
+ mySplit-1P-32L: 10 bytes/line (320 bytes/read) 	real	0m0.095s	user	0m0.052s	sys	0m0.099s	
+ mySplit-4P-32L: 10 bytes/line (320 bytes/read) 	real	0m0.082s	user	0m0.067s	sys	0m0.144s	
+
+ STANDARD READ : 11 bytes/line (1 byte/read)    	real	0m0.171s	user	0m0.105s	sys	0m0.167s	
+ mySplit-1P-1L : 11 bytes/line (11 bytes/read)  	real	0m0.348s	user	0m0.247s	sys	0m0.223s	
+ mySplit-4P-1L : 11 bytes/line (11 bytes/read)  	real	0m0.441s	user	0m0.629s	sys	0m0.475s	
+ mySplit-1P-32L: 11 bytes/line (352 bytes/read) 	real	0m0.097s	user	0m0.053s	sys	0m0.103s	
+ mySplit-4P-32L: 11 bytes/line (352 bytes/read) 	real	0m0.086s	user	0m0.072s	sys	0m0.144s	
+
+ STANDARD READ : 12 bytes/line (1 byte/read)    	real	0m0.183s	user	0m0.103s	sys	0m0.181s	
+ mySplit-1P-1L : 12 bytes/line (12 bytes/read)  	real	0m0.349s	user	0m0.248s	sys	0m0.224s	
+ mySplit-4P-1L : 12 bytes/line (12 bytes/read)  	real	0m0.479s	user	0m0.721s	sys	0m0.471s	
+ mySplit-1P-32L: 12 bytes/line (384 bytes/read) 	real	0m0.092s	user	0m0.049s	sys	0m0.101s	
+ mySplit-4P-32L: 12 bytes/line (384 bytes/read) 	real	0m0.083s	user	0m0.074s	sys	0m0.137s	
+
+ STANDARD READ : 13 bytes/line (1 byte/read)    	real	0m0.192s	user	0m0.124s	sys	0m0.181s	
+ mySplit-1P-1L : 13 bytes/line (13 bytes/read)  	real	0m0.363s	user	0m0.245s	sys	0m0.238s	
+ mySplit-4P-1L : 13 bytes/line (13 bytes/read)  	real	0m0.410s	user	0m0.590s	sys	0m0.449s	
+ mySplit-1P-32L: 13 bytes/line (416 bytes/read) 	real	0m0.096s	user	0m0.060s	sys	0m0.097s	
+ mySplit-4P-32L: 13 bytes/line (416 bytes/read) 	real	0m0.077s	user	0m0.071s	sys	0m0.131s	
+
+ STANDARD READ : 14 bytes/line (1 byte/read)    	real	0m0.206s	user	0m0.126s	sys	0m0.199s	
+ mySplit-1P-1L : 14 bytes/line (14 bytes/read)  	real	0m0.345s	user	0m0.253s	sys	0m0.218s	
+ mySplit-4P-1L : 14 bytes/line (14 bytes/read)  	real	0m0.446s	user	0m0.685s	sys	0m0.448s	
+ mySplit-1P-32L: 14 bytes/line (448 bytes/read) 	real	0m0.095s	user	0m0.056s	sys	0m0.098s	
+ mySplit-4P-32L: 14 bytes/line (448 bytes/read) 	real	0m0.079s	user	0m0.070s	sys	0m0.136s	
+
+ STANDARD READ : 15 bytes/line (1 byte/read)    	real	0m0.212s	user	0m0.118s	sys	0m0.212s	
+ mySplit-1P-1L : 15 bytes/line (15 bytes/read)  	real	0m0.347s	user	0m0.242s	sys	0m0.231s	
+ mySplit-4P-1L : 15 bytes/line (15 bytes/read)  	real	0m0.450s	user	0m0.680s	sys	0m0.458s	
+ mySplit-1P-32L: 15 bytes/line (480 bytes/read) 	real	0m0.100s	user	0m0.053s	sys	0m0.109s	
+ mySplit-4P-32L: 15 bytes/line (480 bytes/read) 	real	0m0.091s	user	0m0.087s	sys	0m0.149s	
+
+ STANDARD READ : 16 bytes/line (1 byte/read)    	real	0m0.228s	user	0m0.130s	sys	0m0.236s	
+ mySplit-1P-1L : 16 bytes/line (16 bytes/read)  	real	0m0.356s	user	0m0.237s	sys	0m0.248s	
+ mySplit-4P-1L : 16 bytes/line (16 bytes/read)  	real	0m0.432s	user	0m0.632s	sys	0m0.462s	
+ mySplit-1P-32L: 16 bytes/line (512 bytes/read) 	real	0m0.095s	user	0m0.051s	sys	0m0.105s	
+ mySplit-4P-32L: 16 bytes/line (512 bytes/read) 	real	0m0.082s	user	0m0.067s	sys	0m0.144s	
+
+ STANDARD READ : 17 bytes/line (1 byte/read)    	real	0m0.236s	user	0m0.131s	sys	0m0.246s	
+ mySplit-1P-1L : 17 bytes/line (17 bytes/read)  	real	0m0.352s	user	0m0.259s	sys	0m0.222s	
+ mySplit-4P-1L : 17 bytes/line (17 bytes/read)  	real	0m0.483s	user	0m0.711s	sys	0m0.497s	
+ mySplit-1P-32L: 17 bytes/line (544 bytes/read) 	real	0m0.097s	user	0m0.048s	sys	0m0.113s	
+ mySplit-4P-32L: 17 bytes/line (544 bytes/read) 	real	0m0.088s	user	0m0.077s	sys	0m0.145s	
+
+ STANDARD READ : 18 bytes/line (1 byte/read)    	real	0m0.250s	user	0m0.158s	sys	0m0.238s	
+ mySplit-1P-1L : 18 bytes/line (18 bytes/read)  	real	0m0.355s	user	0m0.282s	sys	0m0.210s	
+ mySplit-4P-1L : 18 bytes/line (18 bytes/read)  	real	0m0.539s	user	0m0.837s	sys	0m0.479s	
+ mySplit-1P-32L: 18 bytes/line (576 bytes/read) 	real	0m0.092s	user	0m0.057s	sys	0m0.096s	
+ mySplit-4P-32L: 18 bytes/line (576 bytes/read) 	real	0m0.083s	user	0m0.066s	sys	0m0.143s	
+
+ STANDARD READ : 19 bytes/line (1 byte/read)    	real	0m0.269s	user	0m0.137s	sys	0m0.290s	
+ mySplit-1P-1L : 19 bytes/line (19 bytes/read)  	real	0m0.405s	user	0m0.308s	sys	0m0.216s	
+ mySplit-4P-1L : 19 bytes/line (19 bytes/read)  	real	0m0.552s	user	0m0.846s	sys	0m0.526s	
+ mySplit-1P-32L: 19 bytes/line (608 bytes/read) 	real	0m0.106s	user	0m0.065s	sys	0m0.103s	
+ mySplit-4P-32L: 19 bytes/line (608 bytes/read) 	real	0m0.087s	user	0m0.085s	sys	0m0.142s	
+
+ STANDARD READ : 20 bytes/line (1 byte/read)    	real	0m0.277s	user	0m0.148s	sys	0m0.286s	
+ mySplit-1P-1L : 20 bytes/line (20 bytes/read)  	real	0m0.352s	user	0m0.243s	sys	0m0.233s	
+ mySplit-4P-1L : 20 bytes/line (20 bytes/read)  	real	0m0.345s	user	0m0.508s	sys	0m0.394s	
+ mySplit-1P-32L: 20 bytes/line (640 bytes/read) 	real	0m0.094s	user	0m0.053s	sys	0m0.105s	
+ mySplit-4P-32L: 20 bytes/line (640 bytes/read) 	real	0m0.076s	user	0m0.078s	sys	0m0.128s	
+
+ STANDARD READ : 21 bytes/line (1 byte/read)    	real	0m0.281s	user	0m0.153s	sys	0m0.291s	
+ mySplit-1P-1L : 21 bytes/line (21 bytes/read)  	real	0m0.357s	user	0m0.245s	sys	0m0.245s	
+ mySplit-4P-1L : 21 bytes/line (21 bytes/read)  	real	0m0.416s	user	0m0.599s	sys	0m0.457s	
+ mySplit-1P-32L: 21 bytes/line (672 bytes/read) 	real	0m0.097s	user	0m0.066s	sys	0m0.097s	
+ mySplit-4P-32L: 21 bytes/line (672 bytes/read) 	real	0m0.084s	user	0m0.081s	sys	0m0.140s	
+
+ STANDARD READ : 22 bytes/line (1 byte/read)    	real	0m0.290s	user	0m0.145s	sys	0m0.320s	
+ mySplit-1P-1L : 22 bytes/line (22 bytes/read)  	real	0m0.356s	user	0m0.248s	sys	0m0.241s	
+ mySplit-4P-1L : 22 bytes/line (22 bytes/read)  	real	0m0.448s	user	0m0.716s	sys	0m0.429s	
+ mySplit-1P-32L: 22 bytes/line (704 bytes/read) 	real	0m0.096s	user	0m0.060s	sys	0m0.102s	
+ mySplit-4P-32L: 22 bytes/line (704 bytes/read) 	real	0m0.087s	user	0m0.080s	sys	0m0.144s	
+
+ STANDARD READ : 23 bytes/line (1 byte/read)    	real	0m0.301s	user	0m0.147s	sys	0m0.334s	
+ mySplit-1P-1L : 23 bytes/line (23 bytes/read)  	real	0m0.355s	user	0m0.257s	sys	0m0.223s	
+ mySplit-4P-1L : 23 bytes/line (23 bytes/read)  	real	0m0.444s	user	0m0.706s	sys	0m0.420s	
+ mySplit-1P-32L: 23 bytes/line (736 bytes/read) 	real	0m0.099s	user	0m0.052s	sys	0m0.116s	
+ mySplit-4P-32L: 23 bytes/line (736 bytes/read) 	real	0m0.086s	user	0m0.095s	sys	0m0.137s	
+
+ STANDARD READ : 24 bytes/line (1 byte/read)    	real	0m0.314s	user	0m0.178s	sys	0m0.316s	
+ mySplit-1P-1L : 24 bytes/line (24 bytes/read)  	real	0m0.356s	user	0m0.264s	sys	0m0.228s	
+ mySplit-4P-1L : 24 bytes/line (24 bytes/read)  	real	0m0.409s	user	0m0.614s	sys	0m0.433s	
+ mySplit-1P-32L: 24 bytes/line (768 bytes/read) 	real	0m0.100s	user	0m0.058s	sys	0m0.112s	
+ mySplit-4P-32L: 24 bytes/line (768 bytes/read) 	real	0m0.088s	user	0m0.093s	sys	0m0.150s	
+
+ STANDARD READ : 25 bytes/line (1 byte/read)    	real	0m0.330s	user	0m0.180s	sys	0m0.336s	
+ mySplit-1P-1L : 25 bytes/line (25 bytes/read)  	real	0m0.358s	user	0m0.243s	sys	0m0.242s	
+ mySplit-4P-1L : 25 bytes/line (25 bytes/read)  	real	0m0.412s	user	0m0.611s	sys	0m0.440s	
+ mySplit-1P-32L: 25 bytes/line (800 bytes/read) 	real	0m0.101s	user	0m0.062s	sys	0m0.109s	
+ mySplit-4P-32L: 25 bytes/line (800 bytes/read) 	real	0m0.089s	user	0m0.094s	sys	0m0.149s	
+
+ STANDARD READ : 26 bytes/line (1 byte/read)    	real	0m0.334s	user	0m0.171s	sys	0m0.350s	
+ mySplit-1P-1L : 26 bytes/line (26 bytes/read)  	real	0m0.359s	user	0m0.254s	sys	0m0.234s	
+ mySplit-4P-1L : 26 bytes/line (26 bytes/read)  	real	0m0.436s	user	0m0.676s	sys	0m0.435s	
+ mySplit-1P-32L: 26 bytes/line (832 bytes/read) 	real	0m0.103s	user	0m0.067s	sys	0m0.107s	
+ mySplit-4P-32L: 26 bytes/line (832 bytes/read) 	real	0m0.086s	user	0m0.090s	sys	0m0.143s	
+
+ STANDARD READ : 27 bytes/line (1 byte/read)    	real	0m0.347s	user	0m0.209s	sys	0m0.336s	
+ mySplit-1P-1L : 27 bytes/line (27 bytes/read)  	real	0m0.347s	user	0m0.254s	sys	0m0.220s	
+ mySplit-4P-1L : 27 bytes/line (27 bytes/read)  	real	0m0.433s	user	0m0.655s	sys	0m0.448s	
+ mySplit-1P-32L: 27 bytes/line (864 bytes/read) 	real	0m0.103s	user	0m0.064s	sys	0m0.112s	
+ mySplit-4P-32L: 27 bytes/line (864 bytes/read) 	real	0m0.087s	user	0m0.087s	sys	0m0.151s	
+
+ STANDARD READ : 28 bytes/line (1 byte/read)    	real	0m0.357s	user	0m0.177s	sys	0m0.384s	
+ mySplit-1P-1L : 28 bytes/line (28 bytes/read)  	real	0m0.355s	user	0m0.263s	sys	0m0.231s	
+ mySplit-4P-1L : 28 bytes/line (28 bytes/read)  	real	0m0.444s	user	0m0.658s	sys	0m0.472s	
+ mySplit-1P-32L: 28 bytes/line (896 bytes/read) 	real	0m0.098s	user	0m0.056s	sys	0m0.115s	
+ mySplit-4P-32L: 28 bytes/line (896 bytes/read) 	real	0m0.086s	user	0m0.100s	sys	0m0.141s	
+
+ STANDARD READ : 29 bytes/line (1 byte/read)    	real	0m0.364s	user	0m0.171s	sys	0m0.399s	
+ mySplit-1P-1L : 29 bytes/line (29 bytes/read)  	real	0m0.362s	user	0m0.267s	sys	0m0.236s	
+ mySplit-4P-1L : 29 bytes/line (29 bytes/read)  	real	0m0.447s	user	0m0.657s	sys	0m0.482s	
+ mySplit-1P-32L: 29 bytes/line (928 bytes/read) 	real	0m0.103s	user	0m0.071s	sys	0m0.107s	
+ mySplit-4P-32L: 29 bytes/line (928 bytes/read) 	real	0m0.086s	user	0m0.100s	sys	0m0.145s	
+
+ STANDARD READ : 30 bytes/line (1 byte/read)    	real	0m0.380s	user	0m0.197s	sys	0m0.393s	
+ mySplit-1P-1L : 30 bytes/line (30 bytes/read)  	real	0m0.360s	user	0m0.255s	sys	0m0.242s	
+ mySplit-4P-1L : 30 bytes/line (30 bytes/read)  	real	0m0.474s	user	0m0.741s	sys	0m0.466s	
+ mySplit-1P-32L: 30 bytes/line (960 bytes/read) 	real	0m0.099s	user	0m0.063s	sys	0m0.107s	
+ mySplit-4P-32L: 30 bytes/line (960 bytes/read) 	real	0m0.086s	user	0m0.085s	sys	0m0.151s	
+
+ STANDARD READ : 31 bytes/line (1 byte/read)    	real	0m0.387s	user	0m0.184s	sys	0m0.420s	
+ mySplit-1P-1L : 31 bytes/line (31 bytes/read)  	real	0m0.356s	user	0m0.266s	sys	0m0.232s	
+ mySplit-4P-1L : 31 bytes/line (31 bytes/read)  	real	0m0.441s	user	0m0.655s	sys	0m0.463s	
+ mySplit-1P-32L: 31 bytes/line (992 bytes/read) 	real	0m0.102s	user	0m0.075s	sys	0m0.102s	
+ mySplit-4P-32L: 31 bytes/line (992 bytes/read) 	real	0m0.085s	user	0m0.075s	sys	0m0.162s	
+
+ STANDARD READ : 32 bytes/line (1 byte/read)     	real	0m0.403s	user	0m0.200s	sys	0m0.428s	
+ mySplit-1P-1L : 32 bytes/line (32 bytes/read)   	real	0m0.357s	user	0m0.256s	sys	0m0.229s	
+ mySplit-4P-1L : 32 bytes/line (32 bytes/read)   	real	0m0.441s	user	0m0.675s	sys	0m0.450s	
+ mySplit-1P-32L: 32 bytes/line (1024 bytes/read) 	real	0m0.100s	user	0m0.070s	sys	0m0.103s	
+ mySplit-4P-32L: 32 bytes/line (1024 bytes/read) 	real	0m0.086s	user	0m0.084s	sys	0m0.146s	
+
+ STANDARD READ : 33 bytes/line (1 byte/read)     	real	0m0.414s	user	0m0.212s	sys	0m0.431s	
+ mySplit-1P-1L : 33 bytes/line (33 bytes/read)   	real	0m0.355s	user	0m0.258s	sys	0m0.236s	
+ mySplit-4P-1L : 33 bytes/line (33 bytes/read)   	real	0m0.389s	user	0m0.586s	sys	0m0.411s	
+ mySplit-1P-32L: 33 bytes/line (1056 bytes/read) 	real	0m0.101s	user	0m0.067s	sys	0m0.108s	
+ mySplit-4P-32L: 33 bytes/line (1056 bytes/read) 	real	0m0.084s	user	0m0.078s	sys	0m0.150s	
+
+ STANDARD READ : 35 bytes/line (1 byte/read)     	real	0m0.430s	user	0m0.226s	sys	0m0.442s	
+ mySplit-1P-1L : 35 bytes/line (35 bytes/read)   	real	0m0.358s	user	0m0.272s	sys	0m0.227s	
+ mySplit-4P-1L : 35 bytes/line (35 bytes/read)   	real	0m0.438s	user	0m0.664s	sys	0m0.458s	
+ mySplit-1P-32L: 35 bytes/line (1120 bytes/read) 	real	0m0.104s	user	0m0.064s	sys	0m0.116s	
+ mySplit-4P-32L: 35 bytes/line (1120 bytes/read) 	real	0m0.085s	user	0m0.090s	sys	0m0.142s	
+
+ STANDARD READ : 37 bytes/line (1 byte/read)     	real	0m0.455s	user	0m0.227s	sys	0m0.478s	
+ mySplit-1P-1L : 37 bytes/line (37 bytes/read)   	real	0m0.340s	user	0m0.258s	sys	0m0.222s	
+ mySplit-4P-1L : 37 bytes/line (37 bytes/read)   	real	0m0.443s	user	0m0.673s	sys	0m0.464s	
+ mySplit-1P-32L: 37 bytes/line (1184 bytes/read) 	real	0m0.099s	user	0m0.065s	sys	0m0.111s	
+ mySplit-4P-32L: 37 bytes/line (1184 bytes/read) 	real	0m0.089s	user	0m0.101s	sys	0m0.143s	
+
+ STANDARD READ : 39 bytes/line (1 byte/read)     	real	0m0.470s	user	0m0.213s	sys	0m0.506s	
+ mySplit-1P-1L : 39 bytes/line (39 bytes/read)   	real	0m0.355s	user	0m0.263s	sys	0m0.226s	
+ mySplit-4P-1L : 39 bytes/line (39 bytes/read)   	real	0m0.425s	user	0m0.647s	sys	0m0.449s	
+ mySplit-1P-32L: 39 bytes/line (1248 bytes/read) 	real	0m0.101s	user	0m0.073s	sys	0m0.105s	
+ mySplit-4P-32L: 39 bytes/line (1248 bytes/read) 	real	0m0.089s	user	0m0.097s	sys	0m0.144s	
+
+ STANDARD READ : 41 bytes/line (1 byte/read)     	real	0m0.496s	user	0m0.217s	sys	0m0.544s	
+ mySplit-1P-1L : 41 bytes/line (41 bytes/read)   	real	0m0.353s	user	0m0.250s	sys	0m0.251s	
+ mySplit-4P-1L : 41 bytes/line (41 bytes/read)   	real	0m0.395s	user	0m0.612s	sys	0m0.403s	
+ mySplit-1P-32L: 41 bytes/line (1312 bytes/read) 	real	0m0.096s	user	0m0.075s	sys	0m0.098s	
+ mySplit-4P-32L: 41 bytes/line (1312 bytes/read) 	real	0m0.093s	user	0m0.121s	sys	0m0.136s	
+
+ STANDARD READ : 43 bytes/line (1 byte/read)     	real	0m0.517s	user	0m0.240s	sys	0m0.550s	
+ mySplit-1P-1L : 43 bytes/line (43 bytes/read)   	real	0m0.361s	user	0m0.282s	sys	0m0.222s	
+ mySplit-4P-1L : 43 bytes/line (43 bytes/read)   	real	0m0.452s	user	0m0.695s	sys	0m0.465s	
+ mySplit-1P-32L: 43 bytes/line (1376 bytes/read) 	real	0m0.105s	user	0m0.078s	sys	0m0.107s	
+ mySplit-4P-32L: 43 bytes/line (1376 bytes/read) 	real	0m0.084s	user	0m0.104s	sys	0m0.140s	
+
+ STANDARD READ : 45 bytes/line (1 byte/read)     	real	0m0.530s	user	0m0.251s	sys	0m0.550s	
+ mySplit-1P-1L : 45 bytes/line (45 bytes/read)   	real	0m0.349s	user	0m0.252s	sys	0m0.242s	
+ mySplit-4P-1L : 45 bytes/line (45 bytes/read)   	real	0m0.453s	user	0m0.698s	sys	0m0.463s	
+ mySplit-1P-32L: 45 bytes/line (1440 bytes/read) 	real	0m0.108s	user	0m0.080s	sys	0m0.109s	
+ mySplit-4P-32L: 45 bytes/line (1440 bytes/read) 	real	0m0.080s	user	0m0.086s	sys	0m0.146s	
+
+ STANDARD READ : 47 bytes/line (1 byte/read)     	real	0m0.562s	user	0m0.260s	sys	0m0.600s	
+ mySplit-1P-1L : 47 bytes/line (47 bytes/read)   	real	0m0.355s	user	0m0.262s	sys	0m0.237s	
+ mySplit-4P-1L : 47 bytes/line (47 bytes/read)   	real	0m0.408s	user	0m0.636s	sys	0m0.418s	
+ mySplit-1P-32L: 47 bytes/line (1504 bytes/read) 	real	0m0.105s	user	0m0.078s	sys	0m0.108s	
+ mySplit-4P-32L: 47 bytes/line (1504 bytes/read) 	real	0m0.088s	user	0m0.105s	sys	0m0.142s	
+
+ STANDARD READ : 49 bytes/line (1 byte/read)     	real	0m0.583s	user	0m0.276s	sys	0m0.605s	
+ mySplit-1P-1L : 49 bytes/line (49 bytes/read)   	real	0m0.362s	user	0m0.268s	sys	0m0.244s	
+ mySplit-4P-1L : 49 bytes/line (49 bytes/read)   	real	0m0.442s	user	0m0.682s	sys	0m0.459s	
+ mySplit-1P-32L: 49 bytes/line (1568 bytes/read) 	real	0m0.106s	user	0m0.078s	sys	0m0.111s	
+ mySplit-4P-32L: 49 bytes/line (1568 bytes/read) 	real	0m0.090s	user	0m0.098s	sys	0m0.151s	
+
+ STANDARD READ : 51 bytes/line (1 byte/read)     	real	0m0.595s	user	0m0.277s	sys	0m0.612s	
+ mySplit-1P-1L : 51 bytes/line (51 bytes/read)   	real	0m0.343s	user	0m0.250s	sys	0m0.245s	
+ mySplit-4P-1L : 51 bytes/line (51 bytes/read)   	real	0m0.391s	user	0m0.615s	sys	0m0.401s	
+ mySplit-1P-32L: 51 bytes/line (1632 bytes/read) 	real	0m0.107s	user	0m0.075s	sys	0m0.111s	
+ mySplit-4P-32L: 51 bytes/line (1632 bytes/read) 	real	0m0.089s	user	0m0.110s	sys	0m0.140s	
+
+ STANDARD READ : 53 bytes/line (1 byte/read)     	real	0m0.624s	user	0m0.285s	sys	0m0.654s	
+ mySplit-1P-1L : 53 bytes/line (53 bytes/read)   	real	0m0.368s	user	0m0.296s	sys	0m0.221s	
+ mySplit-4P-1L : 53 bytes/line (53 bytes/read)   	real	0m0.403s	user	0m0.623s	sys	0m0.414s	
+ mySplit-1P-32L: 53 bytes/line (1696 bytes/read) 	real	0m0.107s	user	0m0.091s	sys	0m0.099s	
+ mySplit-4P-32L: 53 bytes/line (1696 bytes/read) 	real	0m0.089s	user	0m0.116s	sys	0m0.139s	
+
+ STANDARD READ : 55 bytes/line (1 byte/read)     	real	0m0.646s	user	0m0.292s	sys	0m0.692s	
+ mySplit-1P-1L : 55 bytes/line (55 bytes/read)   	real	0m0.365s	user	0m0.284s	sys	0m0.228s	
+ mySplit-4P-1L : 55 bytes/line (55 bytes/read)   	real	0m0.393s	user	0m0.595s	sys	0m0.437s	
+ mySplit-1P-32L: 55 bytes/line (1760 bytes/read) 	real	0m0.094s	user	0m0.068s	sys	0m0.110s	
+ mySplit-4P-32L: 55 bytes/line (1760 bytes/read) 	real	0m0.083s	user	0m0.098s	sys	0m0.136s	
+
+ STANDARD READ : 57 bytes/line (1 byte/read)     	real	0m0.667s	user	0m0.306s	sys	0m0.693s	
+ mySplit-1P-1L : 57 bytes/line (57 bytes/read)   	real	0m0.358s	user	0m0.250s	sys	0m0.252s	
+ mySplit-4P-1L : 57 bytes/line (57 bytes/read)   	real	0m0.365s	user	0m0.550s	sys	0m0.410s	
+ mySplit-1P-32L: 57 bytes/line (1824 bytes/read) 	real	0m0.109s	user	0m0.082s	sys	0m0.112s	
+ mySplit-4P-32L: 57 bytes/line (1824 bytes/read) 	real	0m0.085s	user	0m0.118s	sys	0m0.131s	
+
+ STANDARD READ : 59 bytes/line (1 byte/read)     	real	0m0.691s	user	0m0.294s	sys	0m0.749s	
+ mySplit-1P-1L : 59 bytes/line (59 bytes/read)   	real	0m0.370s	user	0m0.279s	sys	0m0.233s	
+ mySplit-4P-1L : 59 bytes/line (59 bytes/read)   	real	0m0.338s	user	0m0.499s	sys	0m0.401s	
+ mySplit-1P-32L: 59 bytes/line (1888 bytes/read) 	real	0m0.107s	user	0m0.086s	sys	0m0.103s	
+ mySplit-4P-32L: 59 bytes/line (1888 bytes/read) 	real	0m0.085s	user	0m0.099s	sys	0m0.134s	
+
+ STANDARD READ : 61 bytes/line (1 byte/read)     	real	0m0.707s	user	0m0.324s	sys	0m0.731s	
+ mySplit-1P-1L : 61 bytes/line (61 bytes/read)   	real	0m0.344s	user	0m0.267s	sys	0m0.231s	
+ mySplit-4P-1L : 61 bytes/line (61 bytes/read)   	real	0m0.414s	user	0m0.648s	sys	0m0.430s	
+ mySplit-1P-32L: 61 bytes/line (1952 bytes/read) 	real	0m0.109s	user	0m0.084s	sys	0m0.107s	
+ mySplit-4P-32L: 61 bytes/line (1952 bytes/read) 	real	0m0.097s	user	0m0.113s	sys	0m0.163s	
+
+ STANDARD READ : 63 bytes/line (1 byte/read)     	real	0m0.731s	user	0m0.334s	sys	0m0.753s	
+ mySplit-1P-1L : 63 bytes/line (63 bytes/read)   	real	0m0.369s	user	0m0.279s	sys	0m0.231s	
+ mySplit-4P-1L : 63 bytes/line (63 bytes/read)   	real	0m0.382s	user	0m0.593s	sys	0m0.411s	
+ mySplit-1P-32L: 63 bytes/line (2016 bytes/read) 	real	0m0.111s	user	0m0.088s	sys	0m0.110s	
+ mySplit-4P-32L: 63 bytes/line (2016 bytes/read) 	real	0m0.080s	user	0m0.098s	sys	0m0.128s	
+
+ STANDARD READ : 65 bytes/line (1 byte/read)     	real	0m0.746s	user	0m0.326s	sys	0m0.768s	
+ mySplit-1P-1L : 65 bytes/line (65 bytes/read)   	real	0m0.366s	user	0m0.280s	sys	0m0.245s	
+ mySplit-4P-1L : 65 bytes/line (65 bytes/read)   	real	0m0.319s	user	0m0.499s	sys	0m0.361s	
+ mySplit-1P-32L: 65 bytes/line (2080 bytes/read) 	real	0m0.092s	user	0m0.073s	sys	0m0.099s	
+ mySplit-4P-32L: 65 bytes/line (2080 bytes/read) 	real	0m0.087s	user	0m0.107s	sys	0m0.139s	
+
+ STANDARD READ : 69 bytes/line (1 byte/read)     	real	0m0.791s	user	0m0.349s	sys	0m0.827s	
+ mySplit-1P-1L : 69 bytes/line (69 bytes/read)   	real	0m0.358s	user	0m0.265s	sys	0m0.241s	
+ mySplit-4P-1L : 69 bytes/line (69 bytes/read)   	real	0m0.407s	user	0m0.684s	sys	0m0.389s	
+ mySplit-1P-32L: 69 bytes/line (2208 bytes/read) 	real	0m0.105s	user	0m0.084s	sys	0m0.102s	
+ mySplit-4P-32L: 69 bytes/line (2208 bytes/read) 	real	0m0.082s	user	0m0.106s	sys	0m0.127s	
+
+ STANDARD READ : 73 bytes/line (1 byte/read)     	real	0m0.839s	user	0m0.345s	sys	0m0.910s	
+ mySplit-1P-1L : 73 bytes/line (73 bytes/read)   	real	0m0.364s	user	0m0.298s	sys	0m0.219s	
+ mySplit-4P-1L : 73 bytes/line (73 bytes/read)   	real	0m0.351s	user	0m0.547s	sys	0m0.387s	
+ mySplit-1P-32L: 73 bytes/line (2336 bytes/read) 	real	0m0.112s	user	0m0.082s	sys	0m0.116s	
+ mySplit-4P-32L: 73 bytes/line (2336 bytes/read) 	real	0m0.084s	user	0m0.104s	sys	0m0.143s	
+
+ STANDARD READ : 77 bytes/line (1 byte/read)     	real	0m0.879s	user	0m0.384s	sys	0m0.933s	
+ mySplit-1P-1L : 77 bytes/line (77 bytes/read)   	real	0m0.396s	user	0m0.295s	sys	0m0.248s	
+ mySplit-4P-1L : 77 bytes/line (77 bytes/read)   	real	0m0.310s	user	0m0.491s	sys	0m0.355s	
+ mySplit-1P-32L: 77 bytes/line (2464 bytes/read) 	real	0m0.096s	user	0m0.072s	sys	0m0.112s	
+ mySplit-4P-32L: 77 bytes/line (2464 bytes/read) 	real	0m0.088s	user	0m0.103s	sys	0m0.140s	
+
+ STANDARD READ : 81 bytes/line (1 byte/read)     	real	0m0.918s	user	0m0.390s	sys	0m0.952s	
+ mySplit-1P-1L : 81 bytes/line (81 bytes/read)   	real	0m0.376s	user	0m0.283s	sys	0m0.251s	
+ mySplit-4P-1L : 81 bytes/line (81 bytes/read)   	real	0m0.382s	user	0m0.595s	sys	0m0.416s	
+ mySplit-1P-32L: 81 bytes/line (2592 bytes/read) 	real	0m0.114s	user	0m0.096s	sys	0m0.112s	
+ mySplit-4P-32L: 81 bytes/line (2592 bytes/read) 	real	0m0.086s	user	0m0.107s	sys	0m0.150s	
+
+ STANDARD READ : 85 bytes/line (1 byte/read)     	real	0m0.947s	user	0m0.403s	sys	0m0.977s	
+ mySplit-1P-1L : 85 bytes/line (85 bytes/read)   	real	0m0.369s	user	0m0.283s	sys	0m0.244s	
+ mySplit-4P-1L : 85 bytes/line (85 bytes/read)   	real	0m0.299s	user	0m0.450s	sys	0m0.353s	
+ mySplit-1P-32L: 85 bytes/line (2720 bytes/read) 	real	0m0.117s	user	0m0.100s	sys	0m0.111s	
+ mySplit-4P-32L: 85 bytes/line (2720 bytes/read) 	real	0m0.087s	user	0m0.124s	sys	0m0.139s	
+
+ STANDARD READ : 89 bytes/line (1 byte/read)     	real	0m1.024s	user	0m0.445s	sys	0m1.042s	
+ mySplit-1P-1L : 89 bytes/line (89 bytes/read)   	real	0m0.373s	user	0m0.290s	sys	0m0.245s	
+ mySplit-4P-1L : 89 bytes/line (89 bytes/read)   	real	0m0.428s	user	0m0.683s	sys	0m0.447s	
+ mySplit-1P-32L: 89 bytes/line (2848 bytes/read) 	real	0m0.098s	user	0m0.081s	sys	0m0.107s	
+ mySplit-4P-32L: 89 bytes/line (2848 bytes/read) 	real	0m0.091s	user	0m0.115s	sys	0m0.150s	
+
+ STANDARD READ : 93 bytes/line (1 byte/read)     	real	0m1.037s	user	0m0.412s	sys	0m1.111s	
+ mySplit-1P-1L : 93 bytes/line (93 bytes/read)   	real	0m0.372s	user	0m0.306s	sys	0m0.230s	
+ mySplit-4P-1L : 93 bytes/line (93 bytes/read)   	real	0m0.342s	user	0m0.519s	sys	0m0.402s	
+ mySplit-1P-32L: 93 bytes/line (2976 bytes/read) 	real	0m0.115s	user	0m0.099s	sys	0m0.114s	
+ mySplit-4P-32L: 93 bytes/line (2976 bytes/read) 	real	0m0.091s	user	0m0.109s	sys	0m0.157s	
+
+ STANDARD READ : 97 bytes/line (1 byte/read)     	real	0m1.099s	user	0m0.426s	sys	0m1.205s	
+ mySplit-1P-1L : 97 bytes/line (97 bytes/read)   	real	0m0.381s	user	0m0.304s	sys	0m0.245s	
+ mySplit-4P-1L : 97 bytes/line (97 bytes/read)   	real	0m0.310s	user	0m0.484s	sys	0m0.356s	
+ mySplit-1P-32L: 97 bytes/line (3104 bytes/read) 	real	0m0.115s	user	0m0.097s	sys	0m0.116s	
+ mySplit-4P-32L: 97 bytes/line (3104 bytes/read) 	real	0m0.091s	user	0m0.113s	sys	0m0.158s	
+
+ STANDARD READ : 101 bytes/line (1 byte/read)     	real	0m1.116s	user	0m0.466s	sys	0m1.161s	
+ mySplit-1P-1L : 101 bytes/line (101 bytes/read)  	real	0m0.383s	user	0m0.306s	sys	0m0.244s	
+ mySplit-4P-1L : 101 bytes/line (101 bytes/read)  	real	0m0.426s	user	0m0.688s	sys	0m0.444s	
+ mySplit-1P-32L: 101 bytes/line (3232 bytes/read) 	real	0m0.119s	user	0m0.101s	sys	0m0.114s	
+ mySplit-4P-32L: 101 bytes/line (3232 bytes/read) 	real	0m0.098s	user	0m0.152s	sys	0m0.147s	
+
+ STANDARD READ : 105 bytes/line (1 byte/read)     	real	0m1.220s	user	0m0.547s	sys	0m1.212s	
+ mySplit-1P-1L : 105 bytes/line (105 bytes/read)  	real	0m0.380s	user	0m0.292s	sys	0m0.261s	
+ mySplit-4P-1L : 105 bytes/line (105 bytes/read)  	real	0m0.386s	user	0m0.589s	sys	0m0.444s	
+ mySplit-1P-32L: 105 bytes/line (3360 bytes/read) 	real	0m0.121s	user	0m0.099s	sys	0m0.125s	
+ mySplit-4P-32L: 105 bytes/line (3360 bytes/read) 	real	0m0.089s	user	0m0.122s	sys	0m0.139s	
+
+ STANDARD READ : 109 bytes/line (1 byte/read)     	real	0m1.216s	user	0m0.496s	sys	0m1.291s	
+ mySplit-1P-1L : 109 bytes/line (109 bytes/read)  	real	0m0.379s	user	0m0.295s	sys	0m0.253s	
+ mySplit-4P-1L : 109 bytes/line (109 bytes/read)  	real	0m0.499s	user	0m0.775s	sys	0m0.540s	
+ mySplit-1P-32L: 109 bytes/line (3488 bytes/read) 	real	0m0.123s	user	0m0.108s	sys	0m0.118s	
+ mySplit-4P-32L: 109 bytes/line (3488 bytes/read) 	real	0m0.094s	user	0m0.133s	sys	0m0.153s	
+
+ STANDARD READ : 113 bytes/line (1 byte/read)     	real	0m1.244s	user	0m0.492s	sys	0m1.320s	
+ mySplit-1P-1L : 113 bytes/line (113 bytes/read)  	real	0m0.383s	user	0m0.312s	sys	0m0.241s	
+ mySplit-4P-1L : 113 bytes/line (113 bytes/read)  	real	0m0.250s	user	0m0.399s	sys	0m0.303s	
+ mySplit-1P-32L: 113 bytes/line (3616 bytes/read) 	real	0m0.115s	user	0m0.105s	sys	0m0.110s	
+ mySplit-4P-32L: 113 bytes/line (3616 bytes/read) 	real	0m0.097s	user	0m0.153s	sys	0m0.139s	
+
+ STANDARD READ : 117 bytes/line (1 byte/read)     	real	0m1.299s	user	0m0.508s	sys	0m1.398s	
+ mySplit-1P-1L : 117 bytes/line (117 bytes/read)  	real	0m0.382s	user	0m0.299s	sys	0m0.256s	
+ mySplit-4P-1L : 117 bytes/line (117 bytes/read)  	real	0m0.411s	user	0m0.681s	sys	0m0.434s	
+ mySplit-1P-32L: 117 bytes/line (3744 bytes/read) 	real	0m0.124s	user	0m0.109s	sys	0m0.124s	
+ mySplit-4P-32L: 117 bytes/line (3744 bytes/read) 	real	0m0.090s	user	0m0.133s	sys	0m0.153s	
+
+ STANDARD READ : 121 bytes/line (1 byte/read)     	real	0m1.347s	user	0m0.522s	sys	0m1.457s	
+ mySplit-1P-1L : 121 bytes/line (121 bytes/read)  	real	0m0.382s	user	0m0.290s	sys	0m0.259s	
+ mySplit-4P-1L : 121 bytes/line (121 bytes/read)  	real	0m0.351s	user	0m0.564s	sys	0m0.395s	
+ mySplit-1P-32L: 121 bytes/line (3872 bytes/read) 	real	0m0.123s	user	0m0.109s	sys	0m0.122s	
+ mySplit-4P-32L: 121 bytes/line (3872 bytes/read) 	real	0m0.091s	user	0m0.130s	sys	0m0.146s	
+
+ STANDARD READ : 125 bytes/line (1 byte/read)     	real	0m1.367s	user	0m0.537s	sys	0m1.445s	
+ mySplit-1P-1L : 125 bytes/line (125 bytes/read)  	real	0m0.384s	user	0m0.307s	sys	0m0.257s	
+ mySplit-4P-1L : 125 bytes/line (125 bytes/read)  	real	0m0.359s	user	0m0.579s	sys	0m0.404s	
+ mySplit-1P-32L: 125 bytes/line (4000 bytes/read) 	real	0m0.128s	user	0m0.125s	sys	0m0.117s	
+ mySplit-4P-32L: 125 bytes/line (4000 bytes/read) 	real	0m0.094s	user	0m0.151s	sys	0m0.149s	
+
+ STANDARD READ : 129 bytes/line (1 byte/read)     	real	0m1.425s	user	0m0.574s	sys	0m1.507s	
+ mySplit-1P-1L : 129 bytes/line (129 bytes/read)  	real	0m0.386s	user	0m0.329s	sys	0m0.237s	
+ mySplit-4P-1L : 129 bytes/line (129 bytes/read)  	real	0m0.376s	user	0m0.591s	sys	0m0.435s	
+ mySplit-1P-32L: 129 bytes/line (4128 bytes/read) 	real	0m0.126s	user	0m0.112s	sys	0m0.127s	
+ mySplit-4P-32L: 129 bytes/line (4128 bytes/read) 	real	0m0.101s	user	0m0.142s	sys	0m0.168s	
+
+ STANDARD READ : 137 bytes/line (1 byte/read)     	real	0m1.490s	user	0m0.609s	sys	0m1.564s	
+ mySplit-1P-1L : 137 bytes/line (137 bytes/read)  	real	0m0.387s	user	0m0.307s	sys	0m0.262s	
+ mySplit-4P-1L : 137 bytes/line (137 bytes/read)  	real	0m0.304s	user	0m0.495s	sys	0m0.344s	
+ mySplit-1P-32L: 137 bytes/line (4384 bytes/read) 	real	0m0.129s	user	0m0.127s	sys	0m0.115s	
+ mySplit-4P-32L: 137 bytes/line (4384 bytes/read) 	real	0m0.098s	user	0m0.146s	sys	0m0.152s	
+
+ STANDARD READ : 145 bytes/line (1 byte/read)     	real	0m1.581s	user	0m0.665s	sys	0m1.624s	
+ mySplit-1P-1L : 145 bytes/line (145 bytes/read)  	real	0m0.394s	user	0m0.311s	sys	0m0.272s	
+ mySplit-4P-1L : 145 bytes/line (145 bytes/read)  	real	0m0.271s	user	0m0.449s	sys	0m0.318s	
+ mySplit-1P-32L: 145 bytes/line (4640 bytes/read) 	real	0m0.126s	user	0m0.122s	sys	0m0.105s	
+ mySplit-4P-32L: 145 bytes/line (4640 bytes/read) 	real	0m0.098s	user	0m0.157s	sys	0m0.152s	
+
+ STANDARD READ : 153 bytes/line (1 byte/read)     	real	0m1.687s	user	0m0.670s	sys	0m1.797s	
+ mySplit-1P-1L : 153 bytes/line (153 bytes/read)  	real	0m0.393s	user	0m0.322s	sys	0m0.249s	
+ mySplit-4P-1L : 153 bytes/line (153 bytes/read)  	real	0m0.362s	user	0m0.595s	sys	0m0.405s	
+ mySplit-1P-32L: 153 bytes/line (4896 bytes/read) 	real	0m0.135s	user	0m0.124s	sys	0m0.127s	
+ mySplit-4P-32L: 153 bytes/line (4896 bytes/read) 	real	0m0.101s	user	0m0.147s	sys	0m0.168s	
+
+ STANDARD READ : 161 bytes/line (1 byte/read)     	real	0m1.755s	user	0m0.697s	sys	0m1.848s	
+ mySplit-1P-1L : 161 bytes/line (161 bytes/read)  	real	0m0.398s	user	0m0.312s	sys	0m0.274s	
+ mySplit-4P-1L : 161 bytes/line (161 bytes/read)  	real	0m0.359s	user	0m0.588s	sys	0m0.406s	
+ mySplit-1P-32L: 161 bytes/line (5152 bytes/read) 	real	0m0.139s	user	0m0.129s	sys	0m0.130s	
+ mySplit-4P-32L: 161 bytes/line (5152 bytes/read) 	real	0m0.109s	user	0m0.170s	sys	0m0.166s	
+
+ STANDARD READ : 169 bytes/line (1 byte/read)     	real	0m1.832s	user	0m0.745s	sys	0m1.914s	
+ mySplit-1P-1L : 169 bytes/line (169 bytes/read)  	real	0m0.396s	user	0m0.305s	sys	0m0.274s	
+ mySplit-4P-1L : 169 bytes/line (169 bytes/read)  	real	0m0.311s	user	0m0.516s	sys	0m0.353s	
+ mySplit-1P-32L: 169 bytes/line (5408 bytes/read) 	real	0m0.138s	user	0m0.147s	sys	0m0.108s	
+ mySplit-4P-32L: 169 bytes/line (5408 bytes/read) 	real	0m0.107s	user	0m0.177s	sys	0m0.163s	
+
+ STANDARD READ : 177 bytes/line (1 byte/read)     	real	0m1.892s	user	0m0.698s	sys	0m2.048s	
+ mySplit-1P-1L : 177 bytes/line (177 bytes/read)  	real	0m0.400s	user	0m0.334s	sys	0m0.255s	
+ mySplit-4P-1L : 177 bytes/line (177 bytes/read)  	real	0m0.321s	user	0m0.519s	sys	0m0.371s	
+ mySplit-1P-32L: 177 bytes/line (5664 bytes/read) 	real	0m0.142s	user	0m0.131s	sys	0m0.131s	
+ mySplit-4P-32L: 177 bytes/line (5664 bytes/read) 	real	0m0.112s	user	0m0.175s	sys	0m0.172s	
+
+ STANDARD READ : 185 bytes/line (1 byte/read)     	real	0m2.006s	user	0m0.771s	sys	0m2.158s	
+ mySplit-1P-1L : 185 bytes/line (185 bytes/read)  	real	0m0.397s	user	0m0.331s	sys	0m0.251s	
+ mySplit-4P-1L : 185 bytes/line (185 bytes/read)  	real	0m0.517s	user	0m0.902s	sys	0m0.515s	
+ mySplit-1P-32L: 185 bytes/line (5920 bytes/read) 	real	0m0.144s	user	0m0.147s	sys	0m0.120s	
+ mySplit-4P-32L: 185 bytes/line (5920 bytes/read) 	real	0m0.104s	user	0m0.174s	sys	0m0.157s	
+
+ STANDARD READ : 193 bytes/line (1 byte/read)     	real	0m2.076s	user	0m0.816s	sys	0m2.166s	
+ mySplit-1P-1L : 193 bytes/line (193 bytes/read)  	real	0m0.400s	user	0m0.322s	sys	0m0.260s	
+ mySplit-4P-1L : 193 bytes/line (193 bytes/read)  	real	0m0.314s	user	0m0.494s	sys	0m0.389s	
+ mySplit-1P-32L: 193 bytes/line (6176 bytes/read) 	real	0m0.144s	user	0m0.156s	sys	0m0.115s	
+ mySplit-4P-32L: 193 bytes/line (6176 bytes/read) 	real	0m0.114s	user	0m0.193s	sys	0m0.176s	
+
+ STANDARD READ : 201 bytes/line (1 byte/read)     	real	0m2.168s	user	0m0.862s	sys	0m2.261s	
+ mySplit-1P-1L : 201 bytes/line (201 bytes/read)  	real	0m0.407s	user	0m0.342s	sys	0m0.259s	
+ mySplit-4P-1L : 201 bytes/line (201 bytes/read)  	real	0m0.348s	user	0m0.606s	sys	0m0.379s	
+ mySplit-1P-32L: 201 bytes/line (6432 bytes/read) 	real	0m0.144s	user	0m0.141s	sys	0m0.127s	
+ mySplit-4P-32L: 201 bytes/line (6432 bytes/read) 	real	0m0.110s	user	0m0.195s	sys	0m0.166s	
+
+ STANDARD READ : 209 bytes/line (1 byte/read)     	real	0m2.265s	user	0m0.875s	sys	0m2.399s	
+ mySplit-1P-1L : 209 bytes/line (209 bytes/read)  	real	0m0.412s	user	0m0.349s	sys	0m0.257s	
+ mySplit-4P-1L : 209 bytes/line (209 bytes/read)  	real	0m0.322s	user	0m0.525s	sys	0m0.388s	
+ mySplit-1P-32L: 209 bytes/line (6688 bytes/read) 	real	0m0.148s	user	0m0.141s	sys	0m0.127s	
+ mySplit-4P-32L: 209 bytes/line (6688 bytes/read) 	real	0m0.111s	user	0m0.190s	sys	0m0.169s	
+
+ STANDARD READ : 217 bytes/line (1 byte/read)     	real	0m2.373s	user	0m0.878s	sys	0m2.566s	
+ mySplit-1P-1L : 217 bytes/line (217 bytes/read)  	real	0m0.412s	user	0m0.336s	sys	0m0.270s	
+ mySplit-4P-1L : 217 bytes/line (217 bytes/read)  	real	0m0.310s	user	0m0.503s	sys	0m0.384s	
+ mySplit-1P-32L: 217 bytes/line (6944 bytes/read) 	real	0m0.152s	user	0m0.152s	sys	0m0.128s	
+ mySplit-4P-32L: 217 bytes/line (6944 bytes/read) 	real	0m0.116s	user	0m0.187s	sys	0m0.179s	
+
+ STANDARD READ : 225 bytes/line (1 byte/read)     	real	0m2.412s	user	0m0.944s	sys	0m2.504s	
+ mySplit-1P-1L : 225 bytes/line (225 bytes/read)  	real	0m0.411s	user	0m0.338s	sys	0m0.263s	
+ mySplit-4P-1L : 225 bytes/line (225 bytes/read)  	real	0m0.388s	user	0m0.655s	sys	0m0.446s	
+ mySplit-1P-32L: 225 bytes/line (7200 bytes/read) 	real	0m0.161s	user	0m0.164s	sys	0m0.139s	
+ mySplit-4P-32L: 225 bytes/line (7200 bytes/read) 	real	0m0.115s	user	0m0.197s	sys	0m0.170s	
+
+ STANDARD READ : 233 bytes/line (1 byte/read)     	real	0m2.523s	user	0m0.937s	sys	0m2.738s	
+ mySplit-1P-1L : 233 bytes/line (233 bytes/read)  	real	0m0.412s	user	0m0.365s	sys	0m0.247s	
+ mySplit-4P-1L : 233 bytes/line (233 bytes/read)  	real	0m0.298s	user	0m0.510s	sys	0m0.349s	
+ mySplit-1P-32L: 233 bytes/line (7456 bytes/read) 	real	0m0.149s	user	0m0.148s	sys	0m0.129s	
+ mySplit-4P-32L: 233 bytes/line (7456 bytes/read) 	real	0m0.103s	user	0m0.186s	sys	0m0.155s	
+
+ STANDARD READ : 241 bytes/line (1 byte/read)     	real	0m2.595s	user	0m0.985s	sys	0m2.731s	
+ mySplit-1P-1L : 241 bytes/line (241 bytes/read)  	real	0m0.415s	user	0m0.338s	sys	0m0.269s	
+ mySplit-4P-1L : 241 bytes/line (241 bytes/read)  	real	0m0.260s	user	0m0.426s	sys	0m0.329s	
+ mySplit-1P-32L: 241 bytes/line (7712 bytes/read) 	real	0m0.153s	user	0m0.152s	sys	0m0.123s	
+ mySplit-4P-32L: 241 bytes/line (7712 bytes/read) 	real	0m0.120s	user	0m0.211s	sys	0m0.175s	
+
+ STANDARD READ : 249 bytes/line (1 byte/read)     	real	0m2.684s	user	0m1.061s	sys	0m2.802s	
+ mySplit-1P-1L : 249 bytes/line (249 bytes/read)  	real	0m0.418s	user	0m0.350s	sys	0m0.265s	
+ mySplit-4P-1L : 249 bytes/line (249 bytes/read)  	real	0m0.334s	user	0m0.547s	sys	0m0.410s	
+ mySplit-1P-32L: 249 bytes/line (7968 bytes/read) 	real	0m0.160s	user	0m0.167s	sys	0m0.130s	
+ mySplit-4P-32L: 249 bytes/line (7968 bytes/read) 	real	0m0.113s	user	0m0.200s	sys	0m0.170s	
+
+ STANDARD READ : 257 bytes/line (1 byte/read)     	real	0m2.742s	user	0m1.086s	sys	0m2.835s	
+ mySplit-1P-1L : 257 bytes/line (257 bytes/read)  	real	0m0.422s	user	0m0.361s	sys	0m0.263s	
+ mySplit-4P-1L : 257 bytes/line (257 bytes/read)  	real	0m0.358s	user	0m0.600s	sys	0m0.426s	
+ mySplit-1P-32L: 257 bytes/line (8224 bytes/read) 	real	0m0.166s	user	0m0.178s	sys	0m0.127s	
+ mySplit-4P-32L: 257 bytes/line (8224 bytes/read) 	real	0m0.120s	user	0m0.224s	sys	0m0.184s	
+
+ STANDARD READ : 273 bytes/line (1 byte/read)     	real	0m2.915s	user	0m1.064s	sys	0m3.129s	
+ mySplit-1P-1L : 273 bytes/line (273 bytes/read)  	real	0m0.429s	user	0m0.375s	sys	0m0.262s	
+ mySplit-4P-1L : 273 bytes/line (273 bytes/read)  	real	0m0.288s	user	0m0.490s	sys	0m0.348s	
+ mySplit-1P-32L: 273 bytes/line (8736 bytes/read) 	real	0m0.165s	user	0m0.173s	sys	0m0.128s	
+ mySplit-4P-32L: 273 bytes/line (8736 bytes/read) 	real	0m0.119s	user	0m0.237s	sys	0m0.170s	
+
+ STANDARD READ : 289 bytes/line (1 byte/read)     	real	0m3.063s	user	0m1.161s	sys	0m3.204s	
+ mySplit-1P-1L : 289 bytes/line (289 bytes/read)  	real	0m0.435s	user	0m0.372s	sys	0m0.274s	
+ mySplit-4P-1L : 289 bytes/line (289 bytes/read)  	real	0m0.372s	user	0m0.671s	sys	0m0.404s	
+ mySplit-1P-32L: 289 bytes/line (9248 bytes/read) 	real	0m0.175s	user	0m0.165s	sys	0m0.152s	
+ mySplit-4P-32L: 289 bytes/line (9248 bytes/read) 	real	0m0.123s	user	0m0.234s	sys	0m0.177s	
+
+ STANDARD READ : 305 bytes/line (1 byte/read)     	real	0m3.232s	user	0m1.239s	sys	0m3.382s	
+ mySplit-1P-1L : 305 bytes/line (305 bytes/read)  	real	0m0.435s	user	0m0.370s	sys	0m0.274s	
+ mySplit-4P-1L : 305 bytes/line (305 bytes/read)  	real	0m0.338s	user	0m0.585s	sys	0m0.403s	
+ mySplit-1P-32L: 305 bytes/line (9760 bytes/read) 	real	0m0.181s	user	0m0.194s	sys	0m0.140s	
+ mySplit-4P-32L: 305 bytes/line (9760 bytes/read) 	real	0m0.131s	user	0m0.229s	sys	0m0.198s	
+
+ STANDARD READ : 321 bytes/line (1 byte/read)      	real	0m3.477s	user	0m1.293s	sys	0m3.822s	
+ mySplit-1P-1L : 321 bytes/line (321 bytes/read)   	real	0m0.448s	user	0m0.385s	sys	0m0.286s	
+ mySplit-4P-1L : 321 bytes/line (321 bytes/read)   	real	0m0.325s	user	0m0.589s	sys	0m0.363s	
+ mySplit-1P-32L: 321 bytes/line (10272 bytes/read) 	real	0m0.185s	user	0m0.189s	sys	0m0.146s	
+ mySplit-4P-32L: 321 bytes/line (10272 bytes/read) 	real	0m0.132s	user	0m0.239s	sys	0m0.199s	
+
+ STANDARD READ : 337 bytes/line (1 byte/read)      	real	0m3.546s	user	0m1.321s	sys	0m3.713s	
+ mySplit-1P-1L : 337 bytes/line (337 bytes/read)   	real	0m0.455s	user	0m0.403s	sys	0m0.276s	
+ mySplit-4P-1L : 337 bytes/line (337 bytes/read)   	real	0m0.333s	user	0m0.600s	sys	0m0.386s	
+ mySplit-1P-32L: 337 bytes/line (10784 bytes/read) 	real	0m0.193s	user	0m0.199s	sys	0m0.149s	
+ mySplit-4P-32L: 337 bytes/line (10784 bytes/read) 	real	0m0.136s	user	0m0.247s	sys	0m0.206s	
+
+ STANDARD READ : 353 bytes/line (1 byte/read)      	real	0m3.762s	user	0m1.403s	sys	0m3.938s	
+ mySplit-1P-1L : 353 bytes/line (353 bytes/read)   	real	0m0.459s	user	0m0.418s	sys	0m0.279s	
+ mySplit-4P-1L : 353 bytes/line (353 bytes/read)   	real	0m0.304s	user	0m0.557s	sys	0m0.351s	
+ mySplit-1P-32L: 353 bytes/line (11296 bytes/read) 	real	0m0.188s	user	0m0.192s	sys	0m0.140s	
+ mySplit-4P-32L: 353 bytes/line (11296 bytes/read) 	real	0m0.139s	user	0m0.275s	sys	0m0.193s	
+
+ STANDARD READ : 369 bytes/line (1 byte/read)      	real	0m3.934s	user	0m1.417s	sys	0m4.261s	
+ mySplit-1P-1L : 369 bytes/line (369 bytes/read)   	real	0m0.469s	user	0m0.409s	sys	0m0.296s	
+ mySplit-4P-1L : 369 bytes/line (369 bytes/read)   	real	0m0.314s	user	0m0.576s	sys	0m0.363s	
+ mySplit-1P-32L: 369 bytes/line (11808 bytes/read) 	real	0m0.195s	user	0m0.203s	sys	0m0.144s	
+ mySplit-4P-32L: 369 bytes/line (11808 bytes/read) 	real	0m0.147s	user	0m0.285s	sys	0m0.214s	
+
+ STANDARD READ : 385 bytes/line (1 byte/read)      	real	0m4.123s	user	0m1.486s	sys	0m4.407s	
+ mySplit-1P-1L : 385 bytes/line (385 bytes/read)   	real	0m0.463s	user	0m0.402s	sys	0m0.279s	
+ mySplit-4P-1L : 385 bytes/line (385 bytes/read)   	real	0m0.313s	user	0m0.576s	sys	0m0.368s	
+ mySplit-1P-32L: 385 bytes/line (12320 bytes/read) 	real	0m0.200s	user	0m0.209s	sys	0m0.145s	
+ mySplit-4P-32L: 385 bytes/line (12320 bytes/read) 	real	0m0.143s	user	0m0.302s	sys	0m0.188s	
+
+ STANDARD READ : 401 bytes/line (1 byte/read)      	real	0m4.273s	user	0m1.591s	sys	0m4.528s	
+ mySplit-1P-1L : 401 bytes/line (401 bytes/read)   	real	0m0.481s	user	0m0.442s	sys	0m0.280s	
+ mySplit-4P-1L : 401 bytes/line (401 bytes/read)   	real	0m0.346s	user	0m0.643s	sys	0m0.398s	
+ mySplit-1P-32L: 401 bytes/line (12832 bytes/read) 	real	0m0.212s	user	0m0.224s	sys	0m0.158s	
+ mySplit-4P-32L: 401 bytes/line (12832 bytes/read) 	real	0m0.152s	user	0m0.295s	sys	0m0.215s	
+
+ STANDARD READ : 417 bytes/line (1 byte/read)      	real	0m4.410s	user	0m1.588s	sys	0m4.834s	
+ mySplit-1P-1L : 417 bytes/line (417 bytes/read)   	real	0m0.474s	user	0m0.415s	sys	0m0.294s	
+ mySplit-4P-1L : 417 bytes/line (417 bytes/read)   	real	0m0.320s	user	0m0.598s	sys	0m0.368s	
+ mySplit-1P-32L: 417 bytes/line (13344 bytes/read) 	real	0m0.211s	user	0m0.210s	sys	0m0.160s	
+ mySplit-4P-32L: 417 bytes/line (13344 bytes/read) 	real	0m0.148s	user	0m0.289s	sys	0m0.208s	
+
+ STANDARD READ : 433 bytes/line (1 byte/read)      	real	0m4.574s	user	0m1.688s	sys	0m4.863s	
+ mySplit-1P-1L : 433 bytes/line (433 bytes/read)   	real	0m0.492s	user	0m0.442s	sys	0m0.301s	
+ mySplit-4P-1L : 433 bytes/line (433 bytes/read)   	real	0m0.417s	user	0m0.779s	sys	0m0.470s	
+ mySplit-1P-32L: 433 bytes/line (13856 bytes/read) 	real	0m0.223s	user	0m0.250s	sys	0m0.145s	
+ mySplit-4P-32L: 433 bytes/line (13856 bytes/read) 	real	0m0.161s	user	0m0.314s	sys	0m0.223s	
+
+ STANDARD READ : 449 bytes/line (1 byte/read)      	real	0m4.722s	user	0m1.743s	sys	0m4.992s	
+ mySplit-1P-1L : 449 bytes/line (449 bytes/read)   	real	0m0.488s	user	0m0.417s	sys	0m0.310s	
+ mySplit-4P-1L : 449 bytes/line (449 bytes/read)   	real	0m0.356s	user	0m0.729s	sys	0m0.368s	
+ mySplit-1P-32L: 449 bytes/line (14368 bytes/read) 	real	0m0.235s	user	0m0.268s	sys	0m0.150s	
+ mySplit-4P-32L: 449 bytes/line (14368 bytes/read) 	real	0m0.168s	user	0m0.332s	sys	0m0.229s	
+
+ STANDARD READ : 465 bytes/line (1 byte/read)      	real	0m4.988s	user	0m1.823s	sys	0m5.376s	
+ mySplit-1P-1L : 465 bytes/line (465 bytes/read)   	real	0m0.503s	user	0m0.458s	sys	0m0.295s	
+ mySplit-4P-1L : 465 bytes/line (465 bytes/read)   	real	0m0.329s	user	0m0.639s	sys	0m0.355s	
+ mySplit-1P-32L: 465 bytes/line (14880 bytes/read) 	real	0m0.227s	user	0m0.243s	sys	0m0.153s	
+ mySplit-4P-32L: 465 bytes/line (14880 bytes/read) 	real	0m0.171s	user	0m0.353s	sys	0m0.229s	
+
+ STANDARD READ : 481 bytes/line (1 byte/read)      	real	0m5.062s	user	0m1.895s	sys	0m5.145s	
+ mySplit-1P-1L : 481 bytes/line (481 bytes/read)   	real	0m0.514s	user	0m0.460s	sys	0m0.316s	
+ mySplit-4P-1L : 481 bytes/line (481 bytes/read)   	real	0m0.320s	user	0m0.620s	sys	0m0.358s	
+ mySplit-1P-32L: 481 bytes/line (15392 bytes/read) 	real	0m0.255s	user	0m0.275s	sys	0m0.169s	
+ mySplit-4P-32L: 481 bytes/line (15392 bytes/read) 	real	0m0.180s	user	0m0.369s	sys	0m0.224s	
+
+ STANDARD READ : 497 bytes/line (1 byte/read)      	real	0m5.233s	user	0m1.959s	sys	0m5.449s	
+ mySplit-1P-1L : 497 bytes/line (497 bytes/read)   	real	0m0.518s	user	0m0.477s	sys	0m0.302s	
+ mySplit-4P-1L : 497 bytes/line (497 bytes/read)   	real	0m0.323s	user	0m0.596s	sys	0m0.389s	
+ mySplit-1P-32L: 497 bytes/line (15904 bytes/read) 	real	0m0.257s	user	0m0.282s	sys	0m0.165s	
+ mySplit-4P-32L: 497 bytes/line (15904 bytes/read) 	real	0m0.177s	user	0m0.365s	sys	0m0.238s	
+
+ STANDARD READ : 513 bytes/line (1 byte/read)      	real	0m5.502s	user	0m1.976s	sys	0m5.937s	
+ mySplit-1P-1L : 513 bytes/line (513 bytes/read)   	real	0m0.537s	user	0m0.504s	sys	0m0.304s	
+ mySplit-4P-1L : 513 bytes/line (513 bytes/read)   	real	0m0.354s	user	0m0.667s	sys	0m0.414s	
+ mySplit-1P-32L: 513 bytes/line (16416 bytes/read) 	real	0m0.267s	user	0m0.295s	sys	0m0.173s	
+ mySplit-4P-32L: 513 bytes/line (16416 bytes/read) 	real	0m0.195s	user	0m0.413s	sys	0m0.244s	
+
+ STANDARD READ : 545 bytes/line (1 byte/read)      	real	0m5.760s	user	0m2.026s	sys	0m6.247s	
+ mySplit-1P-1L : 545 bytes/line (545 bytes/read)   	real	0m0.551s	user	0m0.517s	sys	0m0.313s	
+ mySplit-4P-1L : 545 bytes/line (545 bytes/read)   	real	0m0.348s	user	0m0.656s	sys	0m0.417s	
+ mySplit-1P-32L: 545 bytes/line (17440 bytes/read) 	real	0m0.278s	user	0m0.301s	sys	0m0.183s	
+ mySplit-4P-32L: 545 bytes/line (17440 bytes/read) 	real	0m0.195s	user	0m0.428s	sys	0m0.233s	
+
+ STANDARD READ : 577 bytes/line (1 byte/read)      	real	0m6.094s	user	0m2.271s	sys	0m6.524s	
+ mySplit-1P-1L : 577 bytes/line (577 bytes/read)   	real	0m0.554s	user	0m0.516s	sys	0m0.313s	
+ mySplit-4P-1L : 577 bytes/line (577 bytes/read)   	real	0m0.371s	user	0m0.730s	sys	0m0.411s	
+ mySplit-1P-32L: 577 bytes/line (18464 bytes/read) 	real	0m0.292s	user	0m0.323s	sys	0m0.178s	
+ mySplit-4P-32L: 577 bytes/line (18464 bytes/read) 	real	0m0.206s	user	0m0.441s	sys	0m0.246s	
+
+ STANDARD READ : 609 bytes/line (1 byte/read)      	real	0m6.440s	user	0m2.375s	sys	0m6.637s	
+ mySplit-1P-1L : 609 bytes/line (609 bytes/read)   	real	0m0.568s	user	0m0.520s	sys	0m0.339s	
+ mySplit-4P-1L : 609 bytes/line (609 bytes/read)   	real	0m0.366s	user	0m0.705s	sys	0m0.423s	
+ mySplit-1P-32L: 609 bytes/line (19488 bytes/read) 	real	0m0.301s	user	0m0.335s	sys	0m0.185s	
+ mySplit-4P-32L: 609 bytes/line (19488 bytes/read) 	real	0m0.208s	user	0m0.445s	sys	0m0.260s	
+
+ STANDARD READ : 641 bytes/line (1 byte/read)      	real	0m6.896s	user	0m2.429s	sys	0m7.551s	
+ mySplit-1P-1L : 641 bytes/line (641 bytes/read)   	real	0m0.584s	user	0m0.559s	sys	0m0.328s	
+ mySplit-4P-1L : 641 bytes/line (641 bytes/read)   	real	0m0.361s	user	0m0.706s	sys	0m0.423s	
+ mySplit-1P-32L: 641 bytes/line (20512 bytes/read) 	real	0m0.316s	user	0m0.342s	sys	0m0.203s	
+ mySplit-4P-32L: 641 bytes/line (20512 bytes/read) 	real	0m0.206s	user	0m0.438s	sys	0m0.257s	
+
+ STANDARD READ : 673 bytes/line (1 byte/read)      	real	0m7.218s	user	0m2.583s	sys	0m7.775s	
+ mySplit-1P-1L : 673 bytes/line (673 bytes/read)   	real	0m0.599s	user	0m0.571s	sys	0m0.338s	
+ mySplit-4P-1L : 673 bytes/line (673 bytes/read)   	real	0m0.371s	user	0m0.719s	sys	0m0.438s	
+ mySplit-1P-32L: 673 bytes/line (21536 bytes/read) 	real	0m0.328s	user	0m0.361s	sys	0m0.195s	
+ mySplit-4P-32L: 673 bytes/line (21536 bytes/read) 	real	0m0.237s	user	0m0.518s	sys	0m0.275s	
+
+ STANDARD READ : 705 bytes/line (1 byte/read)      	real	0m7.399s	user	0m2.700s	sys	0m7.850s	
+ mySplit-1P-1L : 705 bytes/line (705 bytes/read)   	real	0m0.609s	user	0m0.564s	sys	0m0.359s	
+ mySplit-4P-1L : 705 bytes/line (705 bytes/read)   	real	0m0.366s	user	0m0.702s	sys	0m0.446s	
+ mySplit-1P-32L: 705 bytes/line (22560 bytes/read) 	real	0m0.341s	user	0m0.388s	sys	0m0.193s	
+ mySplit-4P-32L: 705 bytes/line (22560 bytes/read) 	real	0m0.230s	user	0m0.515s	sys	0m0.276s	
+
+ STANDARD READ : 737 bytes/line (1 byte/read)      	real	0m7.830s	user	0m2.785s	sys	0m8.288s	
+ mySplit-1P-1L : 737 bytes/line (737 bytes/read)   	real	0m0.627s	user	0m0.640s	sys	0m0.314s	
+ mySplit-4P-1L : 737 bytes/line (737 bytes/read)   	real	0m0.371s	user	0m0.719s	sys	0m0.465s	
+ mySplit-1P-32L: 737 bytes/line (23584 bytes/read) 	real	0m0.355s	user	0m0.385s	sys	0m0.219s	
+ mySplit-4P-32L: 737 bytes/line (23584 bytes/read) 	real	0m0.247s	user	0m0.548s	sys	0m0.285s	
+
+ STANDARD READ : 769 bytes/line (1 byte/read)      	real	0m8.089s	user	0m2.937s	sys	0m8.496s	
+ mySplit-1P-1L : 769 bytes/line (769 bytes/read)   	real	0m0.632s	user	0m0.615s	sys	0m0.341s	
+ mySplit-4P-1L : 769 bytes/line (769 bytes/read)   	real	0m0.379s	user	0m0.783s	sys	0m0.424s	
+ mySplit-1P-32L: 769 bytes/line (24608 bytes/read) 	real	0m0.388s	user	0m0.438s	sys	0m0.206s	
+ mySplit-4P-32L: 769 bytes/line (24608 bytes/read) 	real	0m0.242s	user	0m0.536s	sys	0m0.293s	
+
+ STANDARD READ : 801 bytes/line (1 byte/read)      	real	0m8.356s	user	0m2.986s	sys	0m8.868s	
+ mySplit-1P-1L : 801 bytes/line (801 bytes/read)   	real	0m0.631s	user	0m0.635s	sys	0m0.312s	
+ mySplit-4P-1L : 801 bytes/line (801 bytes/read)   	real	0m0.371s	user	0m0.752s	sys	0m0.432s	
+ mySplit-1P-32L: 801 bytes/line (25632 bytes/read) 	real	0m0.363s	user	0m0.408s	sys	0m0.201s	
+ mySplit-4P-32L: 801 bytes/line (25632 bytes/read) 	real	0m0.240s	user	0m0.532s	sys	0m0.283s	
+
+ STANDARD READ : 833 bytes/line (1 byte/read)      	real	0m8.805s	user	0m3.165s	sys	0m9.589s	
+ mySplit-1P-1L : 833 bytes/line (833 bytes/read)   	real	0m0.644s	user	0m0.608s	sys	0m0.367s	
+ mySplit-4P-1L : 833 bytes/line (833 bytes/read)   	real	0m0.382s	user	0m0.796s	sys	0m0.440s	
+ mySplit-1P-32L: 833 bytes/line (26656 bytes/read) 	real	0m0.378s	user	0m0.428s	sys	0m0.206s	
+ mySplit-4P-32L: 833 bytes/line (26656 bytes/read) 	real	0m0.255s	user	0m0.569s	sys	0m0.294s	
+
+ STANDARD READ : 865 bytes/line (1 byte/read)      	real	0m9.158s	user	0m3.242s	sys	0m9.957s	
+ mySplit-1P-1L : 865 bytes/line (865 bytes/read)   	real	0m0.681s	user	0m0.674s	sys	0m0.365s	
+ mySplit-4P-1L : 865 bytes/line (865 bytes/read)   	real	0m0.405s	user	0m0.842s	sys	0m0.462s	
+ mySplit-1P-32L: 865 bytes/line (27680 bytes/read) 	real	0m0.403s	user	0m0.447s	sys	0m0.237s	
+ mySplit-4P-32L: 865 bytes/line (27680 bytes/read) 	real	0m0.286s	user	0m0.616s	sys	0m0.349s	
+
+ STANDARD READ : 897 bytes/line (1 byte/read)      	real	0m9.507s	user	0m3.281s	sys	0m10.533s	
+ mySplit-1P-1L : 897 bytes/line (897 bytes/read)   	real	0m0.668s	user	0m0.675s	sys	0m0.332s	
+ mySplit-4P-1L : 897 bytes/line (897 bytes/read)   	real	0m0.372s	user	0m0.750s	sys	0m0.461s	
+ mySplit-1P-32L: 897 bytes/line (28704 bytes/read) 	real	0m0.398s	user	0m0.452s	sys	0m0.210s	
+ mySplit-4P-32L: 897 bytes/line (28704 bytes/read) 	real	0m0.266s	user	0m0.609s	sys	0m0.287s	
+
+ STANDARD READ : 929 bytes/line (1 byte/read)      	real	0m9.795s	user	0m3.426s	sys	0m10.637s	
+ mySplit-1P-1L : 929 bytes/line (929 bytes/read)   	real	0m0.685s	user	0m0.664s	sys	0m0.372s	
+ mySplit-4P-1L : 929 bytes/line (929 bytes/read)   	real	0m0.430s	user	0m0.958s	sys	0m0.485s	
+ mySplit-1P-32L: 929 bytes/line (29728 bytes/read) 	real	0m0.417s	user	0m0.457s	sys	0m0.246s	
+ mySplit-4P-32L: 929 bytes/line (29728 bytes/read) 	real	0m0.276s	user	0m0.626s	sys	0m0.312s	
+
+ STANDARD READ : 961 bytes/line (1 byte/read)      	real	0m10.155s	user	0m3.615s	sys	0m10.971s	
+ mySplit-1P-1L : 961 bytes/line (961 bytes/read)   	real	0m0.719s	user	0m0.695s	sys	0m0.401s	
+ mySplit-4P-1L : 961 bytes/line (961 bytes/read)   	real	0m0.430s	user	0m0.887s	sys	0m0.510s	
+ mySplit-1P-32L: 961 bytes/line (30752 bytes/read) 	real	0m0.450s	user	0m0.500s	sys	0m0.259s	
+ mySplit-4P-32L: 961 bytes/line (30752 bytes/read) 	real	0m0.299s	user	0m0.657s	sys	0m0.360s	
+
+ STANDARD READ : 993 bytes/line (1 byte/read)      	real	0m10.501s	user	0m3.716s	sys	0m11.558s	
+ mySplit-1P-1L : 993 bytes/line (993 bytes/read)   	real	0m0.697s	user	0m0.691s	sys	0m0.352s	
+ mySplit-4P-1L : 993 bytes/line (993 bytes/read)   	real	0m0.402s	user	0m0.869s	sys	0m0.453s	
+ mySplit-1P-32L: 993 bytes/line (31776 bytes/read) 	real	0m0.434s	user	0m0.514s	sys	0m0.205s	
+ mySplit-4P-32L: 993 bytes/line (31776 bytes/read) 	real	0m0.283s	user	0m0.643s	sys	0m0.312s	
+
+ STANDARD READ : 1025 bytes/line (1 byte/read)      	real	0m10.664s	user	0m3.918s	sys	0m10.904s	
+ mySplit-1P-1L : 1025 bytes/line (1025 bytes/read)  	real	0m0.713s	user	0m0.701s	sys	0m0.381s	
+ mySplit-4P-1L : 1025 bytes/line (1025 bytes/read)  	real	0m0.417s	user	0m0.891s	sys	0m0.481s	
+ mySplit-1P-32L: 1025 bytes/line (32800 bytes/read) 	real	0m0.456s	user	0m0.511s	sys	0m0.250s	
+ mySplit-4P-32L: 1025 bytes/line (32800 bytes/read) 	real	0m0.296s	user	0m0.649s	sys	0m0.358s	
+
+ STANDARD READ : 1089 bytes/line (1 byte/read)      	real	0m11.519s	user	0m4.167s	sys	0m12.371s	
+ mySplit-1P-1L : 1089 bytes/line (1089 bytes/read)  	real	0m0.770s	user	0m0.782s	sys	0m0.399s	
+ mySplit-4P-1L : 1089 bytes/line (1089 bytes/read)  	real	0m0.463s	user	0m1.012s	sys	0m0.515s	
+ mySplit-1P-32L: 1089 bytes/line (34848 bytes/read) 	real	0m0.484s	user	0m0.539s	sys	0m0.270s	
+ mySplit-4P-32L: 1089 bytes/line (34848 bytes/read) 	real	0m0.338s	user	0m0.762s	sys	0m0.380s	
+
+ STANDARD READ : 1153 bytes/line (1 byte/read)      	real	0m12.173s	user	0m4.297s	sys	0m13.323s	
+ mySplit-1P-1L : 1153 bytes/line (1153 bytes/read)  	real	0m0.790s	user	0m0.793s	sys	0m0.412s	
+ mySplit-4P-1L : 1153 bytes/line (1153 bytes/read)  	real	0m0.473s	user	0m1.040s	sys	0m0.511s	
+ mySplit-1P-32L: 1153 bytes/line (36896 bytes/read) 	real	0m0.518s	user	0m0.592s	sys	0m0.269s	
+ mySplit-4P-32L: 1153 bytes/line (36896 bytes/read) 	real	0m0.347s	user	0m0.778s	sys	0m0.398s	
+
+ STANDARD READ : 1217 bytes/line (1 byte/read)      	real	0m12.713s	user	0m4.648s	sys	0m13.467s	
+ mySplit-1P-1L : 1217 bytes/line (1217 bytes/read)  	real	0m0.801s	user	0m0.815s	sys	0m0.400s	
+ mySplit-4P-1L : 1217 bytes/line (1217 bytes/read)  	real	0m0.471s	user	0m1.015s	sys	0m0.519s	
+ mySplit-1P-32L: 1217 bytes/line (38944 bytes/read) 	real	0m0.531s	user	0m0.600s	sys	0m0.276s	
+ mySplit-4P-32L: 1217 bytes/line (38944 bytes/read) 	real	0m0.342s	user	0m0.769s	sys	0m0.395s	
+
+ STANDARD READ : 1281 bytes/line (1 byte/read)      	real	0m13.561s	user	0m4.650s	sys	0m15.031s	
+ mySplit-1P-1L : 1281 bytes/line (1281 bytes/read)  	real	0m0.810s	user	0m0.853s	sys	0m0.365s	
+ mySplit-4P-1L : 1281 bytes/line (1281 bytes/read)  	real	0m0.474s	user	0m1.063s	sys	0m0.503s	
+ mySplit-1P-32L: 1281 bytes/line (40992 bytes/read) 	real	0m0.540s	user	0m0.630s	sys	0m0.247s	
+ mySplit-4P-32L: 1281 bytes/line (40992 bytes/read) 	real	0m0.343s	user	0m0.835s	sys	0m0.344s	
+
+ STANDARD READ : 1345 bytes/line (1 byte/read)      	real	0m14.193s	user	0m5.044s	sys	0m15.559s	
+ mySplit-1P-1L : 1345 bytes/line (1345 bytes/read)  	real	0m0.838s	user	0m0.866s	sys	0m0.391s	
+ mySplit-4P-1L : 1345 bytes/line (1345 bytes/read)  	real	0m0.491s	user	0m1.081s	sys	0m0.547s	
+ mySplit-1P-32L: 1345 bytes/line (43040 bytes/read) 	real	0m0.567s	user	0m0.660s	sys	0m0.271s	
+ mySplit-4P-32L: 1345 bytes/line (43040 bytes/read) 	real	0m0.362s	user	0m0.852s	sys	0m0.384s	
+
+ STANDARD READ : 1409 bytes/line (1 byte/read)      	real	0m14.745s	user	0m5.275s	sys	0m15.864s	
+ mySplit-1P-1L : 1409 bytes/line (1409 bytes/read)  	real	0m0.870s	user	0m0.895s	sys	0m0.428s	
+ mySplit-4P-1L : 1409 bytes/line (1409 bytes/read)  	real	0m0.510s	user	0m1.103s	sys	0m0.563s	
+ mySplit-1P-32L: 1409 bytes/line (45088 bytes/read) 	real	0m0.594s	user	0m0.665s	sys	0m0.306s	
+ mySplit-4P-32L: 1409 bytes/line (45088 bytes/read) 	real	0m0.392s	user	0m0.899s	sys	0m0.424s	
+
+ STANDARD READ : 1473 bytes/line (1 byte/read)      	real	0m15.494s	user	0m5.772s	sys	0m15.853s	
+ mySplit-1P-1L : 1473 bytes/line (1473 bytes/read)  	real	0m0.872s	user	0m0.927s	sys	0m0.387s	
+ mySplit-4P-1L : 1473 bytes/line (1473 bytes/read)  	real	0m0.500s	user	0m1.171s	sys	0m0.518s	
+ mySplit-1P-32L: 1473 bytes/line (47136 bytes/read) 	real	0m0.607s	user	0m0.729s	sys	0m0.260s	
+ mySplit-4P-32L: 1473 bytes/line (47136 bytes/read) 	real	0m0.378s	user	0m0.897s	sys	0m0.426s	
+
+ STANDARD READ : 1537 bytes/line (1 byte/read)      	real	0m16.108s	user	0m5.768s	sys	0m17.122s	
+ mySplit-1P-1L : 1537 bytes/line (1537 bytes/read)  	real	0m0.917s	user	0m0.964s	sys	0m0.421s	
+ mySplit-4P-1L : 1537 bytes/line (1537 bytes/read)  	real	0m0.546s	user	0m1.274s	sys	0m0.569s	
+ mySplit-1P-32L: 1537 bytes/line (49184 bytes/read) 	real	0m0.637s	user	0m0.764s	sys	0m0.280s	
+ mySplit-4P-32L: 1537 bytes/line (49184 bytes/read) 	real	0m0.412s	user	0m0.988s	sys	0m0.416s	
+
+ STANDARD READ : 1601 bytes/line (1 byte/read)      	real	0m17.191s	user	0m6.049s	sys	0m18.954s	
+ mySplit-1P-1L : 1601 bytes/line (1601 bytes/read)  	real	0m0.949s	user	0m0.977s	sys	0m0.467s	
+ mySplit-4P-1L : 1601 bytes/line (1601 bytes/read)  	real	0m0.547s	user	0m1.226s	sys	0m0.615s	
+ mySplit-1P-32L: 1601 bytes/line (51232 bytes/read) 	real	0m0.676s	user	0m0.787s	sys	0m0.322s	
+ mySplit-4P-32L: 1601 bytes/line (51232 bytes/read) 	real	0m0.438s	user	0m1.024s	sys	0m0.461s	
+
+ STANDARD READ : 1665 bytes/line (1 byte/read)      	real	0m17.387s	user	0m6.226s	sys	0m18.631s	
+ mySplit-1P-1L : 1665 bytes/line (1665 bytes/read)  	real	0m0.941s	user	0m1.020s	sys	0m0.393s	
+ mySplit-4P-1L : 1665 bytes/line (1665 bytes/read)  	real	0m0.545s	user	0m1.291s	sys	0m0.540s	
+ mySplit-1P-32L: 1665 bytes/line (53280 bytes/read) 	real	0m0.675s	user	0m0.830s	sys	0m0.257s	
+ mySplit-4P-32L: 1665 bytes/line (53280 bytes/read) 	real	0m0.436s	user	0m1.080s	sys	0m0.411s	
+
+ STANDARD READ : 1729 bytes/line (1 byte/read)      	real	0m18.109s	user	0m6.438s	sys	0m19.165s	
+ mySplit-1P-1L : 1729 bytes/line (1729 bytes/read)  	real	0m1.013s	user	0m1.076s	sys	0m0.472s	
+ mySplit-4P-1L : 1729 bytes/line (1729 bytes/read)  	real	0m0.605s	user	0m1.341s	sys	0m0.666s	
+ mySplit-1P-32L: 1729 bytes/line (55328 bytes/read) 	real	0m0.747s	user	0m0.866s	sys	0m0.349s	
+ mySplit-4P-32L: 1729 bytes/line (55328 bytes/read) 	real	0m0.480s	user	0m1.114s	sys	0m0.508s	
+
+ STANDARD READ : 1793 bytes/line (1 byte/read)      	real	0m19.042s	user	0m6.732s	sys	0m20.505s	
+ mySplit-1P-1L : 1793 bytes/line (1793 bytes/read)  	real	0m1.046s	user	0m1.107s	sys	0m0.494s	
+ mySplit-4P-1L : 1793 bytes/line (1793 bytes/read)  	real	0m0.605s	user	0m1.340s	sys	0m0.713s	
+ mySplit-1P-32L: 1793 bytes/line (57376 bytes/read) 	real	0m0.772s	user	0m0.902s	sys	0m0.358s	
+ mySplit-4P-32L: 1793 bytes/line (57376 bytes/read) 	real	0m0.495s	user	0m1.179s	sys	0m0.509s	
+
+ STANDARD READ : 1857 bytes/line (1 byte/read)      	real	0m19.538s	user	0m7.188s	sys	0m20.298s	
+ mySplit-1P-1L : 1857 bytes/line (1857 bytes/read)  	real	0m1.094s	user	0m1.196s	sys	0m0.468s	
+ mySplit-4P-1L : 1857 bytes/line (1857 bytes/read)  	real	0m0.625s	user	0m1.478s	sys	0m0.695s	
+ mySplit-1P-32L: 1857 bytes/line (59424 bytes/read) 	real	0m0.820s	user	0m0.975s	sys	0m0.359s	
+ mySplit-4P-32L: 1857 bytes/line (59424 bytes/read) 	real	0m0.544s	user	0m1.295s	sys	0m0.549s	
+
+ STANDARD READ : 1921 bytes/line (1 byte/read)      	real	0m20.161s	user	0m7.141s	sys	0m21.876s	
+ mySplit-1P-1L : 1921 bytes/line (1921 bytes/read)  	real	0m1.103s	user	0m1.183s	sys	0m0.496s	
+ mySplit-4P-1L : 1921 bytes/line (1921 bytes/read)  	real	0m0.654s	user	0m1.513s	sys	0m0.700s	
+ mySplit-1P-32L: 1921 bytes/line (61472 bytes/read) 	real	0m0.822s	user	0m0.957s	sys	0m0.377s	
+ mySplit-4P-32L: 1921 bytes/line (61472 bytes/read) 	real	0m0.552s	user	0m1.272s	sys	0m0.546s	
+
+ STANDARD READ : 1985 bytes/line (1 byte/read)      	real	0m20.873s	user	0m7.240s	sys	0m22.964s	
+ mySplit-1P-1L : 1985 bytes/line (1985 bytes/read)  	real	0m1.128s	user	0m1.224s	sys	0m0.504s	
+ mySplit-4P-1L : 1985 bytes/line (1985 bytes/read)  	real	0m0.709s	user	0m1.751s	sys	0m0.650s	
+ mySplit-1P-32L: 1985 bytes/line (63520 bytes/read) 	real	0m0.847s	user	0m0.988s	sys	0m0.383s	
+ mySplit-4P-32L: 1985 bytes/line (63520 bytes/read) 	real	0m0.555s	user	0m1.274s	sys	0m0.584s	
+
+ STANDARD READ : 2049 bytes/line (1 byte/read)      	real	0m21.748s	user	0m7.458s	sys	0m24.110s	
+ mySplit-1P-1L : 2049 bytes/line (2049 bytes/read)  	real	0m1.168s	user	0m1.290s	sys	0m0.503s	
+ mySplit-4P-1L : 2049 bytes/line (2049 bytes/read)  	real	0m0.713s	user	0m1.706s	sys	0m0.711s	
+ mySplit-1P-32L: 2049 bytes/line (65568 bytes/read) 	real	0m0.911s	user	0m1.057s	sys	0m0.407s	
+ mySplit-4P-32L: 2049 bytes/line (65568 bytes/read) 	real	0m0.594s	user	0m1.453s	sys	0m0.580s	
+
+ STANDARD READ : 2177 bytes/line (1 byte/read)      	real	0m22.887s	user	0m8.093s	sys	0m24.871s	
+ mySplit-1P-1L : 2177 bytes/line (2177 bytes/read)  	real	0m1.193s	user	0m1.290s	sys	0m0.548s	
+ mySplit-4P-1L : 2177 bytes/line (2177 bytes/read)  	real	0m0.713s	user	0m1.672s	sys	0m0.735s	
+ mySplit-1P-32L: 2177 bytes/line (69664 bytes/read) 	real	0m0.941s	user	0m1.089s	sys	0m0.431s	
+ mySplit-4P-32L: 2177 bytes/line (69664 bytes/read) 	real	0m0.594s	user	0m1.368s	sys	0m0.668s	
+
+ STANDARD READ : 2305 bytes/line (1 byte/read)      	real	0m24.097s	user	0m8.542s	sys	0m25.969s	
+ mySplit-1P-1L : 2305 bytes/line (2305 bytes/read)  	real	0m1.245s	user	0m1.363s	sys	0m0.542s	
+ mySplit-4P-1L : 2305 bytes/line (2305 bytes/read)  	real	0m0.732s	user	0m1.698s	sys	0m0.771s	
+ mySplit-1P-32L: 2305 bytes/line (73760 bytes/read) 	real	0m0.978s	user	0m1.143s	sys	0m0.415s	
+ mySplit-4P-32L: 2305 bytes/line (73760 bytes/read) 	real	0m0.631s	user	0m1.484s	sys	0m0.646s	
+
+ STANDARD READ : 2433 bytes/line (1 byte/read)      	real	0m25.736s	user	0m9.190s	sys	0m27.764s	
+ mySplit-1P-1L : 2433 bytes/line (2433 bytes/read)  	real	0m1.325s	user	0m1.463s	sys	0m0.574s	
+ mySplit-4P-1L : 2433 bytes/line (2433 bytes/read)  	real	0m0.817s	user	0m1.968s	sys	0m0.795s	
+ mySplit-1P-32L: 2433 bytes/line (77856 bytes/read) 	real	0m1.068s	user	0m1.272s	sys	0m0.447s	
+ mySplit-4P-32L: 2433 bytes/line (77856 bytes/read) 	real	0m0.687s	user	0m1.681s	sys	0m0.664s	
+
+ STANDARD READ : 2561 bytes/line (1 byte/read)      	real	0m27.258s	user	0m9.572s	sys	0m29.534s	
+ mySplit-1P-1L : 2561 bytes/line (2561 bytes/read)  	real	0m1.344s	user	0m1.473s	sys	0m0.585s	
+ mySplit-4P-1L : 2561 bytes/line (2561 bytes/read)  	real	0m0.776s	user	0m1.878s	sys	0m0.827s	
+ mySplit-1P-32L: 2561 bytes/line (81952 bytes/read) 	real	0m1.086s	user	0m1.277s	sys	0m0.455s	
+ mySplit-4P-32L: 2561 bytes/line (81952 bytes/read) 	real	0m0.686s	user	0m1.700s	sys	0m0.642s	
+
+ STANDARD READ : 2689 bytes/line (1 byte/read)      	real	0m28.327s	user	0m10.074s	sys	0m30.309s	
+ mySplit-1P-1L : 2689 bytes/line (2689 bytes/read)  	real	0m1.409s	user	0m1.552s	sys	0m0.608s	
+ mySplit-4P-1L : 2689 bytes/line (2689 bytes/read)  	real	0m0.824s	user	0m2.047s	sys	0m0.810s	
+ mySplit-1P-32L: 2689 bytes/line (86048 bytes/read) 	real	0m1.134s	user	0m1.326s	sys	0m0.490s	
+ mySplit-4P-32L: 2689 bytes/line (86048 bytes/read) 	real	0m0.710s	user	0m1.678s	sys	0m0.777s	
+
+ STANDARD READ : 2817 bytes/line (1 byte/read)      	real	0m29.618s	user	0m10.543s	sys	0m31.684s	
+ mySplit-1P-1L : 2817 bytes/line (2817 bytes/read)  	real	0m1.459s	user	0m1.590s	sys	0m0.653s	
+ mySplit-4P-1L : 2817 bytes/line (2817 bytes/read)  	real	0m0.852s	user	0m2.138s	sys	0m0.835s	
+ mySplit-1P-32L: 2817 bytes/line (90144 bytes/read) 	real	0m1.193s	user	0m1.382s	sys	0m0.532s	
+ mySplit-4P-32L: 2817 bytes/line (90144 bytes/read) 	real	0m0.760s	user	0m1.775s	sys	0m0.764s	
+
+ STANDARD READ : 2945 bytes/line (1 byte/read)      	real	0m30.880s	user	0m10.913s	sys	0m33.253s	
+ mySplit-1P-1L : 2945 bytes/line (2945 bytes/read)  	real	0m1.523s	user	0m1.670s	sys	0m0.669s	
+ mySplit-4P-1L : 2945 bytes/line (2945 bytes/read)  	real	0m0.886s	user	0m2.138s	sys	0m0.898s	
+ mySplit-1P-32L: 2945 bytes/line (94240 bytes/read) 	real	0m1.238s	user	0m1.460s	sys	0m0.516s	
+ mySplit-4P-32L: 2945 bytes/line (94240 bytes/read) 	real	0m0.792s	user	0m1.875s	sys	0m0.790s	
+
+ STANDARD READ : 3073 bytes/line (1 byte/read)      	real	0m32.092s	user	0m11.466s	sys	0m34.114s	
+ mySplit-1P-1L : 3073 bytes/line (3073 bytes/read)  	real	0m1.555s	user	0m1.711s	sys	0m0.681s	
+ mySplit-4P-1L : 3073 bytes/line (3073 bytes/read)  	real	0m0.968s	user	0m2.346s	sys	0m0.919s	
+ mySplit-1P-32L: 3073 bytes/line (98336 bytes/read) 	real	0m1.294s	user	0m1.529s	sys	0m0.543s	
+ mySplit-4P-32L: 3073 bytes/line (98336 bytes/read) 	real	0m0.823s	user	0m1.964s	sys	0m0.806s	
+
+ STANDARD READ : 3201 bytes/line (1 byte/read)       	real	0m33.128s	user	0m11.710s	sys	0m35.317s	
+ mySplit-1P-1L : 3201 bytes/line (3201 bytes/read)   	real	0m1.654s	user	0m1.850s	sys	0m0.707s	
+ mySplit-4P-1L : 3201 bytes/line (3201 bytes/read)   	real	0m0.987s	user	0m2.345s	sys	0m1.021s	
+ mySplit-1P-32L: 3201 bytes/line (102432 bytes/read) 	real	0m1.378s	user	0m1.606s	sys	0m0.616s	
+ mySplit-4P-32L: 3201 bytes/line (102432 bytes/read) 	real	0m0.886s	user	0m2.091s	sys	0m0.938s	
+
+ STANDARD READ : 3329 bytes/line (1 byte/read)       	real	0m34.616s	user	0m12.058s	sys	0m36.999s	
+ mySplit-1P-1L : 3329 bytes/line (3329 bytes/read)   	real	0m1.667s	user	0m1.885s	sys	0m0.680s	
+ mySplit-4P-1L : 3329 bytes/line (3329 bytes/read)   	real	0m0.954s	user	0m2.338s	sys	0m0.961s	
+ mySplit-1P-32L: 3329 bytes/line (106528 bytes/read) 	real	0m1.384s	user	0m1.643s	sys	0m0.563s	
+ mySplit-4P-32L: 3329 bytes/line (106528 bytes/read) 	real	0m0.875s	user	0m2.098s	sys	0m0.900s	
+
+ STANDARD READ : 3457 bytes/line (1 byte/read)       	real	0m36.227s	user	0m12.798s	sys	0m39.285s	
+ mySplit-1P-1L : 3457 bytes/line (3457 bytes/read)   	real	0m1.750s	user	0m1.955s	sys	0m0.748s	
+ mySplit-4P-1L : 3457 bytes/line (3457 bytes/read)   	real	0m1.040s	user	0m2.549s	sys	0m1.033s	
+ mySplit-1P-32L: 3457 bytes/line (110624 bytes/read) 	real	0m1.481s	user	0m1.706s	sys	0m0.666s	
+ mySplit-4P-32L: 3457 bytes/line (110624 bytes/read) 	real	0m0.958s	user	0m2.267s	sys	0m0.987s	
+
+ STANDARD READ : 3585 bytes/line (1 byte/read)       	real	0m37.224s	user	0m13.115s	sys	0m39.624s	
+ mySplit-1P-1L : 3585 bytes/line (3585 bytes/read)   	real	0m1.831s	user	0m2.079s	sys	0m0.765s	
+ mySplit-4P-1L : 3585 bytes/line (3585 bytes/read)   	real	0m1.090s	user	0m2.566s	sys	0m1.171s	
+ mySplit-1P-32L: 3585 bytes/line (114720 bytes/read) 	real	0m1.555s	user	0m1.822s	sys	0m0.668s	
+ mySplit-4P-32L: 3585 bytes/line (114720 bytes/read) 	real	0m1.020s	user	0m2.393s	sys	0m1.006s	
+
+ STANDARD READ : 3713 bytes/line (1 byte/read)       	real	0m37.927s	user	0m13.416s	sys	0m40.059s	
+ mySplit-1P-1L : 3713 bytes/line (3713 bytes/read)   	real	0m1.866s	user	0m2.120s	sys	0m0.748s	
+ mySplit-4P-1L : 3713 bytes/line (3713 bytes/read)   	real	0m1.103s	user	0m2.669s	sys	0m1.121s	
+ mySplit-1P-32L: 3713 bytes/line (118816 bytes/read) 	real	0m1.591s	user	0m1.864s	sys	0m0.684s	
+ mySplit-4P-32L: 3713 bytes/line (118816 bytes/read) 	real	0m1.066s	user	0m2.527s	sys	0m0.972s	
+
+ STANDARD READ : 3841 bytes/line (1 byte/read)       	real	0m39.900s	user	0m14.054s	sys	0m42.230s	
+ mySplit-1P-1L : 3841 bytes/line (3841 bytes/read)   	real	0m1.942s	user	0m2.227s	sys	0m0.791s	
+ mySplit-4P-1L : 3841 bytes/line (3841 bytes/read)   	real	0m1.193s	user	0m2.964s	sys	0m1.142s	
+ mySplit-1P-32L: 3841 bytes/line (122912 bytes/read) 	real	0m1.662s	user	0m1.990s	sys	0m0.688s	
+ mySplit-4P-32L: 3841 bytes/line (122912 bytes/read) 	real	0m1.088s	user	0m2.517s	sys	0m1.091s	
+
+ STANDARD READ : 3969 bytes/line (1 byte/read)       	real	0m40.719s	user	0m14.494s	sys	0m42.398s	
+ mySplit-1P-1L : 3969 bytes/line (3969 bytes/read)   	real	0m1.966s	user	0m2.225s	sys	0m0.812s	
+ mySplit-4P-1L : 3969 bytes/line (3969 bytes/read)   	real	0m1.169s	user	0m2.860s	sys	0m1.158s	
+ mySplit-1P-32L: 3969 bytes/line (127008 bytes/read) 	real	0m1.694s	user	0m2.034s	sys	0m0.664s	
+ mySplit-4P-32L: 3969 bytes/line (127008 bytes/read) 	real	0m1.101s	user	0m2.590s	sys	0m1.080s	
+
+ STANDARD READ : 4097 bytes/line (1 byte/read)       	real	0m41.811s	user	0m14.687s	sys	0m44.052s	
+ mySplit-1P-1L : 4097 bytes/line (4097 bytes/read)   	real	0m2.083s	user	0m2.347s	sys	0m0.901s	
+ mySplit-4P-1L : 4097 bytes/line (4097 bytes/read)   	real	0m1.228s	user	0m2.954s	sys	0m1.336s	
+ mySplit-1P-32L: 4097 bytes/line (131104 bytes/read) 	real	0m1.795s	user	0m2.096s	sys	0m0.809s	
+ mySplit-4P-32L: 4097 bytes/line (131104 bytes/read) 	real	0m1.153s	user	0m2.739s	sys	0m1.137s	
