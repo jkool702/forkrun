@@ -1,62 +1,60 @@
-#!/bin/bash        
+#!/bin/bash
 
-mySplit2() {
-    local tDir kk inotifyPID
-    local -a A p_PID
-
-    tDir=/tmp/"$(mktemp -d .mySplit2.XXXXXXXXX)" 
-    mkdir -p "${tDir}"
-    touch "${tDir}"/.record
+mySplit2 ()
+{
+    # make vars local
+    local tDir kk ;
+    local -a A;
+    
+    # setup tmpdir
+    tDir=/tmp/"$(mktemp -d .mySplit2.XXXXXX)";
+    mkdir -p "${tDir}";
+    touch "${tDir}"/.record;
     
     {
-    
-        trap 'kill ${inotifyPID}; exec {fd_inotify}>&-; [[ "${tDir}" == /tmp ]] || rm -r "${tDir}"' EXIT
-        exec {fd_inotify}<><(:)
-    
-        # background inotify process
+        # setup inotify anonymous pipe and background process (in case data is arriving slowly on stdin)
+        # this keeps the read process idle until there is actually something to read without using much CPU time
+        exec {fd_inotify}<><(:);
+        trap 'exec {fd_inotify}>&-;' EXIT;
         {
-            inotifywait -m -e modify,close "${tDir}"/.record | busybox tr -cd $'\n' >&${fd_inotify}
+            inotifywait -m -e modify "${tDir}"/.record | busybox tr -cd $'\n' >&${fd_inotify}
         } &
         
-        inotifyPID=$!
-    
-        # background write porocess - append stdin pipe to tmpfile. IMPORTANT: use '>>', not '>'
+        # background process to append stdin pipe to tmpfile. IMPORTANT: use '>>', not '>'
         {
-            cat >>"${tDir}"/.record 
+            cat >>"${tDir}"/.record
             
             # indicate there is no more data to write
-            touch "${tDir}"/.done
-        } 0<&${fd_stdin} &
+            touch "${tDir}"/.done;
+        } <&${fd_stdin} &
         
-        p_PID+=($!)
-
-        # main read process - read tmpfile and truncate after every read
-        { 
-            runFlag=true
-
-            while ${runFlag} && read -N 1 -u ${fd_inotify}; do 
-                
-                # if tmpfile changed then mapfile record into array A; else continue
+        # main process - read tmpfile and truncate after every read
+        {
+            while true; do
                 if [[ -s "${tDir}"/.record ]]; then
-                        # read  tmpfile
-                        mapfile -t A <"${tDir}"/.record 
-                else 
-                    # end condition
-                    [[ -f "${tDir}"/.done ]] && runFlag=false
+                    mapfile -t A < "${tDir}"/.record;
+                else
+                    [[ -f "${tDir}"/.done ]] && break
+                    read -u ${fd_inotify}
                     continue
-                fi
-
-                # truncate tmpfile
-                printf '%s' "$(busybox tail -n +$(( ${#A[@]} + 1 )) <"${tDir}"/.record)" >"${tDir}"/.record
+                fi;
                 
-                # loop through A and do _________
-                # printf doesnt need a loop for this, but in general for more complex stuff you probably will
-                for kk in ${!A[@]}; do
-                    printf '%s\n' "${A[$kk]}"
-                done 
-            done
-        } 
+                # debug - see how many lines each mapfile consumed
+                #printf 'READ %s LINES\n' "${#A[@]}" 1>&2;
+ 
+                # truncate tmpfile
+                printf '%s' "$(busybox tail -n +$(( ${#A[@]} + 1 )) < "${tDir}"/.record)" > "${tDir}"/.record;
 
+                # loop through array A and do _________
+                # printf doesnt need a loop for this, but in general for more complex stuff you probably will
+                for kk in ${!A[@]};
+                do
+                    printf '%s\n' "${A[$kk]}";
+                done;
+            done
+        }
     } {fd_stdin}<&0
     
-} 
+    # remove tmpdir if the code finished normally
+    [[ "${tDir}" == /tmp ]] || rm -r "${tDir}"
+}
