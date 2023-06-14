@@ -10,8 +10,13 @@ mySplit2 ()
     bbPath="$(type -p busybox)"
     
     # choose whether to use loop or not when printing ${A[@]} with printf
-    #printfFastFlag=true
-    printfFastFlag=false
+    printfFastFlag=true
+    #printfFastFlag=false
+    
+    # choose whether to use inotify
+    #inotifyFlag=true
+    inotifyFlag=false
+    
     
     # setup tmpdir
     tDir=/tmp/"$(mktemp -d .mySplit2.XXXXXX)";
@@ -20,11 +25,13 @@ mySplit2 ()
     {
         # setup inotify anonymous pipe and background process (in case data is arriving slowly on stdin)
         # this keeps the read process idle until there is actually something to read without using much CPU time
-        exec {fd_inotify}<><(:);
-        {
-            { printf '\n'; inotifywait -m -e modify,close "${tDir}"/.record; } | "${bbPath}" tr -cd $'\n' >&${fd_inotify}
-        } &
-        trap 'exec {fd_inotify}>&-; kill '"$!" EXIT;
+        ${inotifyFlag} && {
+            exec {fd_inotify}<><(:);
+            {
+                { printf '\n'; inotifywait -m -e modify,close "${tDir}"/.record; } | "${bbPath}" tr -cd $'\n' >&${fd_inotify}
+            } &
+            trap 'exec {fd_inotify}>&-; kill '"$!" EXIT;
+        }
 
         # background process to append stdin pipe to tmpfile. IMPORTANT: use '>>', not '>'
         {
@@ -32,7 +39,7 @@ mySplit2 ()
             
             # indicate there is no more data to write
             touch "${tDir}"/.done;
-            printf '\n' >&${fd_inotify}
+            ${inotifyFlag} && printf '\n' >&${fd_inotify}
         } <&${fd_stdin} &
         
         # main process - read tmpfile and truncate after every read
@@ -46,7 +53,10 @@ mySplit2 ()
                     [[ -f "${tDir}"/.done ]] && break
                     
                     # blocking read of {fd_inotify}
-                    [[ -s "${tDir}"/.record ]] || read -u ${fd_inotify}
+                    ${inotifyFlag} && {
+                        [[ -s "${tDir}"/.record ]] || read -u ${fd_inotify}
+                    }
+                    
                     continue
                 fi;
                 
