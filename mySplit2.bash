@@ -21,11 +21,11 @@ mySplit2 ()
         # setup inotify anonymous pipe and background process (in case data is arriving slowly on stdin)
         # this keeps the read process idle until there is actually something to read without using much CPU time
         exec {fd_inotify}<><(:);
-        trap 'exec {fd_inotify}>&-;' EXIT;
         {
             { printf '\n'; inotifywait -m -e modify,close "${tDir}"/.record; } | "${bbPath}" tr -cd $'\n' >&${fd_inotify}
         } &
-        
+        trap 'exec {fd_inotify}>&-; kill '"$!" EXIT;
+
         # background process to append stdin pipe to tmpfile. IMPORTANT: use '>>', not '>'
         {
             cat >>"${tDir}"/.record
