@@ -3,19 +3,19 @@
 mySplit2 ()
 {
     # make vars local
-    local tDir kk bbPath printfFastFlag
+    local tDir kk bbPath printfFastFlag inotifyFlag;
     local -a A;
     
     # check for busybox
-    bbPath="$(type -p busybox)"
+    bbPath="$(type -p busybox)";
     
     # choose whether to use loop or not when printing ${A[@]} with printf
-    printfFastFlag=true
-    #printfFastFlag=false
+    printfFastFlag=true;
+    #printfFastFlag=false;
     
     # choose whether to use inotify
-    #inotifyFlag=true
-    inotifyFlag=false
+    inotifyFlag=true;
+    #inotifyFlag=false;
     
     
     # setup tmpdir
@@ -28,18 +28,18 @@ mySplit2 ()
         ${inotifyFlag} && {
             exec {fd_inotify}<><(:);
             {
-                { printf '\n'; inotifywait -m -e modify,close "${tDir}"/.record; } | "${bbPath}" tr -cd $'\n' >&${fd_inotify}
+                { printf '\n'; inotifywait -m -e modify,close --format '' "${tDir}"/.record; } >&${fd_inotify};
             } &
             trap 'exec {fd_inotify}>&-; kill '"$!" EXIT;
         }
 
         # background process to append stdin pipe to tmpfile. IMPORTANT: use '>>', not '>'
         {
-            cat >>"${tDir}"/.record
+            cat >>"${tDir}"/.record;
             
             # indicate there is no more data to write
             touch "${tDir}"/.done;
-            ${inotifyFlag} && printf '\n' >&${fd_inotify}
+            ${inotifyFlag} && printf '\n' >&${fd_inotify};
         } <&${fd_stdin} &
         
         # main process - read tmpfile and truncate after every read
@@ -50,14 +50,14 @@ mySplit2 ()
                     mapfile -t A <"${tDir}"/.record;
                 else
                     # check for end condition
-                    [[ -f "${tDir}"/.done ]] && break
+                    [[ -f "${tDir}"/.done ]] && break;
                     
                     # blocking read of {fd_inotify}
                     ${inotifyFlag} && {
-                        [[ -s "${tDir}"/.record ]] || read -u ${fd_inotify}
+                        [[ -s "${tDir}"/.record ]] || read -u ${fd_inotify};
                     }
                     
-                    continue
+                    continue;
                 fi;
                 
                 # debug - see how many lines each mapfile consumed
@@ -69,16 +69,16 @@ mySplit2 ()
                 # loop through A and do _________
                 # printf doesnt need a loop for this, but in general for more complex stuff you probably will
                 if ${printfFastFlag}; then
-                    printf '%s\n' "${A[@]}"
+                    printf '%s\n' "${A[@]}";
                 else
                     for kk in ${!A[@]}; do
                         printf '%s\n' "${A[$kk]}";
                     done;
-                fi
-            done
+                fi;
+            done;
         }
     } {fd_stdin}<&0
     
     # remove tmpdir if the code finished normally
-    [[ "${tDir}" == /tmp ]] || rm -r "${tDir}"
+    [[ "${tDir}" == /tmp ]] || rm -r "${tDir}";
 }
