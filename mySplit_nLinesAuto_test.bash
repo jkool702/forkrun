@@ -4,8 +4,10 @@ mySplit() {
     ## Splits up stdin into groups of ${1} lines using ${2} bash coprocs
     # input 1: number of lines to group at a time. Default is 32
     # input 2: number of coprocs to use. Default is $(nproc)
+    
+    #set -xv
         
-    (
+    
     
         # make vars local
         local tmpDir fPath inotifyFlag initFlag nLinesAutoFlag nLinesUpdateCmd
@@ -29,9 +31,13 @@ mySplit() {
         type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true || inotifyFlag=false
     
 
-        # setup inotify  + set exit trap 
+        
+    (
+    
+        # setup nLinesAuto
 
         if ${nLinesAutoFlag}; then
+            source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
             nLinesUpdateCmd="$(printf "echo "; source <(echo 'echo '"'"'$(( 1 + ( $(wc -l <"'"'"'"${fPath}"'"'"'") - $(<"'"'"'"${tmpDir}"'"'"'"/.n0'"'"' '"'"') - $(<"'"'"'"${tmpDir}"'"'"'"/.n'"'"'{1..'"$(( ${nProcs} - 1 ))"}' '"'"') ) / '"${nProcs}"' ))'"'"))"
             source <(cat<<EOF
 nLinesUpdate() {
@@ -41,30 +47,29 @@ nLinesUpdate() {
 }
 EOF
             )
-            source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
             nDone=0
+            {
+                while read -u ${fd_nLinesAuto}; do
+                    nLinesUpdate
+                    [[ -f "${tmpDir}"/.done ]] && break
+                done
+            } &
+            
         fi
         
+               
+        # setup inotify  + set exit trap 
+
         if ${inotifyFlag}; then
             #{ coproc pNotify {
-            if ${nLinesAutoFlag}; then
-                inotifywait -m -e modify,close --format '' "${fPath}" 2>/dev/null | tee >(while read; do nLinesUpdate; done) >&${fd_inotify} &
-
-            else
-                inotifywait -m -e modify,close --format '' "${fPath}" 2>/dev/null >&${fd_inotify} &
-            fi
+           
+            inotifywait -m -e modify,close_write --format '' "${fPath}" 2>/dev/null >&${fd_inotify} &
+            
             #   }
             #}
             #trap 'kill -9 '"${pNotify_PID}"' && rm -rf '"${tmpDir}"' || :' EXIT
             trap 'kill '"${!}"' && rm -rf '"${tmpDir}"';' EXIT
         else
-            ${nLinesAutoFlag} && {
-                while true; do
-                    sleep 0.1s
-                    nLinesUpdate
-                    [[ -f "${tmpDir}"/.done ]] && break
-                done
-            } &
             trap 'rm -rf '"${tmpDir}"';' EXIT
         fi
         
@@ -122,6 +127,7 @@ EOF2
     $(${nLinesAutoFlag} && cat<<EOF3
     nDone+=\${nLines}
     echo \${nDone} >"${tmpDir}"/.n${kk}
+    printf '\n' >&${fd_nLinesAuto}
 EOF3
     )
 done
@@ -137,10 +143,10 @@ EOF0
         wait "${p_PID[@]}"
     
     # open anonympous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1     
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1     
 
   
-   
+   return 0
     
     # cleanup
     #kill "${pNotify_PID}"
