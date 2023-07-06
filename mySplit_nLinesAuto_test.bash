@@ -10,7 +10,7 @@ mySplit() {
     
     
         # make vars local
-        local tmpDir fPath inotifyFlag initFlag nLinesAutoFlag nLinesUpdateCmd
+        local tmpDir fPath nLinesUpdateCmd inotifyFlag initFlag nLinesAutoFlag 
         local -i nLines nProcs nDone kk
         local -a A p_PID
   
@@ -37,23 +37,27 @@ mySplit() {
         # setup nLinesAuto
 
         if ${nLinesAutoFlag}; then
+        
             source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
-            nLinesUpdateCmd="$(printf "echo "; source <(echo 'echo '"'"'$(( 1 + ( $(wc -l <"'"'"'"${fPath}"'"'"'") - $(<"'"'"'"${tmpDir}"'"'"'"/.n0'"'"' '"'"') - $(<"'"'"'"${tmpDir}"'"'"'"/.n'"'"'{1..'"$(( ${nProcs} - 1 ))"}' '"'"') ) / '"${nProcs}"' ))'"'"))"
-            source <(cat<<EOF
+            nDone=0
+            
+            { coproc pAuto {
+                    nLinesUpdateCmd="$(printf "echo "; source <(echo 'echo '"'"'$(( 1 + ( $(wc -l <"'"'"'"${fPath}"'"'"'") - $(<"'"'"'"${tmpDir}"'"'"'"/.n0'"'"' '"'"') - $(<"'"'"'"${tmpDir}"'"'"'"/.n'"'"'{1..'"$(( ${nProcs} - 1 ))"}' '"'"') ) / '"${nProcs}"' ))'"'"))"
+                    source <(cat<<EOF
 nLinesUpdate() {
     local nLinesNew
     nLinesNew=\$(${nLinesUpdateCmd})
     (( \${nLinesNew} > \$(<"${tmpDir}"/.nLines) )) && echo \${nLinesNew} >"${tmpDir}"/.nLines
 }
 EOF
-            )
-            nDone=0
-            {
-                while read -u ${fd_nLinesAuto}; do
-                    nLinesUpdate
-                    [[ -f "${tmpDir}"/.done ]] && break
-                done
-            } &
+                    )
+            
+                    while read -u ${fd_nLinesAuto}; do
+                        nLinesUpdate
+                        [[ -f "${tmpDir}"/.done ]] && break
+                    done
+                } 
+            }
             
         fi
         
@@ -127,7 +131,7 @@ EOF2
     $(${nLinesAutoFlag} && cat<<EOF3
     nDone+=\${nLines}
     echo \${nDone} >"${tmpDir}"/.n${kk}
-    printf '\n' >&${fd_nLinesAuto}
+    printf '\\n' >&${fd_nLinesAuto}
 EOF3
     )
 done
