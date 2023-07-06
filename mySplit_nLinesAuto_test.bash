@@ -11,7 +11,7 @@ mySplit() {
     
         # make vars local
         local tmpDir fPath nLinesUpdateCmd inotifyFlag initFlag nLinesAutoFlag 
-        local -i nLines nProcs nDone kk
+        local -i nLines nLinesCur nLinesMax nProcs nDone kk
         local -a A p_PID
   
         # setup tmpdir
@@ -30,7 +30,7 @@ mySplit() {
         # check for inotifywait
         type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true || inotifyFlag=false
     
-
+        nLinesMax=512
         
     (
     
@@ -47,7 +47,9 @@ mySplit() {
 nLinesUpdate() {
     local nLinesNew
     nLinesNew=\$(${nLinesUpdateCmd})
+    (( \${nLinesNew} > ${nLinesMax} )) && nLinesNew=${nLinesMax}
     (( \${nLinesNew} > \$(<"${tmpDir}"/.nLines) )) && echo \${nLinesNew} >"${tmpDir}"/.nLines
+    printf 'Changing nLines to %s\\n' "\${nLinesNew}" >&${fd_stderr}
 }
 EOF
                     )
@@ -111,7 +113,8 @@ EOF
 { coproc p${kk} {
 while true; do
     read -N 1 -u ${fd_continue}
-    mapfile -t -n \$(<"${tmpDir}"/.nLines) -u ${fd_read} A
+    nLinesCur=\$(<"${tmpDir}"/.nLines)
+    mapfile -t -n \${nLinesCur} -u ${fd_read} A
     printf '1' >&${fd_continue}
     [[ \${A} ]] || { 
         $(${inotifyFlag} && cat<<EOF1
@@ -128,12 +131,12 @@ EOF2
     \${initFlag} && initFlag=false
     printf '%s\\n' "\${A[@]}" >&${fd_stdout}
     
-    $(${nLinesAutoFlag} && cat<<EOF3
-    nDone+=\${nLines}
-    echo \${nDone} >"${tmpDir}"/.n${kk}
-    printf '\\n' >&${fd_nLinesAuto}
-EOF3
-    )
+    \${nLinesAutoFlag} && { 
+        [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false && continue
+        nDone+=\${nLinesCur}
+        echo \${nDone} >"${tmpDir}"/.n${kk}
+        printf '\\n' >&${fd_nLinesAuto}
+    }
 done
     }
 }
@@ -147,7 +150,7 @@ EOF0
         wait "${p_PID[@]}"
     
     # open anonympous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1     
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
 
   
    return 0
@@ -158,7 +161,6 @@ EOF0
 
     # exit 0
 
-} 
 
 # # # SPEED IMPROVEMENTS vs old IPC schemes
 #
@@ -173,3 +175,5 @@ EOF0
 
 # a="$(printf '%.0s'"$(echo $(dd if=/dev/urandom bs=4096 count=1 | hexdump) | sed -E s/'^(.{4096}).*$'/'\1'/)"'\n' {1..1000})"
 # for kk in 1 2 4 8 16 32 64 128; do time {  echo "$a" | mySplit $kk 2>/dev/null; } >/dev/null; done
+
+} 
