@@ -2,42 +2,40 @@
 
 mySplit() {
     ## Splits up stdin into groups of ${1} lines using ${2} bash coprocs
-    # input 1: number of lines to group at a time. Default is 32
+    # input 1: number of lines to group at a time. Default is to automatically set nLines.
     # input 2: number of coprocs to use. Default is $(nproc)
     
     #set -xv
         
-    
-    
-        # make vars local
-        local tmpDir fPath nLinesUpdateCmd inotifyFlag initFlag nLinesAutoFlag 
-        local -i nLines nLinesCur nLinesMax nProcs nDone kk
-        local -a A p_PID
+    # make vars local
+    local tmpDir fPath nLinesUpdateCmd inotifyFlag initFlag nLinesAutoFlag 
+    local -i nLines nLinesCur nLinesMax nProcs nDone kk
+    local -a A p_PID
   
-        # setup tmpdir
-        tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
-        fPath="${tmpDir}"/.stdin
-        mkdir -p "${tmpDir}"
-        touch "${fPath}"    
-        
-        # check inputs and set defaults if needed
-        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; nLinesAutoFlag=false; } || { nLines=1; nLinesAutoFlag=true; }
-        [[ "${2}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && nProcs="${2}" || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
-            
-        # set nLines indicator
-        echo ${nLines} >"${tmpDir}"/.nLines
-
-        # check for inotifywait
-        type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true || inotifyFlag=false
+    # setup tmpdir
+    tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
+    fPath="${tmpDir}"/.stdin
+    mkdir -p "${tmpDir}"
+    touch "${fPath}"    
     
-        nLinesMax=512
+    # check inputs and set defaults if needed
+    [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; nLinesAutoFlag=false; } || { nLines=1; nLinesAutoFlag=true; }
+    [[ "${2}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && nProcs="${2}" || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
         
+    # set nLines indicator
+    echo ${nLines} >"${tmpDir}"/.nLines
+
+    # check for inotifywait
+    type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true || inotifyFlag=false
+    
+    nLinesMax=512
+    
     (
     
         # setup nLinesAuto
-
         if ${nLinesAutoFlag}; then
         
+            
             source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
             nDone=0
             
@@ -64,8 +62,7 @@ EOF
         fi
         
                
-        # setup inotify  + set exit trap 
-
+        # setup inotify (if available) + set exit trap 
         if ${inotifyFlag}; then
             #{ coproc pNotify {
            
