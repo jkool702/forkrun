@@ -53,6 +53,7 @@ EOF
                     )
             
                     while read -u ${fd_nLinesAuto}; do
+                        [[ -d "${tmpDir}" ]] || break
                         nLinesUpdate
                         [[ -f "${tmpDir}"/.done ]] && break
                     done
@@ -91,7 +92,7 @@ EOF
         # a process reads 1 byte from {fd_continue} to get the read lock, and that process writes a '1' back to the pipe to release the read lock
 
     
-        printf '1' >&${fd_continue}
+        printf '\n' >&${fd_continue}
     
         # dont exit read loop during init 
         initFlag=true
@@ -109,10 +110,10 @@ EOF
             source <(cat<<EOF0
 { coproc p${kk} {
 while true; do
-    read -N 1 -u ${fd_continue}
+    read -u ${fd_continue}
     nLinesCur=\$(<"${tmpDir}"/.nLines)
     mapfile -t -n \${nLinesCur} -u ${fd_read} A
-    printf '1' >&${fd_continue}
+    printf '\\n' >&${fd_continue}
     [[ \${A} ]] || { 
         $(${inotifyFlag} && cat<<EOF1
         read -u ${fd_inotify}
