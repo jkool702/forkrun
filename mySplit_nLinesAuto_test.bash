@@ -8,8 +8,8 @@ mySplit() {
     #set -xv
         
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd inotifyFlag initFlag nLinesAutoFlag 
-    local -i nLines nLinesCur nLinesMax nProcs nDone kk
+    local tmpDir fPath nLinesUpdateCmd inotifyFlag initFlag nLinesAutoFlag nOrderFlag
+    local -i nLines nLinesCur nLinesMax nProcs nDone nOrderCur nIndex kk
     local -a A p_PID
   
     # setup tmpdir
@@ -29,13 +29,40 @@ mySplit() {
     type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true || inotifyFlag=false
     
     nLinesMax=512
+    nOrderFlag=true
     
     (
+    
+            # spawn a coproc to write stdin to a tmpfile
+        # After we are done reading all of stdin print total line count to a file (for future use)
+        { coproc pWrite {
+                cat  <&5 >&6
+                wc -l <"${fPath}" >"${tmpDir}"/.done
+                ${inotifyFlag} && printf '\n' >&${fd_inotify}
+            }
+        } 5<&${fd_stdin} 6>&${fd_write} 
+
     
         # setup nLinesAuto
         if ${nLinesAutoFlag}; then
         
+               
+        # setup inotify (if available) + set exit trap 
+        if ${inotifyFlag}; then
+            #{ coproc pNotify {
+           
+            inotifywait -m -e modify,close --format '' "${fPath}" 2>/dev/null >&${fd_inotify} &
             
+            #   }
+            #}
+            #trap 'kill -9 '"${pNotify_PID}"' && rm -rf '"${tmpDir}"' || :' EXIT
+            #trap 'kill '"${!}"' && rm -rf '"${tmpDir}"';' EXIT
+            trap 'kill '"${!}"';' EXIT
+        else
+            trap 'rm -rf '"${tmpDir}"';' EXIT
+        fi
+        
+
             source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
             nDone=0
             
@@ -53,7 +80,7 @@ EOF
                     )
             
                     while read -u ${fd_nLinesAuto}; do
-                        [[ -d "${tmpDir}" ]] || break
+                        [[ ${REPLY} == 0 ]] && break
                         nLinesUpdate
                         [[ -f "${tmpDir}"/.done ]] && break
                     done
@@ -61,79 +88,55 @@ EOF
             }
             
         fi
-        
-               
-        # setup inotify (if available) + set exit trap 
-        if ${inotifyFlag}; then
-            #{ coproc pNotify {
-           
-            inotifywait -m -e modify,close_write --format '' "${fPath}" 2>/dev/null >&${fd_inotify} &
-            
-            #   }
-            #}
-            #trap 'kill -9 '"${pNotify_PID}"' && rm -rf '"${tmpDir}"' || :' EXIT
-            trap 'kill '"${!}"' && rm -rf '"${tmpDir}"';' EXIT
-        else
-            trap 'rm -rf '"${tmpDir}"';' EXIT
-        fi
-        
-        # spawn a coproc to write stdin to a tmpfile
-        # After we are done reading all of stdin print total line count to a file (for future use)
-        { coproc pWrite {
-                cat  <&5 >&6 
-                wc -l <"${fPath}" >"${tmpDir}"/.done
-                ${inotifyFlag} && printf '\n' >&${fd_inotify}
-            } 5<&${fd_stdin} 6>&${fd_write}
-        }   
-
 
         # populate {fd_+continue} with an initial '1' 
         # {fd_continue} will act as an exclusive read lock - when there is a '1' buffered in the pipe then nothinghas an read lock: 
         # a process reads 1 byte from {fd_continue} to get the read lock, and that process writes a '1' back to the pipe to release the read lock
-
-    
-        printf '\n' >&${fd_continue}
     
         # dont exit read loop during init 
         initFlag=true
+        
+        # initialize fd_continue
+        ${nOrderFlag} && { mkdir -p "${tmpDir}"/.out; continueStr='$(( ${nIndex} + 1 ))'; printf '0\n' >&${fd_continue}; } || { continueStr='\n'; printf '\n' >&${fd_continue}; }
     
-    # spawn $nProcs coprocs
-    # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
-    # they then read N lines with mapfile and send 1 top {fd_continue} (so the next coproc can start to read)
-    # if the read array is empty the coproc will either continue or break, depending on if end conditions are met
-    # finally it will do something with the data. Currently this is a dummy printf call (for testing). 
-    #
-    # NOTE: by putting the read fd in a brace group surrounding all the coprocs, they will all use the same file descriptor
-    # this means that whenever a coproc reads data it will start reading at the point the last coproc stopped reading at
-    # This basically means that all you need to do is make sure 2 processes dont read at the same time.
+        # spawn $nProcs coprocs
+        # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
+        # they then read N lines with mapfile and send 1 top {fd_continue} (so the next coproc can start to read)
+        # if the read array is empty the coproc will either continue or break, depending on if end conditions are met
+        # finally it will do something with the data. Currently this is a dummy printf call (for testing). 
+        #
+        # NOTE: by putting the read fd in a brace group surrounding all the coprocs, they will all use the same file descriptor
+        # this means that whenever a coproc reads data it will start reading at the point the last coproc stopped reading at
+        # This basically means that all you need to do is make sure 2 processes dont read at the same time.
         for kk in $(seq 0 $(( ${nProcs} - 1 )) ); do
             source <(cat<<EOF0
 { coproc p${kk} {
 while true; do
-    read -u ${fd_continue}
+    read -u ${fd_continue} nIndex
     nLinesCur=\$(<"${tmpDir}"/.nLines)
     mapfile -t -n \${nLinesCur} -u ${fd_read} A
-    printf '\\n' >&${fd_continue}
+    printf "${continueStr}"'\\n' >&${fd_continue}
     [[ \${A} ]] || { 
         $(${inotifyFlag} && cat<<EOF1
         read -u ${fd_inotify}
 EOF1
         )
-        { \${initFlag} && ! [[ -f "${tmpDir}"/.done ]]; } && continue 
-        $(${inotifyFlag} && cat<<EOF2
-        printf '\\n' >&${fd_inotify}
+        { \${initFlag} || { ! [[ -f "${tmpDir}"/.done ]]; }; } && { initFlag=false;  continue; } || {
+            $(${inotifyFlag} && cat<<EOF2
+            printf '\\n' >&${fd_inotify}
 EOF2
-        )
-        break; 
+            )
+            break; 
+        }
     }
-    \${initFlag} && initFlag=false
     printf '%s\\n' "\${A[@]}" >&${fd_stdout}
     
     \${nLinesAutoFlag} && { 
-        [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false && continue
-        nDone+=\${nLinesCur}
-        echo \${nDone} >"${tmpDir}"/.n${kk}
-        printf '\\n' >&${fd_nLinesAuto}
+        [[ \${nLinesCur} == ${nLinesMax} ]] && { nLinesAutoFlag=false; printf '0\\n' >&${fd_nLinesAuto}; } || {
+            nDone+=\${#A[@]}
+            echo \${nDone} >"${tmpDir}"/.n${kk}
+            printf '\\n' >&${fd_nLinesAuto}
+        }
     }
 done
     }
