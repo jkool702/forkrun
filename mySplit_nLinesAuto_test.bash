@@ -8,7 +8,7 @@ mySplit() {
     #set -xv
         
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd inotifyFlag initFlag nLinesAutoFlag nOrderFlag
+    local tmpDir fPath nLinesUpdateCmd outStr inotifyFlag initFlag nLinesAutoFlag nOrderFlag
     local -i nLines nLinesCur nLinesMax nProcs nDone nOrderCur nIndex kk
     local -a A p_PID
   
@@ -97,7 +97,18 @@ EOF
         initFlag=true
         
         # initialize fd_continue
-        ${nOrderFlag} && { mkdir -p "${tmpDir}"/.out; continueStr='$(( ${nIndex} + 1 ))'; printf '0\n' >&${fd_continue}; } || { continueStr='\n'; printf '\n' >&${fd_continue}; }
+        ${nOrderFlag} && { 
+            mkdir -p "${tmpDir}"/.out; 
+            continueStr='((nIndex++)); printf '"'"'%s\n'"'"' ${nIndex} >&'"${fd_continue}"; 
+            printf '0\n' >&${fd_continue}; 
+            outStr='>"'"${tmpDir}"'"/.out/${nIndex}'; 
+            
+
+        } || { 
+            continueStr='printf '"'"'\n'"'"' >&'"${fd_continue}"; 
+            printf '\n' >&${fd_continue}; 
+            outStr='>&'"${fd_stdout}"; 
+        }
     
         # spawn $nProcs coprocs
         # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
@@ -115,7 +126,7 @@ while true; do
     read -u ${fd_continue} nIndex
     nLinesCur=\$(<"${tmpDir}"/.nLines)
     mapfile -t -n \${nLinesCur} -u ${fd_read} A
-    printf "${continueStr}"'\\n' >&${fd_continue}
+    ${continueStr}
     [[ \${A} ]] || { 
         $(${inotifyFlag} && cat<<EOF1
         read -u ${fd_inotify}
@@ -129,8 +140,9 @@ EOF2
             break; 
         }
     }
-    printf '%s\\n' "\${A[@]}" >&${fd_stdout}
     
+    printf '%s\\n' "\${A[@]}" ${outStr}
+
     \${nLinesAutoFlag} && { 
         [[ \${nLinesCur} == ${nLinesMax} ]] && { nLinesAutoFlag=false; printf '0\\n' >&${fd_nLinesAuto}; } || {
             nDone+=\${#A[@]}
@@ -149,11 +161,13 @@ EOF0
         # wait for everything to finish
         # in forkrun the main process will probably manage automaticly changing nLines
         wait "${p_PID[@]}"
-    
+        ${nOrderFlag} && IFS=$'\n' cat $(find "${tmpDir}"/.out -type f | sort -t '/' -k $(( $(echo "${tmpDir//[^'/']/}" | wc -c) + 2 )) -n)
+        
     # open anonympous pipes + other misc file descriptors for the above code block
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
 
   
+   
    return 0
     
     # cleanup
