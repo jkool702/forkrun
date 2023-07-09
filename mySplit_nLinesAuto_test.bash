@@ -8,7 +8,7 @@ mySplit() {
     #set -xv
         
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr inotifyFlag initFlag nLinesAutoFlag nOrderFlag
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr inotifyFlag initFlag nLinesAutoFlag nOrderFlag rmDirFlag
     local -i nLines nLinesCur nLinesMax nProcs nDone nOrderCur nIndex kk
     local -a A p_PID
   
@@ -28,8 +28,8 @@ mySplit() {
     # check for inotifywait
     type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true || inotifyFlag=false
     
-    nLinesMax=512
-    nOrderFlag=true
+    # set defaults for control flags/parameters
+    : ${nOrderFlag:=true} ${rmDirFlag:=true} ${nLinesMax:=512}
     
     (
     
@@ -48,6 +48,7 @@ mySplit() {
         
                
         # setup inotify (if available) + set exit trap 
+        exitTrapStr=''
         if ${inotifyFlag}; then
             #{ coproc pNotify {
            
@@ -57,11 +58,12 @@ mySplit() {
             #}
             #trap 'kill -9 '"${pNotify_PID}"' && rm -rf '"${tmpDir}"' || :' EXIT
             #trap 'kill '"${!}"' && rm -rf '"${tmpDir}"';' EXIT
-            trap 'kill '"${!}"';' EXIT
-        else
-            trap 'rm -rf '"${tmpDir}"';' EXIT
+            exitTrapStr+='kill '"${!}"'; '
         fi
+
+        ${rmDirFlag} && exitTrapStr+='rm -rf '"${tmpDir}"'; '
         
+        trap "${exitTrapStr}" EXIT
 
             source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
             nDone=0
@@ -73,8 +75,7 @@ nLinesUpdate() {
     local nLinesNew
     nLinesNew=\$(${nLinesUpdateCmd})
     (( \${nLinesNew} > ${nLinesMax} )) && nLinesNew=${nLinesMax}
-    (( \${nLinesNew} > \$(<"${tmpDir}"/.nLines) )) && echo \${nLinesNew} >"${tmpDir}"/.nLines
-    printf 'Changing nLines to %s\\n' "\${nLinesNew}" >&${fd_stderr}
+    (( \${nLinesNew} > \$(<"${tmpDir}"/.nLines) )) && echo \${nLinesNew} >"${tmpDir}"/.nLines && printf 'Changing nLines to %s\\n' "\${nLinesNew}" >&${fd_stderr}
 }
 EOF
                     )
