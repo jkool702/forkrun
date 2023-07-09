@@ -8,8 +8,8 @@ mySplit() {
     #set -xv
         
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr inotifyFlag initFlag nLinesAutoFlag nOrderFlag rmDirFlag
-    local -i nLines nLinesCur nLinesMax nProcs nDone nOrderCur nIndex kk
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr nOrder inotifyFlag initFlag nLinesAutoFlag nOrderFlag rmDirFlag
+    local -i nLines nLinesCur nLinesMax nProcs nDone kk
     local -a A p_PID
   
     # setup tmpdir
@@ -29,10 +29,12 @@ mySplit() {
     type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true || inotifyFlag=false
     
     # set defaults for control flags/parameters
-    : ${nOrderFlag:=true} ${rmDirFlag:=true} ${nLinesMax:=512}
+    : "${nOrderFlag:=true}" "${rmDirFlag:=true}" "${nLinesMax:=512}"
     
     (
     
+        ${rmDirFlag} || printf '\ntmpDir: %s\n\n' "${tmpDir}" >&${fd_stderr}
+        
             # spawn a coproc to write stdin to a tmpfile
         # After we are done reading all of stdin print total line count to a file (for future use)
         { coproc pWrite {
@@ -41,15 +43,15 @@ mySplit() {
                 ${inotifyFlag} && printf '\n' >&${fd_inotify}
             }
         } 5<&${fd_stdin} 6>&${fd_write} 
-
-    
-        # setup nLinesAuto
-        if ${nLinesAutoFlag}; then
         
-               
+                       
         # setup inotify (if available) + set exit trap 
         exitTrapStr=''
         if ${inotifyFlag}; then
+        
+            # add 1 newline for each coproc to fd_inotify
+            source <(printf 'printf '"'"'%%.0s\\n'"'"' {0..%s} ' $(( $nProcs-1 ))) >&${fd_inotify}
+            
             #{ coproc pNotify {
            
             inotifywait -m -e modify,close --format '' "${fPath}" 2>/dev/null >&${fd_inotify} &
@@ -65,6 +67,10 @@ mySplit() {
         
         trap "${exitTrapStr}" EXIT
 
+    
+        # setup nLinesAuto
+        if ${nLinesAutoFlag}; then
+
             source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
             nDone=0
             
@@ -75,14 +81,15 @@ nLinesUpdate() {
     local nLinesNew
     nLinesNew=\$(${nLinesUpdateCmd})
     (( \${nLinesNew} > ${nLinesMax} )) && nLinesNew=${nLinesMax}
-    (( \${nLinesNew} > \$(<"${tmpDir}"/.nLines) )) && echo \${nLinesNew} >"${tmpDir}"/.nLines && printf 'Changing nLines to %s\\n' "\${nLinesNew}" >&${fd_stderr}
+    (( \${nLinesNew} > \$(<"${tmpDir}"/.nLines) )) && echo \${nLinesNew} >"${tmpDir}"/.nLines && printf 'Changing nLines to %s\\n' "\${nLinesNew}" >&${fd_stderr} 
+    [[ \${nLinesNew} == ${nLinesMax} ]] && return 0 || return 1
 }
 EOF
                     )
             
                     while read -u ${fd_nLinesAuto}; do
                         [[ ${REPLY} == 0 ]] && break
-                        nLinesUpdate
+                        nLinesUpdate || break
                         [[ -f "${tmpDir}"/.done ]] && break
                     done
                 } 
@@ -99,18 +106,48 @@ EOF
         
         # initialize fd_continue
         ${nOrderFlag} && { 
+        
+getNextIndex() {
+    ## get the name of the next indexed output number to used
+    # input is current index number.
+
+    local x
+    local x_prefix
+    
+    [[ "${1}" == '0' ]] && echo '00' && return 0
+
+    x_prefix=''
+    [[ ${1:${#x_prefix}:1} == 0 ]] && x_prefix+='0'
+    
+    x="${1:${#x_prefix}}"
+    
+    [[ "$x" == '9' ]] && x_prefix="${x_prefix:0:-1}"
+
+    if [[ "${x}" =~ ^9*89+$ ]]; then
+        ((x++))
+        x+='00'
+    else
+        ((x++))
+    fi
+
+    printf '%s%s' "${x_prefix}" "${x}"
+}
+
+# declare -f getNextIndex >&${fd_stderr}
+
+        
             mkdir -p "${tmpDir}"/.out; 
-            continueStr='((nIndex++)); printf '"'"'%s\n'"'"' ${nIndex} >&'"${fd_continue}"; 
-            printf '0\n' >&${fd_continue}; 
-            outStr='>"'"${tmpDir}"'"/.out/${nIndex}'; 
+            printf '%s\n' '0' >&${fd_nOrder}; 
+            outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'; 
             
 
         } || { 
-            continueStr='printf '"'"'\n'"'"' >&'"${fd_continue}"; 
-            printf '\n' >&${fd_continue}; 
+            
             outStr='>&'"${fd_stdout}"; 
         }
     
+        printf '\n' >&${fd_continue}; 
+        
         # spawn $nProcs coprocs
         # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
         # they then read N lines with mapfile and send 1 top {fd_continue} (so the next coproc can start to read)
@@ -124,22 +161,24 @@ EOF
             source <(cat<<EOF0
 { coproc p${kk} {
 while true; do
-    read -u ${fd_continue} nIndex
+    read -u ${fd_continue} 
     nLinesCur=\$(<"${tmpDir}"/.nLines)
     mapfile -t -n \${nLinesCur} -u ${fd_read} A
-    ${continueStr}
-    [[ \${A} ]] || { 
-        $(${inotifyFlag} && cat<<EOF1
-        read -u ${fd_inotify}
+    $(${nOrderFlag} && cat<<EOF1
+read -u ${fd_nOrder} nOrder
+nOrder=\$(getNextIndex \${nOrder})
+printf '%s\n' \${nOrder} >&${fd_nOrder}
 EOF1
-        )
-        { \${initFlag} || { ! [[ -f "${tmpDir}"/.done ]]; }; } && { initFlag=false;  continue; } || {
-            $(${inotifyFlag} && cat<<EOF2
-            printf '\\n' >&${fd_inotify}
+    )
+    printf '\\n' >&${fd_continue}; 
+    [[ \${A} ]] || { 
+        
+        [[ -f "${tmpDir}"/.done ]] && { \${initFlag} && initFlag=false || { printf '\\n' >&${fd_inotify}; break; }; }
+        $(${inotifyFlag} && cat<<EOF2
+read -u ${fd_inotify}
 EOF2
-            )
-            break; 
-        }
+        )
+        continue
     }
     
     printf '%s\\n' "\${A[@]}" ${outStr}
@@ -162,10 +201,12 @@ EOF0
         # wait for everything to finish
         # in forkrun the main process will probably manage automaticly changing nLines
         wait "${p_PID[@]}"
-        ${nOrderFlag} && IFS=$'\n' cat $(find "${tmpDir}"/.out -type f | sort -t '/' -k $(( $(echo "${tmpDir//[^'/']/}" | wc -c) + 2 )) -n)
+        
+        # print output if using ordered output
+        ${nOrderFlag} && IFS=$'\n' cat "${tmpDir}"/.out/x*
         
     # open anonympous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
 
   
    
