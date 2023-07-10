@@ -10,7 +10,7 @@ mySplit() {
     # make vars local
     local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr nOrder inotifyFlag initFlag nLinesAutoFlag nOrderFlag rmDirFlag
     local -i nLines nLinesCur nLinesMax nProcs nDone kk
-    local -a A p_PID fdA
+    local -a A p_PID 
   
     # setup tmpdir
     tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
