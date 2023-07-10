@@ -10,7 +10,7 @@ mySplit() {
     # make vars local
     local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr nOrder inotifyFlag initFlag nLinesAutoFlag nOrderFlag rmDirFlag
     local -i nLines nLinesCur nLinesMax nProcs nDone kk
-    local -a A p_PID
+    local -a A p_PID fdA
   
     # setup tmpdir
     tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
@@ -104,48 +104,37 @@ EOF
         # dont exit read loop during init 
         initFlag=true
         
-        # initialize fd_continue
-        ${nOrderFlag} && { 
-        
-getNextIndex() {
-    ## get the name of the next indexed output number to used
-    # input is current index number.
+        # setup (ordered) output
+        if ${nOrderFlag}; then
 
-    local x
-    local x_prefix
-    
-    [[ "${1}" == '0' ]] && echo '00' && return 0
-
-    x_prefix=''
-    [[ ${1:${#x_prefix}:1} == 0 ]] && x_prefix+='0'
-    
-    x="${1:${#x_prefix}}"
-    
-    [[ "$x" == '9' ]] && x_prefix="${x_prefix:0:-1}"
-
-    if [[ "${x}" =~ ^9*89+$ ]]; then
-        ((x++))
-        x+='00'
-    else
-        ((x++))
-    fi
-
-    printf '%s%s' "${x_prefix}" "${x}"
-}
-
-# declare -f getNextIndex >&${fd_stderr}
-
-        
-            mkdir -p "${tmpDir}"/.out; 
-            printf '%s\n' '0' >&${fd_nOrder}; 
-            outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'; 
+            mkdir -p "${tmpDir}"/.out
+            outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
+                        
+            coproc pOrder ( 
             
+                ulimit -p 1
+                
+                local v0 v0
+                
+                v9='' 
+                v0=''
+                
+                printf '%s\n' {00..09} {10..89} >&${fd_nOrder}
+                
+                while true; do
+                    v9="${v9}9"
+                    v0="${v0}0"
+                    
+                    source <(printf '%s\n' 'printf '"'"'%s\n'"'"' {'"${v9}"'00'"${v0}"'..'"${v9}"'89'"${v9}"'} >&'"${fd_nOrder}")
+                done
+            )
 
-        } || { 
+        else 
             
             outStr='>&'"${fd_stdout}"; 
-        }
-    
+        fi
+
+        # initialize fd_continue    
         printf '\n' >&${fd_continue}; 
         
         # spawn $nProcs coprocs
@@ -157,7 +146,7 @@ getNextIndex() {
         # NOTE: by putting the read fd in a brace group surrounding all the coprocs, they will all use the same file descriptor
         # this means that whenever a coproc reads data it will start reading at the point the last coproc stopped reading at
         # This basically means that all you need to do is make sure 2 processes dont read at the same time.
-        for kk in $(seq 0 $(( ${nProcs} - 1 )) ); do
+        for kk in $( source <(printf '%s\n' 'printf '"'"'%s '"'"' {0..'"$(( ${nProcs} - 1 ))"'}') ); do
             source <(cat<<EOF0
 { coproc p${kk} {
 while true; do
@@ -166,8 +155,6 @@ while true; do
     mapfile -t -n \${nLinesCur} -u ${fd_read} A
     $(${nOrderFlag} && cat<<EOF1
 read -u ${fd_nOrder} nOrder
-nOrder=\$(getNextIndex \${nOrder})
-printf '%s\n' \${nOrder} >&${fd_nOrder}
 EOF1
     )
     printf '\\n' >&${fd_continue}; 
@@ -203,7 +190,7 @@ EOF0
         wait "${p_PID[@]}"
         
         # print output if using ordered output
-        ${nOrderFlag} && IFS=$'\n' cat "${tmpDir}"/.out/x*
+        ${nOrderFlag} && kill ${pOrder_PID} && IFS=$'\n' cat "${tmpDir}"/.out/x*
         
     # open anonympous pipes + other misc file descriptors for the above code block
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
