@@ -1,0 +1,71 @@
+
+TESTING MANY LINES PER FUNCTION CALL
+
+
+FORKRUN (sha1sum):  	 real 0m2.420s	user 0m28.534s	sys 0m8.071s	
+XARGS (sha1sum):    	 real 0m3.012s	user 0m21.353s	sys 0m6.688s	
+PARALLEL (sha1sum): 	 real 0m10.565s	user 0m31.200s	sys 0m9.701s	
+
+FORKRUN (sha256sum):  	 real 0m4.011s	user 0m57.961s	sys 0m8.217s	
+XARGS (sha256sum):    	 real 0m4.774s	user 0m48.619s	sys 0m6.886s	
+PARALLEL (sha256sum): 	 real 0m11.762s	user 0m49.145s	sys 0m9.699s	
+
+FORKRUN (sha512sum):  	 real 0m3.187s	user 0m43.137s	sys 0m8.155s	
+XARGS (sha512sum):    	 real 0m3.874s	user 0m35.315s	sys 0m6.693s	
+PARALLEL (sha512sum): 	 real 0m11.013s	user 0m39.335s	sys 0m9.733s	
+
+FORKRUN (md5sum):  	 real 0m2.648s	user 0m29.011s	sys 0m7.943s	
+XARGS (md5sum):    	 real 0m3.522s	user 0m25.814s	sys 0m6.809s	
+PARALLEL (md5sum): 	 real 0m10.792s	user 0m37.479s	sys 0m9.784s	
+
+FORKRUN (test1):  	 real 0m2.227s	user 0m9.801s	sys 0m8.165s	
+XARGS (test1):    	 real 0m0.019s	user 0m0.005s	sys 0m0.027s	
+PARALLEL (test1): 	 real 0m9.043s	user 0m15.111s	sys 0m5.145s	
+
+FORKRUN (test2):  	 real 0m2.157s	user 0m9.170s	sys 0m7.588s	
+XARGS (test2):    	 real 0m0.018s	user 0m0.010s	sys 0m0.020s	
+PARALLEL (test2): 	 real 0m8.902s	user 0m14.813s	sys 0m5.148s	
+
+FORKRUN (/mnt/forkrun_speedtest/test1.sh):  	 real 0m1.214s	user 0m7.145s	sys 0m4.468s	
+XARGS (/mnt/forkrun_speedtest/test1.sh):    	 real 0m1.550s	user 0m6.282s	sys 0m3.841s	
+PARALLEL (/mnt/forkrun_speedtest/test1.sh): 	 real 0m9.412s	user 0m23.553s	sys 0m10.534s	
+
+FORKRUN (/mnt/forkrun_speedtest/test2.sh):  	 real 0m1.303s	user 0m7.107s	sys 0m4.955s	
+XARGS (/mnt/forkrun_speedtest/test2.sh):    	 real 0m1.556s	user 0m6.081s	sys 0m4.098s	
+PARALLEL (/mnt/forkrun_speedtest/test2.sh): 	 real 0m9.330s	user 0m22.936s	sys 0m10.179s	
+---------------------------------------------
+
+TESTING 1 LINE PER FUNCTION CALL (1st 10000 lines only)
+
+
+FORKRUN-1 (sha1sum):  	 real 0m1.246s	user 0m6.290s	sys 0m13.729s	
+XARGS-1 (sha1sum):    	 real 0m11.831s	user 0m8.376s	sys 0m26.561s	
+PARALLEL-1 (sha1sum): 	 real 0m26.014s	user 0m39.468s	sys 0m57.846s	
+
+FORKRUN-1 (sha256sum):  	 real 0m1.267s	user 0m6.578s	sys 0m13.762s	
+XARGS-1 (sha256sum):    	 real 0m12.027s	user 0m8.876s	sys 0m26.914s	
+PARALLEL-1 (sha256sum): 	 real 0m25.649s	user 0m39.219s	sys 0m57.496s	
+
+FORKRUN-1 (sha512sum):  	 real 0m1.254s	user 0m6.440s	sys 0m13.730s	
+XARGS-1 (sha512sum):    	 real 0m12.139s	user 0m8.711s	sys 0m27.016s	
+PARALLEL-1 (sha512sum): 	 real 0m25.807s	user 0m39.424s	sys 0m57.880s	
+
+FORKRUN-1 (md5sum):  	 real 0m1.254s	user 0m6.317s	sys 0m13.772s	
+XARGS-1 (md5sum):    	 real 0m11.997s	user 0m8.531s	sys 0m26.829s	
+PARALLEL-1 (md5sum): 	 real 0m25.812s	user 0m39.399s	sys 0m57.740s	
+
+FORKRUN-1 (test1):  	 real 0m2.106s	user 0m14.913s	sys 0m30.343s	
+XARGS-1 (test1):    	 real 0m0.002s	user 0m0.002s	sys 0m0.005s	
+PARALLEL-1 (test1): 	 real 0m27.018s	user 0m34.389s	sys 0m45.675s	
+
+FORKRUN-1 (test2):  	 real 0m1.576s	user 0m9.540s	sys 0m18.693s	
+XARGS-1 (test2):    	 real 0m0.002s	user 0m0.004s	sys 0m0.003s	
+PARALLEL-1 (test2): 	 real 0m26.850s	user 0m34.249s	sys 0m45.399s	
+
+FORKRUN-1 (/mnt/forkrun_speedtest/test1.sh):  	 real 0m2.919s	user 0m28.539s	sys 0m38.899s	
+XARGS-1 (/mnt/forkrun_speedtest/test1.sh):    	 real 0m4.148s	user 0m20.509s	sys 0m29.724s	
+PARALLEL-1 (/mnt/forkrun_speedtest/test1.sh): 	 real 0m32.805s	user 1m13.107s	sys 1m43.371s	
+
+FORKRUN-1 (/mnt/forkrun_speedtest/test2.sh):  	 real 0m2.363s	user 0m23.200s	sys 0m27.977s	
+XARGS-1 (/mnt/forkrun_speedtest/test2.sh):    	 real 0m8.194s	user 0m23.557s	sys 0m49.014s	
+PARALLEL-1 (/mnt/forkrun_speedtest/test2.sh): 	 real 0m29.554s	user 1m5.313s	sys 1m19.853s	
