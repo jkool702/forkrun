@@ -168,8 +168,8 @@ EOF2
         continue
     }
     
-    sed -i'' "1,${nLines}d"  "${fPath}"
     printf '%s\\n' "\${A[@]}" ${outStr}
+    sed -i "1,${nLines}d"  "${fPath}"
 
     \${nLinesAutoFlag} && { 
         [[ \${nLinesCur} == ${nLinesMax} ]] && { nLinesAutoFlag=false; printf '0\\n' >&${fd_nLinesAuto}; } || {
