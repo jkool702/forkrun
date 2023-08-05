@@ -168,6 +168,7 @@ EOF2
         continue
     }
     
+    sed -i'' "1,${nLines}d"  "${fPath}"
     printf '%s\\n' "\${A[@]}" ${outStr}
 
     \${nLinesAutoFlag} && { 
