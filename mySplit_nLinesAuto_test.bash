@@ -4,9 +4,7 @@ mySplit() {
     ## Splits up stdin into groups of ${1} lines using ${2} bash coprocs
     # input 1: number of lines to group at a time. Default is to automatically set nLines.
     # input 2: number of coprocs to use. Default is $(nproc)
-    
-    #set -xv
-        
+            
     # make vars local
     local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr nOrder inotifyFlag initFlag nLinesAutoFlag nOrderFlag rmDirFlag
     local -i nLines nLinesCur nLinesMax nProcs nDone kk
@@ -111,10 +109,8 @@ EOF
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
                         
             coproc pOrder ( 
-            
-                ulimit -p 1
                 
-                local v0 v0
+                local v0 v9
                 
                 v9='' 
                 v0=''
@@ -158,18 +154,26 @@ read -u ${fd_nOrder} nOrder
 EOF1
     )
     printf '\\n' >&${fd_continue}; 
-    [[ \${A} ]] || { 
+    [[ \${#A[@]} == 0 ]] && { 
         
-        [[ -f "${tmpDir}"/.done ]] && { \${initFlag} && initFlag=false || { printf '\\n' >&${fd_inotify}; break; }; }
+        if [[ -f "${tmpDir}"/.done ]]; then
+            if \${initFlag}; then
+                initFlag=false
+            else
+                printf '\\n' >&${fd_inotify}
+                break
+            fi
         $(${inotifyFlag} && cat<<EOF2
-read -u ${fd_inotify}
+else        
+    read -u ${fd_inotify}
 EOF2
-        )
+)
+        fi
         continue
     }
     
     printf '%s\\n' "\${A[@]}" ${outStr}
-    sed -i "1,${nLines}d"  "${fPath}"
+    sed -i "1,\${nLinesCur}d" "${fPath}"
 
     \${nLinesAutoFlag} && { 
         [[ \${nLinesCur} == ${nLinesMax} ]] && { nLinesAutoFlag=false; printf '0\\n' >&${fd_nLinesAuto}; } || {
