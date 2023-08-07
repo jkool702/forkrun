@@ -6,7 +6,7 @@ mySplit() {
     # input 2: number of coprocs to use. Default is $(nproc)
             
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr nOrder inotifyFlag initFlag nLinesAutoFlag nOrderFlag rmDirFlag
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr nOrder inotifyFlag initFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag
     local -i nLines nLinesCur nLinesMax nProcs nDone kk
     local -a A p_PID 
   
@@ -14,33 +14,39 @@ mySplit() {
     tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
     fPath="${tmpDir}"/.stdin
     mkdir -p "${tmpDir}"
-    touch "${fPath}"    
-    
-    # check inputs and set defaults if needed
-    [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; nLinesAutoFlag=false; } || { nLines=1; nLinesAutoFlag=true; }
-    [[ "${2}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && nProcs="${2}" || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
-        
-    # set nLines indicator
-    echo ${nLines} >"${tmpDir}"/.nLines
-
-    # check for inotifywait
-    type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true || inotifyFlag=false
-    
-    # set defaults for control flags/parameters
-    : "${nOrderFlag:=true}" "${rmDirFlag:=true}" "${nLinesMax:=512}"
+    touch "${fPath}"   
     
     (
     
+        # check inputs and set defaults if needed
+        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; nLinesAutoFlag=false; } || { nLines=1; nLinesAutoFlag=true; }
+        [[ "${2}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && nProcs="${2}" || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
+            
+        # if reading 1 line at as time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
+        ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && [[ -z ${pipeReadFlag} ]] && pipeReadFlag=true; }
+
+
+        # check for inotifywait
+        type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true || inotifyFlag=false
+        
+        # set defaults for control flags/parameters
+        : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}"
+            
+        ${pipeReadFlag} && ${nLinesAutoFlag} && printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supoported when reading from a pipe' '         Disabling automatic adjustment of number of lines used per function call ' '' >&${fd_stderr} && nLinesAutoFlag=false
+    
         ${rmDirFlag} || printf '\ntmpDir: %s\n\n' "${tmpDir}" >&${fd_stderr}
         
-            # spawn a coproc to write stdin to a tmpfile
-        # After we are done reading all of stdin print total line count to a file (for future use)
-        { coproc pWrite {
-                cat  <&5 >&6
+        # spawn a coproc to write stdin to a tmpfile
+        # After we are done reading all of stdin print total line count to a file 
+        if ${pipeReadFlag}; then
+            touch "${tmpDir}"/.done
+        else
+            coproc pWrite {
+                cat <&${fd_stdin} >&${fd_write} 
                 wc -l <"${fPath}" >"${tmpDir}"/.done
                 ${inotifyFlag} && printf '\n' >&${fd_inotify}
             }
-        } 5<&${fd_stdin} 6>&${fd_write} 
+        fi
         
                        
         # setup inotify (if available) + set exit trap 
@@ -68,6 +74,9 @@ mySplit() {
     
         # setup nLinesAuto
         if ${nLinesAutoFlag}; then
+        
+            # set nLines indicator
+            echo ${nLines} >"${tmpDir}"/.nLines
 
             source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
             nDone=0
@@ -92,7 +101,8 @@ EOF
                     done
                 } 
             }
-            
+        else
+            nLinesCur=${nLines}
         fi
 
         # populate {fd_+continue} with an initial '1' 
@@ -143,16 +153,19 @@ EOF
         # this means that whenever a coproc reads data it will start reading at the point the last coproc stopped reading at
         # This basically means that all you need to do is make sure 2 processes dont read at the same time.
         for kk in $( source <(printf '%s\n' 'printf '"'"'%s '"'"' {0..'"$(( ${nProcs} - 1 ))"'}') ); do
-            source <(cat<<EOF0
-{ coproc p${kk} {
+source <(cat<<EOF0
+coproc p${kk} {
 while true; do
     read -u ${fd_continue} 
+$(${nLinesAutoFlag} && cat<<EOF1
     nLinesCur=\$(<"${tmpDir}"/.nLines)
-    mapfile -t -n \${nLinesCur} -u ${fd_read} A
-    $(${nOrderFlag} && cat<<EOF1
-read -u ${fd_nOrder} nOrder
 EOF1
-    )
+)
+    mapfile -t -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
+$(${nOrderFlag} && cat<<EOF2
+    read -u ${fd_nOrder} nOrder
+EOF2
+)
     printf '\\n' >&${fd_continue}; 
     [[ \${#A[@]} == 0 ]] && { 
         
@@ -163,10 +176,10 @@ EOF1
                 printf '\\n' >&${fd_inotify}
                 break
             fi
-        $(${inotifyFlag} && cat<<EOF2
-else        
-    read -u ${fd_inotify}
-EOF2
+$(${inotifyFlag} && cat<<EOF3
+        else        
+            read -u ${fd_inotify}
+EOF3
 )
         fi
         continue
@@ -183,7 +196,6 @@ EOF2
         }
     }
 done
-    }
 }
 p_PID+=(\${p${kk}_PID})
 EOF0
@@ -199,30 +211,7 @@ EOF0
         
     # open anonympous pipes + other misc file descriptors for the above code block
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
-
-  
-   
-   return 0
     
-    # cleanup
-    #kill "${pNotify_PID}"
-    #rm -rf "${tmpDir}"
-
-    # exit 0
-
-
-# # # SPEED IMPROVEMENTS vs old IPC schemes
-#
-# nLines = 1:  ~2-3x as fast as read-byte-by-byte-from-pipe approach. 
-#              Similiar speed to save-stdin-to-tmpfile-and-read-one-line-at-a-time approach.
-#
-# nLines > 1:  in high nLine limit (>500) speeds are similiar to split+cat approach. 
-#              for intermediate nLines (10-100) speeds are 5-10x faster than split+cat approach
-#              in low nLines limit (2) speeds are 20-30x faster than split+cat approach
-
-
-
-# a="$(printf '%.0s'"$(echo $(dd if=/dev/urandom bs=4096 count=1 | hexdump) | sed -E s/'^(.{4096}).*$'/'\1'/)"'\n' {1..1000})"
-# for kk in 1 2 4 8 16 32 64 128; do time {  echo "$a" | mySplit $kk 2>/dev/null; } >/dev/null; done
+   return 0
 
 } 
