@@ -6,8 +6,8 @@ mySplit() {
     # input 2: number of coprocs to use. Default is $(nproc)
             
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr nOrder coprocSrcCode inotifyFlag initFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag
-    local -i nLines nLinesCur nLinesMax nProcs nDone kk
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag
+    local -i nLines nLinesCur nLinesNew nLinesMax nProcs kk
     local -a A p_PID 
   
     # setup tmpdir
@@ -19,7 +19,7 @@ mySplit() {
     (
     
         # check inputs and set defaults if needed
-        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; nLinesAutoFlag=false; } || { nLines=1; nLinesAutoFlag=true; }
+        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; : "${nLinesAutoFlag:=false}"; } || { nLines=1; nLinesAutoFlag=true; }
         [[ "${2}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && nProcs="${2}" || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
             
         # if reading 1 line at as time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
@@ -30,7 +30,7 @@ mySplit() {
         type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true
         
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${inotifyFlag:=false}"
+        : "${nOrderFlag:=true}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${inotifyFlag:=false}"
             
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supoported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
     
@@ -43,7 +43,7 @@ mySplit() {
         else
             coproc pWrite {
                 cat <&${fd_stdin} >&${fd_write} 
-                wc -l <"${fPath}" >"${tmpDir}"/.done
+                touch "${tmpDir}"/.done
                 ${inotifyFlag} && printf '\n' >&${fd_inotify}
             }
         fi
@@ -66,49 +66,13 @@ mySplit() {
             #trap 'kill '"${!}"' && rm -rf '"${tmpDir}"';' EXIT
             exitTrapStr+='kill '"${!}"'; '
         fi
-
-        ${rmDirFlag} && exitTrapStr+='rm -rf '"${tmpDir}"'; '
-        
-        trap "${exitTrapStr}" EXIT
-
-    
-        # setup nLinesAuto
-        if ${nLinesAutoFlag}; then
-        
-            # set nLines indicator
-            echo ${nLines} >"${tmpDir}"/.nLines
-
-            source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
-            nDone=0
-            
-            { coproc pAuto {
-                    trap - EXIT
-                    #nLinesUpdateCmd="$(printf "echo "; source <(echo 'echo '"'"'$(( 1 + ( $(wc -l <"'"'"'"${fPath}"'"'"'") - $(<"'"'"'"${tmpDir}"'"'"'"/.n0'"'"' '"'"') - $(<"'"'"'"${tmpDir}"'"'"'"/.n'"'"'{1..'"$(( ${nProcs} - 1 ))"}' '"'"') ) / '"${nProcs}"' ))'"'"))"
-#source <(cat<<EOF
-nLinesUpdate() {
-    local -i nLinesNew rVal
-    rVal=0
-    [[ -f "${tmpDir}"/.done ]] && ((rVal++))
-    nLinesNew=$(( 1 + ( $(wc -l <"${fPath}") / ${nProcs} ) ))
-    (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; ((rVal++)); }
-    (( ${nLinesNew} > $(<"${tmpDir}"/.nLines) )) && printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines && printf 'Changing nLines to %s\n' "${nLinesNew}" >&${fd_stderr} 
-    return ${rVal}
-}
-#EOF
-#)
-            
-                    while read -u ${fd_nLinesAuto}; do
-                        [[ ${REPLY} == 0 ]] && break
-                        nLinesUpdate || break
-                    done
-                } 
-            } 2>/dev/null
-        else
-            nLinesCur=${nLines}
-        fi
         
         # setup (ordered) output
         if ${nOrderFlag}; then
+        
+            mkfifo "${tmpDir}"/.nOrder.fifo
+            exec {fd_nOrder}<>"${tmpDir}"/.nOrder.fifo
+            exitTrapStr+='exec {fd_nOrder}>&-; '
 
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
@@ -132,6 +96,55 @@ nLinesUpdate() {
             
             outStr='>&'"${fd_stdout}"; 
         fi
+    
+        # setup nLinesAuto
+        nLinesCur=${nLines}
+        if ${nLinesAutoFlag}; then
+        
+            # set nLines indicator
+            echo ${nLines} >"${tmpDir}"/.nLines
+
+            #source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
+            
+            printf '\n' >&${fd_nLinesAuto}
+            
+            { coproc pAuto {
+                    trap - EXIT
+                    stopFlag=false
+                    
+                    while true; do
+                    
+                        read -u ${fd_nLinesAuto}
+                        { [[ ${REPLY} == 0 ]] || [[ -f "${tmpDir}"/.quit ]]; } && stopFlag=true  
+                        [[ -f "${fPath}" ]] || break
+                        
+                        nLinesNew=$(( 1 + ( $(wc -l <"${fPath}") / ${nProcs} ) ))
+                        
+                        if (( ${nLinesNew} > ${nLinesMax} )) || [[ -f "${tmpDir}"/.quit ]]; then
+                            printf '%s\n' ${nLinesMax} >"${tmpDir}"/.nLines 
+                            printf 'Changing nLines to %s\n' "${nLinesMax}" >&${fd_stderr}                         
+                            stopFlag=true
+                        else
+                            { [[ -f "${tmpDir}"/.done ]] && (( ${nLinesNew} <= ${nLinesCur} )); } || [[ ${nLinesNew} == ${nLinesCur} ]] || {
+                                printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
+                                printf 'Changing nLines to %s\n' "${nLinesNew}" >&${fd_stderr} 
+                                nLinesCur=${nLinesNew}
+                            }
+                        fi
+                        
+                        ${stopFlag} && { printf '%s\n' 'STOPPING pAuto' >${fd_stderr}; break; }
+                    done
+                } 
+            } 2>/dev/null
+            
+            exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&${fd_nLinesAuto}; '
+
+        fi
+        
+        ${rmDirFlag} && exitTrapStr+='rm -rf '"${tmpDir}"'; '
+        
+        trap "${exitTrapStr}" EXIT
+        
 
         # populate {fd_continue} with an initial '1' 
         # {fd_continue} will act as an exclusive read lock - when there is a '1' buffered in the pipe then nothinghas an read lock: 
@@ -187,12 +200,9 @@ EOF4
     sed -i "1,\${#A[@]}d" "${fPath}"
 
 $(${nLinesAutoFlag} && cat<<EOF5
-    \${nLinesAutoFlag} && { 
-        [[ \${nLinesCur} == ${nLinesMax} ]] && { nLinesAutoFlag=false; printf '0\\n' >&${fd_nLinesAuto}; } || {
-            nDone+=\${#A[@]}
-            printf '%%s\\\\n' \${nDone} >"${tmpDir}"/.n%s
-            printf '\\\\n' >&${fd_nLinesAuto}
-        }
+    \${nLinesAutoFlag} && {
+        printf '\\\\n' >&${fd_nLinesAuto}
+        [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false
     }
 EOF5
 )
@@ -202,24 +212,22 @@ done
 p_PID+=(\${p%s_PID})
 EOF0
 )"
-
-        #coprocSrcCode_kk=$(echo "${coprocSrcCode}" | grep -oE '[^%]%s' | wc -l)
         
         for kk in $( source <(printf '%s\n' 'printf '"'"'%s '"'"' {0..'"$(( ${nProcs} - 1 ))"'}') ); do
             [[ -f "${tmpDir}"/.quit ]] && break
-            #source <(printf "${coprocSrcCode}" $(source <(printf 'printf "${kk}%%.0s " {1..'"${coprocSrcCode_kk}"'}')))
-            source <(printf "${coprocSrcCode}" ${kk} ${kk} $(${nLinesAutoFlag} && printf '%s' ${kk}))
+            source <(printf "${coprocSrcCode}" ${kk} ${kk})
         done
        
         # wait for everything to finish
-        # in forkrun the main process will probably manage automaticly changing nLines
         wait "${p_PID[@]}"
-        
+               
         # print output if using ordered output
         ${nOrderFlag} && kill ${pOrder_PID} && IFS=$'\n' cat "${tmpDir}"/.out/x*
-        
+
+        printf 'nLines (final) = %s   (max = %s)\n'  $(<"${tmpDir}"/.nLines) ${nLinesMax} >&${fd_stderr}
+ 
     # open anonympous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
     
    return 0
 
