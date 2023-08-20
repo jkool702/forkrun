@@ -103,11 +103,11 @@ mySplit() {
         
             # set nLines indicator
             echo ${nLines} >"${tmpDir}"/.nLines
+            mkfifo "${tmpDir}"/.nLinesAuto.fifo
+            exec {fd_nLinesAuto}<>"${tmpDir}"/.nLinesAuto.fifo
 
             #source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
-            
-            printf '\n' >&${fd_nLinesAuto}
-            
+                      
             { coproc pAuto {
                     trap - EXIT
                     stopFlag=false
@@ -133,7 +133,9 @@ mySplit() {
                 } 
             } 2>/dev/null
             
-            exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&${fd_nLinesAuto}; '
+            printf '\n' >&${fd_nLinesAuto}
+
+            exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&${fd_nLinesAuto}; exec {fd_nLinesAuto}>&-; '
 
         fi
         
@@ -181,12 +183,15 @@ EOF2
 $(${inotifyFlag} && cat<<EOF3
                 printf '%%.0s\\\\n' {0..${nProcs}} >&${fd_inotify}
 EOF3
+${nLinesAutoFlag} && cat<<EOF4
+                printf '0\\\\n' >&${fd_nLinesAuto}
+EOF4
 )
             \${initFlag} && initFlag=false || { touch "${tmpDir}"/.quit; break; }
-$(${inotifyFlag} && cat<<EOF4
+$(${inotifyFlag} && cat<<EOF5
         else        
             read -u ${fd_inotify}
-EOF4
+EOF5
 )
         fi
         continue
@@ -195,12 +200,12 @@ EOF4
     printf '%%s\\\\n' "\${A[@]}" ${outStr}
     sed -i "1,\${#A[@]}d" "${fPath}"
 
-$(${nLinesAutoFlag} && cat<<EOF5
+$(${nLinesAutoFlag} && cat<<EOF6
     \${nLinesAutoFlag} && {
         printf '\\\\n' >&${fd_nLinesAuto}
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false
     }
-EOF5
+EOF6
 )
 done
 } 2>&${fd_stderr}
@@ -223,7 +228,7 @@ EOF0
         printf 'nLines (final) = %s   (max = %s)\n'  $(<"${tmpDir}"/.nLines) ${nLinesMax} >&${fd_stderr}
  
     # open anonympous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
     
    return 0
 
