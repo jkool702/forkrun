@@ -120,17 +120,13 @@ mySplit() {
                         
                         nLinesNew=$(( 1 + ( $(wc -l <"${fPath}") / ${nProcs} ) ))
                         
-                        if (( ${nLinesNew} > ${nLinesMax} )) || [[ -f "${tmpDir}"/.quit ]]; then
-                            printf '%s\n' ${nLinesMax} >"${tmpDir}"/.nLines 
-                            printf 'Changing nLines to %s\n' "${nLinesMax}" >&${fd_stderr}                         
-                            stopFlag=true
-                        else
-                            { [[ -f "${tmpDir}"/.done ]] && (( ${nLinesNew} <= ${nLinesCur} )); } || [[ ${nLinesNew} == ${nLinesCur} ]] || {
-                                printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
-                                printf 'Changing nLines to %s\n' "${nLinesNew}" >&${fd_stderr} 
-                                nLinesCur=${nLinesNew}
-                            }
-                        fi
+                        (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; stopFlag=true; }
+                        
+                        { [[ -f "${tmpDir}"/.done ]] && (( ${nLinesNew} <= ${nLinesCur} )); } || [[ ${nLinesNew} == ${nLinesCur} ]] || {
+                            printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
+                            printf 'Changing nLines to %s\n' "${nLinesNew}" >&${fd_stderr} 
+                            nLinesCur=${nLinesNew}
+                        }
                         
                         ${stopFlag} && { printf '%s\n' 'STOPPING pAuto' >${fd_stderr}; break; }
                     done
