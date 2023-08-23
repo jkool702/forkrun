@@ -1,0 +1,31 @@
+# test distributing 1 million lines: printf '%s\n' {1..1000000}
+# run on 14-core/28-thread x86_64 machine --> 28 worker coprocs
+
+# base case - printf takes 1.261 seconds to generate the 1 million lines
+
+time { printf '%s\n' {1..1000000} >/dev/null; }
+
+real    0m1.261s
+user    0m0.920s
+sys     0m0.339s
+
+
+# mySplit - printf generates the 1 million lines and mySplit distributes them to 28 workers 
+#           in 1.55 seconds. Less that 0.3 second wall-clock increase versus base case!!!
+
+time { printf '%s\n' {1..1000000} | mySplit >/dev/null; }
+
+real    0m1.550s
+user    0m7.192s
+sys     0m6.879s
+
+# read - printf generates the 1 million lines and reading them directly from the pipe (stdin) took 9.898 seconds
+
+time { printf '%s\n' {1..1000000} | while read -r; do :; done; }
+
+real    0m9.898s
+user    0m5.819s
+sys     0m7.774s
+
+# NOTE: the `read` test actually has an unfair advantage, since it does not print anything and have it redirected to /dev/null
+# a more "apples-to-apples" comarrison would have been: `<...> | while read -r; do echo "${REPLY}"; done >/dev/null`
