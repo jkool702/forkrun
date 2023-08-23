@@ -6,7 +6,7 @@ mySplit() {
     # input 2: number of coprocs to use. Default is $(nproc)
             
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag
     local -i nLines nLinesCur nLinesNew nLinesMax nProcs kk
     local -a A p_PID 
   
@@ -25,19 +25,23 @@ mySplit() {
         # if reading 1 line at as time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
-
         # check for inotifywait
-        type -p inotifywait 2>/dev/null 1>/dev/null && inotifyFlag=true
+        type -p inotifywait &>/dev/null && inotifyFlag=true || inotifyFlag=false
         
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${inotifyFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}"
             
+        # cherck for a conflict that could occur is flags are defined on commandline when mySplit is called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supoported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
     
+        # if keeping tmpDir print its location to stderr
         ${rmDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
         
+        exitTrapStr=''
+        exitTrapStr_kill=''
+        
         # spawn a coproc to write stdin to a tmpfile
-        # After we are done reading all of stdin print total line count to a file 
+        # After we are done reading all of stdin incidate this by touching .done
         if ${pipeReadFlag}; then
             touch "${tmpDir}"/.done
         else
@@ -45,14 +49,17 @@ mySplit() {
                 trap - EXIT
                 cat <&${fd_stdin} >&${fd_write} 
                 touch "${tmpDir}"/.done
-                ${inotifyFlag} && source <(printf 'printf '"'"'%%.0s\\n'"'"' {0..%s} ' ${nProcs} >&${fd_inotify})
-
+                ${inotifyFlag} && {
+                    (
+                        source <(printf 'printf '"'"'%%.0s\\n'"'"' {0..%s} ' ${nProcs} >&${fd_inotify0})
+                    ) {fd_inotify0}>&${fd_inotify}
+                }
             }
+            exitTrapStr_kill+="${pWrite_PID} "
         fi
         
                        
         # setup inotify (if available) + set exit trap 
-        exitTrapStr=''
         if ${inotifyFlag}; then
         
             # add 1 newline for each coproc to fd_inotify
@@ -64,7 +71,8 @@ mySplit() {
             
                }
             } 2>/dev/null
-            exitTrapStr+='kill '"${pNotify_PID}"'; '
+            exitTrapStr+='[[ -f "'"${fPath}"'" ]] && rm -f "'"${fPath}"'"; '
+            exitTrapStr_kill+="${pNotify_PID} "
         fi
         
         # setup (ordered) output
@@ -80,7 +88,7 @@ mySplit() {
                 
                 printf '%s\n' {00..89} >&${fd_nOrder}
                 
-                while true; do
+                while ! [[ -f "${tmpDir}"/.quit ]]; do
                     v9="${v9}9"
                     v0="${v0}0"
                     
@@ -89,7 +97,7 @@ mySplit() {
             )
             } 2>/dev/null
             
-            exitTrapStr+='kill '"${pOrder_PID}"' 2>/dev/null; '
+            exitTrapStr_kill+="${pOrder_PID} "
 
         else 
             
@@ -102,7 +110,6 @@ mySplit() {
         
             # set nLines indicator
             echo ${nLines} >"${tmpDir}"/.nLines
-            exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&'"${fd_nLinesAuto}"'; '
 
             #source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
                       
@@ -123,7 +130,6 @@ mySplit() {
 
                         (( ${nLinesNew} > ${nLinesCur} )) && {
                             printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
-                            #printf 'Changing nLines to %s\n' "${nLinesNew}" >&${fd_stderr} 
                             nLinesCur=${nLinesNew}
                         }
                         
@@ -131,14 +137,18 @@ mySplit() {
                     done
                 } 
             } 2>/dev/null
+
+            exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&'"${fd_nLinesAuto}"'; '
+            exitTrapStr_kill+="${pAuto_PID} "
             
             printf '\n' >&${fd_nLinesAuto}
             
         fi
         
-        ${rmDirFlag} && exitTrapStr+='rm -rf '"${tmpDir}"'; '
-        
-        trap "${exitTrapStr}" EXIT
+        # set EXIT trap
+        exitTrapStr="${exitTrapStr}"'kill '"${exitTrapStr_kill}"' 2>/dev/null; '
+        ${rmDirFlag} && exitTrapStr+='[[ -d $"'"${tmpDir}"'" ]] && rm -rf "'"${tmpDir}"'";'
+        trap "${exitTrapStr}" EXIT        
         
 
         # populate {fd_continue} with an initial '1' 
@@ -219,11 +229,13 @@ EOF0
         # print output if using ordered output
         ${nOrderFlag} && kill ${pOrder_PID} && IFS=$'\n' cat "${tmpDir}"/.out/x*
 
-        printf 'nLines (final) = %s   (max = %s)\n'  $(<"${tmpDir}"/.nLines) ${nLinesMax} >&${fd_stderr}
+        ${nLinesAutoFlag} && printf 'nLines (final) = %s   (max = %s)\n'  $(<"${tmpDir}"/.nLines) ${nLinesMax} >&${fd_stderr}
  
+        # stop inotifywait
+        ${inotifyFlag} && rm -f "${fPath}" 2>/dev/null
+    
     # open anonympous pipes + other misc file descriptors for the above code block
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
-    
-   return 0
-
+ 
+ 
 } 
