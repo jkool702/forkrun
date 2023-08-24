@@ -11,7 +11,7 @@ mySplit() {
     # make vars local
     local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID 
     local -i nLines nLinesCur nLinesNew nLinesMax nProcs kk
-    local -a A p_PID p_running
+    local -a A p_PID runCmd
   
     # setup tmpdir
     tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
@@ -22,9 +22,14 @@ mySplit() {
     (
     
         # check inputs and set defaults if needed
-        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; : "${nLinesAutoFlag:=false}"; } || { nLines=1; nLinesAutoFlag=true; }
-        [[ "${2}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && nProcs="${2}" || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
+        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; : "${nLinesAutoFlag:=false}"; shift 1; } || { nLines=1; nLinesAutoFlag=true; }
+        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nProcs="${1}"; shift 1; } || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
             
+        runCmd=("${@}")
+        [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
+        runCmd=("${runCmd[@]//'%'/'%%'}")
+        runCmd=("${runCmd[@]//'\'/'\\\\'}")
+        
         # if reading 1 line at as time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
@@ -58,7 +63,7 @@ mySplit() {
                     ) {fd_inotify0}>&${fd_inotify}
                 }
             }
-            exitTrapStr_kill+="${pWrite_PID} "
+            exitTrapStr_kill+="${!} "
         fi      
                        
         # setup inotify (if available) + set exit trap 
@@ -214,7 +219,7 @@ EOF4
         continue
     }
     
-    printf '%%s\\\\n' "\${A[@]}" ${outStr}
+    ${runCmd[@]} "\${A[@]}" ${outStr}
     sed -i "1,\${#A[@]}d" "${fPath}"
 
 $(${nLinesAutoFlag} && cat<<EOF5
@@ -234,7 +239,6 @@ EOF0
         # source the coproc code for each coproc worker
         for kk in $( source <(printf '%s' 'printf '"'"'%s '"'"' {0..'"$(( ${nProcs} - 1 ))"'}') ); do
             [[ -f "${tmpDir}"/.quit ]] && break
-            p_running[$kk]=1
             source <(printf "${coprocSrcCode}" ${kk} ${kk})
         done
        
