@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 mySplit() {
     ## Splits up stdin into groups of ${1} lines using ${2} bash coprocs
@@ -9,9 +9,9 @@ mySplit() {
     #      cat, grep, sed, wc (GNU or busybox versions will work...both are supported)
             
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID 
     local -i nLines nLinesCur nLinesNew nLinesMax nProcs kk
-    local -a A p_PID 
+    local -a A p_PID p_running
   
     # setup tmpdir
     tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
@@ -58,7 +58,7 @@ mySplit() {
                     ) {fd_inotify0}>&${fd_inotify}
                 }
             }
-            exitTrapStr_kill+="${pWrite_PID} "
+            exitTrapStr_kill+="${!} "
         fi      
                        
         # setup inotify (if available) + set exit trap 
@@ -66,13 +66,13 @@ mySplit() {
         
             # add 1 newline for each coproc to fd_inotify
             source <(printf 'printf '"'"'%%.0s\\n'"'"' {0..%s} ' ${nProcs} >&${fd_inotify})
-            
-            { coproc pNotify {
            
-            inotifywait -q -m --format '' "${fPath}" >&${fd_inotify}
-            
-               }
+            {
+                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify} &
             } 2>/dev/null
+            
+            pNotify_PID=$!
+
             exitTrapStr+='[[ -f "'"${fPath}"'" ]] && rm -f "'"${fPath}"'"; '
             exitTrapStr_kill+="${pNotify_PID} "
         fi
@@ -103,7 +103,7 @@ mySplit() {
 
         else 
             
-            outStr='>&'"${fd_stdout}"; 
+            outStr='>&'"\${fd_stdout}"; 
         fi
         
         # setup nLinesAuto
@@ -155,8 +155,8 @@ mySplit() {
         fi
         
         # set EXIT trap (dynamically determined based on which option nflags were active)
-        exitTrapStr="${exitTrapStr}"'kill '"${exitTrapStr_kill}"' 2>/dev/null; '
-        ${rmDirFlag} && exitTrapStr+='[[ -d $"'"${tmpDir}"'" ]] && rm -rf "'"${tmpDir}"'";'
+        exitTrapStr="${exitTrapStr}"'kill '"${exitTrapStr_kill}"' 2>/dev/null'
+        ${rmDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && rm -rf "'"${tmpDir}"'"'
         trap "${exitTrapStr}" EXIT        
         
 
@@ -232,25 +232,22 @@ EOF0
 )"
         
         # source the coproc code for each coproc worker
-        for kk in $( source <(printf '%s\n' 'printf '"'"'%s '"'"' {0..'"$(( ${nProcs} - 1 ))"'}') ); do
+        for kk in $( source <(printf '%s' 'printf '"'"'%s '"'"' {0..'"$(( ${nProcs} - 1 ))"'}') ); do
             [[ -f "${tmpDir}"/.quit ]] && break
+            p_running[$kk]=1
             source <(printf "${coprocSrcCode}" ${kk} ${kk})
         done
        
         # wait for everything to finish
-        wait "${p_PID[@]}"
+        wait ${p_PID[@]}
                
         # print output if using ordered output
-        ${nOrderFlag} && kill ${pOrder_PID} && IFS=$'\n' cat "${tmpDir}"/.out/x*
+        ${nOrderFlag} && IFS=$'\n' cat "${tmpDir}"/.out/x*
 
         # print final nLines count
         #${nLinesAutoFlag} && printf 'nLines (final) = %s   (max = %s)\n'  $(<"${tmpDir}"/.nLines) ${nLinesMax} >&${fd_stderr}
  
-        # stop inotifywait
-        ${inotifyFlag} && rm -f "${fPath}" 2>/dev/null
-    
-    # open anonympous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
- 
- 
-} 
+    # open anonympous pipes + other misc file descriptors for the above code block   
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+
+}
