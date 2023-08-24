@@ -58,7 +58,7 @@ mySplit() {
                     ) {fd_inotify0}>&${fd_inotify}
                 }
             }
-            exitTrapStr_kill+="${!} "
+            exitTrapStr_kill+="${pWrite_PID} "
         fi      
                        
         # setup inotify (if available) + set exit trap 
