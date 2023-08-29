@@ -26,9 +26,9 @@ mySplit() {
         [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nProcs="${1}"; shift 1; } || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
             
         runCmd=("${@}")
-        [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
+        [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\\n')
         runCmd=("${runCmd[@]//'%'/'%%'}")
-        runCmd=("${runCmd[@]//'\'/'\\\\'}")
+        runCmd=("${runCmd[@]//'\'/'\\'}")
         
         # if reading 1 line at as time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
