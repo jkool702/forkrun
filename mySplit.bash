@@ -59,7 +59,7 @@ mySplit() {
                 touch "${tmpDir}"/.done
                 ${inotifyFlag} && {
                     (
-                        source <(printf 'printf '"'"'%%.0s\\n'"'"' {0..%s} ' ${nProcs} >&${fd_inotify0})
+                        { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
                     ) {fd_inotify0}>&${fd_inotify}
                 }
             }
@@ -70,7 +70,7 @@ mySplit() {
         if ${inotifyFlag}; then
         
             # add 1 newline for each coproc to fd_inotify
-            source <(printf 'printf '"'"'%%.0s\\n'"'"' {0..%s} ' ${nProcs} >&${fd_inotify})
+            { source /proc/self/fd/0 >&${fd_inotify}; }<<<"printf '%.0s\n' {0..${nProcs}}"
            
             {
                 inotifywait -q -m --format '' "${fPath}" >&${fd_inotify} &
@@ -99,7 +99,7 @@ mySplit() {
                     v9="${v9}9"
                     v0="${v0}0"
                     
-                    source <(printf '%s\n' 'printf '"'"'%s\n'"'"' {'"${v9}"'00'"${v0}"'..'"${v9}"'89'"${v9}"'} >&'"${fd_nOrder}")
+                    { source /proc/self/fd/0 >&${fd_nOrder}; }<<<"printf '%s\n' {${v9}00${v0}..${v9}89${v9}}"
                 done
             )
             } 2>/dev/null
@@ -237,7 +237,7 @@ EOF0
 )"
         
         # source the coproc code for each coproc worker
-        for kk in $( source <(printf '%s' 'printf '"'"'%s '"'"' {0..'"$(( ${nProcs} - 1 ))"'}') ); do
+        for kk in $( { source /proc/self/fd/0; } <<<"printf '%s ' {0..$(( ${nProcs} - 1 ))}" ); do
             [[ -f "${tmpDir}"/.quit ]] && break
             source <(printf "${coprocSrcCode}" ${kk} ${kk})
         done
