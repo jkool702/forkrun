@@ -9,9 +9,9 @@ mySplit() {
     #      cat, grep, sed, wc (GNU or busybox versions will work...both are supported)
             
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID 
-    local -i nLines nLinesCur nLinesNew nLinesMax nProcs kk
-    local -a A p_PID runCmd
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID nLinesDoneCmd
+    local -i nLines nLinesCur nLinesNew nLinesMax nLinesDone nProcs kk
+    local -a A p_PID runCmd fd_read_pos fd_write_pos
   
     # setup tmpdir
     tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
@@ -116,9 +116,9 @@ mySplit() {
         if ${nLinesAutoFlag}; then
         
             # set nLines indicator
+            mkdir -p "${tmpDir}"/.nDone
             echo ${nLines} >"${tmpDir}"/.nLines
-
-            #source <(source <(printf 'echo '"'"'echo 0 >'"${tmpDir}"'/.n'"'"'{0..%s}\; ' $(( $nProcs-1 ))))
+            nLinesDone=0
                       
             # LOGIC FOR DYNAMICALLY SETTING 'nLines': 
             # the new "proposed" 'nLines' is the smaller of 'nLinesMax' and $(( 1 + <num lines currently in .stdin file> / <num coproc workers> ))
@@ -130,33 +130,45 @@ mySplit() {
             { coproc pAuto {
                     trap - EXIT
                     stopFlag=false
+                    source <({ source /proc/self/fd/0; }<<<'echo '"'"'echo 0 >'"${tmpDir}"'/.nDone/n'"'"'{0..'$(( ${nProcs} - 1 ))'}\;\ ')
+                    nLinesDoneCmd="$(printf "echo "; source <(echo 'echo '"'"'$(( $(<"'"'"'"${tmpDir}"'"'"'"/.nDone/n0'"'"' '"'"') + $(<"'"'"'"${tmpDir}"'"'"'"/.nDone/n'"'"'{1..'"$(( ${nProcs} - 1 ))"}' '"'"') ))'"'"))"
+                  
                     while true; do
                     
                         read -u ${fd_nLinesAuto}
                         { [[ ${REPLY} == 0 ]] || [[ -f "${tmpDir}"/.quit ]]; } && stopFlag=true  
                         [[ -f "${fPath}" ]] || break
                         
-                        nLinesNew=$(( 1 + ( $(wc -l <"${fPath}") / ${nProcs} ) ))
+                        nLinesDone=$({ source /proc/self/fd/0; }<<<"${nLinesDoneCmd}")
+                        mapfile -t fd_read_pos </proc/self/fdinfo/${fd_read}
+                        mapfile -t fd_write_pos </proc/self/fdinfo/${fd_write}
                         
-                        (( ${nLinesNew} <= ${nLinesCur} )) && (( ${nLinesCur} > ${nLines} )) && nLinesNew=$(( ( ( 11 * ${nLinesCur} ) / 10 ) + 1 ))
+                        
+                        nLinesNew=$(( 1 + ( ( 1 + ${nLinesDone} ) * ( ${fd_write_pos[0]##*$'\t'} - ${fd_read_pos[0]##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos[0]##*$'\t'} ) ) ))
+                        
+                        #printf 'nLinesDone = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nLinesDone} ${fd_write_pos[0]##*$'\t'} ${fd_read_pos[0]##*$'\t'} ${nLinesNew}" >&${fd_stderr}
+
+                        #(( ${nLinesNew} <= ${nLinesCur} )) && (( ${nLinesCur} > ${nLines} )) && nLinesNew=$(( ( ( 11 * ${nLinesCur} ) / 10 ) + 1 ))
                                                 
                         (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; stopFlag=true; }
 
                         (( ${nLinesNew} > ${nLinesCur} )) && {
                             printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
                             nLinesCur=${nLinesNew}
+                            #printf 'CHANGING nLinesNew to %s\n!!!' "${nLinesNew}"
                         }
                         
                         ${stopFlag} && break
                     done
+                    
                 } 
             } 2>/dev/null
 
             exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&'"${fd_nLinesAuto}"'; '
             exitTrapStr_kill+="${pAuto_PID} "
             
-            printf '\n' >&${fd_nLinesAuto}
-            
+            #printf '\n' >&${fd_nLinesAuto}
+                        
         fi
         
         # set EXIT trap (dynamically determined based on which option nflags were active)
@@ -192,7 +204,7 @@ trap - EXIT
 while true; do
     read -u ${fd_continue} 
 $(${nLinesAutoFlag} && cat<<EOF1
-    nLinesCur=\$(<"${tmpDir}"/.nLines)
+    \${nLinesAutoFlag} && nLinesCur=\$(<"${tmpDir}"/.nLines)
 EOF1
 )
     mapfile -t -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
@@ -206,7 +218,7 @@ EOF2
         if [[ -f "${tmpDir}"/.done ]]; then
             [[ -f "${tmpDir}"/.quit ]] && break
 $(${nLinesAutoFlag} && cat<<EOF3
-                printf '0\\\\n' >&${fd_nLinesAuto}
+                printf '0\\\\n' >&${fd_nLinesAuto0}
 EOF3
 )
             \${initFlag} && initFlag=false || { touch "${tmpDir}"/.quit; break; }
@@ -224,22 +236,24 @@ EOF4
 
 $(${nLinesAutoFlag} && cat<<EOF5
     \${nLinesAutoFlag} && {
-        printf '\\\\n' >&${fd_nLinesAuto}
+        nLinesDone+=\${#A[@]}
+        printf '%%s\\\\n' \${nLinesDone} >"${tmpDir}"/.nDone/n%s
+        printf '\\\\n' >&${fd_nLinesAuto0}
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false
     }
 EOF5
 )
 done
-} 2>&${fd_stderr}
+} 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
 p_PID+=(\${p%s_PID})
 EOF0
 )"
         
         # source the coproc code for each coproc worker
-        for kk in $( { source /proc/self/fd/0; } <<<"printf '%s ' {0..$(( ${nProcs} - 1 ))}" ); do
+        for (( kk=0; kk<${nProcs}; kk++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
-            source <(printf "${coprocSrcCode}" ${kk} ${kk})
+            source <(printf "${coprocSrcCode}" ${kk} ${kk} $(${nLinesAutoFlag} && printf '%s' "${kk}"))
         done
        
         # wait for everything to finish
