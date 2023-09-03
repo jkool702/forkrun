@@ -9,9 +9,9 @@ mySplit() {
     #      cat, grep, sed, wc (GNU or busybox versions will work...both are supported)
             
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID nLinesDoneCmd
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID nLinesDoneCmd fd_read_pos fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nLinesDone nProcs kk
-    local -a A p_PID runCmd fd_read_pos fd_write_pos
+    local -a A p_PID runCmd 
   
     # setup tmpdir
     tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
@@ -24,7 +24,8 @@ mySplit() {
         # check inputs and set defaults if needed
         [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; : "${nLinesAutoFlag:=false}"; shift 1; } || { nLines=1; nLinesAutoFlag=true; }
         [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nProcs="${1}"; shift 1; } || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
-            
+
+        # determine what mySplit is using lines on stdin for
         runCmd=("${@}")
         [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
         runCmd=("${runCmd[@]//'%'/'%%'}")
@@ -44,7 +45,8 @@ mySplit() {
     
         # if keeping tmpDir print its location to stderr
         ${rmDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
-        
+
+        # start building exit trap string
         exitTrapStr=''
         exitTrapStr_kill=''
         
@@ -115,18 +117,17 @@ mySplit() {
         nLinesCur=${nLines}
         if ${nLinesAutoFlag}; then
         
-            # set nLines indicator
+            # setup nLines indicator
             mkdir -p "${tmpDir}"/.nDone
             echo ${nLines} >"${tmpDir}"/.nLines
             nLinesDone=0
                       
             # LOGIC FOR DYNAMICALLY SETTING 'nLines': 
-            # the new "proposed" 'nLines' is the smaller of 'nLinesMax' and $(( 1 + <num lines currently in .stdin file> / <num coproc workers> ))
-            # if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines to match the rate lines are comming in on stdin)
-            # if proposed new 'nLines' is ;ess than or equal to current 'nLines':
-            #   -->  if nLines has never increased it then dont increase it (use case: stdin is arriving slowly)
-            #   -->  if nLines has previously increased, new 'nLines' is $(( 1 + 1.1 * <current 'nLines'> )) (use case: stdin is arriving so fast that wc -l cant keep up --> continue to slowly increase it)
-            # if the new 'nLines' is equal to 'nLinesMax' or .quit file has appeared then break
+            # The avg_bytes_per_line is estimated by looking at the byte offset position of fd_read and having each coproc keep track of how many lines it has read
+            # the new "proposed" 'nLines' is 1 + (fd_write_pos - fd_read_pos)/((nProcs)*(1+avg_bytes_per_line))
+            # if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines to match the rate lines are coming in on stdin)
+            # if proposed new 'nLines' is less than or equal to current 'nLines' ignore it(i.e., nLines can only ever increase...it will never decrease)
+            # if the new 'nLines' is greater than or equal to 'nLinesMax' or .quit file has appeared, then break
             { coproc pAuto {
                     trap - EXIT
                     stopFlag=false
@@ -140,11 +141,10 @@ mySplit() {
                         [[ -f "${fPath}" ]] || break
                         
                         nLinesDone=$({ source /proc/self/fd/0; }<<<"${nLinesDoneCmd}")
-                        mapfile -t fd_read_pos </proc/self/fdinfo/${fd_read}
-                        mapfile -t fd_write_pos </proc/self/fdinfo/${fd_write}
+                        read fd_read_pos </proc/self/fdinfo/${fd_read}
+                        read fd_write_pos </proc/self/fdinfo/${fd_write}
                         
-                        
-                        nLinesNew=$(( 1 + ( ( 1 + ${nLinesDone} ) * ( ${fd_write_pos[0]##*$'\t'} - ${fd_read_pos[0]##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos[0]##*$'\t'} ) ) ))
+                        nLinesNew=$(( 1 + ( ( 1 + ${nLinesDone} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos[0]##*$'\t'} ) ) ))
                         
                         #printf 'nLinesDone = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nLinesDone} ${fd_write_pos[0]##*$'\t'} ${fd_read_pos[0]##*$'\t'} ${nLinesNew}" >&${fd_stderr}
 
@@ -155,7 +155,7 @@ mySplit() {
                         (( ${nLinesNew} > ${nLinesCur} )) && {
                             printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
                             nLinesCur=${nLinesNew}
-                            #printf 'CHANGING nLinesNew to %s\n!!!' "${nLinesNew}"
+                            #printf 'CHANGING nLinesNew to %s\n!!!' "${nLinesNew}" >&${fd_stderr}
                         }
                         
                         ${stopFlag} && break
@@ -171,14 +171,14 @@ mySplit() {
                         
         fi
         
-        # set EXIT trap (dynamically determined based on which option nflags were active)
+        # set EXIT trap (dynamically determined based on which option flags were active)
         exitTrapStr="${exitTrapStr}"'kill '"${exitTrapStr_kill}"' 2>/dev/null'
         ${rmDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && rm -rf "'"${tmpDir}"'"'
         trap "${exitTrapStr}" EXIT        
         
 
         # populate {fd_continue} with an initial '1' 
-        # {fd_continue} will act as an exclusive read lock - when there is a '1' buffered in the pipe then nothinghas an read lock: 
+        # {fd_continue} will act as an exclusive read lock - when there is a '1' buffered in the pipe then nothing has a read lock: 
         # a process reads 1 byte from {fd_continue} to get the read lock, and that process writes a '1' back to the pipe to release the read lock
         printf '\n' >&${fd_continue}; 
 
@@ -197,7 +197,7 @@ mySplit() {
 
         # generate coproc source code template
         # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
-        # the individual coproc's codes are then generated via printf ${coprocSrcCode} $kk $kk and sourced
+        # the individual coproc's codes are then generated via printf ${coprocSrcCode} $kk $kk [$kk] and sourced
         coprocSrcCode="$(cat<<EOF0
 { coproc p%s {
 trap - EXIT
