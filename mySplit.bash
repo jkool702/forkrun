@@ -146,7 +146,7 @@ mySplit() {
                         
                         nLinesNew=$(( 1 + ( ( 1 + ${nLinesDone} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos[0]##*$'\t'} ) ) ))
                         
-                        #printf 'nLinesDone = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nLinesDone} ${fd_write_pos[0]##*$'\t'} ${fd_read_pos[0]##*$'\t'} ${nLinesNew}" >&${fd_stderr}
+                        #printf 'nLinesDone = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nLinesDone} ${fd_write_pos##*$'\t'} ${fd_read_pos##*$'\t'} ${nLinesNew} >&${fd_stderr}
 
                         #(( ${nLinesNew} <= ${nLinesCur} )) && (( ${nLinesCur} > ${nLines} )) && nLinesNew=$(( ( ( 11 * ${nLinesCur} ) / 10 ) + 1 ))
                                                 
@@ -214,7 +214,6 @@ EOF2
 )
     printf '\\\\n' >&${fd_continue}; 
     [[ \${#A[@]} == 0 ]] && { 
-        
         if [[ -f "${tmpDir}"/.done ]]; then
             [[ -f "${tmpDir}"/.quit ]] && break
 $(${nLinesAutoFlag} && cat<<EOF3
@@ -230,19 +229,17 @@ EOF4
         fi
         continue
     }
-    
-    ${runCmd[@]} "\${A[@]}" ${outStr}
-    sed -i "1,\${#A[@]}d" "${fPath}"
-
 $(${nLinesAutoFlag} && cat<<EOF5
     \${nLinesAutoFlag} && {
         nLinesDone+=\${#A[@]}
         printf '%%s\\\\n' \${nLinesDone} >"${tmpDir}"/.nDone/n%s
         printf '\\\\n' >&\${fd_nLinesAuto0}
-        [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false
+        [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false   
     }
 EOF5
-)
+)    
+    ${runCmd[@]} "\${A[@]}" ${outStr}
+    sed -i "1,\${#A[@]}d" "${fPath}"
 done
 } 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
@@ -263,9 +260,10 @@ EOF0
         ${nOrderFlag} && IFS=$'\n' cat "${tmpDir}"/.out/x*
 
         # print final nLines count
-        #${nLinesAutoFlag} && printf 'nLines (final) = %s   (max = %s)\n'  $(<"${tmpDir}"/.nLines) ${nLinesMax} >&${fd_stderr}
+        ${nLinesAutoFlag} && printf 'nLines (final) = %s   (max = %s)\n'  $(<"${tmpDir}"/.nLines) ${nLinesMax} >&${fd_stderr}
  
     # open anonympous pipes + other misc file descriptors for the above code block   
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
 
 }
+
