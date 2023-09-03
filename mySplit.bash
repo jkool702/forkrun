@@ -218,7 +218,7 @@ EOF2
         if [[ -f "${tmpDir}"/.done ]]; then
             [[ -f "${tmpDir}"/.quit ]] && break
 $(${nLinesAutoFlag} && cat<<EOF3
-                printf '0\\\\n' >&${fd_nLinesAuto0}
+                printf '0\\\\n' >&\${fd_nLinesAuto0}
 EOF3
 )
             \${initFlag} && initFlag=false || { touch "${tmpDir}"/.quit; break; }
@@ -238,7 +238,7 @@ $(${nLinesAutoFlag} && cat<<EOF5
     \${nLinesAutoFlag} && {
         nLinesDone+=\${#A[@]}
         printf '%%s\\\\n' \${nLinesDone} >"${tmpDir}"/.nDone/n%s
-        printf '\\\\n' >&${fd_nLinesAuto0}
+        printf '\\\\n' >&\${fd_nLinesAuto0}
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false
     }
 EOF5
