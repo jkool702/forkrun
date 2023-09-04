@@ -198,53 +198,80 @@ mySplit() {
         # generate coproc source code template
         # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
         # the individual coproc's codes are then generated via printf ${coprocSrcCode} $kk $kk [$kk] and sourced
-        coprocSrcCode="$(cat<<EOF0
+coprocSrcCode="$(IFS=$'\n'
+
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
 { coproc p%s {
 trap - EXIT
 while true; do
-    read -u ${fd_continue} 
-$(${nLinesAutoFlag} && cat<<EOF1
+    read -u ${fd_continue}
+EOF
+
+${nLinesAutoFlag} && { 
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
     \${nLinesAutoFlag} && nLinesCur=\$(<"${tmpDir}"/.nLines)
-EOF1
-)
+EOF
+}
+
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
     mapfile -t -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
-$(${nOrderFlag} && cat<<EOF2
+EOF
+
+${nOrderFlag} && { 
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
     read -u ${fd_nOrder} nOrder
-EOF2
-)
+EOF
+}
+
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
     printf '\\\\n' >&${fd_continue}; 
     [[ \${#A[@]} == 0 ]] && { 
         if [[ -f "${tmpDir}"/.done ]]; then
             [[ -f "${tmpDir}"/.quit ]] && break
-$(${nLinesAutoFlag} && cat<<EOF3
+EOF
+
+${nLinesAutoFlag} && { 
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
                 printf '0\\\\n' >&\${fd_nLinesAuto0}
-EOF3
-)
+EOF
+}
+
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
             \${initFlag} && initFlag=false || { touch "${tmpDir}"/.quit; break; }
-$(${inotifyFlag} && cat<<EOF4
+EOF
+
+${inotifyFlag} && { 
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
         else        
             read -u ${fd_inotify} -t 1
-EOF4
-)
+EOF
+}
+
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
         fi
         continue
     }
-$(${nLinesAutoFlag} && cat<<EOF5
+EOF
+
+${nLinesAutoFlag} && { 
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
     \${nLinesAutoFlag} && {
         nLinesDone+=\${#A[@]}
         printf '%%s\\\\n' \${nLinesDone} >"${tmpDir}"/.nDone/n%s
         printf '\\\\n' >&\${fd_nLinesAuto0}
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false   
     }
-EOF5
-)    
+EOF
+}
+
+{ printf '%s\n' "$(</proc/self/fd/0)"; }<<EOF
     ${runCmd[@]} "\${A[@]}" ${outStr}
     sed -i "1,\${#A[@]}d" "${fPath}"
 done
 } 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
 p_PID+=(\${p%s_PID})
-EOF0
+EOF
 )"
         
         # source the coproc code for each coproc worker
@@ -254,7 +281,7 @@ EOF0
         done
        
         # wait for everything to finish
-        wait ${p_PID[@]}
+        wait "${p_PID[@]}"
                
         # print output if using ordered output
         ${nOrderFlag} && IFS=$'\n' cat "${tmpDir}"/.out/x*
@@ -266,4 +293,3 @@ EOF0
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
 
 }
-
