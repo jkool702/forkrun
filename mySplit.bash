@@ -131,7 +131,9 @@ mySplit() {
             { coproc pAuto {
                     trap - EXIT
                     stopFlag=false
-                    source <({ source /proc/self/fd/0; }<<<'echo '"'"'echo 0 >'"${tmpDir}"'/.nDone/n'"'"'{0..'$(( ${nProcs} - 1 ))'}\;\ ')
+                    for (( kk=0; kk<${nProcs}; kk++ )); do
+                        echo 0 > "${tmpDir}"/.nDone/n${kk}
+                    done
                     nLinesDoneCmd="$(printf "echo "; source <(echo 'echo '"'"'$(( $(<"'"'"'"${tmpDir}"'"'"'"/.nDone/n0'"'"' '"'"') + $(<"'"'"'"${tmpDir}"'"'"'"/.nDone/n'"'"'{1..'"$(( ${nProcs} - 1 ))"}' '"'"') ))'"'"))"
                   
                     while true; do
