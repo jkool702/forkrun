@@ -241,7 +241,7 @@ $(${nLinesAutoFlag} && echo """
 """
 )    
     ${runCmd[@]} \"\${A[@]}\" ${outStr}
-    sed -i '1,\${#A[@]}d' \"${fPath}\"
+    sed -i \"1,\${#A[@]}d\" \"${fPath}\"
 done
 } 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
