@@ -174,9 +174,9 @@ mySplit() {
         fi
         
         # set EXIT trap (dynamically determined based on which option flags were active)
-        exitTrapStr="${exitTrapStr}"'kill '"${exitTrapStr_kill}"' 2>/dev/null'
+        exitTrapStr="${exitTrapStr}"'kill -9 '"${exitTrapStr_kill}"' 2>/dev/null'
         ${rmDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && rm -rf "'"${tmpDir}"'"'
-        trap "${exitTrapStr}" EXIT        
+        trap "${exitTrapStr}" EXIT INT TERM HUP QUIT       
         
 
         # populate {fd_continue} with an initial '1' 
@@ -202,7 +202,7 @@ mySplit() {
         # the individual coproc's codes are then generated via printf ${coprocSrcCode} $kk $kk [$kk] and sourced
         coprocSrcCode="""
 { coproc p%s {
-trap - EXIT
+trap - EXIT INT TERM HUP QUIT-
 while true; do
     read -u ${fd_continue} 
 $(${nLinesAutoFlag} && echo """
