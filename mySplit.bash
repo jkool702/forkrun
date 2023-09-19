@@ -147,8 +147,8 @@ mySplit() {
                         read fd_read_pos </proc/self/fdinfo/${fd_read}
                         read fd_write_pos </proc/self/fdinfo/${fd_write}
                         
-                        #nLinesNew=$(( 1 + ( ( 1 + ${nLinesDone} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos[0]##*$'\t'} ) ) ))
-                        nLinesNew=$(( 1 + ( ( 1 + $(<"${tmpDir}"/.nRead) ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos[0]##*$'\t'} ) ) ))
+                        #nLinesNew=$(( 1 + ( ( 1 + ${nLinesDone} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos##*$'\t'} ) ) ))
+                        nLinesNew=$(( 1 + ( ( 1 + $(<"${tmpDir}"/.nRead) ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos##*$'\t'} ) ) ))
                         
                         #printf 'nLinesDone = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nLinesDone} ${fd_write_pos##*$'\t'} ${fd_read_pos##*$'\t'} ${nLinesNew} >&${fd_stderr}
 
