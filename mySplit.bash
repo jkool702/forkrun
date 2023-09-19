@@ -202,7 +202,7 @@ mySplit() {
         # the individual coproc's codes are then generated via printf ${coprocSrcCode} $kk $kk [$kk] and sourced
         coprocSrcCode="""
 { coproc p%s {
-trap - EXIT INT TERM HUP QUIT-
+trap - EXIT INT TERM HUP QUIT
 while true; do
     read -u ${fd_continue} 
 $(${nLinesAutoFlag} && echo """
