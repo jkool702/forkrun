@@ -255,7 +255,7 @@ nBatch=0
 inAll=("${@}")
 
 while [[ "${1,,}" =~ ^-+.+$ ]]; do
-    if [[ "${1,,}" =~ ^-+((j)|(p(rocs)?))$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
+    if [[ "${1,,}" =~ ^-+(j|(n?procs?)?))$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
         # set number of worker coprocs
         nProcs="${2}"
         shift 2
@@ -304,6 +304,7 @@ while [[ "${1,,}" =~ ^-+.+$ ]]; do
     elif [[ "${1,,}" =~ ^-+u(nescape)?$ ]]; then
         # unescape '|' '>' '>>' '||' and '&&' in args0
         unescapeFlag=true
+        shift 1
     elif [[ "${1,,}" =~ ^-+((s(tdin)?)|(pipe))$ ]]; then
         # items in stdin are seperated by NULLS, not newlines
         pipeFlag=true
