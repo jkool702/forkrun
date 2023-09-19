@@ -6,7 +6,7 @@ mySplit() {
     # input 2: number of coprocs to use. Default is $(nproc)
     # 
     # DEPENDENCIES: Bash 4+ (5.2+ required for optimal speed)
-    #      cat, grep, sed, wc (GNU or busybox versions will work...both are supported)
+    #      cat, grep, sed, wc (either GNU or busybox versions will work)
             
     # make vars local
     local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID nLinesDoneCmd fd_read_pos fd_write_pos
