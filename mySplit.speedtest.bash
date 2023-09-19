@@ -12,6 +12,9 @@
 
 # SPEEDTEST CODE
 
+# source mySplit
+source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/mySplit.bash)
+
 # copy /usr onto ramdisk
 mkdir -p /mnt/ramdisk2
 mount -t tmpfs tmpfs /mnt/ramdisk
