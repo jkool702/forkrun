@@ -14,6 +14,68 @@ source <({ genOptParse_pre | genOptParse; }<<'EOF'
 EOF
 )
 
+# this should give the following optparse function code
+:<<'EOF'
+declare -a inFun 
+inFun=()
+shopt -s extglob
+unset optParse
+
+optParse() {
+
+    local continueFlag
+    
+    continueFlag=true
+    while ${continueFlag} && (( $# > 0  )) && [[ "$1" == [\-\+]* ]]; do
+         case "${1}" in 
+            -a|--apple)
+                shift 1
+                flag_a=true
+            ;;
+            -b|--bananna)
+                var_b="${2}"
+                shift 2
+                
+            ;;
+            -b?(=)+([[:graph:]])|--bananna?(=)+([[:graph:]]))
+                var_b="${1##@(-b?(=)|--bananna?(=))}"
+                shift 1
+                
+            ;;
+            -c|--coconut)
+                var_c="${2}"
+                shift 2
+                flag_c=true
+            ;;
+            -c?(=)+([[:graph:]])|--coconut?(=)+([[:graph:]]))
+                var_c="${1##@(-c?(=)|--coconut?(=))}"
+                shift 1
+                flag_c=true
+            ;;
+            +a|++apple)
+                shift 1
+                flag_a=false
+            ;;
+            '--')  
+                shift 1
+                continueFlag=false 
+                break
+            ;;
+            @([\-\+])*)
+                printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$1"
+                shift 1
+            ;;
+            *)
+                continueFlag=false 
+                break
+            ;;
+        esac
+        [[ $# == 0 ]] && continueFlag=false
+    done    
+    inFun=("${@}")
+}
+EOF
+
 # RUN A TEST
 unset flag_a var_b flag_c var_c
 optParse --apple -b 55 --coconut='yum' 'nonOpt0' 'nonOpt1' 'nonOpt2' 'etc...'
