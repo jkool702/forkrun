@@ -1,7 +1,7 @@
 genOptParse() {
 ## READS AN OPTION PARSING DEFINITION TABLE (FROM STDIN) AND GENERATES A OPTION PARSING FUNCTION: optParse
 #
-# USAGE:        source <(genOptParse<<'EOF'
+# USAGE:        source <(genOptParse_pre<<'EOF' | genOptParse
 #               <OPT_PARSE_DEFINITION_TABLE>
 #               EOF
 #               )
@@ -18,8 +18,7 @@ genOptParse() {
 # <CMD_LIST>:   (optional) list of commands to run when flag is given. If setting a variable (i.e., <VAR> is not '-' or '') these are run after the variable is set.
 #               EXAMPLE: passing `-a --apple :: var_a echo "var_a = $var_a"`
 #
-# SPECIAL VARS: In addition to setting variables as defined in the option parsing definition table, optparse will set 2 additional variables (arrays):
-# --> inAll:    bash array containing all inputs passed to optParse. Equivilant to "$@" if `optParse "$@"` is called
+# SPECIAL VARS: In addition to setting variables as defined in the option parsing definition table, optparse will set 1 additional variables (arrays):
 # --> inFun:    bash array containing all inputs passed to optParse. if the first N inputs are option flags (or their arguments), this is equivilant to "${@:N}"
 #
 # MISC NOTES:   Each line in the option parsing definition table corresponds to a single option that you want to define and parse.
@@ -29,16 +28,17 @@ genOptParse() {
 #               optParse works by using the "callback function" feature in `mapfile`. Mapfile loads everything into an array, and after reading each element _optParse is called, which in turn determines what to do with that input.
 
     local outCur
+    local -a A 
 
     cat<<'EOF'
 
-declare -a inFun inAll
+declare -a inFun 
 inFun=()
-inAll=()
 
 optParse() {
     
-    local assignNextVar assignDoneFlag 
+    local assignNextVar assignDoneFlag
+    local -a inAll
     
     assignDoneFlag=false
     
@@ -76,24 +76,25 @@ EOF
         if ${assignFlag}; then
         
             printf '%s' "${matchStr[0]}"
-            printf '|%s' "${matchStr[@]:1}"
+            (( ${#matchStr[@]} > 1 )) && printf '|%s' "${matchStr[@]:1}"
             printf ')\n    assignNextVar=%s\n    %s\n;;\n' "${varAssign}" "${*}"
         
             printf '%s=*' "${matchStr[0]}"
-            printf '|%s=*' "${matchStr[@]:1}"
+            (( ${#matchStr[@]} > 1 )) && printf '|%s=*' "${matchStr[@]:1}"
             printf ')\n    %s="${2#*=}"\n    %s\n;;\n' "${varAssign}" "${*}"
         
         else
         
             printf '%s' "${matchStr[0]}"
-            printf '|%s' "${matchStr[@]:1}"
+            (( ${#matchStr[@]} > 1 )) && printf '|%s' "${matchStr[@]:1}"
             printf ')\n    %s\n;;\n' "${*}"
         
         fi
     }
     
     while read -r; do
-        outCur="$(parseOptTable ${REPLY})"
+        mapfile -t -d ' ' A <<<"${REPLY}"
+        outCur="$(parseOptTable "${A[@]}")"
         printf '                %s\n' "${outCur//$'\n'/$'\n'                }"
     done
     
@@ -115,6 +116,20 @@ EOF
 
 }
 
+genOptParse_pre() {
+    # preparser for genOptParse that looks for option table definition entries that 
+    # dont have arguments and the commands being run only set (flag) variables as true and 
+    # adds the analagous `+OPT` entries to disable these flag variables (set them to false)
+    #
+    # EXAMPLE: if entry `-?(-)v?(erbose) :: - verboseFlag=true` exists in the option parsing definition table, 
+    #          then  `+?(+)v?(erbose) :: - verboseFlag=false` will automatically be added to the table 
+    #
+    # NOTE; IF THE OPTION DOES ANYTHING OTHER THAN SET FLAG VARIABLES TO TRUE IT WILL NOT BE AUTOMAGICALLY ADDED
+
+     { cat | tee >(cat >${fd}) >(cat | grep -E ' :: -( *[^ =]+=true;?)+ *$' | { while read -r; do printf '%s :: %s\n' "$(sed -E 's/(^| )-/\1+/g;s/((^| )\+?[?*+@]\()-\)/\1+)/g'<<<"${REPLY% :: *}")" "$(sed -E 's/=true/=false/g'<<<"${REPLY#* :: }")"; done; } >&${fd}); } {fd}>&1 | grep -vE '^$'
+
+}
+
 # # # # #  TEST EXAMPLE # # # # #
 
 # GENERATE SIMPLE OPTION PARSING DEFINITION TABLE AND PASS TO GENOPTPARSE TO GENERATE THE OPTPARSE FUNCTION, AND SOURCE IT. THIS PARTICULAR TABLE RESULTS IN:
@@ -122,7 +137,7 @@ EOF
 #    -b|--bananna{ ,=}<arg>  -->  var_b=<arg>
 #    -c|--coconut{ ,=}<arg>  -->  var_c=<arg>; flag_c=true
 
-source <(genOptParse<<'EOF'
+source <(genOptParse_pre<<'EOF' | genOptParse
 -a --apple :: - flag_a=true
 -b --bananna :: var_b
 -c --coconut :: var_c flag_c=true
