@@ -18,7 +18,8 @@ genOptParse() {
 # <CMD_LIST>:   (optional) list of commands to run when flag is given. If setting a variable (i.e., <VAR> is not '-' or '') these are run after the variable is set.
 #               EXAMPLE: passing `-a --apple :: var_a echo "var_a = $var_a"`
 #
-# SPECIAL VARS: In addition to setting variables as defined in the option parsing definition table, optparse will set 1 additional variables (arrays):
+# SPECIAL VARS: In addition to setting variables as defined in the option parsing definition table, optparse will set 2 additional variables (arrays):
+# --> inAll:    bash array containing all inputs passed to optParse. Equivilant to "$@" if `optParse "$@"` is called
 # --> inFun:    bash array containing all inputs passed to optParse. if the first N inputs are option flags (or their arguments), this is equivilant to "${@:N}"
 #
 # MISC NOTES:   Each line in the option parsing definition table corresponds to a single option that you want to define and parse.
@@ -34,34 +35,21 @@ genOptParse() {
 
 declare -a inFun 
 inFun=()
+shopt -s extglob
+unset optParse
 
 optParse() {
-    
-    local assignNextVar assignDoneFlag
-    local -a inAll
-    
-    assignDoneFlag=false
-    
-    _optParse() {
 
-        if ${assignDoneFlag}; then
-            inFun+=("$2")
-
-        elif [[ ${assignNextVar} ]]; then 
-            
-            { source /proc/self/fd/0; }<<<"${assignNextVar}=\"$2\"" 
-            assignNextVar=''
-
-        else
-            case "$2" in 
-                --)  
-                    assignDoneFlag=true  
-                ;;
+    local continueFlag
+    
+    continueFlag=true
+    while ${continueFlag} && (( $# > 0  )) && [[ "$1" == \-* ]]; do
+         case "${1}" in 
 EOF
 
     parseOptTable() {    
         
-        local varAssign assignFlag
+        local varAssign assignFlag matchStrCur
         local -a matchStr
         
         until [[ "$1" == '::' ]]; do
@@ -70,47 +58,51 @@ EOF
         done
         
         assignFlag=false
-        [[ -z $2 ]] || [[ "$2" == '-' ]] || { assignFlag=true; varAssign="$2"; }
+        [[ -z $2 ]] || [[ "$2" == '-' ]] || { assignFlag=true; varAssign="${2%$'\n'}"; }
         shift 2
         
         if ${assignFlag}; then
         
             printf '%s' "${matchStr[0]}"
             (( ${#matchStr[@]} > 1 )) && printf '|%s' "${matchStr[@]:1}"
-            printf ')\n    assignNextVar=%s\n    %s\n;;\n' "${varAssign}" "${*}"
+            printf ')\n    %s="${2}"\n    shift 2\n    %s\n;;\n' "${varAssign}" "${*}"
         
-            printf '%s=*' "${matchStr[0]}"
-            (( ${#matchStr[@]} > 1 )) && printf '|%s=*' "${matchStr[@]:1}"
-            printf ')\n    %s="${2#*=}"\n    %s\n;;\n' "${varAssign}" "${*}"
+            matchStrCur="$(printf '%s?(=)+([[:graph:]])' "${matchStr[0]}"; (( ${#matchStr[@]} > 1 )) && printf '|%s?(=)+([[:graph:]])' "${matchStr[@]:1}")"
+            printf '%s)\n    %s="${1##@(%s)}"\n    shift 1\n    %s\n;;\n' "${matchStrCur}" "${varAssign}" "${matchStrCur//'+([[:graph:]])'/}" "${*}"
         
         else
         
             printf '%s' "${matchStr[0]}"
             (( ${#matchStr[@]} > 1 )) && printf '|%s' "${matchStr[@]:1}"
-            printf ')\n    %s\n;;\n' "${*}"
+            printf ')\n    shift 1\n    %s\n;;\n' "${*}"
         
         fi
     }
     
     while read -r; do
-        mapfile -t -d ' ' A <<<"${REPLY}"
+        mapfile -t A <<<"${REPLY//' '/$'\n'}"
         outCur="$(parseOptTable "${A[@]}")"
-        printf '                %s\n' "${outCur//$'\n'/$'\n'                }"
+        printf '            %s\n' "${outCur//$'\n'/$'\n'            }"
     done
     
     cat<<'EOF'
-                -*)
-                    printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$2"
-                ;;
-                *)
-                    inFun+=("$2")
-                    assignDoneFlag=true
-                ;;
-            esac
-        fi
-    }     
-    
-    mapfile -t -d '' -C _optParse -c 1 inAll < <(printf '%s\0' "$@")
+            '--')  
+                shift 1
+                continueFlag=false 
+                break
+            ;;
+            \-*)
+                printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$1"
+                shift 1
+            ;;
+            *)
+                continueFlag=false 
+                break
+            ;;
+        esac
+        [[ $# == 0 ]] && continueFlag=false
+    done    
+    inFun=("${@}")
 }
 EOF
 
@@ -144,71 +136,6 @@ source <(genOptParse_pre<<'EOF' | genOptParse
 EOF
 )
 
-# THE ABOVE CODE PRODUCES THE FOLLOWING FUNCTION DEFINITION, WHICH IS THEN SOURCED
-#
-# NOTE: IT IS MORE EFFICIENT TO TAKE THIS GENERATED FUNCTION AND COPY/PASTE IT INTO THE  
-#       CODE YOU ARE PARSING OPTIONS FOR INSTEAD OF [RE]GENERATING+SOURCING IT EVERY TIME
-
-:<<'EOI'
-declare -a inFun inAll
-inFun=()
-inAll=()
-
-optParse() {
-    
-    local assignNextVar assignDoneFlag 
-    
-    assignDoneFlag=false
-    
-    _optParse() {
-
-        if ${assignDoneFlag}; then
-            inFun+=("$2")
-
-        elif [[ ${assignNextVar} ]]; then 
-            
-            { source /proc/self/fd/0; }<<<"${assignNextVar}=\"$2\"" 
-            assignNextVar=''
-
-        else
-            case "$2" in 
-                --)  
-                    assignDoneFlag=true  
-                ;;
-                -a|--apple)
-                    flag_a=true
-                ;;
-                -b|--bananna)
-                    assignNextVar=var_b
-                    
-                ;;
-                -b=*|--bananna=*)
-                    var_b="${2#*=}"
-                    
-                ;;
-                -c|--coconut)
-                    assignNextVar=var_c
-                    flag_c=true
-                ;;
-                -c=*|--coconut=*)
-                    var_c="${2#*=}"
-                    flag_c=true
-                ;;
-                -*)
-                    printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$2"
-                ;;
-                *)
-                    inFun+=("$2")
-                    assignDoneFlag=true
-                ;;
-            esac
-        fi
-    }     
-    
-    mapfile -t -d '' -C _optParse -c 1 inAll < <(printf '%s\0' "$@")
-}
-EOI
-
 # RUN A TEST
 unset flag_a var_b flag_c var_c
 optParse --apple -b 55 --coconut='yum' 'nonOpt0' 'nonOpt1' 'nonOpt2' 'etc...'
@@ -232,3 +159,42 @@ var_c = yum
 
 REMAINING INPUTS:  "nonOpt0" "nonOpt1" "nonOpt2" "etc..." 
 EOF
+
+# run a harder test
+
+
+# build list of ~59000 possible input combinations
+mapfile -t optA < <(echo {-l\ 512,--lines=512,}\ {-j28,--nprocs=28,}\ {-i,--insert,}\ {-k,--keep-order,}\ {-n,--number-lines,}\ {-z,--null,}\ {-u,--unescape,}\ {-s,--pipe,}\ {-v,--verbose,}\ {-d\ 3,--delete=3,}$'\n')
+
+#setup new option parsing definition table
+unset optParse inFun 
+source <(genOptParse_pre<<'EOF' | genOptParse 
+-?(-)j -?(-)P -?(-)?(n)proc?(s) :: nProcs
+-?(-)l?(ine?(s)) :: nBatch
+-?(-)t?(mp?(?(-)dir)) :: tmpDirRoot
+-?(-)d?(elete) :: rmTmpDirFlag 
+-?(-)i?(nsert) :: - substituteStringFlag=true
+-?(-)I?(D) -?(-)INSERT?(?(-)ID) :: - substituteStringFlag=true; substituteStringIDFlag=true
+-?(-)k?(eep?(?(-)order)) :: - orderedOutFlag=true
+-?(-)K?(EEP?(?(-)ORDER)?(?(-)STRICT)) :: - orderedOutFlag=true; strictOrderedOutFlag=true
+-?(-)n?(umber)?(-)?(line?(s)) :: - exportOrderFlag=true
+-?(-)0 -?(-)z -?(-)null :: - nullDelimiterFlag=true
+-?(-)u?(nescape) :: - unescapeFlag=true
+-?(-)s?(tdin) -?(-)pipe :: - pipeFlag=true
+-?(-)w?(ait) :: - waitFlag=true
+-?(-)v?(erbose) :: - verboseFlag=true
+-?(-)h?(elp) :: - displayHelp
+EOF
+)
+
+# time auto-generated case loop-filter method
+time {
+SECONDS=0
+shopt -s extglob
+for kk in "${!optA[@]}"; do
+    optParse ${optA[$kk]}
+    if [[ "$kk" == *00 ]]; then
+        printf 'Finished %d of %d (%d%% complete) -- elapsed time: %d seconds (current rate: %d inputs / second)\n' $kk ${#optA[@]} $(( ( 100 * $kk ) / ${#optA[@]} )) $SECONDS $(( $kk / ( 1 + $SECONDS ) )) >&2
+    fi
+done
+}
