@@ -62,7 +62,7 @@ optParse() {
                 break
             ;;
             @([\-\+])*)
-                printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$1"
+                printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$1" >&2
                 shift 1
             ;;
             *)
