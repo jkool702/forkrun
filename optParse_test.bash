@@ -110,7 +110,7 @@ mapfile -t optA < <(echo {-l\ 512,--lines=512,}\ {-j28,--nprocs=28,}\ {-i,--inse
 
 # setup new option parsing definition table
 unset optParse inFun 
-source <(genOptParse<<'EOF' |
+source <(genOptParse<<'EOF'
 -?(-)j -?(-)P -?(-)?(n)proc?(s) :: nProcs
 -?(-)l?(ine?(s)) :: nBatch
 -?(-)t?(mp?(?(-)dir)) :: tmpDirRoot
