@@ -7,7 +7,7 @@ source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/optParse.b
 #    -b|--bananna{ ,=}<arg>  -->  var_b=<arg>
 #    -c|--coconut{ ,=}<arg>  -->  var_c=<arg>; flag_c=true
 
-source <({ genOptParse_pre | genOptParse; }<<'EOF'
+source <({ genOptParse; }<<'EOF'
 -a --apple :: - flag_a=true
 -b --bananna :: var_b
 -c --coconut :: var_c flag_c=true
@@ -21,12 +21,14 @@ inFun=()
 shopt -s extglob
 unset optParse
 
+
 optParse() {
 
     local continueFlag
     
     continueFlag=true
-    while ${continueFlag} && (( $# > 0  )) && [[ "$1" == [\-\+]* ]]; do
+
+    while ${continueFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
          case "${1}" in 
             -a|--apple)
                 shift 1
@@ -37,7 +39,7 @@ optParse() {
                 shift 2
                 
             ;;
-            -b?(=)+([[:graph:]])|--bananna?(=)+([[:graph:]]))
+            -b?(=)@([[:graph:]])*|--bananna?(=)@([[:graph:]])*)
                 var_b="${1##@(-b?(=)|--bananna?(=))}"
                 shift 1
                 
@@ -47,7 +49,7 @@ optParse() {
                 shift 2
                 flag_c=true
             ;;
-            -c?(=)+([[:graph:]])|--coconut?(=)+([[:graph:]]))
+            -c?(=)@([[:graph:]])*|--coconut?(=)@([[:graph:]])*)
                 var_c="${1##@(-c?(=)|--coconut?(=))}"
                 shift 1
                 flag_c=true
@@ -56,12 +58,13 @@ optParse() {
                 shift 1
                 flag_a=false
             ;;
-            '--')  
+
+            --)  
                 shift 1
                 continueFlag=false 
                 break
             ;;
-            @([\-\+])*)
+            @([-+])@([[:graph:]])*)
                 printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$1" >&2
                 shift 1
             ;;
@@ -107,7 +110,7 @@ mapfile -t optA < <(echo {-l\ 512,--lines=512,}\ {-j28,--nprocs=28,}\ {-i,--inse
 
 # setup new option parsing definition table
 unset optParse inFun 
-source <(genOptParse_pre<<'EOF' | genOptParse 
+source <(genOptParse<<'EOF' |
 -?(-)j -?(-)P -?(-)?(n)proc?(s) :: nProcs
 -?(-)l?(ine?(s)) :: nBatch
 -?(-)t?(mp?(?(-)dir)) :: tmpDirRoot
