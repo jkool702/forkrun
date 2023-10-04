@@ -6,11 +6,13 @@ mySplit() {
     # input 2: number of coprocs to use. Default is $(nproc)
     # 
     # DEPENDENCIES: Bash 4+ (5.2+ required for optimal speed)
-    #      cat, grep, sed, wc (either GNU or busybox versions will work)
+    #      `cat` --AND-- `sed -i`
+    #      optional: `grep -cE` --OR-- `nproc` (required to automatically set nProcs as # logical cpu cores. without one of these either it must be set manually or it gets set to "4" by default)
+    # for the above external dependencies either the GNU or the busybox versions will work
             
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID nLinesDoneCmd fd_read_pos fd_write_pos
-    local -i nLines nLinesCur nLinesNew nLinesMax nLinesDone nRead nProcs kk
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_write_pos
+    local -i nLines nLinesCur nLinesNew nLinesMax nLinesRead nRead nProcs kk
     local -a A p_PID runCmd 
   
     # setup tmpdir
@@ -31,7 +33,7 @@ mySplit() {
         runCmd=("${runCmd[@]//'%'/'%%'}")
         runCmd=("${runCmd[@]//'\'/'\\\\'}")
         
-        # if reading 1 line at as time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
+        # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # check for inotifywait
@@ -41,7 +43,7 @@ mySplit() {
         : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}"
             
         # cherck for a conflict that could occur is flags are defined on commandline when mySplit is called
-        ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supoported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
+        ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
     
         # if keeping tmpDir print its location to stderr
         ${rmDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
@@ -51,7 +53,7 @@ mySplit() {
         exitTrapStr_kill=''
         
         # spawn a coproc to write stdin to a tmpfile
-        # After we are done reading all of stdin incidate this by touching .done
+        # After we are done reading all of stdin indicate this by touching .done
         if ${pipeReadFlag}; then
             touch "${tmpDir}"/.done
         else
@@ -84,7 +86,7 @@ mySplit() {
             exitTrapStr_kill+="${pNotify_PID} "
         fi
         
-        # setup (ordered) output
+        # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
 
             mkdir -p "${tmpDir}"/.out
@@ -93,17 +95,24 @@ mySplit() {
             { coproc pOrder ( 
                 trap - EXIT
                 
-                local -i v0 v9
-                
-                printf '%s\n' {00..89} >&${fd_nOrder}
-                
+                local -i v9 kkMax kkCur
+
+                # generate enough nOrder indices (~10000) to fill up 64k pipe buffer
+                printf '%s\n' {00..89} {9000..9899} {9900000..9998999} >&${fd_nOrder}
+
+                # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
+                v9='99'
+                kkMax='8'
                 while ! [[ -f "${tmpDir}"/.quit ]]; do
                     v9="${v9}9"
-                    v0="${v0}0"
-                    
-                    { source /proc/self/fd/0 >&${fd_nOrder}; }<<<"printf '%s\n' {${v9}00${v0}..${v9}89${v9}}"
+                    kkmax="${kkMax}9"
+
+                    for (( kk=0 ; kk<=kkMax ; kk++ )); do
+                        kkCur="$(printf '%0.'"${#kkMax}"'d' "$kk")"                    
+                        { source /proc/self/fd/0 >&${fd_nOrder}; }<<<"printf '%s\n' {${v9}${kkCur}000..${v9}${kkCur}999}"
+                    done
                 done
-            )
+              )
             } 2>/dev/null
             
             exitTrapStr_kill+="${pOrder_PID} "
@@ -120,38 +129,33 @@ mySplit() {
             # setup nLines indicator
             #mkdir -p "${tmpDir}"/.nDone
             echo ${nLines} >"${tmpDir}"/.nLines
-            nLinesDone=0
-                      
+            echo 0 > "${tmpDir}"/.nRead
+            
             # LOGIC FOR DYNAMICALLY SETTING 'nLines': 
             # The avg_bytes_per_line is estimated by looking at the byte offset position of fd_read and having each coproc keep track of how many lines it has read
-            # the new "proposed" 'nLines' is 1 + (fd_write_pos - fd_read_pos)/((nProcs)*(1+avg_bytes_per_line))
-            # if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines to match the rate lines are coming in on stdin)
-            # if proposed new 'nLines' is less than or equal to current 'nLines' ignore it(i.e., nLines can only ever increase...it will never decrease)
-            # if the new 'nLines' is greater than or equal to 'nLinesMax' or .quit file has appeared, then break
+            # the new "proposed" 'nLines' is: avg_bytes_per_line=( fd_read-pos / ( 1 + nLinesRead ) ); nLinesNew=( 1 + (1 / nProc) * (fd_write_pos - fd_read_pos) / (1+avg_bytes_per_line) )
+            # --> if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines' to match the rate lines are coming in on stdin)
+            # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
+            # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break
             { coproc pAuto {
                     trap - EXIT
                     stopFlag=false
-                    #for (( kk=0; kk<${nProcs}; kk++ )); do
-                    #    echo 0 > "${tmpDir}"/.nDone/n${kk}
-                    #done
-                    echo 0 > "${tmpDir}"/.nRead
-                    #nLinesDoneCmd="$(printf "echo "; source <(echo 'echo '"'"'$(( $(<"'"'"'"${tmpDir}"'"'"'"/.nDone/n0'"'"' '"'"') + $(<"'"'"'"${tmpDir}"'"'"'"/.nDone/n'"'"'{1..'"$(( ${nProcs} - 1 ))"}' '"'"') ))'"'"))"
-                  
+
+        
                     while true; do
                     
                         read -u ${fd_nLinesAuto}
                         { [[ ${REPLY} == 0 ]] || [[ -f "${tmpDir}"/.quit ]]; } && stopFlag=true  
                         [[ -f "${fPath}" ]] || break
                         
-                        #nLinesDone=$({ source /proc/self/fd/0; }<<<"${nLinesDoneCmd}")
-                        read fd_read_pos </proc/self/fdinfo/${fd_read}
-                        read fd_write_pos </proc/self/fdinfo/${fd_write}
+                        read -d $'\t' fd_read_pos </proc/self/fdinfo/${fd_read}
+                        read -d $'\t' fd_write_pos </proc/self/fdinfo/${fd_write}
+                        read nLinesRead <"${tmpDir}"/.nRead
                         
-                        #nLinesNew=$(( 1 + ( ( 1 + ${nLinesDone} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos##*$'\t'} ) ) ))
-                        nLinesNew=$(( 1 + ( ( 1 + $(<"${tmpDir}"/.nRead) ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos##*$'\t'} ) ) ))
-                        
-                        #printf 'nLinesDone = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nLinesDone} ${fd_write_pos##*$'\t'} ${fd_read_pos##*$'\t'} ${nLinesNew} >&${fd_stderr}
+                        nLinesNew=$(( 1 + ( ( 1 + ${nLinesRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ))
 
+                        # unused: debug output + forced increasing of nLines
+                        #printf 'nLinesRead = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nLinesRead} ${fd_write_pos##*$'\t'} ${fd_read_pos##*$'\t'} ${nLinesNew} >&${fd_stderr}
                         #(( ${nLinesNew} <= ${nLinesCur} )) && (( ${nLinesCur} > ${nLines} )) && nLinesNew=$(( ( ( 11 * ${nLinesCur} ) / 10 ) + 1 ))
                                                 
                         (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; stopFlag=true; }
@@ -174,11 +178,16 @@ mySplit() {
             #printf '\n' >&${fd_nLinesAuto}
                         
         fi
-        
-        # keep track of how many lines that have been read and delete them from the start of stdin cache file after that have been read
+
+        # keep track of how many lines that have been read and delete them from the start of the $fPath file after they have been read 
         { coproc pRead {
             trap - EXIT
-            nRead=0
+
+            # on first read truncate 1 less line than nRead, so that there is always a 1-line buffer between what is going to be read next and what is being truncated
+            read -u ${fd_nRead}
+            nRead=${REPLY}
+            printf '%s\n' ${nRead} > "${tmpDir}"/.nRead 
+            (( ${nRead} > 1 )) && sed -i "1,$(( ${REPLY} - 1 ))d" "${fPath}"
             
             while true; do 
                 read -u ${fd_nRead}
@@ -189,7 +198,7 @@ mySplit() {
                 
                 sed -i "1,${REPLY}d" "${fPath}"
             done
-            }
+          }
         } 2>/dev/null        
         
         exitTrapStr+='printf '"'"'\n'"'"' >&'"${fd_nRead}"'; '
@@ -203,8 +212,10 @@ mySplit() {
         
 
         # populate {fd_continue} with an initial '1' 
-        # {fd_continue} will act as an exclusive read lock - when there is a '1' buffered in the pipe then nothing has a read lock: 
-        # a process reads 1 byte from {fd_continue} to get the read lock, and that process writes a '1' back to the pipe to release the read lock
+        # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
+        #     when there is a '1' the pipe buffer then nothing has a read lock
+        #     a process reads 1 byte from {fd_continue} to get the read lock, and 
+        #     when that process writes a '1' back to the pipe it releases the read lock
         printf '\n' >&${fd_continue}; 
 
         # dont exit read loop during init 
@@ -212,17 +223,17 @@ mySplit() {
         
         # spawn $nProcs coprocs
         # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
-        # they then read N lines with mapfile and send 1 top {fd_continue} (so the next coproc can start to read)
+        # they then read N lines with mapfile and send 1 to {fd_continue} (so the next coproc can start to read)
         # if the read array is empty the coproc will either continue or break, depending on if end conditions are met
-        # finally it will do something with the data. Currently this is a dummy printf call (for testing). 
+        # finally it will do something with the data.
         #
-        # NOTE: by putting the read fd in a brace group surrounding all the coprocs, they will all use the same file descriptor
-        # this means that whenever a coproc reads data it will start reading at the point the last coproc stopped reading at
-        # This basically means that all you need to do is make sure 2 processes dont read at the same time and deal with stopping condiutions.
+        # NOTE: All coprocs share the same fd_read file descriptor ( accomplished via `( <...>; coproc p0 ...; <...> ;  coproc pN ...; ) {fd_read}<><(:)` )
+        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data theb fd_read used by *all* of them i advanced.
 
-        # generate coproc source code template
+        # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly)
         # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
         # the individual coproc's codes are then generated via printf ${coprocSrcCode} $kk $kk [$kk] and sourced
+        
         coprocSrcCode="""
 { coproc p%s {
 trap - EXIT INT TERM HUP QUIT
@@ -265,21 +276,21 @@ p_PID+=(\${p%s_PID})
 """
         
         # source the coproc code for each coproc worker
-        for (( kk=0; kk<${nProcs}; kk++ )); do
+        for (( kk=0 ; kk<${nProcs} ; kk++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
             source <(printf "${coprocSrcCode}" ${kk} ${kk} $(${nLinesAutoFlag} && printf '%s' "${kk}"))
         done
        
         # wait for everything to finish
-        wait ${p_PID[@]}
+        wait "${p_PID[@]}"
                
         # print output if using ordered output
-        ${nOrderFlag} && IFS=$'\n' cat "${tmpDir}"/.out/x*
+        ${nOrderFlag} && cat "${tmpDir}"/.out/x*
 
         # print final nLines count
         ${nLinesAutoFlag} && printf 'nLines (final) = %s   (max = %s)\n'  $(<"${tmpDir}"/.nLines) ${nLinesMax} >&${fd_stderr}
  
-    # open anonympous pipes + other misc file descriptors for the above code block   
+    # open anonymous pipes + other misc file descriptors for the above code block   
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_nRead}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
 
 }
