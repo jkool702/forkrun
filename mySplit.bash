@@ -105,7 +105,7 @@ mySplit() {
                 kkMax='8'
                 while ! [[ -f "${tmpDir}"/.quit ]]; do
                     v9="${v9}9"
-                    kkmax="${kkMax}9"
+                    kkMax="${kkMax}9"
 
                     for (( kk=0 ; kk<=kkMax ; kk++ )); do
                         kkCur="$(printf '%0.'"${#kkMax}"'d' "$kk")"                    
