@@ -183,6 +183,7 @@ mySplit() {
         { coproc pRead {
             trap - EXIT
 
+            nRead=0
             nLinesOld=0
             nWait=${nProcs}
             
@@ -196,10 +197,10 @@ mySplit() {
                 case ${nWait} in
                     0) 
                         nWait=${nProcs}
-#                       read -u ${fd_continue}
+                        # read -u ${fd_continue}
                         nLinesCur=$(<"${tmpDir}"/.nLines)
                         sed -i "1,$(( ${nRead} + ${nLinesOld} - ${nLinesCur} ))d" "${fPath}"
-#                       printf '\n' >&${fd_continue}
+                        # printf '\n' >&${fd_continue}
                         nLinesOld=${nLinesCur}
                     ;;
                     *)
