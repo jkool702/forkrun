@@ -12,7 +12,7 @@ mySplit() {
             
     # make vars local
     local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_write_pos
-    local -i nLines nLinesCur nLinesNew nLinesMax nLinesRead nRead nProcs kk nWait
+    local -i nLines nLinesOld nLinesCur nLinesNew nLinesMax nLinesRead nRead nProcs kk nWait
     local -a A p_PID runCmd 
   
     # setup tmpdir
@@ -175,21 +175,16 @@ mySplit() {
 
             exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&'"${fd_nLinesAuto}"'; '
             exitTrapStr_kill+="${pAuto_PID} "
-            
-            #printf '\n' >&${fd_nLinesAuto}
-                        
+                                    
         fi
 
-        # keep track of how many lines that have been read and delete them from the start of the $fPath file after they have been read 
+        # keep track of how many lines have been read and delete already-read lines from the start of the $fPath file after they have been read (leaving a buffer of $nLines lines)
         nWait=${nProcs}
         { coproc pRead {
             trap - EXIT
 
-            # on first read truncate 1 less line than nRead, so that there is always a 1-line buffer between what is going to be read next and what is being truncated
-            read -u ${fd_nRead}
-            nRead=${REPLY}
-            printf '%s\n' ${nRead} > "${tmpDir}"/.nRead 
-            (( ${nRead} > 1 )) && sed -i "1,$(( ${REPLY} - 1 ))d" "${fPath}"
+            nLinesOld=0
+            nWait=${nProcs}
             
             while true; do 
                 read -u ${fd_nRead}
@@ -197,18 +192,21 @@ mySplit() {
                 nRead+=${REPLY}
                 
                 printf '%s\n' ${nRead} > "${tmpDir}"/.nRead
-                sed -i "1,${REPLY}d" "${fPath}"
-                case $nWait in
+
+                case ${nWait} in
                     0) 
                         nWait=${nProcs}
-#                        read -u ${fd_continue}
-                        sed -i "1,${REPLY}d" "${fPath}"
-#                        printf '\n' >&${fd_continue}
+#                       read -u ${fd_continue}
+                        nLinesCur=$(<"${tmpDir}"/.nLines)
+                        sed -i "1,$(( ${nRead} + ${nLinesOld} - ${nLinesCur} ))d" "${fPath}"
+#                       printf '\n' >&${fd_continue}
+                        nLinesOld=${nLinesCur}
                     ;;
                     *)
                         ((nWait--))
                     ;;
                 esac
+                [[ -f "${tmpDir}"/.quit ]] && break
             done
           }
         } 2>/dev/null        
