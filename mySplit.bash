@@ -12,11 +12,11 @@ mySplit() {
             
     # make vars local
     local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_write_pos
-    local -i nLines nLinesCur nLinesNew nLinesMax nLinesRead nRead nProcs kk
+    local -i nLines nLinesCur nLinesNew nLinesMax nLinesRead nRead nProcs kk nWait
     local -a A p_PID runCmd 
   
     # setup tmpdir
-    tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
+    [[ -d /dev/shm ]] && tmpDir=/dev/shm/"$(mktemp -d .mySplit.XXXXXX)"  || tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
     fPath="${tmpDir}"/.stdin
     mkdir -p "${tmpDir}"
     touch "${fPath}"   
@@ -89,6 +89,7 @@ mySplit() {
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
 
+
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
                                     
@@ -148,11 +149,11 @@ mySplit() {
                         { [[ ${REPLY} == 0 ]] || [[ -f "${tmpDir}"/.quit ]]; } && stopFlag=true  
                         [[ -f "${fPath}" ]] || break
                         
-                        read -d $'\t' fd_read_pos </proc/self/fdinfo/${fd_read}
-                        read -d $'\t' fd_write_pos </proc/self/fdinfo/${fd_write}
+                        read fd_read_pos </proc/self/fdinfo/${fd_read}
+                        read fd_write_pos </proc/self/fdinfo/${fd_write}
                         read nLinesRead <"${tmpDir}"/.nRead
                         
-                        nLinesNew=$(( 1 + ( ( 1 + ${nLinesRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ))
+                        nLinesNew=$(( 1 + ( ( 1 + ${nLinesRead} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos##*$'\t'} ) ) ))
 
                         # unused: debug output + forced increasing of nLines
                         #printf 'nLinesRead = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nLinesRead} ${fd_write_pos##*$'\t'} ${fd_read_pos##*$'\t'} ${nLinesNew} >&${fd_stderr}
@@ -180,6 +181,7 @@ mySplit() {
         fi
 
         # keep track of how many lines that have been read and delete them from the start of the $fPath file after they have been read 
+        nWait=${nProcs}
         { coproc pRead {
             trap - EXIT
 
@@ -195,8 +197,18 @@ mySplit() {
                 nRead+=${REPLY}
                 
                 printf '%s\n' ${nRead} > "${tmpDir}"/.nRead
-                
                 sed -i "1,${REPLY}d" "${fPath}"
+                case $nWait in
+                    0) 
+                        nWait=${nProcs}
+#                        read -u ${fd_continue}
+                        sed -i "1,${REPLY}d" "${fPath}"
+#                        printf '\n' >&${fd_continue}
+                    ;;
+                    *)
+                        ((nWait--))
+                    ;;
+                esac
             done
           }
         } 2>/dev/null        
