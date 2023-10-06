@@ -252,12 +252,13 @@ $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && nLinesCur=\$(<\"${tmpDir}\"/.nLines)
 """)
     read -u ${fd_continue} 
-    mapfile -t -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
+    mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
+    [[ \${#A[@]} == 0 ]] || [[ \${nLinesCur} == 1 ]] || mapfile -n 1 -O \${#A[@]} -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
 $(${nOrderFlag} && echo """
     read -u ${fd_nOrder} nOrder
 """)
     printf '\\\\n' >&${fd_continue}; 
-    [[ \${#A[@]} == 0 ]] && { 
+    [[ \${#A[@]} == 0 ]] && {
         if [[ -f \"${tmpDir}\"/.done ]]; then
             [[ -f \"${tmpDir}\"/.quit ]] && break
 $(${nLinesAutoFlag} && echo """
@@ -278,7 +279,7 @@ $(${nLinesAutoFlag} && echo """
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false   
     }
 """)    
-    ${runCmd[@]} \"\${A[@]}\" ${outStr}
+    ${runCmd[@]} \"\${A[@]//\$'\\n'/}\" ${outStr}
 done
 } 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
