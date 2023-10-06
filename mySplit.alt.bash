@@ -254,7 +254,10 @@ $(${nLinesAutoFlag} && echo """
 """)
     read -u ${fd_continue} 
     mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
-    [[ \${#A[@]} == 0 ]] || [[ \${nLinesCur} == 1 ]] || mapfile -n 1 -O \${#A[@]} -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
+    [[ \${#A[@]} == 0 ]] || [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]}: -1}\" == $'\n' ]] || {
+        read -r -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read})
+        A[\$(( \${#A[@]} - 1 ))]+=\"\${REPLY}\"\$'\\n'
+    }
 $(${nOrderFlag} && echo """
     read -u ${fd_nOrder} nOrder
 """)
