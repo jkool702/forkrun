@@ -1,5 +1,29 @@
 #!/usr/bin/env bash 
 
+# TL;DR SUMMARY 
+# 11 tests were run on `parallel -m`, `xargs -P $(nproc) -d $'\n'`, and `mySplit`. AFAIK, these are the fastest parallelization methods supported by `parallel` and `xargs`, respectively.
+# These tests computed checksums of all files under /usr (including /lib, /lib64, /bin) using 11 different checksumming algorithms. 
+# Files were first copied onto a tmpfs ramdisk to ensure disk I/O did not skew results. Machine has enough RAM to ensure nothing was swapped pout. 
+# 
+# Overall results were:
+# ---> in all tests mySplit was at minimum: at least 30% faster than `xargs -P $(nproc) -d $'\n` and at least 2.41x as fast as `parallel -m`
+# ---> on average, mySplit was: 58% faster than `xargs -P $(nproc) -d $'\n` and 4.28x as fast as `parallel -m`
+#
+# NOTE: though not shown here, when restricted to processing 1 line at a time (`parallel`, `xargs -P $(nproc) -d $'\n' -L 1`, and `mySplit 1`), the performance gap is even larger:
+#       mySplit tends to be 3-4x as fast as xargs and >10x as fast as parallel 
+
+: <<'EOF'
+
+OVERALL RELATIVE WALL-CLOCK TIME RESULTS SUMMARY:
+
+                sha1sum         sha256sum       sha512sum       sha224sum       sha384sum       md5sum          sum -s          sum -r          cksum           b2sum           cksum -a sm3    OVERALL AVERAGE
+
+parallel:       483%            331%            407%            363%            408%            462%            570%            467%            545%            432%            241%            428%           
+xargs:          153%            160%            164%            175%            158%            178%            131%            184%            130%            157%            156%            158%           
+mySplit:        100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%           
+
+EOF
+
 unset tests findDir findDirDefault ramdiskTransferFlag TD_A TD_B TD_C nfun
 
 ######################################### USER SETABLE OPTIONS #########################################
@@ -23,7 +47,7 @@ ramdiskTransferFlag=true
 
 SECONDS=0
 
-declare -f mySplit 1>/dev/null 2>&1 || { [[ -f ./mySplit.bash ]] && source ./mySplit.bash; } || source <(curl )
+declare -F mySplit 1>/dev/null 2>&1 || { [[ -f ./mySplit.bash ]] && source ./mySplit.bash; } || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/mySplit.bash)
 
 [[ -n "$1" ]] && [[ -d "$1" ]] && findDir="$1"
 : ${findDir:="${findDirDefault}"} ${ramdiskTransferFlag:=true}
@@ -143,9 +167,8 @@ printf '\n%-'"$N"'s\t' 'mySplit:'
 printf '%-'"$N"'s\t' "${TD_C[@]}"
 printf '\n\nOVERALL TIME TAKEN: %s SECONDS\n\n' "${SECONDS}"
 
+############################################## RESULTS ##############################################
 
-
-# RESULTS OF SPEEDTESTS
 
 : <<'EOF'
  
