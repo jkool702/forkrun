@@ -12,7 +12,7 @@ mySplit() {
             
     # make vars local
     local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_write_pos
-    local -i nLines nLinesOld nLinesCur nLinesNew nLinesMax nRead nReadOld nProcs kk nWait
+    local -i nLines nLinesCur nLinesNew nLinesMax nRead nReadOld nProcs kk nWait
     local -a A p_PID runCmd 
   
     # setup tmpdir
@@ -178,16 +178,21 @@ mySplit() {
                                     
         fi
 
-        # keep track of how many lines have been read and delete already-read lines from the start of the $fPath file after they have been read (leaving a buffer of $nLines lines)
+        # keep track of how many lines have been read and delete already-read lines from the start of the $fPath file after they have been read (leaving a 1 already-read line as a buffer )
         nWait=${nProcs}
         { coproc pRead {
             trap - EXIT
 
-            nRead=0
-            nLinesOld=0
             nReadOld=0
             nWait=${nProcs}
-            
+
+            read -u ${fd_nRead}
+            [[ -z ${REPLY} ]] && break
+            nRead=${REPLY}
+
+            (( ${nRead} > 1 )) && sed -i "1,$(( ${nRead} - 1 ))d" "${fPath}"
+            nReadOld=${nRead}
+
             while true; do 
                 read -u ${fd_nRead}
                 [[ -z ${REPLY} ]] && break
@@ -198,11 +203,7 @@ mySplit() {
                 case ${nWait} in
                     0) 
                         nWait=${nProcs}
-                        # read -u ${fd_continue}
-                        nLinesCur=$(<"${tmpDir}"/.nLines)
-                        sed -i "1,$(( ${nRead} - ${nReadOld} + ${nLinesOld} - ${nLinesCur} ))d" "${fPath}"
-                        # printf '\n' >&${fd_continue}
-                        nLinesOld=${nLinesCur}
+                        sed -i "1,$(( ${nRead} - ${nReadOld} ))d" "${fPath}"
                         nReadOld=${nRead}
                     ;;
                     *)
