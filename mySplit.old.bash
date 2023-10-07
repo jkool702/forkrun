@@ -12,7 +12,7 @@ mySplit() {
             
     # make vars local
     local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_write_pos
-    local -i nLines nLinesCur nLinesNew nLinesMax nRead nReadOld nProcs kk nWait
+    local -i nLines nLinesOld nLinesCur nLinesNew nLinesMax nLinesRead nRead nProcs kk nWait
     local -a A p_PID runCmd 
   
     # setup tmpdir
@@ -134,7 +134,7 @@ mySplit() {
             
             # LOGIC FOR DYNAMICALLY SETTING 'nLines': 
             # The avg_bytes_per_line is estimated by looking at the byte offset position of fd_read and having each coproc keep track of how many lines it has read
-            # the new "proposed" 'nLines' is: avg_bytes_per_line=( fd_read-pos / ( 1 + nRead ) ); nLinesNew=( 1 + (1 / nProc) * (fd_write_pos - fd_read_pos) / (1+avg_bytes_per_line) )
+            # the new "proposed" 'nLines' is: avg_bytes_per_line=( fd_read-pos / ( 1 + nLinesRead ) ); nLinesNew=( 1 + (1 / nProc) * (fd_write_pos - fd_read_pos) / (1+avg_bytes_per_line) )
             # --> if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines' to match the rate lines are coming in on stdin)
             # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
             # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break
@@ -151,12 +151,12 @@ mySplit() {
                         
                         read fd_read_pos </proc/self/fdinfo/${fd_read}
                         read fd_write_pos </proc/self/fdinfo/${fd_write}
-                        read nRead <"${tmpDir}"/.nRead
+                        read nLinesRead <"${tmpDir}"/.nRead
                         
-                        nLinesNew=$(( 1 + ( ( 1 + ${nRead} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos##*$'\t'} ) ) ))
+                        nLinesNew=$(( 1 + ( ( 1 + ${nLinesRead} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos##*$'\t'} ) ) ))
 
                         # unused: debug output + forced increasing of nLines
-                        #printf 'nRead = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nRead} ${fd_write_pos##*$'\t'} ${fd_read_pos##*$'\t'} ${nLinesNew} >&${fd_stderr}
+                        #printf 'nLinesRead = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nLinesRead} ${fd_write_pos##*$'\t'} ${fd_read_pos##*$'\t'} ${nLinesNew} >&${fd_stderr}
                         #(( ${nLinesNew} <= ${nLinesCur} )) && (( ${nLinesCur} > ${nLines} )) && nLinesNew=$(( ( ( 11 * ${nLinesCur} ) / 10 ) + 1 ))
                                                 
                         (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; stopFlag=true; }
@@ -178,21 +178,15 @@ mySplit() {
                                     
         fi
 
-        # keep track of how many lines have been read and delete already-read lines from the start of the $fPath file after they have been read (leaving a 1 already-read line as a buffer )
+        # keep track of how many lines have been read and delete already-read lines from the start of the $fPath file after they have been read (leaving a buffer of $nLines lines)
         nWait=${nProcs}
         { coproc pRead {
             trap - EXIT
 
-            nReadOld=0
+            nRead=0
+            nLinesOld=0
             nWait=${nProcs}
-
-            read -u ${fd_nRead}
-            [[ -z ${REPLY} ]] && break
-            nRead=${REPLY}
-
-            (( ${nRead} > 1 )) && sed -i "1,$(( ${nRead} - 1 ))d" "${fPath}"
-            nReadOld=${nRead}
-
+            
             while true; do 
                 read -u ${fd_nRead}
                 [[ -z ${REPLY} ]] && break
@@ -203,8 +197,11 @@ mySplit() {
                 case ${nWait} in
                     0) 
                         nWait=${nProcs}
-                        sed -i "1,$(( ${nRead} - ${nReadOld} ))d" "${fPath}"
-                        nReadOld=${nRead}
+                        # read -u ${fd_continue}
+                        nLinesCur=$(<"${tmpDir}"/.nLines)
+                        sed -i "1,$(( ${nRead} + ${nLinesOld} - ${nLinesCur} ))d" "${fPath}"
+                        # printf '\n' >&${fd_continue}
+                        nLinesOld=${nLinesCur}
                     ;;
                     *)
                         ((nWait--))
@@ -256,11 +253,7 @@ $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && nLinesCur=\$(<\"${tmpDir}\"/.nLines)
 """)
     read -u ${fd_continue} 
-    mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
-    [[ \${#A[@]} == 0 ]] || [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == $'\n' ]] || {
-        read -r -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read})
-        A[\$(( \${#A[@]} - 1 ))]+=\"\${REPLY}\"\$'\\n'
-    }
+    mapfile -t -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
 $(${nOrderFlag} && echo """
     read -u ${fd_nOrder} nOrder
 """)
@@ -286,7 +279,7 @@ $(${nLinesAutoFlag} && echo """
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false   
     }
 """)    
-    ${runCmd[@]} \"\${A[@]//\$'\\n'/}\" ${outStr}
+    ${runCmd[@]} \"\${A[@]}\" ${outStr}
 done
 } 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
