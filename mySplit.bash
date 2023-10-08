@@ -286,7 +286,7 @@ $(${nLinesAutoFlag} && echo """
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false   
     }
 """)    
-    ${runCmd[@]} \"\${A[@]//\$'\\n'/}\" ${outStr}
+    ${runCmd[@]} \"\${A[@]%%\$'\\n'}\" ${outStr}
 done
 } 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
