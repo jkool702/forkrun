@@ -279,7 +279,7 @@ $(${inotifyFlag} && echo """
         fi
         continue
     }
-    printf '%s\\\\n' \${#A[@]} >&${fd_nRead}
+    printf '%%s\\\\n' \${#A[@]} >&${fd_nRead}
 $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && {
         printf '\\\\n' >&\${fd_nLinesAuto0}
@@ -296,7 +296,7 @@ p_PID+=(\${p%s_PID})
         # source the coproc code for each coproc worker
         for (( kk=0 ; kk<${nProcs} ; kk++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
-            source <(printf "${coprocSrcCode}" ${kk} ${kk} $(${nLinesAutoFlag} && printf '%s' "${kk}"))
+            source <(printf "${coprocSrcCode}" ${kk} ${kk})
         done
        
         # wait for everything to finish
