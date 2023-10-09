@@ -22,7 +22,6 @@ mySplit() {
     touch "${fPath}"   
     
     (
-    
         # check inputs and set defaults if needed
         [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; : "${nLinesAutoFlag:=false}"; shift 1; } || { nLines=1; nLinesAutoFlag=true; }
         [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nProcs="${1}"; shift 1; } || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
@@ -89,7 +88,6 @@ mySplit() {
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
 
-
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
                                     
@@ -117,9 +115,7 @@ mySplit() {
             } 2>/dev/null
             
             exitTrapStr_kill+="${pOrder_PID} "
-
         else 
-            
             outStr='>&'"\${fd_stdout}"; 
         fi
         
@@ -128,7 +124,6 @@ mySplit() {
         if ${nLinesAutoFlag}; then
         
             # setup nLines indicator
-            #mkdir -p "${tmpDir}"/.nDone
             echo ${nLines} >"${tmpDir}"/.nLines
             echo 0 > "${tmpDir}"/.nRead
             
@@ -174,24 +169,17 @@ mySplit() {
             } 2>/dev/null
 
             exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&'"${fd_nLinesAuto}"'; '
-            exitTrapStr_kill+="${pAuto_PID} "
-                                    
+            exitTrapStr_kill+="${pAuto_PID} "                  
         fi
 
         # keep track of how many lines have been read and delete already-read lines from the start of the $fPath file after they have been read (leaving a 1 already-read line as a buffer )
-        nWait=${nProcs}
-        { coproc pRead {
+{ coproc pRead {
             trap - EXIT
 
-            nReadOld=0
             nWait=${nProcs}
-
-            read -u ${fd_nRead}
-            [[ -z ${REPLY} ]] && break
-            nRead=${REPLY}
-
-            (( ${nRead} > 1 )) && sed -i "1,$(( ${nRead} - 1 ))d" "${fPath}"
-            nReadOld=${nRead}
+            nRead=0
+            nReadOld=0
+            nLinesOld=0
 
             while true; do 
                 read -u ${fd_nRead}
@@ -202,9 +190,13 @@ mySplit() {
 
                 case ${nWait} in
                     0) 
-                        nWait=${nProcs}
-                        sed -i "1,$(( ${nRead} - ${nReadOld} ))d" "${fPath}"
+                        [[ ${nLinesOld} == ${nLinesMax} ]] || read nLines <"${tmpDir}"/.nLines
+                        nLinesDelete=$(( ( ${nRead} - ${nReadOld} ) - ( ${nProcs} * ( ${nLines} - ${nLinesOld} ) ) ))
+                        (( ${nLinesDelete} > 0 )) && sed -i "1,${nLinesDelete}d" "${fPath}"
+
+                        nLinesOld=${nLines}
                         nReadOld=${nRead}
+                        nWait=${nProcs}
                     ;;
                     *)
                         ((nWait--))
@@ -213,7 +205,7 @@ mySplit() {
                 [[ -f "${tmpDir}"/.quit ]] && break
             done
           }
-        } 2>/dev/null        
+        } 2>/dev/null
         
         exitTrapStr+='printf '"'"'\n'"'"' >&'"${fd_nRead}"'; '
         exitTrapStr_kill+="${pRead_PID} "
@@ -286,7 +278,7 @@ $(${nLinesAutoFlag} && echo """
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false   
     }
 """)    
-    ${runCmd[@]} \"\${A[@]%%\$'\\n'}\" ${outStr}
+    ${runCmd[@]} \"\${A[@]%%\$'\\\n'}\" ${outStr}
 done
 } 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
