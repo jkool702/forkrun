@@ -30,7 +30,7 @@ mySplit() {
         runCmd=("${@}")
         [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
         runCmd=("${runCmd[@]//'%'/'%%'}")
-        runCmd=("${runCmd[@]//'\'/'\\\\'}")
+        runCmd=("${runCmd[@]//'\'/'\\'}")
         
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
@@ -173,13 +173,15 @@ mySplit() {
         fi
 
         # keep track of how many lines have been read and delete already-read lines from the start of the $fPath file after they have been read (leaving a 1 already-read line as a buffer )
-{ coproc pRead {
+        { coproc pRead {
             trap - EXIT
 
             nWait=${nProcs}
             nRead=0
-            nReadOld=0
-            nLinesOld=0
+            nReadOld=1
+            
+            # do 1 read without deleting so that there is a buffer between the data being deleted and the live data
+            read -u ${fd_nRead}
 
             while true; do 
                 read -u ${fd_nRead}
@@ -190,11 +192,7 @@ mySplit() {
 
                 case ${nWait} in
                     0) 
-                        [[ ${nLinesOld} == ${nLinesMax} ]] || read nLines <"${tmpDir}"/.nLines
-                        nLinesDelete=$(( ( ${nRead} - ${nReadOld} ) - ( ${nProcs} * ( ${nLines} - ${nLinesOld} ) ) ))
-                        (( ${nLinesDelete} > 0 )) && sed -i "1,${nLinesDelete}d" "${fPath}"
-
-                        nLinesOld=${nLines}
+                        sed -i "1,$(( ${nRead} - ${nReadOld} ))d" "${fPath}"
                         nReadOld=${nRead}
                         nWait=${nProcs}
                     ;;
@@ -210,7 +208,7 @@ mySplit() {
         exitTrapStr+='printf '"'"'\n'"'"' >&'"${fd_nRead}"'; '
         exitTrapStr_kill+="${pRead_PID} "
             
-        
+
         # set EXIT trap (dynamically determined based on which option flags were active)
         exitTrapStr="${exitTrapStr}"'kill -9 '"${exitTrapStr_kill}"' 2>/dev/null'
         ${rmDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && rm -rf "'"${tmpDir}"'"'
@@ -245,13 +243,13 @@ mySplit() {
 trap - EXIT INT TERM HUP QUIT
 while true; do
 $(${nLinesAutoFlag} && echo """
-    \${nLinesAutoFlag} && nLinesCur=\$(<\"${tmpDir}\"/.nLines)
+    \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
 """)
     read -u ${fd_continue} 
     mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
-    [[ \${#A[@]} == 0 ]] || [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == $'\n' ]] || {
+    (( \${#A[@]} <= 1 )) || [[ \"\${A[-1]: -1}\" == \$'\\\n' ]] || {
         read -r -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read})
-        A[\$(( \${#A[@]} - 1 ))]+=\"\${REPLY}\"\$'\\n'
+        A[\$(( \${#A[@]} - 1 ))]+=\"\${REPLY}\"
     }
 $(${nOrderFlag} && echo """
     read -u ${fd_nOrder} nOrder
@@ -278,7 +276,7 @@ $(${nLinesAutoFlag} && echo """
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false   
     }
 """)    
-    ${runCmd[@]} \"\${A[@]%%\$'\\\n'}\" ${outStr}
+    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%%\$'\\\n'}\" ${outStr}
 done
 } 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
