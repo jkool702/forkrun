@@ -11,7 +11,7 @@ mySplit() {
     # for the above external dependencies either the GNU or the busybox versions will work
             
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_write_pos
+    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_write_pos partialLine
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nReadOld nProcs kk nWait
     local -a A p_PID runCmd 
   
@@ -136,7 +136,6 @@ mySplit() {
             { coproc pAuto {
                     trap - EXIT
                     stopFlag=false
-
         
                     while true; do
                     
@@ -149,11 +148,13 @@ mySplit() {
                         read nRead <"${tmpDir}"/.nRead
                         
                         nLinesNew=$(( 1 + ( ( 1 + ${nRead} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos##*$'\t'} ) ) ))
-
+                        
                         # unused: debug output + forced increasing of nLines
                         #printf 'nRead = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nRead} ${fd_write_pos##*$'\t'} ${fd_read_pos##*$'\t'} ${nLinesNew} >&${fd_stderr}
                         #(( ${nLinesNew} <= ${nLinesCur} )) && (( ${nLinesCur} > ${nLines} )) && nLinesNew=$(( ( ( 11 * ${nLinesCur} ) / 10 ) + 1 ))
-                                                
+
+                        nLinesNew=$(( ( ${nLinesCur} + ${nLinesNew} + 1 ) / 2 ))
+          
                         (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; stopFlag=true; }
 
                         (( ${nLinesNew} > ${nLinesCur} )) && {
@@ -177,12 +178,11 @@ mySplit() {
             trap - EXIT
 
             nWait=${nProcs}
-            nRead=0
-            nReadOld=1
+            nReadOld=0
             
             # do 1 read without deleting so that there is a buffer between the data being deleted and the live data
-            read -u ${fd_nRead}
-
+            read -u ${fd_nRead} nRead
+            
             while true; do 
                 read -u ${fd_nRead}
                 [[ -z ${REPLY} ]] && break
@@ -245,11 +245,11 @@ while true; do
 $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
 """)
+    partialLine=''
     read -u ${fd_continue} 
     mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
-    (( \${#A[@]} <= 1 )) || [[ \"\${A[-1]: -1}\" == \$'\\\n' ]] || {
-        read -r -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read})
-        A[\$(( \${#A[@]} - 1 ))]+=\"\${REPLY}\"
+    (( \${#A[@]} <= 1 )) || [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || {
+        read -r -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) partialLine
     }
 $(${nOrderFlag} && echo """
     read -u ${fd_nOrder} nOrder
@@ -269,6 +269,7 @@ $(${inotifyFlag} && echo """
         fi
         continue
     }
+    [[ \${partialLine} ]] && A[\$(( \${#A[@]} - 1 ))]+=\"\${partialLine}\"
     printf '%%s\\\\n' \${#A[@]} >&${fd_nRead}
 $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && {
@@ -276,7 +277,7 @@ $(${nLinesAutoFlag} && echo """
         [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false   
     }
 """)    
-    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%%\$'\\\n'}\" ${outStr}
+    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%%\$'\\n'}\" ${outStr}
 done
 } 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
 } 2>/dev/null
