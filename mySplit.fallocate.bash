@@ -11,8 +11,8 @@ mySplit() {
     # for the above external dependencies either the GNU or the busybox versions will work
             
     # make vars local
-    local tmpDir fPath nLinesUpdateCmd outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag initFlag stopFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fallocateFlag fd_continue fd_inotify fd_nLinesAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_write_pos partialLine
-    local -i nLines nLinesCur nLinesNew nLinesMax nRead nReadOld nProcs kk nWait
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFalg fallocateFlag fd_continue fd_inotify fd_nAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos partialLine
+    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs kk nWait
     local -a A p_PID runCmd 
   
     # setup tmpdir
@@ -23,7 +23,7 @@ mySplit() {
     
     (
         # check inputs and set defaults if needed
-        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; : "${nLinesAutoFlag:=false}"; shift 1; } || { nLines=1; nLinesAutoFlag=true; }
+        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; : "${nLinesAutoFlag:=false}"; shift 1; } || { nLines=1; : "${nLinesAutoFlag=true}"; }
         [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nProcs="${1}"; shift 1; } || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
 
         # determine what mySplit is using lines on stdin for
@@ -31,15 +31,15 @@ mySplit() {
         [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
         runCmd=("${runCmd[@]//'%'/'%%'}")
         runCmd=("${runCmd[@]//'\'/'\\'}")
-        
+
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # check for inotifywait
-        type -p inotifywait &>/dev/null && inotifyFlag=true || inotifyFlag=false
+        type -p inotifywait &>/dev/null && : "${inotifyFlag=true}" || : "${inotifyFlag=false}"
         
-        # check for fallolcate
-        type -p fallocate &>/dev/null && fallocateFlag=true || fallocateFlag=false
+        # check for fallocate
+        type -p fallocate &>/dev/null && : "${fallocateFlag=true}" || : "${fallocateFlag=false}"
         
         # set defaults for control flags/parameters
         : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}"
@@ -99,7 +99,7 @@ mySplit() {
                 
                 local -i v9 kkMax kkCur
 
-                # generate enough nOrder indices (~10000) to fill up 64k pipe buffer
+                # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 printf '%s\n' {00..89} {9000..9899} {9900000..9998999} >&${fd_nOrder}
 
                 # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
@@ -124,7 +124,7 @@ mySplit() {
         
         # setup nLinesAuto
         nLinesCur=${nLines}
-        if ${nLinesAutoFlag}; then
+        if ${nLinesAutoFlag} || ${fallocateFlag}; then
         
             # setup nLines indicator
             echo ${nLines} >"${tmpDir}"/.nLines
@@ -138,82 +138,66 @@ mySplit() {
             # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break
             { coproc pAuto {
                     trap - EXIT
-                    stopFlag=false
-        
-                    while true; do
                     
-                        read -u ${fd_nLinesAuto}
-                        { [[ ${REPLY} == 0 ]] || [[ -f "${tmpDir}"/.quit ]]; } && stopFlag=true  
-                        [[ -f "${fPath}" ]] || break
+                    ${fallocateFlag} && { nWait=${nProcs}; fd_read_pos_old=0; }
+                    nRead=0
+        
+                    while ${fallocateFlag} || ${nLinesAutoFlag}; do 
+                        
+                        read -u ${fd_nAuto}
+                        [[ ${REPLY} == 0 ]] && break
+                        { [[ -z ${REPLY} ]] || [[ -f "${tmpDir}"/.quit ]]; } && nLinesAutoFlag=false
                         
                         read fd_read_pos </proc/self/fdinfo/${fd_read}
-                        read fd_write_pos </proc/self/fdinfo/${fd_write}
-                        read nRead <"${tmpDir}"/.nRead
+                        fd_read_pos=${fd_read_pos##*$'\t'}
                         
-                        nLinesNew=$(( 1 + ( ( 1 + ${nRead} ) * ( ${fd_write_pos##*$'\t'} - ${fd_read_pos##*$'\t'} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos##*$'\t'} ) ) ))
+                        if ${nLinesAutoFlag}; then                    
+                            
+                            nRead+=${REPLY}
+            
+                            read fd_write_pos </proc/self/fdinfo/${fd_write}
+                            fd_write_pos=${fd_write_pos##*$'\t'}
                         
-                        # unused: debug output + forced increasing of nLines
-                        #printf 'nRead = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nRead} ${fd_write_pos##*$'\t'} ${fd_read_pos##*$'\t'} ${nLinesNew} >&${fd_stderr}
-                        #(( ${nLinesNew} <= ${nLinesCur} )) && (( ${nLinesCur} > ${nLines} )) && nLinesNew=$(( ( ( 11 * ${nLinesCur} ) / 10 ) + 1 ))
-
-                        nLinesNew=$(( ( ${nLinesCur} + ${nLinesNew} + 1 ) / 2 ))
+                            nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) / 2 ))
+                        
+                            # unused: debug output + forced increasing of nLines
+                            #printf 'nRead = %s ; write pos = %s ; read pos = %s; "nLinesNew (proposed) = %s\n' ${nRead} ${fd_write_pos} ${fd_read_pos} ${nLinesNew} >&${fd_stderr}
+                            #(( ${nLinesNew} <= ${nLinesCur} )) && (( ${nLinesCur} > ${nLines} )) && nLinesNew=$(( ( ( 11 * ${nLinesCur} ) / 10 ) + 1 ))
+                            #nLinesNew=$(( ( ${nLinesCur} + ${nLinesNew} + 1 ) / 2 ))
           
-                        (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; stopFlag=true; }
+                            (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
 
-                        (( ${nLinesNew} > ${nLinesCur} )) && {
-                            printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
-                            nLinesCur=${nLinesNew}
-                            #printf 'CHANGING nLinesNew to %s\n!!!' "${nLinesNew}" >&${fd_stderr}
-                        }
+                            (( ${nLinesNew} > ${nLinesCur} )) && {
+                                printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
+                                nLinesCur=${nLinesNew}
+                                #printf 'CHANGING nLinesNew to %s\n!!!' "${nLinesNew}" >&${fd_stderr}
+                            }
+                        fi
                         
-                        ${stopFlag} && break
+                        if ${fallocateFlag}; then
+                            case ${nWait} in
+                                0) 
+                                    fd_read_pos=$(( 512 * ( ${fd_read_pos} / 512 ) ))
+                                    (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
+                                        fallocate -p -o 0 -l  "${fPath}"
+                                        fd_read_pos_old=${fd_read_pos}
+                                    }
+                                    nWait=${nProcs}
+                                ;;
+                                *)
+                                    ((nWait--))
+                                ;;
+                            esac
+                        fi
+                        [[ -f "${tmpDir}"/.quit ]] && break                        
                     done
                     
                 } 
             } 2>/dev/null
 
-            exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&'"${fd_nLinesAuto}"'; '
+            exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&'"${fd_nAuto}"'; '
             exitTrapStr_kill+="${pAuto_PID} "                  
         fi
-
-        # keep track of how many lines have been read and delete already-read lines from the start of the $fPath file after they have been read (leaving a 1 already-read line as a buffer )
-        { coproc pRead {
-            trap - EXIT
-
-            nWait=${nProcs}
-            ${fallocateFlag} || nReadOld=1
-            nRead=0
-            
-            while true; do 
-                read -u ${fd_nRead}
-                [[ -z ${REPLY} ]] && break
-                nRead+=${REPLY}
-                
-                printf '%s\n' ${nRead} > "${tmpDir}"/.nRead
-
-                case ${nWait} in
-                    0) 
-                        if ${fallocateFlag}; then
-                            read fd_read_pos </proc/self/fdinfo/${fd_read}
-                            fallocate -p -o 0 -l $(( 512 * ( ${fd_read_pos##*$'\t'} / 512 ) )) "${fPath}"
-                        else
-                            sed -i "1,$(( ${nRead} - ${nReadOld} ))d" "${fPath}"
-                            nReadOld=${nRead}
-                        fi
-                        nWait=${nProcs}
-                    ;;
-                    *)
-                        ((nWait--))
-                    ;;
-                esac
-                [[ -f "${tmpDir}"/.quit ]] && break
-            done
-          }
-        } 2>/dev/null
-        
-        exitTrapStr+='printf '"'"'\n'"'"' >&'"${fd_nRead}"'; '
-        exitTrapStr_kill+="${pRead_PID} "
-            
 
         # set EXIT trap (dynamically determined based on which option flags were active)
         exitTrapStr="${exitTrapStr}"'kill -9 '"${exitTrapStr_kill}"' 2>/dev/null'
@@ -229,7 +213,7 @@ mySplit() {
         printf '\n' >&${fd_continue}; 
 
         # dont exit read loop during init 
-        initFlag=true
+        #initFlag=true
         
         # spawn $nProcs coprocs
         # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
@@ -251,7 +235,6 @@ while true; do
 $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
 """)
-    partialLine=''
     read -u ${fd_continue} 
     mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
     (( \${#A[@]} <= 1 )) || [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || {
@@ -265,7 +248,7 @@ $(${nOrderFlag} && echo """
         if [[ -f \"${tmpDir}\"/.done ]]; then
             [[ -f \"${tmpDir}\"/.quit ]] && break
 $(${nLinesAutoFlag} && echo """
-                printf '0\\\\n' >&\${fd_nLinesAuto0}
+                printf '0\\\\n' >&\${fd_nAuto0}
 """)
             \${initFlag} && initFlag=false || { touch \"${tmpDir}\"/.quit; break; }
 $(${inotifyFlag} && echo """
@@ -275,17 +258,18 @@ $(${inotifyFlag} && echo """
         fi
         continue
     }
-    [[ \${partialLine} ]] && A[\$(( \${#A[@]} - 1 ))]+=\"\${partialLine}\"
-    printf '%%s\\\\n' \${#A[@]} >&${fd_nRead}
-$(${nLinesAutoFlag} && echo """
+    [[ \${partialLine} ]] && { A[\$(( \${#A[@]} - 1 ))]+=\"\${partialLine}\"; partialLine=''; }
+$(${nLinesAutoFlag} && { printf '%s' """
     \${nLinesAutoFlag} && {
-        printf '\\\\n' >&\${fd_nLinesAuto0}
-        [[ \${nLinesCur} == ${nLinesMax} ]] && nLinesAutoFlag=false   
-    }
-""")    
+        printf '%%s\\\\n' \${#A[@]} >&\${fd_nAuto0}
+        (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false   
+    }"""
+    ${fallocateFlag} && printf '%s' ' || ' || echo
+}
+${fallocateFlag} && echo """printf '\\\\n' >&\${fd_nAuto0}""")    
     $(printf '%q ' "${runCmd[@]}") \"\${A[@]%%\$'\\n'}\" ${outStr}
 done
-} 2>&${fd_stderr} {fd_nLinesAuto0}>&${fd_nLinesAuto}
+} 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
 p_PID+=(\${p%s_PID})
 """
@@ -303,9 +287,9 @@ p_PID+=(\${p%s_PID})
         ${nOrderFlag} && cat "${tmpDir}"/.out/x*
 
         # print final nLines count
-        ${nLinesAutoFlag} && printf 'nLines (final) = %s   (max = %s)\n'  $(<"${tmpDir}"/.nLines) ${nLinesMax} >&${fd_stderr}
+        ${nLinesAutoFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
  
     # open anonymous pipes + other misc file descriptors for the above code block   
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nLinesAuto}<><(:) {fd_nOrder}<><(:) {fd_nRead}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
 
 }
