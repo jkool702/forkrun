@@ -5,15 +5,10 @@ mySplit() (
     # input 1: number of lines to group at a time. Default is to automatically dynamically set nLines.
     # input 2: number of coprocs to use. Default is $(nproc)
     # 
-    # DEPENDENCIES: 
-    #      Bash 4+ (5.2+ required for optimal speed)
+    # DEPENDENCIES: Bash 4+ (5.2+ required for optimal speed)
     #      `cat` --AND-- `sed -i`
-    #
-    # OPTIONAL DEPENDENCIES:
-    #      `grep -cE` --OR-- `nproc`       : required to automatically set nProcs as # logical cpu cores. without one of these either it must be set manually or it gets set to "8" by default
-    #      `fallocate` --AND-- kernel 3.5+ : required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is bfed by a long-running process, could eventually result in very high memory use)
-    #
-    # NOTE: for `cat` `sed` and `grep` dependencies:  either the GNU or the busybox versions will work
+    #      optional: `grep -cE` --OR-- `nproc` (required to automatically set nProcs as # logical cpu cores. without one of these either it must be set manually or it gets set to "4" by default)
+    # for the above external dependencies either the GNU or the busybox versions will work
         
     trap - EXIT INT TERM HUP QUIT
             
@@ -23,14 +18,15 @@ mySplit() (
     local -a A p_PID runCmd 
   
     # setup tmpdir
-    { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDir="$(mktemp -p "$TMPDIR}" -d .mySplit.XXXXXX)"; } || [[ -d /dev/shm ]] && tmpDir="$(mktemp -p "/dev/shm" -d .mySplit.XXXXXX)"  || tmpDir="$(mktemp -p "/tmp" -d .mySplit.XXXXXX)"    
+    { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDir="${TMPDIR}$(mktemp -d .mySplit.XXXXXX)"; } ||[[ -d /dev/shm ]] && tmpDir=/dev/shm/"$(mktemp -d .mySplit.XXXXXX)"  || tmpDir=/tmp/"$(mktemp -d .mySplit.XXXXXX)"    
     fPath="${tmpDir}"/.stdin
+    mkdir -p "${tmpDir}"
     touch "${fPath}"   
     
     {
         # check inputs and set defaults if needed
         [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; : "${nLinesAutoFlag:=false}"; shift 1; } || { nLines=1; : "${nLinesAutoFlag=true}"; }
-        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nProcs="${1}"; shift 1; } || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '8')
+        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nProcs="${1}"; shift 1; } || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '4')
 
         # determine what mySplit is using lines on stdin for
         runCmd=("${@}")
@@ -50,7 +46,7 @@ mySplit() (
         # set defaults for control flags/parameters
         : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}"
             
-        # check for a conflict that could occur is flags are defined on commandline when mySplit is called
+        # cherck for a conflict that could occur is flags are defined on commandline when mySplit is called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
     
         # if keeping tmpDir print its location to stderr
@@ -232,25 +228,25 @@ mySplit() (
         # the individual coproc's codes are then generated via printf ${coprocSrcCode} $kk $kk [$kk] and sourced
         
         coprocSrcCode="""
-{ coproc p{<#>} {
+{ coproc p%s {
 trap - EXIT INT TERM HUP QUIT
 while true; do
 $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
 """)
     read -u ${fd_continue} 
-    mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
+    mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
 $(${pipeReadFlag} || echo """
-    [[ \${#A[@]} == 0 ]] || [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || read -r -u ${fd_read} partialLine || until read -r -u ${fd_read}; do partialLine+=\"\${REPLY}\"; done
+    [[ \${#A[@]} == 0 ]] || [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || read -r -u ${fd_read} partialLine
 """
 ${nOrderFlag} && echo """
     read -u ${fd_nOrder} nOrder
 """)
-    printf '\\n' >&${fd_continue}; 
+    printf '\\\\n' >&${fd_continue}; 
     [[ \${#A[@]} == 0 ]] && {
         if [[ -f \"${tmpDir}\"/.done ]]; then
 $(${nLinesAutoFlag} && echo """
-            printf '0\\n' >&\${fd_nAuto0}
+            printf '0\\\\n' >&\${fd_nAuto0}
 """)
             [[ -f \"${tmpDir}\"/.quit ]] || touch \"${tmpDir}\"/.quit
         break
@@ -267,12 +263,12 @@ $(${inotifyFlag} && echo """
     }
 $(${nLinesAutoFlag} && { printf '%s' """
     \${nLinesAutoFlag} && {
-        printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
+        printf '%%s\\\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false   
     }"""
     ${fallocateFlag} && printf '%s' ' || ' || echo
 }
-${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
+${fallocateFlag} && echo """printf '\\\\n' >&\${fd_nAuto0}
 """) 
 
     $(printf '%q ' "${runCmd[@]}") \"\${A[@]%%\$'\\n'}\" ${outStr}
@@ -280,13 +276,13 @@ ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
-p_PID+=(\${p{<#>}_PID})
-""" 
+p_PID+=(\${p%s_PID})
+"""
         
         # source the coproc code for each coproc worker
         for (( kk=0 ; kk<${nProcs} ; kk++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
-            source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/${kk}}"
+            source <(printf "${coprocSrcCode}" ${kk} ${kk})
         done
        
         # wait for everything to finish
