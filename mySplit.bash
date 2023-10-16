@@ -5,25 +5,25 @@ mySplit() (
     # input 1: number of lines to group at a time. Default is to automatically dynamically set nLines.
     # input 2: number of coprocs to use. Default is $(nproc)
     # 
-    # DEPENDENCIES: 
-    #      Bash 4+ (5.2+ required for optimal speed)
-    #      `cat` --AND-- `sed -i`
+    # REQUIRED DEPENDENCIES: 
+    #      Bash 4+ (This is when coprocs were introduced)
+    #      `cat` (either the GNU or the busybox versions will work)
     #
-    # OPTIONAL DEPENDENCIES:
-    #      `grep -cE` --OR-- `nproc`       : required to automatically set nProcs as # logical cpu cores. without one of these either it must be set manually or it gets set to "8" by default
+    # OPTIONAL DEPENDENCIES (to provide enhanced functionality):
+    #       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
+    #      `grep -cE` --OR-- `nproc`       : required to automatically set nProcs as the number of logical cpu cores. without one of these either it must be set manually or it gets set to "8" by default
     #      `fallocate` --AND-- kernel 3.5+ : required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is bfed by a long-running process, could eventually result in very high memory use)
-    #
-    # NOTE: for `cat` `sed` and `grep` dependencies:  either the GNU or the busybox versions will work
+    #      `inotifywait`                   : required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
         
     trap - EXIT INT TERM HUP QUIT
             
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag fd_continue fd_inotify fd_nAuto fd_nOrder fd_wait fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos partialLine
-    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos
+    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk 
     local -a A p_PID runCmd 
   
     # setup tmpdir
-    { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDir="$(mktemp -p "$TMPDIR}" -d .mySplit.XXXXXX)"; } || [[ -d /dev/shm ]] && tmpDir="$(mktemp -p "/dev/shm" -d .mySplit.XXXXXX)"  || tmpDir="$(mktemp -p "/tmp" -d .mySplit.XXXXXX)"    
+    { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDir="$(mktemp -p "${TMPDIR}" -d .mySplit.XXXXXX)"; } || { [[ -d /dev/shm ]] && tmpDir="$(mktemp -p "/dev/shm" -d .mySplit.XXXXXX)"; }  || tmpDir="$(mktemp -p "/tmp" -d .mySplit.XXXXXX)"    
     fPath="${tmpDir}"/.stdin
     touch "${fPath}"   
     
@@ -35,8 +35,6 @@ mySplit() (
         # determine what mySplit is using lines on stdin for
         runCmd=("${@}")
         [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
-        runCmd=("${runCmd[@]//'%'/'%%'}")
-        runCmd=("${runCmd[@]//'\'/'\\'}")
 
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
@@ -48,7 +46,7 @@ mySplit() (
         type -p fallocate &>/dev/null && : "${fallocateFlag=true}" || : "${fallocateFlag=false}"
         
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}"
             
         # check for a conflict that could occur is flags are defined on commandline when mySplit is called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
@@ -59,6 +57,13 @@ mySplit() (
         # start building exit trap string
         exitTrapStr=''
         exitTrapStr_kill=''
+
+        ${verboseFlag} && {
+            ${inotifyFlag} && echo 'using inotify'
+            ${fallocateFlag} && echo 'using fallocate'
+            ${nLinesAutoFlag} && echo 'automatically adjusting batch size (num lines per function call)'
+            ${nOrderFlag} && echo 'ordering output the same as the input'
+        } >&${fd_stderr}
         
         # spawn a coproc to write stdin to a tmpfile
         # After we are done reading all of stdin indicate this by touching .done
@@ -73,7 +78,8 @@ mySplit() (
                         { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
                     ) {fd_inotify0}>&${fd_inotify}
                 }
-            }
+                ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
+            } 2>&${fd_stderr}
             exitTrapStr_kill+="${!} "
         fi      
                        
@@ -141,8 +147,12 @@ mySplit() (
             { coproc pAuto {
                     trap - EXIT
                     
-                    ${fallocateFlag} && { nWait=${nProcs}; fd_read_pos_old=0; }
-                    nRead=0
+                    ${fallocateFlag} && { 
+                        nWait=${nProcs}
+                        read fd_read_pos_old </proc/self/fdinfo/${fd_read};
+                        fd_read_pos_old=${fd_read_pos_old##*$'\t'}
+                    }
+                    ${nLinesAutoFlag} && nRead=0
         
                     while ${fallocateFlag} || ${nLinesAutoFlag}; do 
                         
@@ -166,14 +176,13 @@ mySplit() (
                     
                                 #nLinesNew+=$(( ( ${nLinesCur} * ( ${nLinesNew} - ${nLinesCur} ) ) / 2 ))
                         
-                                # unused: debug output
-                                #printf 'nRead = %s ; write pos = %s ; read pos = %s; nLinesNew (proposed) = %s\n' ${nRead} ${fd_write_pos} ${fd_read_pos} ${nLinesNew} >&${fd_stderr}
-          
                                 (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
 
                                 printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
                                 nLinesCur=${nLinesNew}
-                                #printf 'CHANGING nLinesNew to %s\n!!!' "${nLinesNew}" >&${fd_stderr}
+
+                                # verbose output
+                                ${verboseFlag} && printf '\nCHANGING nLines to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s ; nLinesNew = %s )\n' ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} ${nLinesNew} >&2
                             }
                         fi
                         
@@ -182,7 +191,7 @@ mySplit() (
                                 0) 
                                     fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
                                     (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
-                                        fallocate -p -o 0 -l  "${fPath}"
+                                        fallocate -p -o 0 -l ${fd_read_pos} "${fPath}"
                                         fd_read_pos_old=${fd_read_pos}
                                     }
                                     nWait=${nProcs}
@@ -195,7 +204,7 @@ mySplit() (
                         [[ -f "${tmpDir}"/.quit ]] && break                        
                     done
                     
-                } 
+                } 2>&${fd_stderr} 
             } 2>/dev/null
 
             exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&'"${fd_nAuto}"'; '
@@ -215,9 +224,6 @@ mySplit() (
         #     when that process writes a '1' back to the pipe it releases the read lock
         printf '\n' >&${fd_continue}; 
 
-        # dont exit read loop during init 
-        #initFlag=true
-        
         # spawn $nProcs coprocs
         # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
         # they then read N lines with mapfile and send 1 to {fd_continue} (so the next coproc can start to read)
@@ -274,9 +280,7 @@ $(${nLinesAutoFlag} && { printf '%s' """
 }
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 """) 
-
-    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%%\$'\\n'}\" ${outStr}
-
+    $(printf '%q %s %s\n' "${runCmd[@]}" '"${A[@]%%$'"'"'\n'"'"'}"' "${outStr}")
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
@@ -296,7 +300,7 @@ p_PID+=(\${p{<#>}_PID})
         ${nOrderFlag} && cat "${tmpDir}"/.out/x*
 
         # print final nLines count
-        ${nLinesAutoFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
+        ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
  
     # open anonymous pipes + other misc file descriptors for the above code block   
     } {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
