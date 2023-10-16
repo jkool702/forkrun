@@ -35,7 +35,12 @@ mySplit() (
         # determine what mySplit is using lines on stdin for
         runCmd=("${@}")
         [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
-
+        [[ "${runCmd[*]}" == *$'\r'* ]] && {
+            [[ ${FORCE} ]] || { 
+                runCmd=("${runCmd[@]//$'\r'/}")
+                printf '\nWARNING: The command being parallelized contained a carriage return (\\r)\n         These sometimes get added if the code was saved on or copied+pasted from a windows machine\n         These can make mySplit do nasty things (including becoming a fork bomb) and as such was automatically removed\n         To force mySplit to keep the \\r, invoke it via `echo "${stdin}" | FORCE=1 mySplit %s\n\n' "${runCmd[*]}" >&${fd_stderr}
+            }    
+        }
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
@@ -59,6 +64,7 @@ mySplit() (
         exitTrapStr_kill=''
 
         ${verboseFlag} && {
+            printf '\nCOMMAND TO PARALLELIZE: %s\n' "${runCmd[*]}"
             ${inotifyFlag} && echo 'using inotify'
             ${fallocateFlag} && echo 'using fallocate'
             ${nLinesAutoFlag} && echo 'automatically adjusting batch size (num lines per function call)'
