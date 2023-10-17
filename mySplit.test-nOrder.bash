@@ -113,10 +113,10 @@ mySplit() (
                                     
             ( coproc pOrder {
                 
-                ${inotifyFlag} && {
-                    inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify0} &
-                } 2>/dev/null
-                pNotify0_PID=$!
+                #${inotifyFlag} && {
+                #    inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify0} &
+                #} 2>/dev/null
+                #pNotify0_PID=$!
 
                  { coproc pOrder0 {
 
@@ -125,16 +125,16 @@ mySplit() (
                     
                     until [[ -f "${tmpDir}"/.quit ]]; do         
 
-                           [[ -f "${tmpDir}/.out/x${outCur}" ]] || { ${inotifyFlag} && read -u ${fd_inotify0} -t 0.1; continue; }
+                            [[ -f "${tmpDir}/.out/x${outCur}" ]] || continue
                             cat "${tmpDir}/.out/x${outCur}" >&${fd_stdout} && \rm -f "${tmpDir}/.out/x${outCur}"
 
                             ((outCur++))
                             [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"                        
                     done
-                  } {fd_inotify0}<><(:) 
+                  } 
                 } 2>/dev/null
 
-                trap 'kill -9 '"${pOrder0_PID}"' '"${pNotify0_PID}"  USR1
+                trap 'kill -9 '"${pOrder0_PID}" EXIT
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
@@ -143,7 +143,7 @@ mySplit() (
                 # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
                 v9='99'
                 kkMax='8'
-                while ! [[ -f "${tmpDir}"/.quit ]]; do
+                until [[ -f "${tmpDir}"/.quit ]]; do
                     v9="${v9}9"
                     kkMax="${kkMax}9"
 
@@ -156,7 +156,6 @@ mySplit() (
               } 
             ) 2>/dev/null 
             
-            exitTrapStr='kill -USR1 '"${pOrder_PID}"'; '"${exitTrapStr}"
             exitTrapStr_kill+="${pOrder_PID} "
         else 
 
