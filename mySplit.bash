@@ -286,7 +286,7 @@ $(${nLinesAutoFlag} && { printf '%s' """
 }
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 """) 
-    $(printf '%q %s %s\n' "${runCmd[@]}" '"${A[@]%%$'"'"'\n'"'"'}"' "${outStr}")
+    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%%$'\\n'}\" ${outStr}
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
