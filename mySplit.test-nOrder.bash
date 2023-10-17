@@ -16,6 +16,8 @@ mySplit() (
     #      `inotifywait`                   : required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
         
     trap - EXIT INT TERM HUP QUIT
+
+    shopt -s extglob
             
     # make vars local
     local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pOrder0_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos outCur
@@ -99,7 +101,7 @@ mySplit() (
             
             pNotify_PID=$!
 
-            exitTrapStr+='[[ -f "'"${fPath}"'" ]] && rm -f "'"${fPath}"'"; '
+            exitTrapStr+='[[ -f "'"${fPath}"'" ]] && \rm -f "'"${fPath}"'"; '
             exitTrapStr_kill+="${pNotify_PID} "
         fi
         
@@ -109,33 +111,34 @@ mySplit() (
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
                                     
-            { coproc pOrder { ( 
-
+            ( coproc pOrder {
+                
                 ${inotifyFlag} && {
                     inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify0} &
-                }
+                } 2>/dev/null
                 pNotify0_PID=$!
-                { coproc pOrder0 {
 
-                    read -u ${fd_nOrder0} outCur
+                 { coproc pOrder0 {
+
+                    shopt -s extglob
+                    outCur=10
                     
                     until [[ -f "${tmpDir}"/.quit ]]; do         
 
-                        while [[ -f "${tmpDir}/.out/x${outCur}" ]]; do
-                            cat "${tmpDir}/.out/x${outCur}" >&${fd_stdout}
-                            \rm -f "${tmpDir}/.out/x${outCur}"
-                            read -u ${fd_nOrder0} -t 0.1 outCur 
-                        done
+                           [[ -f "${tmpDir}/.out/x${outCur}" ]] || { ${inotifyFlag} && read -u ${fd_inotify0} -t 0.1; continue; }
+                            cat "${tmpDir}/.out/x${outCur}" >&${fd_stdout} && \rm -f "${tmpDir}/.out/x${outCur}"
 
-                        ${inotifyFlag} && read -u ${fd_inotify0} -t 0.1
+                            ((outCur++))
+                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"                        
                     done
-                  } 
-                }
+                  } {fd_inotify0}<><(:) 
+                } 2>/dev/null
 
-                trap 'kill -9 '"${pNotify0_PID}"' '"${pOrder0_PID}" USR1
+                trap 'kill -9 '"${pOrder0_PID}"' '"${pNotify0_PID}"  USR1
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
-                printf '%s\n' {00..89} {9000..9899} {9900000..9998999} >&${fd_nOrder1}
+                # start at 10 so that bash wont try to treat x0_ as an octal
+                printf '%s\n' {10..89} {9000..9899} {990000..998999} >&${fd_nOrder}
 
                 # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
                 v9='99'
@@ -146,13 +149,14 @@ mySplit() (
 
                     for (( kk=0 ; kk<=kkMax ; kk++ )); do
                         kkCur="$(printf '%0.'"${#kkMax}"'d' "$kk")"                    
-                        { source /proc/self/fd/0 >&${fd_nOrder1}; }<<<"printf '%s\n' {${v9}${kkCur}000..${v9}${kkCur}999}"
+                        { source /proc/self/fd/0 >&${fd_nOrder}; }<<<"printf '%s\n' {${v9}${kkCur}000..${v9}${kkCur}999}"
                     done
                 done
-              ) } {fd_inotify0}<><(:) {fd_nOrder0}<><(:) 
-            } 2>/dev/null 
+                
+              } 
+            ) 2>/dev/null 
             
-            exitTrapStr+='kill -USR1 '"${pOrder_PID}"'; '
+            exitTrapStr='kill -USR1 '"${pOrder_PID}"'; '"${exitTrapStr}"
             exitTrapStr_kill+="${pOrder_PID} "
         else 
 
@@ -241,7 +245,7 @@ mySplit() (
 
         # set EXIT trap (dynamically determined based on which option flags were active)
         exitTrapStr="${exitTrapStr}"'kill -9 '"${exitTrapStr_kill}"' 2>/dev/null'
-        ${rmDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && rm -rf "'"${tmpDir}"'"'
+        ${rmDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && \rm -rf "'"${tmpDir}"'"'
         trap "${exitTrapStr}" EXIT INT TERM HUP QUIT       
         
 
