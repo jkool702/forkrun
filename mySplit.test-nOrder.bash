@@ -64,7 +64,7 @@ mySplit() (
 
         # start building exit trap string
         touch "${tmpDir}"/.pid.kill
-        exitTrapStr='kill -9 $(<"'"${tmpDir}"'"/.pid.kill); '
+        exitTrapStr='kill -9 $(cat '"$(printf '%q\n' "${tmpDir}")"'/.pid.kill); '
         exitTrapStr_kill=''
 
         ${verboseFlag} && {
@@ -120,9 +120,9 @@ mySplit() (
 
                     ${inotifyFlag} && {
                         inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify0} &
-                        echo $! >"${tmpDir}"/.pid.kill
+                        echo $! >>"${tmpDir}"/.pid.kill
                     } 2>/dev/null
-                    echo "$BASHPID" >"${tmpDir}"/.pid.kill
+                    echo "$BASHPID" >>"${tmpDir}"/.pid.kill
 
                     shopt -s extglob
                     outCur=10
@@ -301,7 +301,10 @@ ${nOrderFlag} && echo """
 $(${nLinesAutoFlag} && echo """
             printf '0\\n' >&\${fd_nAuto0}
 """)
-            [[ -f \"${tmpDir}\"/.quit ]] || touch \"${tmpDir}\"/.quit
+            [[ -f \"${tmpDir}\"/.quit ]] || {
+                touch \"${tmpDir}\"/.quit
+                touch \"${tmpDir}\"/.out.done
+            }
         break
 $(${inotifyFlag} && echo """
         else        
