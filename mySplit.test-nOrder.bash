@@ -20,9 +20,9 @@ mySplit() (
     shopt -s extglob
             
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pOrder0_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos outCur PID0
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pOrder1_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos outCur PID0
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk 
-    local -a A p_PID runCmd 
+    local -a A p_PID runCmd catFiles
   
     PID0=$$
 
@@ -64,7 +64,7 @@ mySplit() (
 
         # start building exit trap string
         touch "${tmpDir}"/.pid.kill
-        exitTrapStr='kill -9 $(cat '"$(printf '%q\n' "${tmpDir}")"'/.pid.kill); '
+        exitTrapStr='kill -9 $(cat '"$(printf '%q\n' "${tmpDir}")"'/.pid.kill) 2>/dev/null; '
         exitTrapStr_kill=''
 
         ${verboseFlag} && {
@@ -116,11 +116,12 @@ mySplit() (
                                     
             ( coproc pOrder {
 
-                 { coproc pOrder0 {
+                 { coproc pOrder1 {
 
                     ${inotifyFlag} && {
-                        inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify0} &
-                        echo $! >>"${tmpDir}"/.pid.kill
+                        inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify1} &
+                        pNotify1_PID=$!
+                        echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
                     } 2>/dev/null
                     echo "$BASHPID" >>"${tmpDir}"/.pid.kill
 
@@ -128,24 +129,28 @@ mySplit() (
                     outCur=10
 
                     runFlag=true
+                    catFiles=()
 
-                    while ${runFlag}; do
-                        ${inotifyFlag} && read -u ${fd_inotify0}
+                    until [[ -f "${tmpDir}"/.quit ]]; do
+                        ${inotifyFlag} && read -u ${fd_inotify1}
 
-                        while ${runFlag} && [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
-                            printf '%s/.out/x%s\n' '/tmp/test' "${outCur}"
+                        while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
+                            echo "$(<"${tmpDir}/.out/x${outCur}")" >&${fd_stdout}
+                            \rm -f "${tmpDir}/.out/x${outCur}"
+                            #catFiles+=("$(printf '%s/.out/x%s\n' "${tmpDir}" "${outCur}")")
                             ((outCur++))
                             [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00" 
-                            [[ -f "${tmpDir}"/.quit ]] && runFlag=false
-                        done | { 
-                            mapfile -t catFiles <&0
-                            cat "${catFiles[@]}"
-                            \rm -f "${catFiles[@]}"
-                        }
+                        done 
+
+                        #(( ${#catFiles[@]} > 0 )) && { 
+                        #    cat "${catFiles[@]}"
+                        #    \rm -f "${catFiles[@]}"
+                        #    catFiles=()
+                        #}
                     done
-                    kill -9 "${pNotify0_PID}"
+                    kill -9 "${pNotify1_PID}"
                      
-                  } {fd_inotify0}<><(:)
+                  } {fd_inotify1}<><(:) 2>&${fd_stderr}
                 } 2>/dev/null
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
@@ -290,10 +295,14 @@ $(${nLinesAutoFlag} && echo """
     read -u ${fd_continue} 
     mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
 $(${pipeReadFlag} || echo """
-    [[ \${#A[@]} == 0 ]] || [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || read -r -u ${fd_read} partialLine || until read -r -u ${fd_read}; do partialLine+=\"\${REPLY}\"; done
+    [[ \${#A[@]} == 0 ]] || { 
+        [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || read -r -u ${fd_read} partialLine || until read -r -u ${fd_read}; do partialLine+=\"\${REPLY}\"; done
 """
 ${nOrderFlag} && echo """
-    read -u ${fd_nOrder} nOrder
+        read -u ${fd_nOrder} nOrder
+"""
+${pipeReadFlag} || echo """
+    }
 """)
     printf '\\n' >&${fd_continue}; 
     [[ \${#A[@]} == 0 ]] && {
