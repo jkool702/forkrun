@@ -20,10 +20,12 @@ mySplit() (
     shopt -s extglob
             
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pOrder0_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos outCur
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pOrder0_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos outCur PID0
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk 
     local -a A p_PID runCmd 
   
+    PID0=$$
+
     # setup tmpdir
     { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDir="$(mktemp -p "${TMPDIR}" -d .mySplit.XXXXXX)"; } || { [[ -d /dev/shm ]] && tmpDir="$(mktemp -p "/dev/shm" -d .mySplit.XXXXXX)"; }  || tmpDir="$(mktemp -p "/tmp" -d .mySplit.XXXXXX)"    
     fPath="${tmpDir}"/.stdin
@@ -112,29 +114,44 @@ mySplit() (
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
                                     
             ( coproc pOrder {
-                
-                #${inotifyFlag} && {
-                #    inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify0} &
-                #} 2>/dev/null
-                #pNotify0_PID=$!
+                pOrder_PID=$$
+
 
                  { coproc pOrder0 {
 
+                    ${inotifyFlag} && {
+                        inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify0} &
+                    } 2>/dev/null
+                    pNotify0_PID=$!
+
+                    trap 'kill -9 '"${pNotify0_PID}"'; kill -USR2 '"${pOrder_PID}" USR1
+
                     shopt -s extglob
                     outCur=10
-                    
-                    until [[ -f "${tmpDir}"/.quit ]]; do         
 
-                            [[ -f "${tmpDir}/.out/x${outCur}" ]] || continue
-                            cat "${tmpDir}/.out/x${outCur}" >&${fd_stdout} && \rm -f "${tmpDir}/.out/x${outCur}"
+                    runFlag=true
 
+                    while ${runFlag}; do
+                        ${inotifyFlag} && read -u ${fd_inotify0}
+
+                        while ${runFlag} && [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
+                            printf '%s/.out/x%s\n' '/tmp/test' "${outCur}"
                             ((outCur++))
-                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"                        
+                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00" 
+                            [[ -f "${tmpDir}"/.quit ]] && runFlag=false
+                        done | { 
+                            mapfile -t catFiles <&0
+                            cat "${catFiles[@]}"
+                            \rm -f "${catFiles[@]}"
+                        }
                     done
-                  } 
+                    kill -9 "${pNotify0_PID}"
+                     
+                  } {fd_inotify0}<><(:)
                 } 2>/dev/null
 
-                trap 'kill -9 '"${pOrder0_PID}" EXIT
+                trap 'kill -USR1 '"${pOrder0_PID}" USR1
+                trap 'kill -9 '"${pOrder0_PID}"'; kill -USR2 $PID0' USR2
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
@@ -156,7 +173,8 @@ mySplit() (
               } 
             ) 2>/dev/null 
             
-            exitTrapStr_kill+="${pOrder_PID} "
+            exitTrapStr+='kill -USR1 '"${pOrder_PID} "'; '
+            trap 'kill -9 '"${pOrder_PID}" USR2
         else 
 
             outStr='>&'"${fd_stdout}"; 
