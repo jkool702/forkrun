@@ -63,7 +63,8 @@ mySplit() (
         ${rmDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
 
         # start building exit trap string
-        exitTrapStr=''
+        touch "${tmpDir}"/.pid.kill
+        exitTrapStr='kill -9 $(<"'"${tmpDir}"'"/.pid.kill); '
         exitTrapStr_kill=''
 
         ${verboseFlag} && {
@@ -114,17 +115,14 @@ mySplit() (
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
                                     
             ( coproc pOrder {
-                pOrder_PID=$$
-
 
                  { coproc pOrder0 {
 
                     ${inotifyFlag} && {
                         inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify0} &
+                        echo $! >"${tmpDir}"/.pid.kill
                     } 2>/dev/null
-                    pNotify0_PID=$!
-
-                    trap 'kill -9 '"${pNotify0_PID}"'; kill -USR2 '"${pOrder_PID}" USR1
+                    echo "$BASHPID" >"${tmpDir}"/.pid.kill
 
                     shopt -s extglob
                     outCur=10
@@ -150,9 +148,6 @@ mySplit() (
                   } {fd_inotify0}<><(:)
                 } 2>/dev/null
 
-                trap 'kill -USR1 '"${pOrder0_PID}" USR1
-                trap 'kill -9 '"${pOrder0_PID}"'; kill -USR2 $PID0' USR2
-
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
                 printf '%s\n' {10..89} {9000..9899} {990000..998999} >&${fd_nOrder}
@@ -173,8 +168,7 @@ mySplit() (
               } 
             ) 2>/dev/null 
             
-            exitTrapStr+='kill -USR1 '"${pOrder_PID} "'; '
-            trap 'kill -9 '"${pOrder_PID}" USR2
+            exitTrapStr_kill+="${pOrder_PID} "
         else 
 
             outStr='>&'"${fd_stdout}"; 
