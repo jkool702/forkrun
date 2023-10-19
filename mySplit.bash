@@ -37,6 +37,8 @@ mySplit() (
         # determine what mySplit is using lines on stdin for
         runCmd=("${@}")
         [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
+
+        # check for carriage returns (/r) in the command being parallelizied
         ! [[ "${runCmd[*]}" == *$'\r'* ]] || [[ ${FORCE} ]] || { 
             runCmd=("${runCmd[@]//$'\r'/}")
             printf '\nWARNING: The command being parallelized contained a carriage return (\\r) (these sometimes get added by a windows machine)\n         Unfortunately, these can make mySplit do nasty things (including becoming a fork bomb) and as such it was automatically removed\n\n         To force mySplit to keep the \\r, invoke it via "<...> | FORCE=1 mySplit %s" \n\n' "${runCmd[*]}" >&${fd_stderr}
@@ -90,7 +92,7 @@ mySplit() (
             exitTrapStr_kill+="${!} "
         fi      
                        
-        # setup inotify (if available) + set exit trap 
+        # setup+fork inotifywait (if available)
         if ${inotifyFlag}; then
         
             # add 1 newline for each coproc to fd_inotify
@@ -114,10 +116,10 @@ mySplit() (
                                     
             ( coproc pOrder {
 
-                # fork nested coproc to print outputs (in order) as they show up in ${tmpDir}/.out
+                 # fork nested coproc to print outputs (in order) and then clear them in realtime as they show up in ${tmpDir}/.out
                  { coproc pOrder1 {
 
-                    # monitor ${tmpDir}/.out for new files if we have inotify
+                    # monitor ${tmpDir}/.out for new files if we have inotifywait
                     ${inotifyFlag} && {
                         inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify1} &
                         pNotify1_PID=$!
