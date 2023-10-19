@@ -24,8 +24,6 @@ mySplit() (
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk 
     local -a A p_PID runCmd catFiles
   
-    PID0=$$
-
     # setup tmpdir
     { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDir="$(mktemp -p "${TMPDIR}" -d .mySplit.XXXXXX)"; } || { [[ -d /dev/shm ]] && tmpDir="$(mktemp -p "/dev/shm" -d .mySplit.XXXXXX)"; }  || tmpDir="$(mktemp -p "/tmp" -d .mySplit.XXXXXX)"    
     fPath="${tmpDir}"/.stdin
@@ -116,8 +114,10 @@ mySplit() (
                                     
             ( coproc pOrder {
 
+                # fork nested coproc to print outputs (in order) as they show up in ${tmpDir}/.out
                  { coproc pOrder1 {
 
+                    # monitor ${tmpDir}/.out for new files if we have inotify
                     ${inotifyFlag} && {
                         inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify1} &
                         pNotify1_PID=$!
@@ -132,25 +132,23 @@ mySplit() (
                     catFiles=()
 
                     until [[ -f "${tmpDir}"/.quit ]]; do
-                        ${inotifyFlag} && read -u ${fd_inotify1}
+                        [[ -f "${tmpDir}"/.out/x${outCur} ]] || { 
+                            ${inotifyFlag} && read -u ${fd_inotify1}
+                            continue
+                        }
 
                         while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
                             echo "$(<"${tmpDir}/.out/x${outCur}")" >&${fd_stdout}
                             \rm -f "${tmpDir}/.out/x${outCur}"
-                            #catFiles+=("$(printf '%s/.out/x%s\n' "${tmpDir}" "${outCur}")")
                             ((outCur++))
                             [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00" 
+                            [[ -f "${tmpDir}"/.quit ]] && break
                         done 
-
-                        #(( ${#catFiles[@]} > 0 )) && { 
-                        #    cat "${catFiles[@]}"
-                        #    \rm -f "${catFiles[@]}"
-                        #    catFiles=()
-                        #}
                     done
+                    
                     kill -9 "${pNotify1_PID}"
                      
-                  } {fd_inotify1}<><(:) 2>&${fd_stderr}
+                  } {fd_inotify1}<><(:)
                 } 2>/dev/null
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
