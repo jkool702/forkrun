@@ -220,7 +220,7 @@ mySplit() (
                             
                             (( ${nLinesNew} > ${nLinesCur} )) && {
                     
-                                #nLinesNew+=$(( ( ${nLinesCur} * ( ${nLinesNew} - ${nLinesCur} ) ) / 2 ))
+                                nLinesNew+=$(( ( ${nLinesCur} * ( ${nLinesNew} - ${nLinesCur} ) ) / ${nProcs} ))
                         
                                 (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
 
