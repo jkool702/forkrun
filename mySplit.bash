@@ -310,7 +310,9 @@ $(${nLinesAutoFlag} && echo """
 """)
             [[ -f \"${tmpDir}\"/.quit ]] || {
                 touch \"${tmpDir}\"/.quit
-                touch \"${tmpDir}\"/.out.done
+$(${nOrderFlag} && echo """
+                touch \"${tmpDir}\"/.out/.done
+""")
             }
         break
 $(${inotifyFlag} && echo """
