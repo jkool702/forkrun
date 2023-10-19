@@ -16,11 +16,9 @@ mySplit() (
     #      `inotifywait`                   : required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
         
     trap - EXIT INT TERM HUP QUIT
-
-    shopt -s extglob
             
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nOrder fd_nOrder1 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos outCur
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk 
     local -a A p_PID runCmd 
   
@@ -37,13 +35,12 @@ mySplit() (
         # determine what mySplit is using lines on stdin for
         runCmd=("${@}")
         [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
-
-        # check for carriage returns (/r) in the command being parallelizied
-        ! [[ "${runCmd[*]}" == *$'\r'* ]] || [[ ${FORCE} ]] || { 
-            runCmd=("${runCmd[@]//$'\r'/}")
-            printf '\nWARNING: The command being parallelized contained a carriage return (\\r) (these sometimes get added by a windows machine)\n         Unfortunately, these can make mySplit do nasty things (including becoming a fork bomb) and as such it was automatically removed\n\n         To force mySplit to keep the \\r, invoke it via "<...> | FORCE=1 mySplit %s" \n\n' "${runCmd[*]}" >&${fd_stderr}
+        [[ "${runCmd[*]}" == *$'\r'* ]] && {
+            [[ ${FORCE} ]] || { 
+                runCmd=("${runCmd[@]//$'\r'/}")
+                printf '\nWARNING: The command being parallelized contained a carriage return (\\r)\n         These sometimes get added if the code was saved on or copied+pasted from a windows machine\n         These can make mySplit do nasty things (including becoming a fork bomb) and as such was automatically removed\n         To force mySplit to keep the \\r, invoke it via `echo "${stdin}" | FORCE=1 mySplit %s\n\n' "${runCmd[*]}" >&${fd_stderr}
+            }    
         }
-
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
@@ -63,11 +60,11 @@ mySplit() (
         ${rmDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
 
         # start building exit trap string
-        touch "${tmpDir}"/.pid.kill
-        exitTrapStr='kill -9 $(cat '"$(printf '%q\n' "${tmpDir}")"'/.pid.kill) 2>/dev/null; '
+        exitTrapStr=''
         exitTrapStr_kill=''
 
         ${verboseFlag} && {
+            printf '\nCOMMAND TO PARALLELIZE: %s\n' "${runCmd[*]}"
             ${inotifyFlag} && echo 'using inotify'
             ${fallocateFlag} && echo 'using fallocate'
             ${nLinesAutoFlag} && echo 'automatically adjusting batch size (num lines per function call)'
@@ -92,7 +89,7 @@ mySplit() (
             exitTrapStr_kill+="${!} "
         fi      
                        
-        # setup+fork inotifywait (if available)
+        # setup inotify (if available) + set exit trap 
         if ${inotifyFlag}; then
         
             # add 1 newline for each coproc to fd_inotify
@@ -104,7 +101,7 @@ mySplit() (
             
             pNotify_PID=$!
 
-            exitTrapStr+='[[ -f "'"${fPath}"'" ]] && \rm -f "'"${fPath}"'"; '
+            exitTrapStr+='[[ -f "'"${fPath}"'" ]] && rm -f "'"${fPath}"'"; '
             exitTrapStr_kill+="${pNotify_PID} "
         fi
         
@@ -114,51 +111,15 @@ mySplit() (
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
                                     
-            ( coproc pOrder {
-
-                 # fork nested coproc to print outputs (in order) and then clear them in realtime as they show up in ${tmpDir}/.out
-                 { coproc pOrder1 {
-
-                    # monitor ${tmpDir}/.out for new files if we have inotifywait
-                    ${inotifyFlag} && {
-                        inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify1} &
-                        pNotify1_PID=$!
-                        echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
-                    } 2>/dev/null
-                    echo "$BASHPID" >>"${tmpDir}"/.pid.kill
-
-                    shopt -s extglob
-                    
-                    outCur=10
-
-                    until [[ -f "${tmpDir}"/.quit ]]; do
-                        [[ -f "${tmpDir}"/.out/x${outCur} ]] || { 
-                            ${inotifyFlag} && read -u ${fd_inotify1}
-                            continue
-                        }
-
-                        while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
-                            echo "$(<"${tmpDir}/.out/x${outCur}")" >&${fd_stdout}
-                            \rm -f "${tmpDir}/.out/x${outCur}"
-                            ((outCur++))
-                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00" 
-                            [[ -f "${tmpDir}"/.quit ]] && break
-                        done 
-                    done
-                    
-                    kill -9 "${pNotify1_PID}"
-                     
-                  } {fd_inotify1}<><(:)
-                } 2>/dev/null
-
+            { coproc pOrder ( 
+        
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
-                # start at 10 so that bash wont try to treat x0_ as an octal
-                printf '%s\n' {10..89} {9000..9899} {990000..998999} >&${fd_nOrder}
+                printf '%s\n' {00..89} {9000..9899} {9900000..9998999} >&${fd_nOrder}
 
                 # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
                 v9='99'
                 kkMax='8'
-                until [[ -f "${tmpDir}"/.quit ]]; do
+                while ! [[ -f "${tmpDir}"/.quit ]]; do
                     v9="${v9}9"
                     kkMax="${kkMax}9"
 
@@ -167,9 +128,8 @@ mySplit() (
                         { source /proc/self/fd/0 >&${fd_nOrder}; }<<<"printf '%s\n' {${v9}${kkCur}000..${v9}${kkCur}999}"
                     done
                 done
-                
-              } 
-            ) 2>/dev/null 
+              )
+            } 2>/dev/null
             
             exitTrapStr_kill+="${pOrder_PID} "
         else 
@@ -220,7 +180,7 @@ mySplit() (
                             
                             (( ${nLinesNew} > ${nLinesCur} )) && {
                     
-                                nLinesNew+=$(( ( ${nLinesCur} * ( ${nLinesNew} - ${nLinesCur} ) ) / ${nProcs} ))
+                                #nLinesNew+=$(( ( ${nLinesCur} * ( ${nLinesNew} - ${nLinesCur} ) ) / 2 ))
                         
                                 (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
 
@@ -259,7 +219,7 @@ mySplit() (
 
         # set EXIT trap (dynamically determined based on which option flags were active)
         exitTrapStr="${exitTrapStr}"'kill -9 '"${exitTrapStr_kill}"' 2>/dev/null'
-        ${rmDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && \rm -rf "'"${tmpDir}"'"'
+        ${rmDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && rm -rf "'"${tmpDir}"'"'
         trap "${exitTrapStr}" EXIT INT TERM HUP QUIT       
         
 
@@ -293,14 +253,10 @@ $(${nLinesAutoFlag} && echo """
     read -u ${fd_continue} 
     mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
 $(${pipeReadFlag} || echo """
-    [[ \${#A[@]} == 0 ]] || { 
-        [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || read -r -u ${fd_read} partialLine || until read -r -u ${fd_read}; do partialLine+=\"\${REPLY}\"; done
+    [[ \${#A[@]} == 0 ]] || [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || read -r -u ${fd_read} partialLine || until read -r -u ${fd_read}; do partialLine+=\"\${REPLY}\"; done
 """
 ${nOrderFlag} && echo """
-        read -u ${fd_nOrder} nOrder
-"""
-${pipeReadFlag} || echo """
-    }
+    read -u ${fd_nOrder} nOrder
 """)
     printf '\\n' >&${fd_continue}; 
     [[ \${#A[@]} == 0 ]] && {
@@ -308,12 +264,7 @@ ${pipeReadFlag} || echo """
 $(${nLinesAutoFlag} && echo """
             printf '0\\n' >&\${fd_nAuto0}
 """)
-            [[ -f \"${tmpDir}\"/.quit ]] || {
-                touch \"${tmpDir}\"/.quit
-$(${nOrderFlag} && echo """
-                touch \"${tmpDir}\"/.out/.done
-""")
-            }
+            [[ -f \"${tmpDir}\"/.quit ]] || touch \"${tmpDir}\"/.quit
         break
 $(${inotifyFlag} && echo """
         else        
