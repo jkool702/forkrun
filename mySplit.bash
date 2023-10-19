@@ -20,9 +20,9 @@ mySplit() (
     shopt -s extglob
             
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pOrder1_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos outCur PID0
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nOrder fd_nOrder1 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos outCur
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk 
-    local -a A p_PID runCmd catFiles
+    local -a A p_PID runCmd 
   
     # setup tmpdir
     { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDir="$(mktemp -p "${TMPDIR}" -d .mySplit.XXXXXX)"; } || { [[ -d /dev/shm ]] && tmpDir="$(mktemp -p "/dev/shm" -d .mySplit.XXXXXX)"; }  || tmpDir="$(mktemp -p "/tmp" -d .mySplit.XXXXXX)"    
@@ -126,10 +126,8 @@ mySplit() (
                     echo "$BASHPID" >>"${tmpDir}"/.pid.kill
 
                     shopt -s extglob
+                    
                     outCur=10
-
-                    runFlag=true
-                    catFiles=()
 
                     until [[ -f "${tmpDir}"/.quit ]]; do
                         [[ -f "${tmpDir}"/.out/x${outCur} ]] || { 
