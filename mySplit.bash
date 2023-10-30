@@ -183,7 +183,20 @@ mySplit() (
         # check for cat. if missing define replacement using bash builtins
         type -p cat &>/dev/null || {
 cat() {
-    source <(printf 'echo '; [[ -t 0 ]] || printf '"$(</proc/self/fd/0)" '; [[ $# == 0 ]] || printf '"$(<%s)" ' "$@"; printf '\n')
+    if  [[ -t 0 ]] && [[ $# == 0 ]]; then 
+        # no input 
+        return
+    elif [[ $# == 0 ]]; then
+        # only stdin
+        printf '%s\n' "$(</proc/self/fd/0)"
+    elif [[ -t 0 ]]; then
+        # only function inputs
+        source <(printf 'echo '; printf '"$(<%s)" ' "$@"; printf '\n')
+    else 
+        # both stdin and function inputs. fork printing stdin to allow for printing both in parallel.
+        printf '%s\n' "$(</proc/self/fd/0)" &
+        source <(printf 'echo '; printf '"$(<%s)" ' "$@"; printf '\n')
+    fi
 }
         }
         
