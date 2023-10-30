@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 
 mySplit() (
-    ## Splits up stdin into groups of ${1} lines using ${2} bash coprocs
-    # input 1: number of lines to group at a time. Default is to automatically dynamically set nLines.
-    # input 2: number of coprocs to use. Default is $(nproc)
+    ## (in development) re-write of forkrun
     # 
     # REQUIRED DEPENDENCIES: 
     #      Bash 4+ (This is when coprocs were introduced)
-    #      `cat` (either the GNU or the busybox versions will work)
     #
     # OPTIONAL DEPENDENCIES (to provide enhanced functionality):
     #       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
@@ -182,6 +179,13 @@ mySplit() (
         
         # check for fallocate
         type -p fallocate &>/dev/null && : "${fallocateFlag=true}" || : "${fallocateFlag=false}"
+
+        # check for cat. if missing define replacement using bash builtins
+        type -p cat &>/dev/null || {
+cat() {
+    source <(printf 'echo '; [[ -t 0 ]] || printf '"$(</proc/self/fd/0)" '; [[ $# == 0 ]] || printf '"$(<%s)" ' "$@"; printf '\n')
+}
+        }
         
         # set defaults for control flags/parameters
         : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}" "${nullDelimiterFlag:=false}"
