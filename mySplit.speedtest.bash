@@ -171,7 +171,8 @@ printf '\n\nOVERALL TIME TAKEN: %s SECONDS\n\n' "${SECONDS}"
 ############################################## RESULTS ##############################################
 
 
-: <<'EOF'COPYING FILES FROM /usr TO RAMDISK AT /mnt/ramdisk/usr
+: <<'EOF'
+COPYING FILES FROM /usr TO RAMDISK AT /mnt/ramdisk/usr
 
 
 --------------------------------------------------------------------
