@@ -1,16 +1,34 @@
 #!/usr/bin/env bash
 
 mySplit() (
-    ## (in development) re-write of forkrun
-    # 
-    # REQUIRED DEPENDENCIES: 
-    #      Bash 4+ (This is when coprocs were introduced)
-    #
-    # OPTIONAL DEPENDENCIES (to provide enhanced functionality):
-    #       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
-    #      `grep -cE` --OR-- `nproc`       : required to automatically set nProcs as the number of logical cpu cores. without one of these either it must be set manually or it gets set to "8" by default
-    #      `fallocate` --AND-- kernel 3.5+ : required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is bfed by a long-running process, could eventually result in very high memory use)
-    #      `inotifywait`                   : required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
+## Efficiently parallelize a loop / run many tasks in parallel using bash coprocs
+## NOTE: mySplit is an (in-development) re-write of forkrun that is faster, more efficient, and is less dependent on external dependencies
+#
+# USAGE:   printf '%s\n' "${args}" | mySplit [flags] [--] parFunc [args0]
+#
+#          Usage is vitrually identical to parallelizing a loop using `xargs -P` or  `parallel -m`:
+#          source this file, then pass (newline-seperated) inputs to parallelize over on stdin and pass function name and initial arguments as function inputs.
+#
+# RESULT:  mySplit will run `parFunc [args0] ${line(s)} in parallel for each line (or group of N lines) that are given on stdin.
+#
+# EXAMPLE: find ./ -type f | mySplit sha256sum
+#
+# HOW IT WORKS: coproc code is dynamically generated based on passed mySplit options, then N coprocs are forked off. These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
+#          Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
+#          This parallelization method is MUCH faster than traditional forking (esp. for many quick-to-run tasks)...On my hardware mySplit is 50-70% faster than  'xargs -P'  and 3x-5x faster than 'parallel -m' 
+#
+# ONLY REQUIRED DEPENDENCY:   Bash 4+ (This is when coprocs were introduced)
+#
+# OPTIONAL DEPENDENCIES (to provide enhanced functionality):
+#       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
+#      `fallocate` --AND-- kernel 3.5+ : required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use)
+#      `inotifywait`                   : required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
+#
+# FLAGS: TBD
+#
+# <WORK IN PROGRESS>
+
+############################ BEGIN FUNCTION ############################
         
     trap - EXIT INT TERM HUP QUIT
 
@@ -22,7 +40,7 @@ mySplit() (
     local -a A p_PID runCmd 
 
     # check inputs and set defaults if needed
-    optParseFlag=true
+    [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in 
 
@@ -41,7 +59,7 @@ mySplit() (
             ;;
 
             -?(-)?(n)l?(ine?(s))?([= ])@([[:graph:]])*)
-                nLines="${1##@(-?(-)l?(ine?(s))?([= ]))}"
+                nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
             ;;
 
             -?(-)?(N)L?(INE?(S)))
@@ -51,7 +69,7 @@ mySplit() (
             ;;
 
             -?(-)?(N)L?(INE?(S))?([= ])@([[:graph:]])*)
-                nLines="${1##@(-?(-)l?(ine?(s))?([= ]))}"
+                nLines="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
                 nLinesAutoFlag=true
             ;;
 
@@ -133,11 +151,19 @@ mySplit() (
                 verboseFlag=false
             ;;
 
+             +?(-)n?(umber)?(-)?(line?(s)))
+                exportOrderFlag=false
+            ;;
+            
+            +?(-)u?(nescape))
+                unescapeFlag=false
+            ;;
+ 
             --) 
                 optParseFlag=false 
             ;;
 
-            @([-+])?([-+])@([[:graph:]])*)
+           @([-+])?([-+])@([[:graph:]])*)
                 printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$1" >&2
             ;;
 
@@ -168,19 +194,19 @@ mySplit() (
 
         { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag=true}"
         { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
-        { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '8')
+        { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || nProcs=$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')
 
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # check for inotifywait
-        type -p inotifywait &>/dev/null && : "${inotifyFlag=true}" || : "${inotifyFlag=false}"
+        type -a inotifywait &>/dev/null && : "${inotifyFlag=true}" || : "${inotifyFlag=false}"
         
         # check for fallocate
-        type -p fallocate &>/dev/null && : "${fallocateFlag=true}" || : "${fallocateFlag=false}"
+        type -a fallocate &>/dev/null && : "${fallocateFlag=true}" || : "${fallocateFlag=false}"
 
         # check for cat. if missing define replacement using bash builtins
-        type -p cat &>/dev/null || {
+        type -a cat &>/dev/null || {
 cat() {
     if  [[ -t 0 ]] && [[ $# == 0 ]]; then 
         # no input 
@@ -200,8 +226,8 @@ cat() {
         }
         
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}" "${nullDelimiterFlag:=false}"
-            
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}" "${nullDelimiterFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${unescapeFlag:=false}"
+
         # check for a conflict that could occur is flags are defined on commandline when mySplit is called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
     
@@ -219,6 +245,7 @@ cat() {
             ${nLinesAutoFlag} && echo 'automatically adjusting batch size (num lines per function call)'
             ${nOrderFlag} && echo 'ordering output the same as the input'
         } >&${fd_stderr}
+
         
         # spawn a coproc to write stdin to a tmpfile
         # After we are done reading all of stdin indicate this by touching .done
