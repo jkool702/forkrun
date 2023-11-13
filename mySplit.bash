@@ -135,7 +135,6 @@ mySplit() (
 
             --) 
                 optParseFlag=false 
-                break
             ;;
 
             @([-+])?([-+])@([[:graph:]])*)
@@ -191,11 +190,11 @@ cat() {
         printf '%s\n' "$(</proc/self/fd/0)"
     elif [[ -t 0 ]]; then
         # only function inputs
-        source <(printf 'echo '; printf '"$(<%s)" ' "$@"; printf '\n')
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
     else 
         # both stdin and function inputs. fork printing stdin to allow for printing both in parallel.
         printf '%s\n' "$(</proc/self/fd/0)" &
-        source <(printf 'echo '; printf '"$(<%s)" ' "$@"; printf '\n')
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
     fi
 }
         }
@@ -236,7 +235,7 @@ cat() {
                 }
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
             } 2>&${fd_stderr}
-            exitTrapStr_kill+="${!} "
+            exitTrapStr_kill+="${pWrite_PID} "
         fi      
                        
         # setup+fork inotifywait (if available)
@@ -249,7 +248,7 @@ cat() {
                 inotifywait -q -m --format '' "${fPath}" >&${fd_inotify} &
             } 2>/dev/null
             
-            pNotify_PID=$!
+            pNotify_PID=${!}
 
             exitTrapStr+='[[ -f "'"${fPath}"'" ]] && \rm -f "'"${fPath}"'"; '
             exitTrapStr_kill+="${pNotify_PID} "
@@ -342,8 +341,7 @@ cat() {
                     
                     ${fallocateFlag} && { 
                         nWait=${nProcs}
-                        read fd_read_pos_old </proc/self/fdinfo/${fd_read};
-                        fd_read_pos_old=${fd_read_pos_old##*$'\t'}
+                        fd_read_pos_old=0
                     }
                     ${nLinesAutoFlag} && nRead=0
         
@@ -384,7 +382,7 @@ cat() {
                                 0) 
                                     fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
                                     (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
-                                        fallocate -p -o 0 -l ${fd_read_pos} "${fPath}"
+                                        fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}"
                                         fd_read_pos_old=${fd_read_pos}
                                     }
                                     nWait=${nProcs}
@@ -410,7 +408,7 @@ cat() {
         trap "${exitTrapStr}" EXIT INT TERM HUP QUIT       
         
 
-        # populate {fd_continue} with an initial '1' 
+        # populate {fd_continue} with an initial '\n' 
         # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
         #     when there is a '1' the pipe buffer then nothing has a read lock
         #     a process reads 1 byte from {fd_continue} to get the read lock, and 
