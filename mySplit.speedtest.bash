@@ -46,6 +46,7 @@ ramdiskTransferFlag=true
 ############################################## BEGIN CODE ##############################################
 
 SECONDS=0
+shopt -s extglob
 
 declare -F mySplit 1>/dev/null 2>&1 || { [[ -f ./mySplit.bash ]] && source ./mySplit.bash; } || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/mySplit.bash)
 
