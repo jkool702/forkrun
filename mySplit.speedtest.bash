@@ -46,6 +46,7 @@ ramdiskTransferFlag=true
 ############################################## BEGIN CODE ##############################################
 
 SECONDS=0
+shopt -s extglob
 
 declare -F mySplit 1>/dev/null 2>&1 || { [[ -f ./mySplit.bash ]] && source ./mySplit.bash; } || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/mySplit.bash)
 
@@ -170,7 +171,8 @@ printf '\n\nOVERALL TIME TAKEN: %s SECONDS\n\n' "${SECONDS}"
 ############################################## RESULTS ##############################################
 
 
-: <<'EOF'COPYING FILES FROM /usr TO RAMDISK AT /mnt/ramdisk/usr
+: <<'EOF'
+COPYING FILES FROM /usr TO RAMDISK AT /mnt/ramdisk/usr
 
 
 --------------------------------------------------------------------

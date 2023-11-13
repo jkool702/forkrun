@@ -1,66 +1,238 @@
 #!/usr/bin/env bash
 
 mySplit() (
-    ## Splits up stdin into groups of ${1} lines using ${2} bash coprocs
-    # input 1: number of lines to group at a time. Default is to automatically dynamically set nLines.
-    # input 2: number of coprocs to use. Default is $(nproc)
-    # 
-    # REQUIRED DEPENDENCIES: 
-    #      Bash 4+ (This is when coprocs were introduced)
-    #      `cat` (either the GNU or the busybox versions will work)
-    #
-    # OPTIONAL DEPENDENCIES (to provide enhanced functionality):
-    #       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
-    #      `grep -cE` --OR-- `nproc`       : required to automatically set nProcs as the number of logical cpu cores. without one of these either it must be set manually or it gets set to "8" by default
-    #      `fallocate` --AND-- kernel 3.5+ : required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is bfed by a long-running process, could eventually result in very high memory use)
-    #      `inotifywait`                   : required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
+## Efficiently parallelize a loop / run many tasks in parallel using bash coprocs
+## NOTE: mySplit is an (in-development) re-write of forkrun that is faster, more efficient, and is less dependent on external dependencies
+#
+# USAGE:   printf '%s\n' "${args}" | mySplit [flags] [--] parFunc [args0]
+#
+#          Usage is vitrually identical to parallelizing a loop using `xargs -P` or  `parallel -m`:
+#          source this file, then pass (newline-seperated) inputs to parallelize over on stdin and pass function name and initial arguments as function inputs.
+#
+# RESULT:  mySplit will run `parFunc [args0] ${line(s)} in parallel for each line (or group of N lines) that are given on stdin.
+#
+# EXAMPLE: find ./ -type f | mySplit sha256sum
+#
+# HOW IT WORKS: coproc code is dynamically generated based on passed mySplit options, then N coprocs are forked off. These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
+#          Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
+#          This parallelization method is MUCH faster than traditional forking (esp. for many quick-to-run tasks)...On my hardware mySplit is 50-70% faster than  'xargs -P'  and 3x-5x faster than 'parallel -m' 
+#
+# ONLY REQUIRED DEPENDENCY:   Bash 4+ (This is when coprocs were introduced)
+#
+# OPTIONAL DEPENDENCIES (to provide enhanced functionality):
+#       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
+#      `fallocate` --AND-- kernel 3.5+ : required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use)
+#      `inotifywait`                   : required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
+#
+# FLAGS: TBD
+#
+# <WORK IN PROGRESS>
+
+############################ BEGIN FUNCTION ############################
         
     trap - EXIT INT TERM HUP QUIT
 
     shopt -s extglob
             
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmDirFlag pipeReadFlag verboseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nOrder fd_nOrder1 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos outCur
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmTmpDirFlag pipeReadFlag verboseFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nOrder fd_nOrder1 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos 
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk 
     local -a A p_PID runCmd 
-  
+
+    # check inputs and set defaults if needed
+    [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
+    while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
+        case "${1}" in 
+
+            -?(-)j|-?(-)P|-?(-)?(n)proc?(s))
+                nProcs="${2}"
+                shift 1
+            ;;
+
+            -?(-)j?([= ])@([[:graph:]])*|-?(-)P?([= ])@([[:graph:]])*|-?(-)?(n)proc?(s)?([= ])@([[:graph:]])*)
+                nProcs="${1##@(-?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)proc?(s)?([= ]))}"
+            ;;
+
+            -?(-)?(n)l?(ine?(s)))
+                nLines="${2}"
+                shift 1
+            ;;
+
+            -?(-)?(n)l?(ine?(s))?([= ])@([[:graph:]])*)
+                nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
+            ;;
+
+            -?(-)?(N)L?(INE?(S)))
+                nLines="${2}"
+                nLinesAutoFlag=true
+                shift 1
+            ;;
+
+            -?(-)?(N)L?(INE?(S))?([= ])@([[:graph:]])*)
+                nLines="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
+                nLinesAutoFlag=true
+            ;;
+
+            -?(-)t?(mp?(?(-)dir)))
+                tmpDirRoot="${2}"
+                shift 1
+            ;;
+
+            -?(-)t?(mp?(?(-)dir))?([= ])@([[:graph:]])*)
+                tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
+                [[ -d ${tmpDirRoot} ]] || mkdir -p "${tmpDirRoot}"
+            ;;
+
+            -?(-)i?(nsert))
+                substituteStringFlag=true
+            ;;
+
+            -?(-)I?(D)|-?(-)INSERT?(?(-)ID))
+                substituteStringFlag=true; substituteStringIDFlag=true
+            ;;
+
+            -?(-)k?(eep?(?(-)order)))
+                nOrderFlag=true
+            ;;
+
+            -?(-)0|-?(-)z?(ero)|-?(-)null)
+                nullDelimiterFlag=true
+            ;;
+
+            -?(-)s?(tdin)|-?(-)pipe)
+                pipeReadFlag=true
+            ;;
+
+            -?(-)d?(elete))
+                rmTmpDirFlag=true 
+            ;;
+
+            -?(-)v?(erbose))
+                verboseFlag=true
+            ;;
+
+             -?(-)n?(umber)?(-)?(line?(s)))
+                exportOrderFlag=true
+            ;;
+            
+            -?(-)u?(nescape))
+                unescapeFlag=true
+            ;;
+
+            -?(-)h?(elp)|-?(-)usage|-?(-)\?)
+                : #displayHelp (TBD)
+            ;;
+
+            +?(-)i?(nsert))
+                substituteStringFlag=false
+            ;;
+
+            +?(-)I?(D)|+?(-)INSERT?(?(-)ID))
+                substituteStringFlag=false; substituteStringIDFlag=false
+            ;;
+
+            +?(-)k?(eep?(?(-)order)))
+                nOrderFlag=false
+            ;;
+
+            +?(-)0|+?(-)z|+?(-)null)
+                nullDelimiterFlag=false
+            ;;
+
+            +?(-)s?(tdin)|+?(-)pipe)
+                pipeReadFlag=false
+            ;;
+
+            +?(-)d?(elete))
+                rmTmpDirFlag=false 
+            ;;
+
+            +?(-)v?(erbose))
+                verboseFlag=false
+            ;;
+
+             +?(-)n?(umber)?(-)?(line?(s)))
+                exportOrderFlag=false
+            ;;
+            
+            +?(-)u?(nescape))
+                unescapeFlag=false
+            ;;
+ 
+            --) 
+                optParseFlag=false 
+            ;;
+
+           @([-+])?([-+])@([[:graph:]])*)
+                printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$1" >&2
+            ;;
+
+            *)
+                optParseFlag=false 
+                break
+            ;;
+
+        esac
+
+        shift 1
+        [[ ${#} == 0 ]] && optParseFlag=false
+
+    done
+
+    # determine what mySplit is using lines on stdin for
+    [[ ${FORCE} ]] && runCmd=("${@}") || runCmd=("${@//$'\r'/}")
+    [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
+
     # setup tmpdir
-    { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDir="$(mktemp -p "${TMPDIR}" -d .mySplit.XXXXXX)"; } || { [[ -d /dev/shm ]] && tmpDir="$(mktemp -p "/dev/shm" -d .mySplit.XXXXXX)"; }  || tmpDir="$(mktemp -p "/tmp" -d .mySplit.XXXXXX)"    
+    [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
+    tmpDir="$(mktemp -p "${tmpDirRoot}" -d .mySplit.XXXXXX)"    
     fPath="${tmpDir}"/.stdin
     touch "${fPath}"   
     
+    
     {
-        # check inputs and set defaults if needed
-        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nLines="${1}"; : "${nLinesAutoFlag:=false}"; shift 1; } || { nLines=1; : "${nLinesAutoFlag=true}"; }
-        [[ "${1}" =~ ^[0-9]*[1-9]+[0-9]*$ ]] && { nProcs="${1}"; shift 1; } || nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '8')
 
-        # determine what mySplit is using lines on stdin for
-        runCmd=("${@}")
-        [[ ${#runCmd[@]} == 0 ]] && runCmd=(printf '%s\n')
-
-        # check for carriage returns (/r) in the command being parallelizied
-        ! [[ "${runCmd[*]}" == *$'\r'* ]] || [[ ${FORCE} ]] || { 
-            runCmd=("${runCmd[@]//$'\r'/}")
-            printf '\nWARNING: The command being parallelized contained a carriage return (\\r) (these sometimes get added by a windows machine)\n         Unfortunately, these can make mySplit do nasty things (including becoming a fork bomb) and as such it was automatically removed\n\n         To force mySplit to keep the \\r, invoke it via "<...> | FORCE=1 mySplit %s" \n\n' "${runCmd[*]}" >&${fd_stderr}
-        }
+        { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag=true}"
+        { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
+        { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || nProcs=$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')
 
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # check for inotifywait
-        type -p inotifywait &>/dev/null && : "${inotifyFlag=true}" || : "${inotifyFlag=false}"
+        type -a inotifywait &>/dev/null && : "${inotifyFlag=true}" || : "${inotifyFlag=false}"
         
         # check for fallocate
-        type -p fallocate &>/dev/null && : "${fallocateFlag=true}" || : "${fallocateFlag=false}"
+        type -a fallocate &>/dev/null && : "${fallocateFlag=true}" || : "${fallocateFlag=false}"
+
+        # check for cat. if missing define replacement using bash builtins
+        type -a cat &>/dev/null || {
+cat() {
+    if  [[ -t 0 ]] && [[ $# == 0 ]]; then 
+        # no input 
+        return
+    elif [[ $# == 0 ]]; then
+        # only stdin
+        printf '%s\n' "$(</proc/self/fd/0)"
+    elif [[ -t 0 ]]; then
+        # only function inputs
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    else 
+        # both stdin and function inputs. fork printing stdin to allow for printing both in parallel.
+        printf '%s\n' "$(</proc/self/fd/0)" &
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    fi
+}
+        }
         
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}"
-            
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}" "${nullDelimiterFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${unescapeFlag:=false}"
+
         # check for a conflict that could occur is flags are defined on commandline when mySplit is called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
     
         # if keeping tmpDir print its location to stderr
-        ${rmDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
+        ${rmTmpDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
 
         # start building exit trap string
         touch "${tmpDir}"/.pid.kill
@@ -73,6 +245,7 @@ mySplit() (
             ${nLinesAutoFlag} && echo 'automatically adjusting batch size (num lines per function call)'
             ${nOrderFlag} && echo 'ordering output the same as the input'
         } >&${fd_stderr}
+
         
         # spawn a coproc to write stdin to a tmpfile
         # After we are done reading all of stdin indicate this by touching .done
@@ -89,7 +262,7 @@ mySplit() (
                 }
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
             } 2>&${fd_stderr}
-            exitTrapStr_kill+="${!} "
+            exitTrapStr_kill+="${pWrite_PID} "
         fi      
                        
         # setup+fork inotifywait (if available)
@@ -102,7 +275,7 @@ mySplit() (
                 inotifywait -q -m --format '' "${fPath}" >&${fd_inotify} &
             } 2>/dev/null
             
-            pNotify_PID=$!
+            pNotify_PID=${!}
 
             exitTrapStr+='[[ -f "'"${fPath}"'" ]] && \rm -f "'"${fPath}"'"; '
             exitTrapStr_kill+="${pNotify_PID} "
@@ -195,8 +368,7 @@ mySplit() (
                     
                     ${fallocateFlag} && { 
                         nWait=${nProcs}
-                        read fd_read_pos_old </proc/self/fdinfo/${fd_read};
-                        fd_read_pos_old=${fd_read_pos_old##*$'\t'}
+                        fd_read_pos_old=0
                     }
                     ${nLinesAutoFlag} && nRead=0
         
@@ -237,7 +409,7 @@ mySplit() (
                                 0) 
                                     fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
                                     (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
-                                        fallocate -p -o 0 -l ${fd_read_pos} "${fPath}"
+                                        fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}"
                                         fd_read_pos_old=${fd_read_pos}
                                     }
                                     nWait=${nProcs}
@@ -259,11 +431,11 @@ mySplit() (
 
         # set EXIT trap (dynamically determined based on which option flags were active)
         exitTrapStr="${exitTrapStr}"'kill -9 '"${exitTrapStr_kill}"' 2>/dev/null'
-        ${rmDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && \rm -rf "'"${tmpDir}"'"'
+        ${rmTmpDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && \rm -rf "'"${tmpDir}"'"'
         trap "${exitTrapStr}" EXIT INT TERM HUP QUIT       
         
 
-        # populate {fd_continue} with an initial '1' 
+        # populate {fd_continue} with an initial '\n' 
         # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
         #     when there is a '1' the pipe buffer then nothing has a read lock
         #     a process reads 1 byte from {fd_continue} to get the read lock, and 
@@ -291,8 +463,8 @@ $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
 """)
     read -u ${fd_continue} 
-    mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) A
-$(${pipeReadFlag} || echo """
+    mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) $(${nullDelimiterFlag} && printf '%s' '-d '"''") A
+$(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || { 
         [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || read -r -u ${fd_read} partialLine || until read -r -u ${fd_read}; do partialLine+=\"\${REPLY}\"; done
 """
@@ -322,11 +494,13 @@ $(${inotifyFlag} && echo """
         fi
         continue
     }
+$(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${partialLine} ]] && { 
         A[\$(( \${#A[@]} - 1 ))]+=\"\${partialLine}\"
         partialLine=''
     }
-$(${nLinesAutoFlag} && { printf '%s' """
+"""
+${nLinesAutoFlag} && { printf '%s' """
     \${nLinesAutoFlag} && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false   
