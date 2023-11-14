@@ -7,7 +7,7 @@ mySplit() (
 # USAGE:   printf '%s\n' "${args}" | mySplit [flags] [--] parFunc [args0]
 #
 #          Usage is vitrually identical to parallelizing a loop using `xargs -P` or  `parallel -m`:
-#          source this file, then pass (newline-seperated) inputs to parallelize over on stdin and pass function name and initial arguments as function inputs.
+#          source this file, then pass (newline-seperated) inputs to parallelize over on stdin and pass function name and initial arguments as function inputs. 
 #
 # RESULT:  mySplit will run `parFunc [args0] ${line(s)} in parallel for each line (or group of N lines) that are given on stdin.
 #
@@ -151,7 +151,7 @@ mySplit() (
                 verboseFlag=false
             ;;
 
-             +?(-)n?(umber)?(-)?(line?(s)))
+            +?(-)n?(umber)?(-)?(line?(s)))
                 exportOrderFlag=false
             ;;
             
@@ -388,12 +388,15 @@ cat() {
                         
                             nRead+=${REPLY}
 
-                            nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) / 2 ))
+                            nLinesNew=$(( 1 + ( ( ${nLinesCur} ** 2 ) + ( ( ( 2 * ${nLinesMax} ) - ${nLinesCur} ) * ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( 2 * ${nLinesMax} * ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
+                            #nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( 2 * ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
+                            #nLinesNew=$(( 1 + ( ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
                             
                             (( ${nLinesNew} > ${nLinesCur} )) && {
                     
-                                nLinesNew+=$(( ( ${nLinesCur} * ( ${nLinesNew} - ${nLinesCur} ) ) / ${nProcs} ))
-                        
+                                #nLinesNew+=$(( ( ${nLinesCur} * ( ${nLinesNew} - ${nLinesCur} ) ) / ${nProcs} ))
+                                #nLinesNew+=$(( ( 1 + ${nLinesNew} - ${nLinesCur} ) / ${nLinesCur} ))
+
                                 (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
 
                                 printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines 
