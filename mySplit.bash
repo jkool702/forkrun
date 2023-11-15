@@ -31,6 +31,7 @@ mySplit() (
 ############################ BEGIN FUNCTION ############################
         
     LC_ALL=C
+#    IFS=$'\n'
     trap - EXIT INT TERM HUP QUIT
 
     shopt -s extglob
@@ -391,7 +392,7 @@ cat() {
                         
                             nRead+=${REPLY}
 
-                            nLinesNew=$(( 1 + ( ( ${nLinesCur} * ( ${nLinesMax} - ${nLinesCur} ) ) + ( ( ${nLinesMax} + ${nLinesCur} ) * ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nLinesMax} * ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) / 2 ))
+                            nLinesNew=$(( 1 + ( ( ${nLinesCur} * ( ${nLinesMax} - ${nLinesCur} ) ) + ( ( ${nLinesMax} + ${nLinesCur} ) * ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) / ( ${nLinesMax} * 2 ) ))
                             #nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
                             #nLinesNew=$(( 1 + ( ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
                             
@@ -443,23 +444,23 @@ cat() {
 
         # populate {fd_continue} with an initial '\n'
         # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
-        #     when there is a '1' the pipe buffer then nothing has a read lock
+        #     when there is a '\n' the pipe buffer then nothing has a read lock
         #     a process reads 1 byte from {fd_continue} to get the read lock, and 
-        #     when that process writes a '1' back to the pipe it releases the read lock
+        #     when that process writes a '\n' back to the pipe it releases the read lock
         printf '\n' >&${fd_continue}; 
 
         # spawn $nProcs coprocs
         # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
-        # they then read N lines with mapfile and send 1 to {fd_continue} (so the next coproc can start to read)
+        # they then read N lines with mapfile and send \n to {fd_continue} (so the next coproc can start to read)
         # if the read array is empty the coproc will either continue or break, depending on if end conditions are met
         # finally it will do something with the data.
         #
         # NOTE: All coprocs share the same fd_read file descriptor ( accomplished via `( <...>; coproc p0 ...; <...> ;  coproc pN ...; ) {fd_read}<><(:)` )
-        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data theb fd_read used by *all* of them is advanced.
+        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data the fd_read used by *all* of them is advanced.
 
         # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly)
         # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
-        # the individual coproc's codes are then generated via printf ${coprocSrcCode} $kk $kk [$kk] and sourced
+        # the individual coproc's codes are then generated via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
         
         coprocSrcCode="""
 { coproc p{<#>} {
@@ -472,7 +473,12 @@ $(${nLinesAutoFlag} && echo """
     mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'; ${nullDelimiterFlag} && printf '%s ' '-d '"''") A
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || { 
-        [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || { until read -r -u ${fd_read}; do A[-1]+=\"\${REPLY}\"; done; A[-1]+=\"\${REPLY}\"; }
+	    [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || { 
+            $(${verboseFlag} && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
+            until read -r -u ${fd_read}; do A[-1]+=\"\${REPLY}\"; done
+            A[-1]+=\"\${REPLY}\"
+            $(${verboseFlag} && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""") 
+        }
 """
 ${nOrderFlag} && echo """
         read -u ${fd_nOrder} nOrder
