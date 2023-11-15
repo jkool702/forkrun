@@ -43,6 +43,9 @@ findDirDefault='/usr'
 # a tmpfs will be automatically mounted at /mnt/ramdisk (unless a tmpfs is already mounted there) and files will be copied to /mnt/ramdisk/${findDir} using `rsync a`
 ramdiskTransferFlag=true
 
+# choose whether or not to test parallel
+testParallelFlag=false
+
 ############################################## BEGIN CODE ##############################################
 
 SECONDS=0
@@ -59,6 +62,9 @@ findDir="${findDir%/}"
 TD_A=()
 TD_B=()
 TD_C=()
+TA=()
+TB=()
+TC=()
 
 if ${ramdiskTransferFlag}; then
 
@@ -77,24 +83,36 @@ if ${ramdiskTransferFlag}; then
 
 fi
 
-printf '\n\n--------------------------------------------------------------------\n\nFILE COUNT AND TIME TAKEN BY FIND COMMAND:\n\n'
+# CODE TO RUN SPEEDTESTS
 
+printf '\n\n--------------------------------------------------------------------\n\nFILE COUNT AND TIME TAKEN BY FIND COMMAND:\n\n'
 time { find "${findDir}" -type f  | wc -l; }
 
-# CODE TO RUN SPEEDTESTS
+"${testParallelFlag:=true}"
+
 for nfun in "${tests[@]}"; do
 
-	unset A B C tA tB tC tdA tdB tddA tddB vA vB N 
+	unset A B C tA tB tC tdA tdB tddA tddB vA vB N tD_C 
 	
 	printf '\n\n--------------------------------------------------------------------\n\nSTARTING TESTS FOR %s\n----------------------------\n\n' "$nfun" 
 	
-	printf 'Testing parallel...' >&2
-	mapfile -t A < <({ 
-		printf '%s\n' '-----parallel-----';
-	 	time { find "${findDir}" -type f | parallel -m ${nfun} 2>/dev/null | wc -l; }; 
-	 } 2>&1)
-	printf '...done\n' >&2
+	printf 'Testing mySplit...' >&2
+	mapfile -t C < <({ 
+		printf '%s\n' '-----mySplit------'; 
+		time { find "${findDir}" -type f | mySplit -v ${nfun} 2>/dev/null | wc -l; }; 
+	} 2>&1)
+	printf '....done\n' >&2
 	sleep 1
+
+	${testParallelFlag} && { 
+		printf 'Testing parallel...' >&2
+		mapfile -t A < <({ 
+			printf '%s\n' '-----parallel-----';
+		 	time { find "${findDir}" -type f | parallel -m ${nfun} 2>/dev/null | wc -l; }; 
+		 } 2>&1)
+		printf '...done\n' >&2
+		sleep 1
+	} 
 
 	printf 'Testing xargs...' >&2
 	mapfile -t B < <({ 
@@ -104,40 +122,36 @@ for nfun in "${tests[@]}"; do
 	printf '......done\n' >&2
 	sleep 1
 
-	printf 'Testing mySplit...' >&2
-	mapfile -t C < <({ 
-		printf '%s\n' '-----mySplit------'; 
-		time { find "${findDir}" -type f | mySplit ${nfun} 2>/dev/null | wc -l; }; 
-	} 2>&1)
-	printf '....done\n' >&2
-	sleep 1
 
-	N="$(printf '%s\n' "${A[@]}" "${B[@]}" "${C[@]}" | wc -L)"
+	${testParallelFlag} && N="$(printf '%s\n' "${A[@]}" "${B[@]}" "${C[@]}" | wc -L)" ||  N="$(printf '%s\n' "${B[@]}" "${C[@]}" | wc -L)" 
 
 	printf '\n\nRESULTS FOR %s\n---------------------\n\n' "${nfun}"
 
-	paste <(printf '%-'"$N"'s\n' "${A[@]}") <(printf '%-'"$N"'s\n' "${B[@]}") <(printf '%-'"$N"'s\n' "${C[@]}")
+	paste <(${testParallelFlag} && printf '%-'"$N"'s\n' "${A[@]}" || :) <(printf '%-'"$N"'s\n' "${B[@]}") <(printf '%-'"$N"'s\n' "${C[@]}")
 
-	tA="$(printf '%s\n' "${A[@]}" | grep real | cut -f2 | sed -E 's/s$//;s/m0\.0+/m/g;s/\.//g')"; tA=$(( 60 * ${tA%%m*} + ${tA##*m} ))
-	tB="$(printf '%s\n' "${B[@]}" | grep real | cut -f2 | sed -E 's/s$//;s/m0\.0+/m/g;s/\.//g')"; tB=$(( 60 * ${tB%%m*} + ${tB##*m} ))
 	tC="$(printf '%s\n' "${C[@]}" | grep real | cut -f2 | sed -E 's/s$//;s/m0\.0+/m/g;s/\.//g')"; tC=$(( 60 * ${tC%%m*} + ${tC##*m} ))
-
-	tdA=$(( ( 100 * $tA ) / $tC ))
-	tdB=$(( ( 100 * $tB ) / $tC ))
-
-	TD_A+=(${tdA})
-	TD_B+=(${tdB})
+	TC+=($tC)
 	TD_C+=('100')
 
-	tddA=$(( $tdA - 100 ))
-	tddB=$(( $tdB - 100 ))
+	${testParallelFlag} && { 
+		tA="$(printf '%s\n' "${A[@]}" | grep real | cut -f2 | sed -E 's/s$//;s/m0\.0+/m/g;s/\.//g')"; tA=$(( 60 * ${tA%%m*} + ${tA##*m} ))
+		TA+=($tA)
+		tdA=$(( ( 100 * $tA ) / $tC ))	
+		TD_A+=(${tdA})
+		tddA=$(( $tdA - 100 ))
+		[[ "$tddA" == '-'* ]] && { vA='faster'; tddA=${tddA#-}; } || vA='slower'
+	}
 
-	[[ "$tddA" == '-'* ]] && { vA='faster'; tddA=${tddA#-}; } || vA='slower'
+	tB="$(printf '%s\n' "${B[@]}" | grep real | cut -f2 | sed -E 's/s$//;s/m0\.0+/m/g;s/\.//g')"; tB=$(( 60 * ${tB%%m*} + ${tB##*m} ))
+	TB+=($tB)
+	tdB=$(( ( 100 * $tB ) / $tC ))
+	TD_B+=(${tdB})
+	tddB=$(( $tdB - 100 ))
 	[[ "$tddB" == '-'* ]] && { vB='faster'; tddB=${tddB#-}; } || vB='slower'
 
 	printf '\n\nRELATIVE WALL-CLOCK TIME TAKEN\n------------------------------\n\n'
 
-	printf 'parallel: \t%s%% \t(%s%% %s than mySplit)\n' "$tdA" "$tddA" "$vA"
+	${testParallelFlag} && { printf 'parallel: \t%s%% \t(%s%% %s than mySplit)\n' "$tdA" "$tddA" "$vA"; }
 	printf 'xargs:    \t%s%% \t(%s%% %s than mySplit)\n' "$tdB" "$tddB" "$vB"
 	printf 'mySplit:  \t100%%\n' 
 
@@ -149,19 +163,27 @@ printf '\n\n--------------------------------------------------------------------
 
 tests+=('OVERALL AVERAGE')
 
-TD_A+=($(( ( ${TD_A[0]} $(printf ' + %s' "${TD_A[@]:1}") ) / ${#TD_A[@]} )))
-TD_B+=($(( ( ${TD_B[0]} $(printf ' + %s' "${TD_B[@]:1}") ) / ${#TD_B[@]} )))
-TD_C+=(100)
+#${testParallelFlag} && TD_A+=($(( ( ${TD_A[0]} $(printf ' + %s' "${TD_A[@]:1}") ) / ${#TD_A[@]} )))
+#TD_B+=($(( ( ${TD_B[0]} $(printf ' + %s' "${TD_B[@]:1}") ) / ${#TD_B[@]} )))
+#TD_C+=(100)
 
-mapfile -t TD_A < <(printf '%s%%\n' "${TD_A[@]}")
+tD_C=$(( ${TC[0]} $(printf ' + %s' "${TC[@]:1}") ))
+TD_C+=(100)
+${testParallelFlag} && TD_A+=($(( 100 * ( ${TA[0]} $(printf ' + %s' "${TA[@]:1}") ) / ${tD_C} )))
+TD_B+=($(( 100 * ( ${TB[0]} $(printf ' + %s' "${TB[@]:1}") ) / ${tD_C} )))
+
+
+${testParallelFlag} && mapfile -t TD_A < <(printf '%s%%\n' "${TD_A[@]}")
 mapfile -t TD_B < <(printf '%s%%\n' "${TD_B[@]}")
 mapfile -t TD_C < <(printf '%s%%\n' "${TD_C[@]}")
 
-N=$(printf '%s\n' "${tests[@]}" "${TD_A[@]}" "${TD_B[@]}" "${TD_C[@]}" | wc -L)
+${testParallelFlag} && N=$(printf '%s\n' "${tests[@]}" "${TD_A[@]}" "${TD_B[@]}" "${TD_C[@]}" | wc -L) || N=$(printf '%s\n' "${tests[@]}" "${TD_B[@]}" "${TD_C[@]}" | wc -L)
 
 printf '%-'"$N"'s\t' '' "${tests[@]}"
-printf '\n\n%-'"$N"'s\t' 'parallel:'
-printf '%-'"$N"'s\t' "${TD_A[@]}"
+${testParallelFlag} && { 
+	printf '\n\n%-'"$N"'s\t' 'parallel:'
+	printf '%-'"$N"'s\t' "${TD_A[@]}"
+} || printf '\n'
 printf '\n%-'"$N"'s\t' 'xargs:'
 printf '%-'"$N"'s\t' "${TD_B[@]}"
 printf '\n%-'"$N"'s\t' 'mySplit:'

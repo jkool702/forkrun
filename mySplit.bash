@@ -30,6 +30,7 @@ mySplit() (
 
 ############################ BEGIN FUNCTION ############################
         
+    LC_ALL=C
     trap - EXIT INT TERM HUP QUIT
 
     shopt -s extglob
@@ -187,7 +188,7 @@ mySplit() (
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
     tmpDir="$(mktemp -p "${tmpDirRoot}" -d .mySplit.XXXXXX)"    
     fPath="${tmpDir}"/.stdin
-    touch "${fPath}"   
+    >"${fPath}"   
     
     
     {
@@ -226,7 +227,7 @@ cat() {
         }
         
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}" "${nullDelimiterFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${unescapeFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}" "${nullDelimiterFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${unescapeFlag:=false}" "${exportOrderFlag:=false}"
 
         # check for a conflict that could occur is flags are defined on commandline when mySplit is called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
@@ -235,8 +236,8 @@ cat() {
         ${rmTmpDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
 
         # start building exit trap string
-        touch "${tmpDir}"/.pid.kill
-        exitTrapStr='kill -9 $(cat '"$(printf '%q\n' "${tmpDir}")"'/.pid.kill) 2>/dev/null; '
+        >"${tmpDir}"/.pid.kill
+        exitTrapStr='mapfile -t pidKill <'"$(printf '%q\n' "${tmpDir}")"'/.pid.kill; kill "${pidKill[@]}" 2>/dev/null; kill -9 "${pidKill[@]}" 2>/dev/null '
         exitTrapStr_kill=''
 
         ${verboseFlag} && {
@@ -250,11 +251,11 @@ cat() {
         # spawn a coproc to write stdin to a tmpfile
         # After we are done reading all of stdin indicate this by touching .done
         if ${pipeReadFlag}; then
-            touch "${tmpDir}"/.done
+            >"${tmpDir}"/.done
         else
             coproc pWrite {
                 cat <&${fd_stdin} >&${fd_write} 
-                touch "${tmpDir}"/.done
+                >"${tmpDir}"/.done
                 ${inotifyFlag} && {
                     (
                         { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
@@ -287,14 +288,14 @@ cat() {
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
                                     
-            ( coproc pOrder {
+            { coproc pOrder {
 
                  # fork nested coproc to print outputs (in order) and then clear them in realtime as they show up in ${tmpDir}/.out
                  { coproc pOrder1 {
 
                     # monitor ${tmpDir}/.out for new files if we have inotifywait
                     ${inotifyFlag} && {
-                        inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify1} &
+                        inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify1} &
                         pNotify1_PID=$!
                         echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
                     } 2>/dev/null
@@ -324,6 +325,8 @@ cat() {
                   } {fd_inotify1}<><(:)
                 } 2>/dev/null
 
+                echo "${pOrder1_PID}" >>"${tmpDir}"/.pid.kill
+
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
                 printf '%s\n' {10..89} {9000..9899} {990000..998999} >&${fd_nOrder}
@@ -342,7 +345,7 @@ cat() {
                 done
                 
               } 
-            ) 2>/dev/null 
+            } 2>/dev/null 
             
             exitTrapStr_kill+="${pOrder_PID} "
         else 
@@ -388,13 +391,13 @@ cat() {
                         
                             nRead+=${REPLY}
 
-                            nLinesNew=$(( 1 + ( ( ${nLinesCur} ** 2 ) + ( ( ( 2 * ${nLinesMax} ) - ${nLinesCur} ) * ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( 2 * ${nLinesMax} * ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
-                            #nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( 2 * ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
+                            nLinesNew=$(( 1 + ( ( ${nLinesCur} * ( ${nLinesMax} - ${nLinesCur} ) ) + ( ( ${nLinesMax} + ${nLinesCur} ) * ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nLinesMax} * ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) / 2 ))
+                            #nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
                             #nLinesNew=$(( 1 + ( ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
                             
                             (( ${nLinesNew} > ${nLinesCur} )) && {
                     
-                                #nLinesNew+=$(( ( ${nLinesCur} * ( ${nLinesNew} - ${nLinesCur} ) ) / ${nProcs} ))
+                                nLinesNew+=$(( ( ( ${nLinesCur} + ${nLinesCur} / ( 1 + ${nLinesMax} - ${nLinesCur} ) ) * ( ${nLinesNew} - ${nLinesCur} ) ) / ( 2 * ${nProcs} ) ))
                                 #nLinesNew+=$(( ( 1 + ${nLinesNew} - ${nLinesCur} ) / ${nLinesCur} ))
 
                                 (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
@@ -403,7 +406,7 @@ cat() {
                                 nLinesCur=${nLinesNew}
 
                                 # verbose output
-                                ${verboseFlag} && printf '\nCHANGING nLines to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s ; nLinesNew = %s )\n' ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} ${nLinesNew} >&2
+                                ${verboseFlag} && printf '\nCHANGING nLines to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
                             }
                         fi
                         
@@ -433,12 +436,12 @@ cat() {
         fi
 
         # set EXIT trap (dynamically determined based on which option flags were active)
-        exitTrapStr="${exitTrapStr}"'kill -9 '"${exitTrapStr_kill}"' 2>/dev/null'
-        ${rmTmpDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && \rm -rf "'"${tmpDir}"'"'
+        exitTrapStr="${exitTrapStr}"'kill '"${exitTrapStr_kill}"' 2>/dev/null; kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '
+        ${rmTmpDirFlag} && exitTrapStr+='[[ -d "'"${tmpDir}"'" ]] && \rm -rf "'"${tmpDir}"'"; '
         trap "${exitTrapStr}" EXIT INT TERM HUP QUIT       
         
 
-        # populate {fd_continue} with an initial '\n' 
+        # populate {fd_continue} with an initial '\n'
         # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
         #     when there is a '1' the pipe buffer then nothing has a read lock
         #     a process reads 1 byte from {fd_continue} to get the read lock, and 
@@ -466,15 +469,15 @@ $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
 """)
     read -u ${fd_continue} 
-    mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) $(${nullDelimiterFlag} && printf '%s' '-d '"''") A
+    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'; ${nullDelimiterFlag} && printf '%s ' '-d '"''") A
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || { 
-        [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || read -r -u ${fd_read} partialLine || until read -r -u ${fd_read}; do partialLine+=\"\${REPLY}\"; done
+        [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || { until read -r -u ${fd_read}; do A[-1]+=\"\${REPLY}\"; done; A[-1]+=\"\${REPLY}\"; }
 """
 ${nOrderFlag} && echo """
         read -u ${fd_nOrder} nOrder
 """
-${pipeReadFlag} || echo """
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     }
 """)
     printf '\\n' >&${fd_continue}; 
@@ -482,14 +485,12 @@ ${pipeReadFlag} || echo """
         if [[ -f \"${tmpDir}\"/.done ]]; then
 $(${nLinesAutoFlag} && echo """
             printf '0\\n' >&\${fd_nAuto0}
+"""
+${nOrderFlag} && echo """
+            >\"${tmpDir}\"/.out/.done
 """)
-            [[ -f \"${tmpDir}\"/.quit ]] || {
-                touch \"${tmpDir}\"/.quit
-$(${nOrderFlag} && echo """
-                touch \"${tmpDir}\"/.out/.done
-""")
-            }
-        break
+            [[ -f \"${tmpDir}\"/.quit ]] || >\"${tmpDir}\"/.quit
+            break
 $(${inotifyFlag} && echo """
         else        
             read -u ${fd_inotify} -t 1
@@ -497,13 +498,7 @@ $(${inotifyFlag} && echo """
         fi
         continue
     }
-$(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-    [[ \${partialLine} ]] && { 
-        A[\$(( \${#A[@]} - 1 ))]+=\"\${partialLine}\"
-        partialLine=''
-    }
-"""
-${nLinesAutoFlag} && { printf '%s' """
+$(${nLinesAutoFlag} && { printf '%s' """
     \${nLinesAutoFlag} && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false   
