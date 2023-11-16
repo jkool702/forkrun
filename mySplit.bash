@@ -258,10 +258,8 @@ cat() {
                 cat <&${fd_stdin} >&${fd_write} 
                 >"${tmpDir}"/.done
                 ${inotifyFlag} && {
-                    (
-                        { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-                    ) {fd_inotify0}>&${fd_inotify}
-                }
+		    { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+                } {fd_inotify0}>&${fd_inotify}
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
             } 2>&${fd_stderr}
             exitTrapStr_kill+="${pWrite_PID} "
@@ -270,12 +268,13 @@ cat() {
         # setup+fork inotifywait (if available)
         if ${inotifyFlag}; then
         
-            # add 1 newline for each coproc to fd_inotify
-            { source /proc/self/fd/0 >&${fd_inotify}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-           
-            {
-                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify} &
-            } 2>/dev/null
+           {
+	        # initially add 1 newline for each coproc to fd_inotify
+                { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+
+	   	# run inotifywait
+                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify0} &
+            } 2>/dev/null {fd_inotify0}>&${fd_inotify}
             
             pNotify_PID=${!}
 
@@ -296,10 +295,10 @@ cat() {
 
                     # monitor ${tmpDir}/.out for new files if we have inotifywait
                     ${inotifyFlag} && {
-                        inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify1} &
+                        inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify10} &
                         pNotify1_PID=$!
                         echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
-                    } 2>/dev/null
+                    } 2>/dev/null {fd_inotify10}>{fd_inotify1}
                     echo "$BASHPID" >>"${tmpDir}"/.pid.kill
 
                     shopt -s extglob
@@ -536,6 +535,6 @@ p_PID+=(\${p{<#>}_PID})
         ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
  
     # open anonymous pipes + other misc file descriptors for the above code block   
-    } {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+    } {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
 
 )
