@@ -465,6 +465,7 @@ cat() {
         coprocSrcCode="""
 { coproc p{<#>} {
 trap - EXIT INT TERM HUP QUIT
+trap 'echo \"BASH COMMAND = \${BASH_COMMAND}\"' ERR
 while true; do
 $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
@@ -476,7 +477,7 @@ $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
 	    [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || { 
             $(${verboseFlag} && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
             until read -r -u ${fd_read}; do A[-1]+=\"\${REPLY}\"; done
-            A[-1]+=\"\${REPLY}\"
+            A[-1]+=\"\${REPLY}\"\$'\\n'
             $(${verboseFlag} && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""") 
         }
 """
@@ -512,8 +513,11 @@ $(${nLinesAutoFlag} && { printf '%s' """
     ${fallocateFlag} && printf '%s' ' || ' || echo
 }
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
+"""
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+        IFS=\$'\\n' A=(\$(printf '%s' \"\${A[@]}\"))
 """) 
-    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%%$'\\n'}\" ${outStr}
+    $(printf '%q ' "${runCmd[@]}") \"\${A[@]}\" ${outStr} 
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
