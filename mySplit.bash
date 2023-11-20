@@ -38,7 +38,7 @@ mySplit() (
 #    shopt -s varredir_close
             
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmTmpDirFlag pipeReadFlag verboseFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nOrder fd_nOrder1 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos 
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmTmpDirFlag pipeReadFlag verboseFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos 
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk 
     local -a A p_PID runCmd 
 
