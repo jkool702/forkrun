@@ -30,8 +30,7 @@ mySplit() (
 
 ############################ BEGIN FUNCTION ############################
         
-    LC_ALL=C
-    LANG=C
+    : "${LC_ALL:=C}" "${LANG:=C}"
     IFS=
     trap - EXIT INT TERM HUP QUIT
 
@@ -196,7 +195,7 @@ mySplit() (
     
     {
 
-        { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag=true}"
+        { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
         { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
         { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || nProcs=$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')
 
@@ -204,10 +203,10 @@ mySplit() (
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # check for inotifywait
-        type -a inotifywait &>/dev/null && : "${inotifyFlag=true}" || : "${inotifyFlag=false}"
+        type -a inotifywait &>/dev/null && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
         
         # check for fallocate
-        type -a fallocate &>/dev/null && : "${fallocateFlag=true}" || : "${fallocateFlag=false}"
+        type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
         # check for cat. if missing define replacement using bash builtins
         type -a cat &>/dev/null || {
