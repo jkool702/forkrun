@@ -36,7 +36,7 @@ mySplit() (
     trap - EXIT INT TERM HUP QUIT
 
     shopt -s extglob
-    shopt -s varredir_close
+#    shopt -s varredir_close
             
     # make vars local
     local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmTmpDirFlag pipeReadFlag verboseFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nOrder fd_nOrder1 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos 
@@ -260,7 +260,7 @@ cat() {
                 cat <&${fd_stdin} >&${fd_write} 
                 >"${tmpDir}"/.done
                 ${inotifyFlag} && {
-		    { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+                    { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
                 } {fd_inotify0}>&${fd_inotify}
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
             } 2>&${fd_stderr}
@@ -270,11 +270,11 @@ cat() {
         # setup+fork inotifywait (if available)
         if ${inotifyFlag}; then
         
-           {
-	        # initially add 1 newline for each coproc to fd_inotify
+            {
+                # initially add 1 newline for each coproc to fd_inotify
                 { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
 
-	   	# run inotifywait
+                # run inotifywait
                 inotifywait -q -m --format '' "${fPath}" >&${fd_inotify0} &
             } 2>/dev/null {fd_inotify0}>&${fd_inotify}
             
@@ -308,11 +308,13 @@ cat() {
                     outCur=10
 
                     until [[ -f "${tmpDir}"/.quit ]]; do
+                        # check if the next output file that needs to be printed is available (using inotifywait if possible)
                         [[ -f "${tmpDir}"/.out/x${outCur} ]] || { 
                             ${inotifyFlag} && read -u ${fd_inotify1}
                             continue
                         }
 
+                        # at least 1 output file can be printed...do so and then delete it. repeat this for as long as the next (in order) output file is ready.
                         while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
                             echo "$(<"${tmpDir}/.out/x${outCur}")" >&${fd_stdout}
                             \rm -f "${tmpDir}/.out/x${outCur}"
@@ -477,7 +479,7 @@ $(${nLinesAutoFlag} && echo """
     mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'; ${nullDelimiterFlag} && printf '%s ' '-d '"''") A
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || { 
-	    [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || { 
+        [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || { 
             $(${verboseFlag} && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
             until read -r -u ${fd_read}; do A[-1]+=\"\${REPLY}\"; done
             A[-1]+=\"\${REPLY}\"\$'\\n'
@@ -518,10 +520,11 @@ $(${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 """
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-        [[ \$\{A[*]%%\$'\\n'} ]] && {
-	    IFS=\$'\\n' A=(\$(printf '%s' \"\${A[@]}\"))
-            IFS=
-	}
+        [[ \${A[*]##*\$'\\n'} ]] && {
+            $(${verboseFlag} && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
+            A[-1]=\"\${A[-1]%\$'\\n'}\"
+            mapfile A <<<\"\${A[*]}\"
+        }
 """) 
     $(printf '%q ' "${runCmd[@]}") \"\${A[@]%\$'\\n'}\" ${outStr} 
 done
