@@ -31,7 +31,8 @@ mySplit() (
 ############################ BEGIN FUNCTION ############################
         
     LC_ALL=C
-#    IFS=$'\n'
+    LANG=C
+    IFS=
     trap - EXIT INT TERM HUP QUIT
 
     shopt -s extglob
@@ -464,8 +465,10 @@ cat() {
         
         coprocSrcCode="""
 { coproc p{<#>} {
+LC_ALL=C
+LANG=C
+IFS=
 trap - EXIT INT TERM HUP QUIT
-trap 'echo \"BASH COMMAND = \${BASH_COMMAND}\"' ERR
 while true; do
 $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
@@ -515,9 +518,12 @@ $(${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 """
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-        IFS=\$'\\n' A=(\$(printf '%s' \"\${A[@]}\"))
+        [[ \$\{A[*]%%\$'\\n'} ]] && {
+	    IFS=\$'\\n' A=(\$(printf '%s' \"\${A[@]}\"))
+            IFS=
+	}
 """) 
-    $(printf '%q ' "${runCmd[@]}") \"\${A[@]}\" ${outStr} 
+    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%\$'\\n'}\" ${outStr} 
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
