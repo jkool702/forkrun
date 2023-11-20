@@ -299,7 +299,7 @@ cat() {
                         inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify10} &
                         pNotify1_PID=$!
                         echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
-                    } 2>/dev/null {fd_inotify10}>{fd_inotify1}
+                    } 2>/dev/null {fd_inotify10}>&${fd_inotify1}
                     echo "$BASHPID" >>"${tmpDir}"/.pid.kill
 
                     shopt -s extglob
