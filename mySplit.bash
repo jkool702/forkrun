@@ -30,9 +30,13 @@ mySplit() (
 
 ############################ BEGIN FUNCTION ############################
         
+    LC_ALL=C
+    LANG=C
+    IFS=
     trap - EXIT INT TERM HUP QUIT
 
     shopt -s extglob
+#    shopt -s varredir_close
             
     # make vars local
     local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmTmpDirFlag pipeReadFlag verboseFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nOrder fd_nOrder1 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID partialLine fd_read_pos fd_read_pos_old fd_write_pos 
@@ -187,7 +191,7 @@ mySplit() (
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
     tmpDir="$(mktemp -p "${tmpDirRoot}" -d .mySplit.XXXXXX)"    
     fPath="${tmpDir}"/.stdin
-    touch "${fPath}"   
+    >"${fPath}"   
     
     
     {
@@ -226,7 +230,7 @@ cat() {
         }
         
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}" "${nullDelimiterFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${unescapeFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${pipeReadFlag:=false}" "${verboseFlag:=false}" "${nullDelimiterFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${unescapeFlag:=false}" "${exportOrderFlag:=false}"
 
         # check for a conflict that could occur is flags are defined on commandline when mySplit is called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
@@ -235,8 +239,8 @@ cat() {
         ${rmTmpDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
 
         # start building exit trap string
-        touch "${tmpDir}"/.pid.kill
-        exitTrapStr='kill -9 $(cat '"$(printf '%q\n' "${tmpDir}")"'/.pid.kill) 2>/dev/null; '
+        >"${tmpDir}"/.pid.kill
+        exitTrapStr='mapfile -t pidKill <'"$(printf '%q\n' "${tmpDir}")"'/.pid.kill; kill "${pidKill[@]}" 2>/dev/null; kill -9 "${pidKill[@]}" 2>/dev/null '
         exitTrapStr_kill=''
 
         ${verboseFlag} && {
@@ -250,16 +254,14 @@ cat() {
         # spawn a coproc to write stdin to a tmpfile
         # After we are done reading all of stdin indicate this by touching .done
         if ${pipeReadFlag}; then
-            touch "${tmpDir}"/.done
+            >"${tmpDir}"/.done
         else
             coproc pWrite {
                 cat <&${fd_stdin} >&${fd_write} 
-                touch "${tmpDir}"/.done
+                >"${tmpDir}"/.done
                 ${inotifyFlag} && {
-                    (
-                        { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-                    ) {fd_inotify0}>&${fd_inotify}
-                }
+                    { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+                } {fd_inotify0}>&${fd_inotify}
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
             } 2>&${fd_stderr}
             exitTrapStr_kill+="${pWrite_PID} "
@@ -268,12 +270,13 @@ cat() {
         # setup+fork inotifywait (if available)
         if ${inotifyFlag}; then
         
-            # add 1 newline for each coproc to fd_inotify
-            { source /proc/self/fd/0 >&${fd_inotify}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-           
             {
-                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify} &
-            } 2>/dev/null
+                # initially add 1 newline for each coproc to fd_inotify
+                { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+
+                # run inotifywait
+                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify0} &
+            } 2>/dev/null {fd_inotify0}>&${fd_inotify}
             
             pNotify_PID=${!}
 
@@ -287,17 +290,17 @@ cat() {
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
                                     
-            ( coproc pOrder {
+            { coproc pOrder {
 
                  # fork nested coproc to print outputs (in order) and then clear them in realtime as they show up in ${tmpDir}/.out
                  { coproc pOrder1 {
 
                     # monitor ${tmpDir}/.out for new files if we have inotifywait
                     ${inotifyFlag} && {
-                        inotifywait -q -m --format '' -r "${tmpDir}"/.out >&${fd_inotify1} &
+                        inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify10} &
                         pNotify1_PID=$!
                         echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
-                    } 2>/dev/null
+                    } 2>/dev/null {fd_inotify10}>{fd_inotify1}
                     echo "$BASHPID" >>"${tmpDir}"/.pid.kill
 
                     shopt -s extglob
@@ -305,11 +308,13 @@ cat() {
                     outCur=10
 
                     until [[ -f "${tmpDir}"/.quit ]]; do
+                        # check if the next output file that needs to be printed is available (using inotifywait if possible)
                         [[ -f "${tmpDir}"/.out/x${outCur} ]] || { 
                             ${inotifyFlag} && read -u ${fd_inotify1}
                             continue
                         }
 
+                        # at least 1 output file can be printed...do so and then delete it. repeat this for as long as the next (in order) output file is ready.
                         while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
                             echo "$(<"${tmpDir}/.out/x${outCur}")" >&${fd_stdout}
                             \rm -f "${tmpDir}/.out/x${outCur}"
@@ -323,6 +328,8 @@ cat() {
                      
                   } {fd_inotify1}<><(:)
                 } 2>/dev/null
+
+                echo "${pOrder1_PID}" >>"${tmpDir}"/.pid.kill
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
@@ -342,7 +349,7 @@ cat() {
                 done
                 
               } 
-            ) 2>/dev/null 
+            } 2>/dev/null 
             
             exitTrapStr_kill+="${pOrder_PID} "
         else 
@@ -388,13 +395,13 @@ cat() {
                         
                             nRead+=${REPLY}
 
-                            nLinesNew=$(( 1 + ( ( ${nLinesCur} ** 2 ) + ( ( ( 2 * ${nLinesMax} ) - ${nLinesCur} ) * ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( 2 * ${nLinesMax} * ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
-                            #nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( 2 * ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
+                            nLinesNew=$(( 1 + ( ( ${nLinesCur} * ( ${nLinesMax} - ${nLinesCur} ) ) + ( ( ${nLinesMax} + ${nLinesCur} ) * ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) / ( ${nLinesMax} * 2 ) ))
+                            #nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
                             #nLinesNew=$(( 1 + ( ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
                             
                             (( ${nLinesNew} > ${nLinesCur} )) && {
                     
-                                #nLinesNew+=$(( ( ${nLinesCur} * ( ${nLinesNew} - ${nLinesCur} ) ) / ${nProcs} ))
+                                nLinesNew+=$(( ( ( ${nLinesCur} + ${nLinesCur} / ( 1 + ${nLinesMax} - ${nLinesCur} ) ) * ( ${nLinesNew} - ${nLinesCur} ) ) / ( 2 * ${nProcs} ) ))
                                 #nLinesNew+=$(( ( 1 + ${nLinesNew} - ${nLinesCur} ) / ${nLinesCur} ))
 
                                 (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
@@ -403,7 +410,7 @@ cat() {
                                 nLinesCur=${nLinesNew}
 
                                 # verbose output
-                                ${verboseFlag} && printf '\nCHANGING nLines to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s ; nLinesNew = %s )\n' ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} ${nLinesNew} >&2
+                                ${verboseFlag} && printf '\nCHANGING nLines to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
                             }
                         fi
                         
@@ -433,48 +440,56 @@ cat() {
         fi
 
         # set EXIT trap (dynamically determined based on which option flags were active)
-        exitTrapStr="${exitTrapStr}"'kill -9 '"${exitTrapStr_kill}"' 2>/dev/null'
-        ${rmTmpDirFlag} && exitTrapStr+='; [[ -d $"'"${tmpDir}"'" ]] && \rm -rf "'"${tmpDir}"'"'
+        exitTrapStr="${exitTrapStr}"'kill '"${exitTrapStr_kill}"' 2>/dev/null; kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '
+        ${rmTmpDirFlag} && exitTrapStr+='[[ -d "'"${tmpDir}"'" ]] && \rm -rf "'"${tmpDir}"'"; '
         trap "${exitTrapStr}" EXIT INT TERM HUP QUIT       
         
 
-        # populate {fd_continue} with an initial '\n' 
+        # populate {fd_continue} with an initial '\n'
         # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
-        #     when there is a '1' the pipe buffer then nothing has a read lock
+        #     when there is a '\n' the pipe buffer then nothing has a read lock
         #     a process reads 1 byte from {fd_continue} to get the read lock, and 
-        #     when that process writes a '1' back to the pipe it releases the read lock
+        #     when that process writes a '\n' back to the pipe it releases the read lock
         printf '\n' >&${fd_continue}; 
 
         # spawn $nProcs coprocs
         # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
-        # they then read N lines with mapfile and send 1 to {fd_continue} (so the next coproc can start to read)
+        # they then read N lines with mapfile and send \n to {fd_continue} (so the next coproc can start to read)
         # if the read array is empty the coproc will either continue or break, depending on if end conditions are met
         # finally it will do something with the data.
         #
         # NOTE: All coprocs share the same fd_read file descriptor ( accomplished via `( <...>; coproc p0 ...; <...> ;  coproc pN ...; ) {fd_read}<><(:)` )
-        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data theb fd_read used by *all* of them is advanced.
+        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data the fd_read used by *all* of them is advanced.
 
         # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly)
         # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
-        # the individual coproc's codes are then generated via printf ${coprocSrcCode} $kk $kk [$kk] and sourced
+        # the individual coproc's codes are then generated via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
         
         coprocSrcCode="""
 { coproc p{<#>} {
+LC_ALL=C
+LANG=C
+IFS=
 trap - EXIT INT TERM HUP QUIT
 while true; do
 $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
 """)
     read -u ${fd_continue} 
-    mapfile -n \${nLinesCur} \$([[ \${nLinesCur} == 1 ]] && printf '%s' '-t') -u $(${pipeReadFlag} && printf '%s' ${fd_stdin} || printf '%s' ${fd_read}) $(${nullDelimiterFlag} && printf '%s' '-d '"''") A
+    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'; ${nullDelimiterFlag} && printf '%s ' '-d '"''") A
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || { 
-        [[ \${nLinesCur} == 1 ]] || [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || read -r -u ${fd_read} partialLine || until read -r -u ${fd_read}; do partialLine+=\"\${REPLY}\"; done
+        [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || { 
+            $(${verboseFlag} && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
+            until read -r -u ${fd_read}; do A[-1]+=\"\${REPLY}\"; done
+            A[-1]+=\"\${REPLY}\"\$'\\n'
+            $(${verboseFlag} && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""") 
+        }
 """
 ${nOrderFlag} && echo """
         read -u ${fd_nOrder} nOrder
 """
-${pipeReadFlag} || echo """
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     }
 """)
     printf '\\n' >&${fd_continue}; 
@@ -482,14 +497,12 @@ ${pipeReadFlag} || echo """
         if [[ -f \"${tmpDir}\"/.done ]]; then
 $(${nLinesAutoFlag} && echo """
             printf '0\\n' >&\${fd_nAuto0}
+"""
+${nOrderFlag} && echo """
+            >\"${tmpDir}\"/.out/.done
 """)
-            [[ -f \"${tmpDir}\"/.quit ]] || {
-                touch \"${tmpDir}\"/.quit
-$(${nOrderFlag} && echo """
-                touch \"${tmpDir}\"/.out/.done
-""")
-            }
-        break
+            [[ -f \"${tmpDir}\"/.quit ]] || >\"${tmpDir}\"/.quit
+            break
 $(${inotifyFlag} && echo """
         else        
             read -u ${fd_inotify} -t 1
@@ -497,13 +510,7 @@ $(${inotifyFlag} && echo """
         fi
         continue
     }
-$(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-    [[ \${partialLine} ]] && { 
-        A[\$(( \${#A[@]} - 1 ))]+=\"\${partialLine}\"
-        partialLine=''
-    }
-"""
-${nLinesAutoFlag} && { printf '%s' """
+$(${nLinesAutoFlag} && { printf '%s' """
     \${nLinesAutoFlag} && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false   
@@ -511,8 +518,15 @@ ${nLinesAutoFlag} && { printf '%s' """
     ${fallocateFlag} && printf '%s' ' || ' || echo
 }
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
+"""
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+        [[ \${A[*]##*\$'\\n'} ]] && {
+            $(${verboseFlag} && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
+            A[-1]=\"\${A[-1]%\$'\\n'}\"
+            mapfile A <<<\"\${A[*]}\"
+        }
 """) 
-    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%%$'\\n'}\" ${outStr}
+    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%\$'\\n'}\" ${outStr} 
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
@@ -535,6 +549,6 @@ p_PID+=(\${p{<#>}_PID})
         ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
  
     # open anonymous pipes + other misc file descriptors for the above code block   
-    } {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+    } {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
 
 )
