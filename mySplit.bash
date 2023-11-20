@@ -466,8 +466,7 @@ cat() {
         
         coprocSrcCode="""
 { coproc p{<#>} {
-LC_ALL=C
-LANG=C
+: \"\${LC_ALL:=C}\" \"\${LANG:=C}\"
 IFS=
 trap - EXIT INT TERM HUP QUIT
 while true; do
