@@ -518,7 +518,7 @@ $(${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 """
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-        [[ \${A[*]##*\$'\\n'} ]] && {
+        [[ \"\${A[*]##*\$'\\n'}\" ]] && {
             $(${verboseFlag} && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
             A[-1]=\"\${A[-1]%\$'\\n'}\"
             mapfile A <<<\"\${A[*]}\"
