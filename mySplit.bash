@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+shopt -s extglob
+
 mySplit() (
 ## Efficiently parallelize a loop / run many tasks in parallel using bash coprocs
 ## NOTE: mySplit is an (in-development) re-write of forkrun that is faster, more efficient, and is less dependent on external dependencies
@@ -38,7 +40,7 @@ mySplit() (
 #    shopt -s varredir_close
             
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag nOrderFlag rmTmpDirFlag pipeReadFlag verboseFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos 
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag nOrderFlag nullDelimiterFlag pipeFuncFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos 
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk 
     local -a A p_PID runCmd 
 
@@ -58,11 +60,13 @@ mySplit() (
 
             -?(-)?(n)l?(ine?(s)))
                 nLines="${2}"
+                nLinesAutoFlag=false
                 shift 1
             ;;
 
             -?(-)?(n)l?(ine?(s))?([= ])@([[:graph:]])*)
                 nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
+                nLinesAutoFlag=false
             ;;
 
             -?(-)?(N)L?(INE?(S)))
@@ -90,10 +94,6 @@ mySplit() (
                 substituteStringFlag=true
             ;;
 
-            -?(-)I?(D)|-?(-)INSERT?(?(-)ID))
-                substituteStringFlag=true; substituteStringIDFlag=true
-            ;;
-
             -?(-)k?(eep?(?(-)order)))
                 nOrderFlag=true
             ;;
@@ -103,6 +103,10 @@ mySplit() (
             ;;
 
             -?(-)s?(tdin)|-?(-)pipe)
+                pipeFuncFlag=true
+            ;;
+
+            -?(-)S?(TDIN)|-?(-)PIPE)
                 pipeReadFlag=true
             ;;
 
@@ -118,6 +122,10 @@ mySplit() (
                 exportOrderFlag=true
             ;;
             
+            -?(-)N?(O)?(?(-)F?(UNC)))
+                noFuncFlag=true
+            ;;
+            
             -?(-)u?(nescape))
                 unescapeFlag=true
             ;;
@@ -126,39 +134,43 @@ mySplit() (
                 : #displayHelp (TBD)
             ;;
 
-            +?(-)i?(nsert))
+            +?([-+])i?(nsert))
                 substituteStringFlag=false
             ;;
 
-            +?(-)I?(D)|+?(-)INSERT?(?(-)ID))
-                substituteStringFlag=false; substituteStringIDFlag=false
-            ;;
-
-            +?(-)k?(eep?(?(-)order)))
+            +?([-+])k?(eep?(?(-)order)))
                 nOrderFlag=false
             ;;
 
-            +?(-)0|+?(-)z|+?(-)null)
+            +?([-+])0|+?([-+])z|+?([-+])null)
                 nullDelimiterFlag=false
             ;;
 
-            +?(-)s?(tdin)|+?(-)pipe)
+            +?([-+])s?(tdin)|+?([-+])pipe)
+                pipeFuncFlag=false
+            ;;
+
+            +?([-+])S?(TDIN)|+?([-+])PIPE)
                 pipeReadFlag=false
             ;;
 
-            +?(-)d?(elete))
+            +?([-+])d?(elete))
                 rmTmpDirFlag=false 
             ;;
 
-            +?(-)v?(erbose))
+            +?([-+])v?(erbose))
                 verboseFlag=false
             ;;
 
-            +?(-)n?(umber)?(-)?(line?(s)))
+            +?([-+])n?(umber)?(-)?(line?(s)))
                 exportOrderFlag=false
             ;;
+
+            +?([-+])N?(O)?(?(-)F?(UNC)))
+                noFuncFlag=false
+            ;;
             
-            +?(-)u?(nescape))
+            +?([-+])u?(nescape))
                 unescapeFlag=false
             ;;
  
