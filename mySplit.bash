@@ -40,7 +40,7 @@ mySplit() (
 #    shopt -s varredir_close
 
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pNotify10_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot a1 a2 inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pNotify10_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk
     local -a A p_PID runCmd
 
@@ -544,7 +544,9 @@ $(${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 """
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-        [[ \"\${A[*]##*\$'\\n'}\" ]] && {
+        printf -v a1 '%s' \"\${A[*]//*\$'\\n'/\$'\\034'}\"
+        printf -v a2 '%s\\034' \"\${A[@]##*}\"
+        [[ \"\${a1}\" == \"\${a2}\"  ]] || {
             $(${verboseFlag} && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
             A[-1]=\"\${A[-1]%\$'\\n'}\"
             mapfile A <<<\"\${A[*]}\"
@@ -556,7 +558,7 @@ done
 } 2>/dev/null
 p_PID+=(\${p{<#>}_PID})
 """
-
+#[[ \"\${A[*]##*\$'\\n'}\" ]] && 
         # source the coproc code for each coproc worker
         for (( kk=0 ; kk<${nProcs} ; kk++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
