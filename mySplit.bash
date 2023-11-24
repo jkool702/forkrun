@@ -18,7 +18,8 @@ mySplit() (
 # HOW IT WORKS: coproc code is dynamically generated based on passed mySplit options, then N coprocs are forked off. These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
 #          Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
 #          This parallelization method is MUCH faster than traditional forking (esp. for many quick-to-run tasks)...On my hardware mySplit is 50-70% faster than  'xargs -P'  and 3x-5x faster than 'parallel -m'
-#
+#        { [[ \"\${A[*]##*\$'\\n'}\" ]] || [[ -z \${A[0]} ]]; } && {
+
 # ONLY REQUIRED DEPENDENCY:   Bash 4+ (This is when coprocs were introduced)
 #
 # OPTIONAL DEPENDENCIES (to provide enhanced functionality):
@@ -544,7 +545,7 @@ $(${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 """
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-        [[ \"\${A[*]##*\$'\\n'}\" ]] && {
+        { [[ \"\${A[*]##*\$'\\n'}\" ]] || [[ -z \${A[0]} ]]; } && {
             $(${verboseFlag} && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
             A[-1]=\"\${A[-1]%\$'\\n'}\"
             mapfile A <<<\"\${A[*]}\"
