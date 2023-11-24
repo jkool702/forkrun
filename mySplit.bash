@@ -554,7 +554,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     $(printf '%q ' "${runCmd[@]}") \"\${A[@]%\$'\\n'}\" ${outStr} || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
-            echo 'ERROR DUNING ${runCmd[*]} CALL' 
+            echo 'ERROR DUNING ${runCmd[*]} CALL'
             declare -p A
             echo 'fd_read:'
             cat /proc/self/fdinfo/${fd_read}
@@ -570,10 +570,10 @@ p_PID+=(\${p{<#>}_PID})
 """
 
 #
-#        [[ \"\${A[*]##*\$'\\n'}\" ]] && 
+#        [[ \"\${A[*]##*\$'\\n'}\" ]] &&
 #
 #        printf -v a1 '%s' \"\${A[*]//*\$'\\n'/\$'\\034'}\"	        [[ \"\${A[*]##*\$'\\n'}\" ]] && {
-#        printf -v a2 '%s\\034' \"\${A[@]##*}\"	
+#        printf -v a2 '%s\\034' \"\${A[@]##*}\"
 #        [[ \"\${a1}\" == \"\${a2}\"  ]] || {
 #
 
