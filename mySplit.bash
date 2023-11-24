@@ -567,7 +567,15 @@ done
 } 2>/dev/null
 p_PID+=(\${p{<#>}_PID})
 """
-#[[ \"\${A[*]##*\$'\\n'}\" ]] && 
+
+#
+#        [[ \"\${A[*]##*\$'\\n'}\" ]] && 
+#
+#        printf -v a1 '%s' \"\${A[*]//*\$'\\n'/\$'\\034'}\"	        [[ \"\${A[*]##*\$'\\n'}\" ]] && {
+#        printf -v a2 '%s\\034' \"\${A[@]##*}\"	
+#        [[ \"\${a1}\" == \"\${a2}\"  ]] || {
+#
+
         # source the coproc code for each coproc worker
         for (( kk=0 ; kk<${nProcs} ; kk++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
