@@ -552,7 +552,18 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
             mapfile A <<<\"\${A[*]}\"
         }
 """)
-    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%\$'\\n'}\" ${outStr}
+    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%\$'\\n'}\" ${outStr} || {
+        {
+            printf '\\n\\n----------------------------------------------\\n\\n'
+            echo 'ERROR DUNING ${runCmd[*]} CALL' 
+            declare -p A
+            echo 'fd_read:'
+            cat /proc/self/fdinfo/${fd_read}
+            echo 'fd_write:'
+            cat /proc/self/fdinfo/${fd_write}
+            echo
+        } >&2
+    }
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
