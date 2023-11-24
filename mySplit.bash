@@ -544,9 +544,7 @@ $(${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 """
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-        printf -v a1 '%s' \"\${A[*]//*\$'\\n'/\$'\\034'}\"
-        printf -v a2 '%s\\034' \"\${A[@]##*}\"
-        [[ \"\${a1}\" == \"\${a2}\"  ]] || {
+        [[ \"\${A[*]##*\$'\\n'}\" ]] && {
             $(${verboseFlag} && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
             A[-1]=\"\${A[-1]%\$'\\n'}\"
             mapfile A <<<\"\${A[*]}\"
