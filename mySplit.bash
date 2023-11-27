@@ -392,10 +392,10 @@ cat() {
 
             # LOGIC FOR DYNAMICALLY SETTING 'nLines':
             # The avg_bytes_per_line is estimated by looking at the byte offset position of fd_read and having each coproc keep track of how many lines it has read
-            # the new "proposed" 'nLines' is: avg_bytes_per_line=( fd_read-pos / ( 1 + nRead ) ); nLinesNew=( 1 + (1 / nProc) * (fd_write_pos - fd_read_pos) / (1+avg_bytes_per_line) )
+            # the new "proposed" 'nLines' is determined by estimating the average bytes per line, then taking the averge of the "current nLines" and "(numbedr unread bytes) / ( (avg bytes per line) * (nProcs) )"
             # --> if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines' to match the rate lines are coming in on stdin)
             # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
-            # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break
+            # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break after the current iteratrion is finished
             { coproc pAuto {
                     trap - EXIT
 
@@ -420,23 +420,19 @@ cat() {
                             fd_write_pos=${fd_write_pos##*$'\t'}
 
                             nRead+=${REPLY}
-
-                            nLinesNew=$(( 1 + ( ( ${nLinesCur} * ( ${nLinesMax} - ${nLinesCur} ) ) + ( ( ${nLinesMax} + ${nLinesCur} ) * ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) / ( ${nLinesMax} * 2 ) ))
-                            #nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
-                            #nLinesNew=$(( 1 + ( ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
+                                
+                            nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
 
                             (( ${nLinesNew} > ${nLinesCur} )) && {
-
-                                nLinesNew+=$(( ( ( ${nLinesCur} + ${nLinesCur} / ( 1 + ${nLinesMax} - ${nLinesCur} ) ) * ( ${nLinesNew} - ${nLinesCur} ) ) / ( 2 * ${nProcs} ) ))
-                                #nLinesNew+=$(( ( 1 + ${nLinesNew} - ${nLinesCur} ) / ${nLinesCur} ))
 
                                 (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
 
                                 printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines
-                                nLinesCur=${nLinesNew}
 
                                 # verbose output
-                                ${verboseFlag} && printf '\nCHANGING nLines to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
+                                ${verboseFlag} && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
+
+                                nLinesCur=${nLinesNew}
                             }
                         fi
 
@@ -498,8 +494,8 @@ IFS=
 trap - EXIT INT TERM HUP QUIT
 while true; do
 $(${nLinesAutoFlag} && echo """
-    \${nLinesAutoFlag} && read nLinesCur <\"${tmpDir}\"/.nLines
-""")
+    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \"\${REPLY//[0-9]/}\" ]] && nLinesCur=\${REPLY} 
+ """)
     read -u ${fd_continue}
     mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'; ${nullDelimiterFlag} && printf '%s ' '-d '"''") A
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
@@ -554,8 +550,8 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     $(printf '%q ' "${runCmd[@]}") \"\${A[@]%\$'\\n'}\" ${outStr} || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
-            echo 'ERROR DUNING ${runCmd[*]} CALL'
-            declare -p A
+            echo 'ERROR DURING \"${runCmd[*]}\" CALL'
+            declare -p A nLinesCur nLinesAutoFlag
             echo 'fd_read:'
             cat /proc/self/fdinfo/${fd_read}
             echo 'fd_write:'
@@ -570,11 +566,10 @@ p_PID+=(\${p{<#>}_PID})
 """
 
 #
-#        [[ \"\${A[*]##*\$'\\n'}\" ]] &&
-#
-#        printf -v a1 '%s' \"\${A[*]//*\$'\\n'/\$'\\034'}\"	        [[ \"\${A[*]##*\$'\\n'}\" ]] && {
+#        { [[ \"\${A[*]##*\$'\\n'}\" ]] || [[ -z \${A[0]} ]]; } && {
+#        printf -v a1 '%s' \"\${A[*]//*\$'\\n'/\$'\\034'}\"	       
 #        printf -v a2 '%s\\034' \"\${A[@]##*}\"
-#        [[ \"\${a1}\" == \"\${a2}\"  ]] || {
+#        [[ \"\${a1}\" == \"\${a2}\"  ]] || [[ \${A[0]} ]] || {
 #
 
         # source the coproc code for each coproc worker
