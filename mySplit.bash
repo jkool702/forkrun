@@ -557,8 +557,8 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
             echo 'fd_write:'
             cat /proc/self/fdinfo/${fd_write}
             echo
-        } >&2""")
-    }
+        } >&2
+    }""")
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
