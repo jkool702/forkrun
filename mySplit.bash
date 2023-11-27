@@ -494,7 +494,7 @@ IFS=
 trap - EXIT INT TERM HUP QUIT
 while true; do
 $(${nLinesAutoFlag} && echo """
-    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \"\${REPLY//[0-9]/}\" ]] && nLinesCur=\${REPLY} 
+    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY} 
  """)
     read -u ${fd_continue}
     mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'; ${nullDelimiterFlag} && printf '%s ' '-d '"''") A
@@ -547,7 +547,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
             mapfile A <<<\"\${A[*]}\"
         }
 """)
-    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%\$'\\n'}\" ${outStr} || {
+    $(printf '%q ' "${runCmd[@]}") \"\${A[@]%\$'\\n'}\" ${outStr} $(${verboseFlag} && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
@@ -557,7 +557,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
             echo 'fd_write:'
             cat /proc/self/fdinfo/${fd_write}
             echo
-        } >&2
+        } >&2""")
     }
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
