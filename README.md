@@ -1,4 +1,8 @@
-# forkrun
+NOTE: the below information applies to version 1 of `forkrun`. `mySplit` is a work-in-progress complete rewrite of `forkrun` that is nearly finished. `mySplit` uses a completely different IPC scheme, making it is faster and more efficient while relying on fewer external dependencies. A handful of option flags have not yet been implemented, but mySplit is otherwise fully functional.
+
+In the latest speedtests (see `mySplit.speedtest.bash`)  it is, in terms of "real life / wall clock" time, (on average) roughly twice as fast as the fastest xarghs implementation and roughly 4 times as fast as the fastest parallel implementation. Total CPU time tends to be a bit higher than `xargs` and on average comparable to `parallel`.
+
+# forkrun (v1)
 
 `forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs -P` or `parallel` does, only faster. In my testing, `forkrun` was anywhere from 10-80% faster than `xargs -P $(nproc)` and 100-150% faster than `parallel -m -j $(nproc)`. To be clear, these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
 
