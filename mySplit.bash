@@ -43,7 +43,7 @@ mySplit() (
     # make vars local
     local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot a1 a2 inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pNotify10_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk
-    local -a A p_PID p_PID0 runCmd
+    local -a A p_PID runCmd
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
@@ -318,7 +318,6 @@ cat() {
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
             } 2>&${fd_stderr}
             exitTrapStr_kill+="${pWrite_PID} "
-            p_PID0+=(${pWrite_PID})
         fi
 
         # setup+fork inotifywait (if available)
@@ -335,7 +334,6 @@ cat() {
 
             exitTrapStr+='[[ -f "'"${fPath}"'" ]] && \rm -f "'"${fPath}"'"; '
             exitTrapStr_kill+="${pNotify_PID} "
-            p_PID0+=(${pNotify_PID})
         fi
 
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
@@ -405,10 +403,10 @@ cat() {
  
                 done
 
+                kill -9 ${pOrder1_PID} ${pNotify1_PID}
+
               } 
             } 2>/dev/null
-
-            p_PID0+=(${pOrder_PID})
        else
 
             outStr='>&'"${fd_stdout}";
@@ -438,7 +436,7 @@ cat() {
 
                 while ${fallocateFlag} || ${nLinesAutoFlag}; do
 
-                    read -u ${fd_nAuto}
+                    read -u ${fd_nAuto} -t 1
                     [[ ${REPLY} == 0 ]] && break
                     { [[ -z ${REPLY} ]] || [[ -f "${tmpDir}"/.quit ]]; } && nLinesAutoFlag=false
 
@@ -490,12 +488,12 @@ cat() {
 
             exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&${fd_nAuto}; '
             exitTrapStr_kill+="${pAuto_PID} "
-            p_PID0+=(${pAuto_PID})
         fi
 
         # set EXIT trap (dynamically determined based on which option flags were active)
-        exitTrapStr=': >"'"${tmpDir}"'"/.quit; : >"'"${tmpDir}"'"/.out.quit; '"${exitTrapStr}"' kill '"${exitTrapStr_kill}"' 2>/dev/null; kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '
-        ${rmTmpDirFlag} && exitTrapStr+='wait "${p_PID0[@]}"; \rm -rf "'"${tmpDir}"'" 2>/dev/null; '
+        exitTrapStr=': >"'"${tmpDir}"'"/.quit; : >"'"${tmpDir}"'"/.out.quit; kill "${p_PID[@]}" 2>/dev/null; '"${exitTrapStr}"' kill '"${exitTrapStr_kill}"' 2>/dev/null; kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '
+        ${nOrderFlag} && exitTrapStr+='wait '${pOrder_PID}'; '
+        ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '
         trap "${exitTrapStr%'; '}" EXIT INT TERM HUP QUIT
 
 
@@ -617,7 +615,10 @@ p_PID+=(\${p{<#>}_PID})
         wait "${p_PID[@]}"
 
         # print output if using ordered output
-        ${nOrderFlag} && cat "${tmpDir}"/.out/x* >&${fd_stdout}
+        ${nOrderFlag} &&{
+            #wait ${pOrder_PID}
+            cat "${tmpDir}"/.out/x* >&${fd_stdout}
+        }
 
         # print final nLines count
         ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
