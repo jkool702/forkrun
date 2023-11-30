@@ -402,7 +402,7 @@ cat() {
                     while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
                         if ${exportOrderFlag}; then
                             mapfile -t Acur <"${tmpDir}"/.out/x${outCur}
-                            printf "$({source /proc/self/fd/0; }<<<"printf '%s: %%s\n' {${nCur}..$(( ${nCur} + ${Acur[@]} - 1 ))}")" $(<"${Acur[@]}") >&${fd_stdout}
+                            printf "$({ source /proc/self/fd/0; }<<<"printf '%s: %%s\n' {${nCur}..$(( ${nCur} + ${Acur[@]} - 1 ))}")" $(<"${Acur[@]}") >&${fd_stdout}
                             nCur=$(( ${nCur} + ${#Acur[@]} ))
                         else
                             echo "$(<"${tmpDir}"/.out/x${outCur}?(.+([0-9])))" >&${fd_stdout}
