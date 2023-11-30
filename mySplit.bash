@@ -42,8 +42,8 @@ mySplit() (
 
     # make vars local
     local tmpDir fPath outStr exitTrapStr nOrder coprocSrcCode outCur tmpDirRoot a1 a2 inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pNotify10_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
-    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk
-    local -a A p_PID runCmd
+    local -i nLines nLinesCur nLinesNew nLinesMax nCur nRead nProcs nWait v9 kkMax kkCur kk
+    local -a A Acur p_PID runCmd
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
@@ -341,7 +341,6 @@ cat() {
 
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
-            ${exportOrderFlag} && outStr+='.${#A[@]}'
 
             printf '%s\n' {10..89} >&${fd_nOrder}
 
@@ -385,7 +384,8 @@ cat() {
                 shopt -s extglob
                 outCur=10
                 continueFlag=true
-
+                ${exportOrderFlag} && nCur=1
+                
                 if ${inotifyFlag}; then
                     trap 'continueFlag=false; echo >&'"${fd_inotify10}" USR1
                 else
@@ -399,14 +399,11 @@ cat() {
                     }
 
                     # at least 1 output file can be printed...do so and then delete it. repeat this for as long as the next (in order) output file is ready.
-                    while [[ -f "${tmpDir}"/.out/x${outCur}?(.+([0-9])) ]]; do
+                    while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
                         if ${exportOrderFlag}; then
-                            for fCur in "${tmpDir}"/.out/x${outCur}?(.+([0-9])); do
-                                (
-                                    IFS=$'\n'
-                                    printf "$(source /proc/self/fd/0 <<<"printf '%s: %%s\n' {${outCur}..$(( ${outCur} + ${fCur##*.} ))}")" $(<"${fCur}") >&${fd_stdout}
-                                )
-                            done
+                            mapfile -t Acur <"${tmpDir}"/.out/x${outCur}
+                            printf "$({source /proc/self/fd/0; }<<<"printf '%s: %%s\n' {${nCur}..$(( ${nCur} + ${Acur[@]} - 1 ))}")" $(<"${Acur[@]}") >&${fd_stdout}
+                            nCur=$(( ${nCur} + ${#Acur[@]} ))
                         else
                             echo "$(<"${tmpDir}"/.out/x${outCur}?(.+([0-9])))" >&${fd_stdout}
                         fi
@@ -415,7 +412,9 @@ cat() {
                         [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                         [[ -f "${tmpDir}"/.quit ]] && break
                     done
-                    [[ -f "${tmpDir}"/.quit ]] && continueFlag=false
+                    ${exportOrderFlag} || {
+                        [[ -f "${tmpDir}"/.quit ]] && continueFlag=false
+                    }
                 done
 
                 kill -9 "${pNotify1_PID}" "${pOrder1_PID}" 2>/dev/null
