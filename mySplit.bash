@@ -41,7 +41,7 @@ mySplit() (
 #    shopt -s varredir_close
 
     # make vars local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot a1 a2 inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pNotify10_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local tmpDir fPath outStr exitTrapStr nOrder coprocSrcCode outCur tmpDirRoot a1 a2 inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pNotify10_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk
     local -a A p_PID runCmd
 
@@ -99,7 +99,7 @@ mySplit() (
             -?(-)I?(D)|-?(-)INSERT?(?(-)ID))
                 substituteStringIDFlag=true
             ;;
-           
+
             -?(-)k?(eep?(?(-)order)))
                 nOrderFlag=true
             ;;
@@ -151,7 +151,7 @@ mySplit() (
             +?(-)I?(D)|+?(-)INSERT?(?(-)ID))
                  substituteStringIDFlag=false
             ;;
-            
+
             +?([-+])k?(eep?(?(-)order)))
                 nOrderFlag=false
             ;;
@@ -254,17 +254,17 @@ mySplit() (
         if ${unescapeFlag}; then
             ${substituteStringFlag} && {
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
-            } 
+            }
             ${substituteStringIDFlag} && {
-                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{ID}'/'{<#>}'}") 
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{ID}'/'{<#>}'}")
             }
         else
             mapfile -t runCmd < <(printf '%q\n' "${@}")
             ${substituteStringFlag} && {
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{\}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
-            } 
+            }
             ${substituteStringIDFlag} && {
-                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{ID\}'/'{<#>}'}") 
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{ID\}'/'{<#>}'}")
             }
         fi
 
@@ -293,8 +293,6 @@ cat() {
 
         # start building exit trap string
         : >"${tmpDir}"/.pid.kill
-        exitTrapStr='mapfile -t pidKill <"'"${tmpDir}"'"/.pid.kill; kill "${pidKill[@]}" 2>/dev/null; kill -9 "${pidKill[@]}" 2>/dev/null; '
-        exitTrapStr_kill=''
 
         ${verboseFlag} && {
             ${inotifyFlag} && echo 'using inotify'
@@ -317,7 +315,7 @@ cat() {
                 } {fd_inotify0}>&${fd_inotify}
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
             } 2>&${fd_stderr}
-            exitTrapStr_kill+="${pWrite_PID} "
+            echo "${pWrite_PID}" >>"${tmpDir}"/.pid.kill
         fi
 
         # setup+fork inotifywait (if available)
@@ -332,11 +330,11 @@ cat() {
 
             pNotify_PID=${!}
 
-            exitTrapStr+='[[ -f "'"${fPath}"'" ]] && \rm -f "'"${fPath}"'"; '
-            exitTrapStr_kill+="${pNotify_PID} "
+#            exitTrapStr+='[[ -f "'"${fPath}"'" ]] && \rm -f "'"${fPath}"'"; '
+            echo "${pNotify_PID}" >>"${tmpDir}"/.pid.kill
         fi
 
-        # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
+# setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
 
             mkdir -p "${tmpDir}"/.out
@@ -348,13 +346,21 @@ cat() {
 
                 printf '%s\n' {9000..9899} >&${fd_nOrder}
 
+                # monitor ${tmpDir}/.out for new files if we have inotifywait
+                ${inotifyFlag} && {
+                    inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify10} &
+                    pNotify1_PID=$!
+                    echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
+                } 2>/dev/null
+
+
                 # fork nested coproc to print outputs (in order) and then clear them in realtime as they show up in ${tmpDir}/.out
-                { coproc pOrder1 {        
+                { coproc pOrder1 {
 
                     # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                     # start at 10 so that bash wont try to treat x0_ as an octal
                     printf '%s\n' {990000..998999} >&${fd_nOrder}
-    
+
                     # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
                     v9='99'
                     kkMax='8'
@@ -368,46 +374,45 @@ cat() {
                         done
                     done
 
-                  } 
+                  }
                 } 2>/dev/null
 
                 echo "${pOrder1_PID}" >>"${tmpDir}"/.pid.kill
 
-                # monitor ${tmpDir}/.out for new files if we have inotifywait
-                ${inotifyFlag} && {                
-                    inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify10} &
-                    pNotify1_PID=$!
-                    echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
-                } 2>/dev/null {fd_inotify10}>&${fd_inotify1}
-
                 shopt -s extglob
-
                 outCur=10
+                continueFlag=true
 
-                until [[ -f "${tmpDir}"/.quit ]]; do
+                if ${inotifyFlag}; then
+                    trap 'continueFlag=false; echo >&'"${fd_inotify10}" USR1
+                else
+                    trap 'continueFlag=false' USR1
+                fi
+
+                while ${continueFlag}; do
                     # check if the next output file that needs to be printed is available (using inotifywait if possible)
-                    [[ -f "${tmpDir}"/.out/x${outCur} ]] || {
-                        ${inotifyFlag} && read -u ${fd_inotify1} -t 1
-                        continue
+                    ${inotifyFlag} && {
+                        [[ -f "${tmpDir}"/.out/x${outCur} ]] || read -u ${fd_inotify1}
                     }
 
                     # at least 1 output file can be printed...do so and then delete it. repeat this for as long as the next (in order) output file is ready.
-                    outPrint=()
-                    while [[ -f "${tmpDir}/.out/x${outCur}" ]]; do
-                        [[ -f "${tmpDir}"/.quit ]] && break || { 
-                            cat "${tmpDir}/.out/x${outCur}"
-                            ((outCur++))
-                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
-                        }
+                    while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
+                        echo "$(<"${tmpDir}/.out/x${outCur}")" >&${fd_stdout}
+                        \rm -f "${tmpDir}/.out/x${outCur}"
+                        ((outCur++))
+                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
+                        [[ -f "${tmpDir}"/.quit ]] && break
                     done
- 
+                    [[ -f "${tmpDir}"/.quit ]] && continueFlag=false
                 done
 
-                kill -9 ${pOrder1_PID} ${pNotify1_PID}
+                kill -9 "${pNotify1_PID}" "${pOrder1_PID}" 2>/dev/null
 
-              } 
+              }  {fd_inotify10}>&${fd_inotify1}
             } 2>/dev/null
-       else
+
+            exitTrapStr+='kill -USR1 '"${pOrder_PID}"' 2>/dev/null; wait '"${pOrder_PID}"'; '
+        else
 
             outStr='>&'"${fd_stdout}";
         fi
@@ -426,7 +431,7 @@ cat() {
             # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
             # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break after the current iteratrion is finished
             { coproc pAuto {
-                trap - EXIT
+                trap 'nLinesAutoFlag=false; fallocateFlag=false; echo >&'"${fd_nAuto}" USR1
 
                 ${fallocateFlag} && {
                     nWait=${nProcs}
@@ -449,7 +454,7 @@ cat() {
                         fd_write_pos=${fd_write_pos##*$'\t'}
 
                         nRead+=${REPLY}
-                            
+
                         nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
 
                         (( ${nLinesNew} > ${nLinesCur} )) && {
@@ -480,18 +485,25 @@ cat() {
                             ;;
                         esac
                     fi
-                    [[ -f "${tmpDir}"/.quit ]] && break
+                    [[ -f "${tmpDir}"/.quit ]] && fallocateFlag=false
                 done
 
               } 2>&${fd_stderr}
             } 2>/dev/null
 
-            exitTrapStr+='printf '"'"'%s\n'"'"' 0 >&${fd_nAuto}; '
-            exitTrapStr_kill+="${pAuto_PID} "
+            exitTrapStr+='kill -USR1 '"${pAuto_PID}"' 2>/dev/null; '
+            echo "${pAuto_PID}" >>"${tmpDir}"/.pid.kill
+
         fi
 
         # set EXIT trap (dynamically determined based on which option flags were active)
-        exitTrapStr=': >"'"${tmpDir}"'"/.quit; : >"'"${tmpDir}"'"/.out.quit; kill "${p_PID[@]}" 2>/dev/null; '"${exitTrapStr}"' kill '"${exitTrapStr_kill}"' 2>/dev/null; kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '
+        exitTrapStr=': >"'"${tmpDir}"'"/.quit;
+        : >"'"${tmpDir}"'"/.out.quit;
+        '"${exitTrapStr}"'
+         mapfile -t pidKill <"'"${tmpDir}"'"/.pid.kill;
+         kill "${pidKill[@]}" 2>/dev/null;
+         kill -9 "${pidKill[@]}" 2>/dev/null; '
+
         ${nOrderFlag} && exitTrapStr+='wait '${pOrder_PID}'; '
         ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '
         trap "${exitTrapStr%'; '}" EXIT INT TERM HUP QUIT
@@ -524,7 +536,7 @@ IFS=
 trap - EXIT INT TERM HUP QUIT
 while true; do
 $(${nLinesAutoFlag} && echo """
-    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY} 
+    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}
  """)
     read -u ${fd_continue}
     mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'; ${nullDelimiterFlag} && printf '%s ' '-d '"''") A
