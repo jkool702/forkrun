@@ -243,6 +243,8 @@ mySplit() (
         # check for fallocate
         type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
+        # require -k to use -n
+        ${exportOrderFlag} && nOrderFlag=true
 
         # set defaults for control flags/parameters
         : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${verboseFlag:=false}" "${noFuncFlag:=false}" "${unescapeFlag:=false}"
@@ -339,6 +341,7 @@ cat() {
 
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
+            ${exportOrderFlag} && outStr+='.${#A[@]}'
 
             printf '%s\n' {10..89} >&${fd_nOrder}
 
@@ -396,9 +399,18 @@ cat() {
                     }
 
                     # at least 1 output file can be printed...do so and then delete it. repeat this for as long as the next (in order) output file is ready.
-                    while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
-                        echo "$(<"${tmpDir}/.out/x${outCur}")" >&${fd_stdout}
-                        \rm -f "${tmpDir}/.out/x${outCur}"
+                    while [[ -f "${tmpDir}"/.out/x${outCur}?(.+([0-9])) ]]; do
+                        if ${exportOrderFlag}; then
+                            for fCur in "${tmpDir}"/.out/x${outCur}?(.+([0-9])); do
+                                (
+                                    IFS=$'\n'
+                                    printf "$(source /proc/self/fd/0 <<<"printf '%s: %%s\n' {${outCur}..$(( ${outCur} + ${fCur##*.} ))}")" $(<"${fCur}") >&${fd_stdout}
+                                )
+                            done
+                        else
+                            echo "$(<"${tmpDir}"/.out/x${outCur}?(.+([0-9])))" >&${fd_stdout}
+                        fi
+                        \rm -f "${tmpDir}"/.out/x${outCur}?(.+([0-9]))
                         ((outCur++))
                         [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                         [[ -f "${tmpDir}"/.quit ]] && break
