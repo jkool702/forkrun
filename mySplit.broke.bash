@@ -214,12 +214,31 @@ mySplit() (
 
     # determine what mySplit is using lines on stdin for
     [[ ${FORCE} ]] && runCmd=("${@}") || runCmd=("${@//$'\r'/}")
-    : "${noFuncFlag:=false}"
-    (( ${#runCmd[@]} > 0 )) || ${noFuncFlag} || runCmd=(printf '%s\n')
-    (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
+    (( ${#runCmd[@]} > 0 )) && noFuncFlag=false 
+    : "${noFuncFlag:=false}" 
+    ${noFuncFlag} || (( ${#runCmd[@]} > 0 )) || runCmd=(printf '%s\n')
 
+       # check for cat and mktemp. if missing define a usable replacement using bash builtins
+        type -a cat &>/dev/null || {
+cat() {
+    if  [[ -t 0 ]] && [[ $# == 0 ]]; then
+        # no input
+        return
+    elif [[ $# == 0 ]]; then
+        # only stdin
+        printf '%s\n' "$(</proc/self/fd/0)"
+    elif [[ -t 0 ]]; then
+        # only function inputs
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    else
+        # both stdin and function inputs. fork printing stdin to allow for printing both in parallel.
+        printf '%s\n' "$(</proc/self/fd/0)" &
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    fi
+}
+        }
 
-    type -a mktemp &>/dev/null || {
+        type -a mktemp &>/dev/null || {
 mktemp () ( 
     local p d f
     set -C
@@ -240,13 +259,12 @@ mktemp () (
 )
     }
 
-
     # setup tmpdir
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
     tmpDir="$(mktemp -p "${tmpDirRoot}" -d .mySplit.XXXXXX)"
     fPath="${tmpDir}"/.stdin
     : >"${fPath}"
-
+    : >"${tmpDir}"/.pid.kill
 
     {
 
@@ -268,14 +286,14 @@ mktemp () (
         # check for fallocate
         type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
+        # require -k to use -n
+        ${exportOrderFlag} && nOrderFlag=true
+
         # set defaults for control flags/parameters
         : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${verboseFlag:=false}" "${unescapeFlag:=false}"
 
         # check for conflict in flags that were  defined on the commandline when mySplit was called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
-      
-        # require -k to use -n
-        ${exportOrderFlag} && nOrderFlag=true
 
         # modify runCmd if '-i' '-I' or '-u' flags are set
         if ${unescapeFlag}; then
@@ -294,30 +312,6 @@ mktemp () (
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{ID\}'/'{<#>}'}")
             }
         fi
-
-        # check for cat. if missing define a usable replacement using bash builtins
-        type -a cat &>/dev/null || {
-cat() {
-    if  [[ -t 0 ]] && [[ $# == 0 ]]; then
-        # no input
-        return
-    elif [[ $# == 0 ]]; then
-        # only stdin
-        printf '%s\n' "$(</proc/self/fd/0)"
-    elif [[ -t 0 ]]; then
-        # only function inputs
-        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
-    else
-        # both stdin and function inputs. fork printing stdin to allow for printing both in parallel.
-        printf '%s\n' "$(</proc/self/fd/0)" &
-        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
-    fi
-}
-        }
-
-        # start building exit trap string
-        : >"${tmpDir}"/.pid.kill
-
 
         # if keeping tmpDir print its location to stderr
         ${rmTmpDirFlag} || ${verboseFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
@@ -341,7 +335,6 @@ cat() {
             ${stdinRunFlag} && echo '(-S) coproc workers will pass lines to the command being parallelized via the command'"'"'s stdin'
             printf '\n------------------------------------------\n\n'
         } >&${fd_stderr}
-
 
 
         # spawn a coproc to write stdin to a tmpfile
@@ -375,7 +368,7 @@ cat() {
             echo "${pNotify_PID}" >>"${tmpDir}"/.pid.kill
         fi
 
-        # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
+# setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
 
             mkdir -p "${tmpDir}"/.out
@@ -423,7 +416,8 @@ cat() {
                 shopt -s extglob
                 outCur=10
                 continueFlag=true
-
+                ${exportOrderFlag} && nCur=1
+                
                 if ${inotifyFlag}; then
                     trap 'continueFlag=false; echo >&'"${fd_inotify10}" USR1
                 else
@@ -437,14 +431,26 @@ cat() {
                     }
 
                     # at least 1 output file can be printed...do so and then delete it. repeat this for as long as the next (in order) output file is ready.
-                    while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
-                        echo "$(<"${tmpDir}/.out/x${outCur}")" >&${fd_stdout}
-                        \rm -f "${tmpDir}/.out/x${outCur}"
+                   while true; do
+                        [[ -f "${tmpDir}"/.out/x${outCur} ]] || break
+                        
+                        if ${exportOrderFlag}; then
+                            mapfile -t Acur <"${tmpDir}"/.out/x${outCur}
+                            printf "$({ source /proc/self/fd/0; }<<<"printf '\n' && printf '%s: %%s\n' {${nCur}..$(( ${nCur} + ${#Acur[@]} - 1 ))}")" "${Acur[@]}" >&${fd_stdout}
+                            nCur=$(( ${nCur} + ${#Acur[@]} ))
+                        else
+                            echo "$(<"${tmpDir}"/.out/x${outCur}?(.+([0-9])))" >&${fd_stdout}
+                        fi
+                        
+                        \rm -f "${tmpDir}"/.out/x${outCur}
                         ((outCur++))
                         [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
-                        [[ -f "${tmpDir}"/.quit ]] && break
+                        
+                        ${exportOrderFlag} || {
+                            [[ -f "${tmpDir}"/.quit ]] && break
+                        }
                     done
-                    [[ -f "${tmpDir}"/.quit ]] && continueFlag=false
+                    [[ -f "${tmpDir}"/.quit ]] && continueFlag=false 
                 done
 
                 kill -9 "${pNotify1_PID}" "${pOrder1_PID}" 2>/dev/null
@@ -538,15 +544,14 @@ cat() {
         fi
 
         # set EXIT trap (dynamically determined based on which option flags were active)
-        ${nOrderFlag} && exitTrapStr+='wait '"${pOrder_PID}"'; '
+    
         exitTrapStr=': >"'"${tmpDir}"'"/.quit;
-        : >"'"${tmpDir}"'"/.out.quit;
         '"${exitTrapStr}"'
-         mapfile -t pidKill <"'"${tmpDir}"'"/.pid.kill;
-         kill "${pidKill[@]}" 2>/dev/null;
-         kill -9 "${pidKill[@]}" 2>/dev/null; '
-
-        ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '
+        mapfile -t pidKill <"'"${tmpDir}"'"/.pid.kill;
+        kill "${pidKill[@]}" 2>/dev/null;
+        kill -9 "${pidKill[@]}" 2>/dev/null; '
+     ${nOrderFlag} && exitTrapStr+='wait '${pOrder_PID}'; '
+        ${rmTmpDirFlag} && exitTrapStr+=$'\n''\rm -rf "'"${tmpDir}"'" 2>/dev/null; '
         trap "${exitTrapStr%'; '}" EXIT INT TERM HUP QUIT
 
 
@@ -635,7 +640,7 @@ ${subshellRunFlag} && echo '(' || echo '{'
     ${runCmd[@]} $(${substituteStringFlag} || printf '%s' "\"\${A[@]%\$'\\n'}\"") $(${verboseFlag} && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
-            echo 'ERROR DURING \"${runCmd[*]}\" CALL'
+            echo 'ERROR DURING \"${runCmd[@]}\" CALL'
             declare -p A nLinesCur nLinesAutoFlag
             echo 'fd_read:'
             cat /proc/self/fdinfo/${fd_read}
@@ -646,7 +651,7 @@ ${subshellRunFlag} && echo '(' || echo '{'
     }""")
 $(${subshellRunFlag} && printf '%s' ')' || printf '%s' '}') ${outStr}
 done
-} 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
+} 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto} 
 } 2>/dev/null
 p_PID+=(\${p{<#>}_PID})
 """
@@ -668,9 +673,8 @@ p_PID+=(\${p{<#>}_PID})
         wait "${p_PID[@]}"
 
         # print output if using ordered output
-        ${nOrderFlag} &&{
-            cat "${tmpDir}"/.out/x* >&${fd_stdout}
-            \rm -f "${tmpDir}"/.out/x*
+        ${nOrderFlag} && {
+            ${exportOrderFlag} || cat "${tmpDir}"/.out/x* >&${fd_stdout}
         }
 
         # print final nLines count
