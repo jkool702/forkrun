@@ -41,16 +41,16 @@ mySplit() (
 #    shopt -s varredir_close
 
     # make vars local
-    local tmpDir fPath outStr exitTrapStr nOrder coprocSrcCode outCur tmpDirRoot a1 a2 inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pNotify10_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
-    local -i nLines nLinesCur nLinesNew nLinesMax nCur nRead nProcs nWait v9 kkMax kkCur kk
-    local -a A Acur p_PID runCmd
+    local tmpDir fPath outStr exitTrapStr nOrder coprocSrcCode outCur tmpDirRoot fCur a1 a2 inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pNotify10_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk
+    local -a A Acur p_PID runCmd F
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)j|-?(-)?(n)p?(roc?(s)))
+            -?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)proc?(s)?([= ]))
                 nProcs="${2}"
                 shift 1
             ;;
@@ -61,24 +61,24 @@ mySplit() (
 
             -?(-)?(n)l?(ine?(s)))
                 nLines="${2}"
-                nLinesAutoFlag=false
+                nLinesAutoFlag=true
                 shift 1
             ;;
 
             -?(-)?(n)l?(ine?(s))?([= ])*@([[:graph:]])*)
                 nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
-                nLinesAutoFlag=false
+                nLinesAutoFlag=true
             ;;
 
             -?(-)?(N)L?(INE?(S)))
                 nLines="${2}"
-                nLinesAutoFlag=true
+                nLinesAutoFlag=false
                 shift 1
             ;;
 
             -?(-)?(N)L?(INE?(S))?([= ])*@([[:graph:]])*)
                 nLines="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
-                nLinesAutoFlag=true
+                nLinesAutoFlag=false
             ;;
 
             -?(-)t?(mp?(?(-)dir)))
@@ -116,7 +116,7 @@ mySplit() (
                 stdinRunFlag=true
             ;;
 
-            -?(-)P?(IPE)?(?(-)READ))
+            -?(-)p?(ipe)?(?(-)read))
                 pipeReadFlag=true
             ;;
 
@@ -149,7 +149,7 @@ mySplit() (
             ;;
 
             +?(-)I?(D)|+?(-)INSERT?(?(-)ID))
-                 substituteStringIDFlag=false
+                substituteStringIDFlag=false
             ;;
 
             +?([-+])k?(eep?(?(-)order)))
@@ -168,7 +168,7 @@ mySplit() (
                 stdinRunFlag=false
             ;;
 
-            +?([-+])P?(IPE)?(?(-)READ))
+            +?([-+])p?(ipe)?(?(-)read))
                 pipeReadFlag=false
             ;;
 
@@ -214,7 +214,32 @@ mySplit() (
 
     # determine what mySplit is using lines on stdin for
     [[ ${FORCE} ]] && runCmd=("${@}") || runCmd=("${@//$'\r'/}")
+    : "${noFuncFlag:=false}"
     (( ${#runCmd[@]} > 0 )) || ${noFuncFlag} || runCmd=(printf '%s\n')
+    (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
+
+
+    type -a mktemp &>/dev/null || {
+mktemp () ( 
+    local p d f
+    set -C
+    umask 177
+    while [[ "${1}" == -@([pd]) ]]; do
+        [[ "${1}" == '-p' ]] && p="$2"
+        [[ "${1}" == '-d' ]] && d="$2"
+        shift 2
+    done
+    [[ "$d" == *XXXXXX* ]] || d=''
+    : "${p:=/dev/shm}" "${d:=.mySplit.XXXXXX}"
+
+    f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
+    until mkdir "$f"; do
+        f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
+    done 2>/dev/null
+    echo "$f"
+)
+    }
+
 
     # setup tmpdir
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
@@ -243,14 +268,14 @@ mySplit() (
         # check for fallocate
         type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
-        # require -k to use -n
-        ${exportOrderFlag} && nOrderFlag=true
-
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${verboseFlag:=false}" "${noFuncFlag:=false}" "${unescapeFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${verboseFlag:=false}" "${unescapeFlag:=false}"
 
         # check for conflict in flags that were  defined on the commandline when mySplit was called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
+      
+        # require -k to use -n
+        ${exportOrderFlag} && nOrderFlag=true
 
         # modify runCmd if '-i' '-I' or '-u' flags are set
         if ${unescapeFlag}; then
@@ -261,7 +286,7 @@ mySplit() (
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{ID}'/'{<#>}'}")
             }
         else
-            mapfile -t runCmd < <(printf '%q\n' "${@}")
+            mapfile -t runCmd < <(printf '%q\n' "${runCmd[@]}")
             ${substituteStringFlag} && {
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{\}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
             }
@@ -290,18 +315,33 @@ cat() {
 }
         }
 
-        # if keeping tmpDir print its location to stderr
-        ${rmTmpDirFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
-
         # start building exit trap string
         : >"${tmpDir}"/.pid.kill
 
+
+        # if keeping tmpDir print its location to stderr
+        ${rmTmpDirFlag} || ${verboseFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
+
         ${verboseFlag} && {
+            printf '\n\n-------------------INFO-------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")"
+            ${noFuncFlag} && echo '(no function mode enabled: commands should be included in stdin)' || printf 'tmpdir: %s\n' "${tmpDir}"
+            printf '(-j|-P) using %s coproc workers\n' ${nProcs}
             ${inotifyFlag} && echo 'using inotify'
             ${fallocateFlag} && echo 'using fallocate'
-            ${nLinesAutoFlag} && echo 'automatically adjusting batch size (num lines per function call)'
-            ${nOrderFlag} && echo 'ordering output the same as the input'
+            ${nLinesAutoFlag} && echo '(-N) automatically adjusting batch size (lines per function call)'
+            ${nOrderFlag} && echo '(-k) ordering output the same as the input'
+            ${exportOrderFlag} && echo '(-n) output lines will be numbered (`grep -n` style)'
+            ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
+            ${substituteStringFlag} && echo '(-I) replacing {ID} with coproc worker ID'
+            ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
+            ${pipeReadFlag} && echo '(-p) worker coprocs will read directly from stdin pipe, not from a tmpfile'
+            ${nullDelimiterFlag} && echo '(-0|-z) stdin will be parsed using nulls as delimiter (instead of newlines)'
+            ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automaticvally removed\n' "${tmpDir}"
+            ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
+            ${stdinRunFlag} && echo '(-S) coproc workers will pass lines to the command being parallelized via the command'"'"'s stdin'
+            printf '\n------------------------------------------\n\n'
         } >&${fd_stderr}
+
 
 
         # spawn a coproc to write stdin to a tmpfile
@@ -332,15 +372,15 @@ cat() {
 
             pNotify_PID=${!}
 
-#            exitTrapStr+='[[ -f "'"${fPath}"'" ]] && \rm -f "'"${fPath}"'"; '
             echo "${pNotify_PID}" >>"${tmpDir}"/.pid.kill
         fi
 
-# setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
+        # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
 
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
+            ${exportOrderFlag} && outStr+='.${#A[@]}'
 
             printf '%s\n' {10..89} >&${fd_nOrder}
 
@@ -384,42 +424,46 @@ cat() {
                 shopt -s extglob
                 outCur=10
                 continueFlag=true
-                ${exportOrderFlag} && nCur=1
+                lastIterFlag=false
+                ${exportOrderFlag} && { nCur=1; nNew=1; }
                 
-                if ${inotifyFlag}; then
-                    trap 'continueFlag=false; echo >&'"${fd_inotify10}" USR1
-                else
-                    trap 'continueFlag=false' USR1
-                fi
+        #              if ${inotifyFlag}; then
+        #                 trap '{ echo >&${fd_inotify10}; } {fd_inotify10}>&'"${fd_inotify1}"'; exec {fd_inotify10}>&-' USR1
+        #            else
+        #               trap 'continueFlag=false' USR1
+        #          fi
 
                 while ${continueFlag}; do
-                    # check if the next output file that needs to be printed is available (using inotifywait if possible)
-                    ${inotifyFlag} && {
-                        [[ -f "${tmpDir}"/.out/x${outCur} ]] || read -u ${fd_inotify1}
-                    }
-
-                    # at least 1 output file can be printed...do so and then delete it. repeat this for as long as the next (in order) output file is ready.
-                    while [[ -f "${tmpDir}"/.out/x${outCur} ]]; do
-                        if ${exportOrderFlag}; then
-                            mapfile -t Acur <"${tmpDir}"/.out/x${outCur}
-                            printf "$({ source /proc/self/fd/0; }<<<"printf '%s: %%s\n' {${nCur}..$(( ${nCur} + ${#Acur[@]} - 1 ))}")" "${Acur[@]}" >&${fd_stdout}
-                            nCur=$(( ${nCur} + ${#Acur[@]} ))
+             
+                    # if at least 1 output file can be printed...do so and then delete it. repeat this for as long as the next (in order) output file is ready.
+                
+                    F=()
+                    for fCur in "${tmpDir}"/.out/x${outCur}?(.+([0-9])); do
+                        if [[ -f "${fCur}" ]]; then
+                            F+=("${fCur}")
+                            ${exportOrderFlag} && nNew+=${fCur##*.}
+                            ((outCur++))
+                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                         else
-                            echo "$(<"${tmpDir}"/.out/x${outCur}?(.+([0-9])))" >&${fd_stdout}
+                            ${inotifyFlag} && [[ ${nNew} == ${nCur} ]] && read -u ${fd_inotify1}
+                            break
                         fi
-                        \rm -f "${tmpDir}"/.out/x${outCur}
-                        ((outCur++))
-                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
-                        ${exportOrderFlag} || {
-                            [[ -f "${tmpDir}"/.quit ]] && break
-                        }
                     done
-                    [[ -f "${tmpDir}"/.quit ]] && continueFlag=false
+
+                    if ${exportOrderFlag}; then
+                        source /proc/self/fd/0 <<<"echo \"$(printf "$(source /proc/self/fd/0 <<<"printf '%s: \"\$(<%%s)\"\n' {${nCur}..$(( ${nNew} - 1 ))}")" ."${F[@]}")\"" >&${fd_stdout}
+                        nCur=${nNew}
+                        echo "nCur = ${nCur}" >&${fd_stdout}
+                    else
+                        cat "${F[@]}" >&${fd_stdout}
+                    fi
+
+                    [[ -f "${tmpDir}"/.quit ]] && ! [[ -f "$(echo "${tmpDir}"/.out/x${outCur}?(.+([0-9])))" ]] && continueFlag=false      
                 done
 
                 kill -9 "${pNotify1_PID}" "${pOrder1_PID}" 2>/dev/null
 
-              }  {fd_inotify10}>&${fd_inotify1}
+              }  
             } 2>/dev/null
 
             exitTrapStr+='kill -USR1 '"${pOrder_PID}"' 2>/dev/null; wait '"${pOrder_PID}"'; '
@@ -508,6 +552,7 @@ cat() {
         fi
 
         # set EXIT trap (dynamically determined based on which option flags were active)
+        ${nOrderFlag} && exitTrapStr+='wait '"${pOrder_PID}"'; '
         exitTrapStr=': >"'"${tmpDir}"'"/.quit;
         : >"'"${tmpDir}"'"/.out.quit;
         '"${exitTrapStr}"'
@@ -515,7 +560,6 @@ cat() {
          kill "${pidKill[@]}" 2>/dev/null;
          kill -9 "${pidKill[@]}" 2>/dev/null; '
 
-        ${nOrderFlag} && exitTrapStr+='wait '${pOrder_PID}'; '
         ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '
         trap "${exitTrapStr%'; '}" EXIT INT TERM HUP QUIT
 
@@ -639,8 +683,8 @@ p_PID+=(\${p{<#>}_PID})
 
         # print output if using ordered output
         ${nOrderFlag} &&{
-            #wait ${pOrder_PID}
             cat "${tmpDir}"/.out/x* >&${fd_stdout}
+            \rm -f "${tmpDir}"/.out/x*
         }
 
         # print final nLines count
