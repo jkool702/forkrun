@@ -451,7 +451,7 @@ cat() {
                     done
 
                     if ${exportOrderFlag}; then
-                        source /proc/self/fd/0 <<<"echo \"$(printf "$(source /proc/self/fd/0 <<<"printf '%s: \"\$(<%%s)\"\n' {${nCur}..$(( ${nNew} - 1 ))}")" ."${F[@]}")\"" >&${fd_stdout}
+                        source /proc/self/fd/0 <<<"echo \"$(printf "$(source /proc/self/fd/0 <<<"printf '%s: \"\$(<\"%%s\")\"\n' {${nCur}..$(( ${nNew} - 1 ))}")" "${F[@]}")\"" >&${fd_stdout}
                         nCur=${nNew}
                         echo "nCur = ${nCur}" >&${fd_stdout}
                     else
