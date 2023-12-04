@@ -426,12 +426,6 @@ cat() {
                 continueFlag=true
                 lastIterFlag=false
                 ${exportOrderFlag} && { nCur=1; nNew=1; }
-                
-        #              if ${inotifyFlag}; then
-        #                 trap '{ echo >&${fd_inotify10}; } {fd_inotify10}>&'"${fd_inotify1}"'; exec {fd_inotify10}>&-' USR1
-        #            else
-        #               trap 'continueFlag=false' USR1
-        #          fi
 
                 while ${continueFlag}; do
              
@@ -445,15 +439,14 @@ cat() {
                             ((outCur++))
                             [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                         else
-                            ${inotifyFlag} && [[ ${nNew} == ${nCur} ]] && read -u ${fd_inotify1}
+                            ${inotifyFlag} && [[ ${nNew} == ${nCur} ]] && read -u ${fd_inotify1} -t 0.1
                             break
                         fi
                     done
 
                     if ${exportOrderFlag}; then
-                        source /proc/self/fd/0 <<<"echo \"$(printf "$(source /proc/self/fd/0 <<<"printf '%s: \"\$(<\"%%s\")\"\n' {${nCur}..$(( ${nNew} - 1 ))}")" "${F[@]}")\"" >&${fd_stdout}
+                        source /proc/self/fd/0 <<<"printf '%s' 'echo '; printf \"$(printf '%%s: $(<"%s")\n'  "${F[@]}")\" $(source /proc/self/fd/0 <<<"echo {$nCur..$nNew}")"
                         nCur=${nNew}
-                        echo "nCur = ${nCur}" >&${fd_stdout}
                     else
                         cat "${F[@]}" >&${fd_stdout}
                     fi
@@ -496,7 +489,7 @@ cat() {
 
                 while ${fallocateFlag} || ${nLinesAutoFlag}; do
 
-                    read -u ${fd_nAuto} -t 1
+                    read -u ${fd_nAuto} -t 0.1
                     [[ ${REPLY} == 0 ]] && break
                     { [[ -z ${REPLY} ]] || [[ -f "${tmpDir}"/.quit ]]; } && nLinesAutoFlag=false
 
@@ -623,7 +616,7 @@ $(${nOrderFlag} && echo """
             break
 $(${inotifyFlag} && echo """
         else
-            read -u ${fd_inotify} -t 1
+            read -u ${fd_inotify} -t 0.1
 """)
         fi
         continue
