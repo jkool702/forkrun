@@ -346,26 +346,51 @@ cat() {
 
         # spawn a coproc to write stdin to a tmpfile
         # After we are done reading all of stdin indicate this by touching .done
-        if ${pipeReadFlag}; then
+        ${pipeReadFlag} && {
             : >"${tmpDir}"/.done
+        }
+
+        ${iNotifyFlag} && {
+            # initially add 1 newline for each coproc to fd_inotify
+            { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+        }
+
+        # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
+        if ${nOrderFlag}; then 
+            mkdir -p "${tmpDir}"/.out
+            outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
+
+            printf '%s\n' {10..89} >&${fd_nOrder}
         else
-            coproc pWrite {
+            outStr='>&'"${fd_stdout}";
+        fi
+
+        nLinesCur=${nLines}
+
+        # setup nLinesAuto and/or fallocate truncation
+        if ${nLinesAutoFlag} || ${fallocateFlag}; then
+            # setup nLines indicator
+            printf '%s\n' ${nLines} >"${tmpDir}"/.nLines
+        fi
+
+    { coproc pHelper {
+
+        ${pipeReadFlag} || {
+            { coproc pWrite {
                 cat <&${fd_stdin} >&${fd_write}
                 : >"${tmpDir}"/.done
                 ${inotifyFlag} && {
                     { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
                 } {fd_inotify0}>&${fd_inotify}
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
+              }
             } 2>&${fd_stderr}
             echo "${pWrite_PID}" >>"${tmpDir}"/.pid.kill
-        fi
+        }
 
         # setup+fork inotifywait (if available)
-        if ${inotifyFlag}; then
+        ${inotifyFlag} && {
             {
-                # initially add 1 newline for each coproc to fd_inotify
-                { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-
                 # run inotifywait
                 inotifywait -q -m --format '' "${fPath}" >&${fd_inotify0} &
             } 2>/dev/null {fd_inotify0}>&${fd_inotify}
@@ -373,17 +398,10 @@ cat() {
             pNotify_PID=${!}
 
             echo "${pNotify_PID}" >>"${tmpDir}"/.pid.kill
-        fi
+        }
 
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
-        if ${nOrderFlag}; then
-
-            mkdir -p "${tmpDir}"/.out
-            outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
-
-            printf '%s\n' {10..89} >&${fd_nOrder}
-
-            { coproc pOrder {
+        ${nOrderFlag} && {
 
                 printf '%s\n' {9000..9899} >&${fd_nOrder}
 
@@ -392,11 +410,12 @@ cat() {
                     inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify10} &
                     pNotify1_PID=$!
                     echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
+                    exitTrapStr+='printf '"'"'\n'"'"' >&'"${fd_inotify1}"'; '
                 } 2>/dev/null
 
 
                 # fork nested coproc to print outputs (in order) and then clear them in realtime as they show up in ${tmpDir}/.out
-                { coproc pOrder1 {
+                { coproc pOrder {
 
                     # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                     # start at 10 so that bash wont try to treat x0_ as an octal
@@ -418,53 +437,13 @@ cat() {
                   }
                 } 2>/dev/null
 
-                echo "${pOrder1_PID}" >>"${tmpDir}"/.pid.kill
+                echo "${pOrder_PID}" >>"${tmpDir}"/.pid.kill
+        }
 
-                shopt -s extglob
-                outCur=10
-                continueFlag=true
-                trap 'continueFlag=false' USR1
 
-                while ${continueFlag}; do
-
-                    if [[ -f "${tmpDir}"/.out/x${outCur} ]]; then
-
-                        cat "${tmpDir}"/.out/x${outCur}
-                        \rm  -f "${tmpDir}"/.out/x${outCur}
-                        ((outCur++))
-                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"      
-                        
-                        [[ -f "${tmpDir}"/.quit ]] && {
-                            continueFlag=false 
-                            [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
-                        }
-                    else
-
-                        if [[ -f "${tmpDir}"/.quit ]]; then
-                            continueFlag=false
-                        elif ${inotifyFlag}; then
-                            read -u ${fd_inotify1} -t 0.1
-                        fi
-                    fi
-                done
-
-                kill -9 "${pNotify1_PID}" "${pOrder1_PID}" 2>/dev/null
-
-              }  
-            } 2>/dev/null
-
-            exitTrapStr+='kill -USR1 '"${pOrder_PID}"' 2>/dev/null; printf '"'"'\n'"'"' >&'"${fd_inotify1}"'; '
-        else
-
-            outStr='>&'"${fd_stdout}";
-        fi
 
         # setup nLinesAuto and/or fallocate truncation
-        nLinesCur=${nLines}
         if ${nLinesAutoFlag} || ${fallocateFlag}; then
-
-            # setup nLines indicator
-            printf '%s\n' ${nLines} >"${tmpDir}"/.nLines
 
             # LOGIC FOR DYNAMICALLY SETTING 'nLines':
             # The avg_bytes_per_line is estimated by looking at the byte offset position of fd_read and having each coproc keep track of how many lines it has read
@@ -543,12 +522,19 @@ cat() {
         exitTrapStr=': >"'"${tmpDir}"'"/.quit;
         : >"'"${tmpDir}"'"/.out.quit;
         '"${exitTrapStr}"'
-         mapfile -t pidKill <"'"${tmpDir}"'"/.pid.kill;
-         kill "${pidKill[@]}" 2>/dev/null;
-         kill -9 "${pidKill[@]}" 2>/dev/null; '
+        mapfile -t pidKill <"'"${tmpDir}"'"/.pid.kill;
+        kill "${pidKill[@]}" 2>/dev/null;
+        kill -9 "${pidKill[@]}" 2>/dev/null; '
 
         ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '
         trap "${exitTrapStr%'; '}" EXIT INT TERM HUP QUIT
+
+        read -u ${fd_helper}
+
+      }
+    } 
+
+        trap 'printf '"'"'\n'"'"' >&'"${fd_helper}" EXIT INT TERM HUP QUIT
 
 
         # populate {fd_continue} with an initial '\n'
@@ -632,6 +618,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
         }
 """
 ${subshellRunFlag} && echo '(' || echo '{'
+${exportOrderFlag} && echo 'printf '"'"'\034%s\035'"'"' "${nOrder}"'
 )
     ${runCmd[@]} $(${substituteStringFlag} || printf '%s' "\"\${A[@]%\$'\\n'}\"") $(${verboseFlag} && echo """ || {
         {
@@ -643,7 +630,7 @@ ${subshellRunFlag} && echo '(' || echo '{'
             echo 'fd_write:'
             cat /proc/self/fdinfo/${fd_write}
             echo
-        } >&2
+        } >&${fd_stderr}
     }""")
 $(${subshellRunFlag} && printf '%s' ')' || printf '%s' '}') ${outStr}
 done
@@ -665,8 +652,30 @@ p_PID+=(\${p{<#>}_PID})
             source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/${kk}}"
         done
 
-        # wait for everything to finish
-        wait "${p_PID[@]}"
+        if ${nOrderFlag}; then
+            outCur=10
+
+            while true; do
+
+                [[ -f "${tmpDir}"/.out/x${outCur} ]] && {
+
+                    cat "${tmpDir}"/.out/x${outCur}
+                    \rm  -f "${tmpDir}"/.out/x${outCur}
+                    ((outCur++))
+                    [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"      
+                }
+                                    
+                [[ -f "${tmpDir}"/.quit ]] && {
+                    [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
+                    break
+                }
+
+            done
+
+        else
+            # wait for everything to finish
+            wait "${p_PID[@]}"
+        fi
 
         # print output if using ordered output
         ${nOrderFlag} && wait ${pOrder1_PID}
@@ -675,6 +684,6 @@ p_PID+=(\${p{<#>}_PID})
         ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    } {fd_continue}<><(:) {fd_inotify}<><(:) {fd_inotify1}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+    } {fd_continue}<><(:) {fd_inotify}<><(:) {fd_inotify1}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_helper}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
 
 )
