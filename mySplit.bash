@@ -676,10 +676,7 @@ p_PID+=(\${p{<#>}_PID})
             # wait for everything to finish
             wait "${p_PID[@]}"
         fi
-
-        # print output if using ordered output
-        ${nOrderFlag} && wait ${pOrder1_PID}
-
+        
         # print final nLines count
         ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
 
