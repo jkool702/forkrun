@@ -34,9 +34,8 @@ mySplit() (
 # # # # # # # # # # # # FLAGS # # # # # # # # # # # #
 #
 # GENERAL NOTES:
-#      1. Flags are matched using extglob and have a degree of "fuzzy" matching. Only the most common invocations are shown below. Refer to the code for exact extglob match criteria.
-#      2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumses that the non-mySplit inputs start at the 
-#         first input that does NOT begin with a '-' or '+'. To stop mySplit from using flags sooner than this, add a '--' after the last flag intended as a mySplit option.
+#      1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given seperately (use `-a -b`, not `-ab`). Only the most common invocations are shown below. Refer to the code for exact extglob match criteria. For example: both the short and long flags may use either 1 or 2 leading dashes ('-').
+#      2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumses that the non-mySplit inputs start at the first input that does NOT begin with a '-' or '+'. To stop mySplit from using flags sooner than this, add a '--' after the last flag intended as a mySplit option.
 #
 
 ############################ BEGIN FUNCTION ############################
