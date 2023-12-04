@@ -23,16 +23,20 @@ mySplit() (
 #        This parallelization method is MUCH faster than traditional forking (esp. for many quick-to-run tasks)...On my hardware mySplit is 50-70% faster than  'xargs -P'  and 3x-5x faster than 'parallel -m'
 #
 # REQUIRED DEPENDENCIES:   
-#       Bash 4+                        : This is when coprocs were introduced
-#       `rm`                           : required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
+#       Bash 4+                        : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested.
+#       `rm`                           : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
 #
 # OPTIONAL DEPENDENCIES (to provide enhanced functionality):
 #       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
-#      `fallocate` --AND-- kernel 3.5+ : required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use)
-#      `inotifywait`                   : required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
+#      `fallocate` --AND-- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use)
+#      `inotifywait`                   : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
 #
-# FLAGS: 
+# # # # # # # # # # # # FLAGS # # # # # # # # # # # #
 #
+# GENERAL NOTES:
+#      1. Flags are matched using extglob and have a degree of "fuzzy" matching. Only the most common invocations are shown below. Refer to the code for exact extglob match criteria.
+#      2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumses that the non-mySplit inputs start at the 
+#         first input that does NOT begin with a '-' or '+'. To stop mySplit from using flags sooner than this, add a '--' after the last flag intended as a mySplit option.
 #
 
 ############################ BEGIN FUNCTION ############################
