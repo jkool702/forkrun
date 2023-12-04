@@ -380,7 +380,6 @@ cat() {
 
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
-            ${exportOrderFlag} && outStr+='.${#A[@]}'
 
             printf '%s\n' {10..89} >&${fd_nOrder}
 
@@ -424,34 +423,29 @@ cat() {
                 shopt -s extglob
                 outCur=10
                 continueFlag=true
-                lastIterFlag=false
-                ${exportOrderFlag} && { nCur=1; nNew=1; }
+                trap 'continueFlag=false' USR1
 
                 while ${continueFlag}; do
-             
-                    # if at least 1 output file can be printed...do so and then delete it. repeat this for as long as the next (in order) output file is ready.
-                
-                    F=()
-                    for fCur in "${tmpDir}"/.out/x${outCur}?(.+([0-9])); do
-                        if [[ -f "${fCur}" ]]; then
-                            F+=("${fCur}")
-                            ${exportOrderFlag} && nNew+=${fCur##*.}
-                            ((outCur++))
-                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
-                        else
-                            ${inotifyFlag} && [[ ${nNew} == ${nCur} ]] && read -u ${fd_inotify1} -t 0.1
-                            break
-                        fi
-                    done
 
-                    if ${exportOrderFlag}; then
-                        source /proc/self/fd/0 <<<"printf '%s' 'echo '; printf \"$(printf '%%s: $(<"%s")\n'  "${F[@]}")\" $(source /proc/self/fd/0 <<<"echo {$nCur..$nNew}")"
-                        nCur=${nNew}
+                    if [[ -f "${tmpDir}"/.out/x${outCur} ]]; then
+
+                        cat "${tmpDir}"/.out/x${outCur}
+                        \rm  -f "${tmpDir}"/.out/x${outCur}
+                        ((outCur++))
+                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"      
+                        
+                        [[ -f "${tmpDir}"/.quit ]] && {
+                            continueFlag=false 
+                            [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
+                        }
                     else
-                        cat "${F[@]}" >&${fd_stdout}
-                    fi
 
-                    [[ -f "${tmpDir}"/.quit ]] && ! [[ -f "$(echo "${tmpDir}"/.out/x${outCur}?(.+([0-9])))" ]] && continueFlag=false      
+                        if [[ -f "${tmpDir}"/.quit ]]; then
+                            continueFlag=false
+                        elif ${inotifyFlag}; then
+                            read -u ${fd_inotify1} -t 0.1
+                        fi
+                    fi
                 done
 
                 kill -9 "${pNotify1_PID}" "${pOrder1_PID}" 2>/dev/null
@@ -459,7 +453,7 @@ cat() {
               }  
             } 2>/dev/null
 
-            exitTrapStr+='kill -USR1 '"${pOrder_PID}"' 2>/dev/null; wait '"${pOrder_PID}"'; '
+            exitTrapStr+='kill -USR1 '"${pOrder_PID}"' 2>/dev/null; printf '"'"'\n'"'"' >&'"${fd_inotify1}"'; '
         else
 
             outStr='>&'"${fd_stdout}";
@@ -479,7 +473,7 @@ cat() {
             # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
             # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break after the current iteratrion is finished
             { coproc pAuto {
-                trap 'nLinesAutoFlag=false; fallocateFlag=false; echo >&'"${fd_nAuto}" USR1
+                trap 'nLinesAutoFlag=false; fallocateFlag=false; printf '"'"'\n'"'"' >&'"${fd_nAuto}" USR1
 
                 ${fallocateFlag} && {
                     nWait=${nProcs}
@@ -675,10 +669,7 @@ p_PID+=(\${p{<#>}_PID})
         wait "${p_PID[@]}"
 
         # print output if using ordered output
-        ${nOrderFlag} &&{
-            cat "${tmpDir}"/.out/x* >&${fd_stdout}
-            \rm -f "${tmpDir}"/.out/x*
-        }
+        ${nOrderFlag} && wait ${pOrder1_PID}
 
         # print final nLines count
         ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
