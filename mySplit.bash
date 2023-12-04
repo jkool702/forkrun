@@ -620,7 +620,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
 ${subshellRunFlag} && echo '(' || echo '{'
 ${exportOrderFlag} && echo 'printf '"'"'\034%s\035'"'"' "${nOrder}"'
 )
-    ${runCmd[@]} $(${substituteStringFlag} || printf '%s' "\"\${A[@]%\$'\\n'}\"") $(${verboseFlag} && echo """ || {
+    ${runCmd[@]} $(${stdinRunFlag} && printf '%s' '<<<'; ${substituteStringFlag} || printf '%s' "\"\${A[@]%\$'\\n'}\"") $(${verboseFlag} && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
@@ -676,7 +676,7 @@ p_PID+=(\${p{<#>}_PID})
             # wait for everything to finish
             wait "${p_PID[@]}"
         fi
-        
+
         # print final nLines count
         ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
 
