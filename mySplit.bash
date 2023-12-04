@@ -3,33 +3,37 @@
 shopt -s extglob
 
 mySplit() (
-## Efficiently parallelize a loop / run many tasks in parallel using bash coprocs
-## NOTE: mySplit is an (in-development) re-write of forkrun that is faster, more efficient, and is less dependent on external dependencies
+## Efficiently parallelize a loop / run many tasks in parallel *extreamly* fast using bash coprocs
 #
-# USAGE:   printf '%s\n' "${args}" | mySplit [flags] [--] parFunc [args0]
+# USAGE: printf '%s\n' "${args}" | mySplit [flags] [--] parFunc [args0]
 #
-#          Usage is vitrually identical to parallelizing a loop using `xargs -P` or  `parallel -m`:
-#          source this file, then pass (newline-seperated) inputs to parallelize over on stdin and pass function name and initial arguments as function inputs.
+#        Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
+#            -->  Pass newline-seperated (or null seperated with `-z` flag) inputs to parallelize over on stdin.
+#            -->  Provide function/script/binary to parallalize and initial args as function inputs.
+#        `mySplit`` will then call the function/script/binary in parallel on several coproc workers (default is to use $(nproc) workers)
+#         Each time a worker runs the function/script/binary it will use the intial args and N lines from stdin (default `N` is between 1-512 lines)
 #
-# RESULT:  mySplit will run `parFunc [args0] ${line(s)} in parallel for each line (or group of N lines) that are given on stdin.
+# EXAMPLE CODE:
+#        # get sha256sum of all files under ${PWD}
+#        find ./ -type f | mySplit sha256sum
 #
-# EXAMPLE: find ./ -type f | mySplit sha256sum
+# HOW IT WORKS: 
+#        The coproc code is dynamically generated based on passed mySplit options, then N coprocs are forked off. These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
+#        Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
+#        This parallelization method is MUCH faster than traditional forking (esp. for many quick-to-run tasks)...On my hardware mySplit is 50-70% faster than  'xargs -P'  and 3x-5x faster than 'parallel -m'
 #
-# HOW IT WORKS: coproc code is dynamically generated based on passed mySplit options, then N coprocs are forked off. These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
-#          Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
-#          This parallelization method is MUCH faster than traditional forking (esp. for many quick-to-run tasks)...On my hardware mySplit is 50-70% faster than  'xargs -P'  and 3x-5x faster than 'parallel -m'
-#        { [[ \"\${A[*]##*\$'\\n'}\" ]] || [[ -z \${A[0]} ]]; } && {
-
-# ONLY REQUIRED DEPENDENCY:   Bash 4+ (This is when coprocs were introduced)
+# REQUIRED DEPENDENCIES:   
+#       Bash 4+                        : This is when coprocs were introduced
+#       `rm`                           : required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
 #
 # OPTIONAL DEPENDENCIES (to provide enhanced functionality):
 #       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
 #      `fallocate` --AND-- kernel 3.5+ : required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use)
 #      `inotifywait`                   : required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
 #
-# FLAGS: TBD
+# FLAGS: 
 #
-# <WORK IN PROGRESS>
+#
 
 ############################ BEGIN FUNCTION ############################
 
