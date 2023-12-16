@@ -1,551 +1,691 @@
-#!/usr/bin/env bash 
+#!/usr/bin/env bash
 
-# TL;DR SUMMARY 
-# 11 tests were run on `parallel -m`, `xargs -P $(nproc) -d $'\n'`, and `mySplit`. AFAIK, these are the fastest parallelization methods supported by `parallel` and `xargs`, respectively.
-# These tests computed checksums of all files under /usr (including /lib, /lib64, /bin, /sbin, ...) using 11 different checksumming algorithms. 
-# Files were first copied onto a tmpfs ramdisk to ensure disk I/O did not skew results. Machine has enough RAM to ensure nothing was swapped out. 
-#
-# The speedtest was run on a machine with an i9-7940x (14c/28t) CPU + 128 GB RAM running on Fedora 39 with kernel 6.5.11 at a "nice level" of -20 (highest priority)
-# 
-# Overall results were:
-# ---> on average (looking at total time between all tests), mySplit was around twice as fast `xargs -P $(nproc) -d $'\n'` and around four tiumes as fast as `parallel -m`
-# ---> in all tests mySplit was between 1.82x - 2.35x faster than `xargs -P $(nproc) -d $'\n'` and between 2.23x - 9.13x faster than `parallel -m`
-#
-# NOTE: though not shown here, when restricted to processing 1 line at a time (`parallel` ; `xargs -P $(nproc) -d $'\n' -L 1` ; `mySplit -l 1`), the performance gap is even larger:
-#       mySplit tends to be at least 3-4x as fast as `xargs -P $(nproc) -d $'\n' -L 1` and >10x as fast as `parallel`
+# check for cat. if missing define a usable replacement using bash builtins
+type -a cat &>/dev/null || {
+cat() {
+    if  [[ -t 0 ]] && [[ $# == 0 ]]; then
+        # no input
+        return
+    elif [[ $# == 0 ]]; then
+        # only stdin
+        printf '%s\n' "$(</proc/self/fd/0)"
+    elif [[ -t 0 ]]; then
+        # only function inputs
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    else
+        # both stdin and function inputs. fork printing stdin to allow for printing both in parallel.
+        printf '%s\n' "$(</proc/self/fd/0)" &
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    fi
+}
+}
 
-: <<'EOF'
-TEST: 11 different checksums on ~496k files with a total size of ~19 GB
+# check for mktemp. if missing define a usable replacement using bash builtins
+type -a mktemp &>/dev/null || {
+mktemp () ( 
+    local p d f
+    set -C
+    umask 177
+    while [[ "${1}" == -@([pd]) ]]; do
+        [[ "${1}" == '-p' ]] && p="$2"
+        [[ "${1}" == '-d' ]] && d="$2"
+        shift 2
+    done
+    [[ "$d" == *XXXXXX* ]] || d=''
+    : "${p:=/dev/shm}" "${d:=.mySplit.XXXXXX}"
 
-OVERALL RELATIVE WALL-CLOCK TIME RESULTS SUMMARY:
+    f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
+    until mkdir "$f"; do
+        f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
+    done 2>/dev/null
+    echo "$f"
+)
+}
 
-                sha1sum         sha256sum       sha512sum       sha224sum       sha384sum       md5sum          sum -s          sum -r          cksum           b2sum           cksum -a sm3    OVERALL AVERAGE
-
-parallel:       529%            344%            399%            322%            401%            534%            842%            493%            913%            449%            223%            409%           
-xargs:          198%            196%            182%            185%            184%            235%            195%            213%            208%            192%            187%            194%           
-mySplit:        100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%           
-
-OVERALL TIME TAKEN: 287 SECONDS
-EOF
-
-unset tests findDir findDirDefault ramdiskTransferFlag TD_A TD_B TD_C nfun
-
-######################################### USER SETABLE OPTIONS #########################################
-
-# array: (test1 test2 ... testN)
-# choose tests to run in speedtest. These must be codes that accept a list of multiple files as input and 
-# then does something with each (for example, various checksum functions)
-tests=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum 'sum -s' 'sum -r' cksum b2sum 'cksum -a sm3')
-
-# value: path
-# choose directory to run `find ____ -type f` on, which generates the file lists for the various checksums
-# Note: this can also be passed as a function input to this speedtest, which will take precedence over the default value here
-findDirDefault='/mnt/ramdisk'
-
-# value: true/false 
-# decide whether to copy everything over to a tmpfs mounted at /mnt/ramdisk and run checks on those copies
-# a tmpfs will be automatically mounted at /mnt/ramdisk (unless a tmpfs is already mounted there) and files will be copied to /mnt/ramdisk/${findDir} using `rsync a`
-ramdiskTransferFlag=false
-
-# choose whether or not to test parallel (defazzult is blank is true)
-#testParallelFlag=false
-
-############################################## BEGIN CODE ##############################################
-
-SECONDS=0
 shopt -s extglob
 
-declare -F mySplit 1>/dev/null 2>&1 || { [[ -f ./mySplit.bash ]] && source ./mySplit.bash; } || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/mySplit.bash)
+mySplit() (
+## Efficiently parallelize a loop / run many tasks in parallel *extreamly* fast using bash coprocs
+#
+# USAGE: printf '%s\n' "${args}" | mySplit [flags] [--] parFunc [args0]
+#
+#        Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
+#            -->  Pass newline-seperated (or null seperated with `-z` flag) inputs to parallelize over on stdin.
+#            -->  Provide function/script/binary to parallalize and initial args as function inputs.
+#        `mySplit`` will then call the function/script/binary in parallel on several coproc workers (default is to use $(nproc) workers)
+#         Each time a worker runs the function/script/binary it will use the intial args and N lines from stdin (default `N` is between 1-512 lines)
+#
+# EXAMPLE CODE:
+#        # get sha256sum of all files under ${PWD}
+#        find ./ -type f | mySplit sha256sum
+#
+# HOW IT WORKS: 
+#        The coproc code is dynamically generated based on passed mySplit options, then N coprocs are forked off. These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
+#        Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
+#        This parallelization method is MUCH faster than traditional forking (esp. for many quick-to-run tasks)...On my hardware mySplit is 50-70% faster than  'xargs -P'  and 3x-5x faster than 'parallel -m'
+#
+# REQUIRED DEPENDENCIES:   
+#       Bash 4+                        : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested.
+#       `rm`                           : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
+#
+# OPTIONAL DEPENDENCIES (to provide enhanced functionality):
+#       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
+#      `fallocate` --AND-- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use)
+#      `inotifywait`                   : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
+#
+# # # # # # # # # # # # FLAGS # # # # # # # # # # # #
+#
+# GENERAL NOTES:
+#      1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given seperately (use `-a -b`, not `-ab`). Only the most common invocations are shown below. Refer to the code for exact extglob match criteria. For example: both the short and long flags may use either 1 or 2 leading dashes ('-').
+#      2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumses that the non-mySplit inputs start at the first input that does NOT begin with a '-' or '+'. To stop mySplit from using flags sooner than this, add a '--' after the last flag intended as a mySplit option.
+#
 
-[[ -n "$1" ]] && [[ -d "$1" ]] && findDir="$1"
-: ${findDir:="${findDirDefault}"} ${ramdiskTransferFlag:=true}
+############################ BEGIN FUNCTION ############################
 
-findDir="$(realpath "${findDir}")"
-findDir="${findDir%/}"
+    : "${LC_ALL:=C}" "${LANG:=C}"
+    IFS=
+    trap - EXIT INT TERM HUP QUIT
 
-TD_A=()
-TD_B=()
-TD_C=()
-TA=()
-TB=()
-TC=()
+    shopt -s extglob
+#    shopt -s varredir_close
 
-if ${ramdiskTransferFlag}; then
+    # make vars local
+    local tmpDir fPath outStr exitTrapStr nOrder coprocSrcCode outCur tmpDirRoot fCur a1 a2 inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_nAuto fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pNotify1_PID pNotify10_PID pOrder_PID pOrder1_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk
+    local -a A Acur p_PID runCmd F
 
-	grep -qF 'tmpfs /mnt/ramdisk' </proc/mounts || {
-		printf '\nMOUNTING RAMDISK AT /mnt/ramdisk\n' >&2
-		mkdir -p /mnt/ramdisk
-		sudo mount -t tmpfs tmpfs /mnt/ramdisk
-		sudo chown -R "$USER": /mnt/ramdisk
-	}
-	
-	printf '\nCOPYING FILES FROM %s TO RAMDISK AT %s\n' "${findDir}" "/mnt/ramdisk/${findDir#/}" >&2
-	mkdir -p "/mnt/ramdisk/${findDir}"
-	rsync -a "${findDir}"/* "/mnt/ramdisk/${findDir#/}"
-	
-	findDir="/mnt/ramdisk/${findDir#/}"
+    # check inputs and set defaults if needed
+    [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
+    while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
+        case "${1}" in
 
-fi
+            -?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)proc?(s)?([= ]))
+                nProcs="${2}"
+                shift 1
+            ;;
 
-"${testParallelFlag:=true}"
+            -?(-)j?([= ])*@([[:graph:]])*|-?(-)P?([= ])*@([[:graph:]])*|-?(-)?(n)proc?(s)?([= ])*@([[:graph:]])*)
+                nProcs="${1##@(-?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)proc?(s)?([= ]))}"
+            ;;
 
-# CODE TO RUN SPEEDTESTS
+            -?(-)?(n)l?(ine?(s)))
+                nLines="${2}"
+                nLinesAutoFlag=true
+                shift 1
+            ;;
 
-printf '\n\n--------------------------------------------------------------------\n\nFILE COUNT/SIZE AND TIME TAKEN BY FIND COMMAND:\n\n'
-time { find "${findDir}" -type f  | wc -l; }
-printf '\nTOTAL SIZE OF ALL FILES: %s (%s)\n\n' "$(du -b -d 0 "${findDir}" | cut -f1)" "$(du -h -d 0 "${findDir}" | cut -f1)"
+            -?(-)?(n)l?(ine?(s))?([= ])*@([[:graph:]])*)
+                nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
+                nLinesAutoFlag=true
+            ;;
 
-for nfun in "${tests[@]}"; do
+            -?(-)?(N)L?(INE?(S)))
+                nLines="${2}"
+                nLinesAutoFlag=false
+                shift 1
+            ;;
 
-	unset A B C tA tB tC tdA tdB tddA tddB vA vB N tD_C 
-	
-	printf '\n\n--------------------------------------------------------------------\n\nSTARTING TESTS FOR %s\n----------------------------\n\n' "$nfun" 
-	
-	${testParallelFlag} && { 
-		printf 'Testing parallel...' >&2
-		mapfile -t A < <({ 
-			printf '%s\n' '-----parallel-----';
-		 	time { find "${findDir}" -type f | parallel -m ${nfun} 2>/dev/null | wc -l; }; 
-		 } 2>&1)
-		printf '...done\n' >&2
-		sleep 1
-	} 
+            -?(-)?(N)L?(INE?(S))?([= ])*@([[:graph:]])*)
+                nLines="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
+                nLinesAutoFlag=false
+            ;;
 
-	printf 'Testing xargs...' >&2
-	mapfile -t B < <({ 
-		printf '%s\n' '------xargs-------'; 
-		time { find "${findDir}" -type f | xargs -P $(nproc) -d $'\n' ${nfun} 2>/dev/null | wc -l; }; 
-	} 2>&1)
-	printf '......done\n' >&2
-	sleep 1
+            -?(-)t?(mp?(?(-)dir)))
+                tmpDirRoot="${2}"
+                [[ -d ${tmpDirRoot} ]] || mkdir -p "${tmpDirRoot}"
+                shift 1
+            ;;
 
-	printf 'Testing mySplit...' >&2
-	mapfile -t C < <({ 
-		printf '%s\n' '-----mySplit------'; 
-		time { find "${findDir}" -type f | mySplit ${nfun} 2>/dev/null | wc -l; }; 
-	} 2>&1)
-	printf '....done\n' >&2
-	sleep 1
+            -?(-)t?(mp?(?(-)dir))?([= ])*@([[:graph:]])*)
+                tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
+                [[ -d ${tmpDirRoot} ]] || mkdir -p "${tmpDirRoot}"
+            ;;
+
+            -?(-)i?(nsert))
+                substituteStringFlag=true
+            ;;
+
+            -?(-)I?(D)|-?(-)INSERT?(?(-)ID))
+                substituteStringIDFlag=true
+            ;;
+
+            -?(-)k?(eep?(?(-)order)))
+                nOrderFlag=true
+            ;;
+
+            -?(-)0|-?(-)z?(ero)|-?(-)null)
+                nullDelimiterFlag=true
+            ;;
+
+            -?(-)s?(ub)?(?(-)shell)?(?(-)run))
+                subshellRunFlag=true
+            ;;
+
+            -?(-)S?(TDIN)?(?(-)RUN))
+                stdinRunFlag=true
+            ;;
+
+            -?(-)p?(ipe)?(?(-)read))
+                pipeReadFlag=true
+            ;;
+
+            -?(-)d?(elete))
+                rmTmpDirFlag=true
+            ;;
+
+            -?(-)v?(erbose))
+                verboseFlag=true
+            ;;
+
+             -?(-)n?(umber)?(-)?(line?(s)))
+                exportOrderFlag=true
+            ;;
+
+            -?(-)N?(O)?(?(-)F?(UNC)))
+                noFuncFlag=true
+            ;;
+
+            -?(-)u?(nescape))
+                unescapeFlag=true
+            ;;
+
+            -?(-)h?(elp)|-?(-)usage|-?(-)\?)
+                : #displayHelp (TBD)
+            ;;
+
+            +?([-+])i?(nsert))
+                substituteStringFlag=false
+            ;;
+
+            +?(-)I?(D)|+?(-)INSERT?(?(-)ID))
+                substituteStringIDFlag=false
+            ;;
+
+            +?([-+])k?(eep?(?(-)order)))
+                nOrderFlag=false
+            ;;
+
+            +?([-+])0|+?([-+])z|+?([-+])null)
+                nullDelimiterFlag=false
+            ;;
+
+            +?([+-])s?(ub)?(?(-)shell)?(?(-)run))
+                subshellRunFlag=false
+            ;;
+
+            +?([-+])S?(TDIN)?(?(-)RUN))
+                stdinRunFlag=false
+            ;;
+
+            +?([-+])p?(ipe)?(?(-)read))
+                pipeReadFlag=false
+            ;;
+
+            +?([-+])d?(elete))
+                rmTmpDirFlag=false
+            ;;
+
+            +?([-+])v?(erbose))
+                verboseFlag=false
+            ;;
+
+            +?([-+])n?(umber)?(-)?(line?(s)))
+                exportOrderFlag=false
+            ;;
+
+            +?([-+])N?(O)?(?(-)F?(UNC)))
+                noFuncFlag=false
+            ;;
+
+            +?([-+])u?(nescape))
+                unescapeFlag=false
+            ;;
+
+            --)
+                optParseFlag=false
+            ;;
+
+            @([-+])?([-+])*@([[:graph:]])*)
+                printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$1" >&2
+            ;;
+
+            *)
+                optParseFlag=false
+                break
+            ;;
+
+        esac
+
+        shift 1
+        [[ ${#} == 0 ]] && optParseFlag=false
+
+    done
+
+    # determine what mySplit is using lines on stdin for
+    [[ ${FORCE} ]] && runCmd=("${@}") || runCmd=("${@//$'\r'/}")
+    : "${noFuncFlag:=false}"
+    (( ${#runCmd[@]} > 0 )) || ${noFuncFlag} || runCmd=(printf '%s\n')
+    (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
+
+    # setup tmpdir
+    [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
+    tmpDir="$(mktemp -p "${tmpDirRoot}" -d .mySplit.XXXXXX)"
+    fPath="${tmpDir}"/.stdin
+    : >"${fPath}"
 
 
-	${testParallelFlag} && N="$(printf '%s\n' "${A[@]}" "${B[@]}" "${C[@]}" | wc -L)" ||  N="$(printf '%s\n' "${B[@]}" "${C[@]}" | wc -L)" 
+    {
 
-	printf '\n\nRESULTS FOR %s\n---------------------\n\n' "${nfun}"
+        # dynamically set defaults for a few flags
 
-	paste <(${testParallelFlag} && printf '%-'"$N"'s\n' "${A[@]}" || :) <(printf '%-'"$N"'s\n' "${B[@]}") <(printf '%-'"$N"'s\n' "${C[@]}")
+        # set batch size
+        { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
+        { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
 
-	tC="$(printf '%s\n' "${C[@]}" | grep real | cut -f2 | sed -E 's/s$//;s/m0\.0+/m/g;s/\.//g')"; tC=$(( 60 * ${tC%%m*} + ${tC##*m} ))
-	TC+=($tC)
-	TD_C+=('100')
+        # set number of coproc workers
+        { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || nProcs=$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')
 
-	${testParallelFlag} && { 
-		tA="$(printf '%s\n' "${A[@]}" | grep real | cut -f2 | sed -E 's/s$//;s/m0\.0+/m/g;s/\.//g')"; tA=$(( 60 * ${tA%%m*} + ${tA##*m} ))
-		TA+=($tA)
-		tdA=$(( ( 100 * $tA ) / $tC ))	
-		TD_A+=(${tdA})
-		tddA=$(( $tdA - 100 ))
-		[[ "$tddA" == '-'* ]] && { vA='faster'; tddA=${tddA#-}; } || vA='slower'
-	}
+        # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
+        ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
-	tB="$(printf '%s\n' "${B[@]}" | grep real | cut -f2 | sed -E 's/s$//;s/m0\.0+/m/g;s/\.//g')"; tB=$(( 60 * ${tB%%m*} + ${tB##*m} ))
-	TB+=($tB)
-	tdB=$(( ( 100 * $tB ) / $tC ))
-	TD_B+=(${tdB})
-	tddB=$(( $tdB - 100 ))
-	[[ "$tddB" == '-'* ]] && { vB='faster'; tddB=${tddB#-}; } || vB='slower'
+        # check for inotifywait
+        type -a inotifywait &>/dev/null && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
 
-	printf '\n\nRELATIVE WALL-CLOCK TIME TAKEN\n------------------------------\n\n'
+        # check for fallocate
+        type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
-	${testParallelFlag} && { printf 'parallel: \t%s%% \t(%s%% %s than mySplit)\n' "$tdA" "$tddA" "$vA"; }
-	printf 'xargs:    \t%s%% \t(%s%% %s than mySplit)\n' "$tdB" "$tddB" "$vB"
-	printf 'mySplit:  \t100%%\n' 
+        # set defaults for control flags/parameters
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${verboseFlag:=false}" "${unescapeFlag:=false}"
 
-	sleep 1
+        # check for conflict in flags that were  defined on the commandline when mySplit was called
+        ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
+      
+        # require -k to use -n
+        ${exportOrderFlag} && nOrderFlag=true
 
+        # modify runCmd if '-i' '-I' or '-u' flags are set
+        if ${unescapeFlag}; then
+            ${substituteStringFlag} && {
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
+            }
+            ${substituteStringIDFlag} && {
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{ID}'/'{<#>}'}")
+            }
+        else
+            mapfile -t runCmd < <(printf '%q\n' "${runCmd[@]}")
+            ${substituteStringFlag} && {
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{\}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
+            }
+            ${substituteStringIDFlag} && {
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{ID\}'/'{<#>}'}")
+            }
+        fi
+
+        # start building exit trap string
+        : >"${tmpDir}"/.pid.kill
+
+        if ${nOrderFlag}; then 
+            mkdir -p "${tmpDir}"/.out
+            outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
+
+            printf '%s\n' {10..89} >&${fd_nOrder}
+        else
+            outStr='>&'"${fd_stdout}";
+        fi
+
+        nLinesCur=${nLines}
+
+        # setup nLinesAuto and/or fallocate truncation
+        if ${nLinesAutoFlag} || ${fallocateFlag}; then
+            # setup nLines indicator
+            printf '%s\n' ${nLines} >"${tmpDir}"/.nLines
+        fi
+
+        # if keeping tmpDir print its location to stderr
+        ${rmTmpDirFlag} || ${verboseFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
+
+        ${verboseFlag} && {
+            printf '\n\n-------------------INFO-------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")"
+            ${noFuncFlag} && echo '(no function mode enabled: commands should be included in stdin)' || printf 'tmpdir: %s\n' "${tmpDir}"
+            printf '(-j|-P) using %s coproc workers\n' ${nProcs}
+            ${inotifyFlag} && echo 'using inotify'
+            ${fallocateFlag} && echo 'using fallocate'
+            ${nLinesAutoFlag} && echo '(-N) automatically adjusting batch size (lines per function call)'
+            ${nOrderFlag} && echo '(-k) ordering output the same as the input'
+            ${exportOrderFlag} && echo '(-n) output lines will be numbered (`grep -n` style)'
+            ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
+            ${substituteStringFlag} && echo '(-I) replacing {ID} with coproc worker ID'
+            ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
+            ${pipeReadFlag} && echo '(-p) worker coprocs will read directly from stdin pipe, not from a tmpfile'
+            ${nullDelimiterFlag} && echo '(-0|-z) stdin will be parsed using nulls as delimiter (instead of newlines)'
+            ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automaticvally removed\n' "${tmpDir}"
+            ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
+            ${stdinRunFlag} && echo '(-S) coproc workers will pass lines to the command being parallelized via the command'"'"'s stdin'
+            printf '\n------------------------------------------\n\n'
+        } >&${fd_stderr}
+
+
+        { coproc pHelper {
+
+            ${pipeReadFlag} && {
+                # '.done'  file makes no sense when reading from a pipe
+                : >"${tmpDir}"/.done
+            } || {
+                # spawn a coproc to write stdin to a tmpfile
+                # After we are done reading all of stdin indicate this by touching .done
+                { coproc pWrite {
+                    cat <&${fd_stdin} >&${fd_write}
+                    : >"${tmpDir}"/.done
+                    ${inotifyFlag} && {
+                        { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+                    } {fd_inotify0}>&${fd_inotify}
+                    ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&2
+                  }
+                } 2>&${fd_stderr}
+                echo "${pWrite_PID}" >>"${tmpDir}"/.pid.kill
+            }
+
+            # setup+fork inotifywait (if available)
+            ${inotifyFlag} && {
+                {
+                    # initially add 1 newline for each coproc to fd_inotify
+                    { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+                    
+                    # run inotifywait
+                    inotifywait -q -m --format '' "${fPath}" >&${fd_inotify0} &
+                } 2>/dev/null {fd_inotify0}>&${fd_inotify}
+
+                pNotify_PID=${!}
+
+                echo "${pNotify_PID}" >>"${tmpDir}"/.pid.kill
+            }
+
+            # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
+            ${nOrderFlag} && {
+                printf '%s\n' {9000..9899} >&${fd_nOrder}
+
+                # monitor ${tmpDir}/.out for new files if we have inotifywait
+                ${inotifyFlag} && {
+                    inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify10} &
+                    pNotify1_PID=$!
+                    echo ${pNotify1_PID} >>"${tmpDir}"/.pid.kill
+                    exitTrapStr+='printf '"'"'\n'"'"' >&'"${fd_inotify1}"'; '
+                } 2>/dev/null
+
+
+                # fork nested coproc to print outputs (in order) and then clear them in realtime as they show up in ${tmpDir}/.out
+                { coproc pOrder {
+
+                    # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
+                    # start at 10 so that bash wont try to treat x0_ as an octal
+                    printf '%s\n' {990000..998999} >&${fd_nOrder}
+
+                    # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
+                    v9='99'
+                    kkMax='8'
+                    until [[ -f "${tmpDir}"/.quit ]]; do
+                        v9="${v9}9"
+                        kkMax="${kkMax}9"
+
+                        for (( kk=0 ; kk<=kkMax ; kk++ )); do
+                            kkCur="$(printf '%0.'"${#kkMax}"'d' "$kk")"
+                            { source /proc/self/fd/0 >&${fd_nOrder}; }<<<"printf '%s\n' {${v9}${kkCur}000..${v9}${kkCur}999}"
+                        done
+                    done
+
+                  }
+                } 2>/dev/null
+
+                echo "${pOrder_PID}" >>"${tmpDir}"/.pid.kill
+            }
+
+            # setup nLinesAuto and/or fallocate truncation
+            if ${nLinesAutoFlag} || ${fallocateFlag}; then
+
+                # LOGIC FOR DYNAMICALLY SETTING 'nLines':
+                # The avg_bytes_per_line is estimated by looking at the byte offset position of fd_read and having each coproc keep track of how many lines it has read
+                # the new "proposed" 'nLines' is determined by estimating the average bytes per line, then taking the averge of the "current nLines" and "(numbedr unread bytes) / ( (avg bytes per line) * (nProcs) )"
+                # --> if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines' to match the rate lines are coming in on stdin)
+                # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
+                # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break after the current iteratrion is finished
+                { coproc pAuto {
+                    trap 'nLinesAutoFlag=false; fallocateFlag=false; printf '"'"'\n'"'"' >&'"${fd_nAuto}" USR1
+
+                    ${fallocateFlag} && {
+                        nWait=${nProcs}
+                        fd_read_pos_old=0
+                    }
+                    ${nLinesAutoFlag} && nRead=0
+
+                    while ${fallocateFlag} || ${nLinesAutoFlag}; do
+
+                        read -u ${fd_nAuto} -t 0.1
+                        [[ ${REPLY} == 0 ]] && break
+                        { [[ -z ${REPLY} ]] || [[ -f "${tmpDir}"/.quit ]]; } && nLinesAutoFlag=false
+
+                        read fd_read_pos </proc/self/fdinfo/${fd_read}
+                        fd_read_pos=${fd_read_pos##*$'\t'}
+
+                        if ${nLinesAutoFlag}; then
+
+                            read fd_write_pos </proc/self/fdinfo/${fd_write}
+                            fd_write_pos=${fd_write_pos##*$'\t'}
+
+                            nRead+=${REPLY}
+
+                            nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
+
+                            (( ${nLinesNew} > ${nLinesCur} )) && {
+
+                                (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
+
+                                printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines
+
+                                # verbose output
+                                ${verboseFlag} && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
+
+                                nLinesCur=${nLinesNew}
+                            }
+                        fi
+
+                        if ${fallocateFlag}; then
+                            case ${nWait} in
+                                0)
+                                    fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
+                                    (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
+                                        fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}"
+                                        fd_read_pos_old=${fd_read_pos}
+                                    }
+                                    nWait=${nProcs}
+                                ;;
+                                *)
+                                    ((nWait--))
+                                ;;
+                            esac
+                        fi
+                        [[ -f "${tmpDir}"/.quit ]] && fallocateFlag=false
+                    done
+
+                  } 2>&${fd_stderr}
+                } 2>/dev/null
+
+                exitTrapStr+='kill -USR1 '"${pAuto_PID}"' 2>/dev/null; '
+                echo "${pAuto_PID}" >>"${tmpDir}"/.pid.kill
+
+            fi
+
+            # set EXIT trap (dynamically determined based on which option flags were active)
+            
+            ${nOrderFlag} && exitTrapStr+='wait '"${pOrder_PID}"'; '
+
+            exitTrapStr=': >"'"${tmpDir}"'"/.quit;
+            : >"'"${tmpDir}"'"/.out.quit;
+            '"${exitTrapStr}"'
+            mapfile -t pidKill <"'"${tmpDir}"'"/.pid.kill;
+            kill "${pidKill[@]}" 2>/dev/null;
+            kill -9 "${pidKill[@]}" 2>/dev/null; '
+            
+            ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '
+            
+            exitTrapStr+="${exitTrapStr}"'
+            kill "${BASHPID}" 2>/dev/null
+            kill -9 "${BASHPID}" 2>/dev/null'
+
+            trap "${exitTrapStr%'; '}" EXIT INT TERM HUP QUIT
+
+            read -u ${fd_helper}
+
+          }
+        } 2>/dev/null
+
+        trap 'printf '"'"'\n'"'"' >&'"${fd_helper}"' && wait -n ' EXIT INT TERM HUP QUIT
+
+
+        # populate {fd_continue} with an initial '\n'
+        # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
+        #     when there is a '\n' the pipe buffer then nothing has a read lock
+        #     a process reads 1 byte from {fd_continue} to get the read lock, and
+        #     when that process writes a '\n' back to the pipe it releases the read lock
+        printf '\n' >&${fd_continue};
+
+        # spawn $nProcs coprocs
+        # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
+        # they then read N lines with mapfile and send \n to {fd_continue} (so the next coproc can start to read)
+        # if the read array is empty the coproc will either continue or break, depending on if end conditions are met
+        # finally it will do something with the data.
+        #
+        # NOTE: All coprocs share the same fd_read file descriptor ( accomplished via `( <...>; coproc p0 ...; <...> ;  coproc pN ...; ) {fd_read}<><(:)` )
+        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data the fd_read used by *all* of them is advanced.
+
+        # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly)
+        # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
+        # the individual coproc's codes are then generated via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
+
+        coprocSrcCode="""
+{ coproc p{<#>} {
+: \"\${LC_ALL:=C}\" \"\${LANG:=C}\"
+IFS=
+trap - EXIT INT TERM HUP QUIT
+while true; do
+$(${nLinesAutoFlag} && echo """
+    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}
+ """)
+    read -u ${fd_continue}
+    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'; ${nullDelimiterFlag} && printf '%s ' '-d '"''") A
+$(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+    [[ \${#A[@]} == 0 ]] || {
+        [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || {
+            $(${verboseFlag} && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
+            until read -r -u ${fd_read}; do A[-1]+=\"\${REPLY}\"; done
+            A[-1]+=\"\${REPLY}\"\$'\\n'
+            $(${verboseFlag} && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
+        }
+"""
+${nOrderFlag} && echo """
+        read -u ${fd_nOrder} nOrder
+"""
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+    }
+""")
+    printf '\\n' >&${fd_continue};
+    [[ \${#A[@]} == 0 ]] && {
+        if [[ -f \"${tmpDir}\"/.done ]]; then
+$(${nLinesAutoFlag} && echo """
+            printf '0\\n' >&\${fd_nAuto0}
+""")
+            [[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit
+$(${nOrderFlag} && echo """
+            : >\"${tmpDir}\"/.out/.quit{<#>}
+""")
+            break
+$(${inotifyFlag} && echo """
+        else
+            read -u ${fd_inotify} -t 0.1
+""")
+        fi
+        continue
+    }
+$(${nLinesAutoFlag} && { printf '%s' """
+    \${nLinesAutoFlag} && {
+        printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
+        (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false
+    }"""
+    ${fallocateFlag} && printf '%s' ' || ' || echo
+}
+${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
+"""
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+        { [[ \"\${A[*]##*\$'\\n'}\" ]] || [[ -z \${A[0]} ]]; } && {
+            $(${verboseFlag} && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
+            A[-1]=\"\${A[-1]%\$'\\n'}\"
+            IFS=
+            mapfile A <<<\"\${A[*]}\"
+        }
+"""
+${subshellRunFlag} && echo '(' || echo '{'
+${exportOrderFlag} && echo 'printf '"'"'\034%s\035'"'"' "${nOrder}"'
+)
+    ${runCmd[@]} $(${stdinRunFlag} && printf '%s' '<<<'; ${substituteStringFlag} || printf '%s' "\"\${A[@]%\$'\\n'}\"") $(${verboseFlag} && echo """ || {
+        {
+            printf '\\n\\n----------------------------------------------\\n\\n'
+            echo 'ERROR DURING \"${runCmd[*]}\" CALL'
+            declare -p A nLinesCur nLinesAutoFlag
+            echo 'fd_read:'
+            cat /proc/self/fdinfo/${fd_read}
+            echo 'fd_write:'
+            cat /proc/self/fdinfo/${fd_write}
+            echo
+        } >&${fd_stderr}
+    }""")
+$(${subshellRunFlag} && printf '%s' ')' || printf '%s' '}') ${outStr}
 done
-
-printf '\n\n--------------------------------------------------------------------\n\nTESTS COMPLETE!!!\n\nOVERALL RELATIVE WALL-CLOCK TIME RESULTS SUMMARY:\n\n'
-
-tests+=('OVERALL AVERAGE')
-
-#${testParallelFlag} && TD_A+=($(( ( ${TD_A[0]} $(printf ' + %s' "${TD_A[@]:1}") ) / ${#TD_A[@]} )))
-#TD_B+=($(( ( ${TD_B[0]} $(printf ' + %s' "${TD_B[@]:1}") ) / ${#TD_B[@]} )))
-#TD_C+=(100)
-
-tD_C=$(( ${TC[0]} $(printf ' + %s' "${TC[@]:1}") ))
-TD_C+=(100)
-${testParallelFlag} && TD_A+=($(( 100 * ( ${TA[0]} $(printf ' + %s' "${TA[@]:1}") ) / ${tD_C} )))
-TD_B+=($(( 100 * ( ${TB[0]} $(printf ' + %s' "${TB[@]:1}") ) / ${tD_C} )))
-
-
-${testParallelFlag} && mapfile -t TD_A < <(printf '%s%%\n' "${TD_A[@]}")
-mapfile -t TD_B < <(printf '%s%%\n' "${TD_B[@]}")
-mapfile -t TD_C < <(printf '%s%%\n' "${TD_C[@]}")
-
-${testParallelFlag} && N=$(printf '%s\n' "${tests[@]}" "${TD_A[@]}" "${TD_B[@]}" "${TD_C[@]}" | wc -L) || N=$(printf '%s\n' "${tests[@]}" "${TD_B[@]}" "${TD_C[@]}" | wc -L)
-
-printf '%-'"$N"'s\t' '' "${tests[@]}"
-${testParallelFlag} && { 
-	printf '\n\n%-'"$N"'s\t' 'parallel:'
-	printf '%-'"$N"'s\t' "${TD_A[@]}"
-} || printf '\n'
-printf '\n%-'"$N"'s\t' 'xargs:'
-printf '%-'"$N"'s\t' "${TD_B[@]}"
-printf '\n%-'"$N"'s\t' 'mySplit:'
-printf '%-'"$N"'s\t' "${TD_C[@]}"
-printf '\n\nOVERALL TIME TAKEN: %s SECONDS\n\n' "${SECONDS}"
-
-############################################## RESULTS ##############################################
-
-
-: <<'EOF'
-COPYING FILES FROM /usr TO RAMDISK AT /mnt/ramdisk/usr
-
-
---------------------------------------------------------------------
-
-FILE COUNT/SIZE AND TIME TAKEN BY FIND COMMAND:
-
-496132
-
-real    0m0.742s
-user    0m0.340s
-sys     0m0.451s
-
-TOTAL SIZE OF ALL FILES: 19039242924 (19G)
-
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR sha1sum
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR sha1sum
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m11.580s       real    0m4.331s        real    0m2.186s     
-user    0m35.006s       user    0m23.736s       user    0m35.124s    
-sys     0m10.936s       sys     0m7.489s        sys     0m9.193s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       529%    (429% slower than mySplit)
-xargs:          198%    (98% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR sha256sum
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR sha256sum
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m12.887s       real    0m7.378s        real    0m3.746s     
-user    0m54.450s       user    0m53.746s       user    1m9.437s     
-sys     0m10.581s       sys     0m7.454s        sys     0m9.397s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       344%    (244% slower than mySplit)
-xargs:          196%    (96% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR sha512sum
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR sha512sum
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m12.252s       real    0m5.603s        real    0m3.065s     
-user    0m43.895s       user    0m39.134s       user    0m51.293s    
-sys     0m10.665s       sys     0m7.417s        sys     0m9.131s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       399%    (299% slower than mySplit)
-xargs:          182%    (82% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR sha224sum
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR sha224sum
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m13.016s       real    0m7.511s        real    0m4.040s     
-user    0m54.565s       user    0m53.198s       user    1m8.013s     
-sys     0m10.669s       sys     0m7.659s        sys     0m9.489s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       322%    (222% slower than mySplit)
-xargs:          185%    (85% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR sha384sum
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR sha384sum
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m12.441s       real    0m5.710s        real    0m3.097s     
-user    0m43.585s       user    0m38.179s       user    0m50.946s    
-sys     0m10.890s       sys     0m7.422s        sys     0m9.228s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       401%    (301% slower than mySplit)
-xargs:          184%    (84% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR md5sum
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR md5sum
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m12.117s       real    0m5.334s        real    0m2.268s     
-user    0m42.003s       user    0m28.462s       user    0m34.789s    
-sys     0m10.752s       sys     0m7.533s        sys     0m9.228s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       534%    (434% slower than mySplit)
-xargs:          235%    (135% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR sum -s
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR sum -s
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m10.172s       real    0m2.354s        real    0m1.207s     
-user    0m20.606s       user    0m6.468s        user    0m10.942s    
-sys     0m10.860s       sys     0m7.944s        sys     0m8.930s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       842%    (742% slower than mySplit)
-xargs:          195%    (95% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR sum -r
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR sum -r
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m12.110s       real    0m5.244s        real    0m2.455s     
-user    0m42.128s       user    0m28.203s       user    0m33.128s    
-sys     0m10.788s       sys     0m7.293s        sys     0m8.424s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       493%    (393% slower than mySplit)
-xargs:          213%    (113% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR cksum
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR cksum
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m10.269s       real    0m2.345s        real    0m1.124s     
-user    0m19.123s       user    0m4.930s        user    0m8.825s     
-sys     0m11.431s       sys     0m8.297s        sys     0m9.426s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       913%    (813% slower than mySplit)
-xargs:          208%    (108% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR b2sum
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR b2sum
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m11.863s       real    0m5.068s        real    0m2.637s     
-user    0m40.744s       user    0m33.379s       user    0m43.471s    
-sys     0m10.412s       sys     0m7.312s        sys     0m8.656s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       449%    (349% slower than mySplit)
-xargs:          192%    (92% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-STARTING TESTS FOR cksum -a sm3
-----------------------------
-
-Testing parallel......done
-Testing xargs.........done
-Testing mySplit.......done
-
-
-RESULTS FOR cksum -a sm3
----------------------
-
------parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
-                                                                  
-real    0m15.617s       real    0m13.097s       real    0m6.989s     
-user    1m26.295s       user    1m43.173s       user    2m6.733s     
-sys     0m10.557s       sys     0m7.986s        sys     0m9.783s      
-
-
-RELATIVE WALL-CLOCK TIME TAKEN
-------------------------------
-
-parallel:       223%    (123% slower than mySplit)
-xargs:          187%    (87% slower than mySplit)
-mySplit:        100%
-
-
---------------------------------------------------------------------
-
-TESTS COMPLETE!!!
-
-OVERALL RELATIVE WALL-CLOCK TIME RESULTS SUMMARY:
-
-                sha1sum         sha256sum       sha512sum       sha224sum       sha384sum       md5sum          sum -s          sum -r          cksum           b2sum           cksum -a sm3    OVERALL AVERAGE
-
-parallel:       529%            344%            399%            322%            401%            534%            842%            493%            913%            449%            223%            409%           
-xargs:          198%            196%            182%            185%            184%            235%            195%            213%            208%            192%            187%            194%           
-mySplit:        100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%           
-
-OVERALL TIME TAKEN: 287 SECONDS
-EOF
+} 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
+} 2>/dev/null
+p_PID+=(\${p{<#>}_PID})
+"""
+
+#
+#        { [[ \"\${A[*]##*\$'\\n'}\" ]] || [[ -z \${A[0]} ]]; } && {
+#        printf -v a1 '%s' \"\${A[*]//*\$'\\n'/\$'\\034'}\"
+#        printf -v a2 '%s\\034' \"\${A[@]##*}\"
+#        [[ \"\${a1}\" == \"\${a2}\"  ]] || [[ \${A[0]} ]] || {
+#
+
+        # source the coproc code for each coproc worker
+        for (( kk=0 ; kk<${nProcs} ; kk++ )); do
+            [[ -f "${tmpDir}"/.quit ]] && break
+            source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/${kk}}"
+        done
+
+        if ${nOrderFlag}; then
+            outCur=10
+
+            while true; do
+
+                [[ -f "${tmpDir}"/.out/x${outCur} ]] && {
+
+                    cat "${tmpDir}"/.out/x${outCur}
+                    \rm  -f "${tmpDir}"/.out/x${outCur}
+                    ((outCur++))
+                    [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"      
+                }
+                                    
+                [[ -f "${tmpDir}"/.quit ]] && {
+                    [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
+                    break
+                }
+
+            done
+
+        else
+            # wait for everything to finish
+            wait "${p_PID[@]}"
+        fi
+
+        # print final nLines count
+        ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
+
+    # open anonymous pipes + other misc file descriptors for the above code block
+    } {fd_continue}<><(:) {fd_inotify}<><(:) {fd_inotify1}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_helper}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+
+)
