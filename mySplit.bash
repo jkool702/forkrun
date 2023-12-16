@@ -110,24 +110,24 @@ mySplit() (
 
             -?(-)?(n)l?(ine?(s)))
                 nLines="${2}"
-                nLinesAutoFlag=true
+                nLinesAutoFlag=false
                 shift 1
             ;;
 
             -?(-)?(n)l?(ine?(s))?([= ])*@([[:graph:]])*)
                 nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
-                nLinesAutoFlag=true
+                nLinesAutoFlag=false
             ;;
 
             -?(-)?(N)L?(INE?(S)))
                 nLines="${2}"
-                nLinesAutoFlag=false
+                nLinesAutoFlag=true
                 shift 1
             ;;
 
             -?(-)?(N)L?(INE?(S))?([= ])*@([[:graph:]])*)
                 nLines="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
-                nLinesAutoFlag=false
+                nLinesAutoFlag=true
             ;;
 
             -?(-)t?(mp?(?(-)dir)))
@@ -538,7 +538,7 @@ mySplit() (
           }
         } 2>/dev/null
 
-        trap 'printf '"'"'\n'"'"' >&'"${fd_helper}"' && wait -n ' EXIT INT TERM HUP QUIT
+        trap 'printf '"'"'\n'"'"' >&'"${fd_helper}" EXIT INT TERM HUP QUIT
 
 
         # populate {fd_continue} with an initial '\n'
