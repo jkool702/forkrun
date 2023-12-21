@@ -649,13 +649,14 @@ p_PID+=(\${p{<#>}_PID})
 
             while true; do
 
-                [[ -f "${tmpDir}"/.out/x${outCur} ]] && {
-
+                if [[ -f "${tmpDir}"/.out/x${outCur} ]]; then
                     cat "${tmpDir}"/.out/x${outCur}
                     \rm  -f "${tmpDir}"/.out/x${outCur}
                     ((outCur++))
                     [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"      
-                }
+                else
+                    read -u ${fd_inotify0} -t 0.1
+                fi
                                     
                 [[ -f "${tmpDir}"/.quit ]] && {
                     [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
