@@ -371,29 +371,30 @@ mySplit() {
             { coproc pWrite {
                 cat <&${fd_stdin} >&${fd_write}
                 : >"${tmpDir}"/.done
-                ${inotifyFlag} && (
+                ${inotifyFlag} && {
                     { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-                ) {fd_inotify1}>&${fd_inotify}
+                } {fd_inotify1}>&${fd_inotify}
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
               }
             } 
-            exitTrapStr_kill+='kill '"${pWrite_PID}"' 2>/dev/null; '$'\n'
+            exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
         }
 
         # setup+fork inotifywait (if available)
         ${inotifyFlag} && {
-            (
+            {
                 # initially add 1 newline for each coproc to fd_inotify
                 { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
                 
                 # run inotifywait
                 inotifywait -q -m --format '' "${fPath}" >&${fd_inotify1} &
-            ) 2>/dev/null {fd_inotify1}>&${fd_inotify}
 
-            pNotify_PID=${!}
+                pNotify_PID=${!}
+            } 2>/dev/null {fd_inotify1}>&${fd_inotify}
+
                     
-            exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify2}; ) {fd_inotify2}>&'"${fd_inotify}"'; 
-: >"'"${tmpDir}"'"/.out/.quit; '$'\n'
+            exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify2}; ) {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
+            ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
             exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
         }
 
@@ -407,12 +408,12 @@ mySplit() {
 
             # monitor ${tmpDir}/.out for new files if we have inotifywait
             ${inotifyFlag} && {
-                (
+                {
                     inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify10} &
-                    pNotify0_PID=$!
 
-                ) 2>/dev/null {fd_inotify10}>&${fd_inotify0}
-
+                    pNotify0_PID=${!}
+                } 2>/dev/null {fd_inotify10}>&${fd_inotify0}
+                
                 exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify20}; ) {fd_inotify20}>&'"${fd_inotify0}"'; '$'\n'
                 exitTrapStr_kill+='kill -9 '"${pNotify0_PID}"' 2>/dev/null; '$'\n'
 
@@ -535,7 +536,7 @@ mySplit() {
             } 2>/dev/null
 
             exitTrapStr+='( printf '"'"'0\n'"'"' >&${fd_nAuto0}; ) {fd_nAuto0}>&'"${fd_nAuto}"'; '$'\n'
-            exitTrapStr_kill+='kill '"${pAuto_PID}"' 2>/dev/null; '$'\n'
+            exitTrapStr_kill+='kill -9 '"${pAuto_PID}"' 2>/dev/null; '$'\n'
 
         fi
 
@@ -543,7 +544,7 @@ mySplit() {
         
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
         
-        trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n'"${exitTrapStr_kill//'kill '/'kill -9 '}" EXIT INT TERM HUP QUIT
+        trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}" EXIT INT TERM HUP QUIT
 
         # populate {fd_continue} with an initial '\n'
         # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
