@@ -82,14 +82,14 @@ mySplit() {
 
 ############################ BEGIN FUNCTION ############################
 
-    trap - EXIT INT TERM HUP QUIT
+    trap - EXIT
 
     shopt -s extglob
 #    shopt -s varredir_close
 
     # make vars local
     local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
-    local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait nWait0 v9 kkMax kkCur kk
+    local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk
     local -a A p_PID runCmd
 
     # check inputs and set defaults if needed
@@ -458,12 +458,10 @@ mySplit() {
             # --> if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines' to match the rate lines are coming in on stdin)
             # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
             # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break after the current iteratrion is finished
-            { coproc pAuto {
-            
+            { coproc pAuto {            
 
                 ${fallocateFlag} && {
-                    nWait0=$(( 8 * ( ( ${nProcs} / 16 ) + 1 ) ))
-                    nWait=${nWait0}
+                    nWait=$(( 4 + ( ${nProcs} / 4 ) ))
                     fd_read_pos_old=0
                 }
                 ${nLinesAutoFlag} && nRead=0
@@ -515,9 +513,10 @@ mySplit() {
                                 fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
                                 (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
                                     fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}"
+                                    ${verboseFlag} && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
                                     fd_read_pos_old=${fd_read_pos}
                                 }
-                                nWait=${nWait0}
+                                nWait=$(( 4 + ( ${nProcs} / 4 ) ))
                             ;;
                             *)
                                 ((nWait--))
@@ -544,7 +543,7 @@ mySplit() {
         
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
         
-        trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}" EXIT INT TERM HUP QUIT
+        trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}" EXIT
 
         # populate {fd_continue} with an initial '\n'
         # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
@@ -571,7 +570,7 @@ mySplit() {
 LC_ALL=C
 LANG=C
 IFS=
-trap - EXIT INT TERM HUP QUIT
+trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
 while true; do
@@ -599,7 +598,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] && {
         if [[ -f \"${tmpDir}\"/.done ]]; then
 $(${nLinesAutoFlag} && echo """
-            printf '0\\n' >&\${fd_nAuto0}
+            printf '\\n' >&\${fd_nAuto0}
 """)
             [[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit
 $(${nOrderFlag} && echo """
@@ -667,7 +666,6 @@ p_PID+=(\${p{<#>}_PID})
 
         if ${nOrderFlag}; then
             outCur=10
-            continueFlag=true
 
             while true; do
 
@@ -681,16 +679,19 @@ p_PID+=(\${p{<#>}_PID})
                     read -u ${fd_inotify0} -t 0.1
                 fi
                                     
-                [[ -f "${tmpDir}"/.quit ]] && [[ -z $(echo "${tmpDir}"/.run/p*) ]] && {
-                    [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
-                    continueFlag=false
-                }
+                [[ -f "${tmpDir}"/.quit ]] && break
 
             done
+            
+            wait "${p_PID[@]}"
+
+            [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
 
         else
+
             # wait for everything to finish
             wait "${p_PID[@]}"
+
         fi
 
         # print final nLines count
