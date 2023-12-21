@@ -22,7 +22,7 @@ cat() {
 
 # check for mktemp. if missing define a usable replacement using bash builtins
 type -a mktemp &>/dev/null || {
-mktemp () ( 
+mktemp () (
     local p d f
     set -C
     umask 177
@@ -59,12 +59,12 @@ mySplit() {
 #        # get sha256sum of all files under ${PWD}
 #        find ./ -type f | mySplit sha256sum
 #
-# HOW IT WORKS: 
+# HOW IT WORKS:
 #        The coproc code is dynamically generated based on passed mySplit options, then N coprocs are forked off. These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
 #        Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
 #        This parallelization method is MUCH faster than traditional forking (esp. for many quick-to-run tasks)...On my hardware mySplit is 50-70% faster than  'xargs -P'  and 3x-5x faster than 'parallel -m'
 #
-# REQUIRED DEPENDENCIES:   
+# REQUIRED DEPENDENCIES:
 #       Bash 4+                        : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested.
 #       `rm`                           : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
 #
@@ -261,8 +261,8 @@ mySplit() {
     # setup tmpdir
 
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
-    [[ -d "${tmpDirRoot}" ]] || mkdir -p "${tmpDirRoot}" 
-    
+    [[ -d "${tmpDirRoot}" ]] || mkdir -p "${tmpDirRoot}"
+
     tmpDir="$(mktemp -p "${tmpDirRoot}" -d .mySplit.XXXXXX)"
     fPath="${tmpDir}"/.stdin
 
@@ -271,7 +271,7 @@ mySplit() {
 
     (
 
-        LC_ALL=C 
+        LC_ALL=C
         LANG=C
         IFS=
         umask 177
@@ -307,7 +307,7 @@ mySplit() {
 
         # check for conflict in flags that were  defined on the commandline when mySplit was called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
-      
+
         # require -k to use -n
         ${exportOrderFlag} && nOrderFlag=true
 
@@ -358,9 +358,9 @@ mySplit() {
 
 
         # start building exit trap string
-        exitTrapStr=': >"'"${tmpDir}"'"/.done; 
-: >"'"${tmpDir}"'"/.quit; 
-[[ -z $(echo "'"${tmpDir}"'"/.run/p*) ]] || kill $(cat "'"${tmpDir}"'"/.run/p*); '$'\n'  
+        exitTrapStr=': >"'"${tmpDir}"'"/.done;
+: >"'"${tmpDir}"'"/.quit;
+[[ -z $(echo "'"${tmpDir}"'"/.run/p*) ]] || kill $(cat "'"${tmpDir}"'"/.run/p*); '$'\n'
 
        ${pipeReadFlag} && {
             # '.done'  file makes no sense when reading from a pipe
@@ -376,7 +376,7 @@ mySplit() {
                 } {fd_inotify1}>&${fd_inotify}
                 ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
               }
-            } 
+            }
             exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
         }
 
@@ -385,14 +385,14 @@ mySplit() {
             {
                 # initially add 1 newline for each coproc to fd_inotify
                 { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-                
+
                 # run inotifywait
                 inotifywait -q -m --format '' "${fPath}" >&${fd_inotify1} &
 
                 pNotify_PID=${!}
             } 2>/dev/null {fd_inotify1}>&${fd_inotify}
 
-                    
+
             exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify2}; ) {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
             ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
             exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
@@ -413,7 +413,7 @@ mySplit() {
 
                     pNotify0_PID=${!}
                 } 2>/dev/null {fd_inotify10}>&${fd_inotify0}
-                
+
                 exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify20}; ) {fd_inotify20}>&'"${fd_inotify0}"'; '$'\n'
                 exitTrapStr_kill+='kill -9 '"${pNotify0_PID}"' 2>/dev/null; '$'\n'
 
@@ -458,7 +458,7 @@ mySplit() {
             # --> if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines' to match the rate lines are coming in on stdin)
             # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
             # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break after the current iteratrion is finished
-            { coproc pAuto {            
+            { coproc pAuto {
 
                 ${fallocateFlag} && {
                     nWait=$(( 8 + ( ${nProcs} / 2 ) ))
@@ -476,7 +476,7 @@ mySplit() {
                             fallocateFlag=false
                             break
                         ;;
-                        
+
                         '')
                             nLinesAutoFlag=false
                         ;;
@@ -540,9 +540,9 @@ mySplit() {
         fi
 
         # set EXIT trap (dynamically determined based on which option flags were active)
-        
+
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
-        
+
         trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}" EXIT
 
         # populate {fd_continue} with an initial '\n'
@@ -680,13 +680,13 @@ p_PID+=(\${p{<#>}_PID})
                         cat "${tmpDir}"/.out/x${outCur}
                         \rm  -f "${tmpDir}"/.out/x${outCur}
                         ((outCur++))
-                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"      
+                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                     done
-                                        
+
                     [[ -f "${tmpDir}"/.quit ]] && break
                 done
             }
-            
+
             wait "${p_PID[@]}"
 
             [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
