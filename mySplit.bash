@@ -436,14 +436,13 @@ mySplit() {
             # monitor ${tmpDir}/.out for new files if we have inotifywait
             ${inotifyFlag} && {
                 {
-                    inotifywait -q -m -e create --format '%f' -r "${tmpDir}"/.out >&${fd_inotify10} &
+                    inotifywait -q -m -e close_write --format '%f' -r "${tmpDir}"/.out >&${fd_inotify10} &
 
                     pNotify0_PID=${!}
                 } 2>/dev/null {fd_inotify10}>&${fd_inotify0}
 
                 exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify20}; ) {fd_inotify20}>&'"${fd_inotify0}"'; '$'\n'
                 exitTrapStr_kill+='kill -9 '"${pNotify0_PID}"' 2>/dev/null; '$'\n'
-
             }
 
             # fork coproc to populate a pipe (fd_nOrder) with ordered output file name indicies for the worker copropcs to use
