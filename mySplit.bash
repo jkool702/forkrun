@@ -47,50 +47,72 @@ shopt -s extglob
 mySplit() {
 ## Efficiently parallelize a loop / run many tasks in parallel *extreamly* fast using bash coprocs
 #
-# USAGE: printf '%s\n' "${args}" | mySplit [flags] [--] parFunc [args0]
+# USAGE: printf '%s\n' "${args[@]}" | mySplit [-flags] [--] parFunc ["${args0[@]}"]
 #
-#        Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
-#            -->  Pass newline-seperated (or null seperated with `-z` flag) inputs to parallelize over on stdin.
-#            -->  Provide function/script/binary to parallalize and initial args as function inputs.
-#        `mySplit`` will then call the function/script/binary in parallel on several coproc workers (default is to use $(nproc) workers)
-#         Each time a worker runs the function/script/binary it will use the intial args and N lines from stdin (default `N` is between 1-512 lines)
+#      Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
+#          -->  Pass newline-seperated (or null seperated with `-z` flag) inputs to parallelize over on stdin.
+#          -->  Provide function/script/binary to parallalize and initial args as function inputs.
+#      `mySplit` will then call the function/script/binary in parallel on several coproc "workers" (default is to use $(nproc) workers)
+#       Each time a worker runs the function/script/binary it will use the intial args and N lines from stdin (default: `N` is between 1-512 lines and is automatically dynamically asjusted)
+#          --> i.e., it will run (in parallel on each "worker"):     parFunc "${args0[@]}" "${args[@]:m:N}"    # m = number of lines from stdin already processed
+#       `parFunc` can be an executable binary or bash script, a bash builtin, a declared bash function / alias, or *omitted entirely* (*requires -N [-NO-FUNC] flag. See flag descriptions below for more info.*)
 #
 # EXAMPLE CODE:
-#        # get sha256sum of all files under ${PWD}
-#        find ./ -type f | mySplit sha256sum
+#      # get sha256sum of all files under ${PWD}
+#      find ./ -type f | mySplit sha256sum
 #
 # HOW IT WORKS:
-#        The coproc code is dynamically generated based on passed mySplit options, then N coprocs are forked off. These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
-#        Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
-#        This parallelization method is MUCH faster than traditional forking (esp. for many quick-to-run tasks)...On my hardware mySplit is 50-70% faster than  'xargs -P'  and 3x-5x faster than 'parallel -m'
+#      The coproc code is dynamically generated based on passed mySplit options, then K coprocs (plus some "helper function" coprocs) are forked off.
+#      These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
+#      Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
+#      This is MUCH faster than the traditional "forking each call" in bash (esp. for many fast tasks)...On my hardware `mySplit` is 1x-2x faster than `xargs -P $(nproc) -d $'\n'`  and 3x-8x faster than `parallel -m`.
 #
 # REQUIRED DEPENDENCIES:
-#       Bash 4+                        : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested.
-#       `rm`                           : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
+#      Bash 4+                      : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
+#      `rm`  and  `mkdir`           : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
 #
 # OPTIONAL DEPENDENCIES (to provide enhanced functionality):
-#       Bash 5.1+                      : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) got a major speedup here. Bash versions 4.x and 5.0 *should* still work, but will be (perhaps consideraably) slower.
-#      `fallocate` --AND-- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use)
-#      `inotifywait`                   : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage.
+#      Bash 5.1+                    : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) 
+#                                     got a major speedup here. Bash versions 4.0 - 5.0 *should* still work, but will be (perhaps consideraably) slower.
+#     `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns 
+#                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
+#     `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). 
+#                                     Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage. It also enables the real-time printing (and then freeing from memory) 
+#                                     outputs when "ordered output" mode is being used (flags `-k` or `-n`) (otherwise all output is saved on in memory and printed bat the end after mySplit has finished running).
 #
 # # # # # # # # # # # # FLAGS # # # # # # # # # # # #
 #
 # GENERAL NOTES:
-#      1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given seperately (use `-a -b`, not `-ab`). Only the most common invocations are shown below. Refer to the code for exact extglob match criteria. For example: both the short and long flags may use either 1 or 2 leading dashes ('-').
-#      2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumses that the non-mySplit inputs start at the first input that does NOT begin with a '-' or '+'. To stop mySplit from using flags sooner than this, add a '--' after the last flag intended as a mySplit option.
+#      1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given seperately (use `-a -b`, not `-ab`). Only the most common invocations are shown below. 
+#         Refer to the kcode for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
+#      2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumses that `parFunc` is the first input that does NOT begin with a '-' or '+'. 
+#         To stop optrion parsing sooner, add a '--' after the last mySplit flag. Note: this will only stop option parsing sooner...mySplit will always stop at the first argument that does not begin with a '-' or '+'.
 #
+# FLAGS WITH ARGUMENTS:
+#     SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking) space ' ' , equal sign ('='), or no seperator (''), between the flag and the argument. i.e., the following all work:
+#                  -A Val   |   '-A Val'   |   -A=Val   |   -AVal   |   --A_long Val   |   '--A_long Val'   |   --A_long=Val   |   --A_longVal
+#
+#     COMING SOON
+#    
+# FLAGS WITHOUT ARGUMENTS:
+#     SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags (short or long) may use either 1 or 2 leading dashes ('-f' or '--f' or '-flag' or '--flag' all work) to enable these.
+#                  To instead disable these optional subroutines, replace the leading '-' or '--' with a leading '+' or '++' or '+-'. If a flag is given multiple times, the last one is used.
+#                  Unless otherwise noted, all of  the following flags are, by default, in the "disabled" state
+#    
+#     COMING SOON
 
 ############################ BEGIN FUNCTION ############################
 
     trap - EXIT
 
     shopt -s extglob
-#    shopt -s varredir_close
 
-    # make vars local
+    # make all variables local
     local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk
     local -a A p_PID runCmd outA
+    
+    # # # # # PARSE OPTIONS # # # # #
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
@@ -257,8 +279,7 @@ mySplit() {
 
     done
 
-
-    # setup tmpdir
+    # # # # # SETUP TMPDIR # # # # #
 
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
     [[ -d "${tmpDirRoot}" ]] || mkdir -p "${tmpDirRoot}"
@@ -269,7 +290,12 @@ mySplit() {
     mkdir -p "${tmpDir}"/.run
     : >"${fPath}"
 
+    # # # # # BEGIN MAIN SUBSHELL # # # # #
+    
+    # several file descriptors are opened for use by things running in this subshell. See clkosing `)` near the end of this function.
     (
+    
+        # # # # # INITIAL SETUP # # # # #
 
         LC_ALL=C
         LANG=C
@@ -355,7 +381,8 @@ mySplit() {
             ${stdinRunFlag} && echo '(-S) coproc workers will pass lines to the command being parallelized via the command'"'"'s stdin'
             printf '\n------------------------------------------\n\n'
         } >&${fd_stderr}
-
+        
+        # # # # # FORK "HELPER" PROCESSES # # # # #   
 
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
@@ -419,7 +446,7 @@ mySplit() {
 
             }
 
-            # fork nested coproc to print outputs (in order) and then clear them in realtime as they show up in ${tmpDir}/.out
+            # fork coproc to populate a pipe (fd_nOrder) with ordered output file name indicies for the worker copropcs to use
             { coproc pOrder {
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
@@ -447,7 +474,7 @@ mySplit() {
             outStr='>&'"${fd_stdout}";
         fi
 
-        # setup nLinesAuto and/or fallocate truncation
+        # setup automatic dynamic nLines adjustment and/or fallocate pre-truncation of (already processed) stdin
         if ${nLinesAutoFlag} || ${fallocateFlag}; then
 
             printf '%s\n' ${nLines} >"${tmpDir}"/.nLines
@@ -544,13 +571,14 @@ mySplit() {
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
 
         trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}" EXIT
+        
+        # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
         # populate {fd_continue} with an initial '\n'
         # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
         #     when there is a '\n' the pipe buffer then nothing has a read lock
         #     a process reads 1 byte from {fd_continue} to get the read lock, and
         #     when that process writes a '\n' back to the pipe it releases the read lock
-        printf '\n' >&${fd_continue};
 
         # spawn $nProcs coprocs
         # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
@@ -651,18 +679,18 @@ done
 p_PID+=(\${p{<#>}_PID})
 """
 
-#
-#        { [[ \"\${A[*]##*\$'\\n'}\" ]] || [[ -z \${A[0]} ]]; } && {
-#        printf -v a1 '%s' \"\${A[*]//*\$'\\n'/\$'\\034'}\"
-#        printf -v a2 '%s\\034' \"\${A[@]##*}\"
-#        [[ \"\${a1}\" == \"\${a2}\"  ]] || [[ \${A[0]} ]] || {
-#
+        # # # # # FORK COPROC "WORKERS" # # # # #
+
+        printf '\n' >&${fd_continue};
 
         # source the coproc code for each coproc worker
         for (( kk=0 ; kk<${nProcs} ; kk++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
             source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/${kk}}"
         done
+        
+        # # # # # WAIT FOR THEM TO FINISH # # # # #
+          #   #   PRINT OUTPUT IF ORDERED   #   #
 
         if ${nOrderFlag}; then
             outCur=10
