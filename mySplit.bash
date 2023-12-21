@@ -90,7 +90,7 @@ mySplit() {
     # make vars local
     local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk
-    local -a A p_PID runCmd
+    local -a A p_PID runCmd outA
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
@@ -404,12 +404,12 @@ mySplit() {
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
 
-            printf '%s\n' {10..89} >&${fd_nOrder}
+            printf '%s\n' {10..89} {9000..9899} >&${fd_nOrder}
 
             # monitor ${tmpDir}/.out for new files if we have inotifywait
             ${inotifyFlag} && {
                 {
-                    inotifywait -q -m -e create --format '' -r "${tmpDir}"/.out >&${fd_inotify10} &
+                    inotifywait -q -m -e create --format '%f' -r "${tmpDir}"/.out >&${fd_inotify10} &
 
                     pNotify0_PID=${!}
                 } 2>/dev/null {fd_inotify10}>&${fd_inotify0}
@@ -424,7 +424,7 @@ mySplit() {
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
-                printf '%s\n' {9000..9899} {990000..998999} >&${fd_nOrder}
+                printf '%s\n' {990000..998999} >&${fd_nOrder}
 
                 # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
                 v9='99'
@@ -461,7 +461,7 @@ mySplit() {
             { coproc pAuto {            
 
                 ${fallocateFlag} && {
-                    nWait=$(( 4 + ( ${nProcs} / 4 ) ))
+                    nWait=$(( 8 + ( ${nProcs} / 2 ) ))
                     fd_read_pos_old=0
                 }
                 ${nLinesAutoFlag} && nRead=0
@@ -667,21 +667,25 @@ p_PID+=(\${p{<#>}_PID})
         if ${nOrderFlag}; then
             outCur=10
 
-            while true; do
+            ${inotifyFlag} && {
 
-                if [[ -f "${tmpDir}"/.out/x${outCur} ]]; then
+                while true; do
 
-                    cat "${tmpDir}"/.out/x${outCur}
-                    \rm  -f "${tmpDir}"/.out/x${outCur}
-                    ((outCur++))
-                    [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"      
-                else
-                    read -u ${fd_inotify0} -t 0.1
-                fi
-                                    
-                [[ -f "${tmpDir}"/.quit ]] && break
+                    read -r -u ${fd_inotify0}
 
-            done
+                    [[ ${REPLY} == *\/x+([0-9]) ]] && outA[${REPLY%%*x}]=1
+
+                    while [[ ${outA[${outCur}]} == 1 ]]; do
+
+                        cat "${tmpDir}"/.out/x${outCur}
+                        \rm  -f "${tmpDir}"/.out/x${outCur}
+                        ((outCur++))
+                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"      
+                    done
+                                        
+                    [[ -f "${tmpDir}"/.quit ]] && break
+                done
+            }
             
             wait "${p_PID[@]}"
 
