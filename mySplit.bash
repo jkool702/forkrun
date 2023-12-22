@@ -744,7 +744,7 @@ LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-i] [-I] [-k] [-n] [-z
 
 EOF
 
-(( ${displayMain) > 0 )) && { 
+(( ${displayMain} > 0 )) && { 
 cat<<'EOF' >&2
 
     Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
@@ -762,7 +762,7 @@ EXAMPLE CODE:
 EOF
 }
 
-(( ${displayMain) > 1 )) && { 
+(( ${displayMain} > 1 )) && { 
 cat<<'EOF' >&2
 REQUIRED DEPENDENCIES:
     Bash 4+                      : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
@@ -780,7 +780,7 @@ OPTIONAL DEPENDENCIES (to provide enhanced functionality):
 EOF
 }
 
-(( ${displayMain) > 2 )) && { 
+(( ${displayMain} > 2 )) && { 
 cat<<'EOF' >&2
 HOW IT WORKS:
     The coproc code is dynamically generated based on passed mySplit options, then K coprocs (plus some "helper function" coprocs) are forked off.
