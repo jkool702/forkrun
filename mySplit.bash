@@ -25,7 +25,7 @@ mySplit() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local tmpDir fPath outStr delimiterStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outA
     
@@ -76,6 +76,18 @@ mySplit() {
 
             -?(-)t?(mp?(?(-)dir))?([= ])*@([[:graph:]])*)
                 tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
+            ;;
+
+            -?(-)?(D)|-?(-)[Dd]elim?(iter))
+                (( ${#2} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
+				delimiterStr="-d ${2:0:1}"
+                shift 1
+            ;;
+			
+            -?(-)?(D)?([= ])*@([[:graph:]])*|-?(-)[Dd]elim?(iter)?([= ])*@([[:graph:]])*)
+                delimiterStr="${1##@(-?(-)?(D)?([= ])|-?(-)[Dd]elim?(iter)?([= ]))}"
+				(( ${#delimiterStr} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
+				delimiterStr="-d ${delimiterStr:0:1}"
             ;;
 
             -?(-)i?(nsert))
@@ -264,6 +276,9 @@ mySplit() {
         # require -k to use -n
         ${exportOrderFlag} && nOrderFlag=true
 
+        # set null deliomiter
+        ${nullDelimiterFlag} && delimiterStr="-d ''"
+
         # modify runCmd if '-i' '-I' or '-u' flags are set
         if ${unescapeFlag}; then
             ${substituteStringFlag} && {
@@ -414,7 +429,7 @@ mySplit() {
             { coproc pAuto {
 
                 ${fallocateFlag} && {
-                    nWait=$(( 8 + ( ${nProcs} / 2 ) ))
+                    nWait=$(( 8 + ( ${nProcs} / 4 ) ))
                     fd_read_pos_old=0
                 }
                 ${nLinesAutoFlag} && nRead=0
@@ -469,7 +484,7 @@ mySplit() {
                                     [[ ${verboseLevel} == 2 ]] && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
                                     fd_read_pos_old=${fd_read_pos}
                                 }
-                                nWait=$(( 4 + ( ${nProcs} / 4 ) ))
+                                nWait=$(( 8 + ( ${nProcs} / 4 ) ))
                             ;;
                             *)
                                 ((nWait--))
@@ -532,12 +547,12 @@ $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}
  """)
     read -u ${fd_continue}
-    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'; ${nullDelimiterFlag} && printf '%s ' '-d '"''") A
+    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t') ${delimiterStr} A
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || {
         [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || {
             $([[ ${verboseLevel} == 2 ]] && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
-            until read -r -u ${fd_read}; do A[-1]+=\"\${REPLY}\"; done
+            until read -r -u ${fd_read} ${delimiterStr}; do A[-1]+=\"\${REPLY}\"; done
             A[-1]+=\"\${REPLY}\"\$'\\n'
             $([[ ${verboseLevel} == 2 ]] && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
         }
