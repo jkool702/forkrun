@@ -1,47 +1,5 @@
 #!/usr/bin/env bash
 
-# check for cat. if missing define a usable replacement using bash builtins
-type -a cat &>/dev/null || {
-cat() {
-    if  [[ -t 0 ]] && [[ $# == 0 ]]; then
-        # no input
-        return
-    elif [[ $# == 0 ]]; then
-        # only stdin
-        printf '%s\n' "$(</proc/self/fd/0)"
-    elif [[ -t 0 ]]; then
-        # only function inputs
-        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
-    else
-        # both stdin and function inputs. fork printing stdin to allow for printing both in parallel.
-        printf '%s\n' "$(</proc/self/fd/0)" &
-        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
-    fi
-}
-}
-
-# check for mktemp. if missing define a usable replacement using bash builtins
-type -a mktemp &>/dev/null || {
-mktemp () (
-    local p d f
-    set -C
-    umask 177
-    while [[ "${1}" == -@([pd]) ]]; do
-        [[ "${1}" == '-p' ]] && p="$2"
-        [[ "${1}" == '-d' ]] && d="$2"
-        shift 2
-    done
-    [[ "$d" == *XXXXXX* ]] || d=''
-    : "${p:=/dev/shm}" "${d:=.mySplit.XXXXXX}"
-
-    f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
-    until mkdir "$f"; do
-        f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
-    done 2>/dev/null
-    echo "$f"
-)
-}
-
 shopt -s extglob
 
 mySplit() {
@@ -49,79 +7,14 @@ mySplit() {
 #
 # USAGE: printf '%s\n' "${args[@]}" | mySplit [-flags] [--] parFunc ["${args0[@]}"]
 #
-#      Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
-#          -->  Pass newline-separated (or null-separated with `-z` flag) inputs to parallelize over on stdin.
-#          -->  Provide function/script/binary to parallelize and initial args as function inputs.
-#      `mySplit` will then call the function/script/binary in parallel on several coproc "workers" (default is to use $(nproc) workers)
-#       Each time a worker runs the function/script/binary it will use the initial args and N lines from stdin (default: `N` is between 1-512 lines and is automatically dynamically adjusted)
-#          --> i.e., it will run (in parallel on each "worker"):     parFunc "${args0[@]}" "${args[@]:m:N}"    # m = number of lines from stdin already processed
-#       `parFunc` can be an executable binary or bash script, a bash builtin, a declared bash function / alias, or *omitted entirely* (*requires -N [-NO-FUNC] flag. See flag descriptions below for more info.*)
-#
-# EXAMPLE CODE:
-#      # get sha256sum of all files under ${PWD}
-#      find ./ -type f | mySplit sha256sum
-#
-# HOW IT WORKS:
-#      The coproc code is dynamically generated based on passed mySplit options, then K coprocs (plus some "helper function" coprocs) are forked off.
-#      These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
-#      Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
-#      This is MUCH faster than the traditional "forking each call" in bash (esp. for many fast tasks)...On my hardware `mySplit` is 1x-2x faster than `xargs -P $(nproc) -d $'\n'`  and 3x-8x faster than `parallel -m`.
-#
-# REQUIRED DEPENDENCIES:
-#      Bash 4+                      : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
-#      `rm`  and  `mkdir`           : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
-#
-# OPTIONAL DEPENDENCIES (to provide enhanced functionality):
-#      Bash 5.1+                    : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) 
-#                                     got a major speedup here. Bash versions 4.0 - 5.0 *should* still work, but will be (perhaps considerably) slower.
-#     `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and won't be cleared until mySplit is finished and returns 
-#                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
-#     `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). 
-#                                     Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage. It also enables the real-time printing (and then freeing from memory) 
-#                                     outputs when "ordered output" mode is being used (flags `-k` or `-n`) (otherwise all output is saved on in memory and printed at the end after mySplit has finished running).
-#
-# # # # # # # # # # # # FLAGS # # # # # # # # # # # #
-#
-# GENERAL NOTES:
-#      1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below. 
-#         Refer to the code for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
-#      2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'. 
-#         To stop option parsing sooner, add a '--' after the last mySplit flag. Note: this will only stop option parsing sooner...mySplit will always stop at the first argument that does not begin with a '-' or '+'.
-#
-# FLAGS WITH ARGUMENTS:
-#     SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking) space ' ', equal sign ('='), or no separator (''), between the flag and the argument. i.e., the following all work:
-#                  -A Val   |   '-A Val'   |   -A=Val   |   -AVal   |   --A_long Val   |   '--A_long Val'   |   --A_long=Val   |   --A_longVal
-#
-# ----------------------------------------------------------
-#
-# -j | -P | --nprocs : sets the number of worker coprocs to use
-#    ---->  default  : number of logical CPU cores ($(nproc))
-#    
-# ----------------------------------------------------------
+# For help / usage info, call mySplit with one of the following flags:
 # 
-# -t | --tmp[dir]    : sets the root directory for where the tmpfiles used by mySplit are created.
-#    ---->  default  : /dev/shm ; or (if unavailable) /tmp ; or (if unavailable) ${PWD}
-#    
-#    NOTE: unless running on an extremely memory-constrained system, having this tmp directory on a ramdisk (e.g., a tmpfs) will greatly improve performance
-# 
-# ----------------------------------------------------------
-# 
-# -l | --nlines      : sets the number or lines to pass coprocs to use for each function call to this constant value, disabling the automatic dynamic batch size logic.
-#    ---->  default  : n/a (by default automatic dynamic batch size adjustment is enabled)
-# 
-# -L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled. 
-#    ---->  default  : 1
-#             
-# 	NOTE  : the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
-#    
-# ----------------------------------------------------------
-#    
-# FLAGS WITHOUT ARGUMENTS:
-#     SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags (short or long) may use either 1 or 2 leading dashes ('-f' or '--f' or '-flag' or '--flag' all work) to enable these.
-#                  To instead disable these optional subroutines, replace the leading '-' or '--' with a leading '+' or '++' or '+-'. If a flag is given multiple times, the last one is used.
-#                  Unless otherwise noted, all of  the following flags are, by default, in the "disabled" state
-#    
-#     COMING SOON
+# --usage              :  display brief usage info
+# -? | -h | --help     :  dispay standard help (does not include detailed info on flags)
+# --help=s[hort]       :  more detailed varient of '--usage'
+# --help=f[lags]       :  display detailed info about flags
+# --help=a[ll]         :  display all help (including detailed flag info)
+
 
 ############################ BEGIN FUNCTION ############################
 
@@ -130,24 +23,26 @@ mySplit() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag verboseFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
-    local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk
+    local tmpDir fPath outStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outA
     
     # # # # # PARSE OPTIONS # # # # #
+    
+    verboseLevel=0
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)proc?(s)?([= ]))
+            -?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)[Pp]roc?(s)?([= ]))
                 nProcs="${2}"
                 shift 1
             ;;
 
-            -?(-)j?([= ])*@([[:graph:]])*|-?(-)P?([= ])*@([[:graph:]])*|-?(-)?(n)proc?(s)?([= ])*@([[:graph:]])*)
-                nProcs="${1##@(-?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)proc?(s)?([= ]))}"
+            -?(-)j?([= ])*@([[:graph:]])*|-?(-)P?([= ])*@([[:graph:]])*|-?(-)?(n)[Pp]roc?(s)?([= ])*@([[:graph:]])*)
+                nProcs="${1##@(-?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)[Pp]roc?(s)?([= ]))}"
             ;;
 
             -?(-)?(n)l?(ine?(s)))
@@ -201,7 +96,7 @@ mySplit() {
                 subshellRunFlag=true
             ;;
 
-            -?(-)S?(TDIN)?(?(-)RUN))
+            -?(-)S|-?(-)[Ss]tdin?(?(-)run))
                 stdinRunFlag=true
             ;;
 
@@ -214,14 +109,14 @@ mySplit() {
             ;;
 
             -?(-)v?(erbose))
-                verboseFlag=true
+                ((verboseLevel++))
             ;;
 
              -?(-)n?(umber)?(-)?(line?(s)))
                 exportOrderFlag=true
             ;;
 
-            -?(-)N?(O)?(?(-)F?(UNC)))
+            -?(-)N?(O)|-?(-)[Nn][Oo]?(-)func)
                 noFuncFlag=true
             ;;
 
@@ -229,8 +124,9 @@ mySplit() {
                 unescapeFlag=true
             ;;
 
-            -?(-)h?(elp)|-?(-)usage|-?(-)\?)
-                : #displayHelp (TBD)
+            -?(-)help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|-?(-)usage|-?(-)[h\?])
+                mySplit_displayHelp "${1}"
+                return
             ;;
 
             +?([-+])i?(nsert))
@@ -266,7 +162,7 @@ mySplit() {
             ;;
 
             +?([-+])v?(erbose))
-                verboseFlag=false
+                ((verboseLevel--))
             ;;
 
             +?([-+])n?(umber)?(-)?(line?(s)))
@@ -286,7 +182,10 @@ mySplit() {
             ;;
 
             @([-+])?([-+])*@([[:graph:]])*)
-                printf '\nWARNING: FLAG "%s" NOT RECOGNIZED. IGNORING.\n\n' "$1" >&2
+                printf '\nERROR: FLAG "%s" NOT RECOGNIZED. ABORTING.\n\nNOTE: If this flag was intended for the code big parallelized: then:\n1. ensure all flags for mySplit come first\n2. pass '"'"'--'"'"' to denote where mySplit flag parsing should stop.\n\nUSAGE INFO:' "$1" >&2
+                
+                mySplit_displayHelp --usage
+                return 1
             ;;
 
             *)
@@ -327,6 +226,10 @@ mySplit() {
         shopt -s nullglob
 
         # dynamically set defaults for a few flags
+        
+        # check verboseLevel
+        (( ${verboseLevel} < 0 )) && verboseLevel=0
+        (( ${verboseLevel} > 2 )) && verboseLevel=2
 
         # determine what mySplit is using lines on stdin for
         [[ ${FORCE} ]] && runCmd=("${@}") || runCmd=("${@//$'\r'/}")
@@ -351,7 +254,7 @@ mySplit() {
         type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${verboseFlag:=false}" "${unescapeFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
 
         # check for conflict in flags that were  defined on the commandline when mySplit was called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
@@ -382,9 +285,9 @@ mySplit() {
         mkdir -p "${tmpDir}"/.run
 
         # if keeping tmpDir print its location to stderr
-        ${rmTmpDirFlag} || ${verboseFlag} || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
+        ${rmTmpDirFlag} || [[ ${verboseLevel} == 0 ]] || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
 
-        ${verboseFlag} && {
+        (( ${verboseLevel} > 0 )) && {
             printf '\n\n-------------------INFO-------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")"
             ${noFuncFlag} && echo '(no function mode enabled: commands should be included in stdin)' || printf 'tmpdir: %s\n' "${tmpDir}"
             printf '(-j|-P) using %s coproc workers\n' ${nProcs}
@@ -423,7 +326,7 @@ mySplit() {
                 ${inotifyFlag} && {
                     { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
                 } {fd_inotify1}>&${fd_inotify}
-                ${verboseFlag} && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
+                [[ ${verboseLevel} == 2 ]] && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
               }
             }
             exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
@@ -549,7 +452,7 @@ mySplit() {
                             printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines
 
                             # verbose output
-                            ${verboseFlag} && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
+                            [[ ${verboseLevel} == 2 ]] && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
 
                             nLinesCur=${nLinesNew}
                         }
@@ -561,7 +464,7 @@ mySplit() {
                                 fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
                                 (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
                                     fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}"
-                                    ${verboseFlag} && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
+                                    [[ ${verboseLevel} == 2 ]] && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
                                     fd_read_pos_old=${fd_read_pos}
                                 }
                                 nWait=$(( 4 + ( ${nProcs} / 4 ) ))
@@ -631,10 +534,10 @@ $(${nLinesAutoFlag} && echo """
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || {
         [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || {
-            $(${verboseFlag} && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
+            $([[ ${verboseLevel} == 2 ]] && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
             until read -r -u ${fd_read}; do A[-1]+=\"\${REPLY}\"; done
             A[-1]+=\"\${REPLY}\"\$'\\n'
-            $(${verboseFlag} && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
+            $([[ ${verboseLevel} == 2 ]] && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
         }
 """
 ${nOrderFlag} && echo """
@@ -672,7 +575,7 @@ ${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
 """
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
         { [[ \"\${A[*]##*\$'\\n'}\" ]] || [[ -z \${A[0]} ]]; } && {
-            $(${verboseFlag} && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
+            $([[ ${verboseLevel} == 2 ]] && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
             A[-1]=\"\${A[-1]%\$'\\n'}\"
             IFS=
             mapfile A <<<\"\${A[*]}\"
@@ -681,7 +584,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
 ${subshellRunFlag} && echo '(' || echo '{'
 ${exportOrderFlag} && echo 'printf '"'"'\034%s\035'"'"' "${nOrder}"'
 )
-    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]%\$'\\n'}\""; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]%\$'\\n'}\""; fi) $(${verboseFlag} && echo """ || {
+    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]%\$'\\n'}\""; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]%\$'\\n'}\""; fi) $([[ ${verboseLevel} == 2 ]] && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
@@ -748,9 +651,279 @@ p_PID+=(\${p{<#>}_PID})
         fi
 
         # print final nLines count
-        ${nLinesAutoFlag} && ${verboseFlag} && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
+        ${nLinesAutoFlag} && [[ ${verboseLevel} == 2 ]] && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_inotify0}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+
+}
+
+# check for cat. if missing define a usable replacement using bash builtins
+type -a cat &>/dev/null || {
+cat() {
+    if  [[ -t 0 ]] && [[ $# == 0 ]]; then
+        # no input
+        return
+    elif [[ $# == 0 ]]; then
+        # only stdin
+        printf '%s\n' "$(</proc/self/fd/0)"
+    elif [[ -t 0 ]]; then
+        # only function inputs
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    else
+        # both stdin and function inputs. fork printing stdin to allow for printing both in parallel.
+        printf '%s\n' "$(</proc/self/fd/0)" &
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    fi
+}
+}
+
+# check for mktemp. if missing define a usable replacement using bash builtins
+type -a mktemp &>/dev/null || {
+mktemp () (
+    local p d f
+    set -C
+    umask 177
+    while [[ "${1}" == -@([pd]) ]]; do
+        [[ "${1}" == '-p' ]] && p="$2"
+        [[ "${1}" == '-d' ]] && d="$2"
+        shift 2
+    done
+    [[ "$d" == *XXXXXX* ]] || d=''
+    : "${p:=/dev/shm}" "${d:=.mySplit.XXXXXX}"
+
+    f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
+    until mkdir "$f"; do
+        f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
+    done 2>/dev/null
+    echo "$f"
+)
+}
+
+mySplit_displayHelp() {
+
+local displayFlags 
+local -i displayMain
+
+shopt -s extglob
+
+case "$1" in
+    
+    -?(-)usage)
+        displayMain=0
+        displayFlags=false
+    ;;
+    
+    -?(-)help=s?(hort))
+        displayMain=1
+        displayFlags=false
+    ;;
+    
+    -?(-)help=f?(lags))
+        displayMain=0
+        displayFlags=true
+    ;;
+    
+    -?(-)help=a?(ll))
+        displayMain=3
+        displayFlags=true
+    ;;
+        
+    *)
+        displayMain=2
+        displayFlags=false
+    ;;
+    
+esac
+
+cat<<'EOF' >&2
+
+USAGE: printf '%s\n' "${args[@]}" | mySplit [-flags] [--] parFunc ["${args0[@]}"]
+
+LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-d] [-N] [-u] [-v] [-h|-?]
+
+EOF
+
+(( ${displayMain) > 0 )) && { 
+cat<<'EOF' >&2
+
+    Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
+        -->  Pass newline-separated (or null-separated with `-z` flag) inputs to parallelize over on stdin.
+        -->  Provide function/script/binary to parallelize and initial args as function inputs.
+    `mySplit` will then call the function/script/binary in parallel on several coproc "workers" (default is to use $(nproc) workers)
+    Each time a worker runs the function/script/binary it will use the initial args and N lines from stdin (default: `N` is between 1-512 lines and is automatically dynamically adjusted)
+        --> i.e., it will run (in parallel on each "worker"):     parFunc "${args0[@]}" "${args[@]:m:N}"    # m = number of lines from stdin already processed
+    `parFunc` can be an executable binary or bash script, a bash builtin, a declared bash function / alias, or *omitted entirely* (*requires -N [-NO-FUNC] flag. See flag descriptions below for more info.*)
+
+EXAMPLE CODE:
+    # get sha256sum of all files under ${PWD}
+    find ./ -type f | mySplit sha256sum
+	
+EOF
+}
+
+(( ${displayMain) > 1 )) && { 
+cat<<'EOF' >&2
+REQUIRED DEPENDENCIES:
+    Bash 4+                      : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
+    `rm`  and  `mkdir`           : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
+
+OPTIONAL DEPENDENCIES (to provide enhanced functionality):
+    Bash 5.1+                    : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) 
+                                    got a major speedup here. Bash versions 4.0 - 5.0 *should* still work, but will be (perhaps considerably) slower.
+    `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and won't be cleared until mySplit is finished and returns 
+                                    (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
+    `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). 
+                                    Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage. It also enables the real-time printing (and then freeing from memory) 
+                                    outputs when "ordered output" mode is being used (flags `-k` or `-n`) (otherwise all output is saved on in memory and printed at the end after mySplit has finished running).
+								
+EOF
+}
+
+(( ${displayMain) > 2 )) && { 
+cat<<'EOF' >&2
+HOW IT WORKS:
+    The coproc code is dynamically generated based on passed mySplit options, then K coprocs (plus some "helper function" coprocs) are forked off.
+    These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
+    Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of mySplit, and are continuously piped new data to run.
+    This is MUCH faster than the traditional "forking each call" in bash (esp. for many fast tasks)...On my hardware `mySplit` is 1x-2x faster than `xargs -P $(nproc) -d $'\n'`  and 3x-8x faster than `parallel -m`.
+
+EOF
+}
+
+${displayFlags} && {
+cat<<'EOF' >&2
+# # # # # # # # # # # # FLAGS # # # # # # # # # # # #
+
+GENERAL NOTES:
+     1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below. 
+        Refer to the code for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
+     2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'. 
+        To stop option parsing sooner, add a '--' after the last mySplit flag. Note: this will only stop option parsing sooner...mySplit will always stop at the first argument that does not begin with a '-' or '+'.
+
+--------------------------------------------------------------------------------------------------------------------
+
+FLAGS WITH ARGUMENTS:
+    SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking) space ' ', equal sign ('='), or no separator (''), between the flag and the argument. i.e., the following all work:
+                 -A Val   |   '-A Val'   |   -A=Val   |   -AVal   |   --A_long Val   |   '--A_long Val'   |   --A_long=Val   |   --A_longVal
+
+----------------------------------------------------------
+
+-j | -P | --nprocs : sets the number of worker coprocs to use
+   ---->  default  : number of logical CPU cores ($(nproc))
+   
+----------------------------------------------------------
+
+-t | --tmp[dir]    : sets the root directory for where the tmpfiles used by mySplit are created.
+   ---->  default  : /dev/shm ; or (if unavailable) /tmp ; or (if unavailable) ${PWD}
+   
+   NOTE: unless running on an extremely memory-constrained system, having this tmp directory on a ramdisk (e.g., a tmpfs) will greatly improve performance
+
+----------------------------------------------------------
+
+-l | --nlines      : sets the number or lines to pass coprocs to use for each function call to this constant value, disabling the automatic dynamic batch size logic.
+   ---->  default  : n/a (by default automatic dynamic batch size adjustment is enabled)
+
+-L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled. 
+   ---->  default  : 1
+            
+	NOTE  : the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
+   
+--------------------------------------------------------------------------------------------------------------------
+   
+FLAGS WITHOUT ARGUMENTS:
+    SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags (short or long) may use either 1 or 2 leading dashes ('-f' or '--f' or '-flag' or '--flag' all work) to enable these.
+                 To instead disable these optional subroutines, replace the leading '-' or '--' with a leading '+' or '++' or '+-'. If a flag is given multiple times, the last one is used.
+                 Unless otherwise noted, all of  the following flags are, by default, in the "disabled" state
+   
+# -j | -P | --nprocs : sets the number of worker coprocs to use
+#    ---->  default  : number of logical CPU cores ($(nproc))
+#    
+# ----------------------------------------------------------
+# 
+# -t | --tmp[-dir]    : sets the root directory for where the tmpfiles used by mySplit are created.
+#    ---->  default  : /dev/shm ; or (if unavailable) /tmp ; or (if unavailable) ${PWD}
+#    
+#    NOTE: unless running on an extreamly memory-constrained system, having this tmp directory on a ramdisk (e.g., a tmpfs) will greatly improve performance
+# 
+# ----------------------------------------------------------
+# 
+# -l | --nlines      : sets the number or lines to pass coprocs to use for each function call to this constant value, disabling the automatic dynamic batch size logic.
+#    ---->  default  : n/a (by default automatic dynamic batch size adjustment is enabled)
+# 
+# -L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled. 
+#    ---->  default  : 1
+#             
+# 	NOTE  : the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
+#    
+# 
+
+----------------------------------------------------------
+
+-i | --insert        :
+
+
+-I | --INSERT        :
+
+----------------------------------------------------------
+
+-k | --keep[-order]  :
+
+
+-n | --number[-lines]:
+
+----------------------------------------------------------
+
+-z | -0 | --null     :
+
+----------------------------------------------------------
+
+-s | --subshell[-run]:
+
+----------------------------------------------------------
+
+-S | --stdin[-run]   :
+
+----------------------------------------------------------
+
+-p | --pipe[-read]   :
+
+----------------------------------------------------------
+
+-d | --delete        :
+
+NOTE: this flag is enabled by default. use the '+' version to disable it. passing `-d` has no effect except to re-enable this if `+d` was passed in a previous flag.
+
+----------------------------------------------------------
+
+-N | --no-func       :
+
+----------------------------------------------------------
+
+-u | --unescape      :
+
+----------------------------------------------------------
+
+-v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr.
+
+NOTE: The '+' version of this flag decreases verbosity level by 1. The default level is 0. 
+NOTE: Meaningful verbotisity levels are:
+      --> 0 [or less than 0] (only errors)
+      --> 1 (errors + overview of parsed mySplit options)
+      --> 2 [or more than 2] (errors + overview + indicators of a few runtime events and statistics)
+	  
+----------------------------------------------------------
+
+FLAGS THAT TRIGGER PRINTING HELP/USAGE INFO TO SCREEN THEN EXIT
+
+--usage              :  display brief usage info
+-? | -h | --help     :  dispay standard help (does not include detailed info on flags)
+--help=s[hort]       :  same as '--usage'
+--help=f[lags]       :  display detailed info about flags
+--help=a[ll]         :  display all help (combined output of '--help' and '--help=flags'
+--------------------------------------------------------------------------------------------------------------------
+
+EOF
+}
 
 }
