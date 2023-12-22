@@ -276,7 +276,7 @@ mySplit() {
         # require -k to use -n
         ${exportOrderFlag} && nOrderFlag=true
 
-        # set null deliomiter
+        # setup delimiter
         if ${nullDelimiterFlag}; then
             delimiterStr="-d ''"
         elif [[ -z ${delimiterStr} ]]; then
@@ -355,24 +355,6 @@ mySplit() {
             exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
         }
 
-        # setup+fork inotifywait (if available)
-        ${inotifyFlag} && {
-            {
-                # initially add 1 newline for each coproc to fd_inotify
-                { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-
-                # run inotifywait
-                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify1} &
-
-                pNotify_PID=${!}
-            } 2>/dev/null {fd_inotify1}>&${fd_inotify}
-
-
-            exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify2}; ) {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
-            ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
-            exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
-        }
-
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
 
@@ -380,18 +362,6 @@ mySplit() {
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
 
             printf '%s\n' {10..89} {9000..9899} >&${fd_nOrder}
-
-            # monitor ${tmpDir}/.out for new files if we have inotifywait
-            ${inotifyFlag} && {
-                {
-                    inotifywait -q -m -e close_write --format '%f' -r "${tmpDir}"/.out >&${fd_inotify10} &
-
-                    pNotify0_PID=${!}
-                } 2>/dev/null {fd_inotify10}>&${fd_inotify0}
-
-                exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify20}; ) {fd_inotify20}>&'"${fd_inotify0}"'; '$'\n'
-                exitTrapStr_kill+='kill -9 '"${pNotify0_PID}"' 2>/dev/null; '$'\n'
-            }
 
             # fork coproc to populate a pipe (fd_nOrder) with ordered output file name indicies for the worker copropcs to use
             { coproc pOrder {
@@ -512,6 +482,36 @@ mySplit() {
             exitTrapStr_kill+='kill -9 '"${pAuto_PID}"' 2>/dev/null; '$'\n'
 
         fi
+
+        # setup+fork inotifywait (if available)
+        ${inotifyFlag} && {
+            {
+                # initially add 1 newline for each coproc to fd_inotify
+                { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+
+                # run inotifywait
+                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify1} &
+
+                pNotify_PID=${!}
+            } 2>/dev/null {fd_inotify1}>&${fd_inotify}
+
+
+            exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify2}; ) {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
+            ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
+            exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
+
+            # monitor ${tmpDir}/.out for new files if we have inotifywait
+            ${nOrderFlag} && {
+                {
+                    inotifywait -q -m -e close_write --format '%f' -r "${tmpDir}"/.out >&${fd_inotify10} &
+
+                    pNotify0_PID=${!}
+                } 2>/dev/null {fd_inotify10}>&${fd_inotify0}
+
+                exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify20}; ) {fd_inotify20}>&'"${fd_inotify0}"'; '$'\n'
+                exitTrapStr_kill+='kill -9 '"${pNotify0_PID}"' 2>/dev/null; '$'\n'
+            }
+        }
 
         # set EXIT trap (dynamically determined based on which option flags were active)
 
