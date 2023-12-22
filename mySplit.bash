@@ -7,6 +7,8 @@ mySplit() {
 #
 # USAGE: printf '%s\n' "${args[@]}" | mySplit [-flags] [--] parFunc ["${args0[@]}"]
 #
+# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-d] [-N] [-u] [-v] [-h|-?]
+#
 # For help / usage info, call mySplit with one of the following flags:
 # 
 # --usage              :  display brief usage info
