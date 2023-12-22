@@ -10,7 +10,7 @@ mySplit() {
 # LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-d] [-N] [-u] [-v] [-h|-?]
 #
 # For help / usage info, call mySplit with one of the following flags:
-# 
+#
 # --usage              :  display brief usage info
 # -? | -h | --help     :  dispay standard help (does not include detailed info on flags)
 # --help=s[hort]       :  more detailed varient of '--usage'
@@ -25,12 +25,12 @@ mySplit() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local tmpDir fPath outStr delimiterStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outA
-    
+
     # # # # # PARSE OPTIONS # # # # #
-    
+
     verboseLevel=0
 
     # check inputs and set defaults if needed
@@ -83,7 +83,7 @@ mySplit() {
 				delimiterStr="-d ${2:0:1}"
                 shift 1
             ;;
-			
+
             -?(-)?(D)?([= ])*@([[:graph:]])*|-?(-)[Dd]elim?(iter)?([= ])*@([[:graph:]])*)
                 delimiterStr="${1##@(-?(-)?(D)?([= ])|-?(-)[Dd]elim?(iter)?([= ]))}"
 				(( ${#delimiterStr} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
@@ -197,7 +197,7 @@ mySplit() {
 
             @([-+])?([-+])*@([[:graph:]])*)
                 printf '\nERROR: FLAG "%s" NOT RECOGNIZED. ABORTING.\n\nNOTE: If this flag was intended for the code big parallelized: then:\n1. ensure all flags for mySplit come first\n2. pass '"'"'--'"'"' to denote where mySplit flag parsing should stop.\n\nUSAGE INFO:' "$1" >&2
-                
+
                 mySplit_displayHelp --usage
                 return 1
             ;;
@@ -226,10 +226,10 @@ mySplit() {
     : >"${fPath}"
 
     # # # # # BEGIN MAIN SUBSHELL # # # # #
-    
+
     # several file descriptors are opened for use by things running in this subshell. See clkosing `)` near the end of this function.
     (
-    
+
         # # # # # INITIAL SETUP # # # # #
 
         LC_ALL=C
@@ -240,7 +240,7 @@ mySplit() {
         shopt -s nullglob
 
         # dynamically set defaults for a few flags
-        
+
         # check verboseLevel
         (( ${verboseLevel} < 0 )) && verboseLevel=0
         (( ${verboseLevel} > 2 )) && verboseLevel=2
@@ -277,7 +277,13 @@ mySplit() {
         ${exportOrderFlag} && nOrderFlag=true
 
         # set null deliomiter
-        ${nullDelimiterFlag} && delimiterStr="-d ''"
+        if ${nullDelimiterFlag}; then
+            delimiterStr="-d ''"
+        elif [[ -z ${delimiterStr} ]]; then
+            delimiterRemoveStr="%\$'\\n'"
+        else
+            delimiterRemoveStr="%${delimiterStr: -1}"
+        fi
 
         # modify runCmd if '-i' '-I' or '-u' flags are set
         if ${unescapeFlag}; then
@@ -323,8 +329,8 @@ mySplit() {
             ${stdinRunFlag} && echo '(-S) coproc workers will pass lines to the command being parallelized via the command'"'"'s stdin'
             printf '\n------------------------------------------\n\n'
         } >&${fd_stderr}
-        
-        # # # # # FORK "HELPER" PROCESSES # # # # #   
+
+        # # # # # FORK "HELPER" PROCESSES # # # # #
 
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
@@ -512,7 +518,7 @@ mySplit() {
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
 
         trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}" EXIT
-        
+
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
         # populate {fd_continue} with an initial '\n'
@@ -601,7 +607,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
 ${subshellRunFlag} && echo '(' || echo '{'
 ${exportOrderFlag} && echo 'printf '"'"'\034%s\035'"'"' "${nOrder}"'
 )
-    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]%\$'\\n'}\""; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]%\$'\\n'}\""; fi) $([[ ${verboseLevel} == 2 ]] && echo """ || {
+    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]%${delimiterRemoveStr}\""; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]%${delimiterRemoveStr}\""; fi) $([[ ${verboseLevel} == 2 ]] && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
@@ -629,7 +635,7 @@ p_PID+=(\${p{<#>}_PID})
             [[ -f "${tmpDir}"/.quit ]] && break
             source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/${kk}}"
         done
-        
+
         # # # # # WAIT FOR THEM TO FINISH # # # # #
           #   #   PRINT OUTPUT IF ORDERED   #   #
 
@@ -719,38 +725,38 @@ mktemp () (
 
 mySplit_displayHelp() {
 
-local displayFlags 
+local displayFlags
 local -i displayMain
 
 shopt -s extglob
 
 case "$1" in
-    
+
     -?(-)usage)
         displayMain=0
         displayFlags=false
     ;;
-    
+
     -?(-)help=s?(hort))
         displayMain=1
         displayFlags=false
     ;;
-    
+
     -?(-)help=f?(lags))
         displayMain=0
         displayFlags=true
     ;;
-    
+
     -?(-)help=a?(ll))
         displayMain=3
         displayFlags=true
     ;;
-        
+
     *)
         displayMain=2
         displayFlags=false
     ;;
-    
+
 esac
 
 cat<<'EOF' >&2
@@ -761,7 +767,7 @@ LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-i] [-I] [-k] [-n] [-z
 
 EOF
 
-(( ${displayMain} > 0 )) && { 
+(( ${displayMain} > 0 )) && {
 cat<<'EOF' >&2
 
     Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
@@ -775,29 +781,29 @@ cat<<'EOF' >&2
 EXAMPLE CODE:
     # get sha256sum of all files under ${PWD}
     find ./ -type f | mySplit sha256sum
-	
+
 EOF
 }
 
-(( ${displayMain} > 1 )) && { 
+(( ${displayMain} > 1 )) && {
 cat<<'EOF' >&2
 REQUIRED DEPENDENCIES:
     Bash 4+                       : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
     `rm`  and  `mkdir`            : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
 
 OPTIONAL DEPENDENCIES (to provide enhanced functionality):
-    Bash 5.1+                     : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) 
+    Bash 5.1+                     : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin)
                                     got a major speedup here. Bash versions 4.0 - 5.0 *should* still work, but will be (perhaps considerably) slower.
-    `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and won't be cleared until mySplit is finished and returns 
+    `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and won't be cleared until mySplit is finished and returns
                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
-    `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). 
-                                    Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage. It also enables the real-time printing (and then freeing from memory) 
+    `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit).
+                                    Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage. It also enables the real-time printing (and then freeing from memory)
                                     outputs when "ordered output" mode is being used (flags `-k` or `-n`) (otherwise all output is saved on in memory and printed at the end after mySplit has finished running).
-								
+
 EOF
 }
 
-(( ${displayMain} > 2 )) && { 
+(( ${displayMain} > 2 )) && {
 cat<<'EOF' >&2
 HOW IT WORKS:
     The coproc code is dynamically generated based on passed mySplit options, then K coprocs (plus some "helper function" coprocs) are forked off.
@@ -813,9 +819,9 @@ cat<<'EOF' >&2
 # # # # # # # # # # # # FLAGS # # # # # # # # # # # #
 
 GENERAL NOTES:
-     1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below. 
+     1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below.
         Refer to the code for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
-     2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'. 
+     2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'.
         To stop option parsing sooner, add a '--' after the last mySplit flag. Note: this will only stop option parsing sooner...mySplit will always stop at the first argument that does not begin with a '-' or '+'.
 
 --------------------------------------------------------------------------------------------------------------------
@@ -830,12 +836,12 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 
 -j | -P | --nprocs : sets the number of worker coprocs to use
    ---->  default  : number of logical CPU cores ($(nproc))
-   
+
 ----------------------------------------------------------
 
 -t | --tmp[dir]    : sets the root directory for where the tmpfiles used by mySplit are created.
    ---->  default  : /dev/shm ; or (if unavailable) /tmp ; or (if unavailable) ${PWD}
-   
+
    NOTE: unless running on an extremely memory-constrained system, having this tmp directory on a ramdisk (e.g., a tmpfs) will greatly improve performance
 
 ----------------------------------------------------------
@@ -843,9 +849,9 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 -l | --nlines      : sets the number or lines to pass coprocs to use for each function call to this constant value, disabling the automatic dynamic batch size logic.
    ---->  default  : n/a (by default automatic dynamic batch size adjustment is enabled)
 
--L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled. 
+-L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled.
    ---->  default  : 1
-            
+
 	NOTE: the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
 
 ----------------------------------------------------------
@@ -854,14 +860,14 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
    ---->  default  : newline ($'\n')
 
 --------------------------------------------------------------------------------------------------------------------
-   
+
 FLAGS WITHOUT ARGUMENTS
 -----------------------
 
 SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags (short or long) may use either 1 or 2 leading dashes ('-f' or '--f' or '-flag' or '--flag' all work) to enable these.
                  To instead disable these optional subroutines, replace the leading '-' or '--' with a leading '+' or '++' or '+-'. If a flag is given multiple times, the last one is used.
                  Unless otherwise noted, all of  the following flags are, by default, in the "disabled" state
-   
+
 ----------------------------------------------------------
 
 -i | --insert        :
@@ -912,12 +918,12 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 
 -v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr.
 
-    NOTE: The '+' version of this flag decreases verbosity level by 1. The default level is 0. 
+    NOTE: The '+' version of this flag decreases verbosity level by 1. The default level is 0.
     NOTE: Meaningful verbotisity levels are:
       --> 0 [or less than 0] (only errors)
       --> 1 (errors + overview of parsed mySplit options)
       --> 2 [or more than 2] (errors + overview + indicators of a few runtime events and statistics)
-	  
+
 ----------------------------------------------------------
 
 FLAGS THAT TRIGGER PRINTING HELP/USAGE INFO TO SCREEN THEN EXIT
