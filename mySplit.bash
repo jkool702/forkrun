@@ -767,11 +767,11 @@ EOF
 (( ${displayMain} > 1 )) && { 
 cat<<'EOF' >&2
 REQUIRED DEPENDENCIES:
-    Bash 4+                      : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
-    `rm`  and  `mkdir`           : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
+    Bash 4+                       : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
+    `rm`  and  `mkdir`            : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
 
 OPTIONAL DEPENDENCIES (to provide enhanced functionality):
-    Bash 5.1+                    : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) 
+    Bash 5.1+                     : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) 
                                     got a major speedup here. Bash versions 4.0 - 5.0 *should* still work, but will be (perhaps considerably) slower.
     `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and won't be cleared until mySplit is finished and returns 
                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
@@ -805,8 +805,10 @@ GENERAL NOTES:
 
 --------------------------------------------------------------------------------------------------------------------
 
-FLAGS WITH ARGUMENTS:
-    SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking) space ' ', equal sign ('='), or no separator (''), between the flag and the argument. i.e., the following all work:
+FLAGS WITH ARGUMENTS
+--------------------
+
+SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking) space ' ', equal sign ('='), or no separator (''), between the flag and the argument. i.e., the following all work:
                  -A Val   |   '-A Val'   |   -A=Val   |   -AVal   |   --A_long Val   |   '--A_long Val'   |   --A_long=Val   |   --A_longVal
 
 ----------------------------------------------------------
@@ -829,37 +831,22 @@ FLAGS WITH ARGUMENTS:
 -L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled. 
    ---->  default  : 1
             
-	NOTE  : the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
-   
+	NOTE: the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
+
+----------------------------------------------------------
+
+-D | --delimiter   : sets the delimiter used to seperateate inputs passed on stdin
+   ---->  default  : newline ($'\n')
+
 --------------------------------------------------------------------------------------------------------------------
    
-FLAGS WITHOUT ARGUMENTS:
-    SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags (short or long) may use either 1 or 2 leading dashes ('-f' or '--f' or '-flag' or '--flag' all work) to enable these.
+FLAGS WITHOUT ARGUMENTS
+-----------------------
+
+SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags (short or long) may use either 1 or 2 leading dashes ('-f' or '--f' or '-flag' or '--flag' all work) to enable these.
                  To instead disable these optional subroutines, replace the leading '-' or '--' with a leading '+' or '++' or '+-'. If a flag is given multiple times, the last one is used.
                  Unless otherwise noted, all of  the following flags are, by default, in the "disabled" state
    
-# -j | -P | --nprocs : sets the number of worker coprocs to use
-#    ---->  default  : number of logical CPU cores ($(nproc))
-#    
-# ----------------------------------------------------------
-# 
-# -t | --tmp[-dir]    : sets the root directory for where the tmpfiles used by mySplit are created.
-#    ---->  default  : /dev/shm ; or (if unavailable) /tmp ; or (if unavailable) ${PWD}
-#    
-#    NOTE: unless running on an extreamly memory-constrained system, having this tmp directory on a ramdisk (e.g., a tmpfs) will greatly improve performance
-# 
-# ----------------------------------------------------------
-# 
-# -l | --nlines      : sets the number or lines to pass coprocs to use for each function call to this constant value, disabling the automatic dynamic batch size logic.
-#    ---->  default  : n/a (by default automatic dynamic batch size adjustment is enabled)
-# 
-# -L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled. 
-#    ---->  default  : 1
-#             
-# 	NOTE  : the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
-#    
-# 
-
 ----------------------------------------------------------
 
 -i | --insert        :
@@ -878,6 +865,8 @@ FLAGS WITHOUT ARGUMENTS:
 
 -z | -0 | --null     :
 
+    NOTE: this flag will disable a check that ensures that lines from stdin do not get split into 2 seperate lines. The chances of this occuring are small but nonzero.
+
 ----------------------------------------------------------
 
 -s | --subshell[-run]:
@@ -894,7 +883,7 @@ FLAGS WITHOUT ARGUMENTS:
 
 -d | --delete        :
 
-NOTE: this flag is enabled by default. use the '+' version to disable it. passing `-d` has no effect except to re-enable this if `+d` was passed in a previous flag.
+    NOTE: this flag is enabled by default. use the '+' version to disable it. passing `-d` has no effect except to re-enable this if `+d` was passed in a previous flag.
 
 ----------------------------------------------------------
 
@@ -908,8 +897,8 @@ NOTE: this flag is enabled by default. use the '+' version to disable it. passin
 
 -v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr.
 
-NOTE: The '+' version of this flag decreases verbosity level by 1. The default level is 0. 
-NOTE: Meaningful verbotisity levels are:
+    NOTE: The '+' version of this flag decreases verbosity level by 1. The default level is 0. 
+    NOTE: Meaningful verbotisity levels are:
       --> 0 [or less than 0] (only errors)
       --> 1 (errors + overview of parsed mySplit options)
       --> 2 [or more than 2] (errors + overview + indicators of a few runtime events and statistics)
