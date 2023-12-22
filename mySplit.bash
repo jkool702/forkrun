@@ -7,7 +7,7 @@ mySplit() {
 #
 # USAGE: printf '%s\n' "${args[@]}" | mySplit [-flags] [--] parFunc ["${args0[@]}"]
 #
-# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-D <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-d] [-N] [-u] [-v] [-h|-?]
+# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
 #
 # For help / usage info, call mySplit with one of the following flags:
 #
@@ -26,7 +26,7 @@ mySplit() {
 
     # make all variables local
     local tmpDir fPath outStr delimiterStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
-    local -i nLines nLinesCur nLinesNew nLinesMax nCur nNew nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
+    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outA
 
     # # # # # PARSE OPTIONS # # # # #
@@ -78,16 +78,16 @@ mySplit() {
                 tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
             ;;
 
-            -?(-)?(D)|-?(-)[Dd]elim?(iter))
+            -?(-)d?(elim?(iter)))
                 (( ${#2} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
-				delimiterStr="-d ${2:0:1}"
+                (( ${#2} == 0 )) && nullDelimiterFlag=true || delimiterStr="-d ${2:0:1}"
                 shift 1
             ;;
 
-            -?(-)?(D)?([= ])*@([[:graph:]])*|-?(-)[Dd]elim?(iter)?([= ])*@([[:graph:]])*)
-                delimiterStr="${1##@(-?(-)?(D)?([= ])|-?(-)[Dd]elim?(iter)?([= ]))}"
+            -?(-)d?(elim?(iter))([= ])**([[:graph:]])*)
+                delimiterStr="${1##@(-?(-)d?(elim?(iter))([= ]))}"
 				(( ${#delimiterStr} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
-				delimiterStr="-d ${delimiterStr:0:1}"
+                (( ${#delimiterStr} == 0 )) && nullDelimiterFlag=true || delimiterStr="-d ${delimiterStr:0:1}"
             ;;
 
             -?(-)i?(nsert))
@@ -118,7 +118,7 @@ mySplit() {
                 pipeReadFlag=true
             ;;
 
-            -?(-)d?(elete))
+            -?(-)D|-?(-)[Dd]elete)
                 rmTmpDirFlag=true
             ;;
 
@@ -171,7 +171,7 @@ mySplit() {
                 pipeReadFlag=false
             ;;
 
-            +?([-+])d?(elete))
+            +?([-+])D|+?([-+])[Dd]elete)
                 rmTmpDirFlag=false
             ;;
 
@@ -763,7 +763,7 @@ cat<<'EOF' >&2
 
 USAGE: printf '%s\n' "${args[@]}" | mySplit [-flags] [--] parFunc ["${args0[@]}"]
 
-LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-D <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-d] [-N] [-u] [-v] [-h|-?]
+LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
 
 EOF
 
@@ -856,7 +856,7 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 
 ----------------------------------------------------------
 
--D | --delimiter   : sets the delimiter used to seperateate inputs passed on stdin
+-d | --delimiter   : sets the delimiter used to seperateate inputs passed on stdin
    ---->  default  : newline ($'\n')
 
 --------------------------------------------------------------------------------------------------------------------
@@ -870,49 +870,56 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 
 ----------------------------------------------------------
 
--i | --insert        :
+-i | --insert        : insert {}. replace `{}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the mySplit commandline) with the inputs passed on stdin (instead of placing them at the end)
 
-
--I | --INSERT        :
-
-----------------------------------------------------------
-
--k | --keep[-order]  :
-
-
--n | --number[-lines]:
+-I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the mySplit commandline) with an index (0, 1, ...) indicating which coproc the process is running on. 
+                       this is analagous to the `--plocess-slot-var` option in `xargs`
 
 ----------------------------------------------------------
 
--z | -0 | --null     :
+-k | --keep[-order]  : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc.
+
+
+-n | --number[-lines]: numbered ordered output. Output will be ordered and, for each group of N lines that was run in a single call, an index will be pre-pended to the output group with syntax "$'\034'${INDEX}$'\035'". Impliies -k.
+
+----------------------------------------------------------
+
+-z | -0 | --null     : NULL-seperated stdin. stdin is NULL-seperated, not newline seperated. Equivilant to using flag: --delimiter=''
 
     NOTE: this flag will disable a check that ensures that lines from stdin do not get split into 2 seperate lines. The chances of this occuring are small but nonzero.
 
 ----------------------------------------------------------
 
--s | --subshell[-run]:
+-s | --subshell[-run]: run individual calls of parFunc in a subshell. Typically, the worker coprocs run each call in their own shell. This causes them to run in a subshell. This ensures that previous runs do not alter the shell environment and affect future runs, but has some performance cost.
 
 ----------------------------------------------------------
 
--S | --stdin[-run]   :
+-S | --stdin[-run]   : pass lines from stdin to parfunc via its stdin instead of using its function inputs. i.e., use `parFunc <<<"${args[@]}"` instead of `parFunc "${args[@]}"`
 
 ----------------------------------------------------------
 
--p | --pipe[-read]   :
+-p | --pipe[-read]   : read stdin from a pipe. Typically stdin is saved to a tmpfile (on a tmpfs ramdisk) and then read from the tmpfile, which avoids the "reading 1 byte at a time from a pipe" issue and is typically faster unless you are only reading very small amounts of data for eachg parFunc call. This flag forces reading from a pipe (or from a tmpfile if `+p` is used)
+
+    NOTE: This flag is typicaly disabled, but is enabled by default only when `--nLines=1` flag is also given (causing mySplit to only read 1 line at a time for the enritre time it is running)
 
 ----------------------------------------------------------
 
--d | --delete        :
+-D | --delete        : delete the tmpdir used by mySplit on exit. You typically want this unless you are debugging something, as the tmpdir is (by default) on a tmpfs and as such is using up memory.
 
-    NOTE: this flag is enabled by default. use the '+' version to disable it. passing `-d` has no effect except to re-enable this if `+d` was passed in a previous flag.
-
-----------------------------------------------------------
-
--N | --no-func       :
+    NOTE: this flag is enabled by default. use the '+' version to disable it. passing `-d` has no effect except to re-enable tmpdir deletion if `+d` was passed in a previous flag.
 
 ----------------------------------------------------------
 
--u | --unescape      :
+-N | --no-func       : run with no parFunc. Typically, is parFunc is omitted (e.g., `printf '%s\n' "${args[@]}" | mySplit`) mySplit will silently use `printf '%s\n'` as parFunc, causing all lines from stdin to be printed to stdout. This flag makes mySplit instead run the lines from stdin directly as they are. Presumably these lines would contain the `parFunc` part in the lines on stdin.
+
+    NOTE: This flag can be used to make mySplit paralellize running any generic list of commands, since the `parFunc` used on each line from stdin does not need to be the same. 
+
+----------------------------------------------------------
+
+-u | --unescape      : dont escape `parFunc [${args0[@]}]` before having the coprocs run it. Typically, `parFunc [${args0[@]}]` is run through `printf '%q '`, making such that pipes and redirects and logical operators similiar ('|' '<<<' '<<' '<' '>' '>>' '&' '&&' '||') are treated as literal characters and dont pipe / redirect / logical operators / whatever. This flag makes mySplit skip running these through `printf '%q'`, making pipes and redirects work normally.
+
+    NOTE: keep in mind that the shell will interpret the commandline before mySplit gets it, so pipes and redirects must still be passed either escaped or quoted otherwise the shell will interpret+implemnt them before mySplit does.
+    NOTE: this flag is particuarly useful in combination with the `-i` flag, as it allows you to do things like the following (which will scan files whose paths are given on stdin and search them, for some string and, only if found, print the filename):  printf '%s\n' "${paths[@]}" | mySplit -i -u -l1 -- 'cat {} | grep -q someString && echo {}'
 
 ----------------------------------------------------------
 
