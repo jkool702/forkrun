@@ -7,11 +7,11 @@ mySplit() {
 #
 # USAGE: printf '%s\n' "${args[@]}" | mySplit [-flags] [--] parFunc ["${args0[@]}"]
 #
-# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-d] [-N] [-u] [-v] [-h|-?]
+# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-D <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-d] [-N] [-u] [-v] [-h|-?]
 #
 # For help / usage info, call mySplit with one of the following flags:
 #
-# --usage              :  display brief usage info
+# --usage              :  display brief usage info (shown above)
 # -? | -h | --help     :  dispay standard help (does not include detailed info on flags)
 # --help=s[hort]       :  more detailed varient of '--usage'
 # --help=f[lags]       :  display detailed info about flags
@@ -763,7 +763,7 @@ cat<<'EOF' >&2
 
 USAGE: printf '%s\n' "${args[@]}" | mySplit [-flags] [--] parFunc ["${args0[@]}"]
 
-LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-d] [-N] [-u] [-v] [-h|-?]
+LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-D <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-d] [-N] [-u] [-v] [-h|-?]
 
 EOF
 
