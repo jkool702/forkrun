@@ -45,15 +45,15 @@ mktemp () (
 shopt -s extglob
 
 mySplit() {
-## Efficiently parallelize a loop / run many tasks in parallel *extreamly* fast using bash coprocs
+## Efficiently parallelize a loop / run many tasks in parallel *extremely* fast using bash coprocs
 #
 # USAGE: printf '%s\n' "${args[@]}" | mySplit [-flags] [--] parFunc ["${args0[@]}"]
 #
 #      Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
-#          -->  Pass newline-seperated (or null seperated with `-z` flag) inputs to parallelize over on stdin.
-#          -->  Provide function/script/binary to parallalize and initial args as function inputs.
+#          -->  Pass newline-separated (or null-separated with `-z` flag) inputs to parallelize over on stdin.
+#          -->  Provide function/script/binary to parallelize and initial args as function inputs.
 #      `mySplit` will then call the function/script/binary in parallel on several coproc "workers" (default is to use $(nproc) workers)
-#       Each time a worker runs the function/script/binary it will use the intial args and N lines from stdin (default: `N` is between 1-512 lines and is automatically dynamically asjusted)
+#       Each time a worker runs the function/script/binary it will use the initial args and N lines from stdin (default: `N` is between 1-512 lines and is automatically dynamically adjusted)
 #          --> i.e., it will run (in parallel on each "worker"):     parFunc "${args0[@]}" "${args[@]:m:N}"    # m = number of lines from stdin already processed
 #       `parFunc` can be an executable binary or bash script, a bash builtin, a declared bash function / alias, or *omitted entirely* (*requires -N [-NO-FUNC] flag. See flag descriptions below for more info.*)
 #
@@ -73,26 +73,48 @@ mySplit() {
 #
 # OPTIONAL DEPENDENCIES (to provide enhanced functionality):
 #      Bash 5.1+                    : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin) 
-#                                     got a major speedup here. Bash versions 4.0 - 5.0 *should* still work, but will be (perhaps consideraably) slower.
-#     `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and wont be cleared until mySplit is finished and returns 
+#                                     got a major speedup here. Bash versions 4.0 - 5.0 *should* still work, but will be (perhaps considerably) slower.
+#     `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and won't be cleared until mySplit is finished and returns 
 #                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
 #     `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | mySplit). 
-#                                     Without this the coprocs will non-stop try to read data from stdin, causing unnecessairly high CPU usage. It also enables the real-time printing (and then freeing from memory) 
-#                                     outputs when "ordered output" mode is being used (flags `-k` or `-n`) (otherwise all output is saved on in memory and printed bat the end after mySplit has finished running).
+#                                     Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage. It also enables the real-time printing (and then freeing from memory) 
+#                                     outputs when "ordered output" mode is being used (flags `-k` or `-n`) (otherwise all output is saved on in memory and printed at the end after mySplit has finished running).
 #
 # # # # # # # # # # # # FLAGS # # # # # # # # # # # #
 #
 # GENERAL NOTES:
-#      1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given seperately (use `-a -b`, not `-ab`). Only the most common invocations are shown below. 
-#         Refer to the kcode for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
-#      2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumses that `parFunc` is the first input that does NOT begin with a '-' or '+'. 
-#         To stop optrion parsing sooner, add a '--' after the last mySplit flag. Note: this will only stop option parsing sooner...mySplit will always stop at the first argument that does not begin with a '-' or '+'.
+#      1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below. 
+#         Refer to the code for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
+#      2. All mySplit flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, mySplit assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'. 
+#         To stop option parsing sooner, add a '--' after the last mySplit flag. Note: this will only stop option parsing sooner...mySplit will always stop at the first argument that does not begin with a '-' or '+'.
 #
 # FLAGS WITH ARGUMENTS:
-#     SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking) space ' ' , equal sign ('='), or no seperator (''), between the flag and the argument. i.e., the following all work:
+#     SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking) space ' ', equal sign ('='), or no separator (''), between the flag and the argument. i.e., the following all work:
 #                  -A Val   |   '-A Val'   |   -A=Val   |   -AVal   |   --A_long Val   |   '--A_long Val'   |   --A_long=Val   |   --A_longVal
 #
-#     COMING SOON
+# ----------------------------------------------------------
+#
+# -j | -P | --nprocs : sets the number of worker coprocs to use
+#    ---->  default  : number of logical CPU cores ($(nproc))
+#    
+# ----------------------------------------------------------
+# 
+# -t | --tmp[dir]    : sets the root directory for where the tmpfiles used by mySplit are created.
+#    ---->  default  : /dev/shm ; or (if unavailable) /tmp ; or (if unavailable) ${PWD}
+#    
+#    NOTE: unless running on an extremely memory-constrained system, having this tmp directory on a ramdisk (e.g., a tmpfs) will greatly improve performance
+# 
+# ----------------------------------------------------------
+# 
+# -l | --nlines      : sets the number or lines to pass coprocs to use for each function call to this constant value, disabling the automatic dynamic batch size logic.
+#    ---->  default  : n/a (by default automatic dynamic batch size adjustment is enabled)
+# 
+# -L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled. 
+#    ---->  default  : 1
+#             
+# 	NOTE  : the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
+#    
+# ----------------------------------------------------------
 #    
 # FLAGS WITHOUT ARGUMENTS:
 #     SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags (short or long) may use either 1 or 2 leading dashes ('-f' or '--f' or '-flag' or '--flag' all work) to enable these.
