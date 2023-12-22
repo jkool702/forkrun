@@ -84,8 +84,8 @@ mySplit() {
                 shift 1
             ;;
 
-            -?(-)d?(elim?(iter))([= ])**([[:graph:]])*)
-                delimiterStr="${1##@(-?(-)d?(elim?(iter))([= ]))}"
+            -?(-)d?(elim?(iter))?([= ])**([[:graph:]])*)
+                delimiterStr="${1##@(-?(-)d?(elim?(iter))?([= ]))}"
 				(( ${#delimiterStr} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
                 (( ${#delimiterStr} == 0 )) && nullDelimiterFlag=true || delimiterStr="-d ${delimiterStr:0:1}"
             ;;
