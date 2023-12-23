@@ -25,7 +25,7 @@ mySplit() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outA
 
@@ -507,10 +507,10 @@ mySplit() {
             # monitor ${tmpDir}/.out for new files if we have inotifywait
             ${nOrderFlag} && {
                 {
-                    inotifywait -q -m -e close_write --format '%f' -r "${tmpDir}"/.out >&${fd_inotify10} &
+                    inotifywait -q -m -e close_write --format '%f' -r "${tmpDir}"/.out >&${fd_inotify0} &
 
                     pNotify0_PID=${!}
-                } 2>/dev/null {fd_inotify10}>&${fd_inotify0}
+                } 2>/dev/null
 
                 exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify20}; ) {fd_inotify20}>&'"${fd_inotify0}"'; '$'\n'
                 exitTrapStr_kill+='kill -9 '"${pNotify0_PID}"' 2>/dev/null; '$'\n'
@@ -656,13 +656,13 @@ p_PID+=(\${p{<#>}_PID})
 
                     while [[ ${outA[${outCur}]} == 1 ]]; do
 
-                        cat "${tmpDir}"/.out/x${outCur}
+                        cat "${tmpDir}"/.out/x${outCur} >&${fd_stdout}
                         \rm  -f "${tmpDir}"/.out/x${outCur}
                         ((outCur++))
                         [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                     done
 
-                    [[ -f "${tmpDir}"/.quit ]] && break
+                    { [[ -f "${tmpDir}"/.quit ]] || [[ -z ${REPLY} ]]; } && break
                 done
             }
 
@@ -710,6 +710,7 @@ type -a mktemp &>/dev/null || {
 mktemp () (
     local p d f
     set -C
+    shopt -s extglob
     umask 177
     while [[ "${1}" == -@([pd]) ]]; do
         [[ "${1}" == '-p' ]] && p="$2"
