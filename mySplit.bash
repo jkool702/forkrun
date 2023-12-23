@@ -25,9 +25,9 @@ mySplit() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur outHave tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
-    local -a A p_PID runCmd outA
+    local -a A p_PID runCmd 
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -243,7 +243,7 @@ mySplit() {
 
         # check verboseLevel
         (( ${verboseLevel} < 0 )) && verboseLevel=0
-        (( ${verboseLevel} > 2 )) && verboseLevel=2
+        (( ${verboseLevel} > 3 )) && verboseLevel=3
 
         # determine what mySplit is using lines on stdin for
         [[ ${FORCE} ]] && runCmd=("${@}") || runCmd=("${@//$'\r'/}")
@@ -353,7 +353,7 @@ mySplit() {
                 ${inotifyFlag} && {
                     { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
                 } {fd_inotify1}>&${fd_inotify}
-                [[ ${verboseLevel} == 2 ]] && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
+                [[ ${verboseLevel} > 1 ]] && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
               }
             }
             exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
@@ -449,7 +449,7 @@ mySplit() {
                             printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines
 
                             # verbose output
-                            [[ ${verboseLevel} == 2 ]] && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
+                            [[ ${verboseLevel} > 2 ]] && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
 
                             nLinesCur=${nLinesNew}
                         }
@@ -461,7 +461,7 @@ mySplit() {
                                 fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
                                 (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
                                     fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}"
-                                    [[ ${verboseLevel} == 2 ]] && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
+                                    [[ ${verboseLevel} > 2 ]] && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
                                     fd_read_pos_old=${fd_read_pos}
                                 }
                                 nWait=$(( 16 + ( ${nProcs} / 2 ) ))
@@ -500,19 +500,18 @@ mySplit() {
             } 2>/dev/null {fd_inotify1}>&${fd_inotify}
 
 
-            exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify2}; ) {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
+            exitTrapStr+='{ printf '"'"'\n'"'"' >&${fd_inotify2}; } {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
             ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
             exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
 
             # monitor ${tmpDir}/.out for new files if we have inotifywait
             ${nOrderFlag} && {
                 {
-                    inotifywait -q -m -e close_write --format '%f' -r "${tmpDir}"/.out >&${fd_inotify0} &
+                    inotifywait -m -e close_write --format '%f' -r "${tmpDir}"/.out >&${fd_inotify0} &
 
                     pNotify0_PID=${!}
                 } 2>/dev/null
 
-                exitTrapStr+='( printf '"'"'\n'"'"' >&${fd_inotify20}; ) {fd_inotify20}>&'"${fd_inotify0}"'; '$'\n'
                 exitTrapStr_kill+='kill -9 '"${pNotify0_PID}"' 2>/dev/null; '$'\n'
             }
         }
@@ -523,6 +522,8 @@ mySplit() {
 
         trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}" EXIT
         trap 'kill "${p_PID[@]}"; return' INT TERM HUP
+
+        (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
 
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
@@ -562,10 +563,10 @@ $(${nLinesAutoFlag} && echo """
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || {
         [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {
-            $([[ ${verboseLevel} == 2 ]] && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
+            $([[ ${verboseLevel} > 2 ]] && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
             until read -r -u ${fd_read} ${delimiterReadStr}; do A[-1]+=\"\${REPLY}\"; done
             A[-1]+=\"\${REPLY}\"${delimiterVal}
-            $([[ ${verboseLevel} == 2 ]] && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
+            $([[ ${verboseLevel} > 2 ]] && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
         }
 """
 ${nOrderFlag} && echo """
@@ -602,7 +603,7 @@ $(${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
         { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {
-            $([[ ${verboseLevel} == 2 ]] && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
+            $([[ ${verboseLevel} > 2 ]] && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
             A[-1]=\"\${A[-1]%${delimiterVal}}\"
             IFS=
             mapfile A <<<\"\${A[*]}\"
@@ -611,7 +612,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
 ${subshellRunFlag} && echo '(' || echo '{'
 ${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "${nOrder}"'
 )
-    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ${noFuncFlag}; then printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; [[ ${verboseLevel} == 2 ]] && echo """ || {
+    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ${noFuncFlag}; then printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; [[ ${verboseLevel} > 2 ]] && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
@@ -640,31 +641,50 @@ p_PID+=(\${p{<#>}_PID})
             source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/${kk}}"
         done
 
+        (( ${verboseLevel} > 1 )) && printf '\n\nALL WORKER COPROCS FORKED\n\n' >&${fd_stderr}
+
+
         # # # # # WAIT FOR THEM TO FINISH # # # # #
           #   #   PRINT OUTPUT IF ORDERED   #   #
 
         if ${nOrderFlag}; then
             outCur=10
 
-            ${inotifyFlag} && {
+            if ${inotifyFlag}; then
 
-                while true; do
+                continueFlag=true
 
+                while ${continueFlag}; do
+                    
                     read -r -u ${fd_inotify0}
 
-                    [[ ${REPLY} == *\/x+([0-9]) ]] && outA[${REPLY%%*x}]=1
+                    #echo "READ: $REPLY --> ${REPLY##*x}" >&${fd_stderr}
 
-                    while [[ ${outA[${outCur}]} == 1 ]]; do
+                    if [[ ${REPLY} == *x+([0-9]) ]]; then
+                        outHave+="${REPLY##*x}"
+                    elif [[ -z ${REPLY} ]]; then
+                        continueFlag=false
+                    fi
 
-                        cat "${tmpDir}"/.out/x${outCur} >&${fd_stdout}
-                        \rm  -f "${tmpDir}"/.out/x${outCur}
-                        ((outCur++))
-                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
+                    while true; do
+                        if [[ "${outHave}" == *${outCur}* ]]; then
+
+                            cat "${tmpDir}"/.out/x${outCur} >&${fd_stdout}
+                            \rm  -f "${tmpDir}"/.out/x${outCur}
+                            outHave=${outHave//"${outCur} "/}
+                            ((outCur++))
+                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
+
+                        else
+                            break
+                        fi
                     done
 
-                    { [[ -f "${tmpDir}"/.quit ]] || [[ -z ${REPLY} ]]; } && break
+                    [[ -f "${tmpDir}"/.quit ]] && { continueFlag=false; break; }
                 done
-            }
+            fi
+
+            (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
 
             wait "${p_PID[@]}"
 
@@ -678,7 +698,7 @@ p_PID+=(\${p{<#>}_PID})
         fi
 
         # print final nLines count
-        ${nLinesAutoFlag} && [[ ${verboseLevel} == 2 ]] && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
+        ${nLinesAutoFlag} && [[ ${verboseLevel} > 1 ]] && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_inotify0}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
@@ -931,10 +951,11 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 -v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr.
 
     NOTE: The '+' version of this flag decreases verbosity level by 1. The default level is 0.
-    NOTE: Meaningful verbotisity levels are:
+    NOTE: Meaningful verbotisity levels are 0, 1, 2, and 3
       --> 0 [or less than 0] (only errors)
       --> 1 (errors + overview of parsed mySplit options)
-      --> 2 [or more than 2] (errors + overview + indicators of a few runtime events and statistics)
+      --> 2 (errors + options overview + progress notifications of when the code finishes one of its main sections)
+      --> 3 [or more than 3] (errors + options overview + progress notifcations + indicators of a few runtime events and statistics)
 
 ----------------------------------------------------------
 
