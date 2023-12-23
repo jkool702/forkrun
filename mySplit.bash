@@ -25,7 +25,7 @@ mySplit() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_inotify10 fd_inotify2 fd_inotify20 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outA
 
@@ -80,14 +80,14 @@ mySplit() {
 
             -?(-)d?(elim?(iter)))
                 (( ${#2} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
-                (( ${#2} == 0 )) && nullDelimiterFlag=true || delimiterStr="-d ${2:0:1}"
+                (( ${#2} == 0 )) && nullDelimiterFlag=true || delimiterVal="${2:0:1}"
                 shift 1
             ;;
 
             -?(-)d?(elim?(iter))?([= ])**([[:graph:]])*)
-                delimiterStr="${1##@(-?(-)d?(elim?(iter))?([= ]))}"
-				(( ${#delimiterStr} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
-                (( ${#delimiterStr} == 0 )) && nullDelimiterFlag=true || delimiterStr="-d ${delimiterStr:0:1}"
+                delimiterVal="${1##@(-?(-)d?(elim?(iter))?([= ]))}"
+                (( ${#delimiterVal} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
+                (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
             ;;
 
             -?(-)i?(nsert))
@@ -232,9 +232,9 @@ mySplit() {
 
         # # # # # INITIAL SETUP # # # # #
 
-        LC_ALL=C
-        LANG=C
-        IFS=
+        export LC_ALL=C
+        export LANG=C
+        export IFS=
         umask 177
 
         shopt -s nullglob
@@ -268,7 +268,7 @@ mySplit() {
         type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" 
 
         # check for conflict in flags that were  defined on the commandline when mySplit was called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
@@ -278,11 +278,14 @@ mySplit() {
 
         # setup delimiter
         if ${nullDelimiterFlag}; then
-            delimiterStr="-d ''"
-        elif [[ -z ${delimiterStr} ]]; then
-            delimiterRemoveStr="%\$'\\n'"
+            delimiterReadStr="-d ''"
+        elif [[ -z ${delimiterVal} ]]; then
+            delimiterVal='$'"'"'\n'"'"
+            delimiterRemoveStr='%$'"'"'\n'"'"
         else
-            delimiterRemoveStr="%${delimiterStr: -1}"
+            delimiterVal="$(printf '%q' "${delimiterVal}")"
+            delimiterRemoveStr="%${delimiterVal}"
+            delimiterReadStr="-d ${delimiterVal}"
         fi
 
         # modify runCmd if '-i' '-I' or '-u' flags are set
@@ -335,7 +338,7 @@ mySplit() {
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
-[[ -z $(echo "'"${tmpDir}"'"/.run/p*) ]] || kill $(cat "'"${tmpDir}"'"/.run/p*); '$'\n'
+[[ -z $(echo "'"${tmpDir}"'"/.run/p*) ]] || kill $(cat "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
 
        ${pipeReadFlag} && {
             # '.done'  file makes no sense when reading from a pipe
@@ -405,7 +408,7 @@ mySplit() {
             { coproc pAuto {
 
                 ${fallocateFlag} && {
-                    nWait=$(( 8 + ( ${nProcs} / 4 ) ))
+                    nWait=$(( 16 + ( ${nProcs} / 2 ) ))
                     fd_read_pos_old=0
                 }
                 ${nLinesAutoFlag} && nRead=0
@@ -460,7 +463,7 @@ mySplit() {
                                     [[ ${verboseLevel} == 2 ]] && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
                                     fd_read_pos_old=${fd_read_pos}
                                 }
-                                nWait=$(( 8 + ( ${nProcs} / 4 ) ))
+                                nWait=$(( 16 + ( ${nProcs} / 2 ) ))
                             ;;
                             *)
                                 ((nWait--))
@@ -518,6 +521,7 @@ mySplit() {
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
 
         trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}" EXIT
+        trap 'kill "${p_PID[@]}"; return' INT TERM HUP
 
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
@@ -553,13 +557,13 @@ $(${nLinesAutoFlag} && echo """
     \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}
  """)
     read -u ${fd_continue}
-    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t') ${delimiterStr} A
+    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t') ${delimiterReadStr} A
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || {
-        [[ \"\${A[-1]: -1}\" == \$'\\n' ]] || {
+        [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {
             $([[ ${verboseLevel} == 2 ]] && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
-            until read -r -u ${fd_read} ${delimiterStr}; do A[-1]+=\"\${REPLY}\"; done
-            A[-1]+=\"\${REPLY}\"\$'\\n'
+            until read -r -u ${fd_read} ${delimiterReadStr}; do A[-1]+=\"\${REPLY}\"; done
+            A[-1]+=\"\${REPLY}\"${delimiterVal}
             $([[ ${verboseLevel} == 2 ]] && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
         }
 """
@@ -594,20 +598,19 @@ $(${nLinesAutoFlag} && { printf '%s' """
     }"""
     ${fallocateFlag} && printf '%s' ' || ' || echo
 }
-${fallocateFlag} && echo """printf '\\n' >&\${fd_nAuto0}
-"""
+${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-        { [[ \"\${A[*]##*\$'\\n'}\" ]] || [[ -z \${A[0]} ]]; } && {
+        { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {
             $([[ ${verboseLevel} == 2 ]] && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
-            A[-1]=\"\${A[-1]%\$'\\n'}\"
+            A[-1]=\"\${A[-1]%${delimiterVal}}\"
             IFS=
             mapfile A <<<\"\${A[*]}\"
         }
 """
 ${subshellRunFlag} && echo '(' || echo '{'
-${exportOrderFlag} && echo 'printf '"'"'\034%s\035'"'"' "${nOrder}"'
+${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "${nOrder}"'
 )
-    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi) $([[ ${verboseLevel} == 2 ]] && echo """ || {
+    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; [[ ${verboseLevel} == 2 ]] && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
@@ -618,8 +621,8 @@ ${exportOrderFlag} && echo 'printf '"'"'\034%s\035'"'"' "${nOrder}"'
             cat /proc/self/fdinfo/${fd_write}
             echo
         } >&${fd_stderr}
-    }""")
-$(${subshellRunFlag} && printf '%s' ')' || printf '%s' '}') ${outStr}
+    }"""
+${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}') ${outStr}
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
@@ -852,7 +855,7 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 -L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled.
    ---->  default  : 1
 
-	NOTE: the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
+    NOTE: the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
 
 ----------------------------------------------------------
 
