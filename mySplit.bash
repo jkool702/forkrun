@@ -138,7 +138,7 @@ mySplit() {
                 unescapeFlag=true
             ;;
 
-            -?(-)help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|-?(-)usage|-?(-)[h\?])
+            -?(-)help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|-?(-)usage|-?(-)[h?])
                 mySplit_displayHelp "${1}"
                 return
             ;;
@@ -607,7 +607,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
 ${subshellRunFlag} && echo '(' || echo '{'
 ${exportOrderFlag} && echo 'printf '"'"'\034%s\035'"'"' "${nOrder}"'
 )
-    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]%${delimiterRemoveStr}\""; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]%${delimiterRemoveStr}\""; fi) $([[ ${verboseLevel} == 2 ]] && echo """ || {
+    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi) $([[ ${verboseLevel} == 2 ]] && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
