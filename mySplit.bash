@@ -269,7 +269,7 @@ mySplit() {
         type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" 
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
 
         # check for conflict in flags that were  defined on the commandline when mySplit was called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
@@ -876,7 +876,7 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 
 -i | --insert        : insert {}. replace `{}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the mySplit commandline) with the inputs passed on stdin (instead of placing them at the end)
 
--I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the mySplit commandline) with an index (0, 1, ...) indicating which coproc the process is running on. 
+-I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the mySplit commandline) with an index (0, 1, ...) indicating which coproc the process is running on.
                        this is analagous to the `--plocess-slot-var` option in `xargs`
 
 ----------------------------------------------------------
@@ -916,7 +916,7 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 
 -N | --no-func       : run with no parFunc. Typically, is parFunc is omitted (e.g., `printf '%s\n' "${args[@]}" | mySplit`) mySplit will silently use `printf '%s\n'` as parFunc, causing all lines from stdin to be printed to stdout. This flag makes mySplit instead run the lines from stdin directly as they are. Presumably these lines would contain the `parFunc` part in the lines on stdin.
 
-    NOTE: This flag can be used to make mySplit paralellize running any generic list of commands, since the `parFunc` used on each line from stdin does not need to be the same. 
+    NOTE: This flag can be used to make mySplit paralellize running any generic list of commands, since the `parFunc` used on each line from stdin does not need to be the same.
 
 ----------------------------------------------------------
 
