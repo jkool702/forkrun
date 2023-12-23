@@ -250,6 +250,7 @@ mySplit() {
         : "${noFuncFlag:=false}"
         (( ${#runCmd[@]} > 0 )) || ${noFuncFlag} || runCmd=(printf '%s\n')
         (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
+        ${noFuncFlag} && runCmd=('source')
 
         # set batch size
         { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
@@ -610,7 +611,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
 ${subshellRunFlag} && echo '(' || echo '{'
 ${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "${nOrder}"'
 )
-    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; [[ ${verboseLevel} == 2 ]] && echo """ || {
+    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ${noFuncFlag}; then printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; [[ ${verboseLevel} == 2 ]] && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
