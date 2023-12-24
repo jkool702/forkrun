@@ -610,7 +610,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
         }
 """
 ${subshellRunFlag} && echo '(' || echo '{'
-${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "${nOrder}"'
+${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
 )
     ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ${noFuncFlag}; then printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; [[ ${verboseLevel} > 2 ]] && echo """ || {
         {
