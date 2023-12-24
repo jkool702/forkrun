@@ -8,8 +8,8 @@
 # The speedtest was run on a machine with an i9-7940x (14c/28t) CPU + 128 GB RAM running on Fedora 39 with kernel 6.5.11 at a "nice level" of -20 (highest priority)
 # 
 # Overall results were:
-# ---> on average (looking at total time between all tests), mySplit was around twice as fast `xargs -P $(nproc) -d $'\n'` and around four tiumes as fast as `parallel -m`
-# ---> in all tests mySplit was between 1.82x - 2.35x faster than `xargs -P $(nproc) -d $'\n'` and between 2.23x - 9.13x faster than `parallel -m`
+# ---> on average (looking at total time between all tests), mySplit was around 1.7x as fast `xargs -P $(nproc) -d $'\n'` and around 7.3x as fast as `parallel -m`
+# ---> in all tests mySplit was between 1.42x - 2.73x faster than `xargs -P $(nproc) -d $'\n'` and between 3.64x - 15.39x faster than `parallel -m`
 #
 # NOTE: though not shown here, when restricted to processing 1 line at a time (`parallel` ; `xargs -P $(nproc) -d $'\n' -L 1` ; `mySplit -l 1`), the performance gap is even larger:
 #       mySplit tends to be at least 3-4x as fast as `xargs -P $(nproc) -d $'\n' -L 1` and >10x as fast as `parallel`
@@ -21,11 +21,11 @@ OVERALL RELATIVE WALL-CLOCK TIME RESULTS SUMMARY:
 
                 sha1sum         sha256sum       sha512sum       sha224sum       sha384sum       md5sum          sum -s          sum -r          cksum           b2sum           cksum -a sm3    OVERALL AVERAGE
 
-parallel:       529%            344%            399%            322%            401%            534%            842%            493%            913%            449%            223%            409%           
-xargs:          198%            196%            182%            185%            184%            235%            195%            213%            208%            192%            187%            194%           
+parallel:       941%            590%            714%            576%            751%            887%            1539%           914%            1660%           802%            364%            730%           
+xargs:          172%            168%            142%            161%            152%            176%            216%            181%            273%            153%            172%            170%           
 mySplit:        100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%           
 
-OVERALL TIME TAKEN: 287 SECONDS
+OVERALL TIME TAKEN: 381 SECONDS
 EOF
 
 unset tests findDir findDirDefault ramdiskTransferFlag TD_A TD_B TD_C nfun
@@ -54,6 +54,8 @@ ramdiskTransferFlag=true
 
 SECONDS=0
 shopt -s extglob
+
+renice --priority -20 --pid $$
 
 declare -F mySplit 1>/dev/null 2>&1 || { [[ -f ./mySplit.bash ]] && source ./mySplit.bash; } || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/mySplit.bash)
 
@@ -199,20 +201,49 @@ printf '\n\nOVERALL TIME TAKEN: %s SECONDS\n\n' "${SECONDS}"
 
 
 : <<'EOF'
-COPYING FILES FROM /usr TO RAMDISK AT /mnt/ramdisk/usr
+# SOME PERF STATS AND OS INFO (FEDORA 39)
+
+> uname -a
+
+Linux localhost 6.5.11-300.fc39.x86_64 #1 SMP PREEMPT_DYNAMIC Wed Nov  8 22:37:57 UTC 2023 x86_64 GNU/Linux
+
+# PERF stats on running all 11 checksums on all ~490k files with 5x runs (total time is for all 11 checksums)
+
+Performance counter stats for '/bin/bash -c shopt -s extglob; source /mnt/ramdisk/mySplit.bash; for nfun in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3"; do find /mnt/ramdisk/usr -type f | mySplit ${nfun} | wc -l;  done' (5 runs):
+
+        615,162.80 msec task-clock                       #   18.436 CPUs utilized               ( +-  0.05% )
+         2,077,977      context-switches                 #    3.378 K/sec                       ( +-  0.62% )
+           555,112      cpu-migrations                   #  902.382 /sec                        ( +-  1.37% )
+         6,066,132      page-faults                      #    9.861 K/sec                       ( +-  0.06% )
+ 2,481,708,765,918      cycles                           #    4.034 GHz                         ( +-  0.04% )  (50.68%)
+ 3,991,554,098,630      instructions                     #    1.61  insn per cycle              ( +-  0.01% )  (63.24%)
+   145,925,050,661      branches                         #  237.214 M/sec                       ( +-  0.04% )  (62.92%)
+     1,697,100,092      branch-misses                    #    1.16% of all branches             ( +-  0.11% )  (62.91%)
+   443,952,688,369      L1-dcache-loads                  #  721.683 M/sec                       ( +-  0.02% )  (62.92%)
+    16,268,384,320      L1-dcache-load-misses            #    3.66% of all L1-dcache accesses   ( +-  0.04% )  (62.94%)
+     2,016,933,928      LLC-loads                        #    3.279 M/sec                       ( +-  0.07% )  (50.44%)
+     1,612,870,452      LLC-load-misses                  #   79.97% of all L1-icache accesses   ( +-  0.06% )  (50.68%)
+
+           33.3666 +- 0.0930 seconds time elapsed  ( +-  0.28% )
+EOF
+
+:<<'EOF'
+# SPEEDTEST RESULTS
+
+>./mySplit.speedtest.bash 
 
 
 --------------------------------------------------------------------
 
 FILE COUNT/SIZE AND TIME TAKEN BY FIND COMMAND:
 
-496132
+489946
 
-real    0m0.742s
-user    0m0.340s
-sys     0m0.451s
+real    0m0.902s
+user    0m0.505s
+sys     0m0.460s
 
-TOTAL SIZE OF ALL FILES: 19039242924 (19G)
+TOTAL SIZE OF ALL FILES: 18164753116 (19G)
 
 
 
@@ -230,18 +261,18 @@ RESULTS FOR sha1sum
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m11.580s       real    0m4.331s        real    0m2.186s     
-user    0m35.006s       user    0m23.736s       user    0m35.124s    
-sys     0m10.936s       sys     0m7.489s        sys     0m9.193s      
+real    0m21.560s       real    0m3.943s        real    0m2.289s     
+user    0m48.434s       user    0m23.641s       user    0m34.001s    
+sys     0m11.009s       sys     0m7.020s        sys     0m8.560s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       529%    (429% slower than mySplit)
-xargs:          198%    (98% slower than mySplit)
+parallel:       941%    (841% slower than mySplit)
+xargs:          172%    (72% slower than mySplit)
 mySplit:        100%
 
 
@@ -259,18 +290,18 @@ RESULTS FOR sha256sum
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m12.887s       real    0m7.378s        real    0m3.746s     
-user    0m54.450s       user    0m53.746s       user    1m9.437s     
-sys     0m10.581s       sys     0m7.454s        sys     0m9.397s      
+real    0m22.896s       real    0m6.548s        real    0m3.880s     
+user    1m7.247s        user    0m52.323s       user    1m5.987s     
+sys     0m10.685s       sys     0m6.953s        sys     0m8.629s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       344%    (244% slower than mySplit)
-xargs:          196%    (96% slower than mySplit)
+parallel:       590%    (490% slower than mySplit)
+xargs:          168%    (68% slower than mySplit)
 mySplit:        100%
 
 
@@ -288,18 +319,18 @@ RESULTS FOR sha512sum
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m12.252s       real    0m5.603s        real    0m3.065s     
-user    0m43.895s       user    0m39.134s       user    0m51.293s    
-sys     0m10.665s       sys     0m7.417s        sys     0m9.131s      
+real    0m22.123s       real    0m4.425s        real    0m3.096s     
+user    0m58.822s       user    0m39.179s       user    0m50.085s    
+sys     0m10.757s       sys     0m6.973s        sys     0m8.588s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       399%    (299% slower than mySplit)
-xargs:          182%    (82% slower than mySplit)
+parallel:       714%    (614% slower than mySplit)
+xargs:          142%    (42% slower than mySplit)
 mySplit:        100%
 
 
@@ -317,18 +348,18 @@ RESULTS FOR sha224sum
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m13.016s       real    0m7.511s        real    0m4.040s     
-user    0m54.565s       user    0m53.198s       user    1m8.013s     
-sys     0m10.669s       sys     0m7.659s        sys     0m9.489s      
+real    0m23.017s       real    0m6.432s        real    0m3.994s     
+user    1m7.091s        user    0m52.890s       user    1m5.966s     
+sys     0m10.646s       sys     0m6.889s        sys     0m8.626s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       322%    (222% slower than mySplit)
-xargs:          185%    (85% slower than mySplit)
+parallel:       576%    (476% slower than mySplit)
+xargs:          161%    (61% slower than mySplit)
 mySplit:        100%
 
 
@@ -346,18 +377,18 @@ RESULTS FOR sha384sum
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m12.441s       real    0m5.710s        real    0m3.097s     
-user    0m43.585s       user    0m38.179s       user    0m50.946s    
-sys     0m10.890s       sys     0m7.422s        sys     0m9.228s      
+real    0m22.108s       real    0m4.485s        real    0m2.943s     
+user    0m57.591s       user    0m37.409s       user    0m48.557s    
+sys     0m10.656s       sys     0m6.935s        sys     0m8.564s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       401%    (301% slower than mySplit)
-xargs:          184%    (84% slower than mySplit)
+parallel:       751%    (651% slower than mySplit)
+xargs:          152%    (52% slower than mySplit)
 mySplit:        100%
 
 
@@ -375,18 +406,18 @@ RESULTS FOR md5sum
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m12.117s       real    0m5.334s        real    0m2.268s     
-user    0m42.003s       user    0m28.462s       user    0m34.789s    
-sys     0m10.752s       sys     0m7.533s        sys     0m9.228s      
+real    0m22.009s       real    0m4.367s        real    0m2.481s     
+user    0m54.170s       user    0m28.074s       user    0m33.299s    
+sys     0m10.793s       sys     0m7.058s        sys     0m8.574s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       534%    (434% slower than mySplit)
-xargs:          235%    (135% slower than mySplit)
+parallel:       887%    (787% slower than mySplit)
+xargs:          176%    (76% slower than mySplit)
 mySplit:        100%
 
 
@@ -404,18 +435,18 @@ RESULTS FOR sum -s
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m10.172s       real    0m2.354s        real    0m1.207s     
-user    0m20.606s       user    0m6.468s        user    0m10.942s    
-sys     0m10.860s       sys     0m7.944s        sys     0m8.930s      
+real    0m20.157s       real    0m2.840s        real    0m1.309s     
+user    0m33.584s       user    0m7.784s        user    0m11.150s    
+sys     0m10.804s       sys     0m7.778s        sys     0m8.708s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       842%    (742% slower than mySplit)
-xargs:          195%    (95% slower than mySplit)
+parallel:       1539%   (1439% slower than mySplit)
+xargs:          216%    (116% slower than mySplit)
 mySplit:        100%
 
 
@@ -433,18 +464,18 @@ RESULTS FOR sum -r
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m12.110s       real    0m5.244s        real    0m2.455s     
-user    0m42.128s       user    0m28.203s       user    0m33.128s    
-sys     0m10.788s       sys     0m7.293s        sys     0m8.424s      
+real    0m21.930s       real    0m4.359s        real    0m2.398s     
+user    0m53.694s       user    0m27.681s       user    0m32.038s    
+sys     0m10.639s       sys     0m6.669s        sys     0m7.906s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       493%    (393% slower than mySplit)
-xargs:          213%    (113% slower than mySplit)
+parallel:       914%    (814% slower than mySplit)
+xargs:          181%    (81% slower than mySplit)
 mySplit:        100%
 
 
@@ -462,18 +493,18 @@ RESULTS FOR cksum
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m10.269s       real    0m2.345s        real    0m1.124s     
-user    0m19.123s       user    0m4.930s        user    0m8.825s     
-sys     0m11.431s       sys     0m8.297s        sys     0m9.426s      
+real    0m20.169s       real    0m3.324s        real    0m1.215s     
+user    0m32.173s       user    0m6.940s        user    0m9.225s     
+sys     0m11.087s       sys     0m8.367s        sys     0m9.131s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       913%    (813% slower than mySplit)
-xargs:          208%    (108% slower than mySplit)
+parallel:       1660%   (1560% slower than mySplit)
+xargs:          273%    (173% slower than mySplit)
 mySplit:        100%
 
 
@@ -491,18 +522,18 @@ RESULTS FOR b2sum
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m11.863s       real    0m5.068s        real    0m2.637s     
-user    0m40.744s       user    0m33.379s       user    0m43.471s    
-sys     0m10.412s       sys     0m7.312s        sys     0m8.656s      
+real    0m21.816s       real    0m4.177s        real    0m2.720s     
+user    0m55.612s       user    0m33.948s       user    0m43.072s    
+sys     0m10.538s       sys     0m6.734s        sys     0m8.139s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       449%    (349% slower than mySplit)
-xargs:          192%    (92% slower than mySplit)
+parallel:       802%    (702% slower than mySplit)
+xargs:          153%    (53% slower than mySplit)
 mySplit:        100%
 
 
@@ -520,18 +551,18 @@ RESULTS FOR cksum -a sm3
 ---------------------
 
 -----parallel-----      ------xargs-------      -----mySplit------
-496132                  496132                  496132            
+489946                  489946                  489946            
                                                                   
-real    0m15.617s       real    0m13.097s       real    0m6.989s     
-user    1m26.295s       user    1m43.173s       user    2m6.733s     
-sys     0m10.557s       sys     0m7.986s        sys     0m9.783s      
+real    0m25.402s       real    0m12.021s       real    0m6.977s     
+user    1m36.885s       user    1m40.708s       user    1m59.938s    
+sys     0m10.920s       sys     0m7.379s        sys     0m8.926s      
 
 
 RELATIVE WALL-CLOCK TIME TAKEN
 ------------------------------
 
-parallel:       223%    (123% slower than mySplit)
-xargs:          187%    (87% slower than mySplit)
+parallel:       364%    (264% slower than mySplit)
+xargs:          172%    (72% slower than mySplit)
 mySplit:        100%
 
 
@@ -543,9 +574,9 @@ OVERALL RELATIVE WALL-CLOCK TIME RESULTS SUMMARY:
 
                 sha1sum         sha256sum       sha512sum       sha224sum       sha384sum       md5sum          sum -s          sum -r          cksum           b2sum           cksum -a sm3    OVERALL AVERAGE
 
-parallel:       529%            344%            399%            322%            401%            534%            842%            493%            913%            449%            223%            409%           
-xargs:          198%            196%            182%            185%            184%            235%            195%            213%            208%            192%            187%            194%           
+parallel:       941%            590%            714%            576%            751%            887%            1539%           914%            1660%           802%            364%            730%           
+xargs:          172%            168%            142%            161%            152%            176%            216%            181%            273%            153%            172%            170%           
 mySplit:        100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%            100%           
 
-OVERALL TIME TAKEN: 287 SECONDS
+OVERALL TIME TAKEN: 381 SECONDS
 EOF
