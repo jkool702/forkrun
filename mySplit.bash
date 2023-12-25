@@ -353,7 +353,7 @@ mySplit() {
                 ${inotifyFlag} && {
                     { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
                 } {fd_inotify1}>&${fd_inotify}
-                [[ ${verboseLevel} > 1 ]] && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
+                (( ${verboseLevel} > 1 )) && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
               }
             }
             exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
@@ -449,7 +449,7 @@ mySplit() {
                             printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines
 
                             # verbose output
-                            [[ ${verboseLevel} > 2 ]] && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
+                            (( ${verboseLevel} > 2 )) && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
 
                             nLinesCur=${nLinesNew}
                         }
@@ -461,7 +461,7 @@ mySplit() {
                                 fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
                                 (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
                                     fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}"
-                                    [[ ${verboseLevel} > 2 ]] && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
+                                    (( ${verboseLevel} > 2 )) && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
                                     fd_read_pos_old=${fd_read_pos}
                                 }
                                 nWait=$(( 16 + ( ${nProcs} / 2 ) ))
@@ -563,10 +563,10 @@ $(${nLinesAutoFlag} && echo """
 $(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || {
         [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {
-            $([[ ${verboseLevel} > 2 ]] && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
+            $( (( ${verboseLevel} > 2 )) && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
             until read -r -u ${fd_read} ${delimiterReadStr}; do A[-1]+=\"\${REPLY}\"; done
             A[-1]+=\"\${REPLY}\"${delimiterVal}
-            $([[ ${verboseLevel} > 2 ]] && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
+            $( (( ${verboseLevel} > 2 )) && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
         }
 """
 ${nOrderFlag} && echo """
@@ -603,16 +603,15 @@ $(${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
         { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {
-            $([[ ${verboseLevel} > 2 ]] && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
+            $( (( ${verboseLevel} > 2 )) && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
             A[-1]=\"\${A[-1]%${delimiterVal}}\"
             IFS=
             mapfile A <<<\"\${A[*]}\"
         }
 """
 ${subshellRunFlag} && echo '(' || echo '{'
-${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
-)
-    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ${noFuncFlag}; then printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; [[ ${verboseLevel} > 2 ]] && echo """ || {
+${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"')
+    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ${noFuncFlag}; then printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; (( ${verboseLevel} > 2 )) && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
@@ -698,7 +697,7 @@ p_PID+=(\${p{<#>}_PID})
         fi
 
         # print final nLines count
-        ${nLinesAutoFlag} && [[ ${verboseLevel} > 1 ]] && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
+        ${nLinesAutoFlag} && (( ${verboseLevel} > 1 )) && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
     ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_inotify0}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
