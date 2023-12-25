@@ -1,911 +1,973 @@
-#!/bin/bash 
+#!/usr/bin/env bash
 
-forkrun() {
-## Efficiently parallelize a loop / run many tasks in parallel using bash coprocs
-#
-# USAGE:   printf '%s\n' "${args}" | forkrun [flags] [--] parFunc [args0]
-# 
-# RESULT:  forkrun will run `$parFunc $args0 ${individual line from $args) in parallel for each line in $args
-#
-# EXAMPLE: find ./ -type f | forkrun sha256sum
-#
-# Usage:   Usage is vitruallu identical as running a loop in parallel using xargs -P or  parallel (using stdin):
-#          source this file, then pass inputs to parallelize over on stdin and pass function name and initial arguments as function inputs.
-#
-# HOW IT WORKS: For each simultanious process requested, a coproc is forked off. Data are then piped in/out of these coprocs.
-# Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are piped new data instead.
-# This makes this parallelization method MUCH faster than forking (for tasks with many short/quick tasks and on x86_64 machines
-# with many cores speedup can be >100x). In my testing / on my hardware it is also faster than both 'xargs -P' and 'parallel -m'
-#
-# NO FUNCTION MODE: forkrun supports an additional mode of operation where "parFunc" and "args0" are not given as function inputs, but instead are integrated into each line of "$args".
-#                   In this mode, each line passed on stin will be run as-is (by saving groups of 512 lines to tmp files and then sourcing them). This allows you to easily run multiple 
-#                   different functions in paralel and still utalize forkrun's very quick and efficient parallelization method. This mode has a few limitations/considerations:
-#                       1. The following flags are not supported and, if given, will be ignored: '-i', '-id', '-s' and '-l 1'
-#                       2. Lines from stdin will be "space-split" when run. Typically, forkrun splits stdin on newlines (or nulls, if -0z flag is given), allowing (for example)
-#                          paths that include a space (' ') character to work without needing any quoting. in "no function" mode however, the function and initial args are included in 
-#                          each line on stdin, so they must be space-split to run. Solution is to either quote things containing spaces or easpace the space characters ('\ '). Example:
-#
-#                   printf '%s\n' 'sha256sum "/some/path/with space character"' 'sha512sum "/some/other/path/with space characters"' | forkrun
-#
-# DEBUG MODE: pass 'DEBUG=<FLAGS>' before forkrun to run forkrun with `set <FLAGS>`. example: `find ./ -type f | DEBUG='-xv' forkrun` will run forkrun with `set -xv` set.
-#
-# # # # # # # # # # FLAGS # # # # # # # # # #
-#
-# Most of the xargs functionality and much of the "standard" parallel functionality (including some functionality not present in xargs) 
-# has been implemented in forkrun. Where possible, flags are the same as the analagous xargs / parallel flags, or as "common" shell flags.
-#
-# (-j|-p) <#>  Num Cores. Use either of these flags to specify the number of simultanious processes to use at a given time. The DEFAULT is to use the number of logical cpu cores
-# --procs=<#>  (requires either `nproc` or grep + access to procfs). If logic core count can not be determined, the DEFAULT is 8.
-#
-#    -l <#>    Num lines (from stdin) per function call. Use this flag to define the number of inputs to group together and pass to the worker coprocs.
-# --lines=#>   Sending multiple inputs at once typicallly is faster, though setting this higher than 512 or higher than ( # lines in stdin ) / ( # worker coprocs )
-#              tends to make forkrun slower, not faster. Set this to 0 (or dont set it at all) to have forkrun automatically set and adjust this parameter for you (DEFAULT). 
-#              NOTE:  not all functions (e.g., basename) support running multiple inputs at once. To use these fuctions with forkrun you MUST call forkrun with `-l 1`. Otherwise, use the default.
-#
-#      -i      Substitute {}. Use this flag to insert the argument passed via stdin in a specific spot in the function call indicated by '{}'. '{}' will be replaced with the current input anywhere it appears.
-#   --insert   Example: the standard forkrun usage, where the input is tacked on to the end of the function + args string, is roughly the same as `echo inputs | forkrun -I -- func arg1 ... arg N '{}'`
-#              Note: the entire group of inputs will be inserted at every {}. Depending on your specific usage, you may need to use `-l 1` to make this work right.
-#
-#     -id      Substitute {id}. In addition to what flag `'-i' does (replacing {} with stdin), if '{ID}' is present in the fuction's "$args0" (given as forkrun function inputs),
-# --insert-id  it will be substituted for the unique ID of the coproc worker that is currently running. This is similiar to xargs' `--process-slot-var` option.
-#              The original intent of this flag is (when combined with the '-u' flag) to allow one to send each coproc worker's output to different places. 
-#              EXAMPLE:  seq 1 1000 | forkrun -id -u -- printf '%s\n' {}  '>>.out.{ID}'      (note: flag '-i' is implied and automatically set by flag '-id')
-#
-#     -u       Unescape quoted redirects, pipes, and logical comparrisons. forkrun typically runs the initial function arguments ($args0) through `printf '%q'` prior to embedding them into the coprocs. 
-#  --unescape  This results in quoted pipes ('|'), redirects ('>', '>>') and logical comparrisons ('&&', '||') being escaped and treated as literal characters. Passing forkrun the '-u' flag
-#              makes forkrun unescape any '|', '>' or '&&' characters (which also unescapes '||' and '>>', but not '&'). This allows one to make the coprocs run (and parallelize), for example, piped commands. 
-#              EXAMPLE:  seq 1 1000 | forkrun -id -u -- printf '%s\n' {}  '>>.out.{ID}'
-#
-#      -k      Sorted output. Use this flag to force the output to be given in the same order as arguments were given on stdin. The "cost" of this is that a) you wont get 
-#    --keep    any output as the code runs - it will all come at one at the end; and b) the code runs slightly slower (typically 5-10%).  Behavior varies based on the -l flag 
-# --keep-order -l>1 (default): This will overwrite the split-generated files containing stdin with what will be stdout. forkrun then cat's these all after everything is done running.
-#              -l=1: This re-calls forkrun with the '-n' flag and then sorts the output. NOTE: SORTING MAY NOT ALWAYS BE CORRECT (and the function you are parallelizing can NOT produces any NULL characters) WHEN -L == 1. use flag '-ks' with '-l=1' if this is unacceptable. 
-#
-#    -ks       Use flag '-ks' or '--keep-order-strict' to force correct ordering in the case where -l=1 at the expense of slower run time. With MANY lines input of stdin slowdown may be considerable. NOTE: if -l>1 then '-ks' is identical to '-k'.
-#
-#      -n      Output with ordering info. Use this flag to force the output for each input batch to get pre-pended with "$'\034'<#>$'\034'", where <#> reprenents where that result's input(s) were in 
-#  --number    the input queue. Note: $'\034' is the ASCII field seperator. This will be pre-pended once per output group, and output groups will be seperated by NULL characters, allowing the original  
-#--line-number input order to be recreated easily using null-delimited parsing (e.g., with 'sort -z' and 'cut -z').  This is used by the '-k' flag (when -l=1) to re-order the output to the same order as the inputs
-#
-#  -t <path>   Set tmpdir root. Use this flag to set the base directory where tmp files containing groups of lines from stdin will be kept. Default is '\tmp'.
-# --tmp=<path> To speed up parsing stdin, forkrun splits up stdin into groups of $nBatch and saves them to [ram]disk. This path should not include whitespace characters.
-#              These temp input files are then deleted according to `--remove-tmp-dir` policy set (see below). Highly reccomend that this dir be on a tmpfs/ramdisk.
-#
-#   -d <#>     Set tmpdir deletion behavior. Specify behavior for deleting the temporary directory used to store stdin input batches. <#> must be 0, 1, 2, or 3. These respesent:
-# --delete=<#> [ 0 ] : Never remove the temporary directory
-#              [ 1 ] : Remove the temporary directory if 'forkrun' finishes normally. This is normally the DEFAULT.
-#              [ 2 ] : Remove the temporary directory in all situations, even if 'forkrun' did not finish running normally.
-#              [ 3 ] : Same as [ 'always' | 2 ], but also removes the individual tmp files containing lines from stdin as they are reead and no longer needed.
-#                      This lowers memory use (especially if stdin is *really* large) at the cost of increasing (wall-clock) run-time by ~5-10%.
-#                      This is the DEFAULT if forkrun is able to detect that the system has (in total) less than 8 gb of memory/RAM.
-#              NOTE: when -l>1 and -k flags are given, the split-generated input files are overwritten by the output (which is cat-ed after everything else finishes). In this situation, the original inputs will always be lost
-#                    and the -d flag contorls whether of not the output text (saves in files) is deleted. Also, in this case -d 3 cannot be specified / will be ignored.
-#
-#     -w       Wait for slow stdin. wait indefinately for the files generated by split (containing lines from stdin) to appear in $tmpDir. Normally, forkrun will wait ~5-10 seconds (up to 4096 `sleep 0.001s` calls)
-#   --wait     for `split` to output its first file. This is done to avoid a situation where there is an error somewhere in the pipe feeding forkrun (perhaps die to a typo), which causes forkrun
-#              to stall and become unresponsive while waiting for input on stdin. However, if the pipe feeding forkrun is giving data slowly and during this period has not provided 512 inputs (or EOF)
-#              to split this could cause forkrun to exit prematurely. give the `-w` flag to prevent this and have forkrun wait indefinately for the 1st split file. Note: has no effect if `-l=1`
-#
-#   (-0|-z)    Null seperated stdin. Assume that individual inputs passed on stdin are delimited by NULL's instead of by newlines. Note: that NULL-seperted inputs will be passed as-is to the function
-#   --null     being parallelized, so ensure that it supports and expects NULL-seperated inputs, not newline seperated ones. this note does not apply if you pass forkrun `-l 1`.  
-#              Notes: 1) 'split' must be available to use this flag. 2) this flag doesnt work if `-l 1` is set. 3) To avoid command substitution removing the null bytes,
-#              when this flag is used the inputs will be passed to the function being parallelized via stdin, not via function inputs. i.e., this implies flag '-s'
-#              
-#
-# (-s|--stdin) Pipe inputs to parFunc stdin. Input will be passed to the function being parallelized (parFunc) via stdin instead of via function arguments. Normally, forkrun passes inputs to parFunc via
-#    --pipe    export IFS=$'\n' && ${parFunc} $(<filePath)  --OR--   ${parFunc} ${lineFromStdin}.      When '-s' is specified, inputs are instead passed via stdin. i.e.,
-#              export IFS=$'\n' && ${parFunc} <filePath     --OR--   ${parFunc} <(echo ${lineFromStdin})
-#
-# (-v|--verbose) Increase verbosity. Currently, the only effect this has is that after parsing the forkrun options all the variables associated with forkrun options are printed to stderr.
-#
-# (-h|-?|--help) Display this help.
-#
-#      --      Denote last forkrun option. Use this flag to indicate that all remaining arguments are the 'functionName' and 'initialArgs'. Forkrun, by default, assumes "parFunc" is the 1st argument that
-#               does not begin with '-' is the function name and all remaining arguments are its initialArgs. Using '--' would allow you to parallelize a function that has a '-' as its first character.
-#
-#
-# NOTES: Flags must be given seperately ('-i' '-s', not '-is'). Flags are NOT case sensitive and can be given in any order, but must all be given before the "functionName" input. 
-#        For options that require an argument ( -[jpltd] ): in "short" versionsm, the ' ' can be removed or replaced with '='. e.g., to set -j|-p, the following all work: '-j' '<#>', '-p' '<#>', '-j<#>', '-p<#>, '-j=<#>', '-p=<#>' 
-#        Any of the above with an upper-case flag (-J|-P) will work as well. However, quoting 2 inputs/flags together with a space in between (e.g., '-j <#>') will NOT work.
-#        For long versions of flags: either the '=' or 2 seperate arguments is required. e.g., '--lines=0' and '--lines' '0' work, but '--lines0' will NOT will work (even though '-L0' works)
-#
-#
-# # # # # # # # # # DEPENDENCIES # # # # # # # # # #
-#
-# Where possible, forkrun uses bash builtins, making it have minimal dependencies. There are, however a handful of required external software packages.
-# NOTE: Items prefaced with '(*)' require the "full" [GNU coreutils] version....The busybox version is insufficient. On items prefaced with (x) either the full or busybox version will work.
-#
-# FOR ALL FUNCTIONALITY: bash 4.0 (or later) 
-#    full (gnu coreutil) versions of: split, sort and cut 
-#    full or busybox versions of:     which, wc, cat, mktemp, sleep, (nproc|grep)
-#
-# # # GENERAL DEPENDENCIES # # #
-# (*) Bash 4.0+ (this is when coprocs were introduced)
-# (x) wc
-#
-# # # FOR BATCH SIZE (-l) GREATER THAN 1 # # #
-# (*) split
-# (x) cat
-# (x) mktemp
-# (x) sleep
-#
-# # # FOR ORDERED OUTPUT (-k) (ONLY WHEN BATCH SIZE (-l) EQUALS 1) # # #
-# (*) sort
-# (*) cut
-#
-# # # FOR DETERMINING LOGICAL CORE COUNT # # #
-# (x) nproc --OR-- (x) grep + access to procfs (also for determining total system memory)
-# 
-#
-# # # # # # # # # # KNOWN ISSUES / BUGS / UNEXPECTED BEHAVIOR # # # # # # # # # #
-#
-# ISSUE: when running <...> | fokrun echo, forkrun does not produce output like what `seq 1 12` would give (1 value per line). Instead, you will get something like:
-#        1 2 3 4 
-#        5 6 7 8 
-#        9 10 11 12
-#
-# CAUSE: `echo` seemingly does not respect IFS=$'\n': setting IFS=$'\n' and giving it a newline-seperated list of things to echo
-#        results in everything on the same line and space seperated (instead of everything newline-seperated on its own line)
-#
-# WORKAROUND: use <...> | forkrun printf '%s\n' 
-#
-# 
-# ISSUE: in some situations, using the '-k' flag n combination with the '-l=1' flag *may* result in sorting not being correct
-#
-# CAUSE: I believe this is due to things getting send to stdout at the *exact* same time and getting the indexes jumbled up
-#
-# WORKAROUND: instead of flag '-k' ('--keep-order') use flag '-ks' ('--keep-order-strict'). This will force 100% correct ordering at the expense of speed
-#
-
-######################################################
-# # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #
-######################################################
-
-
-##########################################################################################################
-# # # # # # # # # # SECTION 1 -- DEFINE: LOCAL VARIABLES, SET OPTIONS, EXIT TRAPS, ... # # # # # # # # # #
-##########################################################################################################
-
-# enable job control
-set -m
-[[ -n ${DEBUG} ]] && set "${DEBUG}"
-
-# enable extglob
 shopt -s extglob
 
-# set exit trap to clean up
-trap 'exitTrap; return' EXIT HUP TERM QUIT 
+forkrun() {
+## Efficiently parallelize a loop / run many tasks in parallel *extremely* fast using bash coprocs
+#
+# USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
+#
+# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+#
+# For help / usage info, call forkrun with one of the following flags:
+#
+# --usage              :  display brief usage info (shown above)
+# -? | -h | --help     :  dispay standard help (does not include detailed info on flags)
+# --help=s[hort]       :  more detailed varient of '--usage'
+# --help=f[lags]       :  display detailed info about flags
+# --help=a[ll]         :  display all help (including detailed flag info)
 
-# enable line-by-line time profiling
-# timeProfileFlag=true
-#[[ -n ${timeProfileFlag} ]] && ${timeProfileFlag} && { [[ -f /usr/local/bin/addTimeProfile ]] || source <(curl https://raw.githubusercontent.com/jkool702/timeprofile/main/setup.bash); } && source /usr/local/bin/addTimeProfile
 
-# define exitTrap
-exitTrap() {
+############################ BEGIN FUNCTION ############################
 
-    # restore IFS
-    export IFS="${IFS0}"
+    trap - EXIT
 
-    # remove tmpDir if specified
-    (( ${rmTmpDirFlag} >= 2 )) && [[ -d "${tmpDir}" ]] && rm -rf "${tmpDir}"
+    shopt -s extglob
 
-    # shutdown all coprocs
-    for FD in "${FD_in[@]}"; do
-        [[ -e /proc/"${PID0}"/fd/${FD} ]] && printf '\0' >&${FD}
+    # make all variables local
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur outHave tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
+    local -a A p_PID runCmd 
+
+    # # # # # PARSE OPTIONS # # # # #
+
+    verboseLevel=0
+
+    # check inputs and set defaults if needed
+    [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
+    while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
+        case "${1}" in
+
+            -?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)[Pp]roc?(s)?([= ]))
+                nProcs="${2}"
+                shift 1
+            ;;
+
+            -?(-)j?([= ])*@([[:graph:]])*|-?(-)P?([= ])*@([[:graph:]])*|-?(-)?(n)[Pp]roc?(s)?([= ])*@([[:graph:]])*)
+                nProcs="${1##@(-?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)[Pp]roc?(s)?([= ]))}"
+            ;;
+
+            -?(-)?(n)l?(ine?(s)))
+                nLines="${2}"
+                nLinesAutoFlag=false
+                shift 1
+            ;;
+
+            -?(-)?(n)l?(ine?(s))?([= ])*@([[:graph:]])*)
+                nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
+                nLinesAutoFlag=false
+            ;;
+
+            -?(-)?(N)L?(INE?(S)))
+                nLines="${2}"
+                nLinesAutoFlag=true
+                shift 1
+            ;;
+
+            -?(-)?(N)L?(INE?(S))?([= ])*@([[:graph:]])*)
+                nLines="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
+                nLinesAutoFlag=true
+            ;;
+
+            -?(-)t?(mp?(?(-)dir)))
+                tmpDirRoot="${2}"
+                shift 1
+            ;;
+
+            -?(-)t?(mp?(?(-)dir))?([= ])*@([[:graph:]])*)
+                tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
+            ;;
+
+            -?(-)d?(elim?(iter)))
+                (( ${#2} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
+                (( ${#2} == 0 )) && nullDelimiterFlag=true || delimiterVal="${2:0:1}"
+                shift 1
+            ;;
+
+            -?(-)d?(elim?(iter))?([= ])**([[:graph:]])*)
+                delimiterVal="${1##@(-?(-)d?(elim?(iter))?([= ]))}"
+                (( ${#delimiterVal} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
+                (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
+            ;;
+
+            -?(-)i?(nsert))
+                substituteStringFlag=true
+            ;;
+
+            -?(-)I?(D)|-?(-)INSERT?(?(-)ID))
+                substituteStringIDFlag=true
+            ;;
+
+            -?(-)k?(eep?(?(-)order)))
+                nOrderFlag=true
+            ;;
+
+            -?(-)0|-?(-)z?(ero)|-?(-)null)
+                nullDelimiterFlag=true
+            ;;
+
+            -?(-)s?(ub)?(?(-)shell)?(?(-)run))
+                subshellRunFlag=true
+            ;;
+
+            -?(-)S|-?(-)[Ss]tdin?(?(-)run))
+                stdinRunFlag=true
+            ;;
+
+            -?(-)p?(ipe)?(?(-)read))
+                pipeReadFlag=true
+            ;;
+
+            -?(-)D|-?(-)[Dd]elete)
+                rmTmpDirFlag=true
+            ;;
+
+            -?(-)v?(erbose))
+                ((verboseLevel++))
+            ;;
+
+             -?(-)n?(umber)?(-)?(line?(s)))
+                exportOrderFlag=true
+            ;;
+
+            -?(-)N?(O)|-?(-)[Nn][Oo]?(-)func)
+                noFuncFlag=true
+            ;;
+
+            -?(-)u?(nescape))
+                unescapeFlag=true
+            ;;
+
+            -?(-)help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|-?(-)usage|-?(-)[h?])
+                forkrun_displayHelp "${1}"
+                return
+            ;;
+
+            +?([-+])i?(nsert))
+                substituteStringFlag=false
+            ;;
+
+            +?(-)I?(D)|+?(-)INSERT?(?(-)ID))
+                substituteStringIDFlag=false
+            ;;
+
+            +?([-+])k?(eep?(?(-)order)))
+                nOrderFlag=false
+            ;;
+
+            +?([-+])0|+?([-+])z|+?([-+])null)
+                nullDelimiterFlag=false
+            ;;
+
+            +?([+-])s?(ub)?(?(-)shell)?(?(-)run))
+                subshellRunFlag=false
+            ;;
+
+            +?([-+])S?(TDIN)?(?(-)RUN))
+                stdinRunFlag=false
+            ;;
+
+            +?([-+])p?(ipe)?(?(-)read))
+                pipeReadFlag=false
+            ;;
+
+            +?([-+])D|+?([-+])[Dd]elete)
+                rmTmpDirFlag=false
+            ;;
+
+            +?([-+])v?(erbose))
+                ((verboseLevel--))
+            ;;
+
+            +?([-+])n?(umber)?(-)?(line?(s)))
+                exportOrderFlag=false
+            ;;
+
+            +?([-+])N?(O)?(?(-)F?(UNC)))
+                noFuncFlag=false
+            ;;
+
+            +?([-+])u?(nescape))
+                unescapeFlag=false
+            ;;
+
+            --)
+                optParseFlag=false
+            ;;
+
+            @([-+])?([-+])*@([[:graph:]])*)
+                printf '\nERROR: FLAG "%s" NOT RECOGNIZED. ABORTING.\n\nNOTE: If this flag was intended for the code big parallelized: then:\n1. ensure all flags for forkrun come first\n2. pass '"'"'--'"'"' to denote where forkrun flag parsing should stop.\n\nUSAGE INFO:' "$1" >&2
+
+                forkrun_displayHelp --usage
+                return 1
+            ;;
+
+            *)
+                optParseFlag=false
+                break
+            ;;
+
+        esac
+
+        shift 1
+        [[ ${#} == 0 ]] && optParseFlag=false
+
     done
 
-    # kill all background jobs
-    jobs -rp | while read -r pidK; do
-        kill "${pidK}" 2>/dev/null
-    done
+    # # # # # SETUP TMPDIR # # # # #
 
-    # close pipes
-    ! [[ -e /proc/"${PID0}"/fd/"${fd_index}" ]] || exec {fd_index}>&-
+    [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
+    [[ -d "${tmpDirRoot}" ]] || mkdir -p "${tmpDirRoot}"
 
-    # unset traps
-    trap - EXIT HUP TERM QUIT DEBUG
-    return
-}
+    tmpDir="$(mktemp -p "${tmpDirRoot}" -d .forkrun.XXXXXX)"
+    fPath="${tmpDir}"/.stdin
 
-# make variables local
-local -a FD_in inAll parFunc
-local -i nSent0 nSentCur splitAgainNSent splitAgainNLines splitAgainNFiles nFinal nProcs nBatch nBatchCur workerIndex rmTmpDirFlag
-local fd_index IFS0 sendNext sendNext0 indexNext splitAgainPrefix splitAgainFileNames REPLY REPLYstr REPLYindexStr PID0 tmpDir tmpDirRoot timeoutCount orderedOutFlag strictOrderedOutFlag exportOrderFlag nullDelimiterFlag substituteStringFlag substituteStringIDFlag pipeFlag verboseFlag waitFlag noFuncFlag haveSplitFlag batchFlag stdinReadFlag autoBatchFlag splitAgainFlag unescapeFlag getInputFileName getNextInputFileName
+    mkdir -p "${tmpDir}"/.run
+    : >"${fPath}"
 
-#local -i nArgs
-#local -i nSent
-#local -i nDone
-#local -a FD_out
-#local -a pidA
-#local pCur
-#local pCur_PID
+    # # # # # BEGIN MAIN SUBSHELL # # # # #
 
-# record main process PID
-PID0=$$
+    # several file descriptors are opened for use by things running in this subshell. See clkosing `)` near the end of this function.
+    (
 
-# record IFS, so we can change it back to what it originally was in the exit trap
-IFS0="${IFS}"
-export IFS=$'\n'
+        # # # # # INITIAL SETUP # # # # #
 
-# open anonymous pipe. 
-# This is used by the coprocs to indicate that they are done with a task and ready for another.
-exec {fd_index}<><(:)
+        export LC_ALL=C
+        export LANG=C
+        export IFS=
+        umask 177
 
+        shopt -s nullglob
 
-################################################################################
-# # # # # # # # # # SECTION 2 -- PARSE FORKRUN FLAGS/OPTIONS # # # # # # # # # #
-################################################################################
+        # dynamically set defaults for a few flags
 
-# parse inputs, set forkrun flags and options (using defaults when needed)
-# note: any initial arguments (args0) are rolled into variable $parFunc
-orderedOutFlag=false
-strictOrderedOutFlag=false
-exportOrderFlag=false
-nullDelimiterFlag=false
-substituteStringFlag=false
-substituteStringIDFlag=false
-pipeFlag=false
-verboseFlag=false
-waitFlag=false
-noFuncFlag=false
-tmpDirRoot='/tmp'
-nProcs=0
-nBatch=0
-[[ -f /proc/meminfo ]] && (( $(grep 'MemTotal' /proc/meminfo | grep -oE '[0-9]+') < 8388608 )) && rmTmpDirFlag=3 || rmTmpDirFlag=1
-inAll=("${@}")
+        # check verboseLevel
+        (( ${verboseLevel} < 0 )) && verboseLevel=0
+        (( ${verboseLevel} > 3 )) && verboseLevel=3
 
-while [[ "${1,,}" =~ ^-+.+$ ]]; do
-    if [[ "${1,,}" =~ ^-+(j|(n?procs?)?))$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
-        # set number of worker coprocs
-        nProcs="${2}"
-        shift 2
-    elif [[ "${1,,}" =~ ^-+((j)|(p(rocs)?))=?[0-9]+$ ]]; then
-        # set number of worker coprocs
-        nProcs="${1#*[jpJP]}"
-        nProcs="${nProcs#*=}"
-        shift 1
-    elif [[ "${1,,}" =~ ^-+l(ines)?$ ]] && [[ "${2}" =~ ^[0-9]+$ ]]; then
-        # set number of inputs to use for each parFunc call
-        nBatch="${2}"
-        shift 2
-    elif [[ "${1,,}" =~ ^-+l(ines)?=?[0-9]+$ ]]; then
-        # set number of inputs to use for each parFunc call
-        nBatch="${1#*[lL]}"
-        nBatch="${nBatch#*=}"
-        shift 1
-    elif [[ "${1,,}" =~ ^-+i(nsert)?$ ]]; then
-        # specify location to insert inputs with {} 
-        substituteStringFlag=true
-        shift 1    
-    elif [[ "${1,,}" =~ ^-+i(nsert-?i)?d?$ ]]; then
-        # specify location to insert inputs with {} 
-        substituteStringFlag=true
-        substituteStringIDFlag=true
-        shift 1
-    elif [[ "${1,,}" =~ ^-+k(eep(-?order)?)?$ ]]; then
-        # user requested ordered output
-        orderedOutFlag=true
-        shift 1    
-    elif [[ "${1,,}" =~ ^-+((ks)|(keep(-?order)?-?strict))$ ]]; then
-        # user requested ordered output
-        orderedOutFlag=true
-        strictOrderedOutFlag=true
-        shift 1    
-    elif [[ "${1,,}" =~ ^-+n(umber(-?lines)?)?$ ]]; then
-        # make output include input sorting order, but dont actually re-sort it. 
-        # used internally with -k to allow for auto output re-sorting
-        exportOrderFlag=true
-        shift 1    
-    elif [[ "${1,,}" =~ ^-+(([0z])|(null))$ ]]; then
-        # items in stdin are seperated by NULLS, not newlines
-        nullDelimiterFlag=true
-        pipeFlag=true
-        shift 1      
-    elif [[ "${1,,}" =~ ^-+u(nescape)?$ ]]; then
-        # unescape '|' '>' '>>' '||' and '&&' in args0
-        unescapeFlag=true
-        shift 1
-    elif [[ "${1,,}" =~ ^-+((s(tdin)?)|(pipe))$ ]]; then
-        # items in stdin are seperated by NULLS, not newlines
-        pipeFlag=true
-        shift 1    
-    elif [[ "${1,,}" =~ ^-+t(mp)?$ ]] && [[ "${2}" =~ ^.+$ ]]; then
-        # set tmpDir root path
-        tmpDirRoot="${2}"
-        shift 2
-    elif [[ "${1,,}" =~ ^-+t(mp)?=?.+$ ]]; then
-        # set tmpDir root path
-        tmpDirRoot="${1#*[tT]}"
-        tmpDirRoot="${tmpDirRoot#*=}"
-        shift 1
-    elif [[ "${1,,}" =~ ^-+d(elete)?$ ]] && [[ "${2}" =~ ^[0-3]$ ]]; then
-        # set policy to remove temp files containing data from stdin
-         rmTmpDirFlag="${2}"
-        shift 2
-    elif [[ "${1,,}" =~ ^-+d(elete)?=?[0-3]$ ]]; then
-        # set policy to remove temp files containing data from stdin
-        rmTmpDirFlag="${1#**[dD]}"
-        rmTmpDirFlag="${1#*=}"
-        shift 1    
-    elif [[ "${1,,}" =~ ^-+[\?h](elp)?$ ]]; then
-        # display help
-        local helpText 
-        helpText="$(<"${BASH_SOURCE[0]}")" || helpText="$(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)"
-        helpText="${helpText%%'# # # # # # # # # # BEGIN FUNCTION # # # # # # # # # #'*}"
-        printf '%s\n' "${helpText//$'\n''#'/$'\n'}"
-        return    
-    elif [[ "${1,,}" =~ ^-+v(erbose)?$ ]]; then
-        # increase verbosity
-        verboseFlag=true
-        shift 1
-    elif [[ "${1,,}" =~ ^-+w(ait)?$ ]]; then
-        # wait indefinately for split to output a file
-        waitFlag=true
-        shift 1
-    elif [[ "${1}" == '--' ]]; then
-        # stop processing forkrun options
-        shift 1
-        break
-    else
-        # ignore unrecognized input
-        printf '%s\n' "WARNING: INPUT '${1}' NOT RECOGNIZED AS A FORKRUN OPTION. IGNORING THIS INPUT." >&2
-        shift 1
-    fi
-done
-# all remaining inputs are functionName / initialArgs
+        # determine what forkrun is using lines on stdin for
+        [[ ${FORCE} ]] && runCmd=("${@}") || runCmd=("${@//$'\r'/}")
+        : "${noFuncFlag:=false}"
+        (( ${#runCmd[@]} > 0 )) || ${noFuncFlag} || runCmd=(printf '%s\n')
+        (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
+        ${noFuncFlag} && runCmd=('source')
 
-# check that we dont have both -n and -k. If so, -k supercedes -n
-if ${orderedOutFlag} && ${exportOrderFlag}; then
-    exportOrderFlag=false
-    inAll=("${inAll[@]//'-n'/}")
-    printf '%s\n' "WARNING: BOTH '-k' and '-n' FLAGS WERE PASSED TO FORKRUN. THESE FLAGS ARE MUTUALLY EXCLUSIVE." "'-k' SUPERCEDES '-n'. IGNORING '-n' FLAG." >&2
-fi
+        # set batch size
+        { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
+        { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
 
-# return if we dont have anything to parallelize over
-(( ${#} == 0 )) && { printf '%s\n' 'NOTICE: NO FUNCTION SPECIFIED. COMMANDS PASSED ON STDIN WILL BE DIRECTLY EXECUTED.' >&2; noFuncFlag=true; } || { type -a "${1%%[ $'\n'$'\t']*}" 1>/dev/null 2>/dev/null || declare -F "${1%%[ $'\n'$'\t']*}" 2>/dev/null; } || { printf '%s ' 'ERROR: THE FUNCTION SPECIFIED IS UNKNOWN / CANNOT BE FOUND. ABORTING' $'\n''FUNCTION SPECIFIED: ' "${@}" $'\n' >&2 && return 1; }
-[[ -t 0 ]] && printf '%s\n' 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (NOT A PIPE). ABORTING' >&2 && return 2
+        # set number of coproc workers
+        { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || nProcs=$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')
 
-# check if we are automatically setting nBatch
-(( ${nBatch} == 0 )) && { nBatch=512; autoBatchFlag=true; } || autoBatchFlag=false
-(( ${nBatch} == 1 )) && ! ${strictOrderedOutFlag} && { batchFlag=false; rmTmpDirFlag=0; nullDelimiterFlag=false; waitFlag=false; } || batchFlag=true
+        # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
+        ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
-${orderedOutFlag} && ! ${batchFlag} && printf '%s\n' '' 'WARNING: SORTED OUTPUT (-k) IS NOT GUARANTEED WHEN ONE-LINE-AT-A-TIME MODE (-l = 1) IS USED' 'TO GUARANTEE SORTRED OUTPUT (AT THE EXPENSE OF SLOWER RUN TIME) USE FLAG '"'"'-ks'"'"' instead of flag '"'"'-k'"'" '' >&2
+        # check for inotifywait
+        type -a inotifywait &>/dev/null && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
 
-# if user requested ordered output, re-run the forkrun call trading flag '-k' for flag '-n',
-# then sort the output and remove the ordering index. Flag '-n' causes forkrun to do 2 things: 
-# a) each "result group" (fron a particular batch of nBatch input lines) is NULL seperated
-# b) each result group is pre-pended with the index/order that it was recieved in from stdin.
-if ${orderedOutFlag} && ! ${batchFlag}; then
-    #local outAll
-    #printf '%s' "$(forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -n -k2 -t$'\034' | cut -d$'\034' --output-delimiter=$'\n' -f 3-)" | sed -E s/'[^[:print:]]+'/'\n'/
-    printf '%s\n' "$(forkrun "${inAll[@]//'-k'/'-n'}" | LC_ALL=C sort -z -d -k2 -t$'\034' | cut -f 3- --output-delimiter=$'\n' -d$'\034' -z)"
-    return
-fi
+        # check for fallocate
+        type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
-# finish parsing args
+        # set defaults for control flags/parameters
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
 
-# default nProcs is number of logical cpu cores
-(( ${nProcs} == 0 )) && nProcs=$({ type -a nproc 2>/dev/null 1>/dev/null && nproc; } || grep -cE '^processor.*: ' /proc/cpuinfo || printf '8')
+        # check for conflict in flags that were  defined on the commandline when forkrun was called
+        ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
 
-# check if we have split
-type -a split 1>/dev/null 2>/dev/null && haveSplitFlag=true || { haveSplitFlag=false; batchFlag=false; }
-${haveSplitFlag} || { autoBatchFlag=false; nullDelimiterFlag=false; }
+        # require -k to use -n
+        ${exportOrderFlag} && nOrderFlag=true
 
-${noFuncFlag} && { ${batchFlag} || { batchFlag=true; nBatch=512; printf '%s\n' 'WARNING: ONE-LINE-AT-A-TIME MODE (-l 1) IS NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THIS FLAG.' '(IN THIS USE CASE IT REALLY GIVES NO BENEFIT AND SLOWS THINGS DOWN ANYWAYS)' >&2; }; }
+        # setup delimiter
+        if ${nullDelimiterFlag}; then
+            delimiterReadStr="-d ''"
+        elif [[ -z ${delimiterVal} ]]; then
+            delimiterVal='$'"'"'\n'"'"
+            delimiterRemoveStr='%$'"'"'\n'"'"
+        else
+            delimiterVal="$(printf '%q' "${delimiterVal}")"
+            delimiterRemoveStr="%${delimiterVal}"
+            delimiterReadStr="-d ${delimiterVal}"
+        fi
 
-# prepare temp directory to store split stdin
-mkdir -p "${tmpDirRoot}"
-tmpDir="$(mktemp -d -p "${tmpDirRoot%/}" -t '.forkrun.XXXXXX')"
-touch "${tmpDir}"/xAll
-
-# if (( nBatch > 1 )) then split up input into files undert $tmpDir, each of which contains $nBatch lines and define a function for getting the next file name
-# do this as early as possible so it can work in the background while the script sets itself up
-#${batchFlag} && ${haveSplitFlag} && {
-if ${batchFlag}; then
-    # split into files, each containing a batch of $nBatch lines from stdin, using 'split'
-
-    if ${nullDelimiterFlag}; then 
-        {
-            # split NULL-seperated stdin
-            split -t '\0' -d -l "${nBatch}" - "${tmpDir}"'/x' <&4  
-        } 4<&0 &
-    else 
-        {
-            # split newline-seperated stdin
-            split -d -l "${nBatch}" - "${tmpDir}"'/x' <&4 
-        } 4<&0 &
-    fi
- 
-else
-    # not batching. Save stdin to a tmpfile
-    {
-        cat <&4 >"${tmpDir}"/xAll
-    } 4<&0 &
-fi
-
-# incorporate string to get input into the function string
-${substituteStringFlag} && ! [[ "${*}" == *'{}'* ]] && printf '%s\n' "WARNING: {} NOT FOUND IN FUNCTION STRING OR INITIAL ARGS. LINES FROM STDIN WILL NOT BE PASSED TO THE FUNCTION' 'THE FUNCTION AND ANY INITIAL ARGS WILL BE RUN (WITHOUT ANY OF THE ARGS FROM STDIN) ONCE FOR EACH LINE IN STDIN' 'IF THIS BEHAVIOR IS UNDESIRED, RE-RUN FORKRUN WITHOUT THE '-i' FLAG" >&2
-
-# generate strings that will be used by the coprocs (when they are sourced later on) to actually call the function being parallelized with $nBatch input lines from stdin
-# The function + initial args given as forkrun function inputs need to be `printf '%q'` quoted, but the command that gets the lines from stdin out of the file generated by split needs to be unquoted
-if ${noFuncFlag}; then
-    mapfile -t parFunc < <(printf '%q\n' "source")
-    ! ${substituteStringFlag} && ! ${substituteStringIDFlag} || { substituteStringFlag=false; substituteStringIDFlag=false; printf '%s\n' 'WARNING: STRING SUBSTITUTION (-i | -id) NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THESE FLAGS.' >&2; }
-    ! ${pipeFlag} || { pipeFlag=false; printf '%s\n' 'WARNING: INPUT PIPING (-s) NOT AVAILABLE' 'WHEN NO FUNCTION IS PROVIDED. DISABLING THIS FLAG.' >&2; }    
-else
-    # modify parfunc if '-i' '-id' or '-u' flags are set
-    mapfile -t parFunc < <(printf '%q\n' "${@}")
-    ${substituteStringFlag} && {     
-        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{\}'/'{}'}") 
-    } && ${substituteStringIDFlag} && { 
-        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\{ID\}'/'${kk}'}") 
-    }
-    ${unescapeFlag} && {
-        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\>'/'>'}") 
-        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\<'/'<'}") 
-        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\|'/'|'}")
-        mapfile -t parFunc < <(printf '%s\n' "${parFunc[@]//'\&\&'/'&&'}")
-    }
-fi
-
-# if verboseFlag is set, print theparameters we just parsed to srderr
-${verboseFlag} && {
-printf '%s\n' '' "DONE PARSING INPUTS! Selected forkrun options:" ''
-printf '%s\n' "parFunc = $(printf '%s ' "${parFunc[@]}")" "nProcs = ${nProcs}" "nBatch = ${nBatch}" "tmpDirRoot = ${tmpDirRoot}" "rmTmpDirFlag = ${rmTmpDirFlag}"
-${orderedOutFlag} && printf '%s\n' "orderedOutFlag = true" || printf '%s\n' "orderedOutFlag = false"
-${exportOrderFlag} && printf '%s\n' "exportOrderFlag = true" || printf '%s\n' "exportOrderFlag = false"
-${haveSplitFlag} && printf '%s\n' "haveSplitFlag = true" || printf '%s\n' "haveSplitFlag = false"
-${nullDelimiterFlag} && printf '%s\n' "nullDelimiterFlag = true" || printf '%s\n' "nullDelimiterFlag = false"
-${autoBatchFlag} && printf '%s\n' "autoBatchFlag = true" || printf '%s\n' "autoBatchFlag = false"
-${substituteStringFlag} && printf '%s\n' "substituteStringFlag = true" || printf '%s\n' "substituteStringFlag = false"
-${substituteStringIDFlag} && printf '%s\n' "substituteStringIDFlag = true" || printf '%s\n' "substituteStringIDFlag = false"
-${batchFlag} && printf '%s\n' "batchFlag = true" || printf '%s\n' "batchFlag = false"
-${pipeFlag} && printf '%s\n' "pipeFlag = true" || printf '%s\n' "pipeFlag = false"
-#${verboseFlag} && printf '%s\n' "veboseFlag = true" || printf '%s\n' "veboseFlag = false"
-printf '\n'
-} >&2
-
-
-################################################################################
-# # # # # # # # # # SECTION 3 -- DEFINE SUPPORTING FUNCTIONS # # # # # # # # # #
-################################################################################
-{
-
-
-#else
- # use printf + sed to transform input into repeated blocks of the following form: printf '%s\n' ''' ${in1//'/'"'"'} ... ${inN//'/'"'"'} ''' > ${tmpDir}/in${kk}; ((kk++))
-    # then use 'source' to execute this entire input, which will issue the commands needed to write each batch of N inputs to $tmpDir
-    # Note: using ''' <...> ''' + encasing all single quotes in stdin by double quotes ('"'"') *should* prevent any of the file names from being executed as code unintentionally in normal usage, but might be exploitable. If you dont have `split` perhaps dont run forkrun as root...
- #   {
-  #      source <(printf '%s\n' 'kk=0'; export IFS=$'\n' && printf 'printf '"'"'%%s'"'"' '"\'\'\'"'\n'"$(export IFS=$'\n' && printf '%%s\\n%.0s' $(seq 1 ${nBatch}))\'\'\'"' > ${tmpDir}/x${kk}\n((kk++))\n' $(sed -E s/"'"/"'"'"'"'"'"'"'"/g </dev/stdin) ) &
-   # } 0<&6
-
-
-getNextInputFileName() {
-    ## get the name of the next file generated by split.
-    # input 1 is prefix. input 2 is current split-generated file name.
-    # this is faster than the (more general) getInputFileName, but only will provide the immediate next file name.
-
-    local x
-    local x_prefix
-
-    x_prefix="${1}"
-    [[ ${2:${#x_prefix}:1} == 0 ]] && x_prefix+='0'
-    
-    x="${2:${#x_prefix}}"
-    
-    [[ "$x" == '9' ]] && x_prefix="${x_prefix:0:-1}"
-
-    if [[ "${x}" =~ ^9*89+$ ]]; then
-        ((x++))
-        x+='00'
-    else
-        ((x++))
-    fi
-
-    printf '%s%s' "${x_prefix}" "${x}"
-}
-
-getInputFileName() {
-    ## transform simple count of sent files into file names used by `split -d`
-    # `split -d` names the output files in an "unusual"  way to try and ensure output will always sort correctly. it goes:
-    # x00 --> x89 (90 vals), then x9000 --> x9899 (900 vals), then x990000 -->998999 (9000 vals), etc
-    #
-    # this function transforms a simple count (0, 1, 2, 3, ...) into the `x___` names used by split
-
-    local x; 
-    local x0; 
-    local exp;
-    local prefix;
-
-    prefix="${1}"
-    shift 1
-
-    for x0 in "${@}"; do 
-        x=${x0}; 
-        exp=1;  
-        printf '%s' "${prefix}"
-        while true; do
-            (( ${x} >= ( 9 * ( 10 ** ${exp} ) )  )) && { x=$(( ${x} - ( 9 * ( 10 ** ${exp} ) ) )) && ((exp++)) && printf '%d' '9'; } || { printf '%0.'$(( 1 + ${exp} ))'d\n' "${x}" && break; }
-        done
-    done
-}
-
-
-#################################################################
-# # # # # # # # # # SECTION 4 -- FORK COPROCS # # # # # # # # # #
-#################################################################
-
-# fork off $nProcs coprocs and record FDs / PIDs for them
-#
-# unfortunately this requires a source <(...) [or eval <...>] call to do dynamically... without this the coproc index "$kk" doesnt get properly applied in the loop.
-# as such, the below code does not directly spawn the worker coprocs. Rather, it generates code which, when sourced, will spawn the required coprocs, and then sources this code.
-#
-# for nBatch == 1 : the coproc will recieve/read the line from stdin to run (and if needed ordering index) in the REPLY read from the input pipe.
-# for nBatch > 1  : the coproc will recieve/read the file name of the file (under $tmpDir) to read to get the next batch of lines from the REPLY read from the input pipe.
-#                   If needed, the file name is used as the ordering index.
-#
-# The coproc will then run the group of $nBatch line(s) though the function
-# if ordered output (-n) is requested, the output will have the ordering index (plus a $'\t') pre-pended to each output from running each group of nBatch lines, and each group will be NULL-seperated.
-# 
-# after each worker finishes its current task, it sends its index to pipe {fd_index} to recieve another task. 
-# when all tasks are finished (i.e., everything has been run), each coproc worker will be send a null input, causing it to break its 'while true' loop and terminate
-
-# set a a string for how we will pass inputs to the function we are parallelizing. This string will be used in the coproc code that is generated and sourced below
-if ${batchFlag}; then
-    # REPLY is file name in $tmpDir containing lines from stdin. cat the file using '$(<file)' or (if pipeFlag is set) pass it directly using '<file'
-    if ${noFuncFlag}; then
-        REPLYstr='"'"${tmpDir}"'/${REPLY}"'
-    elif ${pipeFlag}; then 
-        REPLYstr='<"'"${tmpDir}"'/${REPLY}"'
-    else        
-        REPLYstr='$(<"'"${tmpDir}"'/${REPLY}")'
-    fi
-
-    # define string that will generate index representing input order
-    ${exportOrderFlag} && REPLYindexStr='${REPLY#x}'
-
-else
-    # not using batching --> REPLY is a line from stdin
-    if ${exportOrderFlag}; then
-        # REPLY has been pre-pended with input order index. Remove it
-        REPLYstr='${REPLY#*$'"'"'\t'"'"'}'
-
-        # define string that will generate index representing input order
-        REPLYindexStr='${REPLY%%$'"'"'\t'"'"'*}'
-    else
-        # REPLY contains just a line from stdin. Use it as-is
-        REPLYstr='${REPLY}'
-    fi
-    # if pipeFlag is set pass this to stdin instead of giving it as a function input
-    ${pipeFlag} && REPLYstr='<('"${REPLYstr}"')'
-fi
-
-${substituteStringFlag} && parFunc=("${parFunc[@]//'{}'/"${REPLYstr}"}") || parFunc+=("${REPLYstr}")
-
-# generate source code (to be sourced) for coproc workers. Note that:
-# 1) the "structure of" / "template used to generate" the coprocs will vary between several possibilities depending on which forkrun options/flags are set
-# 2) the function + initial args (passed as forkrun function inputs) will be "hard-coded" in the code for each coproc
-for kk in $(seq 0 $(( ${nProcs} - 1 ))); do
-
-source <(cat<<EOI0
-{ coproc p${kk} {
-trap - EXIT HUP TERM INT 
-set -f +B
-$([[ -n ${DEBUG} ]] && printf '%s\n' 'set '"${DEBUG}")
-export IFS=\$'\\n'
-
-while true; do 
-    read -r -d '' -u 7
-    [[ -z \${REPLY} ]] && break
-
-$(if ${exportOrderFlag}; then
-cat<<EOI1
-    {
-        printf '\\034%s\\034%s\\n\\0' "${REPLYindexStr}" "\$(export IFS=\$'\\n' && $(printf '%s ' "${parFunc[@]}"))"
-    } >&8
-EOI1
-else
-cat<<EOI2
-    { 
-    export IFS=\$'\\n' && $(printf '%s ' "${parFunc[@]}") $(${orderedOutFlag} && ${batchFlag} && printf '%s\n' '> "'"${tmpDir}"'/${REPLY}"')
-    } >&8
-EOI2
-fi)
-    printf '%s\\0' ${kk} >&\${fd_index}
-$( (( ${rmTmpDirFlag} >= 3 )) && ! { ${orderedOutFlag} && ${batchFlag}; } && cat<<EOI3
-    rm -f "${tmpDir}/\${REPLY}"
-EOI3
-)
-done
-} 7<&0
-} 8>&9
-FD_in[${kk}]="\${p${kk}[1]}"
-EOI0
-)
-    # record PIDs and i/o pipe file descriptors in indexed arrays (OLD -- NOT USED)
-    #local -n pCur="p${kk}"
-    #FD_in[${kk}]="${pCur[1]}"
-    #FD_out[${kk}]="${pCur[0]}"
-    #local +n pCur
-    #local -n pCur_PID="p${kk}_PID"
-    #pidA[${kk}]="$pCur_PID"
-    #local +n pCur_PID
-
-done
-
-
-##############################################################################
-# # # # # # # # # # SECTION 5 -- MAIN PARALLELIZATION LOOP # # # # # # # # # #
-##############################################################################
-
-# set initial vlues for the loop
-#nSent=0
-#nDone=0
-nSent0=0
-nSentCur=0
-nFinal=${nProcs}
-stdinReadFlag=true
-splitAgainFlag=false
-
-# populate pipe {fd_index} with $nprocs initial indicies - 1 for each coproc
-printf '%d\0' "${!FD_in[@]}" >&${fd_index}
-
-# get next file name to send based on nSent
-if ${autoBatchFlag}; then
-    # when forkrun starts: automatically re-split available input files into $nProcs equal files if there arent enough to fully saturate $nProcs coprocs with 1+ round of $nBatch inputs
-
-    if [[ -f "${tmpDir}/$(getInputFileName 'x' $(( ${nProcs} - 1 )))" ]]; then
-        # Check if there are $nProcs not-yet-read stdin files generated by split available. 
-        # If so then we have at least enough inputs to do 1+ set of $nBatch inputs on each coproc worker, 
-        # so we dont need to adjust nBatch anymore --> turn off autoBatchFlag
-        sendNext="x00"
-        autoBatchFlag=false
-
-    else
-        # we dont (yet) have $nProcs files containing stdin ready to go. This indicates either we dont have that many inputs, or they are comming in on stdin slowly.
-        # take the inputs we do already have saved in files and re-split them into $nProcs new files. A flag gets set to indicate we must deal with these before going back to normal operation.
-
-        # ensure we have at least the 1st file (x00) before continuing
-        [[ -f "${tmpDir}/x00" ]] || {
-            ${waitFlag} || timeoutCount=4096
-            until [[ -f "${tmpDir}/x00" ]]; do 
-                sleep 0.001s
-            if ! ${waitFlag}; then
-                    ((timeoutCount--))
-                    (( ${timeoutCount} == 0 )) && printf '%s\n' 'ERROR: NO FILES CONTAINING LINES FROM STDIN HAVE APPEARED ON '"$tmpDir" 'THIS LIKELY MEANS THERE WAS AN ERROR SOMEWHERE IN THE PIPE FEEDING FORKRUN' 'ABORTING TO AVOID GETTING STUCK IN AN INFINITE WAIT LOOP' 'TO FORCE FORKRUN TO WAIT INDEFINATELY FOR AN INPUT, PASS IT FLAG '"'"'-w'"'" && return 3
-                fi
-            done
-        }
-
-        # set flag and initial paramaters for dealing with the re-split files
-        splitAgainFlag=true
-        nSentCur=0
-        sendNext0='x00'
-        splitAgainPrefix="x00_x"
-
-
-        # determine how many files we actually have available. Should be somewhere between 1 and $(( $nProcs - 1 ))
-        splitAgainFileNames="$(kk=1; while [[ -f "${tmpDir}/${sendNext0}" ]] && (( ${kk} < ${nProcs} )); do
-            printf '%s\n' "${tmpDir}/${sendNext0}" 
-            sendNext0="$(getNextInputFileName 'x' "${sendNext0}")"
-            ((kk++))
-        done)"
-        sendNext0="${splitAgainFileNames##*$'\n'}"
-        sendNext0="${sendNext0##*/}"
-
-
-        # record how many files we will be re-combining and re-splitting to figure out how many lines to put in each re-split file to split them evenly.
-        splitAgainNSent="$(printf '%s\n' "${splitAgainFileNames}" | wc -l)"
-        splitAgainNLines="$(export IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l)"
-        (( ${splitAgainNLines} < ${nProcs} )) && splitAgainNFiles="${splitAgainNLines}" || splitAgainNFiles="${nProcs}"
-
-        nBatchCur=$(( 1 + ( ( ${splitAgainNLines} - 1 ) / ${nProcs} ) )) 
-
-        # recombine (with cat -s to suppress long series of blanks) and then re-split into files with equal number of lines
-        { 
-            export IFS=$'\n' && cat -s ${splitAgainFileNames}
-        } | {
-            if ${nullDelimiterFlag}; then
-                # split NULL-seperated
-                split -l "${nBatchCur}" -t '\0' -d - "${tmpDir}/${splitAgainPrefix}"
-            else
-                # split newline-seperated
-                split -l "${nBatchCur}" -d - "${tmpDir}/${splitAgainPrefix}"    
-            fi
-        }
-        sendNext="x00_x00"
-
-     # remove original files that went into splitAgain files is -d=3 or we are ordering output(to prevent inxcluding them in the output)
-    { (( ${rmTmpDirFlag} == 3 )) || ${orderedOutFlag}; } && {
-            export IFS=$'\n' && rm -f ${splitAgainFileNames}
-        }
-    fi
-
-elif ${batchFlag}; then
-    # using batching but not re-splitting. wait for 1st file (x00) to appear then continue
-    [[ -f "${tmpDir}/x00" ]] || {
-        ${waitFlag} || timeoutCount=4096
-        until [[ -f "${tmpDir}/x00" ]]; do 
-            sleep 0.001s
-        if ! ${waitFlag}; then
-                ((timeoutCount--))
-                (( ${timeoutCount} == 0 )) && printf '%s\n' 'ERROR: NO FILES CONTAINING LINES FROM STDIN HAVE APPEARED ON '"$tmpDir" 'THIS LIKELY MEANS THERE WAS AN ERROR SOMEWHERE IN THE PIPE FEEDING FORKRUN' 'ABORTING TO AVOID GETTING STUCK IN AN INFINITE WAIT LOOP' 'TO FORCE FORKRUN TO WAIT INDEFINATELY FOR AN INPUT, PASS IT FLAG '"'"'-w'"'" && return 3
-            fi
-        done
-    }
-    sendNext='x00'  
-else
-    # not using batching. read 1 line from stdion and store it
-    indexNext='x00'
-    read -r -u 6 sendNext
-    [[ -n "${sendNext}" ]] || { printf '%s\n' 'ERROR: NO INPUT ARGUMENTS GIVEN ON STDIN (EMPTY PIPE). ABORTING' >&2 && return 3; }
-fi
-
-
-# begin main loop. Listen on pipe {fd_index} for workers to send their unique ID, indicating they are free. 
-# Respond with the file name of the file containing $nBatch lines from stdin. Repeat until all of stdin has been processed.
-#while ${stdinReadFlag} || (( ${nFinal} > 0 )) || (( ${nDone} < ${nArgs} )); do
-while ${stdinReadFlag} || (( ${nFinal} > 0 )); do
-
-    # read {fd_index} (sent by worker coprocs) to trigger sending the next input
-    read -r -d '' workerIndex <&${fd_index}            
-    #(( ${nSent} < ${nProcs} )) || ((nDone++))
-
-    if ${stdinReadFlag}; then
-        # still distributing stdin - send next file name (containing next group of inputs) to worker coproc
-
-        if ${batchFlag}; then
-            # using batching. Deal with file names in $tmpDir
-
-            # send filename to worker and iterate counters
-            printf '%s\0' "${sendNext}" >&${FD_in[${workerIndex}]}
-            #((nSent++))
-            ${splitAgainFlag} && ((nSentCur++)) || ((nSent0++))
-
-            # get next file name to send based on $nSent0 (and, if working of a batch of re-split files, on $nSentCur)
-            if ${autoBatchFlag}; then
-
-                if ${splitAgainFlag} && (( ${nSentCur} == ${splitAgainNFiles} )); then
-                    # we just sent to last file from a re-split group. Turn off splitAgainFlag, clear splitAgain parameters
-                    # and advance nSent0 by number of (split-generated) files that originally went in to the resplit group of files
-                    nSentCur=0
-                    splitAgainPrefix=''
-                    splitAgainFileNames=''
-                    nBatchCur=0
-                    splitAgainFlag=false
-                    nSent0=$(( ${nSent0} + ${splitAgainNSent} ))
-                    splitAgainNSent=0
-                    splitAgainNLines=0
-                    splitAgainNFiles=0
-                    sendNext="${sendNext0}"    
-                fi
-
-                if ${splitAgainFlag}; then
-                    # we are still working through the current set of re-split files. next file name is in re-split file group
-                    # naming convention for resplit file group is: x$(indexOfFirstFileThatWentINtoResplitGroup}_x${indexInResplitGroup}
-                    # e.g., the 1st group of resplit files will have names x00_x00, x00_x01, ..., x00_x$(getNextInputFileName '' ${nProcs})
-                    sendNext="$(getNextInputFileName "${splitAgainPrefix}" "${sendNext}")"
-
-                elif [[ -f "${tmpDir}/$(getInputFileName 'x' $(( ${nSent0} + ${nProcs} - 1 )))" ]]; then
-                    # Check if there are $nProcs not-yet-read stdin files generated by split available. 
-                    # If so then we have at least enough inputs to do 1+ set of $nBatch inputs on each coproc worker, 
-                    # so we dont need to adjust nBatch anymore --> turn off autoBatchFlag
-                    sendNext="$(getNextInputFileName 'x' "${sendNext}")"
-                    autoBatchFlag=false
-
-                elif ! [[ -f "$(getNextInputFileName 'x' "${sendNext}")" ]]; then
-                    # the next file with stdin lines doesnt exist. trigger stop condition
-                    stdinReadFlag=false
-                    autoBatchFlag=false
-                    sendNext=''
-                    #nArgs=${nSent}
-
-                else
-                    # we have more than 1 but less than $nProcs available files with lines from stdin in $tmpDir. Re-split them into $nProcs files.
-                    # set flag and initial paramaters for dealing with the re-split files
-                    splitAgainFlag=true
-                    nSentCur=0
-
-                    # determine how many files we actually have available. Should be somewhere between 1 and $(( $nProcs - 1 ))
-                    sendNext0="${sendNext}"
-                    splitAgainPrefix="${sendNext0}_x"
-
-                    # determine how many files we actually have available. Should be somewhere between 1 and $(( $nProcs - 1 ))
-                    splitAgainFileNames="$(kk=1; while [[ -f "${tmpDir}/${sendNext0}" ]] && (( ${kk} < ${nProcs} )); do
-                        printf '%s\n' "${tmpDir}/${sendNext0}" 
-                        sendNext0="$(getNextInputFileName 'x' "${sendNext0}")"
-                        ((kk++))
-                    done)"
-
-                    sendNext0="${splitAgainFileNames##*$'\n'}"
-                    sendNext0="${sendNext0##*/}"
-
-                    # record how many files we will be re-combining and re-splitting to figure out how many lines to put in each re-split file to split them evenly.
-                    splitAgainNSent="$(printf '%s\n' "${splitAgainFileNames}" | wc -l)"
-                    splitAgainNLines="$(export IFS=$'\n' && cat -s ${splitAgainFileNames} | wc -l)"
-                    (( ${splitAgainNLines} < ${nProcs} )) && splitAgainNFiles="${splitAgainNLines}" || splitAgainNFiles="${nProcs}"
-
-                    nBatchCur=$(( 1 + ( ( ${splitAgainNLines} - 1 ) / ${nProcs} ) )) 
-
-                    # recombine (with cat -s to suppress long series of blanks) and then re-split into files with equal number of lines
-                    { 
-                        export IFS=$'\n' && cat -s ${splitAgainFileNames}
-                    } | {
-                        if ${nullDelimiterFlag}; then
-                            # split NULL-seperated
-                            split -l "${nBatchCur}" -t '\0' -d - "${tmpDir}/${splitAgainPrefix}"
-                        else
-                            # split newline-seperated
-                            split -l "${nBatchCur}" -d - "${tmpDir}/${splitAgainPrefix}"            
-                        fi
-                    }
-
-                    # generate name of 1st file in current group
-                    sendNext="${splitAgainPrefix}00" 
-
-            # remove original files that went into splitAgain files is -d=3 or we are ordering output(to prevent inxcluding them in the output)
-            { (( ${rmTmpDirFlag} == 3 )) || ${orderedOutFlag}; }  && {
-                        export IFS=$'\n' && rm -f ${splitAgainFileNames}
-                    }
-
-                fi
-
-            else
-                # dont check how many files we have since we arent re-splitting. Just get the next file name to send.
-                sendNext="$(getNextInputFileName 'x' "${sendNext}")"
-
-            fi
-
-            # if there isnt another file to read (i.e., $sendNext doesnt exist) then trigger stop condition
-            [[ -f "${tmpDir}/${sendNext}" ]] || { 
-                stdinReadFlag=false
-                #nArgs=${nSent}
+        # modify runCmd if '-i' '-I' or '-u' flags are set
+        if ${unescapeFlag}; then
+            ${substituteStringFlag} && {
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
             }
+            ${substituteStringIDFlag} && {
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{ID}'/'{<#>}'}")
+            }
+        else
+            mapfile -t runCmd < <(printf '%q\n' "${runCmd[@]}")
+            ${substituteStringFlag} && {
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{\}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
+            }
+            ${substituteStringIDFlag} && {
+                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{ID\}'/'{<#>}'}")
+            }
+        fi
 
-        else 
-            # not using batching. send lines from stdin. pre-pend $nSent (which gives input ordering) if exportOrderFLag is set
+        nLinesCur=${nLines}
 
-            if ${exportOrderFlag}; then
-                # sorting output. pre-pend data sent with index describing input ordering to the line from stdin that is being sent
-                printf '%s\t%s\0' "${indexNext}" "${sendNext}" >&${FD_in[${workerIndex}]}
+        mkdir -p "${tmpDir}"/.run
 
-               # get next ordering index
-               indexNext="$(getNextInputFileName 'x' "${indexNext}")"
-            else
-                # not sorting output. Just send input lines as-is
-                printf '%s\0' "${sendNext}" >&${FD_in[${workerIndex}]}
-            fi
-            #((nSent0++))
+        # if keeping tmpDir print its location to stderr
+        ${rmTmpDirFlag} || [[ ${verboseLevel} == 0 ]] || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
 
-            # read next line from stdin to send. If read fails or is empty trigger stop contition
-            read -r -u 6 sendNext && [[ -n ${sendNext} ]] || stdinReadFlag=false; 
+        (( ${verboseLevel} > 0 )) && {
+            printf '\n\n-------------------INFO-------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")"
+            ${noFuncFlag} && echo '(no function mode enabled: commands should be included in stdin)' || printf 'tmpdir: %s\n' "${tmpDir}"
+            printf '(-j|-P) using %s coproc workers\n' ${nProcs}
+            ${inotifyFlag} && echo 'using inotify'
+            ${fallocateFlag} && echo 'using fallocate'
+            ${nLinesAutoFlag} && echo '(-N) automatically adjusting batch size (lines per function call)'
+            ${nOrderFlag} && echo '(-k) ordering output the same as the input'
+            ${exportOrderFlag} && echo '(-n) output lines will be numbered (`grep -n` style)'
+            ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
+            ${substituteStringFlag} && echo '(-I) replacing {ID} with coproc worker ID'
+            ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
+            ${pipeReadFlag} && echo '(-p) worker coprocs will read directly from stdin pipe, not from a tmpfile'
+            ${nullDelimiterFlag} && echo '(-0|-z) stdin will be parsed using nulls as delimiter (instead of newlines)'
+            ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automaticvally removed\n' "${tmpDir}"
+            ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
+            ${stdinRunFlag} && echo '(-S) coproc workers will pass lines to the command being parallelized via the command'"'"'s stdin'
+            printf '\n------------------------------------------\n\n'
+        } >&${fd_stderr}
+
+        # # # # # FORK "HELPER" PROCESSES # # # # #
+
+        # start building exit trap string
+        exitTrapStr=': >"'"${tmpDir}"'"/.done;
+: >"'"${tmpDir}"'"/.quit;
+[[ -z $(echo "'"${tmpDir}"'"/.run/p*) ]] || kill $(cat "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+
+       ${pipeReadFlag} && {
+            # '.done'  file makes no sense when reading from a pipe
+            : >"${tmpDir}"/.done
+        } || {
+            # spawn a coproc to write stdin to a tmpfile
+            # After we are done reading all of stdin indicate this by touching .done
+            { coproc pWrite {
+                cat <&${fd_stdin} >&${fd_write}
+                : >"${tmpDir}"/.done
+                ${inotifyFlag} && {
+                    { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+                } {fd_inotify1}>&${fd_inotify}
+                (( ${verboseLevel} > 1 )) && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
+              }
+            }
+            exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
+        }
+
+        # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
+        if ${nOrderFlag}; then
+
+            mkdir -p "${tmpDir}"/.out
+            outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
+
+            printf '%s\n' {10..89} {9000..9899} >&${fd_nOrder}
+
+            # fork coproc to populate a pipe (fd_nOrder) with ordered output file name indicies for the worker copropcs to use
+            { coproc pOrder {
+
+                # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
+                # start at 10 so that bash wont try to treat x0_ as an octal
+                printf '%s\n' {990000..998999} >&${fd_nOrder}
+
+                # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
+                v9='99'
+                kkMax='8'
+                until [[ -f "${tmpDir}"/.quit ]]; do
+                    v9="${v9}9"
+                    kkMax="${kkMax}9"
+
+                    for (( kk=0 ; kk<=kkMax ; kk++ )); do
+                        kkCur="$(printf '%0.'"${#kkMax}"'d' "$kk")"
+                        { source /proc/self/fd/0 >&${fd_nOrder}; }<<<"printf '%s\n' {${v9}${kkCur}000..${v9}${kkCur}999}"
+                    done
+                done
+
+              }
+            } 2>/dev/null
+
+            exitTrapStr_kill+='kill -9 '"${pOrder_PID}"' 2>/dev/null; '$'\n'
+        else
+            outStr='>&'"${fd_stdout}";
+        fi
+
+        # setup automatic dynamic nLines adjustment and/or fallocate pre-truncation of (already processed) stdin
+        if ${nLinesAutoFlag} || ${fallocateFlag}; then
+
+            printf '%s\n' ${nLines} >"${tmpDir}"/.nLines
+
+            # LOGIC FOR DYNAMICALLY SETTING 'nLines':
+            # The avg_bytes_per_line is estimated by looking at the byte offset position of fd_read and having each coproc keep track of how many lines it has read
+            # the new "proposed" 'nLines' is determined by estimating the average bytes per line, then taking the averge of the "current nLines" and "(numbedr unread bytes) / ( (avg bytes per line) * (nProcs) )"
+            # --> if proposed new 'nLines' is greater than current 'nLines' then use it (use case: stdin is arriving fairly fast, increase 'nLines' to match the rate lines are coming in on stdin)
+            # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
+            # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break after the current iteratrion is finished
+            { coproc pAuto {
+
+                ${fallocateFlag} && {
+                    nWait=$(( 16 + ( ${nProcs} / 2 ) ))
+                    fd_read_pos_old=0
+                }
+                ${nLinesAutoFlag} && nRead=0
+
+                while ${fallocateFlag} || ${nLinesAutoFlag}; do
+
+                    read -u ${fd_nAuto} -t 0.1
+
+                    case ${REPLY} in
+                        0)
+                            nLinesAutoFlag=false
+                            fallocateFlag=false
+                            break
+                        ;;
+
+                        '')
+                            nLinesAutoFlag=false
+                        ;;
+                    esac
+
+                    read fd_read_pos </proc/self/fdinfo/${fd_read}
+                    fd_read_pos=${fd_read_pos##*$'\t'}
+
+                    if ${nLinesAutoFlag}; then
+
+                        read fd_write_pos </proc/self/fdinfo/${fd_write}
+                        fd_write_pos=${fd_write_pos##*$'\t'}
+
+                        nRead+=${REPLY}
+
+                        nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
+
+                        (( ${nLinesNew} > ${nLinesCur} )) && {
+
+                            (( ${nLinesNew} >= ${nLinesMax} )) && { nLinesNew=${nLinesMax}; nLinesAutoFlag=false; }
+
+                            printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines
+
+                            # verbose output
+                            (( ${verboseLevel} > 2 )) && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
+
+                            nLinesCur=${nLinesNew}
+                        }
+                    fi
+
+                    if ${fallocateFlag}; then
+                        case ${nWait} in
+                            0)
+                                fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
+                                (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
+                                    fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}"
+                                    (( ${verboseLevel} > 2 )) && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
+                                    fd_read_pos_old=${fd_read_pos}
+                                }
+                                nWait=$(( 16 + ( ${nProcs} / 2 ) ))
+                            ;;
+                            *)
+                                ((nWait--))
+                            ;;
+                        esac
+                    fi
+
+                    [[ -f "${tmpDir}"/.quit ]] && {
+                        nLinesAutoFlag=false
+                        fallocateFlag=false
+                    }
+
+                done
+
+              } 2>&${fd_stderr}
+            } 2>/dev/null
+
+            exitTrapStr+='( printf '"'"'0\n'"'"' >&${fd_nAuto0}; ) {fd_nAuto0}>&'"${fd_nAuto}"'; '$'\n'
+            exitTrapStr_kill+='kill -9 '"${pAuto_PID}"' 2>/dev/null; '$'\n'
 
         fi
 
-    else              
-        # all of stdin has been sent off to workers. As each worker coproc finishes its final task, send it a NULL to cause it to break its 'while true' loop and terminate.
+        # setup+fork inotifywait (if available)
+        ${inotifyFlag} && {
+            {
+                # initially add 1 newline for each coproc to fd_inotify
+                { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
 
-        # iterate counters
-        #(( ${nSent} < ${nProcs} )) && ((nDone++))
-        ((nFinal--))
+                # run inotifywait
+                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify1} &
 
-        # send the (now fully finished) worker coproc '\0' to cause it to shutdown   
-        printf '\0' >&${FD_in[${workerIndex}]}
+                pNotify_PID=${!}
+            } 2>/dev/null {fd_inotify1}>&${fd_inotify}
 
-    fi
 
+            exitTrapStr+='{ printf '"'"'\n'"'"' >&${fd_inotify2}; } {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
+            ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
+            exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
+
+            # monitor ${tmpDir}/.out for new files if we have inotifywait
+            ${nOrderFlag} && {
+                {
+                    inotifywait -m -e close_write --format '%f' -r "${tmpDir}"/.out >&${fd_inotify0} &
+
+                    pNotify0_PID=${!}
+                } 2>/dev/null
+
+                exitTrapStr_kill+='kill -9 '"${pNotify0_PID}"' 2>/dev/null; '$'\n'
+            }
+        }
+
+        # set EXIT trap (dynamically determined based on which option flags were active)
+
+        ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
+
+        trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}" EXIT
+        trap 'kill "${p_PID[@]}"; return' INT TERM HUP
+
+        (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
+
+        # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
+
+        # populate {fd_continue} with an initial '\n'
+        # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
+        #     when there is a '\n' the pipe buffer then nothing has a read lock
+        #     a process reads 1 byte from {fd_continue} to get the read lock, and
+        #     when that process writes a '\n' back to the pipe it releases the read lock
+
+        # spawn $nProcs coprocs
+        # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
+        # they then read N lines with mapfile and send \n to {fd_continue} (so the next coproc can start to read)
+        # if the read array is empty the coproc will either continue or break, depending on if end conditions are met
+        # finally it will do something with the data.
+        #
+        # NOTE: All coprocs share the same fd_read file descriptor ( accomplished via `( <...>; coproc p0 ...; <...> ;  coproc pN ...; ) {fd_read}<><(:)` )
+        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data the fd_read used by *all* of them is advanced.
+
+        # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly)
+        # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
+        # the individual coproc's codes are then generated via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
+
+        coprocSrcCode="""
+{ coproc p{<#>} {
+LC_ALL=C
+LANG=C
+IFS=
+trap - EXIT
+echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
+trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
+while true; do
+$(${nLinesAutoFlag} && echo """
+    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}
+ """)
+    read -u ${fd_continue}
+    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t') ${delimiterReadStr} A
+$(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+    [[ \${#A[@]} == 0 ]] || {
+        [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {
+            $( (( ${verboseLevel} > 2 )) && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
+            until read -r -u ${fd_read} ${delimiterReadStr}; do A[-1]+=\"\${REPLY}\"; done
+            A[-1]+=\"\${REPLY}\"${delimiterVal}
+            $( (( ${verboseLevel} > 2 )) && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
+        }
+"""
+${nOrderFlag} && echo """
+        read -u ${fd_nOrder} nOrder
+"""
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+    }
+""")
+    printf '\\n' >&${fd_continue};
+    [[ \${#A[@]} == 0 ]] && {
+        if [[ -f \"${tmpDir}\"/.done ]]; then
+$(${nLinesAutoFlag} && echo """
+            printf '\\n' >&\${fd_nAuto0}
+""")
+            [[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit
+$(${nOrderFlag} && echo """
+            : >\"${tmpDir}\"/.out/.quit{<#>}
+""")
+            break
+$(${inotifyFlag} && echo """
+        else
+            read -u ${fd_inotify} -t 0.1
+""")
+        fi
+        continue
+    }
+$(${nLinesAutoFlag} && { printf '%s' """
+    \${nLinesAutoFlag} && {
+        printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
+        (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false
+    }"""
+    ${fallocateFlag} && printf '%s' ' || ' || echo
+}
+${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+        { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {
+            $( (( ${verboseLevel} > 2 )) && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
+            A[-1]=\"\${A[-1]%${delimiterVal}}\"
+            IFS=
+            mapfile A <<<\"\${A[*]}\"
+        }
+"""
+${subshellRunFlag} && echo '(' || echo '{'
+${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"')
+    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ${noFuncFlag}; then printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; (( ${verboseLevel} > 2 )) && echo """ || {
+        {
+            printf '\\n\\n----------------------------------------------\\n\\n'
+            echo 'ERROR DURING \"${runCmd[*]}\" CALL'
+            declare -p A nLinesCur nLinesAutoFlag
+            echo 'fd_read:'
+            cat /proc/self/fdinfo/${fd_read}
+            echo 'fd_write:'
+            cat /proc/self/fdinfo/${fd_write}
+            echo
+        } >&${fd_stderr}
+    }"""
+${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}') ${outStr}
 done
+} 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
+} 2>/dev/null
+p_PID+=(\${p{<#>}_PID})
+"""
+
+        # # # # # FORK COPROC "WORKERS" # # # # #
+
+        printf '\n' >&${fd_continue};
+
+        # source the coproc code for each coproc worker
+        for (( kk=0 ; kk<${nProcs} ; kk++ )); do
+            [[ -f "${tmpDir}"/.quit ]] && break
+            source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/${kk}}"
+        done
+
+        (( ${verboseLevel} > 1 )) && printf '\n\nALL WORKER COPROCS FORKED\n\n' >&${fd_stderr}
 
 
-} 6<"${tmpDir}"/xAll 9>&1
+        # # # # # WAIT FOR THEM TO FINISH # # # # #
+          #   #   PRINT OUTPUT IF ORDERED   #   #
 
-${orderedOutFlag} && ${batchFlag} && cat "${tmpDir}"/x*
+        if ${nOrderFlag}; then
+            outCur=10
 
-# remove tmpDir, unless (( rmTmpDirFlag == 0 ))
-if (( ${rmTmpDirFlag} >= 1 )); then
-    [[ -n ${tmpDir} ]] && [[ -d "${tmpDir}" ]] && rm -rf "${tmpDir}"
-elif ${batchFlag}; then
-    printf '%s\n' '' "TEMP DIR CONTAINING INPUTS HAS NOT BEEN REMOVED" "PATH: ${tmpDir}" '' >&2
-fi
+            if ${inotifyFlag}; then
+
+                continueFlag=true
+
+                while ${continueFlag}; do
+                    
+                    read -r -u ${fd_inotify0}
+
+                    #echo "READ: $REPLY --> ${REPLY##*x}" >&${fd_stderr}
+
+                    if [[ ${REPLY} == *x+([0-9]) ]]; then
+                        outHave+="${REPLY##*x}"
+                    elif [[ -z ${REPLY} ]]; then
+                        continueFlag=false
+                    fi
+
+                    while true; do
+                        if [[ "${outHave}" == *${outCur}* ]]; then
+
+                            cat "${tmpDir}"/.out/x${outCur} >&${fd_stdout}
+                            \rm  -f "${tmpDir}"/.out/x${outCur}
+                            outHave=${outHave//"${outCur} "/}
+                            ((outCur++))
+                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
+
+                        else
+                            break
+                        fi
+                    done
+
+                    [[ -f "${tmpDir}"/.quit ]] && { continueFlag=false; break; }
+                done
+            fi
+
+            (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
+
+            wait "${p_PID[@]}"
+
+            [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
+
+        else
+
+            # wait for everything to finish
+            wait "${p_PID[@]}"
+
+        fi
+
+        # print final nLines count
+        ${nLinesAutoFlag} && (( ${verboseLevel} > 1 )) && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
+
+    # open anonymous pipes + other misc file descriptors for the above code block
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_inotify0}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+
+}
+
+# check for cat. if missing define a usable replacement using bash builtins
+type -a cat &>/dev/null || {
+cat() {
+    if  [[ -t 0 ]] && [[ $# == 0 ]]; then
+        # no input
+        return
+    elif [[ $# == 0 ]]; then
+        # only stdin
+        printf '%s\n' "$(</proc/self/fd/0)"
+    elif [[ -t 0 ]]; then
+        # only function inputs
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    else
+        # both stdin and function inputs. fork printing stdin to allow for printing both in parallel.
+        printf '%s\n' "$(</proc/self/fd/0)" &
+        source <(printf 'echo '; printf '"$(<"%s")" ' "$@"; printf '\n')
+    fi
+}
+}
+
+# check for mktemp. if missing define a usable replacement using bash builtins
+type -a mktemp &>/dev/null || {
+mktemp () (
+    local p d f
+    set -C
+    shopt -s extglob
+    umask 177
+    while [[ "${1}" == -@([pd]) ]]; do
+        [[ "${1}" == '-p' ]] && p="$2"
+        [[ "${1}" == '-d' ]] && d="$2"
+        shift 2
+    done
+    [[ "$d" == *XXXXXX* ]] || d=''
+    : "${p:=/dev/shm}" "${d:=.forkrun.XXXXXX}"
+
+    f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
+    until mkdir "$f"; do
+        f="${p}/${d//XXXXXX/$(printf '%06x' ${RANDOM}${RANDOM:1})}"
+    done 2>/dev/null
+    echo "$f"
+)
+}
+
+forkrun_displayHelp() {
+
+local displayFlags
+local -i displayMain
+
+shopt -s extglob
+
+case "$1" in
+
+    -?(-)usage)
+        displayMain=0
+        displayFlags=false
+    ;;
+
+    -?(-)help=s?(hort))
+        displayMain=1
+        displayFlags=false
+    ;;
+
+    -?(-)help=f?(lags))
+        displayMain=0
+        displayFlags=true
+    ;;
+
+    -?(-)help=a?(ll))
+        displayMain=3
+        displayFlags=true
+    ;;
+
+    *)
+        displayMain=2
+        displayFlags=false
+    ;;
+
+esac
+
+cat<<'EOF' >&2
+
+USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
+
+LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+
+EOF
+
+(( ${displayMain} > 0 )) && {
+cat<<'EOF' >&2
+
+    Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
+        -->  Pass newline-separated (or null-separated with `-z` flag) inputs to parallelize over on stdin.
+        -->  Provide function/script/binary to parallelize and initial args as function inputs.
+    `forkrun` will then call the function/script/binary in parallel on several coproc "workers" (default is to use $(nproc) workers)
+    Each time a worker runs the function/script/binary it will use the initial args and N lines from stdin (default: `N` is between 1-512 lines and is automatically dynamically adjusted)
+        --> i.e., it will run (in parallel on each "worker"):     parFunc "${args0[@]}" "${args[@]:m:N}"    # m = number of lines from stdin already processed
+    `parFunc` can be an executable binary or bash script, a bash builtin, a declared bash function / alias, or *omitted entirely* (*requires -N [-NO-FUNC] flag. See flag descriptions below for more info.*)
+
+EXAMPLE CODE:
+    # get sha256sum of all files under ${PWD}
+    find ./ -type f | forkrun sha256sum
+
+EOF
+}
+
+(( ${displayMain} > 1 )) && {
+cat<<'EOF' >&2
+REQUIRED DEPENDENCIES:
+    Bash 4+                       : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
+    `rm`  and  `mkdir`            : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
+
+OPTIONAL DEPENDENCIES (to provide enhanced functionality):
+    Bash 5.1+                     : Bash arrays got a fairly major overhaul here, and in particular the mapfile command (which is used extensively to read data from the tmpfile containing stdin)
+                                    got a major speedup here. Bash versions 4.0 - 5.0 *should* still work, but will be (perhaps considerably) slower.
+    `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and won't be cleared until forkrun is finished and returns
+                                    (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
+    `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | forkrun).
+                                    Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage. It also enables the real-time printing (and then freeing from memory)
+                                    outputs when "ordered output" mode is being used (flags `-k` or `-n`) (otherwise all output is saved on in memory and printed at the end after forkrun has finished running).
+
+EOF
+}
+
+(( ${displayMain} > 2 )) && {
+cat<<'EOF' >&2
+HOW IT WORKS:
+    The coproc code is dynamically generated based on passed forkrun options, then K coprocs (plus some "helper function" coprocs) are forked off.
+    These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
+    Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of forkrun, and are continuously piped new data to run.
+    This is MUCH faster than the traditional "forking each call" in bash (esp. for many fast tasks)...On my hardware `forkrun` is 1x-2x faster than `xargs -P $(nproc) -d $'\n'`  and 3x-8x faster than `parallel -m`.
+
+EOF
+}
+
+${displayFlags} && {
+cat<<'EOF' >&2
+# # # # # # # # # # # # FLAGS # # # # # # # # # # # #
+
+GENERAL NOTES:
+     1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below.
+        Refer to the code for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
+     2. All forkrun flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, forkrun assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'.
+        To stop option parsing sooner, add a '--' after the last forkrun flag. Note: this will only stop option parsing sooner...forkrun will always stop at the first argument that does not begin with a '-' or '+'.
+
+--------------------------------------------------------------------------------------------------------------------
+
+FLAGS WITH ARGUMENTS
+--------------------
+
+SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking) space ' ', equal sign ('='), or no separator (''), between the flag and the argument. i.e., the following all work:
+                 -A Val   |   '-A Val'   |   -A=Val   |   -AVal   |   --A_long Val   |   '--A_long Val'   |   --A_long=Val   |   --A_longVal
+
+----------------------------------------------------------
+
+-j | -P | --nprocs : sets the number of worker coprocs to use
+   ---->  default  : number of logical CPU cores ($(nproc))
+
+----------------------------------------------------------
+
+-t | --tmp[dir]    : sets the root directory for where the tmpfiles used by forkrun are created.
+   ---->  default  : /dev/shm ; or (if unavailable) /tmp ; or (if unavailable) ${PWD}
+
+   NOTE: unless running on an extremely memory-constrained system, having this tmp directory on a ramdisk (e.g., a tmpfs) will greatly improve performance
+
+----------------------------------------------------------
+
+-l | --nlines      : sets the number or lines to pass coprocs to use for each function call to this constant value, disabling the automatic dynamic batch size logic.
+   ---->  default  : n/a (by default automatic dynamic batch size adjustment is enabled)
+
+-L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled.
+   ---->  default  : 1
+
+    NOTE: the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
+
+----------------------------------------------------------
+
+-d | --delimiter   : sets the delimiter used to seperateate inputs passed on stdin
+   ---->  default  : newline ($'\n')
+
+--------------------------------------------------------------------------------------------------------------------
+
+FLAGS WITHOUT ARGUMENTS
+-----------------------
+
+SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags (short or long) may use either 1 or 2 leading dashes ('-f' or '--f' or '-flag' or '--flag' all work) to enable these.
+                 To instead disable these optional subroutines, replace the leading '-' or '--' with a leading '+' or '++' or '+-'. If a flag is given multiple times, the last one is used.
+                 Unless otherwise noted, all of  the following flags are, by default, in the "disabled" state
+
+----------------------------------------------------------
+
+-i | --insert        : insert {}. replace `{}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the forkrun commandline) with the inputs passed on stdin (instead of placing them at the end)
+
+-I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the forkrun commandline) with an index (0, 1, ...) indicating which coproc the process is running on.
+                       this is analagous to the `--plocess-slot-var` option in `xargs`
+
+----------------------------------------------------------
+
+-k | --keep[-order]  : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc.
+
+
+-n | --number[-lines]: numbered ordered output. Output will be ordered and, for each group of N lines that was run in a single call, an index will be pre-pended to the output group with syntax "$'\034'${INDEX}$'\035'". Impliies -k.
+
+----------------------------------------------------------
+
+-z | -0 | --null     : NULL-seperated stdin. stdin is NULL-seperated, not newline seperated. Equivilant to using flag: --delimiter=''
+
+    NOTE: this flag will disable a check that ensures that lines from stdin do not get split into 2 seperate lines. The chances of this occuring are small but nonzero.
+
+----------------------------------------------------------
+
+-s | --subshell[-run]: run individual calls of parFunc in a subshell. Typically, the worker coprocs run each call in their own shell. This causes them to run in a subshell. This ensures that previous runs do not alter the shell environment and affect future runs, but has some performance cost.
+
+----------------------------------------------------------
+
+-S | --stdin[-run]   : pass lines from stdin to parfunc via its stdin instead of using its function inputs. i.e., use `parFunc <<<"${args[@]}"` instead of `parFunc "${args[@]}"`
+
+----------------------------------------------------------
+
+-p | --pipe[-read]   : read stdin from a pipe. Typically stdin is saved to a tmpfile (on a tmpfs ramdisk) and then read from the tmpfile, which avoids the "reading 1 byte at a time from a pipe" issue and is typically faster unless you are only reading very small amounts of data for eachg parFunc call. This flag forces reading from a pipe (or from a tmpfile if `+p` is used)
+
+    NOTE: This flag is typicaly disabled, but is enabled by default only when `--nLines=1` flag is also given (causing forkrun to only read 1 line at a time for the enritre time it is running)
+
+----------------------------------------------------------
+
+-D | --delete        : delete the tmpdir used by forkrun on exit. You typically want this unless you are debugging something, as the tmpdir is (by default) on a tmpfs and as such is using up memory.
+
+    NOTE: this flag is enabled by default. use the '+' version to disable it. passing `-d` has no effect except to re-enable tmpdir deletion if `+d` was passed in a previous flag.
+
+----------------------------------------------------------
+
+-N | --no-func       : run with no parFunc. Typically, is parFunc is omitted (e.g., `printf '%s\n' "${args[@]}" | forkrun`) forkrun will silently use `printf '%s\n'` as parFunc, causing all lines from stdin to be printed to stdout. This flag makes forkrun instead run the lines from stdin directly as they are. Presumably these lines would contain the `parFunc` part in the lines on stdin.
+
+    NOTE: This flag can be used to make forkrun paralellize running any generic list of commands, since the `parFunc` used on each line from stdin does not need to be the same.
+
+----------------------------------------------------------
+
+-u | --unescape      : dont escape `parFunc [${args0[@]}]` before having the coprocs run it. Typically, `parFunc [${args0[@]}]` is run through `printf '%q '`, making such that pipes and redirects and logical operators similiar ('|' '<<<' '<<' '<' '>' '>>' '&' '&&' '||') are treated as literal characters and dont pipe / redirect / logical operators / whatever. This flag makes forkrun skip running these through `printf '%q'`, making pipes and redirects work normally.
+
+    NOTE: keep in mind that the shell will interpret the commandline before forkrun gets it, so pipes and redirects must still be passed either escaped or quoted otherwise the shell will interpret+implemnt them before forkrun does.
+    NOTE: this flag is particuarly useful in combination with the `-i` flag, as it allows you to do things like the following (which will scan files whose paths are given on stdin and search them, for some string and, only if found, print the filename):  printf '%s\n' "${paths[@]}" | forkrun -i -u -l1 -- 'cat {} | grep -q someString && echo {}'
+
+----------------------------------------------------------
+
+-v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr.
+
+    NOTE: The '+' version of this flag decreases verbosity level by 1. The default level is 0.
+    NOTE: Meaningful verbotisity levels are 0, 1, 2, and 3
+      --> 0 [or less than 0] (only errors)
+      --> 1 (errors + overview of parsed forkrun options)
+      --> 2 (errors + options overview + progress notifications of when the code finishes one of its main sections)
+      --> 3 [or more than 3] (errors + options overview + progress notifcations + indicators of a few runtime events and statistics)
+
+----------------------------------------------------------
+
+FLAGS THAT TRIGGER PRINTING HELP/USAGE INFO TO SCREEN THEN EXIT
+
+--usage              :  display brief usage info
+-? | -h | --help     :  dispay standard help (does not include detailed info on flags)
+--help=s[hort]       :  same as '--usage'
+--help=f[lags]       :  display detailed info about flags
+--help=a[ll]         :  display all help (combined output of '--help' and '--help=flags'
+--------------------------------------------------------------------------------------------------------------------
+
+EOF
+}
+
 }
