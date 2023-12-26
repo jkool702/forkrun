@@ -1,13 +1,16 @@
-# forkrun 
+NOTE: the below information applies to version 1 of `forkrun`, found in this repo at [old/forkrun_v1_final/forkrun.bash](https://github.com/jkool702/forkrun/blob/main/OLD/forkrun_v1_final/forkrun.bash). The `forkrun` version found at [forkrun.bash](https://github.com/jkool702/forkrun/blob/main/forkrun.bash) is a complete rewrite of `forkrun` that uses a completely different IPC scheme, making it is faster and more efficient while relying on fewer external dependencies.
 
-`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs` or `parallel` does, only faster than either (especially parallel).  In my testing, `forkrun` was, on average (for problems where the efficiency of the parallelization framework acvtually makes a difference) ~70% faster than `xargs -P $(nproc)` and ~7x as fast as `parallel -m -j $(nproc)`. See To be clear, these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
+In the latest speedtests (see `forkrun.speedtest.bash`)  it is, in terms of "real life / wall clock" time, (on average) roughly 1.7x as fast as the fastest `xargs` implementation and roughly 7 times as fast as the fastest `parallel` implementation. Total CPU time tends to be slightly higher than `xargs` but less than `parallel`.
+
+# forkrun (v1)
+`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs -P` or `parallel` does, only faster. In my testing, `forkrun` was anywhere from 10-80% faster than `xargs -P $(nproc)` and 100-150% faster than `parallel -m -j $(nproc)`. To be clear, these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
 
 
 # # # # # USAGE # # # # #
 
-`forkrun` in invoked in much the same way as `xargs`: on the command-line, pass forkrun options, then the functionscript/binary that you are parallelizing, then any initial constant arguments (in that order). The arguments to parallelize running are passed to forkrun on stdin. A typical `forkrun` invocation looks something like this:
+`forkrun` in invoked in much the same way as `xargs`: forkrun options, the function that you are parallelizing, and any initial constant arguments are given as function inputs )in that order), and the arguments to parallelize are passed to forkrun on stdin.
 
-    printf '%s\n' "${inArgs[@]}" | forkrun [flags] [--] parFunc ["${initialArgs[@]}"]
+    echo "inArgs" | forkrun [flags] -- parFunc [initialArgs]
 
 `forkrun` strives to automatically choose reasonable and near-optimal values for flags, so in most usage scenarios no flags will need to be set to attain maximum performance and speed.
 
@@ -15,11 +18,17 @@ NOTE: you'll need to `source` forkrun before using it
 
     source /path/to/forkrun.bash
     
-Alternately, if you dont have `forkrun.bash` saved locally but have internet access (or want to ensure you are using the latest version), you can run
+Alternately, if you dont have forkrun.bash` saved locally but have internet access (or want to ensure you are using the latest version), you can run
     
     source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)
     
-NO FUNCTION MODE: forkrun supports an additional mode of operation where `parFunc` and `initialArgs` are not given as function inputs, but instead are integrated into each line of "$args". In this mode, each line passed on stin will be run as-is (by saving groups of 512 lines to tmp files and then sourcing them). This allows you to easily run multiple different functions/scripts/binaries in paralel and still utalize forkrun's very quick and efficient parallelization method. To activate this mode, use flag `-N` and do not provide `parFunc` or `initialArgs`.
+NO FUNCTION MODE: forkrun supports an additional mode of operation where "parFunc" and "args0" are not given as function inputs, but instead are integrated into each line of "$args". In this mode, each line passed on stin will be run as-is (by saving groups of 512 lines to tmp files and then sourcing them). This allows you to easily run multiple different functions in paralel and still utalize forkrun's very quick and efficient parallelization method. This mode has a few limitations/considerations:
+
+1. The following flags are not supported and, if given, will be ignored: '-i', '-id', '-s' and '-l 1'
+2. Lines from stdin will be "space-split" when run. Typically, forkrun splits stdin on newlines (or nulls, if -0z flag is given), allowing (for example)paths that include a space (' ') character to work without needing any quoting. in "no function" mode however, the function and initial args are included in each line on stdin, so they must be space-split to run. Solution is to either quote things containing spaces or easpace the space characters ('\ '). Example:
+
+
+     `printf '%s\n' 'sha256sum "/some/path/with space character"' 'sha512sum "/some/other/path/with space characters"' | forkrun`
 
 
 # # # # # HOW IT WORKS # # # # #
