@@ -135,8 +135,8 @@ There are 2 other common programs for parallelizing loops in the (bash) shell: `
 **FLAGS WITHOUT ARGUMENTS**: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless othjerwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
 
 ```
-    -i         : insert {}. replace `{}` with the inputs passed on stdin (instead of placing them at the end)
-    -I         : insert {id}. replace `{id}` with an index (0, 1, ...) describing which coproc the process ran on. 
+    -i          : insert {}. replace `{}` with the inputs passed on stdin (instead of placing them at the end)
+    -I          : insert {id}. replace `{id}` with an index (0, 1, ...) describing which coproc the process ran on. 
     -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. Note: ordering is "close but not guaranteed" if flag -l=1 is also given (see '-ks'). Ordering guaranteed for -l>1.
     -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This requires and will automatically enable the `-k` output ordering flag.
 directory created under the directory specified here. Default is '/tmp'.
