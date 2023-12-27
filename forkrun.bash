@@ -243,7 +243,6 @@ forkrun() {
 
         # check verboseLevel
         (( ${verboseLevel} < 0 )) && verboseLevel=0
-        (( ${verboseLevel} > 3 )) && verboseLevel=3
 
         # determine what forkrun is using lines on stdin for
         [[ ${FORCE} ]] && runCmd=("${@}") || runCmd=("${@//$'\r'/}")
@@ -262,14 +261,14 @@ forkrun() {
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
+        # set defaults for control flags/parameters
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
+
         # check for inotifywait
         type -a inotifywait &>/dev/null && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
 
         # check for fallocate
-        type -a fallocate &>/dev/null && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
-
-        # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
+        type -a fallocate &>/dev/null && ! ${pipeReadFlag} && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
         # check for conflict in flags that were  defined on the commandline when forkrun was called
         ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
@@ -331,6 +330,7 @@ forkrun() {
             ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automaticvally removed\n' "${tmpDir}"
             ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
             ${stdinRunFlag} && echo '(-S) coproc workers will pass lines to the command being parallelized via the command'"'"'s stdin'
+            echo "Verbosity Level: ${verboseLevel}"
             printf '\n------------------------------------------\n\n'
         } >&${fd_stderr}
 
@@ -365,14 +365,14 @@ forkrun() {
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
 
-            printf '%s\n' {10..89} {9000..9899} >&${fd_nOrder}
+            printf '%s\n' {10..89} >&${fd_nOrder}
 
             # fork coproc to populate a pipe (fd_nOrder) with ordered output file name indicies for the worker copropcs to use
             { coproc pOrder {
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
-                printf '%s\n' {990000..998999} >&${fd_nOrder}
+                printf '%s\n' {9000..9899} {990000..998999} >&${fd_nOrder}
 
                 # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
                 v9='99'
@@ -449,7 +449,7 @@ forkrun() {
                             printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines
 
                             # verbose output
-                            (( ${verboseLevel} > 2 )) && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&2
+                            (( ${verboseLevel} > 2 )) && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&${fd_stderr}
 
                             nLinesCur=${nLinesNew}
                         }
@@ -461,7 +461,7 @@ forkrun() {
                                 fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) ))
                                 (( ${fd_read_pos} > ${fd_read_pos_old} )) && {
                                     fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}"
-                                    (( ${verboseLevel} > 2 )) && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the file" >&2
+                                    (( ${verboseLevel} > 2 )) && echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the tmp file storing stdin" >&${fd_stderr}
                                     fd_read_pos_old=${fd_read_pos}
                                 }
                                 nWait=$(( 16 + ( ${nProcs} / 2 ) ))
@@ -524,6 +524,8 @@ forkrun() {
         trap 'kill "${p_PID[@]}"; return' INT TERM HUP
 
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
+        (( ${verboseLevel} > 3 )) && printf '\n\nEXIT TRAP:\n\n%s\n\n' "${exitTrapStr}" >&${fd_stderr}
+
 
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
@@ -641,6 +643,7 @@ p_PID+=(\${p{<#>}_PID})
         done
 
         (( ${verboseLevel} > 1 )) && printf '\n\nALL WORKER COPROCS FORKED\n\n' >&${fd_stderr}
+        (( ${verboseLevel} > 3 )) && printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}" >&${fd_stderr}
 
 
         # # # # # WAIT FOR THEM TO FINISH # # # # #
@@ -950,11 +953,12 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 -v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr.
 
     NOTE: The '+' version of this flag decreases verbosity level by 1. The default level is 0.
-    NOTE: Meaningful verbotisity levels are 0, 1, 2, and 3
+    NOTE: Meaningful verbotisity levels are 0 - 4
       --> 0 [or less than 0] (only errors)
       --> 1 (errors + overview of parsed forkrun options)
       --> 2 (errors + options overview + progress notifications of when the code finishes one of its main sections)
-      --> 3 [or more than 3] (errors + options overview + progress notifcations + indicators of a few runtime events and statistics)
+      --> 3 (errors + options overview + progress notifcations + indicators of a few runtime "milestone" events and statistics)
+      --> 4 [or more than 3] (errors + options overview + progress notifcations + runtime milestones + show code for dynamically generated coproc code anbd exit trap code
 
 ----------------------------------------------------------
 
@@ -962,7 +966,7 @@ FLAGS THAT TRIGGER PRINTING HELP/USAGE INFO TO SCREEN THEN EXIT
 
 --usage              :  display brief usage info
 -? | -h | --help     :  dispay standard help (does not include detailed info on flags)
---help=s[hort]       :  same as '--usage'
+--help=s[hort]       :  more detailed varient of '--usage'
 --help=f[lags]       :  display detailed info about flags
 --help=a[ll]         :  display all help (combined output of '--help' and '--help=flags'
 --------------------------------------------------------------------------------------------------------------------
