@@ -68,18 +68,17 @@ Bash 5.1+:           For improved speed due to overhauled handling of arrays.
     (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc).
     -l <#>      : num lines per function call (batch size). set number of lines to pass to the function on each function call. if -l=1 (and '-ks' is *not* set). then lines from stdin are piped to the function, otherwise `split` groups lines and saves them to a temp directory on a [ram]disk. Default is '-l=0', which enables automatically adjusing batch size.
     -i          : insert {}. replace `{}` with the inputs passed on stdin (instead of placing them at the end)
-    -I         : insert {} and {id}. enables -i and also replaces `{id}` with a index (0, 1, ...) describing which coproc the process ran on. 
+    -I         : insert {} and {id}. enables -i and also replaces `{id}` with an index (0, 1, ...) describing which coproc the process ran on. 
     -u          : unescape redirects/pipes/`&&`/`||`. Un-escapes quoted `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` characters to allow for piping, redirection, and logical comparrison to occur *inside the coproc*. 
     -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. Note: ordering is "close but not guaranteed" if flag -l=1 is also given (see '-ks'). Ordering guaranteed for -l>1.
-    -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This repuires and implies the `-k` flag
-    -t <path>   : set tmp directoiry. set the directory where the temp files containing lines from stdin will be kept (when -l != 1). These files will be saved inside a new mktemp-generated directory created under the directory specified here,. Default is '/tmp'.
-    -d {0,1,2,3}: set tmpdir deletion behavior. specify behavior for deleting the temp files containing stdin when we are done with them / when forkrun exits. Accepts 0, 1, 2, or 3. 0 = never delete, 1 = delete on successful completion, 2 = delete 
-    (-0|-z)     : NULL-seperated stdin. stdin is NULL-seperated, not newline seperated. Implies -s. Incompatable with -l=1 (unless '-ks' is also set).
+    -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This requires and implies the `-k` flag
+    -t <path>   : set tmp directoiry. set the directory where the temp files containing lines from stdin will be kept (when -l != 1). These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/tmp'.
+    (-0|-z)     : NULL-seperated stdin. stdin is NULL-separated, not newline separated.
+  -d <delimiter>: set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag)
     -s          : pass via function's stdin. pass stdin to the function being parallelized via stdin ( $parFunc < /tmpdir/fileWithLinesFromStdin ) instead of via function inputs  ( $parFunc $(</tmpdir/fileWithLinesFromStdin) )
-    -w          : wait for stdin indefinately. wait indefinately for the files output by `split` to appear instead oF timing out after 5-10 seconds. Useful if inputs are coming in very slowly on stdin, but could result in forkrun "getting stuck" if stdin is empty (e.g., due to an error).
     --          : end of forkrun options indicator. indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs
-    -v          : increase verbosity. Currently, thie only thing this does is print a summary of forkrun options to stderr after all the inputs have been parsed.
-    (-h|-?)     : display detailed help text. Prints the entirety of the oinitial comment block at the start of forkrun.bash to screen.
+    -v          : increase verbosity level. This can be passed up to 4 times for progressively more verbose output.
+    (-h|-?)     : display detailed help text. Prints the entirety of the oinitial comment block at the start of forkrun.bash to screen. NOTE: you must escape the `?` otherwise the shell can interpret it before passing it to forkrun.
     
 Note: flags are not case sensitive, but must be given seperately (`-k -v`, not `-kv`) and must be given before the name of the function being parallelized (any flags given after the function name will be assumed to be initial arguments for the function, not forkrun options). There are also "long" versions of the flags (e.g., `--insert` is the same as `-i`). Run `forkrun -?` for a full list of long options/flags.
     
