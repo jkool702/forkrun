@@ -7,16 +7,17 @@ forkrun() {
 #
 # USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
 #
-# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#[,#]>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
 #
 # For help / usage info, call forkrun with one of the following flags:
 #
 # --usage              :  display brief usage info (shown above)
-# -? | -h | --help     :  dispay standard help (does not include detailed info on flags)
+# -? | -h | --help     :  dispay standard help (does not include detailed info on flags) 
 # --help=s[hort]       :  more detailed varient of '--usage'
 # --help=f[lags]       :  display detailed info about flags
 # --help=a[ll]         :  display all help (including detailed flag info)
-
+#
+# NOTE: the `?` may need too be escaped for `-?` to trigger the help (i.e., use `forkrun '-?'` or `forkrun -\?`)
 
 ############################ BEGIN FUNCTION ############################
 
@@ -46,7 +47,7 @@ forkrun() {
             -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])+([0-9]))
                 nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ]))}"
             ;;
-
+shopt -s extglob
             -?(-)?(n)l?(ine?(s)))
                 nLines="${2}"
                 nLinesAutoFlag=false
@@ -804,7 +805,7 @@ cat<<'EOF' >&2
 
 USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
 
-LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#[,#]>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
 
 EOF
 
