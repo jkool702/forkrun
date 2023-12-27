@@ -31,20 +31,20 @@ forkrun() {
 
     # # # # # PARSE OPTIONS # # # # #
 
-    verboseLevel=0
+    : "${verboseLevel:=0}"
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)[Pp]roc?(s)?([= ]))
+            -?(-)@([jP]|?(n)[Pp]roc?(s)?))
                 nProcs="${2}"
                 shift 1
             ;;
 
-            -?(-)j?([= ])*@([[:graph:]])*|-?(-)P?([= ])*@([[:graph:]])*|-?(-)?(n)[Pp]roc?(s)?([= ])*@([[:graph:]])*)
-                nProcs="${1##@(-?(-)j?([= ])|-?(-)P?([= ])|-?(-)?(n)[Pp]roc?(s)?([= ]))}"
+            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])+([0-9]))
+                nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ]))}"
             ;;
 
             -?(-)?(n)l?(ine?(s)))
@@ -53,7 +53,7 @@ forkrun() {
                 shift 1
             ;;
 
-            -?(-)?(n)l?(ine?(s))?([= ])*@([[:graph:]])*)
+            -?(-)?(n)l?(ine?(s))?([= ])+([0-9]))
                 nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
                 nLinesAutoFlag=false
             ;;
@@ -62,20 +62,20 @@ forkrun() {
                 nLines0="${2}"
                 nLinesAutoFlag=true
                 if [[ "${nLines0}" == +([0-9])','+([0-9]) ]]; then
-                    nLinesMax="${nLines##*,}"
-                    nLines="${nLines%%,*}"
+                    nLinesMax="${nLines0##*,}"
+                    nLines="${nLines0%%,*}"
                 else
                     nLines="${nLines0}"
                 fi
                 shift 1
             ;;
 
-            -?(-)?(N)L?(INE?(S))?([= ])*@([[:graph:]])*)
+            -?(-)?(N)L?(INE?(S))?([= ])+([0-9])?(,+([0-9])))
                 nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
                 nLinesAutoFlag=true
                 if [[ "${nLines0}" == +([0-9])','+([0-9]) ]]; then
-                    nLinesMax="${nLines##*,}"
-                    nLines="${nLines%%,*}"
+                    nLinesMax="${nLines0##*,}"
+                    nLines="${nLines0%%,*}"
                 else
                     nLines="${nLines0}"
                 fi
@@ -225,7 +225,7 @@ forkrun() {
         [[ ${#} == 0 ]] && optParseFlag=false
 
     done
-    
+
     # # # # # SETUP TMPDIR # # # # #
 
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
@@ -331,7 +331,7 @@ forkrun() {
             printf '(-j|-P) using %s coproc workers\n' ${nProcs}
             ${inotifyFlag} && echo 'using inotify'
             ${fallocateFlag} && echo 'using fallocate'
-            ${nLinesAutoFlag} && echo '(-N) automatically adjusting batch size (lines per function call)'
+            ${nLinesAutoFlag} && printf '(-N) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
             ${nOrderFlag} && echo '(-k) ordering output the same as the input'
             ${exportOrderFlag} && echo '(-n) output lines will be numbered (`grep -n` style)'
             ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
@@ -664,9 +664,9 @@ p_PID+=(\${p{<#>}_PID})
             continueFlag=true
 
             while ${continueFlag}; do
-                
+
                 read -r -u ${fd_nOrder0}
-                
+
                 case "${REPLY}" in
                     +([0-9]))
                         outHave[$REPLY]=1
@@ -838,7 +838,7 @@ OPTIONAL DEPENDENCIES (to provide enhanced functionality):
     `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and won't be cleared until forkrun is finished and returns
                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
     `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | forkrun).
-                                    Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage. 
+                                    Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage.
 
 EOF
 }
