@@ -1,9 +1,9 @@
-# forkrun 
+# FORKRUN
 
 `forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs` or `parallel` does, only faster than either (especially parallel).  In my testing, `forkrun` was, on average (for problems where the efficiency of the parallelization framework acvtually makes a difference) ~70% faster than `xargs -P $(nproc)` and ~7x as fast as `parallel -m -j $(nproc)`. See To be clear, these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
 
 
-# # # # # USAGE # # # # #
+## USAGE
 
 `forkrun` in invoked in much the same way as `xargs`: on the command-line, pass forkrun options, then the functionscript/binary that you are parallelizing, then any initial constant arguments (in that order). The arguments to parallelize running are passed to forkrun on stdin. A typical `forkrun` invocation looks something like this:
 
@@ -22,20 +22,45 @@ Alternately, if you dont have `forkrun.bash` saved locally but have internet acc
 NO FUNCTION MODE: forkrun supports an additional mode of operation where `parFunc` and `initialArgs` are not given as function inputs, but instead are integrated into each line of "$args". In this mode, each line passed on stin will be run as-is (by saving groups of 512 lines to tmp files and then sourcing them). This allows you to easily run multiple different functions/scripts/binaries in paralel and still utalize forkrun's very quick and efficient parallelization method. To activate this mode, use flag `-N` and do not provide `parFunc` or `initialArgs`.
 
 
-# # # # # HOW IT WORKS # # # # #
+## HOW IT WORKS
 
-`forkrun` parallelizes loops by running multiple inputs through a script/function in parallel using bash coprocs. `forkrun` is fundementally different than most existing loop parallelization codes in the sense that individual function evaluations are not forked. Rather, initially a number of persistent bash coprocs are forked, and then inputs (passed on stdin) are distributed to these coprocs without any additional forking (or reopening pipes/fd's, or...). This,  combined with the (when possible) exclusive use of bash builtins (all of main loop, most of the rest of the code) (these avoid subshell generation, and their associated increase in execution time), is what makes `forkrun` so fast. 
+**BASH COPROCS**: `forkrun` parallelizes loops by running multiple inputs through a script/function in parallel using bash coprocs. `forkrun` is fundementally different than most existing loop parallelization codes in the sense that individual function evaluations are not forked. Rather, initially a number of persistent bash coprocs are forked, and then inputs (passed on stdin) are distributed to these coprocs without any additional forking (or reopening pipes/fd's, or...). This,  combined with the (when possible) exclusive use of bash builtins (all of main loop, most of the rest of the code) (these avoid subshell generation, and their associated increase in execution time). This (as well as being *heavily* optimized) is what makes `forkrun` so fast. 
 
-AUTOMATIC BATCH SIZE ADJUSTMENT: by default, `forkrun` will automatically adjust how many lines are passed to the function each time it is called (batch size). To ooverrule this logic and set a static batch size use the '-l' flag. Note: personal "trial-and-error" testing has suggested that in the "many very fast iterations" limit a batch size of around 512 lines is near-optimal. However, if you have fewer than 512 * `$nProcs` total input lines setting batch size to 512 will leave some coprocs without any lines from stdin. Also, if stduin is comming in very slowly, this might leave coprocs sitting idning waiting for inputs to arrive. To attempot to get the best performance in all of these situations, `forkrun`'s automatic batch size adjustment logic is as follows: 
+**AUTOMATIC BATCH SIZE ADJUSTMENT**: by default, `forkrun` will automatically dynamically adjust how many lines are passed to the function each time it is called (batch size). The batch size starts at 1, and is dynamically adjusted upwards (but never downwards) up to a maximum of 512 lines per batch (which is typically near-optimal in my personal trial-and-error testing). The logic used here involves:
 
-1. split into groups of 512 lines and save to disk in a (ram-backed) tmp dir (via a forked `split` process)
-2. As forkrun is beginning it main loop, at the start of each iteration check if there are `$nProcs` split generated files available (1 for each coproc)
-2a.  --> IF YES: turn off automatic batch size adjustment and proceed normally
-2b.  --> IF  NO: take the files (containing lines from stdin) that are available and re-split into `$nProcs` files (1 for each coproc), so that each coproc has an equal number for 1 round. After these have all been "used up" and sentoff to the coprocs, repeat step 2.
+1. Calculating the average bytes/line by looking number of lines read and number of bytes read (from `/proc/self/fdinfo/$fd`)
+2. Estimating the number of remaining lines left to read by getting the difference in number of bytes read/written and dividing by the average bytes/line
+3. dividing the estimatedd number of remaining lines by the number of worker coprocs
 
+NOTE: this is a "maximum lines per batch" (implemented via `mapfile -n ${nLines}`)...if stdin is arriving slowly then fewer than this many lines will be used. What this serves to accomplish is to prevent a couple of coproc workers from claiming all the lines of input while the rest sit idle if the total number of lines is less than `512 * (# worker coprocs)`
 
+To overrule this logic and set a static batch size use the '-l' flag. Alternately, use the `-L` flag to keep the auitomatic batch size logic enabled but to change the initial and maximum number of lines per batch.
 
-# # # # # SUPPORTRED OPTIONS / FLAGS # # # # #
+**IPC**: Forkrun distributes stdin to the worker coprocs by first saving them to a tmpfile (by default on a tmpfs - under `/dev/shm`, customizable with the `-t` flag) using a forked coproc. The worker coprocs then read data from this file using a shared read-only file descriptor and an exclusive read lock. 
+
+## DEPENDENCIES
+
+`forkrun` strives to rely on as few external dependencies as possible. 
+
+**REQUIRED DEPENDENCIES**
+
+Bash 4+ :             This is when coprocs were added. NOTE: `forkrun` will be much faster on bash 5.1+, since it healivy relies of arrays and the `mapfile` command which got a major overhaul in bash 5.1. The vast majority of testing has been done on bash 5.2 so while bash 4-5.0 *should* work it is not well tested.
+
+`rm` and `mkdir`:     For basic filesystem operations that I couldnt figure out how to re-implement in pure bash. Either the GNU or the busybox versions of these will both work.
+
+**OPTIONAL DEPENDENCIES**
+
+Bash 5.1+:           For improved speed due to overhauled handling of arrays.
+
+`mktemp` and `cat`:  The code will provide pure-bash replacements for these if they arent available, but if external binaries for these are present they will be used
+
+`inotifywait`:       If available, this is used to monitor the tmpfile where stdin is saved before being read by the coprocs. This enables the coprocs to efficiently wait for input if stdin is arriving slowly (e.g., `ping 1.1.1.1 | forkrun <...>`)
+
+`fallocate`:         If available, this is used to deallocate already-processed data from the beginning of the tmpfile holding stdin. This enables `forkrun` to be used in long-ruinning processes that consistently output data for days/weeks/months/... Without `fallocate`, this tmpfile will continually grow and will not be removed until forkrun exits 
+
+## WHY USE FORKRUN
+
+## SUPPORTED OPTIONS / FLAGS 
 
 `forkrun` supports many of the same flags as `xargs` (with the exception of options intended for interactive use), plus several additional options that are present in `parallel` but not `xargs`. A quick summary will be provided here - for more info refer to the comment block at the top of the forkrun function, or source forkrun and then run `forkrun --help`. The following flags are supported:
 
@@ -43,11 +68,10 @@ AUTOMATIC BATCH SIZE ADJUSTMENT: by default, `forkrun` will automatically adjust
     (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc).
     -l <#>      : num lines per function call (batch size). set number of lines to pass to the function on each function call. if -l=1 (and '-ks' is *not* set). then lines from stdin are piped to the function, otherwise `split` groups lines and saves them to a temp directory on a [ram]disk. Default is '-l=0', which enables automatically adjusing batch size.
     -i          : insert {}. replace `{}` with the inputs passed on stdin (instead of placing them at the end)
-    -id         : insert {} and {id}. enables -i and also replaces `{id}` with a index (0, 1, ...) describing which coproc the process ran on. 
+    -I         : insert {} and {id}. enables -i and also replaces `{id}` with a index (0, 1, ...) describing which coproc the process ran on. 
     -u          : unescape redirects/pipes/`&&`/`||`. Un-escapes quoted `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` characters to allow for piping, redirection, and logical comparrison to occur *inside the coproc*. 
     -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. Note: ordering is "close but not guaranteed" if flag -l=1 is also given (see '-ks'). Ordering guaranteed for -l>1.
-    -ks         : ordered output (strict). Same as -k if -l>1. If -l=1 guarantees correct ordering but is slower. Slowdown may be considerable for use cases with "many very fast iterations".
-    -n          : add ordering info to output. pre-pend each (NULL-seperated) output group with a `aplit -d` style index describing its input order, seperated by ACSII Field Seperator (octal '\034'). When a coproc finishes running a group of lines from stdin, it will `printf '\034%s\034%s\n\0' "$order" "$output"`
+    -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This repuires and implies the `-k` flag
     -t <path>   : set tmp directoiry. set the directory where the temp files containing lines from stdin will be kept (when -l != 1). These files will be saved inside a new mktemp-generated directory created under the directory specified here,. Default is '/tmp'.
     -d {0,1,2,3}: set tmpdir deletion behavior. specify behavior for deleting the temp files containing stdin when we are done with them / when forkrun exits. Accepts 0, 1, 2, or 3. 0 = never delete, 1 = delete on successful completion, 2 = delete 
     (-0|-z)     : NULL-seperated stdin. stdin is NULL-seperated, not newline seperated. Implies -s. Incompatable with -l=1 (unless '-ks' is also set).
