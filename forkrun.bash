@@ -25,7 +25,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -59,22 +59,26 @@ forkrun() {
             ;;
 
             -?(-)?(N)L?(INE?(S)))
-                nLines="${2}"
+                nLines0="${2}"
                 nLinesAutoFlag=true
-                [[ "${nLines}" == +([0-9])','+([0-9]) ]] && {
+                if [[ "${nLines0}" == +([0-9])','+([0-9]) ]]; then
                     nLinesMax="${nLines##*,}"
                     nLines="${nLines%%,*}"
-                }
+                else
+                    nLines="${nLines0}"
+                fi
                 shift 1
             ;;
 
             -?(-)?(N)L?(INE?(S))?([= ])*@([[:graph:]])*)
-                nLines="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
+                nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
                 nLinesAutoFlag=true
-                [[ "${nLines}" == +([0-9])','+([0-9]) ]] && {
+                if [[ "${nLines0}" == +([0-9])','+([0-9]) ]]; then
                     nLinesMax="${nLines##*,}"
                     nLines="${nLines%%,*}"
-                }
+                else
+                    nLines="${nLines0}"
+                fi
             ;;
 
             -?(-)t?(mp?(?(-)dir)))
@@ -221,7 +225,7 @@ forkrun() {
         [[ ${#} == 0 ]] && optParseFlag=false
 
     done
-
+    
     # # # # # SETUP TMPDIR # # # # #
 
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
@@ -235,7 +239,7 @@ forkrun() {
 
     # # # # # BEGIN MAIN SUBSHELL # # # # #
 
-    # several file descriptors are opened for use by things running in this subshell. See clkosing `)` near the end of this function.
+    # several file descriptors are opened for use by things running in this subshell. See closing`)` near the end of this function.
     (
 
         # # # # # INITIAL SETUP # # # # #
