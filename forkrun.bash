@@ -61,12 +61,20 @@ forkrun() {
             -?(-)?(N)L?(INE?(S)))
                 nLines="${2}"
                 nLinesAutoFlag=true
+                [[ "${nLines}" == +([0-9])','+([0-9]) ]] && {
+                    nLinesMax="${nLines##*,}"
+                    nLines="${nLines%%,*}"
+                }
                 shift 1
             ;;
 
             -?(-)?(N)L?(INE?(S))?([= ])*@([[:graph:]])*)
                 nLines="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
                 nLinesAutoFlag=true
+                [[ "${nLines}" == +([0-9])','+([0-9]) ]] && {
+                    nLinesMax="${nLines##*,}"
+                    nLines="${nLines%%,*}"
+                }
             ;;
 
             -?(-)t?(mp?(?(-)dir)))
@@ -862,29 +870,29 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 
 ----------------------------------------------------------
 
--j | -P | --nprocs : sets the number of worker coprocs to use
+-j | -P | --nprocs  <#> : sets the number of worker coprocs to use
    ---->  default  : number of logical CPU cores ($(nproc))
 
 ----------------------------------------------------------
 
--t | --tmp[dir]    : sets the root directory for where the tmpfiles used by forkrun are created.
+-t | --tmp[dir] <path>   : sets the root directory for where the tmpfiles used by forkrun are created.
    ---->  default  : /dev/shm ; or (if unavailable) /tmp ; or (if unavailable) ${PWD}
 
    NOTE: unless running on an extremely memory-constrained system, having this tmp directory on a ramdisk (e.g., a tmpfs) will greatly improve performance
 
 ----------------------------------------------------------
 
--l | --nlines      : sets the number or lines to pass coprocs to use for each function call to this constant value, disabling the automatic dynamic batch size logic.
+-l | --nlines <#>       : sets the number or lines to pass coprocs to use for each function call to this constant value, disabling the automatic dynamic batch size logic.
    ---->  default  : n/a (by default automatic dynamic batch size adjustment is enabled)
 
--L | --NLINES      : sets the number or lines to pass coprocs to initially use for each function call, while keeping the automatic dynamic batch size logic enabled.
-   ---->  default  : 1
+-L | --NLINES  <#[,#]>  : tweak the initial (<#>) or initial+maximum (<#,#>) number of lines per batch while keeping the automatic dynamic batch size logic enabled. <#>: sets the number of lines to pass coprocs to initially use for each function call.
+   ---->  default  : 1,512
 
     NOTE: the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
 
 ----------------------------------------------------------
 
--d | --delimiter   : sets the delimiter used to seperateate inputs passed on stdin
+-d | --delimiter <delim> : sets the delimiter used to separate inputs passed on stdin. must be a single character.
    ---->  default  : newline ($'\n')
 
 --------------------------------------------------------------------------------------------------------------------
