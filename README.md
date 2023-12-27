@@ -130,7 +130,7 @@ There are 2 other common programs for parallelizing loops in the (bash) shell: `
     -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynbamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (disable with flag `+p`)
     -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled
     -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm'
--d <delimiter>: set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
+ -d <delimiter> : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
 ```
 
 **FLAGS WITHOUT ARGUMENTS**: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless othjerwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
