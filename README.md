@@ -129,7 +129,8 @@ There are 2 other common programs for parallelizing loops in the (bash) shell: `
     (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc).
     -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynbamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (disable with flag `+p`)
     -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled
-    -t <path>   : set tmp directoiry. set the directory where the temp files containing lines from stdin will be kept (when -l != 1). These files will be saved inside a new mktemp-generated     -d <delimiter>: set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag)
+    -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm'
+-d <delimiter>: set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
 ```
 
 **FLAGS WITHOUT ARGUMENTS**: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless othjerwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
@@ -139,7 +140,6 @@ There are 2 other common programs for parallelizing loops in the (bash) shell: `
     -I          : insert {id}. replace `{id}` with an index (0, 1, ...) describing which coproc the process ran on. 
     -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. Note: ordering is "close but not guaranteed" if flag -l=1 is also given (see '-ks'). Ordering guaranteed for -l>1.
     -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This requires and will automatically enable the `-k` output ordering flag.
-directory created under the directory specified here. Default is '/tmp'.
     (-0|-z)     : NULL-seperated stdin. stdin is NULL-separated, not newline separated.
     -s          : subshell. run each evaluation of `parFunc` in a subshell. This adds some overhead but ensures that running `parFunc` does not alter the coproc's environment and effect future evaluations of `parFunc`.
     -S          : pass via function's stdin. pass stdin to the function being parallelized via stdin ( $parFunc < /tmpdir/fileWithLinesFromStdin ) instead of via function inputs  ( $parFunc $(</tmpdir/fileWithLinesFromStdin) )
@@ -148,7 +148,7 @@ directory created under the directory specified here. Default is '/tmp'.
     -N          : enable no func mode. Only has an effect when `parFunc` and `initialArgs` were not given. If `-N` is not passed and `parFunc` and `initialArgs` are missing, `forkrun` will silently set `parFunc` to `printf '%s\n'`, which will basically just copy stdin to stdout.
     -u          : unescape redirects/pipes/`&&`/`||`. Un-escapes quoted `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` characters to allow for piping, redirection, and logical comparrison to occur *inside the coproc*. 
     --          : end of forkrun options indicator. indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs. This allows using a `parFunc` that begins with a `-`. NOTE: there is no `+<FLAG>` equivilant for `--`.
-    -v          : increase verbosity level. This can be passed up to 4 times for progressively more verbose output. +v reduces verbosity level by 1.
+    -v          : increase verbosity level. This can be passed up to 4 times for progressively more verbose output. +v decreases the verbosity level by 1.
     (-h|-?)     : display help text. use `--help=f[lags]` or `--help=a[ll]` for more details about flags that `forkrun` supports. NOTE: you must escape the `?` otherwise the shell can interpret it before passing it to forkrun.
 ```
 
