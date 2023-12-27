@@ -25,9 +25,9 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur outHave tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify0 fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pNotify0_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
-    local -a A p_PID runCmd 
+    local -a A p_PID runCmd outHave
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -503,17 +503,6 @@ forkrun() {
             exitTrapStr+='{ printf '"'"'\n'"'"' >&${fd_inotify2}; } {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
             ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
             exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
-
-            # monitor ${tmpDir}/.out for new files if we have inotifywait
-            ${nOrderFlag} && {
-                {
-                    inotifywait -m -e close_write --format '%f' -r "${tmpDir}"/.out >&${fd_inotify0} &
-
-                    pNotify0_PID=${!}
-                } 2>/dev/null
-
-                exitTrapStr_kill+='kill -9 '"${pNotify0_PID}"' 2>/dev/null; '$'\n'
-            }
         }
 
         # set EXIT trap (dynamically determined based on which option flags were active)
@@ -588,8 +577,13 @@ $(${nOrderFlag} && echo """
             : >\"${tmpDir}\"/.out/.quit{<#>}
 """)
             break
-$(${inotifyFlag} && echo """
+$({ ${inotifyFlag} || ${nOrderFlag}; } && echo """
         else
+"""
+${nOrderFlag} && echo """
+            printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}
+"""
+${iNotifyFlag} && echo """
             read -u ${fd_inotify} -t 0.1
 """)
         fi
@@ -626,6 +620,9 @@ ${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(
         } >&${fd_stderr}
     }"""
 ${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}') ${outStr}
+$(${nOrderFlag} && echo """
+    printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}
+""")
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
@@ -652,39 +649,44 @@ p_PID+=(\${p{<#>}_PID})
         if ${nOrderFlag}; then
             outCur=10
 
-            if ${inotifyFlag}; then
+            continueFlag=true
 
-                continueFlag=true
-
-                while ${continueFlag}; do
-                    
-                    read -r -u ${fd_inotify0}
-
-                    #echo "READ: $REPLY --> ${REPLY##*x}" >&${fd_stderr}
-
-                    if [[ ${REPLY} == *x+([0-9]) ]]; then
-                        outHave+="${REPLY##*x}"
-                    elif [[ -z ${REPLY} ]]; then
+            while ${continueFlag}; do
+                
+                read -r -u ${fd_nOrder0}
+                
+                case "${REPLY}" in
+                    +([0-9]))
+                        outHave[$REPLY]=1
+                    ;;
+                    x+([0-9]))
+                        outHave[${REPLY#x}]=0
+                    ;;
+                    '')
                         continueFlag=false
-                    fi
+                    ;;
+                esac
 
-                    while true; do
-                        if [[ "${outHave}" == *${outCur}* ]]; then
+                while true; do
+                    case "${outHave[${outCur}]}" in
+                        [01])
+                            [[ "${outHave[${outCur}]}" == 1 ]] && {
+                                cat "${tmpDir}"/.out/x${outCur} >&${fd_stdout}
+                                \rm  -f "${tmpDir}"/.out/x"${outCur}"
+                            }
 
-                            cat "${tmpDir}"/.out/x${outCur} >&${fd_stdout}
-                            \rm  -f "${tmpDir}"/.out/x${outCur}
-                            outHave=${outHave//"${outCur} "/}
+                            unset "outHave[$outCur]"
                             ((outCur++))
                             [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
-
-                        else
+                        ;;
+                        *)
                             break
-                        fi
-                    done
-
-                    [[ -f "${tmpDir}"/.quit ]] && { continueFlag=false; break; }
+                        ;;
+                    esac
                 done
-            fi
+
+                [[ -f "${tmpDir}"/.quit ]] && { continueFlag=false; break; }
+            done
 
             (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
 
@@ -703,7 +705,7 @@ p_PID+=(\${p{<#>}_PID})
         ${nLinesAutoFlag} && (( ${verboseLevel} > 1 )) && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_inotify0}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
 
 }
 
@@ -824,8 +826,7 @@ OPTIONAL DEPENDENCIES (to provide enhanced functionality):
     `fallocate` -AND- kernel 3.5+ : Required to remove already-read data from in-memory tmpfile. Without both of these stdin will accumulate in the tmpfile and won't be cleared until forkrun is finished and returns
                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
     `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | forkrun).
-                                    Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage. It also enables the real-time printing (and then freeing from memory)
-                                    outputs when "ordered output" mode is being used (flags `-k` or `-n`) (otherwise all output is saved on in memory and printed at the end after forkrun has finished running).
+                                    Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage. 
 
 EOF
 }
