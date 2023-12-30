@@ -857,6 +857,7 @@ EOF
 
 (( ${displayFlags} == 1 )) && {
 cat<<'EOF' >&2
+
 # # # # # # # # # # FLAGS # # # # # # # # # #
 
 GENERAL NOTES:
@@ -864,7 +865,9 @@ GENERAL NOTES:
     2.  Flags must be given before the name of the function being parallelized (any flags given after the function name will be assumed to be initial arguments for the function, not forkrun options).
     3.  There are also "long" versions of the flags (e.g., `--insert` is the same as `-i`). Run `forkrun --help=all` for a full list of long options/flags.
 
-# # # # # FLAGS WITH ARGUMENTS # # # # #
+
+FLAGS WITH ARGUMENTS
+--------------------
 
     (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc).
     -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
@@ -872,7 +875,9 @@ GENERAL NOTES:
     -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm', or (if unavailable) '/tmp'
  -d <delimiter> : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
 
-# # # # # FLAGS WITHOUT ARGUMENTS # # # # #
+
+FLAGS WITHOUT ARGUMENTS
+-----------------------
 
 SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless otherwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
 
