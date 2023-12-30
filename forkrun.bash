@@ -892,6 +892,7 @@ SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passi
     (-h|-?)     : display help text. use `--help=f[lags]` or `--help=a[ll]` for more details about flags that `forkrun` supports. NOTE: you must escape the `?` otherwise the shell can interpret it before passing it to forkrun.
 
 EOF
+}
 
 (( ${displayFlags} > 1 )) && {
 cat<<'EOF' >&2
