@@ -1,5 +1,8 @@
 #!/usr/bin/env bash 
 
+shopt -s extglob
+set -m
+
 unset forkrun
 declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/forkrun-v2_RC/forkrun.bash)
 declare -F forkrun &>/dev/null || source ./forkrun.bash
@@ -18,6 +21,10 @@ mapfile -t A3 < <(printf '%s\n' "${A2[@]}" | head -n  $(( ${nProcs} - 2 )))
 
 
 for nn in A3 A2 A1 A0; do
+
+sleep 1
+declare +n C
+unset C
 declare -n C="$nn"
 
 unset forkrun

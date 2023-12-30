@@ -1,5 +1,8 @@
 #!/usr/bin/env bash 
 
+shopt -s extglob
+set -m
+
 unset forkrun
 declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/forkrun-v2_RC/forkrun.bash)
 declare -F forkrun &>/dev/null || source ./forkrun.bash
@@ -10,21 +13,32 @@ cat /proc/mounts | grep -F '/mnt/ramdisk' || mount -t tmpfs tmpfs /mnt/ramdisk
 rsync -a /usr /mnt/ramdisk
 which nproc 1>/dev/null 2>/dev/null && nProcs=$(nproc) || nProcs=8
 
-mapfile -t A0 < <(find /mnt/ramdisk -type f | head -n $(( ${nProcs} * 1024 )))
+mapfile -t A0 < <(find /mnt/ramdisk -type f | head -n $(( ${nProcs} * 512 )))
+mapfile -t A0 < <(printf '%s\n' "${A0[@]}" )
 mapfile -t A1 < <(printf '%s\n' "${A0[@]}" | head -n $(( ${nProcs} * 128 )))
 mapfile -t A2 < <(printf '%s\n' "${A1[@]}" | head -n  $(( ${nProcs} + 2 )))
 mapfile -t A3 < <(printf '%s\n' "${A2[@]}" | head -n  $(( ${nProcs} - 2 )))
 
-nMax="$(( ${nProcs} / 2 ))"
+nMax0="$(( ${nProcs} / 2 ))"
+
+kk=0
 
 for nn in A3 A2 A1 A0; do
+
+kk=$(( 1 + ( 3 * $kk / 2 ) ))
+
+sleep 1
+declare +n C
+unset C
 declare -n C="$nn"
 
 unset forkrun
 declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/forkrun-v2_RC/forkrun.bash)
 declare -F forkrun &>/dev/null || source ./forkrun.bash
 
-echo "BEGINNING TEST CASE FOR STDIN LENGTH = ${#C[@]}"
+nMax=$(( 1 + ( ( ${nMax0} - 1  )  / $kk ) ))
+
+printf '\nBEGINNING TEST CASE FOR STDIN LENGTH = %s\n(running %s tests in parallel)\n\n' "${#C[@]}" "${nMax}"
 
 
 ( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -k sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'//) <(printf '%s\n' "${C[@]}") && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -k sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//'; }  | tee -a /tmp/.forkrun.log; ) &
