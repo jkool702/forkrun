@@ -27,7 +27,7 @@ for nn in A3 A2 A1 A0; do
 
 kk=$(( 1 + ( 3 * $kk / 2 ) ))
 
-sleep 1
+sleep $kk
 declare +n C
 unset C
 declare -n C="$nn"
@@ -37,6 +37,8 @@ declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.co
 declare -F forkrun &>/dev/null || source ./forkrun.bash
 
 nMax=$(( 1 + ( ( ${nMax0} - 1  )  / $kk ) ))
+
+set -m
 
 printf '\nBEGINNING TEST CASE FOR STDIN LENGTH = %s\n(running %s tests in parallel)\n\n' "${#C[@]}" "${nMax}"
 

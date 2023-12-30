@@ -31,6 +31,8 @@ unset forkrun
 declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/forkrun-v2_RC/forkrun.bash)
 declare -F forkrun &>/dev/null || source ./forkrun.bash
 
+set -m
+
 echo "BEGINNING TEST CASE FOR STDIN LENGTH = ${#C[@]}"
 
 
