@@ -11,11 +11,11 @@ forkrun() {
 #
 # For help / usage info, call forkrun with one of the following flags:
 #
-# --usage              :  display brief usage info (shown above)
-# -? | -h | --help     :  dispay standard help (does not include detailed info on flags) 
+# --usage              :  display brief usage info
+# -? | -h | --help     :  dispay standard help (includes brief descriptions + short names for flags)
 # --help=s[hort]       :  more detailed varient of '--usage'
-# --help=f[lags]       :  display detailed info about flags
-# --help=a[ll]         :  display all help (including detailed flag info)
+# --help=f[lags]       :  display detailed info about flags (longer descriptions, short + long names)
+# --help=a[ll]         :  display all help (includes detailed descriptions for flags)
 #
 # NOTE: the `?` may need too be escaped for `-?` to trigger the help (i.e., use `forkrun '-?'` or `forkrun -\?`)
 
