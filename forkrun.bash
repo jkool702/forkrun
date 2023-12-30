@@ -21,7 +21,12 @@ forkrun() {
 
 ############################ BEGIN FUNCTION ############################
 
-    trap - EXIT
+    [ -t 0 ] && {
+        printf '\n\nERROR: STDIN is a terminal. Forkrun requires STDIN to be a pipe (containing the inputs to parallelize over).\n\nABORTING\n\n'
+        return 1
+    }
+    
+    trap - EXIT INT
 
     shopt -s extglob
 
@@ -84,11 +89,13 @@ forkrun() {
 
             -?(-)t?(mp?(?(-)dir)))
                 tmpDirRoot="${2}"
+                mkdir -p "${tmpDirRoot}"
                 shift 1
             ;;
 
             -?(-)t?(mp?(?(-)dir))?([= ])*@([[:graph:]])*)
                 tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
+                mkdir -p "${tmpDirRoot}"
             ;;
 
             -?(-)d?(elim?(iter)))
@@ -230,7 +237,6 @@ forkrun() {
     # # # # # SETUP TMPDIR # # # # #
 
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
-    [[ -d "${tmpDirRoot}" ]] || mkdir -p "${tmpDirRoot}"
 
     tmpDir="$(mktemp -p "${tmpDirRoot}" -d .forkrun.XXXXXX)"
     fPath="${tmpDir}"/.stdin
