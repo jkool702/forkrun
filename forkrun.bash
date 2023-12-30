@@ -47,7 +47,7 @@ forkrun() {
             -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])+([0-9]))
                 nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ]))}"
             ;;
-shopt -s extglob
+
             -?(-)?(n)l?(ine?(s)))
                 nLines="${2}"
                 nLinesAutoFlag=false
@@ -767,8 +767,7 @@ mktemp () (
 
 forkrun_displayHelp() {
 
-local displayFlags
-local -i displayMain
+local -i displayMain displayFlags
 
 shopt -s extglob
 
@@ -776,32 +775,33 @@ case "$1" in
 
     -?(-)usage)
         displayMain=0
-        displayFlags=false
+        displayFlags=0
     ;;
 
     -?(-)help=s?(hort))
         displayMain=1
-        displayFlags=false
+        displayFlags=0
     ;;
 
     -?(-)help=f?(lags))
         displayMain=0
-        displayFlags=true
+        displayFlags=2
     ;;
 
     -?(-)help=a?(ll))
         displayMain=3
-        displayFlags=true
+        displayFlags=2
     ;;
 
     *)
         displayMain=2
-        displayFlags=false
+        displayFlags=1
     ;;
 
 esac
 
 cat<<'EOF' >&2
+# # # # # # # # # # # # # # # FORKRUN # # # # # # # # # # # # # # #
 
 USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
 
@@ -850,20 +850,58 @@ HOW IT WORKS:
     The coproc code is dynamically generated based on passed forkrun options, then K coprocs (plus some "helper function" coprocs) are forked off.
     These coprocs will groups on lines from stdin using a shared fd and run them through the specified function in parallel.
     Importantly, this means that you dont need to fork anything after the initial coprocs are set up...the same coprocs are active for the duration of forkrun, and are continuously piped new data to run.
-    This is MUCH faster than the traditional "forking each call" in bash (esp. for many fast tasks)...On my hardware `forkrun` is 1x-2x faster than `xargs -P $(nproc) -d $'\n'`  and 3x-8x faster than `parallel -m`.
+    This is MUCH faster than the traditional "forking each call" in bash (especially for many fast tasks)...On my hardware `forkrun` is 1x-2x faster than `xargs -P $(nproc) -d $'\n'`  and 3x-8x faster than `parallel -m`.
 
 EOF
 }
 
-${displayFlags} && {
+(( ${displayFlags} == 1 )) && {
 cat<<'EOF' >&2
-# # # # # # # # # # # # FLAGS # # # # # # # # # # # #
+# # # # # # # # # # FLAGS # # # # # # # # # #
 
 GENERAL NOTES:
-     1. Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below.
-        Refer to the code for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
-     2. All forkrun flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, forkrun assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'.
-        To stop option parsing sooner, add a '--' after the last forkrun flag. Note: this will only stop option parsing sooner...forkrun will always stop at the first argument that does not begin with a '-' or '+'.
+    1.  Flags must be given seperately (e.g., use `-k -v` and not `-kv`) 
+    2.  Flags must be given before the name of the function being parallelized (any flags given after the function name will be assumed to be initial arguments for the function, not forkrun options).
+    3.  There are also "long" versions of the flags (e.g., `--insert` is the same as `-i`). Run `forkrun --help=all` for a full list of long options/flags.
+
+# # # # # FLAGS WITH ARGUMENTS # # # # #
+
+    (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc).
+    -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
+    -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,512'
+    -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm', or (if unavailable) '/tmp'
+ -d <delimiter> : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
+
+# # # # # FLAGS WITHOUT ARGUMENTS # # # # #
+
+SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless otherwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
+
+    -i          : insert {}. replace `{}` with the inputs passed on stdin (instead of placing them at the end)
+    -I          : insert {id}. replace `{id}` with an index (0, 1, ...) describing which coproc the process ran on. 
+    -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. 
+    -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This requires and will automatically enable the `-k` output ordering flag.
+    (-0|-z)     : NULL-seperated stdin. stdin is NULL-separated, not newline separated. WARNING: this flag (by necessity) disables a check that prevents lines from occasionally being split into two seperate lines, which can happen if `parFunc` evaluates very quickly. In general a delimiter other than NULL is recommended, especially when `parFunc` evaluates very fast and/or there are many items (passed on stdin) to evaluate.
+    -s          : run in subshell. run each evaluation of `parFunc` in a subshell. This adds some overhead but ensures that running `parFunc` does not alter the coproc's environment and effect future evaluations of `parFunc`.
+    -S          : pass via function's stdin. pass stdin to the function being parallelized via stdin ( $parFunc < /tmpdir/fileWithLinesFromStdin ) instead of via function inputs  ( $parFunc $(</tmpdir/fileWithLinesFromStdin) )
+    -p          : pipe read. dont use a tmpfile and have coprocs read (via shared file descriptor) directly from stdin. Enabled by default only when `-l 1` is passed.
+    -D          : delete tmpdir. Remove the tmp dir used by `forkrun` when `forkrun` exits. NOTE: the `-D` flag is enabled by default...disable with flag `+D`.
+    -N          : enable no func mode. Only has an effect when `parFunc` and `initialArgs` were not given. If `-N` is not passed and `parFunc` and `initialArgs` are missing, `forkrun` will silently set `parFunc` to `printf '%s\n'`, which will basically just copy stdin to stdout.
+    -u          : unescape redirects/pipes/forks/logical operators. Typically `parFunc` and `initialArgs` are run through `printf '%q'` making things like `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` appear as literal characters. This flag skips the `printf '%q'` call, meaning that these operators can be used to allow for piping, redirection, forking, logical comparrison, etc. to occur *inside the coproc*. 
+    --          : end of forkrun options indicator. indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs. This allows using a `parFunc` that begins with a `-`. NOTE: there is no `+<FLAG>` equivilant for `--`.
+    -v          : increase verbosity level by 1. This can be passed up to 4 times for progressively more verbose output. +v decreases the verbosity level by 1.
+    (-h|-?)     : display help text. use `--help=f[lags]` or `--help=a[ll]` for more details about flags that `forkrun` supports. NOTE: you must escape the `?` otherwise the shell can interpret it before passing it to forkrun.
+
+EOF
+
+(( ${displayFlags} > 1 )) && {
+cat<<'EOF' >&2
+# # # # # # # # # # FLAGS # # # # # # # # # #
+
+GENERAL NOTES:
+    1.  Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below.
+          *   Refer to the code for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
+    2.  All forkrun flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, forkrun assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'.
+          *   To stop option parsing sooner, add a '--' after the last forkrun flag. NOTE: this will only stop option parsing sooner...forkrun will always stop at the first argument that does not begin with a '-' or '+'.
 
 --------------------------------------------------------------------------------------------------------------------
 
@@ -906,15 +944,14 @@ FLAGS WITHOUT ARGUMENTS
 -----------------------
 
 SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags (short or long) may use either 1 or 2 leading dashes ('-f' or '--f' or '-flag' or '--flag' all work) to enable these.
-                 To instead disable these optional subroutines, replace the leading '-' or '--' with a leading '+' or '++' or '+-'. If a flag is given multiple times, the last one is used.
-                 Unless otherwise noted, all of  the following flags are, by default, in the "disabled" state
+             To instead disable these optional subroutines, replace the leading '-' or '--' with a leading '+' or '++' or '+-'. If a flag is given multiple times, the last one is used.
+             Unless otherwise noted, all of  the following flags are, by default, in the "disabled" state
 
 ----------------------------------------------------------
 
 -i | --insert        : insert {}. replace `{}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the forkrun commandline) with the inputs passed on stdin (instead of placing them at the end)
 
--I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the forkrun commandline) with an index (0, 1, ...) indicating which coproc the process is running on.
-                       this is analagous to the `--plocess-slot-var` option in `xargs`
+-I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the forkrun commandline) with an index (0, 1, ...) indicating which coproc the process is running on. This is analagous to the `--process-slot-var` option in `xargs`
 
 ----------------------------------------------------------
 
@@ -957,32 +994,33 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 
 ----------------------------------------------------------
 
--u | --unescape      : dont escape `parFunc [${args0[@]}]` before having the coprocs run it. Typically, `parFunc [${args0[@]}]` is run through `printf '%q '`, making such that pipes and redirects and logical operators similiar ('|' '<<<' '<<' '<' '>' '>>' '&' '&&' '||') are treated as literal characters and dont pipe / redirect / logical operators / whatever. This flag makes forkrun skip running these through `printf '%q'`, making pipes and redirects work normally.
+-u | --unescape      : dont escape `parFunc [${args0[@]}]` before having the coprocs run it. Typically, `parFunc [${args0[@]}]` is run through `printf '%q '`, making such that pipes and redirects and logical operators similiar ('|' '<<<' '<<' '<' '>' '>>' '&' '&&' '||') are treated as literal characters and dont pipe / redirect / logical operators / whatever. This flag makes forkrun skip running these through `printf '%q'`, making pipes and redirects work normally. This flag is particuarly useful in combination with the `-i` flag.
 
     NOTE: keep in mind that the shell will interpret the commandline before forkrun gets it, so pipes and redirects must still be passed either escaped or quoted otherwise the shell will interpret+implemnt them before forkrun does.
-    NOTE: this flag is particuarly useful in combination with the `-i` flag, as it allows you to do things like the following (which will scan files whose paths are given on stdin and search them, for some string and, only if found, print the filename):  printf '%s\n' "${paths[@]}" | forkrun -i -u -l1 -- 'cat {} | grep -q someString && echo {}'
+    EXAMPLE: the following will scan files whose paths are given on stdin and search them, for some string and, only if found, print the filename:  
+             printf '%s\n' "${paths[@]}" | forkrun -i -u -l1 -- 'cat {} | grep -q someString && echo {}'
 
 ----------------------------------------------------------
 
--v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr.
-
-    NOTE: The '+' version of this flag decreases verbosity level by 1. The default level is 0.
-    NOTE: Meaningful verbotisity levels are 0 - 4
-      --> 0 [or less than 0] (only errors)
+-v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr. The default level is 0. Meaningful verbotisity levels are 0 - 4
+      --> 0 [or less than 0] (only errors) (DEFAULT)
       --> 1 (errors + overview of parsed forkrun options)
       --> 2 (errors + options overview + progress notifications of when the code finishes one of its main sections)
-      --> 3 (errors + options overview + progress notifcations + indicators of a few runtime "milestone" events and statistics)
-      --> 4 [or more than 3] (errors + options overview + progress notifcations + runtime milestones + show code for dynamically generated coproc code anbd exit trap code
+      --> 3 (errors + options overview + progress notifications + indicators of a few runtime "milestone" events and statistics)
+      --> 4 [or more than 4] (errors + options overview + progress notifications + runtime milestones + print dynamically generated coproc code and exit trap to stderr)
+
+    NOTE: The '+' version of this flag decreases verbosity level by 1.
 
 ----------------------------------------------------------
 
 FLAGS THAT TRIGGER PRINTING HELP/USAGE INFO TO SCREEN THEN EXIT
 
 --usage              :  display brief usage info
--? | -h | --help     :  dispay standard help (does not include detailed info on flags)
+-? | -h | --help     :  dispay standard help (includes brief descriptions + short names for flags)
 --help=s[hort]       :  more detailed varient of '--usage'
---help=f[lags]       :  display detailed info about flags
---help=a[ll]         :  display all help (combined output of '--help' and '--help=flags'
+--help=f[lags]       :  display detailed info about flags (longer descriptions, short + long names)
+--help=a[ll]         :  display all help (includes detailed descriptions for flags)
+
 --------------------------------------------------------------------------------------------------------------------
 
 EOF
