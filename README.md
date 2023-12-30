@@ -121,34 +121,43 @@ There are 2 other common programs for parallelizing loops in the (bash) shell: `
 
 # SUPPORTED OPTIONS / FLAGS 
 
-`forkrun` supports many of the same flags as `xargs` (with the exception of options intended for interactive use), plus several additional options that are present in `parallel` but not `xargs`. A quick summary will be provided here - for more info refer to the comment block at the top of the forkrun function, or source forkrun and then run `forkrun --help[=all]`. The following flags are supported:
+`forkrun` supports many of the same flags as `xargs` (with the exception of options intended for interactive use), plus several additional options that are present in `parallel` but not `xargs`. A quick summary will be provided here - for more info refer to the comment block at the top of the forkrun function, or source forkrun and then run `forkrun --help[={flags,all}]`.
+
+GENERAL NOTES:
+    1.  Flags must be given seperately (e.g., use `-k -v` and not `-kv`) 
+    2.  Flags must be given before the name of the function being parallelized (any flags given after the function name will be assumed to be initial arguments for the function, not forkrun options).
+    3.  There are also "long" versions of the flags (e.g., `--insert` is the same as `-i`). Run `forkrun --help=all` for a full list of long options/flags.
+
+The following flags are supported:
 
 **FLAGS WITH ARGUMENTS**
 
 ```
     (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc).
-    -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynbamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (disable with flag `+p`)
-    -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled
-    -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm'
+    -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
+    -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,512'
+    -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm', or (if unavailable) '/tmp'
  -d <delimiter> : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
 ```
 
 **FLAGS WITHOUT ARGUMENTS**: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless othjerwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
 
 ```
+SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless otherwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
+
     -i          : insert {}. replace `{}` with the inputs passed on stdin (instead of placing them at the end)
     -I          : insert {id}. replace `{id}` with an index (0, 1, ...) describing which coproc the process ran on. 
-    -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. Note: ordering is "close but not guaranteed" if flag -l=1 is also given (see '-ks'). Ordering guaranteed for -l>1.
+    -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. 
     -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This requires and will automatically enable the `-k` output ordering flag.
-    (-0|-z)     : NULL-seperated stdin. stdin is NULL-separated, not newline separated.
-    -s          : subshell. run each evaluation of `parFunc` in a subshell. This adds some overhead but ensures that running `parFunc` does not alter the coproc's environment and effect future evaluations of `parFunc`.
+    (-0|-z)     : NULL-seperated stdin. stdin is NULL-separated, not newline separated. WARNING: this flag (by necessity) disables a check that prevents lines from occasionally being split into two seperate lines, which can happen if `parFunc` evaluates very quickly. In general a delimiter other than NULL is recommended, especially when `parFunc` evaluates very fast and/or there are many items (passed on stdin) to evaluate.
+    -s          : run in subshell. run each evaluation of `parFunc` in a subshell. This adds some overhead but ensures that running `parFunc` does not alter the coproc's environment and effect future evaluations of `parFunc`.
     -S          : pass via function's stdin. pass stdin to the function being parallelized via stdin ( $parFunc < /tmpdir/fileWithLinesFromStdin ) instead of via function inputs  ( $parFunc $(</tmpdir/fileWithLinesFromStdin) )
     -p          : pipe read. dont use a tmpfile and have coprocs read (via shared file descriptor) directly from stdin. Enabled by default only when `-l 1` is passed.
     -D          : delete tmpdir. Remove the tmp dir used by `forkrun` when `forkrun` exits. NOTE: the `-D` flag is enabled by default...disable with flag `+D`.
     -N          : enable no func mode. Only has an effect when `parFunc` and `initialArgs` were not given. If `-N` is not passed and `parFunc` and `initialArgs` are missing, `forkrun` will silently set `parFunc` to `printf '%s\n'`, which will basically just copy stdin to stdout.
-    -u          : unescape redirects/pipes/`&&`/`||`. Un-escapes quoted `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` characters to allow for piping, redirection, and logical comparrison to occur *inside the coproc*. 
+    -u          : unescape redirects/pipes/forks/logical operators. Typically `parFunc` and `initialArgs` are run through `printf '%q'` making things like `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` appear as literal characters. This flag skips the `printf '%q'` call, meaning that these operators can be used to allow for piping, redirection, forking, logical comparrison, etc. to occur *inside the coproc*. 
     --          : end of forkrun options indicator. indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs. This allows using a `parFunc` that begins with a `-`. NOTE: there is no `+<FLAG>` equivilant for `--`.
-    -v          : increase verbosity level. This can be passed up to 4 times for progressively more verbose output. +v decreases the verbosity level by 1.
+    -v          : increase verbosity level by 1. This can be passed up to 4 times for progressively more verbose output. +v decreases the verbosity level by 1.
     (-h|-?)     : display help text. use `--help=f[lags]` or `--help=a[ll]` for more details about flags that `forkrun` supports. NOTE: you must escape the `?` otherwise the shell can interpret it before passing it to forkrun.
 ```
 
