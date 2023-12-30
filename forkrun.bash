@@ -22,7 +22,7 @@ forkrun() {
 ############################ BEGIN FUNCTION ############################
 
     [ -t 0 ] && {
-        printf '\n\nERROR: STDIN is a terminal. \n\nForkrun requires STDIN to be a pipe \n(containing the inputs to parallelize over) \n\nABORTING! \n\n'
+        printf '\n\nERROR: STDIN is a terminal. \n\nforkrun requires STDIN to be a pipe \n(containing the inputs to parallelize over); e.g.: \n\nprintf '"'"'%s\\n'"'"' "${args[@]}" | forkrun parFunc \n\nABORTING! \n\n'
         return 1
     }
     
