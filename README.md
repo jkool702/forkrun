@@ -1,17 +1,14 @@
-NOTE: the below information applies to version 1 of `forkrun`. `mySplit` is a work-in-progress complete rewrite of `forkrun` that is nearly finished. `mySplit` uses a completely different IPC scheme, making it is faster and more efficient while relying on fewer external dependencies. A handful of option flags have not yet been implemented, but mySplit is otherwise fully functional.
+# FORKRUN
 
-In the latest speedtests (see `mySplit.speedtest.bash`)  it is, in terms of "real life / wall clock" time, (on average) roughly twice as fast as the fastest xarghs implementation and roughly 4 times as fast as the fastest parallel implementation. Total CPU time tends to be a bit higher than `xargs` and on average comparable to `parallel`.
+`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs` or `parallel` does, only faster than either (especially parallel).  In my testing, `forkrun` was, on average (for problems where the efficiency of the parallelization framework actually makes a difference) ~70% faster than `xargs -P $(nproc)` and ~7x as fast as `parallel -m -j $(nproc)`. See To be clear, these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
 
-# forkrun (v1)
+***
 
-`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs -P` or `parallel` does, only faster. In my testing, `forkrun` was anywhere from 10-80% faster than `xargs -P $(nproc)` and 100-150% faster than `parallel -m -j $(nproc)`. To be clear, these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
+# USAGE
 
+`forkrun` in invoked in much the same way as `xargs`: on the command-line, pass forkrun options, then the function/script/binary that you are parallelizing, then any initial constant arguments (in that order). The arguments to parallelize running are passed to forkrun on stdin. A typical `forkrun` invocation looks something like this:
 
-# # # # # USAGE # # # # #
-
-`forkrun` in invoked in much the same way as `xargs`: forkrun options, the function that you are parallelizing, and any initial constant arguments are given as function inputs )in that order), and the arguments to parallelize are passed to forkrun on stdin.
-
-    echo "inArgs" | forkrun [flags] -- parFunc [initialArgs]
+    printf '%s\n' "${inArgs[@]}" | forkrun [flags] [--] parFunc ["${initialArgs[@]}"]
 
 `forkrun` strives to automatically choose reasonable and near-optimal values for flags, so in most usage scenarios no flags will need to be set to attain maximum performance and speed.
 
@@ -19,69 +16,147 @@ NOTE: you'll need to `source` forkrun before using it
 
     source /path/to/forkrun.bash
     
-Alternately, if you dont have forkrun.bash` saved locally but have internet access (or want to ensure you are using the latest version), you can run
+Alternately, if you dont have `forkrun.bash` saved locally but have internet access (or want to ensure you are using the latest version), you can run
     
     source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)
+
+***
+
+**HELP**: the `forkrun.bash` script, when sourced, will source a helper function (`forkrun_displayHelp`) to display help. This is activated by calling one of the following:
+
+```
+--usage              :  display brief usage info
+-? | -h | --help     :  dispay standard help (includes brief descriptions + short names for flags)
+--help=s[hort]       :  more detailed varient of '--usage'
+--help=f[lags]       :  display detailed info about flags (longer descriptions, short + long names)
+--help=a[ll]         :  display all help (includes detailed descriptions for flags)
+```
+
+NOTE: text inside of the brackets `[...]` is optional.
+NOTE: `forkrun -?` may not work unless you escape the `?`. i.e., `forkrun -\?` or `forkrun '-?'`
+
+***
     
-NO FUNCTION MODE: forkrun supports an additional mode of operation where "parFunc" and "args0" are not given as function inputs, but instead are integrated into each line of "$args". In this mode, each line passed on stin will be run as-is (by saving groups of 512 lines to tmp files and then sourcing them). This allows you to easily run multiple different functions in paralel and still utalize forkrun's very quick and efficient parallelization method. This mode has a few limitations/considerations:
+# HOW IT WORKS
 
-1. The following flags are not supported and, if given, will be ignored: '-i', '-id', '-s' and '-l 1'
-2. Lines from stdin will be "space-split" when run. Typically, forkrun splits stdin on newlines (or nulls, if -0z flag is given), allowing (for example)paths that include a space (' ') character to work without needing any quoting. in "no function" mode however, the function and initial args are included in each line on stdin, so they must be space-split to run. Solution is to either quote things containing spaces or easpace the space characters ('\ '). Example:
+**BASH COPROCS**: `forkrun` parallelizes loops by running multiple inputs through a script/function in parallel using bash coprocs. `forkrun` is fundamentally different than most existing loop parallelization codes in the sense that individual function evaluations are not forked. Rather, initially, a number of persistent bash coprocs are forked, and then inputs (passed on stdin) are distributed to these coprocs without any additional forking (or reopening pipes/fd's, or...). This,  combined with the (when possible) exclusive use of bash builtins (all of main loop, most of the rest of the code) (these avoid subshell generation, and their associated increase in execution time). This (as well as being *heavily* optimized) is what makes `forkrun` so fast. 
 
+***
 
-     `printf '%s\n' 'sha256sum "/some/path/with space character"' 'sha512sum "/some/other/path/with space characters"' | forkrun`
+**AUTOMATIC BATCH SIZE ADJUSTMENT**: by default, `forkrun` will automatically dynamically adjust how many lines are passed to the function each time it is called (batch size). The batch size starts at 1, and is dynamically adjusted upwards (but never downwards) up to a maximum of 512 lines per batch (which is typically near-optimal in my personal trial-and-error testing). The logic used here involves:
 
+1. Calculating the average bytes/line by looking number of lines read and the number of bytes read (from `/proc/self/fdinfo/$fd`)
+2. Estimating the number of remaining lines left to read by getting the difference in the number of bytes read/written and dividing by the average bytes/line
+3. dividing the estimated number of remaining lines by the number of worker coprocs
 
-# # # # # HOW IT WORKS # # # # #
+NOTE: this is a "maximum lines per batch" (implemented via `mapfile -n ${nLines}`)...if stdin is arriving slowly then fewer than this many lines will be used. What this serves to accomplish is to prevent a couple of coproc workers from claiming all the lines of input while the rest sit idle if the total number of lines is less than `512 * (# worker coprocs)`
 
-`forkrun` parallelizes loops by running multiple inputs through a script/function in parallel using bash coprocs. `forkrun` is fundementally different than most existing loop parallelization codes in the sense that individual function evaluations are not forked. Rather, initially a number of persistent bash coprocs are forked, and then inputs (passed on stdin) are distributed to these coprocs without any additional forking (or reopening pipes/fd's, or...). This,  combined with the (when possible) exclusive use of bash builtins (all of main loop, most of the rest of the code) (these avoid subshell generation, and their associated increase in execution time), is what makes `forkrun` so fast. 
+To overrule this logic and set a static batch size use the '-l' flag. Alternately, use the `-L` flag to keep the automatic batch size logic enabled but to change the initial and maximum number of lines per batch.
 
-AUTOMATIC BATCH SIZE ADJUSTMENT: by default, `forkrun` will automatically adjust how many lines are passed to the function each time it is called (batch size). To ooverrule this logic and set a static batch size use the '-l' flag. Note: personal "trial-and-error" testing has suggested that in the "many very fast iterations" limit a batch size of around 512 lines is near-optimal. However, if you have fewer than 512 * `$nProcs` total input lines setting batch size to 512 will leave some coprocs without any lines from stdin. Also, if stduin is comming in very slowly, this might leave coprocs sitting idning waiting for inputs to arrive. To attempot to get the best performance in all of these situations, `forkrun`'s automatic batch size adjustment logic is as follows: 
+***
 
-1. split into groups of 512 lines and save to disk in a (ram-backed) tmp dir (via a forked `split` process)
-2. As forkrun is beginning it main loop, at the start of each iteration check if there are `$nProcs` split generated files available (1 for each coproc)
-2a.  --> IF YES: turn off automatic batch size adjustment and proceed normally
-2b.  --> IF  NO: take the files (containing lines from stdin) that are available and re-split into `$nProcs` files (1 for each coproc), so that each coproc has an equal number for 1 round. After these have all been "used up" and sentoff to the coprocs, repeat step 2.
+**IPC**: Forkrun distributes stdin to the worker coprocs by first saving them to a tmpfile (by default on a tmpfs -- in a directory under `/dev/shm`; customizable with the `-t` flag) using a forked coproc. The worker coprocs then read data from this file into an array (using `mapfile`) using a shared read-only file descriptor and an exclusive read lock. 
 
+***
 
+**NO FUNCTION MODE**: forkrun supports an additional mode of operation where `parFunc` and `initialArgs` are not given as function inputs, but instead are integrated into each line of `args`. In this mode, each line passed on stin will be run as-is (by saving groups of 512 lines to tmp files and then sourcing them). This allows you to easily run multiple different functions/scripts/binaries in paralel and still utalize forkrun's very quick and efficient parallelization method. To activate this mode, use flag `-N` and do not provide `parFunc` or `initialArgs`. This is implemented via `source <(printf '%s\n' "${args[@]}")`
 
-# # # # # SUPPORTRED OPTIONS / FLAGS # # # # #
+***
 
-`forkrun` supports many of the same flags as `xargs` (with the exception of options intended for interactive use), plus several additional options that are present in `parallel` but not `xargs`. A quick summary will be provided here - for more info refer to the comment block at the top of the forkrun function, or source forkrun and then run `forkrun --help`. The following flags are supported:
+# DEPENDENCIES
 
-    
-    (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc).
-    -l <#>      : num lines per function call (batch size). set number of lines to pass to the function on each function call. if -l=1 (and '-ks' is *not* set). then lines from stdin are piped to the function, otherwise `split` groups lines and saves them to a temp directory on a [ram]disk. Default is '-l=0', which enables automatically adjusing batch size.
+`forkrun` strives to rely on as few external dependencies as possible. It is *almost* pure-bash, though does have a handful of [optional] external dependencies:
+
+***
+
+**REQUIRED DEPENDENCIES**
+
+Bash 4+ :             This is when coprocs were added. NOTE: `forkrun` will be much faster on bash 5.1+, since it healivy relies of arrays and the `mapfile` command which got a major overhaul in bash 5.1. The vast majority of testing has been done on bash 5.2 so while bash 4-5.0 *should* work it is not well tested.
+
+`rm` and `mkdir`:     For some basic filesystem operations. I couldnt figure out how to re-implement these in pure bash. Either the GNU or the busybox versions of these will both work.
+
+***
+
+**OPTIONAL DEPENDENCIES**
+
+Bash 5.1+:           For improved speed due to overhauled handling of arrays.
+
+`mktemp` and `cat`:  The code will provide pure-bash replacements for these if they arent available, but if external binaries for these are present they will be used
+
+`inotifywait`:       If available, this is used to monitor the tmpfile where stdin is saved before being read by the coprocs. This enables the coprocs to efficiently wait for input if stdin is arriving slowly (e.g., `ping 1.1.1.1 | forkrun <...>`)
+
+`fallocate`:         If available, this is used to deallocate already-processed data from the beginning of the tmpfile holding stdin. This enables `forkrun` to be used in long-running processes that consistently output data for days/weeks/months/... Without `fallocate`, this tmpfile will continually grow and will not be removed until forkrun exits 
+
+***
+
+# WHY USE FORKRUN
+
+There are 2 other common programs for parallelizing loops in the (bash) shell: `xargs` and `parallel`. I believe `forkrun` offers more than either of these programs can offer:
+
+***
+
+**COMPARED TO PARALLEL**
+
+* `forkrun` is considerably faster. In terms of "wall clock time" in my tests where I computed 11 different checksums of ~500,000 small files totaling ~19 gb saved on a ramdisk(see `forkrun.speedtest.bash` for details):
+  * forkrun was on average 7x faster than `parallel -m`.
+  * In the particuarly lightweight checksums (`sum -s`, `cksum`) `forkrun` was ~18x faster than `parallel -m`.
+  * If comparing in "1 line at a time mode", forkrun is more like 20-30x faster.
+  * In terms of "CPU" time forkrun also tended to use less CPU cycles than parallel, though the difference here is smaller (forkrun is very good at fully utilizing all CPU cores, but doesnt magically make running whatever is being parallelized take fewer CPU cycles than running it sequential;ly would have taken).
+* `forkrun` has fewer dependencies. As long as your system has a recent-ish version of bash (which is preinstalled on basically every non-embedded linux system) it can run `forkrun`. `parallel`, on the other hand, is not typically installed by default.
+
+***
+
+**COMPARED TO XARGS**
+
+* Better set of available options. All of the `xargs` options (excluding those intended for running code interactively) have been implemented in `forkrun`. Additionally, a handful of additional (and rather useful) options have also been implemented. This includes:
+  * ordering the output the same as the input (making it much easier to use forkrun as a filter)
+  * passing stdin to the workers via the worker's stdin (`func <<<"${args[@]}"` instead of `func "${args[@]}"`)
+  * a "no function mode" that allows you to embed the code to run into `"${args[@]}"` and run arbitrary code that differs from oline to line in parallel
+  * The ability to unescape (via the `-u` flag) the input and have the commands run by `forkrun` interpret things like redirects and forks. (this *might* be possible in `xargs` by wrapping everything in a `bash -c` call, but that is unnecessary here).
+  * Better/easier (IMO) usage of the `-i` flag to replace `{}` with the lines from stdin. No need to wrap everything in a `bash -c '...' _` call, and the `{}` can bne used multiple times.
+
+* Because `forkrun` runs directly in the shell, other shell functions can be used as the `parFunc` being parallelized (this *might* be possible in `xargs` by exporting thje function first, but this is not needed with `forkrun`)
+
+***
+
+# SUPPORTED OPTIONS / FLAGS 
+
+`forkrun` supports many of the same flags as `xargs` (excluding options intended for interactive use), plus several additional options that are present in `parallel` but not `xargs`. A quick summary will be provided here - for more info refer to the comment block at the top of the forkrun function, or source forkrun and then run `forkrun --help[={flags,all}]`.
+
+GENERAL NOTES:
+    1.  Flags must be given separately (e.g., use `-k -v` and not `-kv`) 
+    2.  Flags must be given before the name of the function being parallelized (`parFunc`) -- any flags given after the function name will be assumed to be initial arguments for the function, not forkrun options.
+    3.  There are also "long" versions of the flags (e.g., `--insert` is the same as `-i`). Run `forkrun --help=all` for a full list of long options/flags.
+
+The following flags are supported:
+
+**FLAGS WITH ARGUMENTS**
+
+```
+   (-j|-p) <#>  : num worker coprocs. set number of worker coprocs. Default is $(nproc).
+    -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
+    -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,512'
+    -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm', or (if unavailable) '/tmp'
+ -d <delimiter> : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
+```
+
+**FLAGS WITHOUT ARGUMENTS**: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless otherwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
+
+```
+SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless otherwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
+
     -i          : insert {}. replace `{}` with the inputs passed on stdin (instead of placing them at the end)
-    -id         : insert {} and {id}. enables -i and also replaces `{id}` with a index (0, 1, ...) describing which coproc the process ran on. 
-    -u          : unescape redirects/pipes/`&&`/`||`. Un-escapes quoted `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` characters to allow for piping, redirection, and logical comparrison to occur *inside the coproc*. 
-    -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. Note: ordering is "close but not guaranteed" if flag -l=1 is also given (see '-ks'). Ordering guaranteed for -l>1.
-    -ks         : ordered output (strict). Same as -k if -l>1. If -l=1 guarantees correct ordering but is slower. Slowdown may be considerable for use cases with "many very fast iterations".
-    -n          : add ordering info to output. pre-pend each (NULL-seperated) output group with a `aplit -d` style index describing its input order, seperated by ACSII Field Seperator (octal '\034'). When a coproc finishes running a group of lines from stdin, it will `printf '\034%s\034%s\n\0' "$order" "$output"`
-    -t <path>   : set tmp directoiry. set the directory where the temp files containing lines from stdin will be kept (when -l != 1). These files will be saved inside a new mktemp-generated directory created under the directory specified here,. Default is '/tmp'.
-    -d {0,1,2,3}: set tmpdir deletion behavior. specify behavior for deleting the temp files containing stdin when we are done with them / when forkrun exits. Accepts 0, 1, 2, or 3. 0 = never delete, 1 = delete on successful completion, 2 = delete 
-    (-0|-z)     : NULL-seperated stdin. stdin is NULL-seperated, not newline seperated. Implies -s. Incompatable with -l=1 (unless '-ks' is also set).
-    -s          : pass via function's stdin. pass stdin to the function being parallelized via stdin ( $parFunc < /tmpdir/fileWithLinesFromStdin ) instead of via function inputs  ( $parFunc $(</tmpdir/fileWithLinesFromStdin) )
-    -w          : wait for stdin indefinately. wait indefinately for the files output by `split` to appear instead oF timing out after 5-10 seconds. Useful if inputs are coming in very slowly on stdin, but could result in forkrun "getting stuck" if stdin is empty (e.g., due to an error).
-    --          : end of forkrun options indicator. indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs
-    -v          : increase verbosity. Currently, thie only thing this does is print a summary of forkrun options to stderr after all the inputs have been parsed.
-    (-h|-?)     : display detailed help text. Prints the entirety of the oinitial comment block at the start of forkrun.bash to screen.
-    
-Note: flags are not case sensitive, but must be given seperately (`-k -v`, not `-kv`) and must be given before the name of the function being parallelized (any flags given after the function name will be assumed to be initial arguments for the function, not forkrun options). There are also "long" versions of the flags (e.g., `--insert` is the same as `-i`). Run `forkrun -?` for a full list of long options/flags.
-    
-
-# # # # # DEPENDENCIES # # # # #
-
-Where possible, `forkrun` uses bash builtins, making the dependency list quite small. To get full functionality, the following are required. Note: items prefaced with (\*)  require the "full" [GNU coreutils] version. Items prefaced with (x) will work with the full version or the busybox version
-
-    (*) bash 4.0+
-    (*) split
-    (*) grep (only for '-k' flag)
-    (*) sort (only for '-k' flag)
-    (*) cut  (only for '-k' flag)
-    (x) wc
-    (x) which
-    (x) cat
-    (x) mktemp
-    (x) sleep
-    
+    -I          : insert {id}. replace `{id}` with an index (0, 1, ...) describing which coproc the process ran on. 
+    -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. 
+    -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This requires and will automatically enable the `-k` output ordering flag.
+    (-0|-z)     : NULL-seperated stdin. stdin is NULL-separated, not newline separated. WARNING: this flag (by necessity) disables a check that prevents lines from occasionally being split into two separate lines, which can happen if `parFunc` evaluates very quickly. In general a delimiter other than NULL is recommended, especially when `parFunc` evaluates very fast and/or there are many items (passed on stdin) to evaluate.
+    -s          : run in subshell. run each evaluation of `parFunc` in a subshell. This adds some overhead but ensures that running `parFunc` does not alter the coproc's environment and affect future evaluations of `parFunc`.
+    -S          : pass via function's stdin. pass stdin to the function being parallelized via stdin ( $parFunc < /tmpdir/fileWithLinesFromStdin ) instead of via function inputs  ( $parFunc $(</tmpdir/fileWithLinesFromStdin) )
+    -p          : pipe read. dont use a tmpfile and have coprocs read (via shared file descriptor) directly from stdin. Enabled by default only when `-l 1` is passed.
+    -D          : delete tmpdir. Remove the tmp dir used by `forkrun` when `forkrun` exits. NOTE: the `-D` flag is enabled by default...disable with flag `+D`.
+    -N          : enable no func mode. Only has an effect when `parFunc` and `initialArgs` are not given. If `-N` is not passed and `parFunc` and `initialArgs` are missing, `forkrun` will silently set `parFunc` to `printf '%s\n'`, which will basically just copy stdin to stdout.
+    -u          : unescape redirects/pipes/forks/logical operators. Typically `parFunc` and `initialArgs` are run through `printf '%q'` making things like `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` appear as literal characters. This flag skips the `printf '%q'` call, meaning that these operators can be used to allow for piping, redirection, forking, logical comparison, etc. to occur *inside the coproc*. 
+    --          : end of forkrun options indicator. indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs. This allows using a `parFunc` that begins with a `-`. NOTE: there is no `+<FLAG>` equivalent for `--`.
+    -v          : increase verbosity level by 1. This can be passed up to 4 times for progressively more verbose output. +v decreases the verbosity level by 1.
+    (-h|-?)     : display help text. use `--help=f[lags]` or `--help=a[ll]` for more details about flags that `forkrun` supports. NOTE: you must escape the `?` otherwise the shell can interpret it before passing it to forkrun.
+```
