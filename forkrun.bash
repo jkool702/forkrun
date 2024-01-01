@@ -22,7 +22,7 @@ forkrun() {
 ############################ BEGIN FUNCTION ############################
 
     [ -t 0 ] && {
-        printf '\n\nERROR: STDIN is a terminal. \n\nforkrun requires STDIN to be a pipe \n(containing the inputs to parallelize over); e.g.: \n\nprintf '"'"'%s\\n'"'"' "${args[@]}" | forkrun parFunc \n\nABORTING! \n\n'
+        printf '\n\nERROR: STDIN is a terminal. \n\nforkrun requires STDIN to be a pipe \n(containing the inputs to parallelize over); e.g.: \n\nprintf '"'"'%%s\\n'"'"' "${args[@]}" | forkrun parFunc \n\nABORTING! \n\n'
         return 1
     }
     
@@ -333,23 +333,28 @@ forkrun() {
         ${rmTmpDirFlag} || [[ ${verboseLevel} == 0 ]] || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
 
         (( ${verboseLevel} > 0 )) && {
-            printf '\n\n-------------------INFO-------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")"
-            ${noFuncFlag} && echo '(no function mode enabled: commands should be included in stdin)' || printf 'tmpdir: %s\n' "${tmpDir}"
+            printf '\n\n------------------- FLAGS INFO -------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")"
+            ${inotifyFlag} && echo 'using inotify to efficiently wait for slow inputs on stdin'
+            ${fallocateFlag} && echo 'using fallocate to shrink the tmpfile containing stdin as forkrun runs'
             printf '(-j|-P) using %s coproc workers\n' ${nProcs}
-            ${inotifyFlag} && echo 'using inotify'
-            ${fallocateFlag} && echo 'using fallocate'
             ${nLinesAutoFlag} && printf '(-N) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
+            printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
             ${nOrderFlag} && echo '(-k) ordering output the same as the input'
             ${exportOrderFlag} && echo '(-n) output lines will be numbered (`grep -n` style)'
             ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
             ${substituteStringFlag} && echo '(-I) replacing {ID} with coproc worker ID'
             ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
             ${pipeReadFlag} && echo '(-p) worker coprocs will read directly from stdin pipe, not from a tmpfile'
-            ${nullDelimiterFlag} && echo '(-0|-z) stdin will be parsed using nulls as delimiter (instead of newlines)'
+            if ${nullDelimiterFlag}; then
+                echo '((-0|-z)|(-d)) stdin will be parsed using nulls as delimiter (instead of newlines)'
+            else
+                printf '(-d) delimiter: %q\n' "${delimiterVal}"
+            fi
             ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automaticvally removed\n' "${tmpDir}"
             ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
             ${stdinRunFlag} && echo '(-S) coproc workers will pass lines to the command being parallelized via the command'"'"'s stdin'
-            echo "Verbosity Level: ${verboseLevel}"
+            ${noFuncFlag} && echo '(-N) no function mode enabled: commands should be included in stdin' || printf 'tmpdir: %s\n' "${tmpDir}"
+            echo "(-v) Verbosity Level: ${verboseLevel}"
             printf '\n------------------------------------------\n\n'
         } >&${fd_stderr}
 
