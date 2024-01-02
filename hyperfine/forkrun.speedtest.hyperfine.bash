@@ -41,7 +41,7 @@ else
   hfdir="${PWD}/hyperfine"
 
 fi
-
+testParallelFlag=false
 "${testParallelFlag:=true}"
 
 mkdir -p "${hfdir}"/{results,file_lists}
@@ -51,14 +51,18 @@ for kk in {1..6}; do
 done
 
 for kk in {1..6}; do 
-     printf '\n-------------------------------- %s values --------------------------------\n\n' $(wc -l <"${hfdir}"/file_lists/f${kk}); 
+    printf '\n-------------------------------- %s values --------------------------------\n\n' $(wc -l <"${hfdir}"/file_lists/f${kk}); 
 
-     for c in  sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3"; do 
-         printf '\n---------------- %s ----------------\n\n' "$c"; 
+    for c in  sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3"; do 
+        printf '\n---------------- %s ----------------\n\n' "$c"; 
 
-         hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'source '"${PWD}"'/forkrun.bash && forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' --prepare 'renice --priority -20 --pid $$' '{cmd} '"${c}"' <'"${hfdir}"'/file_lists/f'"${kk}" 
+        if ${testParallelFlag}; then
+           hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'source '"${PWD}"'/forkrun.bash && forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --','parallel -m --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' --prepare 'renice --priority -20 --pid $$' '{cmd} '"${c}"' <'"${hfdir}"'/file_lists/f'"${kk}" 
+        else
+            hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'source '"${PWD}"'/forkrun.bash && forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' --prepare 'renice --priority -20 --pid $$' '{cmd} '"${c}"' <'"${hfdir}"'/file_lists/f'"${kk}" 
+        fi
 
-     done
+    done
 done | tee -a "${hfdir}"/results/forkrun.stdout.results
 
 for t in '"min"' '"mean"' '"max"'; do
@@ -113,50 +117,70 @@ printf0() {
 }
 
 
-printf0 32:'((RUN_TIME_IN_SECONDS))'  70:$(for nn in {1..6}; do printf 'NUM_CHECKSUMS=%s ' $(wc -l <"${hfdir}/file_lists/f${nn}"); done)
+printf0 32:'((RUN_TIME_IN_SECONDS))'  $(${testParallelFlag} && printf '86' || printf '70'):$(for nn in {1..6}; do printf 'NUM_CHECKSUMS=%s ' $(wc -l <"${hfdir}/file_lists/f${nn}"); done)
 printf '\n'
 printf0 8:' ' 
 for kk in {1..6}; do
-    printf0 70:'----------------------------------------------------------------'
+    if ${testParallelFlag}; then
+        printf0 150:'----------------------------------------------------------------------------------------------------------------------------------------------------------------'
+    else
+        printf0 70:'----------------------------------------------------------------'
+    fi
 done
 printf '\n'
 printf0 8:'(algorithm)' 
 for kk in {1..6}; do
-    printf0 12:'  (forkrun)' 12:'   (xargs)' 38:'    (relative performance)'
+    if ${testParallelFlag}; then
+        printf0 12:'  (forkrun)' 12:'   (xargs)' 12:'  (parallel)' 50:'(relative performance vs xargs)' 50:'(relative performance vs parallel)'
+    else
+        printf0 12:'  (forkrun)' 12:'   (xargs)' 38:'    (relative performance)'
+    fi
 done
 printf '\n%s\t' '------------'
 for kk in {1..6}; do
-    printf0 12:'------------' '------------' 38:'--------------------------------'
+    if ${testParallelFlag}; then
+        printf0 12:'------------' '------------' '------------' 50:'--------------------------------' 50:'--------------------------------'
+    else
+        printf0 12:'------------' '------------' 38:'--------------------------------'
+    fi
 done
 printf '\n'
 declare +i -a A
 for c in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3"; do
-printf0 12:"${c}"
-for kk in {1..6}; do
-mapfile -t A < <(grep -F "$t" < "${hfdir}"/results/forkrun."${c// /_}".f${kk}.hyperfine.results | sed -E s/'^.*\:'//)
-A=("${A[@]%%*([ ,])}")
-A=("${A[@]##*( )}")
-printf0 12:$(printf '%.12s ' "${A[@]}")
-mapfile -t -d $'\t' A < <(printf0 12:$(printf '%.12s ' "${A[@]}"))
-A=("${A[@]//\ /0}")
-if (( ${#A[0]} < ${#A[1]} )); then
-    A=("${A[0]:0:${#A[0]}}" "${A[1]:0:${#A[0]}}")
-else
-    A=("${A[0]:0:${#A[1]}}" "${A[1]:0:${#A[1]}}")
-fi
-A=("${A[@]##*([0\.\(\:\)\,])}")
-A=("${A[@]//./}")
-if (( ${A[0]} < ${A[1]} )); then
-    ratio="$(( ( ( 10000 * ${A[1]//./} ) / ${A[0]//./} ) ))"
-    printf0 38:"$(printf 'forkrun is %s%% faster (%s.%sx)' "$(( ( $ratio / 100 ) - 100 ))" "${ratio:0:$(( ${#ratio} - 4 ))}" "${ratio:$(( ${#ratio} - 4 ))}")"
-elif (( ${A[0]} > ${A[1]} )); then
-    ratio="$(( ( ( 10000 * ${A[0]//./} ) / ${A[1]//./} ) ))"
-     printf0 38:"$(printf 'xargs is %s%% faster (%s.%sx)' "$(( ( $ratio / 100 ) - 100 ))" "${ratio:0:$(( ${#ratio} - 4 ))}" "${ratio:$(( ${#ratio} - 4 ))}")"
-else
-    printf0 38:'forkrun and xargs are equal'
-fi
-done
-printf '\n'
+    printf0 12:"${c}"
+    for kk in {1..6}; do
+        mapfile -t A < <(grep -F "$t" < "${hfdir}"/results/forkrun."${c// /_}".f${kk}.hyperfine.results | sed -E s/'^.*\:'//)
+        A=("${A[@]%%*([ ,])}")
+        A=("${A[@]##*( )}")
+        printf0 12:$(printf '%.12s ' "${A[@]}")
+        mapfile -t -d $'\t' A < <(printf0 12:$(printf '%.12s ' "${A[@]}"))
+        A=("${A[@]//\ /0}")
+
+        A_min=${#A[0]}
+        (( ${#A[1]} < $A_min )) && A_min=${#A[1]}
+        ${testParallelFlag} && (( ${#A[2]} < $A_min )) && A_min=${#A[2]}
+
+        if ${testParallelFlag}; then
+            A=("${A[0]:0:${A_min}}" "${A[1]:0:${A_min}}" "${A[2]:0:${A_min}}")
+        else
+            A=("${A[0]:0:${A_min}}" "${A[1]:0:${A_min}}")
+        fi
+
+        A=("${A[@]##*([0\.\(\:\)\,])}")
+        A=("${A[@]//./}")
+        if (( ${A[0]} < ${A[1]} )); then
+            ratio="$(( ( ( 10000 * ${A[1]//./} ) / ${A[0]//./} ) ))"
+            printf0 $(${testParallelFlag} && printf '50' || printf '38'):"$(printf 'forkrun is %s%% faster '"$(${testParallelFlag} && printf 'than xargs ')"'(%s.%sx)' "$(( ( $ratio / 100 ) - 100 ))" "${ratio:0:$(( ${#ratio} - 4 ))}" "${ratio:$(( ${#ratio} - 4 ))}")"
+        else
+            ratio="$(( ( ( 10000 * ${A[0]//./} ) / ${A[1]//./} ) ))"
+            printf0 $(${testParallelFlag} && printf '50' || printf '38'):"$(printf 'xargs is %s%% faster '"$(${testParallelFlag} && printf 'than forkrun ')"'(%s.%sx)' "$(( ( $ratio / 100 ) - 100 ))" "${ratio:0:$(( ${#ratio} - 4 ))}" "${ratio:$(( ${#ratio} - 4 ))}")"
+        fi
+        if ${testParallelFlag}; then
+            ratio1="$(( ( ( 10000 * ${A[2]//./} ) / ${A[0]//./} ) ))"
+            printf0 50:"$(printf 'forkrun is %s%% faster than parallel (%s.%sx)' "$(( ( $ratio1 / 100 ) - 100 ))" "${ratio1:0:$(( ${#ratio1} - 4 ))}" "${ratio1:$(( ${#ratio1} - 4 ))}")"
+        fi
+    done
+    printf '\n'
 done
 
 
