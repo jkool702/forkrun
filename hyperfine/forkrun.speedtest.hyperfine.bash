@@ -176,8 +176,13 @@ for c in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -
             printf0 $(${testParallelFlag} && printf '50' || printf '38'):"$(printf 'xargs is %s%% faster '"$(${testParallelFlag} && printf 'than forkrun ')"'(%s.%sx)' "$(( ( $ratio / 100 ) - 100 ))" "${ratio:0:$(( ${#ratio} - 4 ))}" "${ratio:$(( ${#ratio} - 4 ))}")"
         fi
         if ${testParallelFlag}; then
-            ratio1="$(( ( ( 10000 * ${A[2]//./} ) / ${A[0]//./} ) ))"
-            printf0 50:"$(printf 'forkrun is %s%% faster than parallel (%s.%sx)' "$(( ( $ratio1 / 100 ) - 100 ))" "${ratio1:0:$(( ${#ratio1} - 4 ))}" "${ratio1:$(( ${#ratio1} - 4 ))}")"
+            if (( ${A[0]} < ${A[2]} )); then
+                ratio1="$(( ( ( 10000 * ${A[2]//./} ) / ${A[0]//./} ) ))"
+                printf0 50:"$(printf 'forkrun is %s%% faster than parallel (%s.%sx)' "$(( ( $ratio1 / 100 ) - 100 ))" "${ratio1:0:$(( ${#ratio1} - 4 ))}" "${ratio1:$(( ${#ratio1} - 4 ))}")"
+            else
+                ratio1="$(( ( ( 10000 * ${A[0]//./} ) / ${A[2]//./} ) ))"
+                printf0 50:"$(printf 'parallel is %s%% faster than forkrun (%s.%sx)' "$(( ( $ratio1 / 100 ) - 100 ))" "${ratio1:0:$(( ${#ratio1} - 4 ))}" "${ratio1:$(( ${#ratio1} - 4 ))}")"
+            fi
         fi
     done
     printf '\n'
