@@ -1,4 +1,6 @@
-The results from running the hyperfine-based speedtest (`forkrun.speedtest.hyperfine.bash`) are shown below
+The results from running the hyperfine-based speedtest (`forkrun.speedtest.hyperfine.bash`) are shown below.
+
+RESULTS COMPARING FORKRUN TO XARGS (PARALLEL NOT TESTED):
 
 ```
 ((RUN_TIME_IN_SECONDS))                 NUM_CHECKSUMS=10                                                        NUM_CHECKSUMS=100                                                       NUM_CHECKSUMS=1000                                                      NUM_CHECKSUMS=10000                                                     NUM_CHECKSUMS=100000                                                    NUM_CHECKSUMS=523216                                                  
@@ -16,4 +18,10 @@ sum -r          0.0221777563    0.0016084583    xargs is 1278% faster (13.7882x)
 cksum           0.0229761049    0.0020637659    xargs is 1013% faster (11.1330x)        0.0287677803    0.0158464363    xargs is 81% faster (1.8154x)           0.0700222129    0.1343218709    forkrun is 91% faster (1.9182x)         0.149270862     0.3015391450    forkrun is 102% faster (2.0200x)        0.2981644694    0.4521087184    forkrun is 51% faster (1.5163x)         0.7633647118    1.1106532538    forkrun is 45% faster (1.4549x)       
 b2sum           0.0225403794    0.0017399104    xargs is 1195% faster (12.9549x)        0.0713991948    0.1151591638    forkrun is 61% faster (1.6128x)         0.3764101116    1.0833418616    forkrun is 187% faster (2.8780x)        0.9660892357    2.3769900597    forkrun is 146% faster (2.4604x)        1.5151152033    2.4653708053    forkrun is 62% faster (1.6271x)         2.6501455329    2.9071726339    forkrun is 9% faster (1.0969x)        
 cksum -a sm3    0.0228634608    0.0021010068    xargs is 988% faster (10.8821x)         0.1723447310    0.3438100340    forkrun is 99% faster (1.9948x)         1.0046851802    3.2255455712    forkrun is 221% faster (3.2105x)        2.7967673503    7.0860510003    forkrun is 153% faster (2.5336x)        4.3362087352    7.5085174762    forkrun is 73% faster (1.7315x)         7.2440910516    8.7723690785    forkrun is 21% faster (1.2109x)       
+```
+
+RESULTS COMPARING FORKRUN TO PARALLEL AND XARGS
+
+```
+...currently running...
 ```
