@@ -629,7 +629,7 @@ $({ ${inotifyFlag} || ${nOrderFlag}; } && echo """
 ${nOrderFlag} && echo """
             printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}
 """
-${iNotifyFlag} && echo """
+${inotifyFlag} && echo """
             read -u ${fd_inotify} -t 0.1
 """)
         fi
