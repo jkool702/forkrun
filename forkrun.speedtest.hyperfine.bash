@@ -51,12 +51,12 @@ for kk in {1..6}; do
 done
 
 for kk in {1..6}; do 
-     printf '\n-------------------------------- %s values --------------------------------\n\n' $(wc -l <./f${kk}); 
+     printf '\n-------------------------------- %s values --------------------------------\n\n' $(wc -l <"${hfdir}"/file_lists/f${kk}); 
 
      for c in  sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3"; do 
          printf '\n---------------- %s ----------------\n\n' "$c"; 
 
-         hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'source '"${PWD}"'/forkrun.bash && cat '"${hfdir}"'/file_lists/f'"${kk}"' | forkrun','cat '"${hfdir}"'/file_lists/f'"${kk}"' | xargs -P $(nproc) -d $'"'"'\n'"'" --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' '{cmd} '"${c}"; 
+         hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'source '"${PWD}"'/forkrun.bash && forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' --prepare 'renice --priority -20 --pid $$' '{cmd} '"${c}"' <'"${hfdir}"'/file_lists/f'"${kk}" 
 
      done
 done
