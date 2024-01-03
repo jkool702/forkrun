@@ -1,14 +1,17 @@
-The results from running the hyperfine-based speedtest (`forkrun.speedtest.hyperfine.bash`) and some observations regarding the results are shown below.
+The results from running the hyperfine-based speedtest (`forkrun.speedtest.hyperfine.bash`) and some observations regarding the results are shown below. This benchmark computes 11 different checksums on various-sie batches of small files. Batches of 10 files, 100 files, 1000 files 10000 files, 100000 files and ~521000 files were tested. Parallelization was tested/timed using:   `forkrun --`  ,   `xargs -P $(nproc) -d $'\n' --`   and   `parallel -m --`  .
+
+## OBSERVATIONS:
+
+**BASE "NO-LOAD" TIME**: ~ 2ms for `xargs`; ~22 ms for `forkrun`; and ~163 ms for `parallel` --> `xargs` is fastest in cases where this is a significant part of the total runtime (i.e., problems that finish running very fast, say, for total run times of under 80 ms for `forkrun` and under 500 ms for `parallel`)
+
+**FORKRUN vs XARGS**: `xargs` is faster for problems that take ~50-70 ms or less (due to lower "no-load" time. `forkrun` is faster for all problems that take longer than ~50-70 ms (which is most of the problems you'd actually want to parallelize). For medium-sized problems `forkrun` is typically around 75% faster. For larger problems (i.e., >>100k inputs) `forkrun` is typically around 25% faster. This suggests that `forkrun` is better at "ramping up to full speed" (i.e., its dynamic batch size logic gets up to the maximum batch size faster).\*\*
+
+**FORKRUN vs PARALLEL**: In all cases forkrun was faster than parallel. Its best (relative) performance was for medium-sized problems (~10000 inputs), where its speed was comparable to `xargs` (and on occasion slightly faster even), but `forkrun` was still ~75% faster. For larger problems (cases where stdin had 100,000+ inputs), parallel's time is almost linearly dependent on the number of inputs and the checksum being used has minimal effect on the time taken, indicating that its maximum throughput is only about 1/10th of `forkrun`/`xargs` for larger problems with many inputs (each of which runs very quickly).
+
+\*\*This is because forkrun tries to estimate how many "cached in a tmpfile but not yet processed" lines from stdin are available, divides by the number of worker coprocs and sets that (or the pre-set maximum, whichever is lower) as the batch size. The process that caches stdin to a tmpfile is forked off a good bit before the coproc workers are forked, so when all of stdin is available immediately the batch size goes up to maximum almost instantly. xargs, on the other hand, AFAIK, just gradually ramps up the batch size until it hits some pre-set maximum without considering how many unprocessed lines from stdin are available.
 
 ## RESULTS OF HYPERFINE BENCHMARK COMPARING FORKRUN TO XARGS AND PARALLEL  
 
-### OBSERVATIONS:
-
-**BASE "NO-LOAD" TIME**: ~ 2ms for xargs; ~22 ms for forkrun; ~163 ms for parallel --> xargs is fastest in cases where this is a significant part of the total runtime (i.e., problems that finish running very fast, say well under 100 ms)
-
-**FORKRUN vs XARGS**: Xargs is faster for problems that take ~50-70 ms or less (due to lower "no-load" time. forkrun is faster for all problems that take longer than ~50-70 ms (which is most of the problems youd actually want to parallelize)
-
-**FORKRUN vs PARALLEL**: In all cases forkrun was faster than parallel. For cases where stdin had many (100,000+) inputs, parallel's time is almost linearly dependend on the number of inputs and the checksum being used has minimal affect on the time taken.
 
 ```
 
