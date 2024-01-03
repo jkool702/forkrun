@@ -173,18 +173,28 @@ for kk in {1..6}; do
     T0=0.0
     T1=0.0
     ${testParallelFlag} && T2=0.0
-    for c in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3"; do
-        printf0 12:"${c}"
+    for c in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" OVERALL; do
+        if [[ "${c}" == 'OVERALL' ]]; then
+            if ${testParallelFlag}; then
+                A=(${T0} ${T1} ${T2})
+            else
+                A=(${T0} ${T1})
+            fi
+            printf '\n'
+        else
+            printf0 12:"${c}"
             mapfile -t A < <(grep -F "mean" < "${hfdir}"/results/forkrun."${c// /_}".f${kk}.hyperfine.results | sed -E s/'^.*\:'//)
             A=("${A[@]%%*([ ,])}")
             A=("${A[@]##*( )}")
-           
+
+            T0="$(myAdd "${T0}" "${A[0]}")"
+            T1="$(myAdd "${T1}" "${A[1]}")"
+            ${testParallelFlag} && T2="$(myAdd "${T2}" "${A[2]}")"  
+        fi
+            
             printf0 12:$(printf '%.12s ' "${A[@]}")
             mapfile -t -d $'\t' A < <(printf0 12:$(printf '%.12s ' "${A[@]}"))
             A=("${A[@]//\ /0}")
-            T0="$(myAdd "${T0}" "${A[0]}")"
-            T1="$(myAdd "${T1}" "${A[1]}")"
-            ${testParallelFlag} && T2="$(myAdd "${T2}" "${A[2]}")"
 
             A1=("${A[@]%%.*}")
             A0=("${A[@]##*.}")
@@ -220,45 +230,6 @@ for kk in {1..6}; do
             fi
             printf '\n'
     done
-    printf '\n'
-    if ${testParallelFlag}; then
-        Ta=(${T0} ${T1} ${T2})
-    else
-        Ta=(${T0} ${T1})
-    fi
-    printf0 12:OVERALL  $(printf '%.12s ' "${Ta[@]}")
-    Ta1=("${Ta[@]%%.*}")
-    Ta0=("${Ta[@]##*.}")
-
-    Ta_min=${#Ta0[0]}
-    (( ${#Ta0[1]} < $Ta_min )) && Ta_min=${#Ta0[1]}
-    ${testParallelFlag} && (( ${#Ta0[2]} < $Ta_min )) && Ta_min=${#Ta0[2]}
-
-    if ${testParallelFlag}; then
-        Ta=("${Ta1[0]}.${Ta0[0]:0:${Ta_min}}" "${Ta1[1]}.${Ta0[1]:0:${Ta_min}}" "${Ta1[2]}.${Ta0[2]:0:${Ta_min}}")
-    else
-        Ta=("${Ta[0]:0:${Ta_min}}" "${Ta[1]:0:${Ta_min}}")
-    fi
-    
-    Ta=("${Ta[@]##*([0\.\(\:\)\,])}")
-    Ta=("${Ta[@]//./}")
-    Ta=("${Ta[@]##*([0\.\(\:\)\,])}")
-    if (( ${Ta[0]} < ${Ta[1]} )); then
-        ratio2="$(( ( ( 10000 * ${Ta[1]//./} ) / ${Ta[0]//./} ) ))"
-        printf0 $(${testParallelFlag} && printf '44' || printf '38'):"$(printf 'forkrun is %s%% faster '"$(${testParallelFlag} && printf 'than xargs ')"'(%s.%sx)' "$(( ( $ratio2 / 100 ) - 100 ))" "${ratio2:0:$(( ${#ratio2} - 4 ))}" "${ratio2:$(( ${#ratio2} - 4 ))}")"
-    else
-        ratio2="$(( ( ( 10000 * ${Ta[0]//./} ) / ${Ta[1]//./} ) ))"
-        printf0 $(${testParallelFlag} && printf '44' || printf '38'):"$(printf 'xargs is %s%% faster '"$(${testParallelFlag} && printf 'than forkrun ')"'(%s.%sx)' "$(( ( $ratio2 / 100 ) - 100 ))" "${ratio2:0:$(( ${#ratio2} - 4 ))}" "${ratio2:$(( ${#ratio2} - 4 ))}")"
-    fi
-    if ${testParallelFlag}; then
-        if (( ${Ta[0]} < ${Ta[2]} )); then
-            ratio2="$(( ( ( 10000 * ${Ta[2]//./} ) / ${Ta[0]//./} ) ))"
-            printf0 44:"$(printf 'forkrun is %s%% faster than parallel (%s.%sx)' "$(( ( $ratio2 / 100 ) - 100 ))" "${ratio2:0:$(( ${#ratio2} - 4 ))}" "${ratio2:$(( ${#ratio2} - 4 ))}")"
-        else
-            ratio2="$(( ( ( 10000 * ${Ta[0]//./} ) / ${Ta[2]//./} ) ))"
-            printf0 44:"$(printf 'parallel is %s%% faster than forkrun (%s.%sx)' "$(( ( $ratio2 / 100 ) - 100 ))" "${ratio2:0:$(( ${#ratio2} - 4 ))}" "${ratio2:$(( ${#ratio2} - 4 ))}")"
-        fi
-    fi
     printf '\n'
 done
 } | tee "${hfdir}"/results/results-table
