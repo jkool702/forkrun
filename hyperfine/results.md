@@ -1,14 +1,14 @@
-The results from running the hyperfine-based speedtest (`forkrun.speedtest.hyperfine.bash`) are shown below.
+The results from running the hyperfine-based speedtest (`forkrun.speedtest.hyperfine.bash`) and some observations regarding the results are shown below.
 
-RESULTS COMPARING FORKRUN TO PARALLEL AND XARGS
+## RESULTS OF HYPERFINE BENCHMARK COMPARING FORKRUN TO XARGS AND PARALLEL  
 
-OBSERVATIONS:
+### OBSERVATIONS:
 
-BASE "NO-LOAD' TIME: ~ 2ms for xargs; ~22 ms for forkrun; ~163 ms for parallel --> xargs is fastest in cases where this is a significanjt parrt of the total runtime
+**BASE "NO-LOAD" TIME**: ~ 2ms for xargs; ~22 ms for forkrun; ~163 ms for parallel --> xargs is fastest in cases where this is a significanjt parrt of the total runtime
 
-FORKRUN vs XARGS: Xargs is faster for problems that take ~50-70 ms or less (due to lower "no-load" time. forkrun is faster for all problems that take longer than ~50-70 ms (which is most of the peoblems youd actually want to parallelize)
+**FORKRUN vs XARGS**: Xargs is faster for problems that take ~50-70 ms or less (due to lower "no-load" time. forkrun is faster for all problems that take longer than ~50-70 ms (which is most of the peoblems youd actually want to parallelize)
 
-FORKRUN vs PARALLEL: In all cases forkrun was faster than parallel. For cases where stdin had many (100,000+) inputs, parallel's time is almost linearly dependend on the number of inputs and the checksum being used has minimal affect on the time taken.
+**FORKRUN vs PARALLEL**: In all cases forkrun was faster than parallel. For cases where stdin had many (100,000+) inputs, parallel's time is almost linearly dependend on the number of inputs and the checksum being used has minimal affect on the time taken.
 
 ```
 
