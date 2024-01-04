@@ -34,8 +34,7 @@ if ${ramdiskTransferFlag}; then
     
     printf '\nCOPYING FILES FROM %s TO RAMDISK AT %s\n' "${findDir}" "/mnt/ramdisk/${findDir#/}" >&2
     mkdir -p "/mnt/ramdisk/${findDir}"
-#    rsync -a "${findDir}"/* "/mnt/ramdisk/${findDir#/}"
-#    \rm  -rf ./usr/lib64/dri
+    rsync -a "${findDir}"/* "/mnt/ramdisk/${findDir#/}"
     
     findDir="/mnt/ramdisk/${findDir#/}"
     hfdir0='/mnt/ramdisk/hyperfine'

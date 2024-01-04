@@ -1,0 +1,35 @@
+INPUT FROM FILE  ----- OUTPUT TO STDOUT
+
+
+
+***
+
+INPUT FROM PIPE  ----- OUTPUT TO STDOUT
+
+
+
+***
+
+INPUT FROM FILE  ----- OUTPUT TO PIPE
+
+
+
+***
+
+INPUT FROM PIPE  ----- OUTPUT TO PIPE
+
+
+
+***
+
+INPUT FROM FILE  ----- OUTPUT TO REDIRECT
+
+
+
+***
+
+INPUT FROM PIPE  ----- OUTPUT TO RDIRECT
+
+
+
+***
