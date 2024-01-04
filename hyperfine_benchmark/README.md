@@ -1,4 +1,24 @@
-The results from running the hyperfine-based speedtest (`forkrun.speedtest.hyperfine.bash`) and some observations regarding the results are shown below. This benchmark computes 11 different checksums on various-sie batches of small files. Batches of 10 files, 100 files, 1000 files 10000 files, 100000 files and ~521000 files were tested. Parallelization was tested/timed using:   `forkrun --`  ,   `xargs -P $(nproc) -d $'\n' --`   and   `parallel -m --`  .
+The results from running the hyperfine-based speedtest (`forkrun.speedtest.hyperfine.bash`) can be found in the "results" subdirectory. Some descriptions about the benchmark and observations regarding the results are shown below. 
+
+## DESCRIPTION OF BENCHMARK
+
+This benchmark computes 11 different checksums on various-sie batches of small files. Batches of 10 files, 100 files, 1000 files 10000 files, 100000 files and ~521000 files were tested. For each checksum + total batch size combination, 3 parallelization codes were tested and timed:
+
+* `forkrun --`
+* `xargs -P $(nproc) -d $'\n' --`
+* `parallel -m --`
+
+Additionallly, each checksum + total batch size + parallelization code combination was tested with 2 different data input styles:
+
+* `<cmd> <filelist`
+* `cat filelist | <cmd>`
+
+as well as 3 different output styles:
+
+* `<cmd>  # (to stdout)`
+* `<cmd> | wc -l`
+* `<cmd> >/dev/null`
+
 
 ## OBSERVATIONS:
 
