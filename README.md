@@ -1,6 +1,6 @@
 # FORKRUN
 
-`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs` or `parallel` does, only faster than either (especially parallel) (see the `hyperfine` subdirectory for benchmarks showing this).  In my testing, `forkrun` was, on average (for problems where the efficiency of the parallelization framework actually makes a difference) ~20% faster to twice as fast versus `xargs -P $(nproc)`; and ~2x to ~8x as fast versus `parallel -m`. To be clear: these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
+`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs` or `parallel` does, only faster than either (especially parallel) (see the `hyperfine_benchmark` subdirectory for benchmarks showing this).  In my testing, `forkrun` was, on average (for problems where the efficiency of the parallelization framework actually makes a difference) ~20% faster to twice as fast versus `xargs -P $(nproc)`; and ~2x to ~8x as fast versus `parallel -m`. To be clear: these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
 
 ***
 
