@@ -1,6 +1,6 @@
 # FORKRUN
 
-`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs` or `parallel` does, only faster than either (especially parallel).  In my testing, `forkrun` was, on average (for problems where the efficiency of the parallelization framework actually makes a difference) ~70% faster than `xargs -P $(nproc)` and ~7x as fast as `parallel -m -j $(nproc)`. See To be clear, these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
+`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs` or `parallel` does, only faster than either (especially parallel) (see the `hyperfine` subdirectory for benchmarks showing this).  In my testing, `forkrun` was, on average (for problems where the efficiency of the parallelization framework actually makes a difference) ~20% faster to twice as fast versus `xargs -P $(nproc)`; and ~2x to ~8x as fast versus `parallel -m`. To be clear: these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
 
 ***
 
@@ -97,8 +97,8 @@ There are 2 other common programs for parallelizing loops in the (bash) shell: `
 
 **COMPARED TO PARALLEL**
 
-* `forkrun` is considerably faster. In terms of "wall clock time" in my tests where I computed 11 different checksums of ~500,000 small files totaling ~19 gb saved on a ramdisk(see `forkrun.speedtest.bash` for details):
-  * forkrun was on average 7x faster than `parallel -m`.
+* `forkrun` is considerably faster. In terms of "wall clock time" in my tests where I computed 11 different checksums of ~500,000 small files totaling ~19 gb saved on a ramdisk (see the `hyperfine_speedtest` sub-directory for details):
+  * forkrun was on average 8x faster than `parallel -m` for very large file counts. For all batch sizes tested forkrun was at leasst twice as fast as parallel
   * In the particuarly lightweight checksums (`sum -s`, `cksum`) `forkrun` was ~18x faster than `parallel -m`.
   * If comparing in "1 line at a time mode", forkrun is more like 20-30x faster.
   * In terms of "CPU" time forkrun also tended to use less CPU cycles than parallel, though the difference here is smaller (forkrun is very good at fully utilizing all CPU cores, but doesnt magically make running whatever is being parallelized take fewer CPU cycles than running it sequential;ly would have taken).
@@ -116,6 +116,8 @@ There are 2 other common programs for parallelizing loops in the (bash) shell: `
   * Better/easier (IMO) usage of the `-i` flag to replace `{}` with the lines from stdin. No need to wrap everything in a `bash -c '...' _` call, and the `{}` can bne used multiple times.
 
 * Because `forkrun` runs directly in the shell, other shell functions can be used as the `parFunc` being parallelized (this *might* be possible in `xargs` by exporting thje function first, but this is not needed with `forkrun`)
+
+* Because `forkrun` is faster in problems where parallelization speed matters (in problems where total run time is more than 50 ms or so). Forkrun is twice as fast in medium-size problems (10,000 - 100,000 inputs) and slightly faster (10-20%) in large-size problems (>500,000 inputs).
 
 ***
 
