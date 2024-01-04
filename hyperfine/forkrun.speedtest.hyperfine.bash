@@ -43,6 +43,30 @@ else
 fi
 "${testParallelFlag:=true}"
 
+declare -a C0 C1
+
+C0[0]=''
+C1[0]=' <"'"${hfdir0}"'"/file_lists/f${kk}'
+
+C0[1]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
+C1[1]=''
+
+C0[2]=''
+C1[2]=' <"'"${hfdir0}"'"/file_lists/f${kk} | wc -l'
+
+C0[3]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
+C1[3]=' | wc -l'
+
+C0[4]=''
+C1[4]=' <"'"${hfdir0}"'"/file_lists/f${kk} | >/dev/null'
+
+C0[5]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
+C1[5]=' >/dev/null'
+
+for jj in ${!C0[@]}; do
+    
+hfdir="${hfdir0}/${jj}"
+
 mkdir -p "${hfdir}"/{results,file_lists}
 
 for kk in {1..6}; do
@@ -56,7 +80,7 @@ for kk in {1..6}; do
         printf '\n---------------- %s ----------------\n\n' "$c"; 
 
         if ${testParallelFlag}; then
-           hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'source '"${PWD}"'/forkrun.bash && forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --','parallel -m --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' --prepare 'renice --priority -20 --pid $$' '{cmd} '"${c}"' <'"${hfdir}"'/file_lists/f'"${kk}" 
+           hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --','parallel -m --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' --prepare 'renice --priority -20 --pid $$' 'source '"${PWD}"'/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
         else
             hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'source '"${PWD}"'/forkrun.bash && forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' --prepare 'renice --priority -20 --pid $$' '{cmd} '"${c}"' <'"${hfdir}"'/file_lists/f'"${kk}" 
         fi
@@ -64,11 +88,13 @@ for kk in {1..6}; do
     done
 done | tee -a "${hfdir}"/results/forkrun.stdout.results
 
+# generare quick table of results (raw times)
+
 for t in '"min"' '"mean"' '"max"'; do
     printf '\n-----------------------------------------------------\n-------------------- %s TIMES --------------------\n-----------------------------------------------------\n\n' "$t"
     printf '%0.11s    \t' '#' sha1sum sha1sum sha256sum sha256sum sha512sum sha512sum sha224sum sha224sum sha384sum sha384sum md5sum md5sum  "sum -s" "sum -s" "sum -r" "sum -r" cksum cksum b2sum b2sum "cksum -a sm3" "cksum -a sm3" 
     printf '\n(stdin)\t'; 
-    for kk in {1..11}; do printf '%0.12s    \t' '(forkrun)' '(xargs)'; done; 
+    for kk in {1..11}; do printf '%0.12s    \t' '(forkrun)' '(xargs)' "$(${testParallelFlag} && echo '(parallel)')"; done; 
         printf '\n\n'; 
         for kk in {1..6}; do
             printf '%s\t' $(wc -l <"${hfdir}"/file_lists/f$kk)
@@ -79,8 +105,7 @@ for t in '"min"' '"mean"' '"max"'; do
     done
 done
 
-shopt -s extglob
-
+# generate "real" table of results (the good one that looks all pretty.
 printf0() {
     local -a val pad
     local nn nn1 padStr 
@@ -178,6 +203,8 @@ for kk in {1..6}; do
     printf '\n'
 done
 } | tee "${hfdir}"/results/results-table
+
+done
 
 # RESULTS
 :<<'EOF'
