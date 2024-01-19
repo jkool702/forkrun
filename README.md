@@ -20,6 +20,10 @@ Alternately, if you dont have `forkrun.bash` saved locally but have internet acc
     
     source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)
 
+Or, for those (understandably) concerned with directly sourcing unseen code from the internet, you can use
+
+    source <(echo 'shopt -s extglob'; ( cd /proc/self/fd; decfun='forkrun forkrun_displayHelp '; type -p cat &>/dev/null || decfun+='cat '; type -p mktemp &>/dev/null || decfun+='mktemp '; shopt -s extglob; curl="$(type -p curl)"; bash="$(type -p bash)"; PATH=''; { $curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash; echo 'declare -f '"$decfun"; } | $bash -r ) )
+
 ***
 
 **HELP**: the `forkrun.bash` script, when sourced, will source a helper function (`forkrun_displayHelp`) to display help. This is activated by calling one of the following:
