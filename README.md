@@ -22,7 +22,7 @@ Alternately, if you dont have `forkrun.bash` saved locally but have internet acc
 
 Or, for those (understandably) concerned with directly sourcing unseen code from the internet, you can use
 
-    source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash | ( cd /proc/self/fd; decfun='forkrun forkrun_getHelp '; type -a cat 2>/dev/null || decfun+='cat '; type -a mktemp 2>/dev/null || decfun+='mktemp '; PATH='';  /bin/bash -r -c 'source 0 && declare -f '"$decfun" ) )
+    source <(echo 'shopt -s extglob'; ( cd /proc/self/fd; decfun='forkrun forkrun_displayHelp '; type -p cat &>/dev/null || decfun+='cat '; type -p mktemp &>/dev/null || decfun+='mktemp '; shopt -s extglob; curl="$(type -p curl)"; bash="$(type -p bash)"; PATH=''; { $curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash; echo 'declare -f '"$decfun"; } | $bash -r ) )
 
 ***
 
