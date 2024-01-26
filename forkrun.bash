@@ -270,7 +270,7 @@ forkrun() {
         export LC_ALL=C
         export LANG=C
         export IFS=
-        umask 177
+        #umask 177
 
         shopt -s nullglob
 
