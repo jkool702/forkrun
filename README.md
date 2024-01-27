@@ -6,7 +6,7 @@
 
 # USAGE
 
-`forkrun` in invoked in much the same way as `xargs`: on the command-line, pass forkrun options, then the function/script/binary that you are parallelizing, then any initial constant arguments (in that order). The arguments to parallelize running are passed to forkrun on stdin. A typical `forkrun` invocation looks something like this:
+`forkrun` is invoked in much the same way as `xargs`: on the command-line, pass forkrun options, then the function/script/binary that you are parallelizing, then any initial constant arguments (in that order). The arguments to parallelize running are passed to forkrun on stdin. A typical `forkrun` invocation looks something like this:
 
     printf '%s\n' "${inArgs[@]}" | forkrun [flags] [--] parFunc ["${initialArgs[@]}"]
 
@@ -23,6 +23,17 @@ Alternately, if you dont have `forkrun.bash` saved locally but have internet acc
 Or, for those (understandably) concerned with directly sourcing unseen code from the internet, you can use
 
     source <(echo 'shopt -s extglob'; ( cd /proc/self/fd; decfun='forkrun forkrun_displayHelp '; type -p cat &>/dev/null || decfun+='cat '; type -p mktemp &>/dev/null || decfun+='mktemp '; shopt -s extglob; curl="$(type -p curl)"; bash="$(type -p bash)"; PATH=''; { $curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash; echo 'declare -f '"$decfun"; } | $bash -r ) )
+
+**PARALLELIZING FUNCTIONS**: one extremely powerful feature of `forkrun` is that it can parallelize arbitrarily complex tasks very efficiently by wrapping them in a function. This is done by doing something like the following:
+
+    myfun() {
+        mapfile -t A < <(some_task "$@")
+        some_other_task "${A[@]}"
+        # ...
+    }
+    forkrun myfun <inputs
+
+`forkrun` particularly excels at doing this since, unlike other loop parallelizers that have to spin up a whole new bash shell for every function invocation, forkrun simply calls this function directly. For simple functions (e.g., `myfun() { :; }`), simply running `myfun` from an already-running bash shell is ~200x faster and more efficient than running `export -f myfun; bash -c 'myfun'` (overhead from 10,000 calls is ~55 seconds using `bash -c` vs ~1/4 second with direct calling).
 
 ***
 
