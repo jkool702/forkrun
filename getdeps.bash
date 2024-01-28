@@ -72,12 +72,10 @@ EOF
             mapfile -t F <deps.guess
 
             for kk in "${!F[@]}"; do
-                grep -F -q "${F[$kk]}" <deps && F[$kk]=''
-            done
+                grep -F -q "${F[$kk]}" <deps || echo "${F[$kk]}"
+            done >deps.guess
 
-            F=(${F[@]})
-
-            printf '%s\n' "${F[@]}" >deps.guess
+            echo "$(sort -u <deps.guess)" >deps.guess
 
             printf '\n\nDEPENDENCIES DETERMINED FOR: %s\n\nDEPENDENCIES FOUND FROM EXECUTED CODE:\n%s\n' "${scriptpath}" "$(<deps)"
 
