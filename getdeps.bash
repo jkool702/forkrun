@@ -20,7 +20,10 @@ echo "${BASH_CMDS[@]}" >>"'"${PWD}"'/cmds";
 
             for nn in deps deps.guess coverage *.coverage.missed cmds funcs funcnames; do
                 [[ -f "${PWD}/${nn}" ]] && \mv -f "${PWD}/${nn}" "${PWD}/${nn}.old"
+                touch "${PWD}/${nn}"
             done
+
+            type -p bash >>deps
 
             hash -r
 
