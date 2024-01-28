@@ -64,7 +64,8 @@ EOF
 
                 printf '%s\n' "${F[@]}" >"${scriptname}.${funcname}.coverage.missed"
                 mapfile -t F < <(printf '%s\n' "${F[@]// +(['&|']) /$'\n'}")
-                mapfile -t F < <(printf '%s\n' "${F[@]//['$<>']'('/$'\n'}" | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]\(\{]*//;s/ .*$//;s/\;$//' | grep -E '[^[:space:]]+' | sort -u)
+                mapfile -t F < <(printf '%s\n' "${F[@]//['$<>']'('/$'\n'}")
+                mapfile -t F < <(printf '%s\n' "${F[@]//@('eval'|'exec')' '/$'\n'}" | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]\(\{]*//;s/(\/usr\/?)?(\/bin\/?)?bash -c ["'"'"']*/\n/g;s/ .*$//;s/\;$//' | grep -E '[^[:space:]]+' | sort -u)
                 type -p "${F[@]}" 2>/dev/null >>deps.guess
             done
 
