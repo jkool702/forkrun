@@ -10,15 +10,24 @@ echo "${FUNCNAME:-"${BASH_SOURCE:-"$0"}"}:${LINENO}" >>"'"${PWD}"'/coverage";
 echo "${BASH_CMDS[@]}" >>"'"${PWD}"'/cmds"; 
 [[ "${DEBUG_declaredFunctionNames[*]}" == *"${FUNCNAME}"* ]] || { declare -F "${FUNCNAME}" &>/dev/null && { declare -f "${FUNCNAME}" 2>/dev/null >>"'"${PWD}"'/funcs"; echo "${FUNCNAME}" >>"'"${PWD}"'/funcnames"; DEBUG_declaredFunctionNames+=("${FUNCNAME}"); }; }'
 
-    for scriptpath in "$@"; do
-        (
+    if [[ "$1" == $'\034' ]]; then
+        printAllDepsFlag=false
+        shift 1
+    else
+        printAllDepsFlag=false
+    fi
+        
+
+    scriptpath="$1"
+
+    shift 1
 
             scriptname="${scriptpath##*\/}"
             scriptname="${scriptname//+([[:space:]])/_}"
 
             fname="fun_${RANDOM}${RANDOM}"
 
-            for nn in deps deps.guess coverage *.coverage.missed cmds funcs funcnames; do
+            for nn in deps deps.guess deps.all deps.guess.all coverage *.coverage.missed cmds funcs funcnames xtrace; do
                 [[ -f "${PWD}/${nn}" ]] && \mv -f "${PWD}/${nn}" "${PWD}/${nn}.old"
                 touch "${PWD}/${nn}"
             done
@@ -30,16 +39,18 @@ echo "${BASH_CMDS[@]}" >>"'"${PWD}"'/cmds";
             source /proc/self/fd/0 <<EOF
 ${fname}() (
 hash -r
+BASH_XTRACEFD=5
 set -T
 set -h
+set -x
 local -a DEBUG_declaredFunctionNames=("$fname")
 trap '${DEBUG_trap}' DEBUG
 
 $(cat "${scriptpath}")
-)
+) 5>${PWD}/xtrace
 EOF
 
-            ${fname}
+            ${fname} "$@"
 
             trap -- DEBUG
 
@@ -84,7 +95,25 @@ EOF
 
             [[ $(<deps.guess) ]] && printf '\nGUESSED DEPENDENCIES FROM "MISSED" CODE:\n%s\n' "$(<deps.guess)"
 
-            for nn in deps deps.guess coverage *.coverage.missed cmds funcs funcnames; do
+            cat deps >>deps.all
+            cat deps.guess >>deps.guess.all
+
+            mapfile -t mdeps < <(file -f deps | grep ASCII | sed -E s/'\:[[:space:]]+.*$'// | while read -r; do grep -F "${REPLY}" <xtrace | grep -v 'type -p'; done)
+            mapfile -t fdeps < <(file -f deps.guess | grep ASCII | sed -E s/'\:[[:space:]]+.*$'//)
+
+        (( ${#mdeps[@]} > 0 )) && for kk in "${!mdeps[@]}"; do
+            getdeps $'\034' ${mdeps[$kk]}
+            ${printAllDepsFlag} && {
+                printf '\n\nDEPENDENCIES DETERMINED FOR %s AND ALL DEPENDENT SCRIPTS CALLED BY IT\n\nDEPENDENCIES FOUND FROM EXECUTED CODE:\n%s\n' "${scriptpath}" "$(<deps.all)"
+
+            [[ $(<deps.guess.all) ]] && printf '\nALL GUESSED DEPENDENCIES FROM "MISSED" CODE:\n%s\n' "$(<deps.guess.all)"
+
+            }
+        done
+
+            (( ${#fdeps[@]} > 0 )) && printf '\nWARNING: THE FOLLOWING SHELL SCRIPTS ARE INCLUDED IN THE "GUESSED DEPENDENCIES" FROM ANALYSING CODE THAT WAS NOT EXECUTED:\N%s\n\nTHESE HAVE NOT BEEN RECURSVELY CHECKED FOR THEIR OWN DEPENDENCIES.\nAS SUCH, THE LIST OF DEPENDENCIES MAY BE INCOMPLETE.\nTO GET A MORE COMPLETE LIST, INCREASE CODE COVERAGE AND ENSURE THESE SHELL SCRIPTS ARE EXECUTED.' "${fdeps[*]}"
+
+            for nn in deps deps.guess deps.all deps.guess.all coverage *.coverage.missed cmds funcs funcnames xtrace; do
                 [[ "$nn" == "${scriptname}".* ]] && continue
                 [[ -f "${scriptname}.${nn}" ]] && \mv "${scriptname}.${nn}" "${scriptname}.${nn}.old"
                 \mv -f "${nn}" "${scriptname}.${nn}"
@@ -92,6 +121,4 @@ EOF
 
             printf '\nINFORMATION related to dependencies and coverage \nhas been saved in various files located at: %s/%s.*\n\n' "${PWD}" "${scriptname}"
 
-        )
-    done
 )
