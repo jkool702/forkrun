@@ -1,0 +1,22 @@
+name: sh-format
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+jobs:
+  sh-checker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Run the sh-checker
+        uses: luizm/action-sh-checker@master
+        env:
+          SHELLCHECK_OPTS: -e SC1004 # exclude some shellcheck warnings.
+          SHFMT_OPTS: -s # arguments to shfmt.
+        with:
+          sh_checker_checkbashisms_enable: true
