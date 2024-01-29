@@ -20,3 +20,4 @@ jobs:
           SHFMT_OPTS: -s # arguments to shfmt.
         with:
           sh_checker_checkbashisms_enable: true
+          sh_checker_exclude: OLD
