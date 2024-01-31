@@ -163,7 +163,8 @@ EOF
         printf '%s\n' "${F[@]}" >"${tmpdir}"/"${scriptname}.${funcname}.coverage.missed"
         mapfile -t F < <(printf '%s\n' "${F[@]// +(['&|']) /$'\n'}")
         mapfile -t F < <(printf '%s\n' "${F[@]//['$<>']'('/$'\n'}")
-mapfile -t F < <(printf '%s\n' "${F[@]//@('eval'|'exec'|'if'|'elif')' '/$'\n'}" | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]\(\{]*//;s/(\/usr\/?)?(\/bin\/?)?bash -c ["'"'"']*/\n/g;s/ .*$//;s/\;$//' | grep -E '[^[:space:]]+' | sort -u)        type -p "${F[@]}" 2>/dev/null >>"${tmpdir}"/"${scriptname}".deps.guess
+        mapfile -t F < <(printf '%s\n' "${F[@]//@('eval'|'exec'|'if'|'elif')' '/$'\n'}" | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]\(\{]*//;s/(\/usr\/?)?(\/bin\/?)?bash -c ["'"'"']*/\n/g;s/ .*$//;s/\;$//' | grep -E '[^[:space:]]+' | sort -u)
+        type -p "${F[@]}" 2>/dev/null >>"${tmpdir}"/"${scriptname}".deps.guess
     done <"${tmpdir}"/"${scriptname}".funcnames
 
     mapfile -t F <"${tmpdir}"/"${scriptname}".deps.guess
