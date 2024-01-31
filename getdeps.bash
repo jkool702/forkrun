@@ -15,7 +15,6 @@ getdeps() (
 
 	if [[ "$cfun" == 'getdeps' ]]; then
 		printAllDepsFlag=false
-		shift 1
 	else
 		printAllDepsFlag=false
 	fi
