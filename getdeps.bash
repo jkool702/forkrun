@@ -136,6 +136,7 @@ EOF
     source "${tmpdir}"/"${scriptname}".funcs
 
     # run lists of recorded commands and coverage through sort -u to remove duplicates
+    echo "$(printf '%s\n' $(<"${tmpdir}"/"${scriptname}".cmds))" >"${tmpdir}"/"${scriptname}".cmds
     echo "$(printf '\n'; sort -u <"${tmpdir}"/"${scriptname}".cmds)" >"${tmpdir}"/"${scriptname}".cmds
     echo "$(sort -u <"${tmpdir}"/"${scriptname}".deps)" >"${tmpdir}"/"${scriptname}".deps
     cat "${tmpdir}"/"${scriptname}".cmds >>"${tmpdir}"/"${scriptname}".deps
