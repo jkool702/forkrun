@@ -113,11 +113,11 @@ $(<"${scriptpath}")
 ) {fd_xtrace}>"${tmpdir}"/"${scriptname}".xtrace $(${stdinFlag} && echo '0<&${fd_stdin}')
 EOF
 
-    # actually run the wrapper function we just made
+    # actually run the wrapper function we just made (send output to stderr)
     if ${stdinFlag}; then
-        (${fname} "$@") {fd_stdin}<&0
+        (${fname} "$@") {fd_stdin}<&0 >&2
     else
-        (${fname} "$@")
+        (${fname} "$@") >&2
     fi
 
     trap -- DEBUG
