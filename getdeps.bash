@@ -211,6 +211,6 @@ EOF
     ((${#fdeps[@]} > 0)) && printf '\nWARNING: THE FOLLOWING SHELL SCRIPTS ARE INCLUDED IN THE "GUESSED DEPENDENCIES" FROM ANALYSING CODE THAT WAS NOT EXECUTED:\N%s\n\nTHESE HAVE NOT BEEN RECURSVELY CHECKED FOR THEIR OWN DEPENDENCIES.\nAS SUCH, THE LIST OF DEPENDENCIES MAY BE INCOMPLETE.\nTO GET A MORE COMPLETE LIST, INCREASE CODE COVERAGE AND ENSURE THESE SHELL SCRIPTS ARE EXECUTED.\n\n' "${fdeps[*]}"
 
     # print tmpdir path where saved dependency lists are kept
-    printf '\nMORE DETAILED INFORMATION related to dependencies and coverage can be found under: %s\n\n' "${tmpdir}"
+    ${printAllDepsFlag} && printf '\nMORE DETAILED INFORMATION related to dependencies and coverage can be found under: %s\n\n' "${tmpdir}"
 
 )
