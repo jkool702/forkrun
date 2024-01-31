@@ -6,7 +6,7 @@ getdeps() (
 	shopt -s extglob
 	shopt -s extdebug
 
-	local DEBUG_trap cfun printAllDepsFlag scriptpath scriptname fname tmpdir shellFuncFlag stdinFlag
+	local DEBUG_trap cfun printAllDepsFlag scriptpath scriptname fname shellFuncFlag stdinFlag
 	local -a F
 
 	cfun="$(caller 0)"
@@ -14,9 +14,10 @@ getdeps() (
 	cfun="${cfun% *}"
 
 	if [[ "$cfun" == 'getdeps' ]]; then
-		printAllDepsFlag=false
+                printAllDepsFlag=false
 	else
-		printAllDepsFlag=false
+                printAllDepsFlag=true
+                local tmpdir="$(mktemp -d -t getdeps.XXXXXX)"
 	fi
 
 	scriptpath="$1"
@@ -29,15 +30,13 @@ getdeps() (
 
 	[ -t 0 ] && stdinFlag=false || stdinFlag=true
 
-	tmpdir="$(mktemp -d -t getdeps.XXXXXX)"
-
 	if [[ -f "${scriptpath}" ]]; then
 		type -p realpath &>/dev/null && scriptpath="$(realpath "${scriptpath}")"
 		shellFuncFlag=false
 
 	elif declare -F "${scriptname}" &>/dev/null; then
 		declare -f "${scriptname}" >"${tmpdir}"/"${scriptname}".script.src
-		cat <<EOF >"${tmpdir}"/"${scriptname}".script
+		cat<<EOF >"${tmpdir}"/"${scriptname}".script
 $(${stdinFlag} && printf 'cat |') ${scriptname} "\${@}" $(${stdinFlag})
 EOF
 		scriptpath="${tmpdir}"/"${scriptname}".script
