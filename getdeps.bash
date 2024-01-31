@@ -176,9 +176,9 @@ EOF
     echo "$(sort -u <"${tmpdir}"/"${scriptname}".deps.guess)" >"${tmpdir}"/"${scriptname}".deps.guess
 
     # print dependencies and guessed dependencies for this script
-    printf '\n\nDEPENDENCIES DETERMINED FOR: %s\n\nDEPENDENCIES FOUND FROM EXECUTED CODE:\n%s\n' "$(${shellFuncFlag} && echo "${scriptname}" || echo "${scriptpath}")" "$(<"${tmpdir}"/"${scriptname}".deps)"
+    printf '\n\n----------------------------------------------------------------\n\nDEPENDENCIES DETERMINED FOR: %s\n\nDEPENDENCIES FOUND FROM EXECUTED CODE:\n%s\n' "$(${shellFuncFlag} && echo "${scriptname}" || echo "${scriptpath}")" "$(<"${tmpdir}"/"${scriptname}".deps)"
 
-    [[ $(<"${tmpdir}"/"${scriptname}".deps.guess) ]] && printf '\nGUESSED DEPENDENCIES FROM "MISSED" CODE:\n%s\n' "$(<"${tmpdir}"/"${scriptname}".deps.guess)"
+    [[ $(<"${tmpdir}"/"${scriptname}".deps.guess) ]] && printf '\n\nGUESSED DEPENDENCIES FROM "MISSED" CODE:\n\n%s\n' "$(<"${tmpdir}"/"${scriptname}".deps.guess)"
 
     # add dependencies to overall dependency lists
     cat "${tmpdir}"/"${scriptname}".deps >>"${tmpdir}"/deps.all
@@ -201,16 +201,16 @@ EOF
         
     # print final overall dependency list and guessed dependency lists, if needed
     ${printAllDepsFlag} && {
-        printf '\n\nDEPENDENCIES DETERMINED FOR %s AND ALL DEPENDENT SCRIPTS CALLED BY IT\n\nDEPENDENCIES FOUND FROM EXECUTED CODE:\n%s\n' "$(${shellFuncFlag} && echo "${scriptname}" || echo "${scriptpath}")" "$(<"${tmpdir}"/deps.all)"
+        printf '\n\n----------------------------------------------------------------\n\nDEPENDENCIES DETERMINED FOR %s AND ALL DEPENDENT SCRIPTS CALLED BY IT\n\nDEPENDENCIES FOUND FROM EXECUTED CODE:\n%s\n' "$(${shellFuncFlag} && echo "${scriptname}" || echo "${scriptpath}")" "$(sort -u <"${tmpdir}"/deps.all | grep -E '.+')"
 
-        [[ $(<"${tmpdir}"/deps.guess.all) ]] && printf '\nALL GUESSED DEPENDENCIES FROM "MISSED" CODE:\n%s\n' "$(<"${tmpdir}"/deps.guess.all)"
+        [[ $(<"${tmpdir}"/deps.guess.all) ]] && printf '\n\nALL GUESSED DEPENDENCIES FROM "MISSED" CODE:\n%s\n' "$(sort -u <"${tmpdir}"/deps.guess.all | grep -E '.+')"
 
         }
 
     # print warning about missed dependency is guessed depedent shell scripts
-    ((${#fdeps[@]} > 0)) && printf '\nWARNING: THE FOLLOWING SHELL SCRIPTS ARE INCLUDED IN THE "GUESSED DEPENDENCIES" FROM ANALYSING CODE THAT WAS NOT EXECUTED:\N%s\n\nTHESE HAVE NOT BEEN RECURSVELY CHECKED FOR THEIR OWN DEPENDENCIES.\nAS SUCH, THE LIST OF DEPENDENCIES MAY BE INCOMPLETE.\nTO GET A MORE COMPLETE LIST, INCREASE CODE COVERAGE AND ENSURE THESE SHELL SCRIPTS ARE EXECUTED.\n\n' "${fdeps[*]}"
+    ((${#fdeps[@]} > 0)) && printf '\n\n----------------------------------------------------------------\n\nWARNING: THE FOLLOWING SHELL SCRIPTS ARE INCLUDED IN THE "GUESSED DEPENDENCIES" FROM ANALYSING CODE THAT WAS NOT EXECUTED:\N%s\n\nTHESE HAVE NOT BEEN RECURSVELY CHECKED FOR THEIR OWN DEPENDENCIES.\nAS SUCH, THE LIST OF DEPENDENCIES MAY BE INCOMPLETE.\nTO GET A MORE COMPLETE LIST, INCREASE CODE COVERAGE AND ENSURE THESE SHELL SCRIPTS ARE EXECUTED.\n\n' "${fdeps[*]}"
 
     # print tmpdir path where saved dependency lists are kept
-    ${printAllDepsFlag} && printf '\nMORE DETAILED INFORMATION related to dependencies and coverage can be found under: %s\n\n' "${tmpdir}"
+    ${printAllDepsFlag} && printf '\n\n----------------------------------------------------------------\n\nMORE DETAILED INFORMATION related to dependencies and coverage can be found under: %s\n\n' "${tmpdir}"
 
 )
