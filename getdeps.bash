@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+shopt -s extglob
+
 getdeps() (
     ## analyzes a shell script / function to determine its dependencies using a hybrid dynamic + static analysis
     #
