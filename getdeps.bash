@@ -201,9 +201,9 @@ EOF
         
     # print final overall dependency list and guessed dependency lists, if needed
     ${printAllDepsFlag} && {
-        printf '\n\n----------------------------------------------------------------\n\nDEPENDENCIES DETERMINED FOR %s AND ALL DEPENDENT SCRIPTS CALLED BY IT\n\nDEPENDENCIES FOUND FROM EXECUTED CODE:\n%s\n' "$(${shellFuncFlag} && echo "${scriptname}" || echo "${scriptpath}")" "$(sort -u <"${tmpdir}"/deps.all | grep -E '.+')"
+        printf '\n\n----------------------------------------------------------------\n\nDEPENDENCIES DETERMINED FOR %s AND ALL DEPENDENT SCRIPTS CALLED BY IT\n\nDEPENDENCIES FOUND FROM EXECUTED CODE:\n\n%s\n' "$(${shellFuncFlag} && echo "${scriptname}" || echo "${scriptpath}")" "$(sort -u <"${tmpdir}"/deps.all | grep -E '.+')"
 
-        [[ $(<"${tmpdir}"/deps.guess.all) ]] && printf '\n\nALL GUESSED DEPENDENCIES FROM "MISSED" CODE:\n%s\n' "$(sort -u <"${tmpdir}"/deps.guess.all | grep -E '.+')"
+        [[ $(<"${tmpdir}"/deps.guess.all) ]] && printf '\n\nALL GUESSED DEPENDENCIES FROM "MISSED" CODE:\n\n%s\n' "$(sort -u <"${tmpdir}"/deps.guess.all | grep -E '.+')"
 
         }
 
