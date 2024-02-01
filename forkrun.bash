@@ -662,16 +662,25 @@ echo """
 if ${readBytesFlag}; then
     :
 else
-    echo """
-    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t') ${delimiterReadStr} A"""
-    ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-    [[ \${#A[@]} == 0 ]] || {
-        [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {
-            $( (( ${verboseLevel} > 2 )) && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
-            until read -r -u ${fd_read} ${delimiterReadStr}; do A[-1]+=\"\${REPLY}\"; done
-            A[-1]+=\"\${REPLY}\"${delimiterVal}
-            $( (( ${verboseLevel} > 2 )) && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
+    printf '%s ' "mapfile -n \${nLinesCur} -u"
+    ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; 
+    { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
+    echo "${delimiterReadStr} A"
+    ${pipeReadFlag} || ${nullDelimiterFlag} || {
+        echo """
+        [[ \${#A[@]} == 0 ]] || {
+            [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"""
+                (( ${verboseLevel} > 2 )) && echo "echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"
+                echo """
+                until read -r -u ${fd_read} ${delimiterReadStr}; do 
+                    A[-1]+=\"\${REPLY}\"; 
+                done
+                A[-1]+=\"\${REPLY}\"${delimiterVal}"""
+                (( ${verboseLevel} > 2 )) && echo "{ echo \"Partial read at: \${A[-1]}\"; echo; } >&${fd_stderr}"
+                echo """
+            }
         }"""
+    }
 fi
 ${nOrderFlag} && echo """
         read -u ${fd_nOrder} nOrder"""
@@ -707,7 +716,7 @@ ${nLinesAutoFlag} && { printf '%s' """
     ${fallocateFlag} && printf '%s' ' || ' || echo
 }
 ${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
-${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
         { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {
             $( (( ${verboseLevel} > 2 )) && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
             A[-1]=\"\${A[-1]%${delimiterVal}}\"
@@ -716,8 +725,16 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
         }
 """
 ${subshellRunFlag} && echo '(' || echo '{'
-${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"')
-    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ${noFuncFlag}; then printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; (( ${verboseLevel} > 2 )) && echo """ || {
+${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
+printf '%s' "${runCmd[@]}"
+if ${stdinRunFlag}; then 
+    printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
+elif ${noFuncFlag}; then 
+    printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; 
+elif ! ${substituteStringFlag}; then 
+    printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
+fi; 
+(( ${verboseLevel} > 2 )) && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
@@ -970,16 +987,17 @@ FLAGS WITH ARGUMENTS
     -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
     -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,512'
     -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm', or (if unavailable) '/tmp'
+    -b <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL NOT wait and will continue with fewer bytes of data read.
+    -B <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read.
  -d <delimiter> : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
-
-
+    
 FLAGS WITHOUT ARGUMENTS
 -----------------------
 
 SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless otherwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
 
     -i          : insert {}. replace `{}` with the inputs passed on stdin (instead of placing them at the end)
-    -I          : insert {id}. replace `{id}` with an index (0, 1, ...) describing which coproc the process ran on. 
+    -I          : insert {ID}. replace `{ID}` with an index (0, 1, ...) describing which coproc the process ran on. If -k also passed then also replace `{IND}` with an index describing the output order (the same index that the  `-n` flag prints).
     -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. 
     -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This requires and will automatically enable the `-k` output ordering flag.
     (-0|-z)     : NULL-seperated stdin. stdin is NULL-separated, not newline separated. WARNING: this flag (by necessity) disables a check that prevents lines from occasionally being split into two seperate lines, which can happen if `parFunc` evaluates very quickly. In general a delimiter other than NULL is recommended, especially when `parFunc` evaluates very fast and/or there are many items (passed on stdin) to evaluate.
@@ -1038,8 +1056,14 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 
 ----------------------------------------------------------
 
+-b | --bytes <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL NOT wait and will continue with fewer bytes of data read. This can be useful when you have a maximum chunk size you can process but do not necessairly want to wait for that much data to accumulate.
+
+-B | --BYTES <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. This can be useful for things like spliting a compressed or binary file into equal size chunks.
+    
+----------------------------------------------------------
+  
 -d | --delimiter <delim> : sets the delimiter used to separate inputs passed on stdin. must be a single character.
-   ---->  default  : newline ($'\n')
+   ---->  default  : newline ($'\n') 
 
 --------------------------------------------------------------------------------------------------------------------
 
@@ -1053,8 +1077,8 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 ----------------------------------------------------------
 
 -i | --insert        : insert {}. replace `{}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the forkrun commandline) with the inputs passed on stdin (instead of placing them at the end)
-
--I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the forkrun commandline) with an index (0, 1, ...) indicating which coproc the process is running on. This is analagous to the `--process-slot-var` option in `xargs`
+]` (
+-I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}i.e., in what is passed on the forkrun commandline) with an index (0, 1, ...) indicating which coproc the process is running on. This is analagous to the `--process-slot-var` option in `xargs`. Additionally, if the `-k` flag is used in conjuction with the `-I` flag, an addition replacement will be made: `{IND}` will be replaced with the ordering INDex describing which batch it ran in. This gives the same index that the `-n` flag prints.
 
 ----------------------------------------------------------
 
@@ -1130,3 +1154,4 @@ EOF
 }
 
 }
+
