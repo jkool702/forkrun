@@ -670,22 +670,24 @@ else
         echo """
         [[ \${#A[@]} == 0 ]] || {
             [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"""
-                (( ${verboseLevel} > 2 )) && echo "echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"
+                (( ${verboseLevel} > 2 )) && echo """
+		echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"""
                 echo """
                 until read -r -u ${fd_read} ${delimiterReadStr}; do 
                     A[-1]+=\"\${REPLY}\"; 
                 done
                 A[-1]+=\"\${REPLY}\"${delimiterVal}"""
-                (( ${verboseLevel} > 2 )) && echo "{ echo \"Partial read at: \${A[-1]}\"; echo; } >&${fd_stderr}"
+                (( ${verboseLevel} > 2 )) && echo """
+		echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}
+		echo  >&${fd_stderr}"""
                 echo """
-            }
-        }"""
+	    }"""
     }
 fi
 ${nOrderFlag} && echo """
         read -u ${fd_nOrder} nOrder"""
-${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-    }"""
+${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
+        }"""
 echo """
     printf '\\n' >&${fd_continue};
     [[ \${#A[@]} == 0 ]] && {
@@ -726,7 +728,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
 """
 ${subshellRunFlag} && echo '(' || echo '{'
 ${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
-printf '%s' "${runCmd[@]}"
+printf '%s ' "${runCmd[@]}"
 if ${stdinRunFlag}; then 
     printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
 elif ${noFuncFlag}; then 
