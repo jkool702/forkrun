@@ -88,27 +88,27 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)?(b)?(yte?(s)))
+            -?(-)b?(yte?(s)))
                 nBytes="${2,,}"
                 readBytesFlag=true
                 readBytesExactFlag=false
                 shift 1
             ;;
 
-            -?(-)?(b)?(yte?(s))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
+            -?(-)b?(yte?(s))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
                 nBytes="${1,,}"
                 readBytesFlag=true
                 readBytesExactFlag=false
             ;;
 
-            -?(-)?(B)?(YTE?(S)))
+            -?(-)B?(YTE?(S)))
                 nBytes="${2,,}"
                 readBytesFlag=true
                 readBytesExactFlag=true
                 shift 1
             ;;
 
-            -?(-)?(B)?(YTE?(S))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
+            -?(-)B?(YTE?(S))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
                 nBytes="${1,,}"
                 readBytesFlag=true
                 readBytesExactFlag=true
