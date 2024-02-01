@@ -32,7 +32,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -86,6 +86,32 @@ forkrun() {
                 else
                     nLines="${nLines0}"
                 fi
+            ;;
+
+            -?(-)?(b)?(yte?(s)))
+                nBytes="${2,,}"
+                readBytesFlag=true
+                readBytesExactFlag=false
+                shift 1
+            ;;
+
+            -?(-)?(b)?(yte?(s))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
+                nBytes="${1,,}"
+                readBytesFlag=true
+                readBytesExactFlag=false
+            ;;
+
+            -?(-)?(B)?(YTE?(S)))
+                nBytes="${2,,}"
+                readBytesFlag=true
+                readBytesExactFlag=true
+                shift 1
+            ;;
+
+            -?(-)?(B)?(YTE?(S))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
+                nBytes="${1,,}"
+                readBytesFlag=true
+                readBytesExactFlag=true
             ;;
 
             -?(-)t?(mp?(?(-)dir)))
@@ -292,9 +318,43 @@ forkrun() {
         (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
         ${noFuncFlag} && runCmd=('source')
 
-        # set batch size
-        { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
-        { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
+        : "${readBytesFlag:=false}" "${nullDelimiterFlag:=false}"
+
+        if ${readBytesFlag}; then
+            # turn off nLinesAuto
+            : "${nLinesAutoFlag:=false}"
+
+            # parse byte read size 
+            nBytes="${nBytes//' '/}"
+            nBytes="${nBytes%b}"
+            [[ "${nBytes}" == *[kmgtp]?(i) ]] && {
+                local -A nBytesParser=([k]=2 [m]=3 [g]=4 [t]=5 [p]=6)
+
+                if [[ ${nBytes[-1]} == 'i' ]]; then
+                    nBytes="$(( ${nBytes%[kmgtp]i} * ( 1024 ** ${nBytesParser[${nBytes[-2]}]} ) ))"
+                else
+                    nBytes="$(( ${nBytes%[kmgtp]} * ( 1000 ** ${nBytesParser[${nBytes[-1]}]} ) ))"
+                fi
+            }
+
+            # make sure nBytes is only digits
+            [[ "${nBytes//[0-9]/}" ]] && { 
+                printf '\nERROR: the byte count passed to the ( -b | -B ) flag did not parse correctly. \nThis must consist solely of numbers, optionally followed by a standard si prefix. \nVALID EXAMPLES:  4  8b  16k  32mb  64G  128TB  256PiB \nNOTE: the count is always in bytes, never in bits, regardless of the case of the (optional) trailing "b" / "B"\n\n'
+                return 1
+            }
+
+            # check for incompatible flags
+            { ${nullDelimiterFlag} || [[ ${delimiterVal} ]]; } && {
+                printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' 
+                nullDelimiterFlag=false
+                delimiterVal=''
+            }
+
+        else
+            # set batch size
+            { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
+            { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
+        fi
 
         # set number of coproc workers
         { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || nProcs=$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')
@@ -303,7 +363,7 @@ forkrun() {
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
 
         # check for inotifywait
         type -a inotifywait &>/dev/null && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
@@ -336,6 +396,7 @@ forkrun() {
             }
             ${substituteStringIDFlag} && {
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{ID}'/'{<#>}'}")
+                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{IND}'/'${nOrder}'}")
             }
         else
             mapfile -t runCmd < <(printf '%q\n' "${runCmd[@]}")
@@ -344,6 +405,7 @@ forkrun() {
             }
             ${substituteStringIDFlag} && {
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{ID\}'/'{<#>}'}")
+                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{IND\}'/'${nOrder}'}")
             }
         fi
 
@@ -361,8 +423,9 @@ forkrun() {
             printf '(-j|-P) using %s coproc workers\n' ${nProcs}
             ${nLinesAutoFlag} && printf '(-N) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
             printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
-            ${nOrderFlag} && echo '(-k) ordering output the same as the input'
-            ${exportOrderFlag} && echo '(-n) output lines will be numbered (`grep -n` style)'
+            ${readBytesFlag} && printf '(-%s) data will be read in chunks of %s %s bytes\n' "$(${readBytesExactFlag} && echo 'B' || echo 'b')" "$(${readBytesExactFlag} && echo 'exactly' || echo 'up to')" "${nBytes}"
+            ${nOrderFlag} && echo '(-k) output will be ordered the same as if the inputs were run sequentially'
+            ${exportOrderFlag} && echo '(-n) output batches will be numbered (index is per-batch, denoted using \\034<IND>:\\035\\n)'
             ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
             ${substituteStringFlag} && echo '(-I) replacing {ID} with coproc worker ID'
             ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
@@ -583,7 +646,7 @@ forkrun() {
         # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
         # the individual coproc's codes are then generated via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
 
-        coprocSrcCode="""
+        coprocSrcCode="$(echo """
 { coproc p{<#>} {
 LC_ALL=C
 LANG=C
@@ -591,51 +654,52 @@ IFS=
 trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
-while true; do
-$(${nLinesAutoFlag} && echo """
-    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}
- """)
-    read -u ${fd_continue}
-    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t') ${delimiterReadStr} A
-$(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+while true; do"""
+${nLinesAutoFlag} && echo """
+    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}"""
+echo """
+    read -u ${fd_continue}"""
+if ${readBytesFlag}; then
+    :
+else
+    echo """
+    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t') ${delimiterReadStr} A"""
+    ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
     [[ \${#A[@]} == 0 ]] || {
         [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {
             $( (( ${verboseLevel} > 2 )) && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
             until read -r -u ${fd_read} ${delimiterReadStr}; do A[-1]+=\"\${REPLY}\"; done
             A[-1]+=\"\${REPLY}\"${delimiterVal}
             $( (( ${verboseLevel} > 2 )) && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
-        }
-"""
+        }"""
+fi
 ${nOrderFlag} && echo """
-        read -u ${fd_nOrder} nOrder
-"""
+        read -u ${fd_nOrder} nOrder"""
 ${pipeReadFlag} || ${nullDelimiterFlag} || echo """
-    }
-""")
+    }"""
+echo """
     printf '\\n' >&${fd_continue};
     [[ \${#A[@]} == 0 ]] && {
-        if [[ -f \"${tmpDir}\"/.done ]]; then
-$(${nLinesAutoFlag} && echo """
-            printf '\\n' >&\${fd_nAuto0}
-""")
-            [[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit
-$(${nOrderFlag} && echo """
-            : >\"${tmpDir}\"/.out/.quit{<#>}
-""")
-            break
-$({ ${inotifyFlag} || ${nOrderFlag}; } && echo """
-        else
-"""
+        if [[ -f \"${tmpDir}\"/.done ]]; then"""
+${nLinesAutoFlag} && echo """
+            printf '\\n' >&\${fd_nAuto0}"""
+echo """
+            [[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit"""
 ${nOrderFlag} && echo """
-            printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}
-"""
+            : >\"${tmpDir}\"/.out/.quit{<#>}"""
+echo """
+            break"""
+{ ${inotifyFlag} || ${nOrderFlag}; } && echo """
+        else"""
+${nOrderFlag} && echo """
+            printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"""
 ${inotifyFlag} && echo """
-            read -u ${fd_inotify} -t 0.1
-""")
+            read -u ${fd_inotify} -t 0.1"""
+echo """
         fi
         continue
-    }
-$(${nLinesAutoFlag} && { printf '%s' """
+    }"""
+${nLinesAutoFlag} && { printf '%s' """
     \${nLinesAutoFlag} && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false
@@ -665,15 +729,15 @@ ${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(
             echo
         } >&${fd_stderr}
     }"""
-${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}') ${outStr}
-$(${nOrderFlag} && echo """
-    printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}
-""")
+${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}'
+echo "${outStr}"
+${nOrderFlag} && echo """
+    printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"""
+echo """
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
-p_PID+=(\${p{<#>}_PID})
-"""
+p_PID+=(\${p{<#>}_PID})""")"
 
         # # # # # FORK COPROC "WORKERS" # # # # #
 
