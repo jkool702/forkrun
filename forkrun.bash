@@ -300,6 +300,12 @@ forkrun() {
 
         shopt -s nullglob
 
+        #PS4=''
+        #set -vx
+        #exec {fd_xtrace}>&2 
+        #exec 2>./.log
+        #BASH_XTRACEFD=2
+
         # dynamically set defaults for a few flags
 
         # check verboseLevel
@@ -340,7 +346,7 @@ forkrun() {
             }
 
             nBytes="${nBytes%b}"
-            [[ "${nBytes}" == *[kmgtp]?(i) ]] && {
+            [[ "${nBytes}" == +([0-9])@([kmgtp])?(i) ]] && {
                 local -A nBytesParser=([k]=2 [m]=3 [g]=4 [t]=5 [p]=6)
 
                 if [[ ${nBytes[-1]} == 'i' ]]; then
@@ -360,7 +366,7 @@ forkrun() {
             { ${nullDelimiterFlag} || [[ ${delimiterVal} ]]; } && {
                 printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' 
                 nullDelimiterFlag=false
-                delimiterVal=''
+                unset delimiterVal
             }
 
         else
@@ -391,16 +397,18 @@ forkrun() {
         ${exportOrderFlag} && nOrderFlag=true
 
         # setup delimiter
-        if ${nullDelimiterFlag}; then
-            delimiterReadStr="-d ''"
-        elif [[ -z ${delimiterVal} ]]; then
-            delimiterVal='$'"'"'\n'"'"
-            delimiterRemoveStr='%$'"'"'\n'"'"
-        else
-            delimiterVal="$(printf '%q' "${delimiterVal}")"
-            delimiterRemoveStr="%${delimiterVal}"
-            delimiterReadStr="-d ${delimiterVal}"
-        fi
+        ${readBytesFlag} || {
+            if ${nullDelimiterFlag}; then
+                delimiterReadStr="-d ''"
+            elif [[ -z ${delimiterVal} ]]; then
+                delimiterVal='$'"'"'\n'"'"
+                delimiterRemoveStr='%$'"'"'\n'"'"
+            else
+                delimiterVal="$(printf '%q' "${delimiterVal}")"
+                delimiterRemoveStr="%${delimiterVal}"
+                delimiterReadStr="-d ${delimiterVal}"
+            fi
+        }
 
         # modify runCmd if '-i' '-I' or '-u' flags are set
         if ${unescapeFlag}; then
@@ -673,10 +681,10 @@ ${nLinesAutoFlag} && echo """
 echo """
     read -u ${fd_continue}"""
 if ${readBytesFlag}; then
-     printf '%s ' 'read -r -N %s -u ' '${nBytes}'
+     printf 'read -r -N %s -u ' "${nBytes}"
      if ${readBytesExactFlag}; then
         printf '%s ' "${fd_stdin}" 
-        [[ ${tTimeout} ]] &&  printf '-t %s ' "${tTimeout} "
+        [[ ${tTimeout} ]] && printf '-t %s ' "${tTimeout} "
     else
         printf '%s ' ${fd_read}
     fi
