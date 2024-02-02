@@ -32,7 +32,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -89,27 +89,27 @@ forkrun() {
             ;;
 
             -?(-)b?(yte?(s)))
-                nBytes="${2,,}"
+                nBytes="${2}"
                 readBytesFlag=true
                 readBytesExactFlag=false
                 shift 1
             ;;
 
             -?(-)b?(yte?(s))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
-                nBytes="${1,,}"
+                nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))}"
                 readBytesFlag=true
                 readBytesExactFlag=false
             ;;
 
             -?(-)B?(YTE?(S)))
-                nBytes="${2,,}"
+                nBytes="${2}"
                 readBytesFlag=true
                 readBytesExactFlag=true
                 shift 1
             ;;
 
-            -?(-)B?(YTE?(S))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
-                nBytes="${1,,}"
+            -?(-)B?(YTE?(S))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))))
+                nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))))}"
                 readBytesFlag=true
                 readBytesExactFlag=true
             ;;
@@ -324,8 +324,21 @@ forkrun() {
             # turn off nLinesAuto
             : "${nLinesAutoFlag:=false}"
 
-            # parse byte read size 
+            # read from pipe for -B --> dont need inotifywait
+            ${readBytesExactFlag} && { 
+                pipeReadFlag=true
+                inotifyFlag=false
+            }
+
+            # parse read size (in bytes)
+            nBytes="${nBytes,,}"
             nBytes="${nBytes//' '/}"
+
+            [[ "${nBytes}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]),+([0-9])?(.+([0-9])) ]] && {
+                tTimeOut="${nBytes##*,}"
+                nBytes="${nBytes%,*}"
+            }
+
             nBytes="${nBytes%b}"
             [[ "${nBytes}" == *[kmgtp]?(i) ]] && {
                 local -A nBytesParser=([k]=2 [m]=3 [g]=4 [t]=5 [p]=6)
@@ -660,10 +673,17 @@ ${nLinesAutoFlag} && echo """
 echo """
     read -u ${fd_continue}"""
 if ${readBytesFlag}; then
-    :
+     printf '%s ' 'read -r -N %s -u ' '${nBytes}'
+     if ${readBytesExactFlag}; then
+        printf '%s ' "${fd_stdin}" 
+        [[ ${tTimeout} ]] &&  printf '-t %s ' "${tTimeout} "
+    else
+        printf '%s ' ${fd_read}
+    fi
+     echo '-a A'
 else
     printf '%s ' "mapfile -n \${nLinesCur} -u"
-    ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; 
+    ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
     { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
     echo "${delimiterReadStr} A"
     ${pipeReadFlag} || ${nullDelimiterFlag} || {
@@ -990,7 +1010,7 @@ FLAGS WITH ARGUMENTS
     -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,512'
     -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm', or (if unavailable) '/tmp'
     -b <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL NOT wait and will continue with fewer bytes of data read.
-    -B <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read.
+-B <#>[,<time>] : instead of reading data using a delimiter, read up to this many ( -B <#> )bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. example: `-B 4mb`. You may optionally pass a time as another input (-B <#>,<time>) which will set a timeout on how long the read commands will wait to accumulate input (if not used, they wait indefinately). example: `-B 4096k,3.5` sets 4 mb reads with a 3.5 sec timeout.
  -d <delimiter> : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
     
 FLAGS WITHOUT ARGUMENTS
@@ -1060,7 +1080,9 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 
 -b | --bytes <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL NOT wait and will continue with fewer bytes of data read. This can be useful when you have a maximum chunk size you can process but do not necessairly want to wait for that much data to accumulate.
 
--B | --BYTES <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. This can be useful for things like spliting a compressed or binary file into equal size chunks.
+-B | --BYTES <bytes>[,<seconds>]  : instead of reading data using a delimiter, read up to this many ( -B <#> )bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. example: `-B 4mb`. You may optionally pass a time as another input (-B <#>,<time>) which will set a timeout on how long the read commands will wait to accumulate input (if not used, they wait indefinately). example: `-B 4096k,3.5` sets 4 mb reads with a 3.5 sec timeout. This can be useful for things like spliting a compressed or binary file into equal size chunks.
+
+    NOTE: standard byte size notations (k, m, g, t, p, ki, mi, ti, pi) may be used. The trailing `b` is optional and can be either upper or lower case but always will represent bytes, never bits. Seconds for `-B` can be a decimal but should not contain any units.
     
 ----------------------------------------------------------
   
