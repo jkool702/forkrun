@@ -301,12 +301,6 @@ forkrun() {
 
         shopt -s nullglob
 
-        #PS4=''
-        #set -vx
-        #exec {fd_xtrace}>&2 
-        #exec 2>./.log
-        #BASH_XTRACEFD=2
-
         # dynamically set defaults for a few flags
 
         # check verboseLevel
