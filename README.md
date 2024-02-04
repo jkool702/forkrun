@@ -1,6 +1,19 @@
 # FORKRUN
 
-`forkrun` is a pure-bash function for parallelizing loops in much the same way that `xargs` or `parallel` does, only faster than either (especially parallel) (see the `hyperfine_benchmark` subdirectory for benchmarks showing this).  In my testing, `forkrun` was, on average (for problems where the efficiency of the parallelization framework actually makes a difference) ~20% faster to twice as fast versus `xargs -P $(nproc)`; and ~2x to ~8x as fast versus `parallel -m`. To be clear: these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
+`forkrun` is an *extremely* fast pure-bash function that leverages bash coprocs to efficiently run several commands simultaniously in parallel (i.e., it's a "loop parallelizer"). 
+
+`forkrun` is used in much the same way that `xargs` or `parallel` are, but is faster (see the `hyperfine_benchmark` subdirectory for benchmarks) while still being full-featured and only requires having a fairly recent `bash` version (4.0+) to run<sup>1</sup>. `forkrun`:
+* offers more features than `xargsd` and is mildly faster than it's fastest invocation (`forkrun` without any flags is functionally equivilant to `xargs -P $*(nproc) -d $'\n'`)  
+* is considerably faster than `parallel` (over an order of magnitude faster in some cases) while still supporting many of the particularly useful "core" `parallel` features
+* can be easily and efficiently be adapted to parallelize complex tasks without penalty by using shell functions (unlike `xargs` and `parallel`, `forkrun` doesnt need to use `/bin/bash -c` every time the function is executed)
+
+<sup>1: bash 5.1+ is preffered and much better tested. A few basic filesystem operations (`rm`, `mkdir`) must also be available. `fallocate` and `inotifywait` are not required; but, if present, will be used to lower runtime resource usage.</sup>
+
+**CURRENT VERSION**: forkrun v1.1
+
+**PREVIOUS VERION**: forkrun v1.0
+
+**CHANGES**: 2 new flags (`-b <bytes>` and `-B <bytes>`) that cause forkrun to split up stdin into blocks of `<bytes>` bytes. `-B` will wait and accululate blocks of exactly `<bytes>` bytes, `-b` will not. The `-I` flag has been expanded so that if `-k` (or `-n`) is also passed then a second susbstitution is made, swapping `{IND}` for the batch ordering index (the same thing that `-n` outputs at the start of each block) (`{ID}` will still be swapped for coproc ID). A handful of optimizations and bug-fixes have also been implemented (notably with how the coproc source code is dynamically generated). Lastly. the forkrun repo had some changes to how it is organized.
 
 ***
 
@@ -8,30 +21,42 @@
 
 `forkrun` is invoked in much the same way as `xargs`: on the command-line, pass forkrun options, then the function/script/binary that you are parallelizing, then any initial constant arguments (in that order). The arguments to parallelize running are passed to forkrun on stdin. A typical `forkrun` invocation looks something like this:
 
-    printf '%s\n' "${inArgs[@]}" | forkrun [flags] [--] parFunc ["${initialArgs[@]}"]
+```bash
+printf '%s\n' "${inArgs[@]}" | forkrun [flags] [--] <parFunc> ["${args0[@]}"]
+forkrun [flags] [--] <parFunc> ["${args0[@]}"] <inArgs
+```
 
 `forkrun` strives to automatically choose reasonable and near-optimal values for flags, so in most usage scenarios no flags will need to be set to attain maximum performance and speed.
 
 NOTE: you'll need to `source` forkrun before using it
 
-    source /path/to/forkrun.bash
-    
+```bash
+source /path/to/forkrun.bash
+```
 Alternately, if you dont have `forkrun.bash` saved locally but have internet access (or want to ensure you are using the latest version), you can run
     
-    source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)
+```bash
+source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)
+```
 
 Or, for those (understandably) concerned with directly sourcing unseen code from the internet, you can use
 
-    source <(echo 'shopt -s extglob'; ( cd /proc/self/fd; decfun='forkrun forkrun_displayHelp '; type -p cat &>/dev/null || decfun+='cat '; type -p mktemp &>/dev/null || decfun+='mktemp '; shopt -s extglob; curl="$(type -p curl)"; bash="$(type -p bash)"; PATH=''; { $curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash; echo 'declare -f '"$decfun"; } | $bash -r ) )
+```bash
+source <(echo 'shopt -s extglob'; ( cd /proc/self/fd; decfun='forkrun forkrun_displayHelp '; type -p cat &>/dev/null || decfun+='cat '; type -p mktemp &>/dev/null || decfun+='mktemp '; shopt -s extglob; curl="$(type -p curl)"; bash="$(type -p bash)"; PATH=''; { $curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash; echo 'declare -f '"$decfun"; } | $bash -r ) )
+```
+
+This monster of a one-liner will source the `forkrun` code in an extremely restricted shell that really cant do much else, then `declare -f` the required forkrun functions and finally the main shell sources those. This drops any non-forkrun-related code and ensures that nothing is actually run until the forkrun function is called, giving you a chance to review the code via `declare -f` (should you wish). This offers some protection against a bad actor maliciously changing the code (without your nor my knowledge) through some attack.
 
 **PARALLELIZING FUNCTIONS**: one extremely powerful feature of `forkrun` is that it can parallelize arbitrarily complex tasks very efficiently by wrapping them in a function. This is done by doing something like the following:
 
-    myfun() {
-        mapfile -t A < <(some_task "$@")
-        some_other_task "${A[@]}"
-        # ...
-    }
-    forkrun myfun <inputs
+```bash
+myfun() {
+    mapfile -t A < <(some_task "$@")
+    some_other_task "${A[@]}"
+    # ...
+}
+forkrun myfun <inputs
+```
 
 `forkrun` particularly excels at doing this since, unlike other loop parallelizers that have to spin up a whole new bash shell for every function invocation, forkrun simply calls this function directly. For simple functions (e.g., `myfun() { :; }`), simply running `myfun` from an already-running bash shell is ~200x faster and more efficient than running `export -f myfun; bash -c 'myfun'` (overhead from 10,000 calls is ~55 seconds using `bash -c` vs ~1/4 second with direct calling).
 
@@ -49,6 +74,8 @@ Or, for those (understandably) concerned with directly sourcing unseen code from
 
 NOTE: text inside of the brackets `[...]` is optional.
 NOTE: `forkrun -?` may not work unless you escape the `?`. i.e., `forkrun -\?` or `forkrun '-?'`
+
+**SPEED**: In my testing, `forkrun` was, on average (for problems where the efficiency of the parallelization framework actually makes a difference) ~20% faster to twice as fast versus `xargs -P $(nproc)`; and ~2x to ~8x as fast versus `parallel -m`. To be clear: these are the "fast" invocations of xargs and parallel. If you were to compare the "1 line at a time" version of all 3 (`forkrun -l1`, `xargs -P $(nproc) -L 1`, `parallel -j $(nprooc)`), `forkrun` is 7-10x as fast as `xargs` and 20-30x as fast as `parallel`.
 
 ***
     

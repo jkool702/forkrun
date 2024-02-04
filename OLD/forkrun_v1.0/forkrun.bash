@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2004,SC2015,SC2016,SC2028,SC2162 source=/dev/null
 
 shopt -s extglob
 
@@ -22,13 +21,19 @@ forkrun() {
 
 ############################ BEGIN FUNCTION ############################
 
+    [ -t 0 ] && {
+        printf '\n\nERROR: STDIN is a terminal. \n\nforkrun requires STDIN to be a pipe \n(containing the inputs to parallelize over); e.g.: \n\nprintf '"'"'%%s\\n'"'"' "${args[@]}" | forkrun parFunc \n\nABORTING! \n\n'
+        returnVal=1
+        return 1
+    }
+    
     trap - EXIT INT TERM HUP
 
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 v9 kkMax kkCur kk verboseLevel
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
     # # # # # PARSE OPTIONS # # # # #
@@ -81,32 +86,6 @@ forkrun() {
                 else
                     nLines="${nLines0}"
                 fi
-            ;;
-
-            -?(-)b?(yte?(s)))
-                nBytes="${2}"
-                readBytesFlag=true
-                readBytesExactFlag=false
-                shift 1
-            ;;
-
-            -?(-)b?(yte?(s))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
-                nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))}"
-                readBytesFlag=true
-                readBytesExactFlag=false
-            ;;
-
-            -?(-)B?(YTE?(S)))
-                nBytes="${2}"
-                readBytesFlag=true
-                readBytesExactFlag=true
-                shift 1
-            ;;
-
-            -?(-)B?(YTE?(S))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))))
-                nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))))}"
-                readBytesFlag=true
-                readBytesExactFlag=true
             ;;
 
             -?(-)t?(mp?(?(-)dir)))
@@ -257,13 +236,6 @@ forkrun() {
 
     done
 
-    [ -t 0 ] && {
-        printf '\n\nERROR: STDIN is a terminal. \n\nforkrun requires STDIN to be a pipe \n(containing the inputs to parallelize over); e.g.: \n\nprintf '"'"'%%s\\n'"'"' "${args[@]}" | forkrun parFunc \n\nABORTING! \n\n'
-        returnVal=1
-        return 1
-    }
-    
-
     # # # # # SETUP TMPDIR # # # # #
 
     [[ ${tmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && tmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && tmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && tmpDirRoot='/tmp'; } || tmpDirRoot="$(pwd)"
@@ -320,56 +292,9 @@ forkrun() {
         (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
         ${noFuncFlag} && runCmd=('source')
 
-        : "${readBytesFlag:=false}" "${nullDelimiterFlag:=false}"
-
-        if ${readBytesFlag}; then
-            # turn off nLinesAuto
-            : "${nLinesAutoFlag:=false}"
-
-            # read from pipe for -B --> dont need inotifywait
-            ${readBytesExactFlag} && { 
-                pipeReadFlag=true
-                inotifyFlag=false
-            }
-
-            # parse read size (in bytes)
-            nBytes="${nBytes,,}"
-            nBytes="${nBytes//' '/}"
-
-            [[ "${nBytes}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]),+([0-9])?(.+([0-9])) ]] && {
-                tTimeOut="${nBytes##*,}"
-                nBytes="${nBytes%,*}"
-            }
-
-            nBytes="${nBytes%b}"
-            [[ "${nBytes}" == +([0-9])@([kmgtp])?(i) ]] && {
-                local -A nBytesParser=([k]=2 [m]=3 [g]=4 [t]=5 [p]=6)
-
-                if [[ ${nBytes[-1]} == 'i' ]]; then
-                    nBytes="$(( ${nBytes%[kmgtp]i} * ( 1024 ** ${nBytesParser[${nBytes[-2]}]} ) ))"
-                else
-                    nBytes="$(( ${nBytes%[kmgtp]} * ( 1000 ** ${nBytesParser[${nBytes[-1]}]} ) ))"
-                fi
-            }
-
-            # make sure nBytes is only digits
-            [[ "${nBytes//[0-9]/}" ]] && { 
-                printf '\nERROR: the byte count passed to the ( -b | -B ) flag did not parse correctly. \nThis must consist solely of numbers, optionally followed by a standard si prefix. \nVALID EXAMPLES:  4  8b  16k  32mb  64G  128TB  256PiB \nNOTE: the count is always in bytes, never in bits, regardless of the case of the (optional) trailing "b" / "B"\n\n'
-                return 1
-            }
-
-            # check for incompatible flags
-            { ${nullDelimiterFlag} || [[ ${delimiterVal} ]]; } && {
-                printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' 
-                nullDelimiterFlag=false
-                unset delimiterVal
-            }
-
-        else
-            # set batch size
-            { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
-            { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
-        fi
+        # set batch size
+        { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
+        { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
 
         # set number of coproc workers
         { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || nProcs=$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')
@@ -378,7 +303,7 @@ forkrun() {
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${nullDelimiterFlag:=false}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
 
         # check for inotifywait
         type -a inotifywait &>/dev/null && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
@@ -393,18 +318,16 @@ forkrun() {
         ${exportOrderFlag} && nOrderFlag=true
 
         # setup delimiter
-        ${readBytesFlag} || {
-            if ${nullDelimiterFlag}; then
-                delimiterReadStr="-d ''"
-            elif [[ -z ${delimiterVal} ]]; then
-                delimiterVal='$'"'"'\n'"'"
-                delimiterRemoveStr='%$'"'"'\n'"'"
-            else
-                delimiterVal="$(printf '%q' "${delimiterVal}")"
-                delimiterRemoveStr="%${delimiterVal}"
-                delimiterReadStr="-d ${delimiterVal}"
-            fi
-        }
+        if ${nullDelimiterFlag}; then
+            delimiterReadStr="-d ''"
+        elif [[ -z ${delimiterVal} ]]; then
+            delimiterVal='$'"'"'\n'"'"
+            delimiterRemoveStr='%$'"'"'\n'"'"
+        else
+            delimiterVal="$(printf '%q' "${delimiterVal}")"
+            delimiterRemoveStr="%${delimiterVal}"
+            delimiterReadStr="-d ${delimiterVal}"
+        fi
 
         # modify runCmd if '-i' '-I' or '-u' flags are set
         if ${unescapeFlag}; then
@@ -413,7 +336,6 @@ forkrun() {
             }
             ${substituteStringIDFlag} && {
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{ID}'/'{<#>}'}")
-                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{IND}'/'${nOrder0}'}")
             }
         else
             mapfile -t runCmd < <(printf '%q\n' "${runCmd[@]}")
@@ -422,7 +344,6 @@ forkrun() {
             }
             ${substituteStringIDFlag} && {
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{ID\}'/'{<#>}'}")
-                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{IND\}'/'${nOrder0}'}")
             }
         fi
 
@@ -440,9 +361,8 @@ forkrun() {
             printf '(-j|-P) using %s coproc workers\n' ${nProcs}
             ${nLinesAutoFlag} && printf '(-N) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
             printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
-            ${readBytesFlag} && printf '(-%s) data will be read in chunks of %s %s bytes\n' "$(${readBytesExactFlag} && echo 'B' || echo 'b')" "$(${readBytesExactFlag} && echo 'exactly' || echo 'up to')" "${nBytes}"
-            ${nOrderFlag} && echo '(-k) output will be ordered the same as if the inputs were run sequentially'
-            ${exportOrderFlag} && echo '(-n) output batches will be numbered (index is per-batch, denoted using \\034<IND>:\\035\\n)'
+            ${nOrderFlag} && echo '(-k) ordering output the same as the input'
+            ${exportOrderFlag} && echo '(-n) output lines will be numbered (`grep -n` style)'
             ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
             ${substituteStringFlag} && echo '(-I) replacing {ID} with coproc worker ID'
             ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
@@ -663,7 +583,7 @@ forkrun() {
         # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
         # the individual coproc's codes are then generated via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
 
-        coprocSrcCode="$(echo """
+        coprocSrcCode="""
 { coproc p{<#>} {
 LC_ALL=C
 LANG=C
@@ -671,70 +591,51 @@ IFS=
 trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
-while true; do"""
-${nLinesAutoFlag} && echo """
-    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}"""
-echo """
-    read -u ${fd_continue}"""
-if ${readBytesFlag}; then
-     printf 'read -r -N %s -u ' "${nBytes}"
-     if ${readBytesExactFlag}; then
-        printf '%s ' "${fd_stdin}" 
-        [[ ${tTimeout} ]] && printf '-t %s ' "${tTimeout} "
-    else
-        printf '%s ' ${fd_read}
-    fi
-     echo '-a A'
-else
-    printf '%s ' "mapfile -n \${nLinesCur} -u"
-    ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
-    { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
-    echo "${delimiterReadStr} A"
-    ${pipeReadFlag} || ${nullDelimiterFlag} || {
-        echo """
-        [[ \${#A[@]} == 0 ]] || {
-            [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"""
-                (( ${verboseLevel} > 2 )) && echo """
-                echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"""
-                echo """
-                until read -r -u ${fd_read} ${delimiterReadStr}; do 
-                    A[-1]+=\"\${REPLY}\"; 
-                done
-                A[-1]+=\"\${REPLY}\"${delimiterVal}"""
-                (( ${verboseLevel} > 2 )) && echo """
-                echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}
-                echo  >&${fd_stderr}"""
-                echo """
-            }"""
-    }
-fi
+while true; do
+$(${nLinesAutoFlag} && echo """
+    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}
+ """)
+    read -u ${fd_continue}
+    mapfile -n \${nLinesCur} -u $(${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}; { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t') ${delimiterReadStr} A
+$(${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+    [[ \${#A[@]} == 0 ]] || {
+        [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {
+            $( (( ${verboseLevel} > 2 )) && echo """echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""")
+            until read -r -u ${fd_read} ${delimiterReadStr}; do A[-1]+=\"\${REPLY}\"; done
+            A[-1]+=\"\${REPLY}\"${delimiterVal}
+            $( (( ${verboseLevel} > 2 )) && echo """echo \"partial read fixed to: \${A[-1]}\" >&${fd_stderr}; echo >&${fd_stderr}""")
+        }
+"""
 ${nOrderFlag} && echo """
-        read -u ${fd_nOrder} nOrder"""
-${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
-        }"""
-echo """
+        read -u ${fd_nOrder} nOrder
+"""
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
+    }
+""")
     printf '\\n' >&${fd_continue};
     [[ \${#A[@]} == 0 ]] && {
-        if [[ -f \"${tmpDir}\"/.done ]]; then"""
-${nLinesAutoFlag} && echo """
-            printf '\\n' >&\${fd_nAuto0}"""
-echo """
-            [[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit"""
+        if [[ -f \"${tmpDir}\"/.done ]]; then
+$(${nLinesAutoFlag} && echo """
+            printf '\\n' >&\${fd_nAuto0}
+""")
+            [[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit
+$(${nOrderFlag} && echo """
+            : >\"${tmpDir}\"/.out/.quit{<#>}
+""")
+            break
+$({ ${inotifyFlag} || ${nOrderFlag}; } && echo """
+        else
+"""
 ${nOrderFlag} && echo """
-            : >\"${tmpDir}\"/.out/.quit{<#>}"""
-echo """
-            break"""
-{ ${inotifyFlag} || ${nOrderFlag}; } && echo """
-        else"""
-${nOrderFlag} && echo """
-            printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"""
+            printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}
+"""
 ${inotifyFlag} && echo """
-            read -u ${fd_inotify} -t 0.1"""
-echo """
+            read -u ${fd_inotify} -t 0.1
+""")
         fi
         continue
-    }"""
-${nLinesAutoFlag} && { printf '%s' """
+    }
+$(${nLinesAutoFlag} && { printf '%s' """
     \${nLinesAutoFlag} && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false
@@ -742,7 +643,7 @@ ${nLinesAutoFlag} && { printf '%s' """
     ${fallocateFlag} && printf '%s' ' || ' || echo
 }
 ${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
-${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
+${pipeReadFlag} || ${nullDelimiterFlag} || echo """
         { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {
             $( (( ${verboseLevel} > 2 )) && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
             A[-1]=\"\${A[-1]%${delimiterVal}}\"
@@ -751,17 +652,8 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
         }
 """
 ${subshellRunFlag} && echo '(' || echo '{'
-{ ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
-${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "${nOrder0}"'
-printf '%s ' "${runCmd[@]}"
-if ${stdinRunFlag}; then 
-    printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
-elif ${noFuncFlag}; then 
-    printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; 
-elif ! ${substituteStringFlag}; then 
-    printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
-fi; 
-(( ${verboseLevel} > 2 )) && echo """ || {
+${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"')
+    ${runCmd[@]} $(if ${stdinRunFlag}; then printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; elif ${noFuncFlag}; then printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; elif ! ${substituteStringFlag}; then printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; fi; (( ${verboseLevel} > 2 )) && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
             echo 'ERROR DURING \"${runCmd[*]}\" CALL'
@@ -773,15 +665,15 @@ fi;
             echo
         } >&${fd_stderr}
     }"""
-${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}'
-echo "${outStr}"
-${nOrderFlag} && echo """
-    printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"""
-echo """
+${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}') ${outStr}
+$(${nOrderFlag} && echo """
+    printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}
+""")
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
-p_PID+=(\${p{<#>}_PID})""")"
+p_PID+=(\${p{<#>}_PID})
+"""
 
         # # # # # FORK COPROC "WORKERS" # # # # #
 
@@ -1014,17 +906,16 @@ FLAGS WITH ARGUMENTS
     -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
     -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,512'
     -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm', or (if unavailable) '/tmp'
-    -b <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL NOT wait and will continue with fewer bytes of data read.
--B <#>[,<time>] : instead of reading data using a delimiter, read up to this many ( -B <#> )bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. example: `-B 4mb`. You may optionally pass a time as another input (-B <#>,<time>) which will set a timeout on how long the read commands will wait to accumulate input (if not used, they wait indefinately). example: `-B 4096k,3.5` sets 4 mb reads with a 3.5 sec timeout.
  -d <delimiter> : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
-    
+
+
 FLAGS WITHOUT ARGUMENTS
 -----------------------
 
 SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passing `+<FLAG>` disables the feature. Unless otherwise noted, all features are, by default, disabled. If a given flag is passed multiple times both enabling `-<FLAG>` and disabling `+<FLAG>` some option, the last one passed is used.
 
     -i          : insert {}. replace `{}` with the inputs passed on stdin (instead of placing them at the end)
-    -I          : insert {ID}. replace `{ID}` with an index (0, 1, ...) describing which coproc the process ran on. If -k also passed then also replace `{IND}` with an index describing the output order (the same index that the  `-n` flag prints).
+    -I          : insert {id}. replace `{id}` with an index (0, 1, ...) describing which coproc the process ran on. 
     -k          : ordered output. retain input order in output. The 1st output will correspond to the 1st input, 2nd output to 2nd input, etc. 
     -n          : add ordering info to output. pre-pend each output group with an index describing its input order, demoted via `$'\n'\n$'\034'$INDEX$'\035'$'\n'`. This requires and will automatically enable the `-k` output ordering flag.
     (-0|-z)     : NULL-seperated stdin. stdin is NULL-separated, not newline separated. WARNING: this flag (by necessity) disables a check that prevents lines from occasionally being split into two seperate lines, which can happen if `parFunc` evaluates very quickly. In general a delimiter other than NULL is recommended, especially when `parFunc` evaluates very fast and/or there are many items (passed on stdin) to evaluate.
@@ -1083,16 +974,8 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 
 ----------------------------------------------------------
 
--b | --bytes <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL NOT wait and will continue with fewer bytes of data read. This can be useful when you have a maximum chunk size you can process but do not necessairly want to wait for that much data to accumulate.
-
--B | --BYTES <bytes>[,<seconds>]  : instead of reading data using a delimiter, read up to this many ( -B <#> )bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. example: `-B 4mb`. You may optionally pass a time as another input (-B <#>,<time>) which will set a timeout on how long the read commands will wait to accumulate input (if not used, they wait indefinately). example: `-B 4096k,3.5` sets 4 mb reads with a 3.5 sec timeout. This can be useful for things like spliting a compressed or binary file into equal size chunks.
-
-    NOTE: standard byte size notations (k, m, g, t, p, ki, mi, ti, pi) may be used. The trailing `b` is optional and can be either upper or lower case but always will represent bytes, never bits. Seconds for `-B` can be a decimal but should not contain any units.
-    
-----------------------------------------------------------
-  
 -d | --delimiter <delim> : sets the delimiter used to separate inputs passed on stdin. must be a single character.
-   ---->  default  : newline ($'\n') 
+   ---->  default  : newline ($'\n')
 
 --------------------------------------------------------------------------------------------------------------------
 
@@ -1106,8 +989,8 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 ----------------------------------------------------------
 
 -i | --insert        : insert {}. replace `{}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the forkrun commandline) with the inputs passed on stdin (instead of placing them at the end)
-]` (
--I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}i.e., in what is passed on the forkrun commandline) with an index (0, 1, ...) indicating which coproc the process is running on. This is analagous to the `--process-slot-var` option in `xargs`. Additionally, if the `-k` flag is used in conjuction with the `-I` flag, an addition replacement will be made: `{IND}` will be replaced with the ordering INDex describing which batch it ran in. This gives the same index that the `-n` flag prints.
+
+-I | --INSERT        : insert {ID}.  replace `{ID}` in `parFunc [${args0[@]}]` (i.e., in what is passed on the forkrun commandline) with an index (0, 1, ...) indicating which coproc the process is running on. This is analagous to the `--process-slot-var` option in `xargs`
 
 ----------------------------------------------------------
 
@@ -1183,4 +1066,3 @@ EOF
 }
 
 }
-

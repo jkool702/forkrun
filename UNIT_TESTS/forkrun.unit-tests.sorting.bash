@@ -4,7 +4,8 @@ shopt -s extglob
 set -m
 
 unset forkrun
-declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/forkrun-v2_RC/forkrun.bash)
+[[ -f ./forkrun.bash ]] && . ./forkrun.bash 
+declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/readBytes_testing/forkrun.bash)
 declare -F forkrun &>/dev/null || source ./forkrun.bash
 
 mkdir -p /mnt/ramdisk
@@ -28,13 +29,19 @@ unset C
 declare -n C="$nn"
 
 unset forkrun
-declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/forkrun-v2_RC/forkrun.bash)
+[[ -f ./forkrun.bash ]] && . ./forkrun.bash 
+declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/readBytes_testing/forkrun.bash)
 declare -F forkrun &>/dev/null || source ./forkrun.bash
 
 set -m
 
 echo "BEGINNING TEST CASE FOR STDIN LENGTH = ${#C[@]}"
 
+IFS=$'\n'; 
+
+mapfile -t Csort < <(sort <"${C[*]}")
+
+# test sorting
 
 ( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -k sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'//) <(printf '%s\n' "${C[@]}") && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -k sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//'; }  | tee -a /tmp/.forkrun.log; )
 
@@ -420,5 +427,390 @@ echo "BEGINNING TEST CASE FOR STDIN LENGTH = ${#C[@]}"
 
 ( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -k -j 27 -l 1 -t /tmp -D -i -- printf '%s\n' {}) <(printf '%s\n' "${C[@]}") && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -k -j 27 -l 1 -t /tmp -D -i -- printf '"'"'%s\n'"'"' {}'; }  | tee -a /tmp/.forkrun.log; )
 
+# test no sorting
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -D -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -D -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -t /tmp -D -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -t /tmp -D -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -D -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -D -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -l 1 -t /tmp -D -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -D -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -D -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -t /tmp -D -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -D -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -- sha1sum | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -- sha1sum | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -- sha256sum | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -- sha256sum | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -- printf '%s\n' | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -- printf '"'"'%s\n'"'"'' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i -- sha1sum {} | sed -E s/'^[0-9a-f]{40}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i -- sha1sum {} | sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i -- sha256sum {} | sed -E s/'^[0-9a-f]{64}[ \t]*'// | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i -- sha256sum {} | sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//' | sort; }  | tee -a /tmp/.forkrun.log; )
+
+( { diff 2>/dev/null -q -B -E -Z -d -a -b -w <(printf '%s\n' "${C[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i -- printf '%s\n' {} | sort) <(printf '%s\n' "${C[@]}" | sort) && printf '%s' "PASS" || printf '%s' "FAIL"; printf ': %s\n' 'printf '"'"'%s\n'"'"' "${'"${nn}"'[@]}" | forkrun 2>/dev/null -j 27 -l 1 -t /tmp -D -i -- printf '"'"'%s\n'"'"' {}' | sort; }  | tee -a /tmp/.forkrun.log; )
 
 done
