@@ -26,7 +26,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nOrder0 nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -412,7 +412,7 @@ forkrun() {
             }
             ${substituteStringIDFlag} && {
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{ID}'/'{<#>}'}")
-                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{IND}'/'${nOrder}'}")
+                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{IND}'/'${nOrder0}'}")
             }
         else
             mapfile -t runCmd < <(printf '%q\n' "${runCmd[@]}")
@@ -421,7 +421,7 @@ forkrun() {
             }
             ${substituteStringIDFlag} && {
                 mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{ID\}'/'{<#>}'}")
-                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{IND\}'/'${nOrder}'}")
+                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{IND\}'/'${nOrder0}'}")
             }
         fi
 
@@ -750,7 +750,8 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
         }
 """
 ${subshellRunFlag} && echo '(' || echo '{'
-${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
+{ ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
+${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "${nOrder0}"'
 printf '%s ' "${runCmd[@]}"
 if ${stdinRunFlag}; then 
     printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
