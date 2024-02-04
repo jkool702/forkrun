@@ -26,8 +26,8 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nOrder0 nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait v9 kkMax kkCur kk verboseLevel
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
     # # # # # PARSE OPTIONS # # # # #
@@ -694,17 +694,17 @@ else
         [[ \${#A[@]} == 0 ]] || {
             [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"""
                 (( ${verboseLevel} > 2 )) && echo """
-		echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"""
+                echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"""
                 echo """
                 until read -r -u ${fd_read} ${delimiterReadStr}; do 
                     A[-1]+=\"\${REPLY}\"; 
                 done
                 A[-1]+=\"\${REPLY}\"${delimiterVal}"""
                 (( ${verboseLevel} > 2 )) && echo """
-		echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}
-		echo  >&${fd_stderr}"""
+                echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}
+                echo  >&${fd_stderr}"""
                 echo """
-	    }"""
+            }"""
     }
 fi
 ${nOrderFlag} && echo """
