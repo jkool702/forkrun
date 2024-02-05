@@ -142,6 +142,8 @@ EOF
     echo "$(printf '\n'; sort -u <"${tmpdir}"/"${scriptname}".cmds)" >"${tmpdir}"/"${scriptname}".cmds
     echo "$(sort -u <"${tmpdir}"/"${scriptname}".deps)" >"${tmpdir}"/"${scriptname}".deps
     cat "${tmpdir}"/"${scriptname}".cmds >>"${tmpdir}"/"${scriptname}".deps
+    echo "$(mapfile -t deps < <(bash --rpm-requires -n -O extglob ff | sed -E 's/^executable\(\\?//;s/\)$//' | sort -u); type -p "${deps[@]}" | sort -u)" >"${tmpdir}"/"${scriptname}".rpm-requires
+    cat "${tmpdir}"/"${scriptname}".rpm-requires >>"${tmpdir}"/"${scriptname}".deps
     echo "$(sort -u <"${tmpdir}"/"${scriptname}".deps)" >"${tmpdir}"/"${scriptname}".deps
     echo "$(sort -t':' -k1,2 -V <"${tmpdir}"/"${scriptname}".coverage | uniq)" >"${tmpdir}"/"${scriptname}".coverage
 
