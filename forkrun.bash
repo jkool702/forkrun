@@ -345,10 +345,10 @@ forkrun() {
             [[ "${nBytes}" == +([0-9])@([kmgtp])?(i) ]] && {
                 local -A nBytesParser=([k]=2 [m]=3 [g]=4 [t]=5 [p]=6)
 
-                if [[ ${nBytes[-1]} == 'i' ]]; then
-                    nBytes="$(( ${nBytes%[kmgtp]i} * ( 1024 ** ${nBytesParser[${nBytes[-2]}]} ) ))"
+                if [[ ${nBytes: -1:1} == 'i' ]]; then
+                    nBytes="$(( ${nBytes%[kmgtp]i} * ( 1024 ** ${nBytesParser[${nBytes: -2:1}]} ) ))"
                 else
-                    nBytes="$(( ${nBytes%[kmgtp]} * ( 1000 ** ${nBytesParser[${nBytes[-1]}]} ) ))"
+                    nBytes="$(( ${nBytes%[kmgtp]} * ( 1000 ** ${nBytesParser[${nBytes: -1:1}]} ) ))"
                 fi
             }
 
