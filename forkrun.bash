@@ -343,7 +343,7 @@ forkrun() {
 
             nBytes="${nBytes%b}"
             [[ "${nBytes}" == +([0-9])@([kmgtp])?(i) ]] && {
-                local -A nBytesParser=([k]=2 [m]=3 [g]=4 [t]=5 [p]=6)
+                local -A nBytesParser=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5)
 
                 if [[ ${nBytes: -1:1} == 'i' ]]; then
                     nBytes="$(( ${nBytes%[kmgtp]i} * ( 1024 ** ${nBytesParser[${nBytes: -2:1}]} ) ))"
