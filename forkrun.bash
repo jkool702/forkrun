@@ -675,6 +675,7 @@ forkrun() {
 LC_ALL=C
 LANG=C
 IFS=
+export LC_ALL LANG IFS
 trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
@@ -686,10 +687,15 @@ echo """
 if ${readBytesFlag}; then
     case "${readBytesProg}" in
         'dd')
-
+            printf '{ dd bs=32768  count=%sB; } ' "${nBytes}"
+            ${pipeReadFlag} && printf '<&\${%s} ' "${fd_stdin}" || printf '<&\${%s} ' "${fd_read}"
+            printf '2>&1 >"%s"/.stdin.tmp.{<#>} | grep -qE '""'"'^0 bytes'"'"' && A=() || A=(1)\n' "${tmpDir}"
         ;;
         'head')
-
+            printf '{ head -c %s; } ' "${nBytes}"
+            ${pipeReadFlag} && printf '<&\${%s} ' "${fd_stdin}" || printf '<&\${%s} ' "${fd_read}"
+            printf '>"%s"/.stdin.tmp.{<#>}\n' "${tmpDir}"
+            printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] && A=(1) || A=()' "${tmpDir}"
         ;;
         *)
              printf 'read -r -N %s -u ' "${nBytes}"
@@ -771,13 +777,21 @@ ${subshellRunFlag} && echo '(' || echo '{'
 { ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
 ${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "${nOrder0}"'
 printf '%s ' "${runCmd[@]}"
-if ${stdinRunFlag}; then 
-    printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
-elif ${noFuncFlag}; then 
-    printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; 
-elif ! ${substituteStringFlag}; then 
-    printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
-fi; 
+if ${readBytesFlag} && [[ ${readBytesProg} ]]; then
+    if ${stdinRunFlag}; then 
+        printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp/{<#>}'
+    else
+        printf '"$(<"%s"/%s)"' "${tmpDir}" '.stdin.tmp/{<#>}'
+    fi
+else
+    if ${stdinRunFlag}; then 
+        printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""
+    elif ${noFuncFlag}; then 
+        printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"
+    elif ! ${substituteStringFlag}; then 
+        printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""
+    fi
+fi
 (( ${verboseLevel} > 2 )) && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
@@ -790,6 +804,7 @@ fi;
             echo
         } >&${fd_stderr}
     }"""
+${readBytesFlag} && [[ ${readBytesProg} ]] && echo '\\rm -f "'"${tmpDir}"'"/.stdin.tmp/{<#>}'
 ${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}'
 echo "${outStr}"
 ${nOrderFlag} && echo """
