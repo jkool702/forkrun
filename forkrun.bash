@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -304,9 +304,6 @@ forkrun() {
 
         # dynamically set defaults for a few flags
 
-        # check verboseLevel
-        (( ${verboseLevel} < 0 )) && verboseLevel=0
-
         # determine what forkrun is using lines on stdin for
         : "${noFuncFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}"
         if ${FORCE_allowCarriageReturnsFlag}; then
@@ -320,8 +317,9 @@ forkrun() {
         (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
         ${noFuncFlag} && runCmd=('source')
 
+        # setup byte reading if passed -b or -B
         : "${readBytesFlag:=false}" "${nullDelimiterFlag:=false}"
-
+        
         if ${readBytesFlag}; then
             # turn off nLinesAuto
             : "${nLinesAutoFlag:=false}"
@@ -353,17 +351,26 @@ forkrun() {
             }
 
             # make sure nBytes is only digits
-            [[ "${nBytes//[0-9]/}" ]] && { 
-                printf '\nERROR: the byte count passed to the ( -b | -B ) flag did not parse correctly. \nThis must consist solely of numbers, optionally followed by a standard si prefix. \nVALID EXAMPLES:  4  8b  16k  32mb  64G  128TB  256PiB \nNOTE: the count is always in bytes, never in bits, regardless of the case of the (optional) trailing "b" / "B"\n\n'
+            [[ "${nBytes//[0-9]/}" ]] && (( ${verboseLevel} >= 0 )) && { 
+                printf '\nERROR: the byte count passed to the ( -b | -B ) flag did not parse correctly. \nThis must consist solely of numbers, optionally followed by a standard si prefix. \nVALID EXAMPLES:  4  8b  16k  32mb  64G  128TB  256PiB \nNOTE: the count is always in bytes, never in bits, regardless of the case of the (optional) trailing "b" / "B"\n\n' >&${fd_stderr}; 
                 return 1
             }
 
             # check for incompatible flags
-            { ${nullDelimiterFlag} || [[ ${delimiterVal} ]]; } && {
-                printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' 
+            { ${nullDelimiterFlag} || [[ ${delimiterVal} ]]; } && (( ${verboseLevel} >= 0 )) && {
+                printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' >&${fd_stderr}; 
                 nullDelimiterFlag=false
                 unset delimiterVal
             }
+
+            # check for GNU dd or (if unavailable) check for head (either GNU or busybox)
+            if type -p dd &>/dev/null && dd --version | grep -qF 'coreutils'; then
+                readBytesProg='dd'
+            elif type -p head; then
+                readBytesProg='head'
+            elif (( ${verboseLevel} >= 0 )); then
+                printf '\nWARNING: neither "dd (GNU)" nor "head" are available. The bash builtin `read -N` will be used by the worker coprocs to read data.\nforkrun will run considerably slower will probably mangle binary data (text data passed on stdin should work)\n\n' >&${fd_stderr}; 
+            fi
 
         else
             # set batch size
@@ -387,7 +394,7 @@ forkrun() {
         type -a fallocate &>/dev/null && ! ${pipeReadFlag} && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
         # check for conflict in flags that were  defined on the commandline when forkrun was called
-        ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
+        ${pipeReadFlag} && ${nLinesAutoFlag} && (( ${verboseLevel} >= 0 )) && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
 
         # require -k to use -n
         ${exportOrderFlag} && nOrderFlag=true
@@ -677,14 +684,24 @@ ${nLinesAutoFlag} && echo """
 echo """
     read -u ${fd_continue}"""
 if ${readBytesFlag}; then
-     printf 'read -r -N %s -u ' "${nBytes}"
-     if ${readBytesExactFlag}; then
-        printf '%s ' "${fd_stdin}" 
-        [[ ${tTimeout} ]] && printf '-t %s ' "${tTimeout} "
-    else
-        printf '%s ' ${fd_read}
-    fi
-     echo '-a A'
+    case "${readBytesProg}" in
+        'dd')
+
+        ;;
+        'head')
+
+        ;;
+        *)
+             printf 'read -r -N %s -u ' "${nBytes}"
+             if ${readBytesExactFlag}; then
+                printf '%s ' "${fd_stdin}" 
+                [[ ${tTimeout} ]] && printf '-t %s ' "${tTimeout} "
+            else
+                printf '%s ' ${fd_read}
+            fi
+            echo '-a A'
+        ;;
+    esac
 else
     printf '%s ' "mapfile -n \${nLinesCur} -u"
     ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
