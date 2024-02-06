@@ -8,7 +8,7 @@ forkrun() {
 #
 # USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
 #
-# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#[,#]>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#[,#]>] [(-b|-B) <bytes>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
 #
 # For help / usage info, call forkrun with one of the following flags:
 #
@@ -985,7 +985,7 @@ EOF
 (( ${displayMain} > 0 )) && {
 cat<<'EOF' >&2
 
-    Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
+    Usage is virtually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
         -->  Pass newline-separated (or null-separated with `-z` flag) inputs to parallelize over on stdin.
         -->  Provide function/script/binary to parallelize and initial args as function inputs.
     `forkrun` will then call the function/script/binary in parallel on several coproc "workers" (default is to use $(nproc) workers)
@@ -1003,7 +1003,7 @@ EOF
 (( ${displayMain} > 1 )) && {
 cat<<'EOF' >&2
 REQUIRED DEPENDENCIES:
-    Bash 4+                       : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
+    Bash 4+                       : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is preferable has undergone much more testing.
     `rm`  and  `mkdir`            : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
 
 OPTIONAL DEPENDENCIES (to provide enhanced functionality):
@@ -1013,6 +1013,8 @@ OPTIONAL DEPENDENCIES (to provide enhanced functionality):
                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
     `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | forkrun).
                                     Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage.
+    `dd` (GNU)   -OR-             : When splitting up stdin by byte count (due to either the `-b` or `-B` flag being used), if either of these is available it will be used to read stdin instead of the builtin `read -N`.
+    `head` (GNU|busybox):           One of these is required to process binary data without mangling it - otherwise bash will drop any NULL's. If both are available `dd` is preferred.
 
 EOF
 }
