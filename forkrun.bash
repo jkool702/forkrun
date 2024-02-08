@@ -8,7 +8,7 @@ forkrun() {
 #
 # USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
 #
-# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#[,#]>] [(-b|-B) <bytes>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+# LIST OF FLAGS: [-j|-P <#>] [-t <path>] ( [-l <#>] | [-L <#[,#]>]] ) ( [-b <#>] | [-B <#>[,<#>]] ) [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
 #
 # For help / usage info, call forkrun with one of the following flags:
 #
@@ -1060,7 +1060,7 @@ SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passi
     -N          : enable no func mode. Only has an effect when `parFunc` and `initialArgs` were not given. If `-N` is not passed and `parFunc` and `initialArgs` are missing, `forkrun` will silently set `parFunc` to `printf '%s\n'`, which will basically just copy stdin to stdout.
     -u          : unescape redirects/pipes/forks/logical operators. Typically `parFunc` and `initialArgs` are run through `printf '%q'` making things like `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` appear as literal characters. This flag skips the `printf '%q'` call, meaning that these operators can be used to allow for piping, redirection, forking, logical comparrison, etc. to occur *inside the coproc*. 
     --          : end of forkrun options indicator. indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs. This allows using a `parFunc` that begins with a `-`. NOTE: there is no `+<FLAG>` equivilant for `--`.
-    -v          : increase verbosity level by 1. This can be passed up to 4 times for progressively more verbose output. +v decreases the verbosity level by 1.
+    -v          : increase verbosity level by 1. Higher levels give progressively more verbose output. Default level is 0. Meaningful levels range from -1 to 4. +v decreases the verbosity level by 1.
     (-h|-?)     : display help text. use `--help=f[lags]` or `--help=a[ll]` for more details about flags that `forkrun` supports. NOTE: you must escape the `?` otherwise the shell can interpret it before passing it to forkrun.
 
 EOF
@@ -1074,7 +1074,7 @@ GENERAL NOTES:
     1.  Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below.
           *   Refer to the code for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
     2.  All forkrun flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, forkrun assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'.
-          *   To stop option parsing sooner, add a '--' after the last forkrun flag. NOTE: this will only stop option parsing sooner...forkrun will always stop at the first argument that does not begin with a '-' or '+'.
+          *   To stop option parsing sooner (e.g., to parallelize something starting with a `-`), add a '--' after the last forkrun flag. NOTE: this will only stop option parsing sooner...forkrun will always stop at the first argument that does not begin with a '-' or '+'.
 
 --------------------------------------------------------------------------------------------------------------------
 
@@ -1184,7 +1184,8 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 ----------------------------------------------------------
 
 -v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr. The default level is 0. Meaningful verbotisity levels are 0 - 4
-      --> 0 [or less than 0] (only errors) (DEFAULT)
+      --> -1 [or less than -1] (nothing)
+      --> 0 (only warnings and errors) (DEFAULT)
       --> 1 (errors + overview of parsed forkrun options)
       --> 2 (errors + options overview + progress notifications of when the code finishes one of its main sections)
       --> 3 (errors + options overview + progress notifications + indicators of a few runtime "milestone" events and statistics)
