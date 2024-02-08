@@ -690,7 +690,7 @@ if ${readBytesFlag}; then
         'dd')
             printf 'dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>} 2>"%s"/.stdin.tmp-status.{<#>}' "${nBytes}" "${tmpDir}" "${tmpDir}"
             ${pipeReadFlag} && printf '<&%s\n' "${fd_stdin}" || printf '<&%s\n' "${fd_read}"
-            printf '[[ "$("%s"/.stdin.tmp-status.{<#>})" == *$'"'"'\n'"'"'"0 bytes"* ]] && A=() || A[0]=1\n' "${tmpDir}"
+            printf '[[ "$(<"%s"/.stdin.tmp-status.{<#>})" == *$'"'"'\n'"'"'"0 bytes"* ]] && A=() || A[0]=1\n' "${tmpDir}"
         ;;
         'head')
             printf 'head -c %s ' "${nBytes}"
@@ -796,7 +796,7 @@ fi
             echo
         } >&${fd_stderr}
     }"""
-${readBytesFlag} && [[ ${readBytesProg} ]] && echo '\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}'
+${readBytesFlag} && [[ ${readBytesProg} ]] && printf '\n\\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}\n'
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
 ${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
