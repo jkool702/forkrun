@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -132,105 +132,66 @@ forkrun() {
                 (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
             ;;
 
-            -?(-)i?(nsert))
-                substituteStringFlag=true
+            [+-]?([+-])i?(nsert))
+                [[ "${1:0:1}" == '-' ]] && substituteStringFlag=true || substituteStringFlag=false
             ;;
 
-            -?(-)I?(D)|-?(-)INSERT?(?(-)ID))
-                substituteStringIDFlag=true
+            [+-]?([+-])@(I?(D)|INSERT?(?(-)ID)))
+                [[ "${1:0:1}" == '-' ]] && substituteStringIDFlag=true || substituteStringIDFlag=false
             ;;
 
-            -?(-)k?(eep?(?(-)order)))
-                nOrderFlag=true
+            [+-]?([+-])k?(eep?(?(-)order)))
+                [[ "${1:0:1}" == '-' ]] && nOrderFlag=true || nOrderFlag=false
             ;;
 
-            -?(-)0|-?(-)z?(ero)|-?(-)null)
-                nullDelimiterFlag=true
+            [+-]?([+-])@(0|z?(ero)|null))
+                [[ "${1:0:1}" == '-' ]] && nullDelimiterFlag=true || nullDelimiterFlag=false
             ;;
 
-            -?(-)s?(ub)?(?(-)shell)?(?(-)run))
-                subshellRunFlag=true
+            [+-]?([+-])s?(ub)?(?(-)shell)?(?(-)run))
+                [[ "${1:0:1}" == '-' ]] && subshellRunFlag=true || subshellRunFlag=false
             ;;
 
-            -?(-)S|-?(-)[Ss]tdin?(?(-)run))
-                stdinRunFlag=true
+            [+-]?([+-])@(S|[Ss]tdin?(?(-)run)))
+                [[ "${1:0:1}" == '-' ]] && stdinRunFlag=true || stdinRunFlag=false
             ;;
 
-            -?(-)p?(ipe)?(?(-)read))
-                pipeReadFlag=true
+            [+-]?([+-])p?(ipe)?(?(-)read))
+                [[ "${1:0:1}" == '-' ]] && pipeReadFlag=true || pipeReadFlag=false
             ;;
 
-            -?(-)D|-?(-)[Dd]elete)
-                rmTmpDirFlag=true
+            [+-]?([+-])@(D|[Dd]elete))
+                [[ "${1:0:1}" == '-' ]] && rmTmpDirFlag=true || rmTmpDirFlag=false
             ;;
 
-            -?(-)v?(erbose))
-                ((verboseLevel++))
+            [+-]?([+-])n?(umber)?(-)?(line?(s)))
+                [[ "${1:0:1}" == '-' ]] && exportOrderFlag=true || exportOrderFlag=false
             ;;
 
-             -?(-)n?(umber)?(-)?(line?(s)))
-                exportOrderFlag=true
+            [+-]?([+-])@(N?(O)|[Nn][Oo]?(-)func))
+                [[ "${1:0:1}" == '-' ]] && noFuncFlag=true || noFuncFlag=false
             ;;
 
-            -?(-)N?(O)|-?(-)[Nn][Oo]?(-)func)
-                noFuncFlag=true
+            [+-]?([+-])u?(nescape))
+                [[ "${1:0:1}" == '-' ]] && unescapeFlag=true || unescapeFlag=false
             ;;
 
-            -?(-)u?(nescape))
-                unescapeFlag=true
+            [+-]?([+-])@(+(v)|verbose))
+                case "${1}" in
+                    [+-]?([+-])verbose)
+                        [[ "${1:0:1}" == '-' ]] && ((verboseLevel++)) || ((verboseLevel--))
+                    ;;
+                    [+-]?([+-])+(v))
+                       tmpVar="${1##+([+-])}"
+                       [[ "${1:0:1}" == '-' ]] && verboseLevel=$(( ${verboseLevel} + ${#tmpVar} )) || verboseLevel=$(( ${verboseLevel} - ${#tmpVar} )) 
+                       unset tmpVar
+                    ;;
+                esac
             ;;
-
+            
             -?(-)help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|-?(-)usage|-?(-)[h?])
                 forkrun_displayHelp "${1}"
                 return
-            ;;
-
-            +?([-+])i?(nsert))
-                substituteStringFlag=false
-            ;;
-
-            +?(-)I?(D)|+?(-)INSERT?(?(-)ID))
-                substituteStringIDFlag=false
-            ;;
-
-            +?([-+])k?(eep?(?(-)order)))
-                nOrderFlag=false
-            ;;
-
-            +?([-+])0|+?([-+])z|+?([-+])null)
-                nullDelimiterFlag=false
-            ;;
-
-            +?([+-])s?(ub)?(?(-)shell)?(?(-)run))
-                subshellRunFlag=false
-            ;;
-
-            +?([-+])S?(TDIN)?(?(-)RUN))
-                stdinRunFlag=false
-            ;;
-
-            +?([-+])p?(ipe)?(?(-)read))
-                pipeReadFlag=false
-            ;;
-
-            +?([-+])D|+?([-+])[Dd]elete)
-                rmTmpDirFlag=false
-            ;;
-
-            +?([-+])v?(erbose))
-                ((verboseLevel--))
-            ;;
-
-            +?([-+])n?(umber)?(-)?(line?(s)))
-                exportOrderFlag=false
-            ;;
-
-            +?([-+])N?(O)?(?(-)F?(UNC)))
-                noFuncFlag=false
-            ;;
-
-            +?([-+])u?(nescape))
-                unescapeFlag=false
             ;;
 
             --)
