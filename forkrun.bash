@@ -686,9 +686,14 @@ while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}"
 echo "read -u ${fd_continue}"
 if ${readBytesFlag}; then
+    echo """
+    [[ -f \"${tmpDir}\"/.quit ]] && {
+        printf '\\n' >&${fd_continue}
+        break
+    }"""
     case "${readBytesProg}" in
         'dd')
-            printf 'dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>} 2>"%s"/.stdin.tmp-status.{<#>}' "${nBytes}" "${tmpDir}" "${tmpDir}"
+            printf 'dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>} 2>"%s"/.stdin.tmp-status.{<#>} ' "${nBytes}" "${tmpDir}" "${tmpDir}"
             ${pipeReadFlag} && printf '<&%s\n' "${fd_stdin}" || printf '<&%s\n' "${fd_read}"
             printf '[[ "$(<"%s"/.stdin.tmp-status.{<#>})" == *$'"'"'\n'"'"'"0 bytes"* ]] && A=() || A[0]=1\n' "${tmpDir}"
         ;;
