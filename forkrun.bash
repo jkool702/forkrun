@@ -366,14 +366,16 @@ forkrun() {
             }
 
             # check for GNU dd or (if unavailable) check for head (either GNU or busybox)
-            if type -p dd &>/dev/null && dd --version | grep -qF 'coreutils'; then
-                readBytesProg='dd'
-            elif type -p head; then
-                readBytesProg='head'
-            else
-                readBytesProg='bash'
-                (( ${verboseLevel} >= 0 )) && printf '\nWARNING: neither "dd (GNU)" nor "head" are available. The bash builtin `read -N` will be used by the worker coprocs to read data.\nforkrun will run considerably slower will probably mangle binary data (text data passed on stdin should work)\n\n' >&${fd_stderr}; 
-            fi
+            [[ ${readBytesProg} ]] || {
+                if type -p dd &>/dev/null && dd --version | grep -qF 'coreutils'; then
+                   readBytesProg='dd'
+                elif type -p head; then
+                    readBytesProg='head'
+                else
+                    readBytesProg='bash'
+                    (( ${verboseLevel} >= 0 )) && printf '\nWARNING: neither "dd (GNU)" nor "head" are available. The bash builtin `read -N` will be used by the worker coprocs to read data.\nforkrun will run considerably slower will probably mangle binary data (text data passed on stdin should work)\n\n' >&${fd_stderr}; 
+                fi
+            }
 
         else
             # set batch size
@@ -667,6 +669,9 @@ forkrun() {
 
         # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly and have many "code branch selection" decisions already resolved)
         # this contains the code for the coprocs but has the worker ID represented using {<#>}. coprocs will be sourced via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
+        #
+        # NOTE: because the coproc code generation dynamically adaptsd to all of forkrun's possible options, this part is...well...hard to follow. 
+        # To see the resulting coproc code for a given set of forkrun options, run:   `echo | forkrun -v -v -v -v <FLAGS> :`
 
         coprocSrcCode="$( echo """
 { coproc p{<#>} {
