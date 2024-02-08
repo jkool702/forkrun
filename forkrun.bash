@@ -654,26 +654,21 @@ forkrun() {
 
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
-        # populate {fd_continue} with an initial '\n'
-        # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
-        #     when there is a '\n' the pipe buffer then nothing has a read lock
-        #     a process reads 1 byte from {fd_continue} to get the read lock, and
-        #     when that process writes a '\n' back to the pipe it releases the read lock
-
-        # spawn $nProcs coprocs
-        # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
-        # they then read N lines with mapfile and send \n to {fd_continue} (so the next coproc can start to read)
-        # if the read array is empty the coproc will either continue or break, depending on if end conditions are met
-        # finally it will do something with the data.
+        # Due to how the coproc code is dynamically generated and sourced, it cannot directly contain comments. A very brief overview of their function is below.
         #
-        # NOTE: All coprocs share the same fd_read file descriptor ( accomplished via `( <...>; coproc p0 ...; <...> ;  coproc pN ...; ) {fd_read}<><(:)` )
-        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data the fd_read used by *all* of them is advanced.
+        # on each loop, they will acquire a read lock by read {fd_continue}, which blocks them until they have exclusive read access
+        # they then read N lines with mapfile and check/fix a partial read (or read N bytes with $readBytesProg) and (if -k/-n) read the output order from {fd_nOrder}
+        # they then release the read lock by sending \n to {fd_continue} (so the next coproc can start to read)
+        # if no data was read, the coproc will either wait/continue or break, depending on if end conditions are met
+        # finally (assuming it read data) it will run it through whatever is being parallelized. If -k/-n write [x]$nOrder to {fd_nOrder0} to indicate that index has run / was empty
+        #
+        # NOTE: All coprocs share the same {fd_read} file descriptor ( defined just after the end of the main forkrun subshell )
+        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data the {fd_read} used by *all* of them is advanced.
 
-        # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly)
-        # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
-        # the individual coproc's codes are then generated via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
+        # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly and have many "code branch selection" decisions already resolved)
+        # this contains the code for the coprocs but has the worker ID represented using {<#>}. coprocs will be sourced via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
 
-        coprocSrcCode="$(echo """
+        coprocSrcCode="$( echo """
 { coproc p{<#>} {
 LC_ALL=C
 LANG=C
@@ -683,22 +678,20 @@ trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
 while true; do"""
-${nLinesAutoFlag} && echo """
-    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}"""
-echo """
-    read -u ${fd_continue}"""
+${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}"
+echo "read -u ${fd_continue}"
 if ${readBytesFlag}; then
     case "${readBytesProg}" in
         'dd')
-            printf '{ { dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>}; } ' "${nBytes}" "${tmpDir}"
-            ${pipeReadFlag} && printf '<&%s ' "${fd_stdin}" || printf '<&%s ' "${fd_read}"
-            printf '2>&1 | grep -qE '"'"'^0 bytes'"'"'; } && A=() || A=(1)\n'
+            printf 'dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>} 2>"%s"/.stdin.tmp-status.{<#>}' "${nBytes}" "${tmpDir}" "${tmpDir}"
+            ${pipeReadFlag} && printf '<&%s\n' "${fd_stdin}" || printf '<&%s\n' "${fd_read}"
+            printf '[[ "$("%s"/.stdin.tmp-status.{<#>})" == *$'"'"'\n'"'"'"0 bytes"* ]] && A=() || A[0]=1\n' "${tmpDir}"
         ;;
         'head')
-            printf '{ head -c %s; } ' "${nBytes}"
+            printf 'head -c %s ' "${nBytes}"
             ${pipeReadFlag} && printf '<&%s ' "${fd_stdin}" || printf '<&%s ' "${fd_read}"
             printf '>"%s"/.stdin.tmp.{<#>}\n' "${tmpDir}"
-            printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] && A=(1) || A=()\n' "${tmpDir}"
+            printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] && A[0]=1 || A=()\n' "${tmpDir}"
         ;;
         *)
              printf 'read -r -N %s -u ' "${nBytes}"
@@ -734,28 +727,19 @@ else
             }"""
     }
 fi
-${nOrderFlag} && echo """
-        read -u ${fd_nOrder} nOrder"""
-${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
-        }"""
+${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
+${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo "}"
 echo """
     printf '\\n' >&${fd_continue};
     [[ \${#A[@]} == 0 ]] && {
         if [[ -f \"${tmpDir}\"/.done ]]; then"""
-${nLinesAutoFlag} && echo """
-            printf '\\n' >&\${fd_nAuto0}"""
-echo """
-            [[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit"""
-${nOrderFlag} && echo """
-            : >\"${tmpDir}\"/.out/.quit{<#>}"""
-echo """
-            break"""
-{ ${inotifyFlag} || ${nOrderFlag}; } && echo """
-        else"""
-${nOrderFlag} && echo """
-            printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"""
-${inotifyFlag} && echo """
-            read -u ${fd_inotify} -t 0.1"""
+${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
+echo "[[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit"
+${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
+echo "break"
+{ ${inotifyFlag} || ${nOrderFlag}; } && echo "else"
+${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
+${inotifyFlag} && echo "read -u ${fd_inotify} -t 0.1"
 echo """
         fi
         continue
@@ -810,16 +794,19 @@ fi
 ${readBytesFlag} && [[ ${readBytesProg} ]] && echo '\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}'
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
-${nOrderFlag} && echo """
-    printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"""
+${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
 echo """
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
-p_PID+=(\${p{<#>}_PID})""")"
+p_PID+=(\${p{<#>}_PID})""" )"
 
         # # # # # FORK COPROC "WORKERS" # # # # #
 
+        # initialize read lock {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
+        #     when there is a '\n' the pipe buffer then nothing has a read lock
+        #     a process reads 1 byte from {fd_continue} to get the read lock, and
+        #     when that process writes a '\n' back to the pipe it releases the read lock
         printf '\n' >&${fd_continue};
 
         # source the coproc code for each coproc worker
@@ -831,31 +818,34 @@ p_PID+=(\${p{<#>}_PID})""")"
         (( ${verboseLevel} > 1 )) && printf '\n\nALL WORKER COPROCS FORKED\n\n' >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}" >&${fd_stderr}
 
-
         # # # # # WAIT FOR THEM TO FINISH # # # # #
           #   #   PRINT OUTPUT IF ORDERED   #   #
 
         if ${nOrderFlag}; then
+            # initialize real-time printing of ordered output as forkrun runs
             outCur=10
-
             continueFlag=true
 
             while ${continueFlag}; do
 
+                # read order indices that are done running. 
                 read -r -u ${fd_nOrder0}
-
                 case "${REPLY}" in
                     +([0-9]))
+                        # index has an output file
                         outHave[$REPLY]=1
                     ;;
                     x+([0-9]))
+                        # index was empty
                         outHave[${REPLY#x}]=0
                     ;;
                     '')
+                        # end condition was met
                         continueFlag=false
                     ;;
                 esac
 
+                # starting at $outCur, print all indices in sequential order that have been recorded as being run and then remove the tmp output file[s]
                 while true; do
                     case "${outHave[${outCur}]}" in
                         [01])
@@ -865,6 +855,8 @@ p_PID+=(\${p{<#>}_PID})""")"
                             }
 
                             unset "outHave[$outCur]"
+
+                            # advance outCur by 1
                             ((outCur++))
                             [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                         ;;
@@ -874,21 +866,17 @@ p_PID+=(\${p{<#>}_PID})""")"
                     esac
                 done
 
+                # check for end condition
                 [[ -f "${tmpDir}"/.quit ]] && { continueFlag=false; break; }
             done
-
-            (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
-
-            wait "${p_PID[@]}"
-
-            [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
-
-        else
-
-            # wait for everything to finish
-            wait "${p_PID[@]}"
-
         fi
+
+        # wait for coprocs to finish
+        (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
+        wait "${p_PID[@]}"
+
+        # if ordering output print the remaining ones
+        ${nOrderFlag} && [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x* >&${fd_stdout}
 
         # print final nLines count
         ${nLinesAutoFlag} && (( ${verboseLevel} > 1 )) && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
