@@ -318,17 +318,19 @@ forkrun() {
         ${noFuncFlag} && runCmd=('source')
 
         # setup byte reading if passed -b or -B
-        : "${readBytesFlag:=false}" "${nullDelimiterFlag:=false}"
+        : "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}"
         
         if ${readBytesFlag}; then
             # turn off nLinesAuto
-            : "${nLinesAutoFlag:=false}"
+            nLinesAutoFlag=false
 
             # read from pipe for -B --> dont need inotifywait
-            ${readBytesExactFlag} && { 
+            if ${readBytesExactFlag}; then  
                 pipeReadFlag=true
                 inotifyFlag=false
-            }
+            else
+                pipeReadFlag=false
+            fi
 
             # parse read size (in bytes)
             nBytes="${nBytes,,}"
@@ -368,8 +370,9 @@ forkrun() {
                 readBytesProg='dd'
             elif type -p head; then
                 readBytesProg='head'
-            elif (( ${verboseLevel} >= 0 )); then
-                printf '\nWARNING: neither "dd (GNU)" nor "head" are available. The bash builtin `read -N` will be used by the worker coprocs to read data.\nforkrun will run considerably slower will probably mangle binary data (text data passed on stdin should work)\n\n' >&${fd_stderr}; 
+            else
+                readBytesProg='bash'
+                (( ${verboseLevel} >= 0 )) && printf '\nWARNING: neither "dd (GNU)" nor "head" are available. The bash builtin `read -N` will be used by the worker coprocs to read data.\nforkrun will run considerably slower will probably mangle binary data (text data passed on stdin should work)\n\n' >&${fd_stderr}; 
             fi
 
         else
@@ -447,17 +450,17 @@ forkrun() {
             printf '(-j|-P) using %s coproc workers\n' ${nProcs}
             ${nLinesAutoFlag} && printf '(-N) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
             printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
-            ${readBytesFlag} && printf '(-%s) data will be read in chunks of %s %s bytes\n' "$(${readBytesExactFlag} && echo 'B' || echo 'b')" "$(${readBytesExactFlag} && echo 'exactly' || echo 'up to')" "${nBytes}"
+            ${readBytesFlag} && printf '(-%s) data will be read in chunks of %s %s bytes using %s\n' "$(${readBytesExactFlag} && echo 'B' || echo 'b')" "$(${readBytesExactFlag} && echo 'exactly' || echo 'up to')" "${nBytes}" "${readBytesProg}"
             ${nOrderFlag} && echo '(-k) output will be ordered the same as if the inputs were run sequentially'
             ${exportOrderFlag} && echo '(-n) output batches will be numbered (index is per-batch, denoted using \\034<IND>:\\035\\n)'
             ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
-            ${substituteStringFlag} && echo '(-I) replacing {ID} with coproc worker ID'
+            ${substituteStringIDFlag} && echo '(-I) replacing {ID} with coproc worker ID'
             ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
             ${pipeReadFlag} && echo '(-p) worker coprocs will read directly from stdin pipe, not from a tmpfile'
             if ${nullDelimiterFlag}; then
                 echo '((-0|-z)|(-d)) stdin will be parsed using nulls as delimiter (instead of newlines)'
             else
-                printf '(-d) delimiter: %q\n' "${delimiterVal}"
+                printf '(%s) delimiter: %q\n' "$([[ "${delimiterVal}" == '$'"'"'\n'"'" ]] && echo '--' || echo '-d')" "${delimiterVal}"
             fi
             ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automaticvally removed\n' "${tmpDir}"
             ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
@@ -687,15 +690,15 @@ echo """
 if ${readBytesFlag}; then
     case "${readBytesProg}" in
         'dd')
-            printf '{ dd bs=32768  count=%sB; } ' "${nBytes}"
-            ${pipeReadFlag} && printf '<&\${%s} ' "${fd_stdin}" || printf '<&\${%s} ' "${fd_read}"
-            printf '2>&1 >"%s"/.stdin.tmp.{<#>} | grep -qE '""'"'^0 bytes'"'"' && A=() || A=(1)\n' "${tmpDir}"
+            printf '{ { dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>}; } ' "${nBytes}" "${tmpDir}"
+            ${pipeReadFlag} && printf '<&%s ' "${fd_stdin}" || printf '<&%s ' "${fd_read}"
+            printf '2>&1 | grep -qE '"'"'^0 bytes'"'"'; } && A=() || A=(1)\n'
         ;;
         'head')
             printf '{ head -c %s; } ' "${nBytes}"
-            ${pipeReadFlag} && printf '<&\${%s} ' "${fd_stdin}" || printf '<&\${%s} ' "${fd_read}"
+            ${pipeReadFlag} && printf '<&%s ' "${fd_stdin}" || printf '<&%s ' "${fd_read}"
             printf '>"%s"/.stdin.tmp.{<#>}\n' "${tmpDir}"
-            printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] && A=(1) || A=()' "${tmpDir}"
+            printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] && A=(1) || A=()\n' "${tmpDir}"
         ;;
         *)
              printf 'read -r -N %s -u ' "${nBytes}"
@@ -767,7 +770,7 @@ ${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
         { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {
-            $( (( ${verboseLevel} > 2 )) && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
+            $( (( ${verboseLevel} > 2 )) && echo "echo \"FIXING SPLIT READ\" >&${fd_stderr}")
             A[-1]=\"\${A[-1]%${delimiterVal}}\"
             IFS=
             mapfile A <<<\"\${A[*]}\"
@@ -775,13 +778,13 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
 """
 ${subshellRunFlag} && echo '(' || echo '{'
 { ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
-${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "${nOrder0}"'
+${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""
 printf '%s ' "${runCmd[@]}"
 if ${readBytesFlag} && [[ ${readBytesProg} ]]; then
     if ${stdinRunFlag}; then 
-        printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp/{<#>}'
+        printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp.{<#>}'
     else
-        printf '"$(<"%s"/%s)"' "${tmpDir}" '.stdin.tmp/{<#>}'
+        printf '"$(<"%s"/%s)"' "${tmpDir}" '.stdin.tmp.{<#>}'
     fi
 else
     if ${stdinRunFlag}; then 
@@ -804,8 +807,8 @@ fi
             echo
         } >&${fd_stderr}
     }"""
-${readBytesFlag} && [[ ${readBytesProg} ]] && echo '\\rm -f "'"${tmpDir}"'"/.stdin.tmp/{<#>}'
-${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}'
+${readBytesFlag} && [[ ${readBytesProg} ]] && echo '\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}'
+${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
 ${nOrderFlag} && echo """
     printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"""
@@ -891,7 +894,7 @@ p_PID+=(\${p{<#>}_PID})""")"
         ${nLinesAutoFlag} && (( ${verboseLevel} > 1 )) && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
