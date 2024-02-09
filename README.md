@@ -9,11 +9,13 @@
 
 <sup>1: bash 5.1+ is preffered and much better tested. A few basic filesystem operations (`rm`, `mkdir`) must also be available. `fallocate` and `inotifywait` are not required; but, if present, will be used to lower runtime resource usage.</sup>
 
-**CURRENT VERSION**: forkrun v1.1
+**CURRENT VERSION**: forkrun v1.1.1
 
 **PREVIOUS VERION**: forkrun v1.0
 
 **CHANGES**: 2 new flags (`-b <bytes>` and `-B <bytes>`) that cause forkrun to split up stdin into blocks of `<bytes>` bytes. `-B` will wait and accululate blocks of exactly `<bytes>` bytes, `-b` will not. The `-I` flag has been expanded so that if `-k` (or `-n`) is also passed then a second susbstitution is made, swapping `{IND}` for the batch ordering index (the same thing that `-n` outputs at the start of each block) (`{ID}` will still be swapped for coproc ID). A handful of optimizations and bug-fixes have also been implemented (notably with how the coproc source code is dynamically generated). Lastly. the forkrun repo had some changes to how it is organized.
+
+NOTE: for the `-b` and `-B` flags to have the sort of effeciency and speed that forkrun typically has, you need to have GNU `dd` available. If you dont, `forkrun` will try to use `head -c` (which is *much* slower), and if thats unavailable itll use the `read -N` builtin (which is *much much* slower still and will mangle binary data since it will drop NULL's). You *really* want to use GNU `dd` here. Also, if passing binary data you should use the `-S` flag to pass it via stdin and avoid having bash process it and mangle it.
 
 ***
 
@@ -134,6 +136,9 @@ Bash 5.1+:           For improved speed due to overhauled handling of arrays.
 `inotifywait`:       If available, this is used to monitor the tmpfile where stdin is saved before being read by the coprocs. This enables the coprocs to efficiently wait for input if stdin is arriving slowly (e.g., `ping 1.1.1.1 | forkrun <...>`)
 
 `fallocate`:         If available, this is used to deallocate already-processed data from the beginning of the tmpfile holding stdin. This enables `forkrun` to be used in long-running processes that consistently output data for days/weeks/months/... Without `fallocate`, this tmpfile will continually grow and will not be removed until forkrun exits 
+
+`dd` (GNU)  -OR-  `head` (GNU|busybox): When splitting up stdin by byte count (due to either the `-b` or `-B` flag being used), if either of these is available it will be used to read stdin instead of the builtin `read -N`. Note that one of these is required to split + process binary data without mangling it - otherwise bash will drop any NULL's. If both are available `dd` is preferred.
+
 
 ***
 
