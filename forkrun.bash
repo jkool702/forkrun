@@ -8,7 +8,7 @@ forkrun() {
 #
 # USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
 #
-# LIST OF FLAGS: [-j|-P <#>] [-t <path>] [-l <#>] [-L <#[,#]>] [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+# LIST OF FLAGS: [-j|-P <#>] [-t <path>] ( [-l <#>] | [-L <#[,#]>]] ) ( [-b <#>] | [-B <#>[,<#>]] ) [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
 #
 # For help / usage info, call forkrun with one of the following flags:
 #
@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -132,105 +132,66 @@ forkrun() {
                 (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
             ;;
 
-            -?(-)i?(nsert))
-                substituteStringFlag=true
+            [+-]?([+-])i?(nsert))
+                [[ "${1:0:1}" == '-' ]] && substituteStringFlag=true || substituteStringFlag=false
             ;;
 
-            -?(-)I?(D)|-?(-)INSERT?(?(-)ID))
-                substituteStringIDFlag=true
+            [+-]?([+-])@(I?(D)|INSERT?(?(-)ID)))
+                [[ "${1:0:1}" == '-' ]] && substituteStringIDFlag=true || substituteStringIDFlag=false
             ;;
 
-            -?(-)k?(eep?(?(-)order)))
-                nOrderFlag=true
+            [+-]?([+-])k?(eep?(?(-)order)))
+                [[ "${1:0:1}" == '-' ]] && nOrderFlag=true || nOrderFlag=false
             ;;
 
-            -?(-)0|-?(-)z?(ero)|-?(-)null)
-                nullDelimiterFlag=true
+            [+-]?([+-])@(0|z?(ero)|null))
+                [[ "${1:0:1}" == '-' ]] && nullDelimiterFlag=true || nullDelimiterFlag=false
             ;;
 
-            -?(-)s?(ub)?(?(-)shell)?(?(-)run))
-                subshellRunFlag=true
+            [+-]?([+-])s?(ub)?(?(-)shell)?(?(-)run))
+                [[ "${1:0:1}" == '-' ]] && subshellRunFlag=true || subshellRunFlag=false
             ;;
 
-            -?(-)S|-?(-)[Ss]tdin?(?(-)run))
-                stdinRunFlag=true
+            [+-]?([+-])@(S|[Ss]tdin?(?(-)run)))
+                [[ "${1:0:1}" == '-' ]] && stdinRunFlag=true || stdinRunFlag=false
             ;;
 
-            -?(-)p?(ipe)?(?(-)read))
-                pipeReadFlag=true
+            [+-]?([+-])p?(ipe)?(?(-)read))
+                [[ "${1:0:1}" == '-' ]] && pipeReadFlag=true || pipeReadFlag=false
             ;;
 
-            -?(-)D|-?(-)[Dd]elete)
-                rmTmpDirFlag=true
+            [+-]?([+-])@(D|[Dd]elete))
+                [[ "${1:0:1}" == '-' ]] && rmTmpDirFlag=true || rmTmpDirFlag=false
             ;;
 
-            -?(-)v?(erbose))
-                ((verboseLevel++))
+            [+-]?([+-])n?(umber)?(-)?(line?(s)))
+                [[ "${1:0:1}" == '-' ]] && exportOrderFlag=true || exportOrderFlag=false
             ;;
 
-             -?(-)n?(umber)?(-)?(line?(s)))
-                exportOrderFlag=true
+            [+-]?([+-])@(N?(O)|[Nn][Oo]?(-)func))
+                [[ "${1:0:1}" == '-' ]] && noFuncFlag=true || noFuncFlag=false
             ;;
 
-            -?(-)N?(O)|-?(-)[Nn][Oo]?(-)func)
-                noFuncFlag=true
+            [+-]?([+-])u?(nescape))
+                [[ "${1:0:1}" == '-' ]] && unescapeFlag=true || unescapeFlag=false
             ;;
 
-            -?(-)u?(nescape))
-                unescapeFlag=true
+            [+-]?([+-])@(+(v)|verbose))
+                case "${1}" in
+                    [+-]?([+-])verbose)
+                        [[ "${1:0:1}" == '-' ]] && ((verboseLevel++)) || ((verboseLevel--))
+                    ;;
+                    [+-]?([+-])+(v))
+                       tmpVar="${1##+([+-])}"
+                       [[ "${1:0:1}" == '-' ]] && verboseLevel=$(( ${verboseLevel} + ${#tmpVar} )) || verboseLevel=$(( ${verboseLevel} - ${#tmpVar} )) 
+                       unset tmpVar
+                    ;;
+                esac
             ;;
-
+            
             -?(-)help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|-?(-)usage|-?(-)[h?])
                 forkrun_displayHelp "${1}"
-                return
-            ;;
-
-            +?([-+])i?(nsert))
-                substituteStringFlag=false
-            ;;
-
-            +?(-)I?(D)|+?(-)INSERT?(?(-)ID))
-                substituteStringIDFlag=false
-            ;;
-
-            +?([-+])k?(eep?(?(-)order)))
-                nOrderFlag=false
-            ;;
-
-            +?([-+])0|+?([-+])z|+?([-+])null)
-                nullDelimiterFlag=false
-            ;;
-
-            +?([+-])s?(ub)?(?(-)shell)?(?(-)run))
-                subshellRunFlag=false
-            ;;
-
-            +?([-+])S?(TDIN)?(?(-)RUN))
-                stdinRunFlag=false
-            ;;
-
-            +?([-+])p?(ipe)?(?(-)read))
-                pipeReadFlag=false
-            ;;
-
-            +?([-+])D|+?([-+])[Dd]elete)
-                rmTmpDirFlag=false
-            ;;
-
-            +?([-+])v?(erbose))
-                ((verboseLevel--))
-            ;;
-
-            +?([-+])n?(umber)?(-)?(line?(s)))
-                exportOrderFlag=false
-            ;;
-
-            +?([-+])N?(O)?(?(-)F?(UNC)))
-                noFuncFlag=false
-            ;;
-
-            +?([-+])u?(nescape))
-                unescapeFlag=false
+                return 0
             ;;
 
             --)
@@ -304,9 +265,6 @@ forkrun() {
 
         # dynamically set defaults for a few flags
 
-        # check verboseLevel
-        (( ${verboseLevel} < 0 )) && verboseLevel=0
-
         # determine what forkrun is using lines on stdin for
         : "${noFuncFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}"
         if ${FORCE_allowCarriageReturnsFlag}; then
@@ -320,17 +278,20 @@ forkrun() {
         (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
         ${noFuncFlag} && runCmd=('source')
 
-        : "${readBytesFlag:=false}" "${nullDelimiterFlag:=false}"
-
+        # setup byte reading if passed -b or -B
+        : "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}"
+        
         if ${readBytesFlag}; then
             # turn off nLinesAuto
-            : "${nLinesAutoFlag:=false}"
+            nLinesAutoFlag=false
 
             # read from pipe for -B --> dont need inotifywait
-            ${readBytesExactFlag} && { 
+            if ${readBytesExactFlag}; then  
                 pipeReadFlag=true
                 inotifyFlag=false
-            }
+            else
+                pipeReadFlag=false
+            fi
 
             # parse read size (in bytes)
             nBytes="${nBytes,,}"
@@ -353,16 +314,29 @@ forkrun() {
             }
 
             # make sure nBytes is only digits
-            [[ "${nBytes//[0-9]/}" ]] && { 
-                printf '\nERROR: the byte count passed to the ( -b | -B ) flag did not parse correctly. \nThis must consist solely of numbers, optionally followed by a standard si prefix. \nVALID EXAMPLES:  4  8b  16k  32mb  64G  128TB  256PiB \nNOTE: the count is always in bytes, never in bits, regardless of the case of the (optional) trailing "b" / "B"\n\n'
+            [[ "${nBytes//[0-9]/}" ]] && (( ${verboseLevel} >= 0 )) && { 
+                printf '\nERROR: the byte count passed to the ( -b | -B ) flag did not parse correctly. \nThis must consist solely of numbers, optionally followed by a standard si prefix. \nVALID EXAMPLES:  4  8b  16k  32mb  64G  128TB  256PiB \nNOTE: the count is always in bytes, never in bits, regardless of the case of the (optional) trailing "b" / "B"\n\n' >&${fd_stderr}; 
+                returnVal=1
                 return 1
             }
 
             # check for incompatible flags
-            { ${nullDelimiterFlag} || [[ ${delimiterVal} ]]; } && {
-                printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' 
+            { ${nullDelimiterFlag} || [[ ${delimiterVal} ]]; } && (( ${verboseLevel} >= 0 )) && {
+                printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' >&${fd_stderr}; 
                 nullDelimiterFlag=false
                 unset delimiterVal
+            }
+
+            # check for GNU dd or (if unavailable) check for head (either GNU or busybox)
+            [[ ${readBytesProg} ]] || {
+                if type -p dd &>/dev/null && dd --version | grep -qF 'coreutils'; then
+                   readBytesProg='dd'
+                elif type -p head; then
+                    readBytesProg='head'
+                else
+                    readBytesProg='bash'
+                    (( ${verboseLevel} >= 0 )) && printf '\nWARNING: neither "dd (GNU)" nor "head" are available. The bash builtin `read -N` will be used by the worker coprocs to read data.\nforkrun will run considerably slower will probably mangle binary data (text data passed on stdin should work)\n\n' >&${fd_stderr}; 
+                fi
             }
 
         else
@@ -387,7 +361,7 @@ forkrun() {
         type -a fallocate &>/dev/null && ! ${pipeReadFlag} && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
         # check for conflict in flags that were  defined on the commandline when forkrun was called
-        ${pipeReadFlag} && ${nLinesAutoFlag} && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
+        ${pipeReadFlag} && ${nLinesAutoFlag} && (( ${verboseLevel} >= 0 )) && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
 
         # require -k to use -n
         ${exportOrderFlag} && nOrderFlag=true
@@ -440,17 +414,17 @@ forkrun() {
             printf '(-j|-P) using %s coproc workers\n' ${nProcs}
             ${nLinesAutoFlag} && printf '(-N) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
             printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
-            ${readBytesFlag} && printf '(-%s) data will be read in chunks of %s %s bytes\n' "$(${readBytesExactFlag} && echo 'B' || echo 'b')" "$(${readBytesExactFlag} && echo 'exactly' || echo 'up to')" "${nBytes}"
+            ${readBytesFlag} && printf '(-%s) data will be read in chunks of %s %s bytes using %s\n' "$(${readBytesExactFlag} && echo 'B' || echo 'b')" "$(${readBytesExactFlag} && echo 'exactly' || echo 'up to')" "${nBytes}" "${readBytesProg}"
             ${nOrderFlag} && echo '(-k) output will be ordered the same as if the inputs were run sequentially'
             ${exportOrderFlag} && echo '(-n) output batches will be numbered (index is per-batch, denoted using \\034<IND>:\\035\\n)'
             ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
-            ${substituteStringFlag} && echo '(-I) replacing {ID} with coproc worker ID'
+            ${substituteStringIDFlag} && echo '(-I) replacing {ID} with coproc worker ID'
             ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
             ${pipeReadFlag} && echo '(-p) worker coprocs will read directly from stdin pipe, not from a tmpfile'
             if ${nullDelimiterFlag}; then
                 echo '((-0|-z)|(-d)) stdin will be parsed using nulls as delimiter (instead of newlines)'
             else
-                printf '(-d) delimiter: %q\n' "${delimiterVal}"
+                printf '(%s) delimiter: %q\n' "$([[ "${delimiterVal}" == '$'"'"'\n'"'" ]] && echo '--' || echo '-d')" "${delimiterVal}"
             fi
             ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automaticvally removed\n' "${tmpDir}"
             ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
@@ -476,10 +450,12 @@ forkrun() {
             { coproc pWrite {
                 cat <&${fd_stdin} >&${fd_write}
                 : >"${tmpDir}"/.done
-                ${inotifyFlag} && {
-                    { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-                } {fd_inotify1}>&${fd_inotify}
                 (( ${verboseLevel} > 1 )) && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
+                ${inotifyFlag} && {
+                    for (( kk=0 ; kk<=nProcs ; kk++ )); do
+                        : >&${fd_write}
+                    done
+                }
               }
             }
             exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
@@ -617,16 +593,16 @@ forkrun() {
         ${inotifyFlag} && {
             {
                 # initially add 1 newline for each coproc to fd_inotify
-                { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+                { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
 
                 # run inotifywait
-                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify1} &
+                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify0} &
 
                 pNotify_PID=${!}
-            } 2>/dev/null {fd_inotify1}>&${fd_inotify}
+            } 2>/dev/null {fd_inotify0}>&${fd_inotify}
 
 
-            exitTrapStr+='{ printf '"'"'\n'"'"' >&${fd_inotify2}; } {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
+            exitTrapStr+=': > "'"${tmpDir}"'"/.stdin; '$'\n'
             ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
             exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
         }
@@ -636,7 +612,7 @@ forkrun() {
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
 
         trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n''return ${returnVal}' EXIT
-        trap 'kill "${p_PID[@]}"; returnVal=1; return 1' INT TERM HUP
+        trap 'kill "${p_PID[@]}" 2>/dev/null'$'\n''returnVal=1'$'\n''return 1' INT TERM HUP
 
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && printf '\n\nEXIT TRAP:\n\n%s\n\n' "${exitTrapStr}" >&${fd_stderr}
@@ -644,47 +620,64 @@ forkrun() {
 
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
-        # populate {fd_continue} with an initial '\n'
-        # {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
-        #     when there is a '\n' the pipe buffer then nothing has a read lock
-        #     a process reads 1 byte from {fd_continue} to get the read lock, and
-        #     when that process writes a '\n' back to the pipe it releases the read lock
-
-        # spawn $nProcs coprocs
-        # on each loop, they will read {fd_continue}, which blocks them until they have exclusive read access
-        # they then read N lines with mapfile and send \n to {fd_continue} (so the next coproc can start to read)
-        # if the read array is empty the coproc will either continue or break, depending on if end conditions are met
-        # finally it will do something with the data.
+        # Due to how the coproc code is dynamically generated and sourced, it cannot directly contain comments. A very brief overview of their function is below.
         #
-        # NOTE: All coprocs share the same fd_read file descriptor ( accomplished via `( <...>; coproc p0 ...; <...> ;  coproc pN ...; ) {fd_read}<><(:)` )
-        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data the fd_read used by *all* of them is advanced.
+        # on each loop, they will acquire a read lock by read {fd_continue}, which blocks them until they have exclusive read access
+        # they then read N lines with mapfile and check/fix a partial read (or read N bytes with $readBytesProg) and (if -k/-n) read the output order from {fd_nOrder}
+        # they then release the read lock by sending \n to {fd_continue} (so the next coproc can start to read)
+        # if no data was read, the coproc will either wait/continue or break, depending on if end conditions are met
+        # finally (assuming it read data) it will run it through whatever is being parallelized. If -k/-n write [x]$nOrder to {fd_nOrder0} to indicate that index has run / was empty
+        #
+        # NOTE: All coprocs share the same {fd_read} file descriptor ( defined just after the end of the main forkrun subshell )
+        #       This has the benefit of keeping the coprocs in sync with each other - when one reads data the {fd_read} used by *all* of them is advanced.
 
-        # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly)
-        # this contains the code for the coprocs but has the worker ID ($kk) replaced with '%s' and '%' replaced with '%%'
-        # the individual coproc's codes are then generated via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
+        # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly and have many "code branch selection" decisions already resolved)
+        # this contains the code for the coprocs but has the worker ID represented using {<#>}. coprocs will be sourced via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
+        #
+        # NOTE: because the coproc code generation dynamically adaptsd to all of forkrun's possible options, this part is...well...hard to follow. 
+        # To see the resulting coproc code for a given set of forkrun options, run:   `echo | forkrun -v -v -v -v <FLAGS> :`
 
-        coprocSrcCode="$(echo """
+        coprocSrcCode="$( echo """
 { coproc p{<#>} {
 LC_ALL=C
 LANG=C
 IFS=
+export LC_ALL LANG IFS
 trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
 while true; do"""
-${nLinesAutoFlag} && echo """
-    \${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}"""
-echo """
-    read -u ${fd_continue}"""
+${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}"
+echo "read -u ${fd_continue}"
 if ${readBytesFlag}; then
-     printf 'read -r -N %s -u ' "${nBytes}"
-     if ${readBytesExactFlag}; then
-        printf '%s ' "${fd_stdin}" 
-        [[ ${tTimeout} ]] && printf '-t %s ' "${tTimeout} "
-    else
-        printf '%s ' ${fd_read}
-    fi
-     echo '-a A'
+    echo """
+    [[ -f \"${tmpDir}\"/.quit ]] && {
+        printf '\\n' >&${fd_continue}
+        break
+    }"""
+    case "${readBytesProg}" in
+        'dd')
+            printf 'dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>} 2>"%s"/.stdin.tmp-status.{<#>} ' "${nBytes}" "${tmpDir}" "${tmpDir}"
+            ${pipeReadFlag} && printf '<&%s\n' "${fd_stdin}" || printf '<&%s\n' "${fd_read}"
+            printf '[[ "$(<"%s"/.stdin.tmp-status.{<#>})" == *$'"'"'\n'"'"'"0 bytes"* ]] && A=() || A[0]=1\n' "${tmpDir}"
+        ;;
+        'head')
+            printf 'head -c %s ' "${nBytes}"
+            ${pipeReadFlag} && printf '<&%s ' "${fd_stdin}" || printf '<&%s ' "${fd_read}"
+            printf '>"%s"/.stdin.tmp.{<#>}\n' "${tmpDir}"
+            printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] && A[0]=1 || A=()\n' "${tmpDir}"
+        ;;
+        *)
+             printf 'read -r -N %s -u ' "${nBytes}"
+             if ${readBytesExactFlag}; then
+                printf '%s ' "${fd_stdin}" 
+                [[ ${tTimeout} ]] && printf '-t %s ' "${tTimeout} "
+            else
+                printf '%s ' ${fd_read}
+            fi
+            echo '-a A'
+        ;;
+    esac
 else
     printf '%s ' "mapfile -n \${nLinesCur} -u"
     ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
@@ -708,28 +701,19 @@ else
             }"""
     }
 fi
-${nOrderFlag} && echo """
-        read -u ${fd_nOrder} nOrder"""
-${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
-        }"""
+${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
+${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo "}"
 echo """
     printf '\\n' >&${fd_continue};
     [[ \${#A[@]} == 0 ]] && {
         if [[ -f \"${tmpDir}\"/.done ]]; then"""
-${nLinesAutoFlag} && echo """
-            printf '\\n' >&\${fd_nAuto0}"""
-echo """
-            [[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit"""
-${nOrderFlag} && echo """
-            : >\"${tmpDir}\"/.out/.quit{<#>}"""
-echo """
-            break"""
-{ ${inotifyFlag} || ${nOrderFlag}; } && echo """
-        else"""
-${nOrderFlag} && echo """
-            printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"""
-${inotifyFlag} && echo """
-            read -u ${fd_inotify} -t 0.1"""
+${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
+echo "[[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit"
+${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
+echo "break"
+{ ${inotifyFlag} || ${nOrderFlag}; } && echo "else"
+${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
+${inotifyFlag} && echo "read -u ${fd_inotify} -t 0.1"
 echo """
         fi
         continue
@@ -744,7 +728,7 @@ ${nLinesAutoFlag} && { printf '%s' """
 ${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
         { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {
-            $( (( ${verboseLevel} > 2 )) && echo """echo \"FIXING SPLIT READ\" >&${fd_stderr}""")
+            $( (( ${verboseLevel} > 2 )) && echo "echo \"FIXING SPLIT READ\" >&${fd_stderr}")
             A[-1]=\"\${A[-1]%${delimiterVal}}\"
             IFS=
             mapfile A <<<\"\${A[*]}\"
@@ -752,15 +736,23 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
 """
 ${subshellRunFlag} && echo '(' || echo '{'
 { ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
-${exportOrderFlag} && echo 'printf '"'"'\034%s:\035\n'"'"' "${nOrder0}"'
+${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""
 printf '%s ' "${runCmd[@]}"
-if ${stdinRunFlag}; then 
-    printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
-elif ${noFuncFlag}; then 
-    printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"; 
-elif ! ${substituteStringFlag}; then 
-    printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""; 
-fi; 
+if ${readBytesFlag} && [[ ${readBytesProg} ]]; then
+    if ${stdinRunFlag}; then 
+        printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp.{<#>}'
+    else
+        printf '"$(<"%s"/%s)"' "${tmpDir}" '.stdin.tmp.{<#>}'
+    fi
+else
+    if ${stdinRunFlag}; then 
+        printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""
+    elif ${noFuncFlag}; then 
+        printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"
+    elif ! ${substituteStringFlag}; then 
+        printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""
+    fi
+fi
 (( ${verboseLevel} > 2 )) && echo """ || {
         {
             printf '\\n\\n----------------------------------------------\\n\\n'
@@ -773,18 +765,22 @@ fi;
             echo
         } >&${fd_stderr}
     }"""
-${subshellRunFlag} && printf '\n%s' ')' || printf '\n%s' '}'
+${readBytesFlag} && [[ ${readBytesProg} ]] && printf '\n\\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}\n'
+${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
-${nOrderFlag} && echo """
-    printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"""
+${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
 echo """
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
-p_PID+=(\${p{<#>}_PID})""")"
+p_PID+=(\${p{<#>}_PID})""" )"
 
         # # # # # FORK COPROC "WORKERS" # # # # #
 
+        # initialize read lock {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
+        #     when there is a '\n' the pipe buffer then nothing has a read lock
+        #     a process reads 1 byte from {fd_continue} to get the read lock, and
+        #     when that process writes a '\n' back to the pipe it releases the read lock
         printf '\n' >&${fd_continue};
 
         # source the coproc code for each coproc worker
@@ -796,31 +792,34 @@ p_PID+=(\${p{<#>}_PID})""")"
         (( ${verboseLevel} > 1 )) && printf '\n\nALL WORKER COPROCS FORKED\n\n' >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}" >&${fd_stderr}
 
-
         # # # # # WAIT FOR THEM TO FINISH # # # # #
           #   #   PRINT OUTPUT IF ORDERED   #   #
 
         if ${nOrderFlag}; then
+            # initialize real-time printing of ordered output as forkrun runs
             outCur=10
-
             continueFlag=true
 
             while ${continueFlag}; do
 
+                # read order indices that are done running. 
                 read -r -u ${fd_nOrder0}
-
                 case "${REPLY}" in
                     +([0-9]))
+                        # index has an output file
                         outHave[$REPLY]=1
                     ;;
                     x+([0-9]))
+                        # index was empty
                         outHave[${REPLY#x}]=0
                     ;;
                     '')
+                        # end condition was met
                         continueFlag=false
                     ;;
                 esac
 
+                # starting at $outCur, print all indices in sequential order that have been recorded as being run and then remove the tmp output file[s]
                 while true; do
                     case "${outHave[${outCur}]}" in
                         [01])
@@ -830,6 +829,8 @@ p_PID+=(\${p{<#>}_PID})""")"
                             }
 
                             unset "outHave[$outCur]"
+
+                            # advance outCur by 1
                             ((outCur++))
                             [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                         ;;
@@ -839,27 +840,23 @@ p_PID+=(\${p{<#>}_PID})""")"
                     esac
                 done
 
+                # check for end condition
                 [[ -f "${tmpDir}"/.quit ]] && { continueFlag=false; break; }
             done
-
-            (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
-
-            wait "${p_PID[@]}"
-
-            [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x*
-
-        else
-
-            # wait for everything to finish
-            wait "${p_PID[@]}"
-
         fi
+
+        # wait for coprocs to finish
+        (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
+        wait "${p_PID[@]}"
+
+        # if ordering output print the remaining ones
+        ${nOrderFlag} && [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x* >&${fd_stdout}
 
         # print final nLines count
         ${nLinesAutoFlag} && (( ${verboseLevel} > 1 )) && printf 'nLines (final) = %s   (max = %s)\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdout}>&1 {fd_stdin}<&0 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
@@ -953,7 +950,7 @@ EOF
 (( ${displayMain} > 0 )) && {
 cat<<'EOF' >&2
 
-    Usage is vitrually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
+    Usage is virtually identical to parallelizing a loop by using `xargs -P` or `parallel -m`:
         -->  Pass newline-separated (or null-separated with `-z` flag) inputs to parallelize over on stdin.
         -->  Provide function/script/binary to parallelize and initial args as function inputs.
     `forkrun` will then call the function/script/binary in parallel on several coproc "workers" (default is to use $(nproc) workers)
@@ -971,7 +968,7 @@ EOF
 (( ${displayMain} > 1 )) && {
 cat<<'EOF' >&2
 REQUIRED DEPENDENCIES:
-    Bash 4+                       : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is prefferable has undergone much more testing.
+    Bash 4+                       : This is when coprocs were introduced. WARNING: running this code on bash 4.x  *should* work, but is largely untested. Bah 5.1+ is preferable has undergone much more testing.
     `rm`  and  `mkdir`            : Required for various tasks, and doesnt have an obvious pure-bash implementation. Either the GNU version or the Busybox version is sufficient.
 
 OPTIONAL DEPENDENCIES (to provide enhanced functionality):
@@ -981,6 +978,8 @@ OPTIONAL DEPENDENCIES (to provide enhanced functionality):
                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
     `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | forkrun).
                                     Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage.
+    `dd` (GNU)   -OR-             : When splitting up stdin by byte count (due to either the `-b` or `-B` flag being used), if either of these is available it will be used to read stdin instead of the builtin `read -N`.
+    `head` (GNU|busybox):           One of these is required to process binary data without mangling it - otherwise bash will drop any NULL's. If both are available `dd` is preferred.
 
 EOF
 }
@@ -1035,7 +1034,7 @@ SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passi
     -N          : enable no func mode. Only has an effect when `parFunc` and `initialArgs` were not given. If `-N` is not passed and `parFunc` and `initialArgs` are missing, `forkrun` will silently set `parFunc` to `printf '%s\n'`, which will basically just copy stdin to stdout.
     -u          : unescape redirects/pipes/forks/logical operators. Typically `parFunc` and `initialArgs` are run through `printf '%q'` making things like `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` appear as literal characters. This flag skips the `printf '%q'` call, meaning that these operators can be used to allow for piping, redirection, forking, logical comparrison, etc. to occur *inside the coproc*. 
     --          : end of forkrun options indicator. indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs. This allows using a `parFunc` that begins with a `-`. NOTE: there is no `+<FLAG>` equivilant for `--`.
-    -v          : increase verbosity level by 1. This can be passed up to 4 times for progressively more verbose output. +v decreases the verbosity level by 1.
+    -v          : increase verbosity level by 1. Higher levels give progressively more verbose output. Default level is 0. Meaningful levels range from -1 to 4. +v decreases the verbosity level by 1.
     (-h|-?)     : display help text. use `--help=f[lags]` or `--help=a[ll]` for more details about flags that `forkrun` supports. NOTE: you must escape the `?` otherwise the shell can interpret it before passing it to forkrun.
 
 EOF
@@ -1049,7 +1048,7 @@ GENERAL NOTES:
     1.  Flags are matched using extglob and have a degree of "fuzzy" matching. As such, the "short" flag options must be given separately (use `-a -b`, not `-ab`). Only the most common invocations are shown below.
           *   Refer to the code for exact extglob match criteria. Example of "fuzziness" in matching: both the short and long flags may use either 1 or 2 leading dashes ('-'). NOTE: Flags ARE case-sensitive.
     2.  All forkrun flags must be given before the name or (and arguments for) whatever you are parallelizing. By default, forkrun assumes that `parFunc` is the first input that does NOT begin with a '-' or '+'.
-          *   To stop option parsing sooner, add a '--' after the last forkrun flag. NOTE: this will only stop option parsing sooner...forkrun will always stop at the first argument that does not begin with a '-' or '+'.
+          *   To stop option parsing sooner (e.g., to parallelize something starting with a `-`), add a '--' after the last forkrun flag. NOTE: this will only stop option parsing sooner...forkrun will always stop at the first argument that does not begin with a '-' or '+'.
 
 --------------------------------------------------------------------------------------------------------------------
 
@@ -1087,7 +1086,8 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 
 -B | --BYTES <bytes>[,<seconds>]  : instead of reading data using a delimiter, read up to this many ( -B <#> )bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. example: `-B 4mb`. You may optionally pass a time as another input (-B <#>,<time>) which will set a timeout on how long the read commands will wait to accumulate input (if not used, they wait indefinately). example: `-B 4096k,3.5` sets 4 mb reads with a 3.5 sec timeout. This can be useful for things like spliting a compressed or binary file into equal size chunks.
 
-    NOTE: standard byte size notations (k, m, g, t, p, ki, mi, ti, pi) may be used. The trailing `b` is optional and can be either upper or lower case but always will represent bytes, never bits. Seconds for `-B` can be a decimal but should not contain any units.
+    NOTE: standard byte size notations (1000^N: k, m, g, t, p;  1024^N: ki, mi, gi, ti, pi) may be used. The trailing `b` is optional and can be either upper or lower case but always will represent bytes, never bits. <seconds> for `-B` can be a decimal but should not contain any units.
+    NOTE: if GNU `dd` is available it will be used to read data. If not but `head` (GNU or busybox) is available it will be used, but will be considerably slower (order of magnitude) than `dd`. If neither is available then the builtin `read -N` will be used, which is considerably slower (a few orders of magnitude) than `head` and cannot handle null bytes (meaning binary data will likely be mangled). i.e., you *really* want to use GNU `dd` for this...
     
 ----------------------------------------------------------
   
@@ -1159,7 +1159,8 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 ----------------------------------------------------------
 
 -v | --verbose       :  increase verbosity level by 1. this controls what "extra info" gets printed to stderr. The default level is 0. Meaningful verbotisity levels are 0 - 4
-      --> 0 [or less than 0] (only errors) (DEFAULT)
+      --> -1 [or less than -1] (nothing)
+      --> 0 (only warnings and errors) (DEFAULT)
       --> 1 (errors + overview of parsed forkrun options)
       --> 2 (errors + options overview + progress notifications of when the code finishes one of its main sections)
       --> 3 (errors + options overview + progress notifications + indicators of a few runtime "milestone" events and statistics)
