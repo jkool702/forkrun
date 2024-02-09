@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify1 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -439,7 +439,6 @@ forkrun() {
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
-kill "${p_PID[@]}" 2>/dev/null; 
 [[ -z $(echo "'"${tmpDir}"'"/.run/p*) ]] || kill $(cat "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
 
        ${pipeReadFlag} && {
@@ -451,10 +450,12 @@ kill "${p_PID[@]}" 2>/dev/null;
             { coproc pWrite {
                 cat <&${fd_stdin} >&${fd_write}
                 : >"${tmpDir}"/.done
-                ${inotifyFlag} && {
-                    { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-                } {fd_inotify1}>&${fd_inotify}
                 (( ${verboseLevel} > 1 )) && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
+                ${inotifyFlag} && {
+                    for (( kk=0 ; kk<=nProcs ; kk++ )); do
+                        : >&${fd_write}
+                    done
+                }
               }
             }
             exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
@@ -592,16 +593,16 @@ kill "${p_PID[@]}" 2>/dev/null;
         ${inotifyFlag} && {
             {
                 # initially add 1 newline for each coproc to fd_inotify
-                { source /proc/self/fd/0 >&${fd_inotify1}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+                { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
 
                 # run inotifywait
-                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify1} &
+                inotifywait -q -m --format '' "${fPath}" >&${fd_inotify0} &
 
                 pNotify_PID=${!}
-            } 2>/dev/null {fd_inotify1}>&${fd_inotify}
+            } 2>/dev/null {fd_inotify0}>&${fd_inotify}
 
 
-            exitTrapStr+='{ printf '"'"'\n'"'"' >&${fd_inotify2}; } {fd_inotify2}>&'"${fd_inotify}"'; '$'\n'
+            exitTrapStr+=': > "'"${tmpDir}"'"/.stdin; '$'\n'
             ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
             exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
         }
@@ -611,7 +612,7 @@ kill "${p_PID[@]}" 2>/dev/null;
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
 
         trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n''return ${returnVal}' EXIT
-        trap "${exitTrapStr}"$'\n''returnVal=1' INT TERM HUP
+        trap 'kill "${p_PID[@]}" 2>/dev/null'$'\n''returnVal=1'$'\n''return 1' INT TERM HUP
 
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && printf '\n\nEXIT TRAP:\n\n%s\n\n' "${exitTrapStr}" >&${fd_stderr}
@@ -1085,7 +1086,8 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 
 -B | --BYTES <bytes>[,<seconds>]  : instead of reading data using a delimiter, read up to this many ( -B <#> )bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. example: `-B 4mb`. You may optionally pass a time as another input (-B <#>,<time>) which will set a timeout on how long the read commands will wait to accumulate input (if not used, they wait indefinately). example: `-B 4096k,3.5` sets 4 mb reads with a 3.5 sec timeout. This can be useful for things like spliting a compressed or binary file into equal size chunks.
 
-    NOTE: standard byte size notations (k, m, g, t, p, ki, mi, ti, pi) may be used. The trailing `b` is optional and can be either upper or lower case but always will represent bytes, never bits. Seconds for `-B` can be a decimal but should not contain any units.
+    NOTE: standard byte size notations (1000^N: k, m, g, t, p;  1024^N: ki, mi, gi, ti, pi) may be used. The trailing `b` is optional and can be either upper or lower case but always will represent bytes, never bits. <seconds> for `-B` can be a decimal but should not contain any units.
+    NOTE: if GNU `dd` is available it will be used to read data. If not but `head` (GNU or busybox) is available it will be used, but will be considerably slower (order of magnitude) than `dd`. If neither is available then the builtin `read -N` will be used, which is considerably slower (a few orders of magnitude) than `head` and cannot handle null bytes (meaning binary data will likely be mangled). i.e., you *really* want to use GNU `dd` for this...
     
 ----------------------------------------------------------
   
