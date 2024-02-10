@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2004,SC2015,SC2016,SC2028,SC2162 source=/dev/null
 
+# TO DO: try implementing `-b`` flag (when reading with bash) using 
+# `read -r -n ${nBytes} -d ''; A+="$REPLY"` until correct number of bytes read, 
+# then replace "${A[@]}" with "$(printf '%s\0' "${A[@]}")" when running the command.
+
 shopt -s extglob
 
 forkrun() {
@@ -40,96 +44,92 @@ forkrun() {
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)@([jP]|?(n)[Pp]roc?(s)?))
-                nProcs="${2}"
-                shift 1
+            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?(?([= ])+([0-9])))
+                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])+([0-9]) ]]; then
+                    nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ]))}"
+                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?) ]] && [[ "$2" == +([0-9]) ]]; then
+                    nProcs="${2}"
+                    shift 1
+                fi
             ;;
 
-            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])+([0-9]))
-                nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ]))}"
+            -?(-)?(n)l?(ine?(s))?(?([= ])+([0-9])))
+                if [[ "${1}" == -?(-)?(n)l?(ine?(s))?([= ])+([0-9]) ]]; then
+                    nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
+                    nLinesAutoFlag=false
+                elif [[ "${1}" == -?(-)?(n)l?(ine?(s)) ]] && [[ "$2" == +([0-9]) ]]; then
+                    nLines="${2}"
+                    nLinesAutoFlag=false
+                    shift 1
+                fi
             ;;
 
-            -?(-)?(n)l?(ine?(s)))
-                nLines="${2}"
-                nLinesAutoFlag=false
-                shift 1
-            ;;
-
-            -?(-)?(n)l?(ine?(s))?([= ])+([0-9]))
-                nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
-                nLinesAutoFlag=false
-            ;;
-
-            -?(-)?(N)L?(INE?(S)))
-                nLines0="${2}"
-                nLinesAutoFlag=true
+            -?(-)?(N)L?(INE?(S))?(?([= ])+([0-9])?(,+([0-9]))))
+                if [[ "${1}" == -?(-)?(N)L?(INE?(S))?([= ])+([0-9])?(,+([0-9])) ]]; then
+                    nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
+                    nLinesAutoFlag=true
+                elif [[ "${1}" == -?(-)?(N)L?(INE?(S)) ]] && [[ "$2" == +([0-9])?(,+([0-9])) ]]; then
+                    nLines0="${2}"
+                    nLinesAutoFlag=true
+                    shift 1
+                else
+                    continue
+                fi
                 if [[ "${nLines0}" == +([0-9])','+([0-9]) ]]; then
                     nLinesMax="${nLines0##*,}"
                     nLines="${nLines0%%,*}"
                 else
                     nLines="${nLines0}"
                 fi
-                shift 1
             ;;
 
-            -?(-)?(N)L?(INE?(S))?([= ])+([0-9])?(,+([0-9])))
-                nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
-                nLinesAutoFlag=true
-                if [[ "${nLines0}" == +([0-9])','+([0-9]) ]]; then
-                    nLinesMax="${nLines0##*,}"
-                    nLines="${nLines0%%,*}"
-                else
-                    nLines="${nLines0}"
+            -?(-)b?(yte?(s))?(?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])))
+                if [[ "${1}" == -?(-)b?(yte?(s))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]) ]]; then
+                    nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))}"
+                    readBytesFlag=true
+                    readBytesExactFlag=false
+                elif [[ "${1}" == -?(-)b?(yte?(s)) ]] && [[ "$2" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]) ]]; then
+                    nBytes="${2}"
+                    readBytesFlag=true
+                    readBytesExactFlag=false
+                    shift 1
                 fi
             ;;
 
-            -?(-)b?(yte?(s)))
-                nBytes="${2}"
-                readBytesFlag=true
-                readBytesExactFlag=false
-                shift 1
+            -?(-)B?(YTE?(S))?(?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9])))))
+                if [[ "${1}" == -?(-)B?(YTE?(S))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))) ]]; then
+                    nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))))}"
+                    readBytesFlag=true
+                    readBytesExactFlag=true
+                elif [[ "${1}" == -?(-)B?(YTE?(S)) ]] && [[ "$2" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))) ]]; then
+                    nBytes="${2}"
+                    readBytesFlag=true
+                    readBytesExactFlag=true
+                    shift 1
+                fi
             ;;
 
-            -?(-)b?(yte?(s))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))
-                nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))}"
-                readBytesFlag=true
-                readBytesExactFlag=false
+            -?(-)t?(mp?(?(-)dir))?(?([= ])*@([[:graph:]])*))
+                if [[ "${1}" == -?(-)t?(mp?(?(-)dir))?([= ])*@([[:graph:]])* ]]; then
+                    tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
+                    mkdir -p "${tmpDirRoot}"
+                elif [[ "${1}" == -?(-)t?(mp?(?(-)dir)) ]] && [[ "$2" == *@([[:graph:]])* ]]; then
+                    tmpDirRoot="${2}"
+                    mkdir -p "${tmpDirRoot}"
+                    shift 1
+                fi
             ;;
 
-            -?(-)B?(YTE?(S)))
-                nBytes="${2}"
-                readBytesFlag=true
-                readBytesExactFlag=true
-                shift 1
-            ;;
-
-            -?(-)B?(YTE?(S))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))))
-                nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))))}"
-                readBytesFlag=true
-                readBytesExactFlag=true
-            ;;
-
-            -?(-)t?(mp?(?(-)dir)))
-                tmpDirRoot="${2}"
-                mkdir -p "${tmpDirRoot}"
-                shift 1
-            ;;
-
-            -?(-)t?(mp?(?(-)dir))?([= ])*@([[:graph:]])*)
-                tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
-                mkdir -p "${tmpDirRoot}"
-            ;;
-
-            -?(-)d?(elim?(iter)))
-                (( ${#2} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
-                (( ${#2} == 0 )) && nullDelimiterFlag=true || delimiterVal="${2:0:1}"
-                shift 1
-            ;;
-
-            -?(-)d?(elim?(iter))?([= ])**([[:graph:]])*)
-                delimiterVal="${1##@(-?(-)d?(elim?(iter))?([= ]))}"
-                (( ${#delimiterVal} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
-                (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
+            -?(-)d?(elim?(iter))?(?([= ])@([[:graph:]])*))
+                if [[ "${1}" == -?(-)d?(elim?(iter))?([= ])@([[:graph:]])* ]]; then
+                    delimiterVal="${1##@(-?(-)d?(elim?(iter))?([= ]))}"
+                    (( ${#delimiterVal} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
+                    (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
+                elif [[ "${1}" == -?(-)d?(elim?(iter)) ]] && [[ "$2" == @([[:graph:]])* ]]; then
+                    (( ${#2} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
+                    (( ${#2} == 0 )) && nullDelimiterFlag=true || delimiterVal="${2:0:1}"
+                    shift 1
+                fi
             ;;
 
             [+-]?([+-])i?(nsert))
@@ -412,7 +412,7 @@ forkrun() {
             ${inotifyFlag} && echo 'using inotify to efficiently wait for slow inputs on stdin'
             ${fallocateFlag} && echo 'using fallocate to shrink the tmpfile containing stdin as forkrun runs'
             printf '(-j|-P) using %s coproc workers\n' ${nProcs}
-            ${nLinesAutoFlag} && printf '(-N) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
+            ${nLinesAutoFlag} && printf '(-L) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
             printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
             ${readBytesFlag} && printf '(-%s) data will be read in chunks of %s %s bytes using %s\n' "$(${readBytesExactFlag} && echo 'B' || echo 'b')" "$(${readBytesExactFlag} && echo 'exactly' || echo 'up to')" "${nBytes}" "${readBytesProg}"
             ${nOrderFlag} && echo '(-k) output will be ordered the same as if the inputs were run sequentially'
@@ -426,7 +426,7 @@ forkrun() {
             else
                 printf '(%s) delimiter: %q\n' "$([[ "${delimiterVal}" == '$'"'"'\n'"'" ]] && echo '--' || echo '-d')" "${delimiterVal}"
             fi
-            ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automaticvally removed\n' "${tmpDir}"
+            ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automatically removed\n' "${tmpDir}"
             ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
             ${stdinRunFlag} && echo '(-S) coproc workers will pass lines to the command being parallelized via the command'"'"'s stdin'
             ${noFuncFlag} && echo '(-N) no function mode enabled: commands should be included in stdin' || printf 'tmpdir: %s\n' "${tmpDir}"
