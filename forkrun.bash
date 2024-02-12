@@ -266,7 +266,7 @@ forkrun() {
         # dynamically set defaults for a few flags
 
         # determine what forkrun is using lines on stdin for
-        : "${noFuncFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}"
+        : "${noFuncFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}" "${stdinRunFlag:=false}" 
         if ${FORCE_allowCarriageReturnsFlag}; then
             # NOTE: allowing carriage returns in parFunC (or its initial args) is DANGEROUS. Dont do this unless you know what you are doing.
             # As such, `FORCE_allowCarriageReturnsFlag` can only be enabled (set to `true`) using the DEBUG_FORKRUN environment variable
@@ -279,7 +279,6 @@ forkrun() {
         ${noFuncFlag} && runCmd=('source')
 
         # setup byte reading if passed -b or -B
-        : "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}"
         
         if ${readBytesFlag}; then
             # turn off nLinesAuto
@@ -313,10 +312,10 @@ forkrun() {
             }
 
             # check for incompatible flags
-            { ${nullDelimiterFlag} || [[ ${delimiterVal} ]]; } && (( ${verboseLevel} >= 0 )) && {
+            { ${nullDelimiterFlag} || [[ ${delimiterVal} ]] || [[ ${delimiterRemoveStr} ]]; } && (( ${verboseLevel} >= 0 )) && {
                 printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' >&${fd_stderr}; 
                 nullDelimiterFlag=false
-                unset delimiterVal
+                unset delimiterVal delimiterRemoveStr
             }
 
             # check for GNU dd or (if unavailable) check for head (either GNU or busybox)
@@ -325,17 +324,17 @@ forkrun() {
                     readBytesProg='dd'
                 elif type -p head; then
                     readBytesProg='head'
-                elif ${stdinRunFlag}; then
-                    readBytesProg='bash-stdin'
                 else
-                    readBytesProg='bash-noNull'
-                    (( ${verboseLevel} >= 0 )) && printf '\nWARNING: neither "dd (GNU)" nor "head" are available. The bash builtin `read -N` will be used by the worker coprocs to read data.\nforkrun will run considerably slower will probably mangle binary data (text data passed on stdin should work)\n\n' >&${fd_stderr}; 
+                    readBytesProg='bash'
+                    (( ${verboseLevel} >= 0 )) && printf '\nWARNING: neither "dd (GNU)" nor "head" are available. The `read` builtin will be used by the worker coprocs to read data. forkrun will run considerably slower. \n\n' >&${fd_stderr}; 
                 fi
             }
+            ${stdinRunFlag} || (( ${verboseLevel} < 0 )) || printf '\nWARNING: data will be passed to coprocs via bash variables, which will drop NULLs and will probably mangle binary data (text data should still work). \nIt is recommended to use the `-S` flag to pass data to the coprocs stdin instead\n\n' >&${fd_stderr}; 
 
             # read from pipe for -B if using dd/head. also dont need inotifywait
-            if ${readBytesExactFlag}; then  
-                [[ ${readBytesProg//'bash'/} ]] && { pipeReadFlag=true; inotifyFlag=false; } || pipeReadFlag=false
+            if ${readBytesExactFlag} && [[ ${readBytesProg//'bash'/} ]] && ! ${stdinRunFlag}; then  
+                 pipeReadFlag=true
+                 inotifyFlag=false
             else
                 pipeReadFlag=false
             fi
@@ -353,7 +352,7 @@ forkrun() {
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${subshellRunFlag:=false}" "${stdinRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
 
         # check for inotifywait
         type -a inotifywait &>/dev/null && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
@@ -668,7 +667,8 @@ if ${readBytesFlag}; then
             printf '>"%s"/.stdin.tmp.{<#>}\n' "${tmpDir}"
             printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] && A[0]=1 || A=()\n' "${tmpDir}"
         ;;
-        bash-stdin)
+        'bash')
+          if ${stdinRunFlag}; then
              printf 'read -r -d '"''"' -n %s -u %s\n' "${nBytes}" "${fd_read}"
              echo '[[ ${REPLY} ]] && A=("${REPLY}") || A=()'
              if ${readBytesExactFlag}; then
@@ -707,8 +707,7 @@ if ${readBytesFlag}; then
                 else
                     { printf '%s\0' \"\${A[@]:0:\$(( \${#A[@]} - 1 ))}\"; printf '%s' \"\${A[-1]}\" >\"${tmpDir}\"/.stdin.tmp-status.{<#>} 
                 fi"""
-        ;;
-        bash-noNull)
+          else
             printf 'read -r -N %s -u ' "${nBytes}"
             if ${readBytesExactFlag}; then
                 printf '%s ' "${fd_stdin}" 
@@ -717,6 +716,7 @@ if ${readBytesFlag}; then
                 printf '%s ' ${fd_read}
             fi
             echo '-a A'
+          fi
         ;;
     esac
 else
@@ -779,7 +779,7 @@ ${subshellRunFlag} && echo '(' || echo '{'
 { ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
 ${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""
 printf '%s ' "${runCmd[@]}"
-if ${readBytesFlag} && [[ ${readBytesProg//bash-noNull/} ]]; then
+if ${readBytesFlag} && { [[ ${readBytesProg//bash/} ]] || ${stdinRunFlag}; }; then
     if ${stdinRunFlag}; then 
         printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp.{<#>}'
     else
