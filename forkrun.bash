@@ -276,7 +276,7 @@ forkrun() {
         fi
         (( ${#runCmd[@]} > 0 )) || ${noFuncFlag} || runCmd=(printf '%s\n')
         (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
-        ${noFuncFlag} && runCmd=('source')
+        ${noFuncFlag} && runCmd=('source' '/proc/self/fd/0')
 
         # setup byte reading if passed -b or -B
         
@@ -313,7 +313,7 @@ forkrun() {
 
             # check for incompatible flags
             { ${nullDelimiterFlag} || [[ ${delimiterVal} ]] || [[ ${delimiterRemoveStr} ]]; } && (( ${verboseLevel} >= 0 )) && {
-                printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' >&${fd_stderr}; 
+                (( ${verboseLevel} >= 0 )) && printf '\nWARNING: The flag to use a null or a custom delimiter (-z | -0 | -d <delim> ) and the flag to read by byte count ( -b | -B ) were both passed.\nThere are no delimiters required when reading by bytes, so the delimiter flag will be unset and ignored\n\n' >&${fd_stderr}; 
                 nullDelimiterFlag=false
                 unset delimiterVal delimiterRemoveStr
             }
@@ -322,7 +322,7 @@ forkrun() {
             [[ ${readBytesProg} ]] || {
                 if type -p dd &>/dev/null && dd --version | grep -qF 'coreutils'; then
                     readBytesProg='dd'
-                elif type -p head; then
+                elif type -p head &>/dev/null; then
                     readBytesProg='head'
                 else
                     readBytesProg='bash'
@@ -372,10 +372,10 @@ forkrun() {
                 delimiterReadStr="-d ''"
             elif [[ -z ${delimiterVal} ]]; then
                 delimiterVal='$'"'"'\n'"'"
-                delimiterRemoveStr='%$'"'"'\n'"'"
+                ${noFuncFlag} || delimiterRemoveStr='%$'"'"'\n'"'"
             else
                 delimiterVal="$(printf '%q' "${delimiterVal}")"
-                delimiterRemoveStr="%${delimiterVal}"
+                 ${noFuncFlag} && delimiterRemoveStr='//'"{delimiterVal}"'/\$'"'"'\n'"'" || delimiterRemoveStr="%${delimiterVal}"
                 delimiterReadStr="-d ${delimiterVal}"
             fi
         }
@@ -383,20 +383,20 @@ forkrun() {
         # modify runCmd if '-i' '-I' or '-u' flags are set
         if ${unescapeFlag}; then
             ${substituteStringFlag} && {
-                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
+                runCmd=("${runCmd[@]//'{}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
             }
             ${substituteStringIDFlag} && {
-                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{ID}'/'{<#>}'}")
-                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'{IND}'/'${nOrder0}'}")
+                runCmd=("${runCmd[@]//'{ID}'/'{<#>}'}")
+                ${nOrderFlag} && runCmd=("${runCmd[@]//'{IND}'/'${nOrder0}'}")
             }
         else
             mapfile -t runCmd < <(printf '%q\n' "${runCmd[@]}")
             ${substituteStringFlag} && {
-                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{\}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
+                runCmd=("${runCmd[@]//'\{\}'/'"${A[@]%$'"'"'\n'"'"'}"'}")
             }
             ${substituteStringIDFlag} && {
-                mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{ID\}'/'{<#>}'}")
-                ${nOrderFlag} && mapfile -t runCmd < <(printf '%s\n' "${runCmd[@]//'\{IND\}'/'${nOrder0}'}")
+                runCmd=("${runCmd[@]//'\{ID\}'/'{<#>}'}")
+                ${nOrderFlag} && runCmd=("${runCmd[@]//'\{IND\}'/'${nOrder0}'}")
             }
         fi
 
@@ -778,9 +778,10 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
 ${subshellRunFlag} && echo '(' || echo '{'
 { ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
 ${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""
+${noFuncFlag} && echo 'IFS=$'"'"'\n'"'"
 printf '%s ' "${runCmd[@]}"
 if ${readBytesFlag} && { [[ ${readBytesProg//bash/} ]] || ${stdinRunFlag}; }; then
-    if ${stdinRunFlag}; then 
+    if ${stdinRunFlag} || ${noFuncFlag}; then 
         printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp.{<#>}'
     else
         printf '"$(<"%s"/%s)"' "${tmpDir}" '.stdin.tmp.{<#>}'
@@ -789,7 +790,7 @@ else
     if ${stdinRunFlag}; then 
         printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\""
     elif ${noFuncFlag}; then 
-        printf "<(printf '%%s\\\\n' \"\${A[@]%s}\")" "${delimiterRemoveStr}"
+        printf "<<<\"\${A[*]%s}\"" "${delimiterRemoveStr}"
     elif ! ${substituteStringFlag}; then 
         printf '%s' "\"\${A[@]${delimiterRemoveStr}}\""
     fi
@@ -807,6 +808,7 @@ fi
         } >&${fd_stderr}
     }"""
 ${readBytesFlag} && [[ ${readBytesProg} ]] && printf '\n\\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}\n'
+${noFuncFlag} && echo 'IFS='
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
 ${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
