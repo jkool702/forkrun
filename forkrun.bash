@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2004,SC2015,SC2016,SC2028,SC2162 source=/dev/null
 
-# TO DO: try implementing `-b`` flag (when reading with bash) using 
-# `read -r -n ${nBytes} -d ''; A+="$REPLY"` until correct number of bytes read, 
-# then replace "${A[@]}" with "$(printf '%s\0' "${A[@]}")" when running the command.
-
 shopt -s extglob
 
 forkrun() {
@@ -728,7 +724,7 @@ else
         echo """
         [[ \${#A[@]} == 0 ]] || {
             [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"""
-                (( ${verboseLevel} > 2 )) && echo """
+        (( ${verboseLevel} > 2 )) && echo """
                 echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"""
         echo """
                 until read -r -u ${fd_read} ${delimiterReadStr}; do 
@@ -764,15 +760,16 @@ ${nLinesAutoFlag} && { printf '%s' """
     ${fallocateFlag} && printf '%s' ' || ' || echo
 }
 ${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
-${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
+${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || {
+    echo """
         { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {"""
-(( ${verboseLevel} > 2 )) && echo "echo \"FIXING SPLIT READ\" >&${fd_stderr}"
-echo """
+    (( ${verboseLevel} > 2 )) && echo "echo \"FIXING SPLIT READ\" >&${fd_stderr}"
+    echo """
             A[-1]=\"\${A[-1]%${delimiterVal}}\"
             IFS=
             mapfile ${delimiterReadStr} A <<<\"\${A[*]}\"
-        }
-"""
+        }"""
+}
 ${subshellRunFlag} && echo '(' || echo '{'
 { ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
 ${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""
