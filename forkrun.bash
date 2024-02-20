@@ -634,8 +634,8 @@ forkrun() {
         # generate coproc source code template (which, in turn, allows you to then spawn many coprocs very quickly and have many "code branch selection" decisions already resolved)
         # this contains the code for the coprocs but has the worker ID represented using {<#>}. coprocs will be sourced via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
         #
-        # NOTE: because the coproc code generation dynamically adaptsd to all of forkrun's possible options, this part is...well...hard to follow. 
-        # To see the resulting coproc code for a given set of forkrun options, run:   `echo | forkrun -v -v -v -v <FLAGS> :`
+        # NOTE: because the (uncommented) coproc code generation dynamically adapts to all of forkrun's possible options, this part is...well...hard to follow. 
+        # To see the resulting coproc code for a given set of forkrun options, run:   `echo | forkrun -vvvv <FLAGS> :`
 
         coprocSrcCode="$( echo """
 { coproc p{<#>} {
@@ -669,14 +669,13 @@ if ${readBytesFlag}; then
         ;;
         'bash')
           if ${stdinRunFlag}; then
-             printf 'read -r -d '"''"' -n %s -u %s\n' "${nBytes}" "${fd_read}"
-             echo '[[ ${REPLY} ]] && A=("${REPLY}") || A=()'
+             printf 'read -r -d '"''"' -n %s -u %s -a A\n' "${nBytes}" "${fd_read}"
              if ${readBytesExactFlag}; then
-                echo "nBytesRemaining=\$(( \${nBytes} - \${#REPLY} ))"
+                echo "nBytesRemaining=\$(( \${nBytes} - \${#A[0]} ))"
                 if [[ ${tTimeout} ]]; then
                     echo """
-                    t0=\${EPOCHSECONDS}
-                    while (( ( \${t0} - \${EPOCHSECONDS} ) <= \${tTimeout} )); do"""
+                    SECONDS=0
+                    while (( \${SECONDS} <= \${tTimeout} )); do"""
                 else
                     echo "while true; do"
                 fi
@@ -688,7 +687,7 @@ if ${readBytesFlag}; then
                     ;;
                     1)
                         trailingNullFlag=true
-                        ((nBytesRemaining--))
+                        nBytesRemaining=0
                         break
                     ;;
                     *)
@@ -699,14 +698,15 @@ if ${readBytesFlag}; then
                 esac
             done"""
             else
-                echo '[[ ${#REPLY} == ${nBytes} ]] && trailingNullFlag=false || trailingNullFlag=true'
+                echo '[[ ${#A[0]} == ${nBytes} ]] && trailingNullFlag=false || trailingNullFlag=true'
             fi
             echo """
                 if \${trailingNullFlag}; then
-                    printf '%s\0' \"\${A[@]}\" >\"${tmpDir}\"/.stdin.tmp-status.{<#>} 
+                    printf '%s\0' \"\${A[@]}\" 
                 else
-                    { printf '%s\0' \"\${A[@]:0:\$(( \${#A[@]} - 1 ))}\"; printf '%s' \"\${A[-1]}\" >\"${tmpDir}\"/.stdin.tmp-status.{<#>} 
-                fi"""
+                    printf '%s' \"\${A[0]}\" 
+                    printf '\0%s' \"\${A[@]:1}\"
+                fi >\"${tmpDir}\"/.stdin.tmp-status.{<#>}"""
           else
             printf 'read -r -N %s -u ' "${nBytes}"
             if ${readBytesExactFlag}; then
@@ -730,16 +730,13 @@ else
             [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"""
                 (( ${verboseLevel} > 2 )) && echo """
                 echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"""
-                echo """
+        echo """
                 until read -r -u ${fd_read} ${delimiterReadStr}; do 
                     A[-1]+=\"\${REPLY}\"; 
                 done
                 A[-1]+=\"\${REPLY}\"${delimiterVal}"""
-                (( ${verboseLevel} > 2 )) && echo """
-                echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}
-                echo  >&${fd_stderr}"""
-                echo """
-            }"""
+        (( ${verboseLevel} > 2 )) && echo "echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}"
+        echo "}"
     }
 fi
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
@@ -754,7 +751,7 @@ ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
 echo "break"
 { ${inotifyFlag} || ${nOrderFlag}; } && echo "else"
 ${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
-${inotifyFlag} && echo "read -u ${fd_inotify} -t 0.1"
+${inotifyFlag} && echo "read -u ${fd_inotify} -t 1"
 echo """
         fi
         continue
@@ -768,11 +765,12 @@ ${nLinesAutoFlag} && { printf '%s' """
 }
 ${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo """
-        { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {
-            $( (( ${verboseLevel} > 2 )) && echo "echo \"FIXING SPLIT READ\" >&${fd_stderr}")
+        { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {"""
+(( ${verboseLevel} > 2 )) && echo "echo \"FIXING SPLIT READ\" >&${fd_stderr}"
+echo """
             A[-1]=\"\${A[-1]%${delimiterVal}}\"
             IFS=
-            mapfile A <<<\"\${A[*]}\"
+            mapfile ${delimiterReadStr} A <<<\"\${A[*]}\"
         }
 """
 ${subshellRunFlag} && echo '(' || echo '{'
@@ -807,7 +805,7 @@ fi
             echo
         } >&${fd_stderr}
     }"""
-${readBytesFlag} && [[ ${readBytesProg} ]] && printf '\n\\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}\n'
+${readBytesFlag} && [[ ${readBytesProg//bash/} ]] && printf '\n\\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}\n'
 ${noFuncFlag} && echo 'IFS='
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
