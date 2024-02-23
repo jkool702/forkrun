@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local nLines0 tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local  tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 nBytesRemaining v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -260,9 +260,9 @@ forkrun() {
         shopt -s nullglob
 
         # dynamically set defaults for a few flags
+        : "${noFuncFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}"
 
         # determine what forkrun is using lines on stdin for
-        : "${noFuncFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}" "${stdinRunFlag:=false}" 
         if ${FORCE_allowCarriageReturnsFlag}; then
             # NOTE: allowing carriage returns in parFunC (or its initial args) is DANGEROUS. Dont do this unless you know what you are doing.
             # As such, `FORCE_allowCarriageReturnsFlag` can only be enabled (set to `true`) using the DEBUG_FORKRUN environment variable
@@ -288,7 +288,7 @@ forkrun() {
             nBytes="${nBytes//' '/}"
 
             [[ "${nBytes}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]),+([0-9])?(.+([0-9])) ]] && {
-                tTimeOut="${nBytes##*,}"
+                tTimeout="${nBytes##*,}"
                 nBytes="${nBytes%,*}"
             }
 
@@ -328,12 +328,12 @@ forkrun() {
                     (( ${verboseLevel} >= 0 )) && printf '\nWARNING: neither "dd (GNU)" nor "head" are available. The `read` builtin will be used by the worker coprocs to read data. forkrun will run considerably slower. \n\n' >&${fd_stderr}; 
                 fi
             }
-            ${stdinRunFlag} || (( ${verboseLevel} < 0 )) || printf '\nWARNING: data will be passed to coprocs via bash variables, which will drop NULLs and will probably mangle binary data (text data should still work). \nIt is recommended to use the `-S` flag to pass data to the coprocs stdin instead\n\n' >&${fd_stderr}; 
+            ${stdinRunFlag} || (( ${verboseLevel} < 0 )) || printf '\nWARNING: data will be passed to coprocs via bash variables, which will drop NULLs and will probably mangle binary data (text data should still work). \nIt is not recommended to use the `+S` flag to prevent passing data to the coprocs stdin\n\n' >&${fd_stderr}; 
 
             # read from pipe for -B if using dd/head. also dont need inotifywait
-            if ${readBytesExactFlag} && [[ ${readBytesProg//'bash'/} ]] && ! ${stdinRunFlag}; then  
-                 pipeReadFlag=true
-                 inotifyFlag=false
+            if ${readBytesExactFlag} && ! { [[ ${readBytesProg} == 'bash' ]] && ${stdinRunFlag}; }; then  
+                pipeReadFlag=true
+                inotifyFlag=false
             else
                 pipeReadFlag=false
             fi
@@ -351,10 +351,11 @@ forkrun() {
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}"
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" "${stdinRunFlag:=false}" 
+        doneIndicatorFlag=false
 
         # check for inotifywait
-        type -a inotifywait &>/dev/null && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
+        type -a inotifywait &>/dev/null && ! ${pipeReadFlag} && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
 
         # check for fallocate
         type -a fallocate &>/dev/null && ! ${pipeReadFlag} && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
@@ -417,7 +418,7 @@ forkrun() {
             ${nOrderFlag} && echo '(-k) output will be ordered the same as if the inputs were run sequentially'
             ${exportOrderFlag} && echo '(-n) output batches will be numbered (index is per-batch, denoted using \\034<IND>:\\035\\n)'
             ${substituteStringFlag} && echo '(-i) replacing {} with lines from stdin'
-            ${substituteStringIDFlag} && echo '(-I) replacing {ID} with coproc worker ID'
+            ${substituteStringIDFlag} && printf '%s %s\n' '(-I) replacing {ID} with coproc worker ID' "$(${nOrderFlag} && echo 'and replacing {IND} with output order INDex')"
             ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
             ${pipeReadFlag} && echo '(-p) worker coprocs will read directly from stdin pipe, not from a tmpfile'
             if ${nullDelimiterFlag}; then
@@ -644,41 +645,41 @@ IFS=
 export LC_ALL LANG IFS
 trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
-trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
+trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}; : > \"${tmpDir}\"/.stdin; : > \"${tmpDir}\"/.done; : > \"${tmpDir}\"/.quit ' EXIT
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}"
-echo "read -u ${fd_continue}"
-if ${readBytesFlag}; then
-    echo """
+echo """
+    read -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
-        printf '\\n' >&${fd_continue}
+        printf '\n' >&${fd_continue}
         break
-    }"""
+    }
+    [[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true"""
+if ${readBytesFlag}; then
     case "${readBytesProg}" in
         'dd')
             printf 'dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>} 2>"%s"/.stdin.tmp-status.{<#>} ' "${nBytes}" "${tmpDir}" "${tmpDir}"
-            ${pipeReadFlag} && printf '<&%s\n' "${fd_stdin}" || printf '<&%s\n' "${fd_read}"
-            printf '[[ "$(<"%s"/.stdin.tmp-status.{<#>})" == *$'"'"'\n'"'"'"0 bytes"* ]] && A=() || A[0]=1\n' "${tmpDir}"
+            ${pipeReadFlag} && printf 'iflag=fullblock <&%s\n' "${fd_stdin}" || printf '<&%s\n' "${fd_read}"
+            printf '[[ "$(<"%s"/.stdin.tmp-status.{<#>})" == *$'"'"'\\n'"'"'"0 bytes"* ]] && A=() || A[0]=1\n' "${tmpDir}"
         ;;
         'head')
             printf 'head -c %s ' "${nBytes}"
             ${pipeReadFlag} && printf '<&%s ' "${fd_stdin}" || printf '<&%s ' "${fd_read}"
             printf '>"%s"/.stdin.tmp.{<#>}\n' "${tmpDir}"
-            printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] && A[0]=1 || A=()\n' "${tmpDir}"
+            printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] 2>/dev/null && A[0]=1 || A=()\n' "${tmpDir}"
         ;;
         'bash')
           if ${stdinRunFlag}; then
-             printf 'read -r -d '"''"' -n %s -u %s -a A\n' "${nBytes}" "${fd_read}"
-             if ${readBytesExactFlag}; then
+            [[ ${tTimeout} ]] && echo "SECONDS=0"
+            printf 'read -r -d '"''"' -n %s -u %s -a A' "${nBytes}" "${fd_read}"
+            [[ ${tTimeout} ]] && echo " -t ${tTimeout}" || echo
+
+            if ${readBytesExactFlag}; then
                 echo "nBytesRemaining=\$(( \${nBytes} - \${#A[0]} ))"
-                if [[ ${tTimeout} ]]; then
-                    echo """
-                    SECONDS=0
-                    while (( \${SECONDS} <= \${tTimeout} )); do"""
-                else
-                    echo "while true; do"
-                fi
+
                 echo """
+            [[ \${nBytesRemaining} == \${nBytes} ]] || while (( \${nBytesRemaining} > 0 )); do
+
                 case \${nBytesRemaining} in
                     0)
                         trailingNullFlag=false
@@ -689,10 +690,17 @@ if ${readBytesFlag}; then
                         nBytesRemaining=0
                         break
                     ;;
-                    *)
-                        read -r -d '' -n \"\${nBytesRemaining}\" -u \"\${fd_read}\"
-                        nBytesRemaining-=\${#REPLY}
-                        A+=(\"\${REPLY}\")
+                    *)"""
+                printf "read -r -d '' -n \"\${nBytesRemaining}\" -u \"\${fd_read}\""
+                [[ ${tTimeout} ]] && echo " -t ${tTimeout}" || echo
+                echo """
+                        if [[ \${#REPLY} == 0 ]]; then
+                            trailingNullFlag=true
+                            break
+                        else
+                            nBytesRemaining=\$(( \${nBytesRemaining} - \${#REPLY} - 1 ))
+                            A+=(\"\${REPLY}\")
+                        fi
                     ;;
                 esac
             done"""
@@ -705,7 +713,7 @@ if ${readBytesFlag}; then
                 else
                     printf '%s' \"\${A[0]}\" 
                     printf '\0%s' \"\${A[@]:1}\"
-                fi >\"${tmpDir}\"/.stdin.tmp-status.{<#>}"""
+                fi >\"${tmpDir}\"/.stdin.tmp.{<#>}"""
           else
             printf 'read -r -N %s -u ' "${nBytes}"
             if ${readBytesExactFlag}; then
@@ -741,16 +749,18 @@ fi
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
 ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo "}"
 echo """
-    printf '\\n' >&${fd_continue};
+    printf '\\n' >&${fd_continue}
     [[ \${#A[@]} == 0 ]] && {
-        if [[ -f \"${tmpDir}\"/.done ]]; then"""
+        if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
-echo "[[ -f \"${tmpDir}\"/.quit ]] || : >\"${tmpDir}\"/.quit"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
-echo "break"
+echo """
+            : >\"${tmpDir}\"/.quit
+            printf '\\n' >&${fd_continue}
+        break"""
 { ${inotifyFlag} || ${nOrderFlag}; } && echo "else"
 ${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
-${inotifyFlag} && echo "read -u ${fd_inotify} -t 1"
+${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify} -t 0.1"
 echo """
         fi
         continue
