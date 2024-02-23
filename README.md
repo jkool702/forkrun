@@ -9,13 +9,13 @@
 
 <sup>1: bash 5.1+ is preffered and much better tested. A few basic filesystem operations (`rm`, `mkdir`) must also be available. `fallocate` and `inotifywait` are not required; but, if present, will be used to lower runtime resource usage.</sup>
 
-**CURRENT VERSION**: forkrun v1.1.1
+**CURRENT VERSION**: forkrun v1.1.2
 
 **PREVIOUS VERION**: forkrun v1.0
 
 **CHANGES**: 2 new flags (`-b <bytes>` and `-B <bytes>`) that cause forkrun to split up stdin into blocks of `<bytes>` bytes. `-B` will wait and accululate blocks of exactly `<bytes>` bytes, `-b` will not. The `-I` flag has been expanded so that if `-k` (or `-n`) is also passed then a second susbstitution is made, swapping `{IND}` for the batch ordering index (the same thing that `-n` outputs at the start of each block) (`{ID}` will still be swapped for coproc ID). A handful of optimizations and bug-fixes have also been implemented (notably with how the coproc source code is dynamically generated). Lastly. the forkrun repo had some changes to how it is organized.
 
-NOTE: for the `-b` and `-B` flags to have the sort of effeciency and speed that forkrun typically has, you need to have GNU `dd` available. If you dont, `forkrun` will try to use `head -c` (which is *much* slower), and if thats unavailable itll use the `read -N` builtin (which is *much much* slower still and will mangle binary data since it will drop NULL's). You *really* want to use GNU `dd` here. Also, if passing binary data you should use the `-S` flag to pass it via stdin and avoid having bash process it and mangle it.
+NOTE: for the `-b` and `-B` flags to have the sort of effeciency and speed that forkrun typically has, you need to have GNU `dd` available. If you dont, `forkrun` will try to use `head -c` (which is *much* slower), and if thats unavailable itll use the `read` builtin with either `-n` or `-N` (which is *much* slower still...You *really* want to use GNU `dd` here). Also, when using these flags the `-S` flag is auomatically selected, meaning data is passed to the function being parallelized via its stdin. This is to avoid mangling binary data passed on stdin. This can be overruled by passing the`+S` flag, but all NULLs in stdin will be dropped.
 
 ***
 
