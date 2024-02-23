@@ -14,7 +14,7 @@ forkrun() {
 #
 # --usage              :  display brief usage info
 # -? | -h | --help     :  dispay standard help (includes brief descriptions + short names for flags)
-# --help=s[hort]       :  more detailed varient of '--usage'
+# --help=s[hort]       :  more detailed variant of '--usage'
 # --help=f[lags]       :  display detailed info about flags (longer descriptions, short + long names)
 # --help=a[ll]         :  display all help (includes detailed descriptions for flags)
 #
@@ -28,7 +28,7 @@ forkrun() {
 
     # make all variables local
     local  tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 nBytesRemaining v9 kkMax kkCur kk verboseLevel
+    local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 nBytesRead v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
     # # # # # PARSE OPTIONS # # # # #
@@ -195,7 +195,7 @@ forkrun() {
             ;;
 
             @([-+])?([-+])*@([[:graph:]])*)
-                printf '\nERROR: FLAG "%s" NOT RECOGNIZED. ABORTING.\n\nNOTE: If this flag was intended for the code big parallelized: then:\n1. ensure all flags for forkrun come first\n2. pass '"'"'--'"'"' to denote where forkrun flag parsing should stop.\n\nUSAGE INFO:' "$1" >&2
+                printf '\nERROR: FLAG "%s" NOT RECOGNIZED. ABORTING.\n\nNOTE: If this flag was intended for the code being parallelized: then:\n1. ensure all flags for forkrun come first\n2. pass '"'"'--'"'"' to denote where forkrun flag parsing should stop.\n\nUSAGE INFO:' "$1" >&2
 
                 forkrun_displayHelp --usage
                 returnVal=1
@@ -273,6 +273,7 @@ forkrun() {
         (( ${#runCmd[@]} > 0 )) || ${noFuncFlag} || runCmd=(printf '%s\n')
         (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
         ${noFuncFlag} && runCmd=('source' '/proc/self/fd/0')
+        hash "${runCmd[0]}"
 
         # setup byte reading if passed -b or -B
         
@@ -289,6 +290,7 @@ forkrun() {
 
             [[ "${nBytes}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]),+([0-9])?(.+([0-9])) ]] && {
                 tTimeout="${nBytes##*,}"
+                [[ "${tTimeout}" == +([0-9]).*([0-9]) ]] && { tTimeout="${tTimeout%%.*}"; ((tTimeout++)); }
                 nBytes="${nBytes%,*}"
             }
 
@@ -337,6 +339,8 @@ forkrun() {
             else
                 pipeReadFlag=false
             fi
+
+             [[ ${readBytesProg} == 'bash' ]] || hash "${readBytesProg}"
 
         else
             # set batch size
@@ -647,7 +651,7 @@ trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}; : > \"${tmpDir}\"/.stdin; : > \"${tmpDir}\"/.done; : > \"${tmpDir}\"/.quit ' EXIT
 while true; do"""
-${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ -z \${REPLY//[0-9]/} ]] && nLinesCur=\${REPLY}"
+${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
 echo """
     read -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
@@ -675,30 +679,33 @@ if ${readBytesFlag}; then
             [[ ${tTimeout} ]] && echo " -t ${tTimeout}" || echo
 
             if ${readBytesExactFlag}; then
-                echo "nBytesRemaining=\$(( \${nBytes} - \${#A[0]} ))"
+                echo "nBytesRead=\${#A[0]}"
 
                 echo """
-            [[ \${nBytesRemaining} == \${nBytes} ]] || while (( \${nBytesRemaining} > 0 )); do
-
-                case \${nBytesRemaining} in
-                    0)
+        [[ \${nBytesRead} == 0 ]] || {"""
+        
+            [[ ${tTimeout} ]] && echo "while (( \${SECONDS} < ${tTimeout} )); do" || echo "while true; do"
+            echo """
+                case \$(( \${nBytesRead} + \${#A[@]} )) in
+                    ${nBytes})
+                        trailingNullFlag=true
+                        break
+                    ;;
+                    $(( ${nBytes} + 1 )))
                         trailingNullFlag=false
                         break
                     ;;
-                    1)
-                        trailingNullFlag=true
-                        nBytesRemaining=0
-                        break
-                    ;;
-                    *)"""
-                printf "read -r -d '' -n \"\${nBytesRemaining}\" -u \"\${fd_read}\""
+
+                    *)
+                { (( ( \${nBytesRead} + \${#A[@]} ) > ${nBytes} )) || [[ -f \"${tmpDir}\"/.done ]]; } && { trailingNullFlag=true; break; }"""
+                printf "read -r -d '' -n \$(( ${nBytes} - ( \${nBytesRead} + \${#A[@]} ) )) -u ${fd_read}"
                 [[ ${tTimeout} ]] && echo " -t ${tTimeout}" || echo
                 echo """
-                        if [[ \${#REPLY} == 0 ]]; then
+                        if [[ \${#REPLY} == 0 ]] && [[ -f \"${tmpDir}\"/.done ]] ; then
                             trailingNullFlag=true
                             break
                         else
-                            nBytesRemaining=\$(( \${nBytesRemaining} - \${#REPLY} - 1 ))
+                            nBytesRead+=\${#REPLY}
                             A+=(\"\${REPLY}\")
                         fi
                     ;;
@@ -713,7 +720,8 @@ if ${readBytesFlag}; then
                 else
                     printf '%s' \"\${A[0]}\" 
                     printf '\0%s' \"\${A[@]:1}\"
-                fi >\"${tmpDir}\"/.stdin.tmp.{<#>}"""
+                fi >\"${tmpDir}\"/.stdin.tmp.{<#>}
+                }"""
           else
             printf 'read -r -N %s -u ' "${nBytes}"
             if ${readBytesExactFlag}; then
