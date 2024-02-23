@@ -332,6 +332,9 @@ forkrun() {
             }
             ${stdinRunFlag} || (( ${verboseLevel} < 0 )) || printf '\nWARNING: data will be passed to coprocs via bash variables, which will drop NULLs and will probably mangle binary data (text data should still work). \nIt is not recommended to use the `+S` flag to prevent passing data to the coprocs stdin\n\n' >&${fd_stderr}; 
 
+            # TEMP FIX - force readBytesExactFlag if using bash and stdinRunFlag. Otherwise it gets stuck somewhere :/
+            [[ ${readBytesProg} == 'bash' ]] && ${stdinRunFlag} && readBytesExactFlag=true
+
             # read from pipe for -B if using dd/head. also dont need inotifywait
             if ${readBytesExactFlag} && ! { [[ ${readBytesProg} == 'bash' ]] && ${stdinRunFlag}; }; then  
                 pipeReadFlag=true
@@ -649,7 +652,7 @@ IFS=
 export LC_ALL LANG IFS
 trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
-trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}; : > \"${tmpDir}\"/.stdin; : > \"${tmpDir}\"/.done; : > \"${tmpDir}\"/.quit ' EXIT
+trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
 echo """
@@ -675,54 +678,53 @@ if ${readBytesFlag}; then
         'bash')
           if ${stdinRunFlag}; then
             [[ ${tTimeout} ]] && echo "SECONDS=0"
-            printf 'read -r -d '"''"' -n %s -u %s -a A' "${nBytes}" "${fd_read}"
-            [[ ${tTimeout} ]] && echo " -t ${tTimeout}" || echo
+            printf 'if read -r -d '"''"' -n %s -u %s' "${nBytes}" "${fd_read}"
+            [[ ${tTimeout} ]] && printf ' -t %s' "${tTimeout}"
+            echo """; then
+                [[ \${REPLY} ]] && A=(\"\${REPLY}\") || A=('')
+                trailingNullFlag=true"""
+            ${readBytesExactFlag} && echo 'nBytesRead=1'
+            echo """
+            else
+                [[ \${REPLY} ]] && A=(\"\${REPLY}\") || A=()
+                trailingNullFlag=false"""
+            ${readBytesExactFlag} && echo 'nBytesRead=0'
+            echo 'fi'
 
             if ${readBytesExactFlag}; then
-                echo "nBytesRead=\${#A[0]}"
-
                 echo """
-        [[ \${nBytesRead} == 0 ]] || {"""
+            nBytesRead+=\${#REPLY}
+            [[ \${nBytesRead} == 0 ]] || (( \${nBytesRead} >= ${nBytes} )) || {"""
         
             [[ ${tTimeout} ]] && echo "while (( \${SECONDS} < ${tTimeout} )); do" || echo "while true; do"
-            echo """
-                case \$(( \${nBytesRead} + \${#A[@]} )) in
-                    ${nBytes})
-                        trailingNullFlag=true
-                        break
-                    ;;
-                    $(( ${nBytes} + 1 )))
-                        trailingNullFlag=false
-                        break
-                    ;;
+            echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true"
 
-                    *)
-                { (( ( \${nBytesRead} + \${#A[@]} ) > ${nBytes} )) || [[ -f \"${tmpDir}\"/.done ]]; } && { trailingNullFlag=true; break; }"""
-                printf "read -r -d '' -n \$(( ${nBytes} - ( \${nBytesRead} + \${#A[@]} ) )) -u ${fd_read}"
-                [[ ${tTimeout} ]] && echo " -t ${tTimeout}" || echo
-                echo """
-                        if [[ \${#REPLY} == 0 ]] && [[ -f \"${tmpDir}\"/.done ]] ; then
-                            trailingNullFlag=true
-                            break
-                        else
-                            nBytesRead+=\${#REPLY}
-                            A+=(\"\${REPLY}\")
-                        fi
-                    ;;
-                esac
-            done"""
-            else
-                echo '[[ ${#A[0]} == ${nBytes} ]] && trailingNullFlag=false || trailingNullFlag=true'
+            printf "if read -r -d '' -n \$(( ${nBytes} - \${nBytesRead} )) -u ${fd_read}"
+            [[ ${tTimeout} ]] && printf ' -t %s' "${tTimeout}" 
+            echo """; then
+                    ((nBytesRead++))
+                    nBytesRead+=\${#REPLY}
+                    [[ \${REPLY} ]] && A+=(\"\${REPLY}\") || A+=('')
+                    (( \${nBytesRead} >= ${nBytes} )) && { trailingNullFlag=true; break; }
+                else
+                    trailingNullFlag=false
+                    [[ \${REPLY} ]] && A+=(\"\${REPLY}\")
+                    { (( \${nBytesRead} >= ${nBytes} )) || ${doneIndicatorFlag}; } && { trailingNullFlag=false; break; }
+                    break
+                fi
+            done
+        }"""
             fi
             echo """
-                if \${trailingNullFlag}; then
-                    printf '%s\0' \"\${A[@]}\" 
-                else
-                    printf '%s' \"\${A[0]}\" 
-                    printf '\0%s' \"\${A[@]:1}\"
-                fi >\"${tmpDir}\"/.stdin.tmp.{<#>}
-                }"""
-          else
+        {
+            if \${trailingNullFlag}; then
+                printf '%s\0' \"\${A[@]}\" 
+            else
+                printf '%s' \"\${A[0]}\" 
+                printf '\0%s' \"\${A[@]:1}\"
+            fi 
+        } >\"${tmpDir}\"/.stdin.tmp.{<#>}"""
+        else
             printf 'read -r -N %s -u ' "${nBytes}"
             if ${readBytesExactFlag}; then
                 printf '%s ' "${fd_stdin}" 
@@ -730,8 +732,14 @@ if ${readBytesFlag}; then
             else
                 printf '%s ' ${fd_read}
             fi
-            echo '-a A'
-          fi
+            echo """
+            if [[ \${REPLY} ]]; then
+                echo \"\${REPLY}\" >\"${tmpDir}\"/.stdin.tmp.{<#>}
+                A=('')
+            else
+                A=()
+            fi"""
+        fi
         ;;
     esac
 else
@@ -796,7 +804,7 @@ ${subshellRunFlag} && echo '(' || echo '{'
 ${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""
 ${noFuncFlag} && echo 'IFS=$'"'"'\n'"'"
 printf '%s ' "${runCmd[@]}"
-if ${readBytesFlag} && { [[ ${readBytesProg//bash/} ]] || ${stdinRunFlag}; }; then
+if ${readBytesFlag}; then
     if ${stdinRunFlag} || ${noFuncFlag}; then 
         printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp.{<#>}'
     else
@@ -823,7 +831,7 @@ fi
             echo
         } >&${fd_stderr}
     }"""
-${readBytesFlag} && [[ ${readBytesProg//bash/} ]] && printf '\n\\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}\n'
+${readBytesFlag} && { [[ ${readBytesProg//bash/} ]] || ${stdinRunFlag}; } && printf '\n\\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}\n'
 ${noFuncFlag} && echo 'IFS='
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
@@ -849,7 +857,10 @@ p_PID+=(\${p{<#>}_PID})""" )"
         done
 
         (( ${verboseLevel} > 1 )) && printf '\n\nALL WORKER COPROCS FORKED\n\n' >&${fd_stderr}
-        (( ${verboseLevel} > 3 )) && printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}" >&${fd_stderr}
+        (( ${verboseLevel} > 3 )) && { 
+            printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}"
+            declare -p fd_continue fd_inotify fd_nAuto fd_nOrder fd_nOrder0 fd_read fd_write fd_stdin fd_stdout fd_stderr 
+        } >&${fd_stderr}
 
         # # # # # WAIT FOR THEM TO FINISH # # # # #
           #   #   PRINT OUTPUT IF ORDERED   #   #
