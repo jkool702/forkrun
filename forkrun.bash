@@ -732,13 +732,7 @@ if ${readBytesFlag}; then
             else
                 printf '%s ' ${fd_read}
             fi
-            echo """
-            if [[ \${REPLY} ]]; then
-                echo \"\${REPLY}\" >\"${tmpDir}\"/.stdin.tmp.{<#>}
-                A=('')
-            else
-                A=()
-            fi"""
+            echo '-a A'
         fi
         ;;
     esac
@@ -804,7 +798,7 @@ ${subshellRunFlag} && echo '(' || echo '{'
 ${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""
 ${noFuncFlag} && echo 'IFS=$'"'"'\n'"'"
 printf '%s ' "${runCmd[@]}"
-if ${readBytesFlag}; then
+if ${readBytesFlag} && ! { [[ ${readBytesProg} == 'bash' ]] && ! ${stdinRunFlag}; }; then
     if ${stdinRunFlag} || ${noFuncFlag}; then 
         printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp.{<#>}'
     else
