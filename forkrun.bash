@@ -997,15 +997,15 @@ echo -t{,=} --{tmp,tmpdir}{,=} --t{,=} -{tmp,tmpdir}{,=} $'\n' \
 -B{,=} --BYTE{S,}{,=} --B{,=} -BYTE{S,}{,=} $'\n' \
 -d{,=} --{delim,delimiter}{,=} --d{,=} -{delim,delimiter}{,=} $'\n' \
 {-,+}i {--,++}insert {--,++}i {-,+}insert {-+,+-}i {-+,+-}insert $'\n' \
-{-,+}I {--,++}INSERT{,-ID,ID} {--,++}I {-,+}INSERT{,-ID,ID}{-+,+-}I {-+,+-}INSERT{,-ID,ID}$'\n' \
+{-,+}I {--,++}INSERT{,-ID,ID} {--,++}I {-,+}INSERT{,-ID,ID}{-+,+-}I {-+,+-}INSERT{,-ID,ID} $'\n' \
 {-,+}k {--,++}keep{,-order,order} {--,++}k {-,+}keep{,-order,order} {-+,+-}k {-+,+-}keep{,-order,order} $'\n' \
 {-,+}n {--,++}number{-,}line{,s} {--,++}n {-,+}number{-,}line{,s} {-+,+-}n {-+,+-}number{-,}line{,s} $'\n' \
 {-,+}{z,0} {--,++}{zero,null} {--,++}{z,0} {-,+}{zero,null} {-+,+-}{z,0} {-+,+-}{zero,null} $'\n' \
 {-,+}s {--,++}sub{,-}shell{-,}run {--,++}s {-,+}sub{,-}shell{-,}run {-+,+-}s {-+,+-}sub{,-}shell{-,}run $'\n' \
-{-,+}S {--,++}{S,s}tdin{,-run,run} {--,++}S {-,+}{S,s}tdin{,-run,run} {-+,+-}S {-+,+-}{S,s}tdin{,-run,run}  $'\n' \
+{-,+}S {--,++}{S,s}tdin{,-run,run} {--,++}S {-,+}{S,s}tdin{,-run,run} {-+,+-}S {-+,+-}{S,s}tdin{,-run,run} $'\n' \
 {-,+}p {--,++}pipe{,-read,read} {--,++}p {-,+}pipe{,-read,read} {-+,+-}p {-+,+-}pipe{,-read,read} $'\n' \
 {-,+}D {--,++}{D,d}elete {--,++}D {-,+}{D,d}elete {-+,+-}D {-+,+-}{D,d}elete $'\n' \
-{-,+}N {--,++}{No,no,NO,nO}{,-}func {--,++}N {-,+}{No,no,NO,nO}{,-}func {-+,+-}N {-+,+-}{No,no,NO,nO}{,-}func {--,++}{No,no,NO,nO} {-,+}{No,no,NO,nO} {-+,+-}{No,no,NO,nO}  $'\n' \
+{-,+}N {--,++}{No,no,NO,nO}{,-}func {--,++}N {-,+}{No,no,NO,nO}{,-}func {-+,+-}N {-+,+-}{No,no,NO,nO}{,-}func {--,++}{No,no,NO,nO} {-,+}{No,no,NO,nO} {-+,+-}{No,no,NO,nO} $'\n' \
 {-,+}u {--,++}unescape {--,++}u {-,+}unescape {-+,+-}u {-+,+-}unescape $'\n' \
 {-,+}{v,vv,vvv,vvvv} {--,++}verbose {--,++}{v,vv,vvv,vvvv} {-,+}verbose {-+,+-}{v,vv,vvv,vvvv} {-+,+-}verbose $'\n' \
 {--,-}usage $'\n' \
