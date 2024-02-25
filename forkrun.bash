@@ -18,7 +18,7 @@ forkrun() {
 # --help=f[lags]       :  display detailed info about flags (longer descriptions, short + long names)
 # --help=a[ll]         :  display all help (includes detailed descriptions for flags)
 #
-# NOTE: the `?` may need too be escaped for `-?` to trigger the help (i.e., use `forkrun '-?'` or `forkrun -\?`)
+# NOTE: the `?` may need to be escaped for `-?` to trigger the help (i.e., use `forkrun '-?'` or `forkrun -\?`)
 
 ############################ BEGIN FUNCTION ############################
 
@@ -978,8 +978,8 @@ _forkrun_complete() {
 
         else
             # completion is an argument for the command being parallelized
-            # TBD - generate completions as if "${COMP_WORDS[@]:${kk}}" was typed on the command line
-            :
+            # shift by index of the command being parallelized (which is "${kk}")
+            _command_offset ${kk}
         fi
 
     else
@@ -1012,7 +1012,8 @@ echo -t{,=} --{tmp,tmpdir}{,=} --t{,=} -{tmp,tmpdir}{,=} $'\n' \
 -{\?,h} --help --{\?,h} -help $'\n' \
 {--,-}help={s,short} $'\n' \
 {--,-}help={f,flags} $'\n' \
-{--,-}help={a,all})
+{--,-}help={a,all} $'\n' \
+--)
 
         # generate possible complertions
         mapfile -t comps0 < <( IFS=' '; compgen -W "${compsA[*]}" -- "${COMP_WORDS[${COMP_CWORD}]}"; )
