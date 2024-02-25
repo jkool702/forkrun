@@ -1152,7 +1152,10 @@ OPTIONAL DEPENDENCIES (to provide enhanced functionality):
                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
     `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | forkrun).
                                     Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage.
-    `dd` (GNU)  -OR-  `head`      : When splitting up stdin by byte count (due to either the `-b` or `-B` flag being used), if either of these is available it will be used to read stdin instead of the builtin `read (-n|-N)`. If both are available `dd` is preferred.
+    `dd` (GNU)  -OR-  `head`      : When splitting up stdin by byte count (due to either the `-b` or `-B` flag being used), if available one of these will be used to read stdin (instead of the `read (-n|-N)` builtin). 
+                                    If both are available `dd` is preferred. `dd` is much faster than `head`, which in much *much* faster than `read (-n|-N)`. NOTE: `dd` must be the GNU version...the busybox `dd` doesnt work here.
+    `bash-completion`             : Required for bash automatic completion (on <TAB> press) to work as you are typing the forkrun commandline. 
+                                    This is strictly a "quality of life" feature to make typing the forkrun cmdline easier -- it has zero effect on forkrun's execution after it has been called.
 
 EOF
 }
