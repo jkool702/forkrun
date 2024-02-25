@@ -18,7 +18,7 @@ forkrun() {
 # --help=f[lags]       :  display detailed info about flags (longer descriptions, short + long names)
 # --help=a[ll]         :  display all help (includes detailed descriptions for flags)
 #
-# NOTE: the `?` may need to be escaped for `-?` to trigger the help (i.e., use `forkrun '-?'` or `forkrun -\?`)
+# NOTE: the `?` may need too be escaped for `-?` to trigger the help (i.e., use `forkrun '-?'` or `forkrun -\?`)
 
 ############################ BEGIN FUNCTION ############################
 
@@ -185,7 +185,7 @@ forkrun() {
                 esac
             ;;
             
-            -?(-)@(help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|usage|[h?]))
+            -?(-)help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|-?(-)usage|-?(-)[h?])
                 forkrun_displayHelp "${1}"
                 return 0
             ;;
@@ -924,116 +924,6 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
 }
 
-# set up completion fodr forkrun
-_forkrun_complete() {
-    local -i kk jj
-    local cmdFlag 
-    local -a compsA comps0 compsT
-    local -A comps
-
-    cmdFlag=false
-
-    kk=1
-    while (( ${kk} < ${COMP_CWORD} )); do
-        case "${COMP_WORDS[$kk]}" in
-            # forkrun option with arg - 2 inputs
-            -?(-)@(@([jP]|?(n)[Pp]roc?(s)?)|?(n)l?(ine?(s))|?(N)L?(INE?(S))|b?(yte?(s))|B?(YTE?(S))|t?(mp?(?(-)dir))|d?(elim?(iter))))
-                kk+=2
-            ;;
-
-            # forkrun option with arg or for displaying help - 1 input
-            -?(-)@(@([jP]|?(n)[Pp]roc?(s)?)@([= ])+([0-9])|?(n)l?(ine?(s))@([= ])+([0-9])|?(N)L?(INE?(S))@([= ])+([0-9])?(,+([0-9]))|b?(yte?(s))@([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])|B?(YTE?(S))@([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9])))|t?(mp?(?(-)dir))@([= ])*@([[:graph:]])*|d?(elim?(iter))@([= ])@([[:graph:]])*|help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|usage|[h?]))
-                ((kk++))
-            ;;
-
-            # forkrun option without arg - 1 input
-            [+-]?([+-])@(@(i?(nsert))|@(I?(D)|INSERT?(?(-)ID))|k?(eep?(?(-)order))|@(0|z?(ero)|null)|s?(ub)?(?(-)shell)?(?(-)run)|@(S|[Ss]tdin?(?(-)run))|p?(ipe)?(?(-)read)|@(D|[Dd]elete)|n?(umber)?(-)?(line?(s))|@(N?(O)|[Nn][Oo]?(-)func)|u?(nescape)|@(+(v)|verbose)))
-                ((kk++))
-            ;;
-
-            # option to force stop forkrun option parsing - next option is the command being parallelized
-            --)
-                ((kk++))
-                cmdFlag=true
-                break
-            ;;
-
-            # this option is the start of the command being parallelized
-            *)
-                cmdFlag=true
-                break
-            ;;
-
-        esac
-    done
-
-    [[ "${kk}" == "${COMP_CWORD}" ]] && ! [[ "${COMP_WORDS[${COMP_CWORD}]:0:1}" == @([-+]) ]] && cmdFlag=true
-
-    if ${cmdFlag}; then
-        # completion is not a forkrun option
-
-        if [[ "${kk}" == "${COMP_CWORD}" ]]; then
-            # completion is the command that forkrun is parallelizing
-            COMPREPLY=($(compgen -c -- "${COMP_WORDS[${COMP_CWORD}]}"))
-
-        else
-            # completion is an argument for the command being parallelized
-            # shift by index of the command being parallelized (which is "${kk}")
-            _command_offset ${kk}
-        fi
-
-    else
-        # completion is a forkrun option
-
-        # dont complete arguments for options that are standalong seperate inputs
-        (( ${kk} > ${COMP_CWORD} )) && return
-
-        # generate array with possible completions
-        mapfile -t compsA < <(printf '%s ' '' -{,-}{j,P,nprocs}{,=} $'\n' \
-echo -t{,=} --{tmp,tmpdir}{,=} --t{,=} -{tmp,tmpdir}{,=} $'\n' \
--l{,=} --{,n}line{s,}{,=} --l{,=} -{,n}line{s,}{,=} $'\n' \
--L{,=} --{,N}LINE{S,}{,=} --L{,=} -{,N}LINE{S,}{,=} $'\n' \
--b{,=} --byte{s,}{,=} --b{,=} -byte{s,}{,=} $'\n' \
--B{,=} --BYTE{S,}{,=} --B{,=} -BYTE{S,}{,=} $'\n' \
--d{,=} --{delim,delimiter}{,=} --d{,=} -{delim,delimiter}{,=} $'\n' \
-{-,+}i {--,++}insert {--,++}i {-,+}insert {-+,+-}i {-+,+-}insert $'\n' \
-{-,+}I {--,++}INSERT{,-ID,ID} {--,++}I {-,+}INSERT{,-ID,ID}{-+,+-}I {-+,+-}INSERT{,-ID,ID} $'\n' \
-{-,+}k {--,++}keep{,-order,order} {--,++}k {-,+}keep{,-order,order} {-+,+-}k {-+,+-}keep{,-order,order} $'\n' \
-{-,+}n {--,++}number{-,}line{,s} {--,++}n {-,+}number{-,}line{,s} {-+,+-}n {-+,+-}number{-,}line{,s} $'\n' \
-{-,+}{z,0} {--,++}{zero,null} {--,++}{z,0} {-,+}{zero,null} {-+,+-}{z,0} {-+,+-}{zero,null} $'\n' \
-{-,+}s {--,++}sub{,-}shell{-,}run {--,++}s {-,+}sub{,-}shell{-,}run {-+,+-}s {-+,+-}sub{,-}shell{-,}run $'\n' \
-{-,+}S {--,++}{S,s}tdin{,-run,run} {--,++}S {-,+}{S,s}tdin{,-run,run} {-+,+-}S {-+,+-}{S,s}tdin{,-run,run} $'\n' \
-{-,+}p {--,++}pipe{,-read,read} {--,++}p {-,+}pipe{,-read,read} {-+,+-}p {-+,+-}pipe{,-read,read} $'\n' \
-{-,+}D {--,++}{D,d}elete {--,++}D {-,+}{D,d}elete {-+,+-}D {-+,+-}{D,d}elete $'\n' \
-{-,+}N {--,++}{No,no,NO,nO}{,-}func {--,++}N {-,+}{No,no,NO,nO}{,-}func {-+,+-}N {-+,+-}{No,no,NO,nO}{,-}func {--,++}{No,no,NO,nO} {-,+}{No,no,NO,nO} {-+,+-}{No,no,NO,nO} $'\n' \
-{-,+}u {--,++}unescape {--,++}u {-,+}unescape {-+,+-}u {-+,+-}unescape $'\n' \
-{-,+}{v,vv,vvv,vvvv} {--,++}verbose {--,++}{v,vv,vvv,vvvv} {-,+}verbose {-+,+-}{v,vv,vvv,vvvv} {-+,+-}verbose $'\n' \
-{--,-}usage $'\n' \
--{\?,h} --help --{\?,h} -help $'\n' \
-{--,-}help={s,short} $'\n' \
-{--,-}help={f,flags} $'\n' \
-{--,-}help={a,all} $'\n' \
---)
-
-        # generate possible complertions
-        mapfile -t comps0 < <( IFS=' '; compgen -W "${compsA[*]}" -- "${COMP_WORDS[${COMP_CWORD}]}"; )
-
-        # for each possible match, use 1 match from each type of option that forkrun supports. This prevents multiple aliases for a given option being suggested together.
-        for kk in "${!comps0[@]}"; do
-            for jj in "${!compsA[@]}"; do
-                if [[ "${compsA[$jj]}" == *" ${comps0[$kk]} "* ]]; then
-                    mapfile -t compsT < <( IFS=' '; compgen -W "${compsA[$jj]}" -- "${COMP_WORDS[${COMP_CWORD}]}"; )
-                    comps[${compsT[0]}]=''
-                fi
-            done
-        done
-
-        COMPREPLY=("${!comps[@]}")
-
-    fi
-}
-complete -o bashdefault -o nosort -F _forkrun_complete forkrun
-
 # check for cat. if missing define a usable replacement using bash builtins
 type -a cat &>/dev/null || {
 cat() {
@@ -1152,10 +1042,7 @@ OPTIONAL DEPENDENCIES (to provide enhanced functionality):
                                     (which, especially if stdin is being fed by a long-running process, could eventually result in very high memory use).
     `inotifywait`                 : Required to efficiently wait for stdin if it is arriving much slower than the coprocs are capable of processing it (e.g. `ping 1.1.1.1 | forkrun).
                                     Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage.
-    `dd` (GNU)  -OR-  `head`      : When splitting up stdin by byte count (due to either the `-b` or `-B` flag being used), if available one of these will be used to read stdin (instead of the `read (-n|-N)` builtin). 
-                                    If both are available `dd` is preferred. `dd` is much faster than `head`, which in much *much* faster than `read (-n|-N)`. NOTE: `dd` must be the GNU version...the busybox `dd` doesnt work here.
-    `bash-completion`             : Required for bash automatic completion (on <TAB> press) to work as you are typing the forkrun commandline. 
-                                    This is strictly a "quality of life" feature to make typing the forkrun cmdline easier -- it has zero effect on forkrun's execution after it has been called.
+    `dd` (GNU)  -OR-  `head`      : When splitting up stdin by byte count (due to either the `-b` or `-B` flag being used), if either of these is available it will be used to read stdin instead of the builtin `read (-n|-N)`. If both are available `dd` is preferred.
 
 EOF
 }
@@ -1364,4 +1251,3 @@ EOF
 }
 
 }
-

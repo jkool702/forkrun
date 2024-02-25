@@ -7,15 +7,21 @@
 * is considerably faster than `parallel` (over an order of magnitude faster in some cases) while still supporting many of the particularly useful "core" `parallel` features
 * can be easily and efficiently be adapted to parallelize complex tasks without penalty by using shell functions (unlike `xargs` and `parallel`, `forkrun` doesnt need to use `/bin/bash -c` every time the function is executed)
 
-<sup>1: bash 5.1+ is preffered and much better tested. A few basic filesystem operations (`rm`, `mkdir`) must also be available. `fallocate` and `inotifywait` are not required; but, if present, will be used to lower runtime resource usage.</sup>
+<sup>1: bash 5.1+ is preffered and much better tested. A few basic filesystem operations (`rm`, `mkdir`) must also be available. `fallocate` and `inotifywait` are not required; but, if present, will be used to lower runtime resource usage. `bash-completion` is required to enable automatic completion (on `<TAB>` press) when typing the forkrun cmdline.</sup>
 
-**CURRENT VERSION**: forkrun v1.1.2
+**CURRENT VERSION**: forkrun v1.2.0
 
-**PREVIOUS VERION**: forkrun v1.0
+**PREVIOUS VERION**: forkrun v1.1.2
 
-**CHANGES**: 2 new flags (`-b <bytes>` and `-B <bytes>`) that cause forkrun to split up stdin into blocks of `<bytes>` bytes. `-B` will wait and accululate blocks of exactly `<bytes>` bytes, `-b` will not. The `-I` flag has been expanded so that if `-k` (or `-n`) is also passed then a second susbstitution is made, swapping `{IND}` for the batch ordering index (the same thing that `-n` outputs at the start of each block) (`{ID}` will still be swapped for coproc ID). A handful of optimizations and bug-fixes have also been implemented (notably with how the coproc source code is dynamically generated). Lastly. the forkrun repo had some changes to how it is organized.
+# CHANGELOG
 
-NOTE: for the `-b` and `-B` flags to have the sort of effeciency and speed that forkrun typically has, you need to have GNU `dd` available. If you dont, `forkrun` will try to use `head -c` (which is *much* slower), and if thats unavailable itll use the `read` builtin with either `-n` or `-N` (which is *much* slower still...You *really* want to use GNU `dd` here). Also, when using these flags the `-S` flag is auomatically selected, meaning data is passed to the function being parallelized via its stdin. This is to avoid mangling binary data passed on stdin. This can be overruled by passing the`+S` flag, but all NULLs in stdin will be dropped.
+**forkrun v1.2**: forkrun now supports bash automatic completion. Pressing `<TAB>` while typing out the forkrun commandline will auto-complete (when possible) forkrun options, command names, and command options. If no unique auto-complete result is available, pressing `<TAB>` a second time will bring up a list of possibilities. The code required for this functionality is loaded (via the `_forkrun_complete` function) and registered (via the `complete` builtin) when `forkrun.bash` is sourced.
+
+NOTE: forkrun uses mildly "fuzzy" option matching, so to make the automatic completion feature actually useful only the single most reasonable completion is shown for any given forkrun option. e.g., the completion for typing `--pip` will only show `--pipe`, but if you continue typing `--pipe-r` the completion will change to `--pipe-read`, since `--pipe` and `--pipe-read` are both aliases for the same option (`-p`).
+
+**forkrun v1.1**: 2 new flags (`-b <bytes>` and `-B <bytes>`) that cause forkrun to split up stdin into blocks of `<bytes>` bytes. `-B` will wait and accululate blocks of exactly `<bytes>` bytes, `-b` will not. The `-I` flag has been expanded so that if `-k` (or `-n`) is also passed then a second susbstitution is made, swapping `{IND}` for the batch ordering index (the same thing that `-n` outputs at the start of each block) (`{ID}` will still be swapped for coproc ID). A handful of optimizations and bug-fixes have also been implemented (notably with how the coproc source code is dynamically generated). Lastly. the forkrun repo had some changes to how it is organized.
+
+NOTE: for the `-b` and `-B` flags to have the sort of effeciency and speed that forkrun typically has, you need to have GNU `dd` available. If you dont, `forkrun` will try to use `head -c` (which is *much* slower), and if thats unavailable itll use the `read` builtin with either `-n` or `-N` (which is *much* slower still...You *really* want to use GNU `dd` here). Also, when using these flags the `-S` flag is automatically selected, meaning data is passed to the function being parallelized via its stdin. This is to avoid mangling binary data passed on stdin. This can be overruled by passing the`+S` flag, but all NULLs in stdin will be dropped.
 
 ***
 
@@ -139,6 +145,7 @@ Bash 5.1+:           For improved speed due to overhauled handling of arrays.
 
 `dd` (GNU)  -OR-  `head` (GNU|busybox): When splitting up stdin by byte count (due to either the `-b` or `-B` flag being used), if either of these is available it will be used to read stdin instead of the builtin `read -N`. Note that one of these is required to split + process binary data without mangling it - otherwise bash will drop any NULL's. If both are available `dd` is preferred.
 
+`bash-completion`:   Required for bash automatic completion (on `<TAB>` press) to work as you are typing the `forkrun` commandline. This is strictly a "quality of life" feature to maqke typing the nforkrun commandline easier -- it has zero effect on forkrun's execution after it has been called.
 
 ***
 
