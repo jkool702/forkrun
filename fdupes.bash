@@ -2,7 +2,7 @@
 fdupes() {
     ## quickly finds duplicate files using "forkrun", "du", and the "cksum" hash 
     
-fdupes_help() ( cat<<'EOF'
+fdupes_help() ( cat<<'EOF' >&2
 # fdupes implements a 2 stage search: 
 #    it first finds files that have identical sizes, then
 #    for these files, it computes the cksum hash and looks for matching hashes
