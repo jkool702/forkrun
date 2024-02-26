@@ -3,7 +3,9 @@ fdupes() {
     ## quickly finds duplicate files using "forkrun", "du", and the "cksum" hash 
     
 fdupes_help() ( cat<<'EOF' >&2
-# fdupes implements a 2 stage search: 
+## fdupes: quickly finds duplicate files using "forkrun", "du", and the "cksum" hash 
+#
+# fdupes implements a 2 stage search for duplicate files: 
 #    it first finds files that have identical sizes, then
 #    for these files, it computes the cksum hash and looks for matching hashes
 #
@@ -18,16 +20,17 @@ fdupes_help() ( cat<<'EOF' >&2
 # calling fdupes without any inputs is equivilant to calling 'fdupes / \!/{dev,proc,sys,tmp}'
 #
 # FLAGS: 
-#     to skip the initial search for files with identical size,
-#         pass flag '-c' or '--cksum' or '--checksum' or '--crc' or '--hash'
+#     to skip the initial search for files with identical size, pass flag '-c' or '--cksum' or '--checksum' or '--crc' or '--hash'
 #     to display this help, pass flag '-h' or '-?' or '--help'
 #     to prevent printing informational info to stderr, pass flag '-q' or '--quiet'
 #
 # OUTPUT: is split between stdout and stderr to allow for both easy interactive viewing and easy parsing
+#
 #    stdout contains the list of duplicate files found (newline-seperated),
 #        with each group of duplicates additionally NULL-seperated
-#    stderr contains the extra "fluff" to make interactive viewing of the output more pleasant. 
-#        Redirect '2>/dev/null' or use '-q' flag to mute this.
+#
+#    stderr contains the extra "fluff" to make interactive viewing of the output more pleasant
+#        redirect '2>/dev/null' or use the '-q' flag to mute this
 #
 # DEPENDENCIES: forkrun, find, du*, cksum        *not required with -c flag
 EOF
