@@ -183,13 +183,17 @@ fdupes_size() (
 
 
     # print duplicate files found to stdout and stuff to make it look nice to stderr
-    [[ $(echo "${fdTmpDir}"/hash/dupes/*) ]] && {
-        ${quietFlag} || printf '\nDUPLICATES FOUND!!!\n' >&2
-        for nn in "${fdTmpDir}"/hash/dupes/*; do
+fdupes_print() {
+    for nn in "$@"; do
             nnCur="${nn##*/}"
             ${quietFlag} || printf '\n\n-------------------------------------------------------\nCKSUM HASH: %s\n\n' "${nnCur/_/ }" >&2
             cat "${fdTmpDir}/hash/data/${nnCur}"
             printf '\0'
         done
+}
+
+    [[ $(echo "${fdTmpDir}"/hash/dupes/*) ]] && {
+        ${quietFlag} || printf '\nDUPLICATES FOUND!!!\n' >&2
+        printf '%s\n' "${fdTmpDir}"/hash/dupes/* | forkrun fdupes_print
     }
 }
