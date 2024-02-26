@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
-fdupes() {
+dupefind() {
     ## quickly finds duplicate files using "forkrun", "du", and the "cksum" hash
 
-fdupes_help() ( cat<<'EOF' >&2
-## fdupes: quickly finds duplicate files using "forkrun", "du", and the "cksum" hash
+dupefind_help() ( cat<<'EOF' >&2
+## dupefind: quickly finds duplicate files using "forkrun", "du", and the "cksum" hash
 #
-# fdupes implements a 2 stage search for duplicate files:
+# dupefind implements a 2 stage search for duplicate files:
 #    it first finds files that have identical sizes, then
 #    for these files, it computes the cksum hash and looks for matching hashes
 #
@@ -18,7 +18,7 @@ fdupes_help() ( cat<<'EOF' >&2
 # if you want to look for duplicates under a directory starting with a '!' or '-h'
 #     then use the full path (e.g. use '/${PWD}/!whyyyy', not '!whyyyy')
 #
-# calling fdupes without any inputs is equivilant to calling 'fdupes / \!/{dev,proc,sys,tmp}'
+# calling dupefind without any inputs is equivilant to calling 'dupefind / \!/{dev,proc,sys,tmp}'
 #
 # FLAGS:
 #     to skip the initial search for files with identical size, pass flag '-c' or '--cksum' or '--checksum' or '--crc' or '--hash'
@@ -56,7 +56,7 @@ EOF
         # loop over inputs
         for nn in "$@"; do
             case "${nn}" in
-                -h|-\?|--help) fdupes_help; return 0 ;;
+                -h|-\?|--help) dupefind_help; return 0 ;;
                 -q|-quiet) quietFlag=true ;;
                 -c|--cksum|--checksum|--crc|--hash) useSizeFlag=false ;;
                 '!'*) excludeA+=("${nn#'!'}") ;;
@@ -75,29 +75,29 @@ EOF
         fi
     fi
 
-    # setup tmpdir for fdupes
+    # setup tmpdir for dupefind
     [[ ${fdTmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && fdTmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && fdTmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && fdTmpDirRoot='/tmp'; } || fdTmpDirRoot="$(pwd)"
-    fdTmpDir="$(mktemp -p "${fdTmpDirRoot}" -d .fdupes.XXXXXX)"
+    fdTmpDir="$(mktemp -p "${fdTmpDirRoot}" -d .dupefind.XXXXXX)"
     mkdir -p "${fdTmpDir}"/hash/{data,dupes}
 
     # rm tmpdir on exit
     trap '\rm -rf "${fdTmpDir:?}"' EXIT
 
     ${quietFlag} || {
-        printf '\n\nfdupes will now search for duplicate files under : '
+        printf '\n\ndupefind will now search for duplicate files under : '
         printf "'%s' " "${searchA[@]}"
         printf '\n'
         [[ ${#excludeA[@]} == 0 ]] || { 
             printf 'the following files/directories will be excluded: '
             printf "'%s' " "${excludeA[@]}"
         }
-        printf '\nfdupes file data will be temporairly stored under: %s\n\n' "${fdTmpDir}" >&2
+        printf '\ndupefind file data will be temporairly stored under: %s\n\n' "${fdTmpDir}" >&2
     }
 
     # setup find exclusions
     printf -v excludeStr ' -path '"'"'%s'"'"' -prune -o ' "${excludeA[@]}"
 
-fdupes_hash() (
+dupefind_hash() (
     # function run in parallel by forkrun to find duplicate file cksum hashes
 
     set -C
@@ -126,10 +126,10 @@ fdupes_hash() (
     if ${useSizeFlag}; then
         # search for duplicate file sizes
 
-        # make tmp dirs for fdupes_size
+        # make tmp dirs for dupefind_size
         mkdir -p "${fdTmpDir}"/size/{data,dupes}
 
-fdupes_size() (
+dupefind_size() (
     # function run in parallel by forkrun to find duplicate files size
 
     set -C
@@ -156,34 +156,34 @@ fdupes_size() (
 
         ${quietFlag} || printf '\nBeginning search for files with identical size\n' >&2
 
-        # search for duplicate file sizes by using forkrun to run fdupes_size
-        { source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print"; } | forkrun fdupes_size
+        # search for duplicate file sizes by using forkrun to run dupefind_size
+        { source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print"; } | forkrun dupefind_size
 
-        # take duplicates found by fdupes_size and run find duplicate file hashes from within this list
+        # take duplicates found by dupefind_size and run find duplicate file hashes from within this list
         mapfile -t dupes_size < <(printf '%s\n' "${fdTmpDir}"/size/dupes/*)
         if [[ ${#dupes_size[@]} == 0 ]]; then
             # no duplicate file sizes means no duplicates. Skip computing hashes.
             ${quietFlag} || printf '\nNo files with the exact same size found. \nSkipping duplicate search based on file hash.\n' >&2
             return 0
         else
-            # search for duplicate file hashes by using forkrun to run fdupes_hash
+            # search for duplicate file hashes by using forkrun to run dupefind_hash
             ${quietFlag} || printf '\nBeginning search for files with identical cksum (crc hash)\n' >&2
             dupes_size=("${dupes_size[@]//'/size/dupes/'/'/size/data/'}")
-            cat "${dupes_size[@]}" | forkrun fdupes_hash
+            cat "${dupes_size[@]}" | forkrun dupefind_hash
         fi
 
     else
 
         ${quietFlag} || printf '\nBeginning search for files with identical cksum (crc hash)\n' >&2
 
-        # search for duplicate file hashes by using forkrun to run fdupes_hash
-        source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print" | forkrun fdupes_hash
+        # search for duplicate file hashes by using forkrun to run dupefind_hash
+        source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print" | forkrun dupefind_hash
 
     fi
 
 
     # print duplicate files found to stdout and stuff to make it look nice to stderr
-fdupes_print() {
+dupefind_print() {
     for nn in "$@"; do
             nnCur="${nn##*/}"
             ${quietFlag} || printf '\n\n-------------------------------------------------------\nCKSUM HASH: %s\n\n' "${nnCur/_/ }" >&2
@@ -194,6 +194,6 @@ fdupes_print() {
 
     [[ $(echo "${fdTmpDir}"/hash/dupes/*) ]] && {
         ${quietFlag} || printf '\nDUPLICATES FOUND!!!\n' >&2
-        printf '%s\n' "${fdTmpDir}"/hash/dupes/* | forkrun fdupes_print
+        printf '%s\n' "${fdTmpDir}"/hash/dupes/* | forkrun dupefind_print
     }
 }
