@@ -81,7 +81,7 @@ EOF
     mkdir -p "${fdTmpDir}"/hash/{data,dupes}
 
     # rm tmpdir on exit
-    trap '\rm -rf "${fdTmpDir:?}"' EXIT
+    trap '\rm -rf "'"${fdTmpDir}"'"' EXIT
 
     ${quietFlag} || {
         printf '\n\ndupefind will now search for duplicate files under : '
@@ -183,17 +183,22 @@ dupefind_size() (
 
 
     # print duplicate files found to stdout and stuff to make it look nice to stderr
-dupefind_print() {
+dupefind_print() (
+    local nn nnCur
     for nn in "$@"; do
-            nnCur="${nn##*/}"
-            ${quietFlag} || printf '\n\n-------------------------------------------------------\nCKSUM HASH: %s\n\n' "${nnCur/_/ }" >&2
-            cat "${fdTmpDir}/hash/data/${nnCur}"
-            printf '\0'
-        done
-}
+        nnCur="${nn##*/}"
+        printf '\n\0' >>  "${fdTmpDir}/hash/data/${nnCur}"
+            if ${quietFlag}; then
+                cat "${fdTmpDir}/hash/data/${nnCur}"
+            else
+                 printf '\n\n-------------------------------------------------------\nCKSUM HASH: %s\n\n' "${nnCur/_/ }" 
+                 cat "${fdTmpDir}/hash/data/${nnCur}"
+            fi
+    done
+)
 
     [[ $(echo "${fdTmpDir}"/hash/dupes/*) ]] && {
         ${quietFlag} || printf '\nDUPLICATES FOUND!!!\n' >&2
-        printf '%s\n' "${fdTmpDir}"/hash/dupes/* | forkrun dupefind_print
+        find "${fdTmpDir}"/hash/dupes -type f | forkrun $(${quietFlag} || echo '-k') dupefind_print
     }
 }
