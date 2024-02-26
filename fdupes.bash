@@ -37,6 +37,8 @@ fdupes_help() ( cat<<'EOF' >&2
 EOF
 )
 
+    set +C
+
     # source forkrun
     declare -F forkrun &>/dev/null || { [[ -f ./forkrun.bash ]] && source ./forkrun.bash; } || { type -p forkrun.bash &>/dev/null && source "$(type -p forkrun.bash )"; } || source <(curl 'https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash') || { printf '\nERROR!!! The forkrun function is not defined and its source code could not be found/downloaded. ABORTING!\n\n'; return 1; }
 
@@ -62,6 +64,8 @@ EOF
             esac
         done
 
+        [[ ${#searchA[@]} == 0 ]] && searchA=('/')
+
         # if doing a full system search 'everything under /' and not using -q flag check if they want to skip '/dev' '/proc' '/sys' '/tmp'
         if [[ "${searchA[*]}" == '/' ]] && ! ${quietFlag}; then
             for nnCur in '/dev' '/proc' '/sys' '/tmp'; do
@@ -79,7 +83,16 @@ EOF
     # rm tmpdir on exit
     trap '\rm -rf "${fdTmpDir:?}"' EXIT
 
-    ${quietFlag} || printf '\nfdupes file data will be temporairly stored under: %s\n' "${fdTmpDir}" >&2
+    ${quietFlag} || {
+        printf '\n\nfdupes will now search for duplicate files under : '
+        printf "'%s' " "${searchA[@]}"
+        printf '\n'
+        [[ ${#excludeA[@]} == 0 ]] || { 
+            printf 'the following files/directories will be excluded: '
+            printf "'%s' " "${excludeA[@]}"
+        }
+        printf '\nfdupes file data will be temporairly stored under: %s\n\n' "${fdTmpDir}" >&2
+    }
 
     # setup find exclusions
     printf -v excludeStr ' -path '"'"'%s'"'"' -prune -o ' "${excludeA[@]}"
@@ -144,7 +157,7 @@ fdupes_size() (
         ${quietFlag} || printf '\nBeginning search for files with identical size\n' >&2
 
         # search for duplicate file sizes by using forkrun to run fdupes_size
-        source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print" | forkrun fdupes_size
+        { source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print"; } | forkrun fdupes_size
 
         # take duplicates found by fdupes_size and run find duplicate file hashes from within this list
         mapfile -t dupes_size < <(printf '%s\n' "${fdTmpDir}"/size/dupes/*)
@@ -155,8 +168,8 @@ fdupes_size() (
         else
             # search for duplicate file hashes by using forkrun to run fdupes_hash
             ${quietFlag} || printf '\nBeginning search for files with identical cksum (crc hash)\n' >&2
-            mapfile -t dupes_size < <(cat "${dupes_size[@]//'/size/dupes/'/'/size/data/'}")
-            printf '%s\n' "${dupes_size[@]}" | forkrun fdupes_hash
+            dupes_size=("${dupes_size[@]//'/size/dupes/'/'/size/data/'}")
+            cat "${dupes_size[@]}" | forkrun fdupes_hash
         fi
 
     else
