@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 
 fdupes() {
     ## quickly finds duplicate files using "forkrun", "du", and the "cksum" hash 
