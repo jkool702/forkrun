@@ -41,7 +41,7 @@ EOF
     declare -F forkrun &>/dev/null || { [[ -f ./forkrun.bash ]] && source ./forkrun.bash; } || { type -p forkrun.bash &>/dev/null && source "$(type -p forkrun.bash )"; } || source <(curl 'https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash') || { printf '\nERROR!!! The forkrun function is not defined and its source code could not be found/downloaded. ABORTING!\n\n'; return 1; }
 
     # make vars local
-    local excludeStr fdTmpDirRoot fdTmpDir nn nnCur Atmp1 Atmp2
+    local excludeStr fdTmpDirRoot fdTmpDir nn nnCur
     local -a searchA excludeA useSizeFlag quietFlag dupes_size
 
     # parse inputs
@@ -63,7 +63,7 @@ EOF
         done
 
         # if doing a full system search 'everything under /' and not using -q flag check if they want to skip '/dev' '/proc' '/sys' '/tmp'
-        if [[ "${searchA[*]}" == '/' ]] && ! ${quietFlag} && {
+        if [[ "${searchA[*]}" == '/' ]] && ! ${quietFlag}; then
             for nnCur in '/dev' '/proc' '/sys' '/tmp'; do
                 ( IFS=' '; [[ " ${excludeA[*]} " == *' '"${nnCur}"?(/)' '* ]] ) || read -p "would you like to exclude ${nnCur} from your search for duplicate files? "$'\n'"(Y/n)  " -t 10 -n 1
                 [[ "${REPLY}" == [nN] ]] || excludeA+=("${nnCur}")
