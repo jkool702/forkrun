@@ -78,7 +78,6 @@ EOF
     # setup tmpdir for dupefind
     [[ ${fdTmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && fdTmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && fdTmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && fdTmpDirRoot='/tmp'; } || fdTmpDirRoot="$(pwd)"
     fdTmpDir="$(mktemp -p "${fdTmpDirRoot}" -d .dupefind.XXXXXX)"
-    mkdir -p "${fdTmpDir}"/hash/{data,dupes}
 
     # rm tmpdir on exit
     trap '\rm -rf "'"${fdTmpDir}"'"' EXIT
@@ -96,6 +95,114 @@ EOF
 
     # setup find exclusions
     printf -v excludeStr ' -path '"'"'%s'"'"' -prune -o ' "${excludeA[@]}"
+
+
+    if ${useSizeFlag}; then
+        # search for duplicate file sizes
+
+        # make tmp dirs for dupefind_size
+        mkdir -p "${fdTmpDir}"/size/{data,dupes}
+
+dupefind_size() (
+    # function run in parallel by forkrun to find duplicate files size
+
+    set -C
+    IFS=$'\n'
+
+    local -a fSizeA fNameA
+    local -i kk
+
+    # get file size/name with 'du' and split into 2 arrays
+    mapfile -t fSizeA < <(du "${@}")
+    mapfile -t fNameA <<<"${fSizeA[*]#*$'\t'}"
+    mapfile -t fSizeA <<<"${fSizeA[*]%%$'\t'*}"
+
+    # add each file name to a file named using the file size under ${fdTmpDir}/size/data using a '>' redirect
+    # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>')
+    # the filename instead and note that there are multiple files with this size by touching ${fdTmpDir}/size/dupes/<filesize>
+    for kk in "${!fSizeA[@]}"; do
+        echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >"${fdTmpDir}/size/data/${fSizeA[$kk]}" || {
+            echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
+            [[ -d "${fdTmpDir}/size/dupes/${fSizeA[$kk]}" ]] || mkdir -p "${fdTmpDir}/size/dupes/${fSizeA[$kk]}"
+        }
+    done &>/dev/null
+)
+
+dupefind_hash() (
+    # function run in parallel by forkrun to find duplicate file cksum hashes
+
+    set -C
+    IFS=$'\n'
+
+    local -a fHashA fSizeA fNameA
+    local -i kk
+
+    # get file hash/size/name with 'cksum' and split into 3 arrays
+    fSizeA=("${@%%$'\034'*}")
+    fNameA=("${@##*$'\034'}")
+    mapfile -t fHashA < <(cksum "${fNameA[@]}")
+    mapfile -t fHashA <<<"${fHashA[*]/ /_}"
+    mapfile -t fHashA <<<"${fHashA[*]%% *}"
+
+#    for kk in ${!fHashA[@]}; do
+#        printf 'name: %s  ;  size: %s  ;  hash: %s\n' "${fNameA[$kk]}" "${fSizeA[$kk]}" "${fHashA[$kk]}" >&2
+#    done
+
+    # add each file name to a file named using the file size under ${fdTmpDir}/hash/data using a '>' redirect
+    # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>')
+    # the filename instead and note that there are duplicate files with this hash by touching ${fdTmpDir}/hash/dupes/<hash>
+     for kk in "${!fHashA[@]}"; do
+        mkdir -p "${fdTmpDir}/size/dupes/${fSizeA[$kk]}/hash"/{data,dupes}
+        echo "${fNameA[$kk]}" >"${fdTmpDir}/size/dupes/${fSizeA[$kk]}/hash/data/${fHashA[$kk]}" || {
+            echo "${fNameA[$kk]}" >>"${fdTmpDir}/size/dupes/${fSizeA[$kk]}/hash/data/${fHashA[$kk]}"
+            : >"${fdTmpDir}/size/dupes/${fSizeA[$kk]}/hash/dupes/${fHashA[$kk]}"
+        }
+    done &>/dev/null
+)
+
+dupefind_print() (
+    # print duplicate files found and (optionally) stuff to make it look nice to stdout
+    local nn nnCur
+    for nn in "$@"; do
+        nnCur="${nn//'/hash/dupes/'/'/hash/data/'}"
+        printf '\n\0' >> "${nnCur}"
+            if ${quietFlag}; then
+                cat "${nnCur}"
+            else
+                nnSize="${nn##"${fdTmpDir}/size/dupes/"}"
+                printf '\n\n-------------------------------------------------------\nCKSUM HASH: %s\nFILE SIZE: %s\n\n' "${nn##*/}" "${nnSize%%/*}" 
+                cat "${nnCur}"
+            fi
+    done
+)
+
+
+        ${quietFlag} || printf '\nBeginning search for files with identical size\n' >&2
+
+        # search for duplicate file sizes by using forkrun to run dupefind_size
+        { source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print"; } | forkrun dupefind_size
+
+        # take duplicates found by dupefind_size and run find duplicate file hashes from within this list
+        mapfile -t dupes_size < <(printf '%s\n' "${fdTmpDir}"/size/dupes/*)
+        if [[ ${#dupes_size[@]} == 0 ]]; then
+            # no duplicate file sizes means no duplicates. Skip computing hashes.
+            ${quietFlag} || printf '\nNo files with the exact same size found. \nSkipping duplicate search based on file hash.\n' >&2
+            return 0
+        else
+            # search for duplicate file hashes by using forkrun to run dupefind_hash
+            ${quietFlag} || printf '\nBeginning search for files with identical cksum (crc hash)\n' >&2
+            dupes_size=("${dupes_size[@]//'/size/dupes/'/'/size/data/'}")
+            cat "${dupes_size[@]}" | forkrun dupefind_hash
+        fi
+
+        [[ $(echo "${fdTmpDir}"/size/dupes/*/hash/dupes/*) ]] && {
+            ${quietFlag} || printf '\nDUPLICATES FOUND!!!\n' >&2
+            find "${fdTmpDir}"/size/dupes/*/hash/dupes/ -type f | forkrun $(${quietFlag} || echo '-k') dupefind_print
+        }
+
+    else
+
+        mkdir -p "${fdTmpDir}"/hash/{data,dupes}
 
 dupefind_hash() (
     # function run in parallel by forkrun to find duplicate file cksum hashes
@@ -123,82 +230,30 @@ dupefind_hash() (
     done &>/dev/null
 )
 
-    if ${useSizeFlag}; then
-        # search for duplicate file sizes
-
-        # make tmp dirs for dupefind_size
-        mkdir -p "${fdTmpDir}"/size/{data,dupes}
-
-dupefind_size() (
-    # function run in parallel by forkrun to find duplicate files size
-
-    set -C
-    IFS=$'\n'
-
-    local -a fSizeA fNameA
-    local -i kk
-
-    # get file size/name with 'du' and split into 2 arrays
-    mapfile -t fSizeA < <(du "${@}")
-    mapfile -t fNameA <<<"${fSizeA[*]#*$'\t'}"
-    mapfile -t fSizeA <<<"${fSizeA[*]%%$'\t'*}"
-
-    # add each file name to a file named using the file size under ${fdTmpDir}/size/data using a '>' redirect
-    # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>')
-    # the filename instead and note that there are multiple files with this size by touching ${fdTmpDir}/size/dupes/<filesize>
-    for kk in "${!fSizeA[@]}"; do
-        echo "${fNameA[$kk]}" >"${fdTmpDir}/size/data/${fSizeA[$kk]}" || {
-            echo "${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
-            : >>"${fdTmpDir}/size/dupes/${fSizeA[$kk]}"
-        }
-    done &>/dev/null
+dupefind_print() (
+    # print duplicate files found and (optionally) stuff to make it look nice to stdout
+    local nn nnCur
+    for nn in "$@"; do
+        nnCur="${nn//'/hash/dupes/'/'/hash/data/'}"
+        printf '\n\0' >> "${nnCur}"
+            if ${quietFlag}; then
+                cat "${nnCur}"
+            else
+                 printf '\n\n-------------------------------------------------------\nCKSUM HASH: %s\n\n' "${nn##*/}" 
+                 cat "${nnCur}"
+            fi
+    done
 )
-
-        ${quietFlag} || printf '\nBeginning search for files with identical size\n' >&2
-
-        # search for duplicate file sizes by using forkrun to run dupefind_size
-        { source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print"; } | forkrun dupefind_size
-
-        # take duplicates found by dupefind_size and run find duplicate file hashes from within this list
-        mapfile -t dupes_size < <(printf '%s\n' "${fdTmpDir}"/size/dupes/*)
-        if [[ ${#dupes_size[@]} == 0 ]]; then
-            # no duplicate file sizes means no duplicates. Skip computing hashes.
-            ${quietFlag} || printf '\nNo files with the exact same size found. \nSkipping duplicate search based on file hash.\n' >&2
-            return 0
-        else
-            # search for duplicate file hashes by using forkrun to run dupefind_hash
-            ${quietFlag} || printf '\nBeginning search for files with identical cksum (crc hash)\n' >&2
-            dupes_size=("${dupes_size[@]//'/size/dupes/'/'/size/data/'}")
-            cat "${dupes_size[@]}" | forkrun dupefind_hash
-        fi
-
-    else
 
         ${quietFlag} || printf '\nBeginning search for files with identical cksum (crc hash)\n' >&2
 
         # search for duplicate file hashes by using forkrun to run dupefind_hash
         source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print" | forkrun dupefind_hash
 
+       [[ $(echo "${fdTmpDir}"/hash/dupes/*) ]] && {
+            ${quietFlag} || printf '\nDUPLICATES FOUND!!!\n' >&2
+            find "${fdTmpDir}"/hash/dupes -type f | forkrun $(${quietFlag} || echo '-k') dupefind_print
+        }
     fi
-
-
-    # print duplicate files found to stdout and stuff to make it look nice to stderr
-dupefind_print() (
-    local nn nnCur
-    for nn in "$@"; do
-        nnCur="${nn##*/}"
-        printf '\n\0' >>  "${fdTmpDir}/hash/data/${nnCur}"
-            if ${quietFlag}; then
-                cat "${fdTmpDir}/hash/data/${nnCur}"
-            else
-                 printf '\n\n-------------------------------------------------------\nCKSUM HASH: %s\n\n' "${nnCur/_/ }" 
-                 cat "${fdTmpDir}/hash/data/${nnCur}"
-            fi
-    done
-)
-
-    [[ $(echo "${fdTmpDir}"/hash/dupes/*) ]] && {
-        ${quietFlag} || printf '\nDUPLICATES FOUND!!!\n' >&2
-        find "${fdTmpDir}"/hash/dupes -type f | forkrun $(${quietFlag} || echo '-k') dupefind_print
-    }
+    
 }
