@@ -539,7 +539,7 @@ forkrun() {
                         ;;
                     esac
 
-                    read fd_read_pos </proc/self/fdinfo/${fd_read}
+                    read -r fd_read_pos </proc/self/fdinfo/${fd_read}
                     fd_read_pos=${fd_read_pos##*$'\t'}
 
                     if ${nLinesAutoFlag}; then
@@ -654,7 +654,7 @@ trap - EXIT
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
 while true; do"""
-${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
+${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
 echo """
     read -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
@@ -741,10 +741,16 @@ else
     ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
     { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
     echo "${delimiterReadStr} A"
-    ${pipeReadFlag} || ${nullDelimiterFlag} || {
-        echo """
-        [[ \${#A[@]} == 0 ]] || {
-            [[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"""
+    ${pipeReadFlag} || {
+        echo "[[ \${#A[@]} == 0 ]] || {"
+        if ${nullDelimiterFlag}; then
+            echo """
+                read -r fd_read_pos </proc/self/fdinfo/${fd_read}
+                { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -r -d ''; } || {"""
+
+        else
+            echo "[[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"
+        fi
         (( ${verboseLevel} > 2 )) && echo """
                 echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"""
         echo """
@@ -757,7 +763,7 @@ else
     }
 fi
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
-${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || echo "}"
+${pipeReadFlag} || ${readBytesFlag} || echo "}"
 echo """
     printf '\\n' >&${fd_continue}
     [[ \${#A[@]} == 0 ]] && {
@@ -1154,6 +1160,7 @@ OPTIONAL DEPENDENCIES (to provide enhanced functionality):
                                     Without this the coprocs will non-stop try to read data from stdin, causing unnecessarily high CPU usage.
     `dd` (GNU)  -OR-  `head`      : When splitting up stdin by byte count (due to either the `-b` or `-B` flag being used), if available one of these will be used to read stdin (instead of the `read (-n|-N)` builtin). 
                                     If both are available `dd` is preferred. `dd` is much faster than `head`, which in much *much* faster than `read (-n|-N)`. NOTE: `dd` must be the GNU version...the busybox `dd` doesnt work here.
+    `dd` (GNU|busybox)            : Required when using NULL as the delimiter to break up stdin (via `-z` flag or via `-d ''` flag). 
     `bash-completion`             : Required for bash automatic completion (on <TAB> press) to work as you are typing the forkrun commandline. 
                                     This is strictly a "quality of life" feature to make typing the forkrun cmdline easier -- it has zero effect on forkrun's execution after it has been called.
 
