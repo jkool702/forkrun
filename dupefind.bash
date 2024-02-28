@@ -126,10 +126,14 @@ dupefind_size() (
     # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>')
     # the filename instead and note that there are multiple files with this size by touching ${fdTmpDir}/size/dupes/<filesize>
     for kk in "${!fSizeA[@]}"; do
-        echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >"${fdTmpDir}/size/data/${fSizeA[$kk]}" || {
+        if [[ -d "${fdTmpDir}/size/dupes/${fSizeA[$kk]}" ]]; then
             echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
-            [[ -d "${fdTmpDir}/size/dupes/${fSizeA[$kk]}" ]] || mkdir -p "${fdTmpDir}/size/dupes/${fSizeA[$kk]}"
-        }
+        else
+            echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >"${fdTmpDir}/size/data/${fSizeA[$kk]}" || {
+                echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
+                mkdir -p "${fdTmpDir}/size/dupes/${fSizeA[$kk]}"
+            }
+        fi
     done &>/dev/null
 )
 
@@ -158,9 +162,10 @@ dupefind_hash() (
      for kk in "${!fHashA[@]}"; do
         [[ -z ${fHashA[$kk]} ]] && continue
         [[ -d "${fdTmpDir}"/size/dupes/"${fSizeA[$kk]}"/hash ]] || mkdir -p "${fdTmpDir}"/size/dupes/"${fSizeA[$kk]}"/hash/{data,dupes}
+       
         echo "${fNameA[$kk]}" >"${fdTmpDir}/size/dupes/${fSizeA[$kk]}/hash/data/${fHashA[$kk]}" || {
             echo "${fNameA[$kk]}" >>"${fdTmpDir}/size/dupes/${fSizeA[$kk]}/hash/data/${fHashA[$kk]}"
-            : >"${fdTmpDir}/size/dupes/${fSizeA[$kk]}/hash/dupes/${fHashA[$kk]}"
+            [[ -f "${fdTmpDir}/size/dupes/${fSizeA[$kk]}/hash/dupes/${fHashA[$kk]}" ]] || : >"${fdTmpDir}/size/dupes/${fSizeA[$kk]}/hash/dupes/${fHashA[$kk]}"
         }
     done &>/dev/null
 )
