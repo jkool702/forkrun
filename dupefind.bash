@@ -137,7 +137,7 @@ dupefind_size() (
     # the filename instead and note that there are multiple files with this size by touching ${fdTmpDir}/size/dupes/<filesize>
     for kk in "${!fSizeA[@]}"; do
         if [[ -d "${fdTmpDir}/size/dupes/${fSizeA[$kk]}" ]]; then
-            echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
+            printf '%s\0' "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
         else
             printf '%s\0' "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >"${fdTmpDir}/size/data/${fSizeA[$kk]}" || {
                  printf '%s\0' "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
