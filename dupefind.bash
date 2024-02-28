@@ -2,38 +2,48 @@
 
 
 dupefind() {
-    ## quickly finds duplicate files using "forkrun", "du", and the "sha1sum" hash
+    ## Quickly finds duplicate files using "forkrun", "du", and the "sha1sum" hash
+    #
+    # USAGE: dupefind [-q] [-e] [-s] <path> [<path2> ...] [\!<epath> \!<epath2 ...]
+    #
+    #  all <path> locations are recursively searched under (at any depth level) for duplicates
+    #  all <epath> locations (and anything under at any depth level) are excluded from the search
+    #
+    # EXAMPLE: dupefind -e / \!/{root,efi,DATA}
+    #
+    # For more detailed help, run `dupefind -h`
 
 dupefind_help() ( cat<<'EOF' >&2
 ## dupefind: quickly finds duplicate files using "forkrun", "du", and the "sha1sum" hash
 #
 # dupefind implements a 2 stage search for duplicate files:
-#    it first finds files that have identical sizes, then
+#    it first finds files that have identical sizes (unless the '-s' flag is passed), then
 #    for these files, it computes the sha1sum hash and looks for matching hashes
 #
-# INPUTS: are directories to look for duplicate files under (at any depth level)
+# USAGE: dupefind [-q] [-e] [-s] <path> [<path2> ...] [\!<epath> \!<epath2 ...]
 #
-# inputs starting with `!` will be excluded from this duplicate search
-#     dont forget to quote/escape the '!': use '!/path' or \!/path
+# EXAMPLE: dupefind -e / \!/{root,efi,DATA}
 #
-# if you want to look for duplicates under a directory starting with a '!' or '-h'
-#     then use the full path (e.g. use '/${PWD}/!whyyyy', not '!whyyyy')
+# INPUTS: 
+#     all <path> locations are recursively searched under (at any depth level) for duplicates
+#     all <epath> (inputs with a leading `!`) locations (and under) are excluded from the search
+#         NOTE: dont forget to quote/escape the '!': use '!/path' or \!/path
 #
-# calling dupefind without any inputs is equivilant to calling 'dupefind / \!/{dev,proc,sys,tmp}'
+#      NOTES: If you want to look for duplicates under a directory starting with a '!' or '-h'
+#                 then use the full path (e.g. use '/${PWD}/!whyyyy', not '!whyyyy')
+#             Default when no inputs are passed:   dupefind -e /
 #
 # FLAGS:
 #     to skip the initial search for files with identical size, pass flag '-s' or '--sha1' or '--sha1sum' or '--sha1-only' or '--sha1sum-only'
-#     to display this help, pass flag '-h' or '-?' or '--help'
 #     to prevent printing informational info to stderr, pass flag '-q' or '--quiet'
 #     to automatically exclude '/dev' '/proc' '/run' '/sys' '/tmp', pass flag '-e' or '--exclude'
+#     to display this help, pass flag '-h' or '-?' or '--help'
 #
-# OUTPUT: is split between stdout and stderr to allow for both easy interactive viewing and easy parsing
-#
-#    stdout contains the list of duplicate files found (newline-seperated),
-#        with each group of duplicates additionally NULL-seperated
-#
-#    stderr contains the extra "fluff" to make interactive viewing of the output more pleasant
-#        redirect '2>/dev/null' or use the '-q' flag to mute this
+# OUTPUT: 
+#    stdout contains a newline-separated list of duplicate files,
+#    each group of duplicates is separated by a blank line *and* a NULL
+#    when both a) output is to a terminal, and b) the '-q' flag is not used, then:
+#        a separator line, the sha1sum hash, and the file size (unless '-s') of each duplicate set are also printed
 #
 # DEPENDENCIES: forkrun, find, du*, sha1sum        *not required with -c flag
 EOF
