@@ -139,8 +139,8 @@ dupefind_size() (
         if [[ -d "${fdTmpDir}/size/dupes/${fSizeA[$kk]}" ]]; then
             echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
         else
-            echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >"${fdTmpDir}/size/data/${fSizeA[$kk]}" || {
-                echo "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
+            printf '%s\0' "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >"${fdTmpDir}/size/data/${fSizeA[$kk]}" || {
+                 printf '%s\0' "${fSizeA[$kk]}"$'\034'"${fNameA[$kk]}" >>"${fdTmpDir}/size/data/${fSizeA[$kk]}"
                 mkdir -p "${fdTmpDir}/size/dupes/${fSizeA[$kk]}"
             }
         fi
@@ -200,10 +200,10 @@ dupefind_print() (
         ${quietFlag} || printf '\nBeginning search for files with identical size\n' >&2
 
         # search for duplicate file sizes by using forkrun to run dupefind_size
-        { source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print"; } | forkrun dupefind_size
+        { source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print0"; } | forkrun -z dupefind_size
 
         # take duplicates found by dupefind_size and run find duplicate file hashes from within this list
-        mapfile -t dupes_size < <(printf '%s\n' "${fdTmpDir}"/size/dupes/*)
+        mapfile -t -d '' dupes_size < <(printf '%s\0' "${fdTmpDir}"/size/dupes/*)
         if [[ ${#dupes_size[@]} == 0 ]]; then
             # no duplicate file sizes means no duplicates. Skip computing hashes.
             ${quietFlag} || printf '\nNo files with the exact same size found. \nSkipping duplicate search based on file hash.\n' >&2
@@ -212,12 +212,12 @@ dupefind_print() (
             # search for duplicate file hashes by using forkrun to run dupefind_hash
             ${quietFlag} || printf '\nBeginning search for files with identical sha1sum hash\n' >&2
             dupes_size=("${dupes_size[@]//'/size/dupes/'/'/size/data/'}")
-            cat "${dupes_size[@]}" | forkrun dupefind_hash
+            cat "${dupes_size[@]}" | forkrun -z dupefind_hash
         fi
 
         [[ $(echo "${fdTmpDir}"/size/dupes/*/hash/dupes/*) ]] && {
             ${quietFlag} || printf '\nDUPLICATES FOUND!!!\n' >&2
-            find "${fdTmpDir}"/size/dupes/*/hash/dupes/ -type f | forkrun $(${quietFlag} || echo '-k') dupefind_print
+            find "${fdTmpDir}"/size/dupes/*/hash/dupes/ -type f | forkrun $(${quietFlag} || ! [[ -t 1 ]] || printf '-k') dupefind_print
         }
 
     else
