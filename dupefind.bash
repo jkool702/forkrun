@@ -143,7 +143,7 @@ dupefind_size() (
     # the filename instead and note that there are multiple files with this size by touching ${fdTmpDir}/size/dupes/<filesize>
     for kk in "${!fSizeA[@]}"; do
         (( ${fSizeA[$kk]} > $sizeCutoff )) && sizePath='size1' || sizePath='size0'
-        if [[ -d "${fdTmpDir}/"${sizePath}"/dupes/${fSizeA[$kk]}" ]]; then
+        if [[ -d "${fdTmpDir}/${sizePath}/dupes/${fSizeA[$kk]}" ]]; then
             printf '%s\034%s\0' "${fSizeA[$kk]}" "${fNameA[$kk]}" >>"${fdTmpDir}/${sizePath}/data/${fSizeA[$kk]}"
         else
             printf '%s\034%s\0' "${fSizeA[$kk]}" "${fNameA[$kk]}" >"${fdTmpDir}/${sizePath}/data/${fSizeA[$kk]}" || {
@@ -238,7 +238,7 @@ dupefind_unique() (
     shopt -s extglob
 
     for nn in "$@"; do
-        if [[ "${nn}" == "${fdTMpDir}"'/size1/dupes/'+([0-9])'/hash-partial/data/'* ]]; then
+        if [[ "${nn}" == "${fdTmpDir}"'/size1/dupes/'+([0-9])'/hash-partial/data/'* ]]; then
             sortKey=3
         else
             sortKey=2
