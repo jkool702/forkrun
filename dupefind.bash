@@ -190,7 +190,10 @@ dupefind_hash() (
     fi
 
     if ${size1Flag}; then
-        mapfile -t fHashA < <(for kk in "${!fNameA[@]}"; do dd if="${fNameA[$kk]}" bs=64k count=1 iflag=fullblock status=none | sha1sum -; done)
+        mapfile -t fHashA < <(for kk in "${!fNameA[@]}"; do {
+            dd if="${fNameA[$kk]}" bs=64k count=1 iflag=fullblock status=none
+            dd if="${fNameA[$kk]}" bs=64k count=1 iflag=fullblock status=none skip=$(( ${fSizeA[$kk]} - 65536 ))B
+        } | sha1sum -; done)
     else
         mapfile -t -d '' fHashA < <(sha1sum -z "${fNameA[@]}" 2>&1)
         fHashA=("${fHashA[@]%%?(sha1sum:) *}")
