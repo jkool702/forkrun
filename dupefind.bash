@@ -56,8 +56,10 @@ EOF
     declare -F forkrun &>/dev/null || { [[ -f ./forkrun.bash ]] && source ./forkrun.bash; } || { type -p forkrun.bash &>/dev/null && source "$(type -p forkrun.bash )"; } || source <(curl 'https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash') || { printf '\nERROR!!! The forkrun function is not defined and its source code could not be found/downloaded. ABORTING!\n\n'; return 1; }
 
     # make vars local
-    local excludeStr fdTmpDirRoot fdTmpDir nn nnCur sizeCutoff
+    local excludeStr fdTmpDirRoot fdTmpDir nn nnCur sizeCutoff realpathFlag
     local -a searchA excludeA useSizeFlag quietFlag autoExcludeFlag dupes_size
+
+    type -p realpath &>/dev/null && realpathFlag=true || realpathFlag=false
 
     sizeCutoff=$(( 2 ** 20 ))
 
@@ -130,11 +132,11 @@ dupefind_size() (
     local -i kk
 
     # get file size/name with 'du' and split into 2 arrays
-    mapfile -t fSizeA < <(du --block-size=1 "${@}")
+    mapfile -t -d '' fSizeA < <(du -s -b -0 "${@}")
     fNameA=("${fSizeA[@]#*$'\t'}")
     fSizeA=("${fSizeA[@]%%$'\t'*}")
 
-    mapfile -t -d '' < <(realpath -z "${fNameA[@]}")
+    ${realpathFlag} && mapfile -t -d '' fNameA < <(realpath -z "${fNameA[@]}")
 
     # add each file name to a file named using the file size under ${fdTmpDir}/size/data using a '>' redirect
     # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>')
@@ -148,7 +150,7 @@ dupefind_size() (
                 printf '%s\034%s\0' "${fSizeA[$kk]}" "${fNameA[$kk]}" >>"${fdTmpDir}/${sizePath}/data/${fSizeA[$kk]}"
                 mkdir -p "${fdTmpDir}/${sizePath}/dupes/${fSizeA[$kk]}"
             }
-        fi
+        fi 
     done &>/dev/null
 )
 
@@ -172,13 +174,13 @@ dupefind_hash() (
             size2Flag=false
         ;;
         -2) 
-            size1Flag=true
+            size1Flag=false
             size2Flag=true
         ;;
     esac
     shift 1
 
-    # get file size/name from name and hash with 'sha1sum' and split into 3 arrays
+    # get file size/name[/hash-partial] from name and compute hash[-partial] with 'sha1sum' and split into 3/4 arrays
     fSizeA=("${@%%$'\034'*}")
     fNameA=("${@#*$'\034'}")
     
@@ -190,11 +192,11 @@ dupefind_hash() (
     if ${size1Flag}; then
         mapfile -t fHashA < <(for kk in "${!fNameA[@]}"; do dd if="${fNameA[$kk]}" bs=64k count=1 iflag=fullblock status=none | sha1sum -; done)
     else
-        mapfile -t fHashA < <(sha1sum "${fNameA[@]}" 2>&1)
+        mapfile -t -d '' fHashA < <(sha1sum -z "${fNameA[@]}" 2>&1)
         fHashA=("${fHashA[@]%%?(sha1sum:) *}")
     fi
 
-    mapfile -t -d '' < <(realpath -z "${fNameA[@]}")
+    ${realpathFlag} && mapfile -t -d '' fNameA < <(realpath -z "${fNameA[@]}")
 
     # add each file name to a file named using the file size under ${fdTmpDir}/size/dupes/<size>/hash/data using a '>' redirect
     # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>')
@@ -222,24 +224,24 @@ dupefind_hash() (
                 echo "${fNameA[$kk]}" >>"${pathCur}/data/${fHashA[$kk]}"
                 [[ -f "${pathCur}/dupes/${fHashA[$kk]}" ]] || : >"${pathCur}/dupes/${fHashA[$kk]}"
             }
-        fi
+        fi 
 
     done &>/dev/null
 )
 
 dupefind_unique() (
     local nn sortKey
-    local -a pathCurA allCurA
+    local -a allCurA
     shopt -s extglob
 
     for nn in "$@"; do
-        if [[ "$nn" == *'/size1/dupes/+([0-9])/hash-partial/data/'* ]]; then
+        if [[ "${nn}" == "${fdTMpDir}"'/size1/dupes/'+([0-9])'/hash-partial/data/'* ]]; then
             sortKey=3
         else
             sortKey=2
         fi
-        mapfile -t -d '' allCurA <"$nn"
-        printf '%s\0' "${allCurA[@]}" | sort -z -t$'\034' -k${sortKey} >"${nn}"
+        mapfile -t -d '' allCurA <"${nn}"
+        printf '%s\0' "${allCurA[@]}" | sort -u -z -t$'\034' -k${sortKey} >"${nn}"
     done
 
 )
