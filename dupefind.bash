@@ -174,9 +174,10 @@ dupefind_size() (
     shopt -s extglob
 #    IFS=$'\n'
 
-    local -a fSizeA fNameA  
+    local -a fSizeA fNameA fNameA1 fNameRm
+    local -A fName0
     local -i kk
-    local fHash0
+    local fHash0 nn mm
 
     # get file size/name with 'du' and split into 2 arrays
     mapfile -t -d '' fSizeA < <(du -b -0 "${@}")
@@ -185,6 +186,20 @@ dupefind_size() (
 
     ${realpathFlag} && mapfile -t -d '' fNameA < <(realpath -z "${fNameA[@]}")
 
+    fNameA1=("${fNameA[@]}")
+
+    source <(declare -p fNameA | sed -E 's/^(declare \-)a( fName)A1(\=\()/\1A\20\3'$'\034'' /; s/\" \[([0-9]+)\]=\"/'$'\034'' [\1]=/g; s/\"\)$/'$'\034'' )/; s/('$'\034'' )?\[([0-9]+)\]=([^'$'\034'']+)'$'\034''/["\3"]="\2"/g; s/^(declare -A [^=]+\=\(\[)\"?/\1/')
+    for kk in "${!fNameA1[@]}"; do
+        nn="${fNameA1[$kk]}"
+        unset fNameA1[$kk]
+        mapfile -t -d '' fNameRm < <(find "${fNameA1[@]}" -samefile "$nn" -print0)
+        for mm in "${fNameRm[@]}"; do
+            unset fNameA["${fName0["${mm}"]}"]
+            unset fSizeA["${fName0["${mm}"]}"]
+        done
+        fNameRm=()
+    done
+    
     # add each file name to a file named using the file size under ${fdTmpDir}/size/data using a '>' redirect
     # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>')
     # the filename instead and note that there are multiple files with this size by touching ${fdTmpDir}/size/dupes/<filesize>
