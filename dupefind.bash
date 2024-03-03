@@ -174,8 +174,7 @@ dupefind_size() (
     shopt -s extglob
 #    IFS=$'\n'
 
-    local -a fSizeA fNameA fNameA1 fNameRm
-    local -A fName0
+    local -a fSizeA fNameA
     local -i kk
     local fHash0 nn mm
 
@@ -185,20 +184,6 @@ dupefind_size() (
     fSizeA=("${fSizeA[@]%%$'\t'*}")
 
     ${realpathFlag} && mapfile -t -d '' fNameA < <(realpath -z "${fNameA[@]}")
-
-    fNameA1=("${fNameA[@]}")
-
-    source <(declare -p fNameA | sed -E 's/^(declare \-)a( fName)A1(\=\()/\1A\20\3'$'\034'' /; s/\" \[([0-9]+)\]=\"/'$'\034'' [\1]=/g; s/\"\)$/'$'\034'' )/; s/('$'\034'' )?\[([0-9]+)\]=([^'$'\034'']+)'$'\034''/["\3"]="\2"/g; s/^(declare -A [^=]+\=\(\[)\"?/\1/')
-    for kk in "${!fNameA1[@]}"; do
-        nn="${fNameA1[$kk]}"
-        unset fNameA1[$kk]
-        mapfile -t -d '' fNameRm < <(find "${fNameA1[@]}" -samefile "$nn" -print0)
-        for mm in "${fNameRm[@]}"; do
-            unset fNameA["${fName0["${mm}"]}"]
-            unset fSizeA["${fName0["${mm}"]}"]
-        done
-        fNameRm=()
-    done
     
     # add each file name to a file named using the file size under ${fdTmpDir}/size/data using a '>' redirect
     # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>')
@@ -235,11 +220,23 @@ dupefind_hash() (
 #    IFS=$'\n'
 
     local -a fHashA fSizeA fNameA 
+    local -A fName0
     local -i kk
 
     # get file size/name[/hash-partial] from name and compute hash[-partial] with 'sha1sum' and split into 3/4 arrays
     fSizeA=("${@%%$'\034'*}")
     fNameA=("${@#*$'\034'}")
+
+    source <(declare -p fNameA | sed -E 's/^declare -a fNameA/declare -A fName0/; s/\[([0-9]+)\]=("[^ ]*")([ \)])/[\2]="\1"\3/g')
+    for kk in "${!fNameA[@]}"; do
+       [[ ${fNameA[$kk]} ]] || continue
+        mapfile -t -d '' fNameRm < <(find "${fNameA[@]}" ! -path "${fNameA[$kk]}" -samefile "${fNameA[$kk]}" -print0)
+        for mm in "${fNameRm[@]}"; do
+            unset fNameA["${fName0["${mm}"]}"]
+            unset fSizeA["${fName0["${mm}"]}"]
+        done
+        fNameRm=()
+    done
     
     mapfile -t -d '' fHashA < <(sha1sum -z "${fNameA[@]}" 2>&1)
     fHashA=("${fHashA[@]%%?(sha1sum:) *}")
