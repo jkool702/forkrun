@@ -56,8 +56,10 @@ EOF
     declare -F forkrun &>/dev/null || { [[ -f ./forkrun.bash ]] && source ./forkrun.bash; } || { type -p forkrun.bash &>/dev/null && source "$(type -p forkrun.bash )"; } || source <(curl 'https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash') || { printf '\nERROR!!! The forkrun function is not defined and its source code could not be found/downloaded. ABORTING!\n\n'; return 1; }
 
     # make vars local
-    local excludeStr fdTmpDirRoot fdTmpDir nn nnCur sizeCutoff realpathFlag
+    local excludeStr fdTmpDirRoot fdTmpDir nn nnCur sizeCutoff realpathFlag PID0
     local -a searchA excludeA useSizeFlag quietFlag autoExcludeFlag 
+
+    PID0=$$
 
     type -p realpath &>/dev/null && realpathFlag=true || realpathFlag=false
 
@@ -125,34 +127,42 @@ EOF
 
 dupefind_progress() { (
     # Prints progress of current operation to screen
-    local -i numFilesCur numFilesAll percentCur
+    local numFilesCur numFilesAll percentCur unknownFlag
+
 
     numFilesAll="$1"
     shift 1
+    if { [[ ${numFilesAll} ]] && (( ${numFilesAll} > 0 )); }; then
+        unknownFlag=false 
+    else
+        unknownFlag=true
+    fi
 
-  {
-    SECONDS=0
-    printf '\n\n--------------------------------------------------------------------------------\nPROGRESS: %s\n\nTOTAL FILES: \t%s\nCOMPLETED: \t0 %s' "${*}" "$([[ ${numFilesAll} ]] && (( ${numFilesAll} > 0 )) && echo "${numFilesAll}" || echo "UNKNOWN")" "$([[ ${numFilesAll} ]] && (( ${numFilesAll} > 0 )) && echo ' ( 0%% ) ')" >&${fd2}
-    numFilesCur=0
-    while true; do
-        read -r -u ${fd_progress}
-        [[ ${REPLY} ]] || break
-        numFilesCur+=${REPLY}
-        { [[ ${numFilesAll} ]] && (( ${numFilesAll} > 0 )); } || {
-            [[ -f "${fdTmpDir}"/totalCur ]] && {
-                read -r numFilesAll <"${fdTmpDir}"/totalCur
-                \rm -f "${fdTmpDir}"/totalCur
+    {
+        SECONDS=0
+        printf '\n\n--------------------------------------------------------------------------------\nPROGRESS: %s\n\nCOMPLETED\t/\tTOTAL\t( %% )\n0\t/\t%s%s' "${*}" "$(${unknownFlag} && echo "???"|| echo "${numFilesAll}")" "$(${unknownFlag} || printf '\t( 0%% ) ')" >&${fd2}
+        numFilesCur=0
+        while true; do
+            read -r -u ${fd_progress}
+            [[ ${REPLY} ]] || break
+            numFilesCur+=${REPLY}
+            ${unknownFlag} && {
+                if [[ -f /proc/${PID0}/fdinfo/${fd_numFiles} ]]; then
+                    read -r numFilesAll </proc/$PID0/fdinfo/${fd_numFiles}
+                    numFilesAll="${numFilesAll#*$'\t'}"
+                else
+                    unknownFlag=false
+                fi
             }
-        }
-        if [[ ${numFilesAll} ]] && (( ${numFilesAll} > 0 )); then
-            percentCur="$(( 100 * ${numFilesCur} / ${numFilesAll} ))"
-            printf '\rCOMPLETED: \t%s  ( %s%% )' "${numFilesCur}" "${percentCur}" >&${fd2}
-        else
-            printf '\rCOMPLETED: \t%s' "${numFilesCur}" >&${fd2}
-        fi
-    done
-    printf '\n\nSTAGE FINISHED!!!\n\nTIME TAKEN: %s SECONDS\n\n' "${SECONDS}" >&${fd2}
-  } &
+            if { [[ ${numFilesAll} ]] && (( ${numFilesAll} > 0 )); }; then
+                percentCur="$(( 100 * ${numFilesCur} / ${numFilesAll} ))"
+                printf '\%s\t/\t%s\t( %s )' "${numFilesCur}" "${numFilesAll}" "${percentCur}" >&${fd2}
+            else
+                printf '\rCOMPLETED: \t%s' "${numFilesCur}" >&${fd2}
+            fi
+        done
+        printf '\n\nSTAGE FINISHED!!!\n\nTIME TAKEN: %s SECONDS\n\n' "${SECONDS}" >&${fd2}
+    } &
 ) {fd2}>&2
 }
 
@@ -271,13 +281,15 @@ dupefind_print() (
 )
 
 
-        ${quietFlag} || printf '\nBeginning search for files with identical size\n' >&2
 
         # search for duplicate file sizes by using forkrun to run dupefind_size
-        { source /proc/self/fd/0 >"${fdTmpDir}"/.fileListCur <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print0"; } 
-        ${quietFlag} || dupefind_progress "$(tr -d '\n' <"${fdTmpDir}"/.fileListCur | tr '\0' '\n' | wc -l)" 'CHECKING FILE SIZES FOR IDENTICALLY SIZED FILES'
-        forkrun -z -k dupefind_size <"${fdTmpDir}"/.fileListCur
-        ${quietFlag} || printf '\n' >&${fd_progress}
+        : >"${fdTmpDir}"/totalCur
+        {
+            ${quietFlag} || { printf '\nBeginning search for files with identical size\n' >&2; dupefind_progress '' 'CHECKING FILE SIZES FOR IDENTICALLY SIZED FILES'; }
+            { source /proc/self/fd/0 <<<"find \"\${searchA[@]}\" ${excludeStr} -type f -print0"; } | tee >(tr -c -d '\0' >&${fd_numFiles}) | forkrun -z -k dupefind_size
+            ${quietFlag} || { printf '\n' >&${fd_progress}; exec {fd_numFiles}>&-; }
+        } {fd_numFiles}>"${fdTmpDir}"/totalCur
+        \rm -f "${fdTmpDir}"/totalCur;
 
         if [[ $(find "${fdTmpDir}"/size/dupes -maxdepth 0 -empty) ]]; then
             # no duplicate file sizes means no duplicates. Skip computing hashes.
@@ -287,21 +299,27 @@ dupefind_print() (
             #printf '%s/0' "${dupes_size0[@]}" "${dupes_size1[@]}" | forkrun -z dupefind_unique
 
             # search for duplicate file hashes by using forkrun to run dupefind_hash
-            ${quietFlag} || printf '\nBeginning search for files with identical sha1sum hash\n' >&2
-            find "${fdTmpDir}"/size/dupes/ -name 'link' | forkrun -i -u -l1 'cat' '{} | sort -u -z' >"${fdTmpDir}"/.fileListCur 
-            ${quietFlag} || dupefind_progress "$(tr -d '\n' <"${fdTmpDir}"/.fileListCur | tr '\0' '\n' | wc -l)" 'COMPUTING SHA1SUM HASH FOR FILES WITH IDENTICAL SIZES'
-            forkrun -z dupefind_hash <"${fdTmpDir}"/.fileListCur
-            ${quietFlag} || printf '\n' >&${fd_progress}
-          
+            : >"${fdTmpDir}"/totalCur
+            {
+                ${quietFlag} || { printf '\nBeginning search for files with identical sha1sum hash\n' >&2; dupefind_progress '' 'COMPUTING SHA1SUM HASH FOR FILES WITH IDENTICAL SIZES'; }
+                find "${fdTmpDir}"/size/dupes/ -name 'link' | forkrun -i -u -l1 'cat' '{} | sort -u -z' | tee >(tr -c -d '\0' >&${fd_numFiles}) | forkrun -z dupefind_hash 
+                ${quietFlag} || { printf '\n' >&${fd_progress}; exec {fd_numFiles}>&-;}
+            } {fd_numFiles}>"${fdTmpDir}"/totalCur
+            \rm -f "${fdTmpDir}"/totalCur; 
         fi
 
-        [[ $(echo "${fdTmpDir}"/size/dupes/*/hash/dupes/*) ]] && {
-            ${quietFlag} || printf '\nDUPLICATES FOUND!!!\n' >&2
-            find "${fdTmpDir}" -path "${fdTmpDir}"'/size/dupes/*/hash/dupes/*' -type f >"${fdTmpDir}"/.fileListCur 
-            ${quietFlag} || [ -t 1 ] || dupefind_progress "$(tr -d '\n' <"${fdTmpDir}"/.fileListCur | tr '\0' '\n' | wc -l)" 'SAVING DUPLICATE LIST TO OUTPUT FILE'
-            forkrun $(${quietFlag} || ! [[ -t 1 ]] || printf '-k') dupefind_print <"${fdTmpDir}"/.fileListCur 
-            ${quietFlag} || [ -t 1 ] || printf '\n' >&${fd_progress}
-        }
+        if [[ $(find "${fdTmpDir}"/size/dupes/*/hash/dupes/* -maxdepth 0 -empty) ]]; then
+            ${quietFlag} || printf '\nNO DUPLICATES FOUND\n' >&2
+            return 0
+        else
+            : >"${fdTmpDir}"/totalCur
+            {
+                ${quietFlag} || { printf '\nDUPLICATES FOUND!!!\n' >&2; [ -t 1 ] || dupefind_progress "$(tr -d '\n' <"${fdTmpDir}"/.fileListCur | tr '\0' '\n' | wc -l)" 'SAVING DUPLICATE LIST TO OUTPUT FILE'; }
+                find "${fdTmpDir}" -path "${fdTmpDir}"'/size/dupes/*/hash/dupes/*' -type f | tee >(tr -c -d '\0' >&${fd_numFiles}) | forkrun $(${quietFlag} || ! [[ -t 1 ]] || printf '-k') dupefind_print <"${fdTmpDir}"/.fileListCur 
+                ${quietFlag} || [ -t 1 ] ||  { printf '\n' >&${fd_progress}; exec {fd_numFiles}>&-; }
+            } {fd_numFiles}>"${fdTmpDir}"/totalCur
+            \rm -f "${fdTmpDir}"/totalCur; 
+        fi
 
     else
 
