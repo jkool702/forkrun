@@ -301,7 +301,7 @@ _dupefind_print() (
             {
                 ${quietFlag} || { printf '\nBeginning search for files with identical sha1sum hash\n' >&2; _dupefind_progress '' 'COMPUTING SHA1SUM HASH FOR FILES WITH IDENTICAL SIZES'; }
                 \rm -f "${dfTmpDir}"/totalCur; 
-                find "${dfTmpDir}"/size/dupes/ -name 'link' | forkrun -i -u -l1 'cat' '{} | sort -u -z' | tee >(tr -d -c '\0' | tr '\0' '\n' >&${fd_numFiles}) | forkrun -z _dupefind_hash 
+                find "${dfTmpDir}"/size/dupes/ -name 'link' | forkrun -i -u -l1 'cat' '{} | sort -u -z; \rm -f "$(realpath {})"' | tee >(tr -d -c '\0' | tr '\0' '\n' >&${fd_numFiles}) | forkrun -z _dupefind_hash 
                 ${quietFlag} || { printf '\n' >&${fd_progress}; exec {fd_numFiles}>&-;}
             } {fd_numFiles}>"${dfTmpDir}"/totalCur
         fi
