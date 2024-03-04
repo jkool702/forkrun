@@ -13,7 +13,7 @@ dupefind() { (
     #
     # For more detailed help, run `dupefind -h`
 
-dupefind_help() ( cat<<'EOF' >&2
+_dupefind_help() ( cat<<'EOF' >&2
 ## dupefind: quickly finds duplicate files using "forkrun", "du", and the "sha1sum" hash
 #
 # dupefind implements a 2 stage search for duplicate files:
@@ -75,7 +75,7 @@ EOF
         # loop over inputs
         for nn in "$@"; do
             case "${nn}" in
-                -h|-\?|--help) dupefind_help; return 0 ;;
+                -h|-\?|--help) _dupefind_help; return 0 ;;
                 -q|-quiet) quietFlag=true ;;
                 -e|--exclude) autoExcludeFlag=true ;;
                 -s|--sha1|--sha1sum|--sha1-only|--sha1sum-only) useSizeFlag=false ;;
