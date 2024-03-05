@@ -203,19 +203,25 @@ _dupefind_rmDupeLinks() {
     local -a fNameA fSizeA fNameRm
     local -A fName0
     local -i kk
+    local mm fNameCur
 
 
     for sizeCur in "$@"; do
-        mapfile -t -d '' fNameA < <(find "${dfTmpDir}"/size/data/"${sizeCur}" -type f -printf '/%P\0')
+        mapfile -t -d '' fNameA < <(find "${dfTmpDir}"/size/data/"${sizeCur}" -mindepth 1 -type f -printf '/%P\0')
+        mapfile -t -d '' fNameA < <(find -L "${fNameA[@]}" -maxdepth 0 -links +1 -print0)
+        [[ ${#fNameA[@]} == 0 ]] && continue
         for kk in "${!fNameA[@]}"; do
             fName0["${fNameA[${kk}]}"]="${kk}"
         done
         for kk in "${!fNameA[@]}"; do
             [[ ${fNameA[$kk]} ]] || continue
-            mapfile -t -d '' fNameRm < <(find -L "${fNameA[@]}" ! -path "${fNameA[$kk]}" -samefile "${fNameA[$kk]}" -print0)
+            fNameCur="${fNameA[$kk]}"
+            unset "fNameA[$kk]"
+            mapfile -t -d '' fNameRm < <(find -L "${fNameA[@]}" -samefile "${fNameCur}" -print0)
+            [[ ${#fNameRm[@]} == 0 ]] && continue
             for mm in "${fNameRm[@]}"; do
                 unset "fNameA[${fName0["${mm}"]}]"
-                \rm -f "${dfTmpDir}/size/data/${sizeCur}/${mm}"
+                \rm -f "${dfTmpDir}"/size/data/"${sizeCur}"/"${mm}"
             done
             fNameRm=()
             [[ ${#fNameA[@]} == 1 ]] && \rm -rf "${dfTmpDir}"/size/{data,dupes}/"${sizeCur}"
@@ -326,6 +332,7 @@ _dupefind_print() (
             fi
         fi
         
+        :<<'EOF'
         if [[ $(find "${dfTmpDir}"/size/dupes -maxdepth 0 -empty) ]]; then
             # no duplicate file sizes means no duplicates. Skip computing hashes.
             ${quietFlag} || printf '\nThe only files found the exact same size were linked to the same file. There are no (non-link) duiplicates. \nSkipping duplicate search based on file hash.\n' >&2
@@ -360,7 +367,7 @@ _dupefind_print() (
              } {fd_numFiles}>"${dfTmpDir}"/totalCur
             \rm -f "${dfTmpDir}"/totalCur; 
        fi
-
+EOF
     else
 
         mkdir -p "${dfTmpDir}"/hash/{data,dupes}
