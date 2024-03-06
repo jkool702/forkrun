@@ -251,7 +251,7 @@ _dupefind_rmDupeLinks() {
             for mm in "${fNameRm[@]}"; do
                 unset "fNameA[${fName0["${mm}"]}]"
             done
-            { [ ${kk} == 0 ]] && [[ ${#fNameA[@]} == 1 ]]; } || printf '%s\0' "${fNameCur}"
+            { [[ ${kk} == 0 ]] && [[ ${#fNameA[@]} == 1 ]]; } || printf '%s\0' "${fNameCur}"
         done
     done
     
@@ -364,14 +364,14 @@ _dupefind_print() (
             return 0
         else
             if ${quietFlag}; then 
-
+                find "${dfTmpDir}" -path "${dfTmpDir}"'/size/dupes/*/hash/dupes/*' -type f | forkrun $(${quietFlag} || ! [[ -t 1 ]] || printf '-k') _dupefind_print
             else
-                [ -t 1 ] || printf '\n' 'Printing duplicate file list to specified output file'
-                find "${dfTmpDir}" -path "${dfTmpDir}"'/size/dupes/*/hash/dupes/*' -type f | tee >(tr -d -c '\0' | tr '\0' '\n' >&${fd_numFiles}) | forkrun $(${quietFlag} || ! [[ -t 1 ]] || printf '-k') _dupefind_print <"${dfTmpDir}"/.fileListCur 
+                [ -t 1 ] || printf '\nPrinting duplicate file list to specified output file\n'
+                find "${dfTmpDir}"/size/dupes -path "${dfTmpDir}"'/size/dupes/*/hash/dupes/*' -type f | tee >(tr -d -c '\0' | tr '\0' '\n' >&${fd_numFiles3}) | forkrun $(${quietFlag} || ! [[ -t 1 ]] || printf '-k') _dupefind_print 
            
                 exec {fd_numFiles3}>&-
                 \rm -f "${dfTmpDir}"/totalCur3
-                printf '\n' >7${fd_progress}
+                printf '\n' >&${fd_progress}
             fi
        fi
 
