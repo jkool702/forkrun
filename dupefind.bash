@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-
+# shellcheck disable=SC2004,SC2059,SC2317 source=/dev/null
 
 dupefind() { (
     ## Quickly finds duplicate files using "forkrun", "du", and the "sha1sum" hash
@@ -89,7 +89,7 @@ EOF
         if [[ "${searchA[*]}" == '/' ]] && { ${autoExcludeFlag} || ! ${quietFlag}; }; then
             for nnCur in '/dev' '/proc' '/run' '/sys' '/tmp'; do
                 ( IFS=' '; [[ " ${excludeA[*]} " == *' '"${nnCur}"?(/)' '* ]] ) || {
-                    { ${autoExcludeFlag} || { read -p "would you like to exclude ${nnCur} from your search for duplicate files? "$'\n'"(Y/n)  " -t 10 -n 1; ! [[ "${REPLY}" == [nN] ]]; }; } && excludeA+=("${nnCur}")
+                    { ${autoExcludeFlag} || { read -r -p "would you like to exclude ${nnCur} from your search for duplicate files? "$'\n'"(Y/n)  " -t 10 -n 1; ! [[ "${REPLY}" == [nN] ]]; }; } && excludeA+=("${nnCur}")
                 }
             done
         fi
