@@ -100,6 +100,16 @@ EOF
     dfTmpDir="$(mktemp -p "${dfTmpDirRoot}" -d .dupefind.XXXXXX)"
     excludeA+=("${dfTmpDir}")
 
+    excludeA=("${excludeA[@]%'/'}")
+    excludeA=("${excludeA[@]%'/*'}")
+
+    source <(printf 'excludeA=("${excludeA[@]%%%%"%s"/*}")\n' "${excludeA[@]}")
+
+    for kk in ${!excludeA[@]}; do
+        [[ "${excludeA[$kk]}" ]] || unset "excludeA[$kk]"
+    done
+
+
     # rm tmpdir on exit
     trap 'printf '"'"'\n'"'"' >&${fd_progress}; \rm -rf "${dfTmpDir}"' EXIT INT HUP TERM
 
@@ -116,6 +126,7 @@ EOF
 
     # setup find exclusions
     printf -v excludeStr ' -path '"'"'%s'"'"' -prune -o ' "${excludeA[@]}"
+#    printf -v excludeStrSize ' -path '"'"'{<SIZE>}/root/%s'"'"' -prune -o ' "${excludeA[@]}"
 
 
     if ${useSizeFlag}; then
@@ -197,7 +208,7 @@ _dupefind_size() (
     # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>') the filename instead and
     #  note that there are multiple files with this size by creating directory ${dfTmpDir}/size/dupes/<filesize> + make "<...>/link" to the data
     for kk in "${!fSizeA[@]}"; do
-        [[ ${fSizeA[$kk]} == +([0-9]) ]] || continue   
+        { [[ ${fSizeA[$kk]} == +([0-9]) ]] && [[ -f "${fNameA[$kk]}" ]]; } || continue   
 
         (( ${fSizeA[$kk]} > $sizeCutoff )) && {
             fHash0="$({ dd if="${fNameA[$kk]}" bs=64k count=1 iflag=fullblock status=none; dd if="${fNameA[$kk]}" bs=64k count=1 iflag=fullblock status=none skip=$(( ${fSizeA[$kk]} - 65536 ))B; } | sha1sum)"
@@ -205,15 +216,15 @@ _dupefind_size() (
         }
 
         if [[ -d "${dfTmpDir}/size/dupes/${fSizeA[$kk]}" ]]; then
-            printf '%s/root/%s\0' "${fSizeA[$kk]}" "${fNameA[$kk]}" >>"${dfTmpDir}/size/data/${fSizeA[$kk]}"
+            printf '%s\0' "${fNameA[$kk]}" >>"${dfTmpDir}/size/data/${fSizeA[$kk]}"
         else
-            printf '%s/root/%s\0' "${fSizeA[$kk]}" "${fNameA[$kk]}" >"${dfTmpDir}/size/data/${fSizeA[$kk]}" || {
+            printf '%s\0' "${fNameA[$kk]}" >"${dfTmpDir}/size/data/${fSizeA[$kk]}" || {
 
                 mkdir -p "${dfTmpDir}/size/dupes/${fSizeA[$kk]}"
                 ln -sf "${dfTmpDir}/size/data/${fSizeA[$kk]}" "${dfTmpDir}/size/dupes/${fSizeA[$kk]}/link"
                 ln -sf / "${dfTmpDir}/size/dupes/${fSizeA[$kk]}/root"
 
-               printf '%s/root/%s\0' "${fSizeA[$kk]}" "${fNameA[$kk]}" >>"${dfTmpDir}/size/data/${fSizeA[$kk]}"
+                printf '%s\0' "${fNameA[$kk]}" >>"${dfTmpDir}/size/data/${fSizeA[$kk]}"
             }
         fi 2>/dev/null
 
@@ -229,36 +240,35 @@ _dupefind_rmDupeLinks() {
     local -i kk
     local mm fNameCur fSizeCur excludeStrCur
 
-    pushd "${dfTmpDir}"/size/dupes
-
-    printf -v excludeStrCur ' -path '"'"'{<SIZE>}/root/%s'"'"' -prune -o ' "${excludeA[@]}"
+    #pushd "${dfTmpDir}"/size/dupes
 
     # print all non-duplicate-{hard,soft}links sop their sha1sum can start to be computed
     for fSizeCur in "$@"; do
-        { source /proc/self/fd/0; } <<<"find -L -O3 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStrCur//' -path {<SIZE>}/root/'/' -path '"${fSizeCur}"'/root/'} -maxdepth 0 -links 1 -print0" 
+        #{ source /proc/self/fd/0; } <<<"find -L -O3 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStrCur//' -path {<SIZE>}/root/'/' -path '"${fSizeCur}"'/root/'} -maxdepth 0 -links 1 -print0" 
+        [[ -f "${dfTmpDir}/size/data/${fSizeCur}" ]] && { source /proc/self/fd/0; } <<<"find -L -O3 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStr} -maxdepth 0 -links 1 -printf '${fSizeCur}//%p\0'"}
     done
 
     for fSizeCur in "$@"; do
-        mapfile -t -d '' fNameA < <({ source /proc/self/fd/0; } <<<"find -L -O3 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStrCur//' -path {<SIZE>}/root/'/' -path '"${fSizeCur}"'/root/'} -maxdepth 0 -links +1 -print0" )
+#        mapfile -t -d '' fNameA < <({ source /proc/self/fd/0; } <<<"find -L -O3 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStrSize//' -path {<SIZE>}/root/'/' -path '"${fSizeCur}"'/root/'} -maxdepth 0 -links +1 -print0" )
+        [[ -f "${dfTmpDir}/size/data/${fSizeCur}" ]] || continue
+        mapfile -t -d '' fNameA < <({ source /proc/self/fd/0; } <<<"find -L -O3 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStr} -maxdepth 0 -links +1 -print0" )
         [[ ${#fNameA[@]} == 0 ]] && continue
         for kk in "${!fNameA[@]}"; do
             fName0["${fNameA[${kk}]}"]="${kk}"
         done
         for kk in "${!fNameA[@]}"; do
             [[ ${fNameA[$kk]} ]] || continue
-            fNameCur="${fNameA[$kk]}"
-            unset "fNameA[$kk]"
-            mapfile -t -d '' fNameRm < <(find -L "${fNameA[@]}" -samefile "${fNameCur}" -print0)
+            mapfile -t -d '' fNameRm < <(find -L "${fNameA[@]:$((kk+1))}" -samefile "${fNameA[$kk]}" -print0)
             for mm in "${fNameRm[@]}"; do
                 unset "fNameA[${fName0["${mm}"]}]"
             done
-            { [[ ${kk} == 0 ]] && [[ ${#fNameA[@]} == 1 ]]; } || printf '%s\0' "${fNameCur}"
         done
+        { [[ ${kk} == 0 ]] && [[ ${#fNameA[@]} == 1 ]]; } || printf '%s//%s\0' "${fSizeCur}" "${fNameCur}"
     done
     
     ${quietFlag} || printf '2 %s\n' "${#}" >&${fd_progress}
 
-    popd
+    #popd
 }
 
 _dupefind_hash() (
@@ -274,7 +284,7 @@ _dupefind_hash() (
 
     # get file size[_hash-partial]/name from name and compute hash with 'sha1sum' and split into 3 arrays
     fSizeA=("${@%%/*}")
-    fNameA=("${@#*/root}")
+    fNameA=("${@#*/}")
     
     mapfile -t -d '' fHashA < <(sha1sum -z "${fNameA[@]}" 2>&1)
     fHashA=("${fHashA[@]%%?(sha1sum:) *}")
@@ -285,7 +295,7 @@ _dupefind_hash() (
     # If the file already exists this will fail (due to set -C), meaning it is a duplicate. in this case append ('>>')
     # the filename instead and note that there are duplicate files with this hash by touching ${dfTmpDir}/size/dupes/<size>/hash/dupes/<hash>
      for kk in "${!fHashA[@]}"; do
-        [[ -z ${fHashA[$kk]} ]] && continue
+        { [[ ${fHashA[$kk]} ]] && [[ ${fSizeA[$kk]} == +([0-9]) ]] && [[ -f "${fNameA[$kk]}" ]]; } || continue
 
         [[ -d "${dfTmpDir}/size/dupes/${fSizeA[$kk]}/hash" ]] || mkdir -p "${dfTmpDir}/size/dupes/${fSizeA[$kk]}/hash"/{data,dupes}
 
@@ -326,7 +336,7 @@ _dupefind_print() (
             echo 0 >"${dfTmpDir}"/totalCur2
             echo 0 >"${dfTmpDir}"/totalCur3
             echo 0 >"${dfTmpDir}"/totalCur4
-            exec  {fd_progress}<><(:) {fd_numFilesA[1]}>"${dfTmpDir}"/totalCur1 {fd_numFilesA[2]}>"${dfTmpDir}"/totalCur2 {fd_numFilesA[3]}>"${dfTmpDir}"/totalCur3 {fd_numFilesA[4]}>"${dfTmpDir}"/totalCur4
+            { :; } {fd_progress}<><(:) {fd_numFilesA[1]}>"${dfTmpDir}"/totalCur1 {fd_numFilesA[2]}>"${dfTmpDir}"/totalCur2 {fd_numFilesA[3]}>"${dfTmpDir}"/totalCur3 {fd_numFilesA[4]}>"${dfTmpDir}"/totalCur4
 
             if [ -t 1 ]; then
                 _dupefind_progress 'CHECKING FILE SIZES FOR IDENTICALLY SIZED FILES' 'CHECKING FOR [LINKED] DUPLICATE FILES IN FILE LISTS' 'COMPUTING SHA1SUM HASH FOR FILES WITH IDENTICAL SIZES'
@@ -337,11 +347,11 @@ _dupefind_print() (
         }
 
         if ${quietFlag}; then
-            { source /proc/self/fd/0 <<<"find -O3 \"\${searchA[@]}\" ${excludeStr} -type f -printf '%s/%p\0'"; } | forkrun -z _dupefind_size
+            { source /proc/self/fd/0 <<<"find -O3 -H \"\${searchA[@]}\" ${excludeStr} -type f -printf '%s/%p\0'"; } | forkrun -z _dupefind_size
         else
             printf '\nBeginning search for files with identical size\n' >&2;
 
-            { source /proc/self/fd/0 <<<"find -O3 \"\${searchA[@]}\" ${excludeStr} -type f -printf '%s/%p\0'"; } | tee >(tr -d -c '\0' | tr '\0' '\n' >&${fd_numFilesA[1]}) | forkrun -z _dupefind_size
+            { source /proc/self/fd/0 <<<"find -O3 -H \"\${searchA[@]}\" ${excludeStr} -type f -printf '%s/%p\0'"; } | tee >(tr -d -c '\0' | tr '\0' '\n' >&${fd_numFilesA[1]}) | forkrun -z _dupefind_size
 
             exec {fd_numFilesA[1]}>&-;  
             \rm -f "${dfTmpDir}"/totalCur1; 
@@ -377,7 +387,7 @@ _dupefind_print() (
                 find "${dfTmpDir}" -path "${dfTmpDir}"'/size/dupes/*/hash/dupes/*' -type f | forkrun $(${quietFlag} || ! [ -t 1 ] || printf '-k') _dupefind_print
             else
                 [ -t 1 ] || printf '\nPrinting duplicate file list to specified output file\n'
-                find -L "${dfTmpDir}"/size/dupes -path "${dfTmpDir}"'/size/dupes/*/hash/dupes/*' -type f | tee >(tr -d -c '\0' | tr '\0' '\n' >&${fd_numFilesA[4]}) | forkrun $(${quietFlag} || ! [ -t 1 ] || printf '-k') _dupefind_print 
+                find "${dfTmpDir}"/size/dupes -path "${dfTmpDir}"'/size/dupes/*/hash/dupes/*' -type f | tee >(tr -d -c '\0' | tr '\0' '\n' >&${fd_numFilesA[4]}) | forkrun $(${quietFlag} || ! [ -t 1 ] || printf '-k') _dupefind_print 
            
                 exec {fd_numFilesA[4]}>&-
                 \rm -f "${dfTmpDir}"/totalCur4
