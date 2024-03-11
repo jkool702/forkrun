@@ -57,7 +57,8 @@ EOF
 
     # make vars local
     local excludeStr dfTmpDirRoot dfTmpDir nn nnCur sizeCutoff 
-    local -a searchA excludeA useSizeFlag quietFlag autoExcludeFlag fd_numFilesA
+    local -a searchA excludeA  quietFlag autoExcludeFlag fd_numFilesA
+    #local useSizeFlag
 
     #PID0=$$
 
@@ -65,7 +66,8 @@ EOF
     sizeCutoff=$(( 2 ** 20 ))
 
     # parse inputs
-    : "${useSizeFlag:=true}" "${quietFlag:=false}" "${autoExcludeFlag:=false}"
+    :  "${quietFlag:=false}" "${autoExcludeFlag:=false}"
+    # : "${useSizeFlag:=true}"
     if [[ $# == 0 ]]; then
         # set default runtime values
         searchA=('/')
@@ -77,7 +79,7 @@ EOF
                 -h|-\?|--help) _dupefind_help; return 0 ;;
                 -q|-quiet) quietFlag=true ;;
                 -e|--exclude) autoExcludeFlag=true ;;
-                -s|--sha1|--sha1sum|--sha1-only|--sha1sum-only) useSizeFlag=false ;;
+           #     -s|--sha1|--sha1sum|--sha1-only|--sha1sum-only) useSizeFlag=false ;;
                 '!'*) excludeA+=("${nn#'!'}") ;;
                 *) searchA+=("${nn}") ;;
             esac
@@ -98,8 +100,11 @@ EOF
     # setup tmpdir for dupefind
     [[ ${dfTmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && dfTmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && dfTmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && dfTmpDirRoot='/tmp'; } || dfTmpDirRoot="$(pwd)"
     dfTmpDir="$(mktemp -p "${dfTmpDirRoot}" -d .dupefind.XXXXXX)"
-    excludeA+=("${dfTmpDir}")
 
+    # add tmpDir to exclude list, then remove unnecessary duplicates in exclude list 
+    # e.g., if it includes '/dev' and '/dev/shm/.dupefind.XXXXXX', remove '/dev/shm/.dupefind.XXXXXX' since it is already covered by '/dev'
+    excludeA+=("${dfTmpDir}")
+    
     excludeA=("${excludeA[@]%'/'}")
     excludeA=("${excludeA[@]%'/*'}")
 
@@ -113,6 +118,7 @@ EOF
     # rm tmpdir on exit
     trap 'printf '"'"'\n'"'"' >&${fd_progress}; \rm -rf "${dfTmpDir}"' EXIT INT HUP TERM
 
+    # print info about parsed options
     ${quietFlag} || {
         printf '\n\ndupefind will now search for duplicate files under : '
         printf "'%s' " "${searchA[@]}"
@@ -129,7 +135,7 @@ EOF
 #    printf -v excludeStrSize ' -path '"'"'{<SIZE>}/root/%s'"'"' -prune -o ' "${excludeA[@]}"
 
 
-    if ${useSizeFlag}; then
+#    if ${useSizeFlag}; then
         # search for duplicate file sizes
 
         # make tmp dirs for _dupefind_size
@@ -137,18 +143,18 @@ EOF
 
 
 _dupefind_progress() (
+    ## Prints progress of current operation to screen
     {
-        # Prints progress of current operation to screen
         local percentCur lineCur lineNew numFilesAdd
         local -a -i numFilesAll numFilesCur 
-
-
+        
         shopt -s extglob
 
         {
             SECONDS=0
             printf '\n\n--------------------------------------------------------------------------------\nPROGRESS REPORT FOR THE FOLLOWING %s TASKS:\n\n' $# >&${fd2}
 
+            # setup arrays for file counts
             for (( kk=1; kk<=$#; kk++ )); do
                 printf 'TASK %s: %s\n' "${kk}" "${!kk}" >&${fd2}
                 numFilesAll[$kk]=0
@@ -158,17 +164,21 @@ _dupefind_progress() (
             lineCur=1
    
             while true; do
+                # read progress update
                 read -r -u ${fd_progress} lineNew numFilesAdd
                 [[ ${numFilesAdd} ]] || break
 
+                # add update to file count of specified task
                 numFilesCur[${lineNew}]+=${numFilesAdd}
                 [[ -f /proc/self/fdinfo/${fd_numFilesA[${lineNew}]} ]] && {
                     read -r </proc/self/fdinfo/${fd_numFilesA[${lineNew}]}
                     [[ ${REPLY##*$'\t'} == +([0-9]) ]] && numFilesAll[${lineNew}]="${REPLY##*$'\t'}"
                 }
 
+                # get current percent from file counts
                 (( ${numFilesAll[${lineNew}]} > 0 )) && percentCur="$(( 100 * ${numFilesCur[${lineNew}]} / ${numFilesAll[${lineNew}]} ))" || percentCur='???'
 
+                # move curson to correct line for task update
                 printf '\r' >&${fd2}
                 [[ "${lineCur}" == "${lineNew}" ]] || {
                     if (( "${lineCur}" > "${lineNew}" )); then 
@@ -177,10 +187,14 @@ _dupefind_progress() (
                         printf '\033['"$(( ${lineNew} - ${lineCur}))"'B' >&${fd2} 
                     fi
                 }
+
+                # update status line for task
                 printf '\033[KTASK #%s:  %s \t / \t %s \t ( %s%% )' "${lineNew}" "${numFilesCur[${lineNew}]}" "${numFilesAll[${lineNew}]}" "${percentCur}" >&${fd2}
 
                 lineCur="${lineNew}"
             done
+
+            # finished. print overall time taken
             printf '\n\nFINISHED!!!\n\nTIME TAKEN: %s SECONDS\n\n' "${SECONDS}" >&${fd2}
             exec {fd2}>&-
         } &
@@ -337,6 +351,7 @@ _dupefind_print() (
             echo 0 >"${dfTmpDir}"/totalCur3
             echo 0 >"${dfTmpDir}"/totalCur4
             { :; } {fd_progress}<><(:) {fd_numFilesA[1]}>"${dfTmpDir}"/totalCur1 {fd_numFilesA[2]}>"${dfTmpDir}"/totalCur2 {fd_numFilesA[3]}>"${dfTmpDir}"/totalCur3 {fd_numFilesA[4]}>"${dfTmpDir}"/totalCur4
+            
 
             if [ -t 1 ]; then
                 _dupefind_progress 'CHECKING FILE SIZES FOR IDENTICALLY SIZED FILES' 'CHECKING FOR [LINKED] DUPLICATE FILES IN FILE LISTS' 'COMPUTING SHA1SUM HASH FOR FILES WITH IDENTICAL SIZES'
@@ -394,7 +409,7 @@ _dupefind_print() (
                 printf '\n' >&${fd_progress}
             fi
        fi
-
+:<<'EOF'
     else
 
         mkdir -p "${dfTmpDir}"/hash/{data,dupes}
@@ -450,6 +465,6 @@ _dupefind_print() (
             find "${dfTmpDir}"/hash/dupes -type f | forkrun $(${quietFlag} || echo '-k') _dupefind_print
         }
     fi
-
+EOF
   ) 
 }
