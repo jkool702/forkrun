@@ -749,7 +749,7 @@ else
         if ${nullDelimiterFlag}; then
             echo """
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}
-                { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -r -d ''; } || {"""
+                { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -t 1 -r -d ''; } || {"""
 
         else
             echo "[[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"
@@ -768,8 +768,23 @@ fi
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
 ${pipeReadFlag} || ${readBytesFlag} || echo "}"
 echo """
-    printf '\\n' >&${fd_continue}
-    [[ \${#A[@]} == 0 ]] && {
+    printf '\\n' >&${fd_continue}"""
+if ${nullDelimiterFlag}; then
+echo """
+    [[ -f \"${tmpDir}\"/.done ]] && {
+        read -r fd_write_pos </proc/self/fdinfo/${fd_write}
+        [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && {
+            doneIndicatorFlag=true
+            : >\"${tmpDir}\"/.quit
+        }
+    }
+    { [[ \${#A[@]} == 0 ]] || [[ -f \"${tmpDir}\"/.quit ]]; } && {
+        """
+else
+echo """
+    [[ \${#A[@]} == 0 ]] && {"""
+fi
+echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
