@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local  tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 nBytesRead v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -446,7 +446,7 @@ forkrun() {
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
-[[ -z $(echo "'"${tmpDir}"'"/.run/p*) ]] || kill $(cat "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+[[ -d  "'"${tmpDir}"'"/.run ]] && [[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill $(<"'"${tmpDir}"'"/.run/p*) 2>/dev/null; '$'\n'
 
        ${pipeReadFlag} && {
             # '.done'  file makes no sense when reading from a pipe
@@ -618,7 +618,9 @@ forkrun() {
 
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
 
-        trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n''return ${returnVal}' EXIT
+        exitTrapStr="${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n''return ${returnVal:-0}'
+        
+        trap "${exitTrapStr}" EXIT
         trap 'kill "${p_PID[@]}" 2>/dev/null'$'\n''returnVal=1'$'\n''return 1' INT TERM HUP
 
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
@@ -645,6 +647,7 @@ forkrun() {
         # To see the resulting coproc code for a given set of forkrun options, run:   `echo | forkrun -vvvv <FLAGS> :`
 
         coprocSrcCode="$( echo """
+local p{<#>} p{<#>}_PID
 { coproc p{<#>} {
 LC_ALL=C
 LANG=C
@@ -746,7 +749,7 @@ else
         if ${nullDelimiterFlag}; then
             echo """
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}
-                { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -r -d ''; } || {"""
+                { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -t 1 -r -d ''; } || {"""
 
         else
             echo "[[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"
@@ -765,8 +768,23 @@ fi
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
 ${pipeReadFlag} || ${readBytesFlag} || echo "}"
 echo """
-    printf '\\n' >&${fd_continue}
-    [[ \${#A[@]} == 0 ]] && {
+    printf '\\n' >&${fd_continue}"""
+if ${nullDelimiterFlag}; then
+echo """
+    [[ -f \"${tmpDir}\"/.done ]] && {
+        read -r fd_write_pos </proc/self/fdinfo/${fd_write}
+        [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && {
+            doneIndicatorFlag=true
+            : >\"${tmpDir}\"/.quit
+        }
+    }
+    { [[ \${#A[@]} == 0 ]] || [[ -f \"${tmpDir}\"/.quit ]]; } && {
+        """
+else
+echo """
+    [[ \${#A[@]} == 0 ]] && {"""
+fi
+echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
