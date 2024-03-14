@@ -249,24 +249,25 @@ _dupefind_size() (
 
 _dupefind_rmDupeLinks() (
     
-    local -a fNameA fSizeA fNameRm
-    local -A fName0
+    local -a fNameA 
     local -i kk
-    local mm fNameCur fSizeCur excludeStrCur
+    local mm fSizeCur 
 
     #pushd "${dfTmpDir}"/size/dupes
 
     # print all non-duplicate-{hard,soft}links sop their sha1sum can start to be computed
     for fSizeCur in "$@"; do
         #{ source /proc/self/fd/0; } <<<"find -L -O3 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStrCur//' -path {<SIZE>}/root/'/' -path '"${fSizeCur}"'/root/'} -maxdepth 0 -links 1 -print0" 
-        ( 
-            \rm -f "${dfTmpDir}/size/data/${fSizeCur}"
-            sort -z -u -V <&${fd} >"${dfTmpDir}/size/data/${fSizeCur}"
-        ) {fd}<"${dfTmpDir}/size/data/${fSizeCur}"
+        #( 
+        #    \rm -f "${dfTmpDir}/size/data/${fSizeCur}"
+        #    sort -z -u -V <&${fd} >"${dfTmpDir}/size/data/${fSizeCur}"
+        #) {fd}<"${dfTmpDir}/size/data/${fSizeCur}"
 
-        [[ -f "${dfTmpDir}/size/data/${fSizeCur}" ]] && { source /proc/self/fd/0; } <<<"find -L -O3 -maxdepth 0 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStr} -links 1 -printf '${fSizeCur}/%p\0'" 
+        [[ -f "${dfTmpDir}/size/data/${fSizeCur}" ]] && source <(printf 'fNameA=('; { source /proc/self/fd/0; } <<<"find -L -O3 -maxdepth 0 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStr} -printf '[%i]=\"${fSizeCur}/%p\" '"; printf ')')
+        printf '%s/0' "${fNameA[@]}"
     done
 
+:<<'EOF'
     for fSizeCur in "$@"; do
 #        mapfile -t -d '' fNameA < <({ source /proc/self/fd/0; } <<<"find -L -O3 -files0-from \"${dfTmpDir}/size/data/${fSizeCur}\" ${excludeStrSize//' -path {<SIZE>}/root/'/' -path '"${fSizeCur}"'/root/'} -maxdepth 0 -links +1 -print0" )
         [[ -f "${dfTmpDir}/size/data/${fSizeCur}" ]] || continue
@@ -285,6 +286,7 @@ _dupefind_rmDupeLinks() (
         done
         { [[ ${kk} == 0 ]] && [[ ${#fNameA[@]} == 1 ]]; } || printf "${fSizeCur}"'/%s\0' "${fNameA[@]}"
     done
+EOF
     
     ${quietFlag} || printf '2 %s\n' "${#}" >&${fd_progress}
 
