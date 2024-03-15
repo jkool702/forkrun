@@ -62,11 +62,9 @@ EOF
     #PID0=$$
 
 
-    sizeCutoff=$(( 2 ** 20 ))
 
     # parse inputs
-    :  "${quietFlag:=false}" "${autoExcludeFlag:=false}"
-    # : "${useSizeFlag:=true}"
+    :  "${quietFlag:=false}" "${autoExcludeFlag:=false}" "${sizeCutoff:=$(( 2 ** 20 ))}"
     if [[ $# == 0 ]]; then
         # set default runtime values
         searchA=('/')
@@ -78,7 +76,7 @@ EOF
                 -h|-\?|--help) _dupefind_help; return 0 ;;
                 -q|-quiet) quietFlag=true ;;
                 -e|--exclude) autoExcludeFlag=true ;;
-           #     -s|--sha1|--sha1sum|--sha1-only|--sha1sum-only) useSizeFlag=false ;;
+                --cutoff=*) sizeCutoff="${nn##*=}" ;;
                 '!'*) excludeA+=("${nn#'!'}") ;;
                 *) searchA+=("${nn}") ;;
             esac
