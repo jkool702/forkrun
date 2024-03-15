@@ -98,19 +98,20 @@ EOF
     [[ ${dfTmpDirRoot} ]] || { [[ ${TMPDIR} ]] && [[ -d "${TMPDIR}" ]] && dfTmpDirRoot="${TMPDIR}"; } || { [[ -d '/dev/shm' ]] && dfTmpDirRoot='/dev/shm'; }  || { [[ -d '/tmp' ]] && dfTmpDirRoot='/tmp'; } || dfTmpDirRoot="$(pwd)"
     dfTmpDir="$(mktemp -p "${dfTmpDirRoot}" -d .dupefind.XXXXXX)"
 
-    # add tmpDir to exclude list, then remove unnecessary duplicates in exclude list 
+    # add tmpDir to exclude list, then remove unnecessary duplicates in search and exclude lists
     # e.g., if it includes '/dev' and '/dev/shm/.dupefind.XXXXXX', remove '/dev/shm/.dupefind.XXXXXX' since it is already covered by '/dev'
     excludeA+=("${dfTmpDir}")
     
-    excludeA=("${excludeA[@]%'/'}")
-    excludeA=("${excludeA[@]%'/*'}")
+    searchA0=("${searchA[@]%'/'}")
+    searchA0=("${searchA0[@]%'/*'}")
+    excludeA0=("${excludeA[@]%'/'}")
+    excludeA0=("${excludeA0[@]%'/*'}")
 
-    source <(printf 'excludeA=("${excludeA[@]%%%%"%s"/*}")\n' "${excludeA[@]}")
+    source <(printf 'searchA=("${searchA[@]%%%%"%s"/*}")\n' "${searchA0[@]}")
+    source <(printf 'excludeA=("${excludeA[@]%%%%"%s"/*}")\n' "${excludeA0[@]}")
 
-    for kk in ${!excludeA[@]}; do
-        [[ "${excludeA[$kk]}" ]] || unset "excludeA[$kk]"
-    done
-
+    mapfile -t -d '' searchA < <(printf '%s\0' "${searchA[@]}" | sed -z s/'^$'/'\/'/ | sort -u -z)
+    mapfile -t -d '' excludeA < <(printf '%s\0' "${excludeA[@]}" | sed -z s/'^$'/'\/'/ | sort -u -z)
 
     # rm tmpdir on exit
     trap '${quietFlag} || printf '"'"'\n'"'"' >&${fd_progress}; \rm -rf "${dfTmpDir}"' EXIT INT HUP TERM
@@ -123,20 +124,16 @@ EOF
         [[ ${#excludeA[@]} == 0 ]] || { 
             printf 'the following files/directories will be excluded: '
             printf "'%s' " "${excludeA[@]}"
+            printf '\n'
         }
-        printf '\ndupefind file data will be temporairly stored under: %s\n\n' "${dfTmpDir}" 
+        printf 'dupefind file data will be temporairly stored under: %s\n\n' "${dfTmpDir}" 
     } >&2
 
     # setup find exclusions
     printf -v excludeStr ' -path '"'"'%s'"'"' -prune -o ' "${excludeA[@]}"
-#    printf -v excludeStrSize ' -path '"'"'{<SIZE>}/root/%s'"'"' -prune -o ' "${excludeA[@]}"
 
-
-#    if ${useSizeFlag}; then
-        # search for duplicate file sizes
-
-        # make tmp dirs for _dupefind_size
-        mkdir -p "${dfTmpDir}"/size/{data,dupes} 
+    # make tmp dirs for _dupefind_size
+    mkdir -p "${dfTmpDir}"/size/{data,dupes} 
 
 
 _dupefind_progress() (
