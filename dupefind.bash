@@ -4,7 +4,7 @@
 shopt -s extglob
 
 dupefind() { (
-    ## Quickly finds duplicate files using "forkrun", "du", and the "sha1sum" hash
+    ## Quickly finds duplicate files using "forkrun", "find", and the "sha1sum" hash
     #
     # USAGE: dupefind [-q] [-e] <path> [<path2> ...] [\!<epath> \!<epath2 ...]
     #
@@ -16,7 +16,7 @@ dupefind() { (
     # For more detailed help, run `dupefind -h`
 
 _dupefind_help() ( cat<<'EOF' >&2
-## dupefind: quickly finds duplicate files using "forkrun", "du", and the "sha1sum" hash
+## dupefind: quickly finds duplicate files using "forkrun", "find", and the "sha1sum" hash
 #
 # dupefind implements a 2 stage search for duplicate files:
 #    it first finds files that have identical sizes (unless the '-s' flag is passed), then
@@ -46,7 +46,7 @@ _dupefind_help() ( cat<<'EOF' >&2
 #    when both a) output is to a terminal, and b) the '-q' flag is not used, then:
 #        a separator line, the sha1sum hash, and the file size (unless '-s') of each duplicate set are also printed
 #
-# DEPENDENCIES: forkrun, find,, sha1sum        
+# DEPENDENCIES: forkrun, find, sha1sum, dd*         *required for `forkrun -z`
 EOF
 )
 
