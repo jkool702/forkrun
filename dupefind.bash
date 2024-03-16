@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2004,SC2059,SC2317 source=/dev/null
 
+shopt -s extglob
+
 dupefind() { (
     ## Quickly finds duplicate files using "forkrun", "du", and the "sha1sum" hash
     #
@@ -56,8 +58,8 @@ EOF
 
     # make vars local
     local excludeStr dfTmpDirRoot dfTmpDir nn nnCur sizeCutoff quietFlag autoExcludeFlag 
-    local -a searchA excludeA fd_numFilesA
-    #local useSizeFlag
+    local -a searchA excludeA searchA0 excludeA0 fd_numFilesA
+    local -i kk
 
     #PID0=$$
 
@@ -112,6 +114,28 @@ EOF
 
     mapfile -t -d '' searchA < <(printf '%s\0' "${searchA[@]}" | sed -z s/'^$'/'\/'/ | sort -u -z)
     mapfile -t -d '' excludeA < <(printf '%s\0' "${excludeA[@]}" | sed -z s/'^$'/'\/'/ | sort -u -z)
+
+    # parse sizeCutoff to get byte count     
+    sizeCutoff="${sizeCutoff,,}"
+	sizeCutoff="${sizeCutoff//[[:space:]]/}"
+	sizeCutoff="${sizeCutoff%b}"
+	
+	[[ "${sizeCutoff}" == +([0-9])@([kmgtp])?(i) ]] && {
+		local -A sizeCutoffParser=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5)
+
+		if [[ ${sizeCutoff: -1:1} == 'i' ]]; then
+			sizeCutoff="$(( ${sizeCutoff%[kmgtp]i} * ( 1024 ** ${sizeCutoffParser[${sizeCutoff: -2:1}]} ) ))"
+		else
+			sizeCutoff="$(( ${sizeCutoff%[kmgtp]} * ( 1000 ** ${sizeCutoffParser[${sizeCutoff: -1:1}]} ) ))"
+		fi
+	}
+
+	# make sure sizeCutoff is only digits or use default of 1 MiB
+	[[ "${sizeCutoff//[0-9]/}" ]] || sizeCutoff=1048576
+	
+	# set minimim sizeCutoff to 128 KiB
+	(( ${sizeCutoff} < 131072 )) && sizeCutoff=131072
+
 
     # rm tmpdir on exit
     trap '${quietFlag} || printf '"'"'\n'"'"' >&${fd_progress}; \rm -rf "${dfTmpDir}"' EXIT INT HUP TERM
