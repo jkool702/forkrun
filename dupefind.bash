@@ -113,7 +113,7 @@ EOF
     source <(printf 'excludeA=("${excludeA[@]%%%%"%s"/*}")\n' "${excludeA0[@]}")
 
     mapfile -t -d '' searchA < <(printf '%s\0' "${searchA[@]}" | sed -z s/'^$'/'\/'/ | sort -u -z)
-    mapfile -t -d '' excludeA < <(printf '%s\0' "${excludeA[@]}" | sed -z s/'^$'/'\/'/ | sort -u -z)
+    mapfile -t -d '' excludeA < <(printf '%s\0' "${excludeA[@]}" | grep -zE '.+' | sort -u -z)
 
     # parse sizeCutoff to get byte count     
     sizeCutoff="${sizeCutoff,,}"
@@ -150,7 +150,8 @@ EOF
             printf "'%s' " "${excludeA[@]}"
             printf '\n'
         }
-        printf 'dupefind file data will be temporairly stored under: %s\n\n' "${dfTmpDir}" 
+        printf 'dupefind file data will be temporairly stored under: %s\n' "${dfTmpDir}" 
+        printf 'cutoff size for initially computing the hash of the first/last 64 kb: %s bytes\n\n' "${sizeCutoff}"
     } >&2
 
     # setup find exclusions
