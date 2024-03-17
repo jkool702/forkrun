@@ -648,14 +648,19 @@ forkrun() {
 
         coprocSrcCode="$( echo """
 local p{<#>} p{<#>}_PID
+
 { coproc p{<#>} {
 LC_ALL=C
 LANG=C
 IFS=
 export LC_ALL LANG IFS
-trap - EXIT
+
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
-trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
+
+trap ': >\"${tmpDir}\"/.quit; 
+[[ -f \"${tmpDir}\"/.run/p{<#>} ]] && \\rm -f \"${tmpDir}\"/.run/p{<#>}; 
+printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT
+
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
 echo """
@@ -750,7 +755,6 @@ else
             echo """
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}
                 { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -t 1 -r -d ''; } || {"""
-
         else
             echo "[[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"
         fi
@@ -769,21 +773,20 @@ ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
 ${pipeReadFlag} || ${readBytesFlag} || echo "}"
 echo """
     printf '\\n' >&${fd_continue}"""
-if ${nullDelimiterFlag}; then
+
+echo """
+    [[ \${#A[@]} == 0 ]] && {"""
+${nullDelimiterFlag} && {
 echo """
     [[ -f \"${tmpDir}\"/.done ]] && {
+        read -r fd_read_pos </proc/self/fdinfo/${fd_read}
         read -r fd_write_pos </proc/self/fdinfo/${fd_write}
-        [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && {
+        [[ \"\${fd_read_pos##*$'\t'}\" == \"\${fd_write_pos##*$'\t'}\" ]] && {
             doneIndicatorFlag=true
             : >\"${tmpDir}\"/.quit
         }
-    }
-    { [[ \${#A[@]} == 0 ]] || [[ -f \"${tmpDir}\"/.quit ]]; } && {
-        """
-else
-echo """
-    [[ \${#A[@]} == 0 ]] && {"""
-fi
+    }"""
+}
 echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
@@ -791,10 +794,10 @@ ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
 echo """
             : >\"${tmpDir}\"/.quit
             printf '\\n' >&${fd_continue}
-        break"""
+            break"""
 { ${inotifyFlag} || ${nOrderFlag}; } && echo "else"
 ${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
-${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify} -t 0.1"
+${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify} -t 1"
 echo """
         fi
         continue
