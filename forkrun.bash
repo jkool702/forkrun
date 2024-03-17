@@ -750,7 +750,7 @@ else
     { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
     echo "${delimiterReadStr} A"
     ${pipeReadFlag} || {
-        echo "[[ \${#A[@]} == 0 ]] || {"
+        echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
         if ${nullDelimiterFlag}; then
             echo """
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}
