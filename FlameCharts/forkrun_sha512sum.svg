@@ -1,0 +1,3669 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="4096" height="2110" onload="init(evt)" viewBox="0 0 4096 2110" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="4096.0" height="2110.0" fill="url(#background)"  />
+<text id="title" x="2048.00" y="24" >forkrun flamechart</text>
+<text id="details" x="10.00" y="2093" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="3986.00" y="24" >Search</text>
+<text id="ignorecase" x="4070.00" y="24" >ic</text>
+<text id="matched" x="3986.00" y="2093" > </text>
+<g id="frames">
+<g >
+<title>unlink_chunk.isra.0 (27,244,614 samples, 0.01%)</title><rect x="111.0" y="397" width="0.2" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="113.97" y="411.5" ></text>
+</g>
+<g >
+<title>_dl_call_fini (12,916,069 samples, 0.00%)</title><rect x="331.1" y="1861" width="0.1" height="23.0" fill="rgb(240,184,38)" rx="2" ry="2" />
+<text  x="334.07" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command (391,640,316 samples, 0.08%)</title><rect x="10.2" y="445" width="3.3" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.22" y="459.5" ></text>
+</g>
+<g >
+<title>_int_malloc (75,972,992 samples, 0.02%)</title><rect x="162.0" y="565" width="0.6" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="164.98" y="579.5" ></text>
+</g>
+<g >
+<title>_dl_catch_exception (116,971,393 samples, 0.02%)</title><rect x="4073.0" y="1885" width="1.0" height="23.0" fill="rgb(247,184,46)" rx="2" ry="2" />
+<text  x="4076.04" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (37,709,227,939 samples, 7.75%)</title><rect x="13.9" y="1261" width="316.0" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.87" y="1275.5" >execute_command_internal</text>
+</g>
+<g >
+<title>__printf_buffer_to_file_switch (641,519,956 samples, 0.13%)</title><rect x="695.0" y="1861" width="5.3" height="23.0" fill="rgb(242,141,41)" rx="2" ry="2" />
+<text  x="697.97" y="1875.5" ></text>
+</g>
+<g >
+<title>__libc_start_call_main (52,953,988,926 samples, 10.89%)</title><rect x="330.8" y="1957" width="443.7" height="23.0" fill="rgb(247,154,46)" rx="2" ry="2" />
+<text  x="333.77" y="1971.5" >__libc_start_call_main</text>
+</g>
+<g >
+<title>_int_free (127,534,197 samples, 0.03%)</title><rect x="24.6" y="397" width="1.1" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="27.62" y="411.5" ></text>
+</g>
+<g >
+<title>[bash] (12,267,779 samples, 0.00%)</title><rect x="14.7" y="181" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="17.65" y="195.5" ></text>
+</g>
+<g >
+<title>_IO_sgetn (69,554,212 samples, 0.01%)</title><rect x="368.0" y="1861" width="0.6" height="23.0" fill="rgb(244,132,43)" rx="2" ry="2" />
+<text  x="371.02" y="1875.5" ></text>
+</g>
+<g >
+<title>__ctype_b_loc (28,921,100 samples, 0.01%)</title><rect x="208.1" y="709" width="0.2" height="23.0" fill="rgb(238,144,36)" rx="2" ry="2" />
+<text  x="211.05" y="723.5" ></text>
+</g>
+<g >
+<title>_dl_sort_maps (32,187,781 samples, 0.01%)</title><rect x="4069.8" y="1981" width="0.3" height="23.0" fill="rgb(243,184,42)" rx="2" ry="2" />
+<text  x="4072.84" y="1995.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (440,352,648 samples, 0.09%)</title><rect x="10.1" y="1069" width="3.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1083.5" ></text>
+</g>
+<g >
+<title>_int_malloc (531,827,722 samples, 0.11%)</title><rect x="304.8" y="709" width="4.5" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="307.80" y="723.5" ></text>
+</g>
+<g >
+<title>dispose_words (323,188,644 samples, 0.07%)</title><rect x="179.2" y="637" width="2.7" height="23.0" fill="rgb(241,177,39)" rx="2" ry="2" />
+<text  x="182.21" y="651.5" ></text>
+</g>
+<g >
+<title>[bash] (57,338,450 samples, 0.01%)</title><rect x="14.9" y="397" width="0.5" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="17.94" y="411.5" ></text>
+</g>
+<g >
+<title>malloc (218,185,707 samples, 0.04%)</title><rect x="260.1" y="661" width="1.8" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="263.10" y="675.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate.part.0 (38,262,254 samples, 0.01%)</title><rect x="375.3" y="1789" width="0.3" height="23.0" fill="rgb(233,153,31)" rx="2" ry="2" />
+<text  x="378.28" y="1803.5" ></text>
+</g>
+<g >
+<title>execute_command (40,313,772 samples, 0.01%)</title><rect x="14.6" y="325" width="0.3" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.59" y="339.5" ></text>
+</g>
+<g >
+<title>xstrmatch (34,794,950 samples, 0.01%)</title><rect x="154.4" y="589" width="0.2" height="23.0" fill="rgb(242,179,41)" rx="2" ry="2" />
+<text  x="157.36" y="603.5" ></text>
+</g>
+<g >
+<title>malloc (243,300,668 samples, 0.05%)</title><rect x="265.2" y="685" width="2.0" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="268.18" y="699.5" ></text>
+</g>
+<g >
+<title>__libc_fork (18,050,455 samples, 0.00%)</title><rect x="302.4" y="733" width="0.2" height="23.0" fill="rgb(236,154,34)" rx="2" ry="2" />
+<text  x="305.43" y="747.5" ></text>
+</g>
+<g >
+<title>_getopt_internal_r (24,915,608 samples, 0.01%)</title><rect x="761.0" y="1861" width="0.2" height="23.0" fill="rgb(240,153,38)" rx="2" ry="2" />
+<text  x="763.98" y="1875.5" ></text>
+</g>
+<g >
+<title>dispose_word (72,519,870 samples, 0.01%)</title><rect x="129.0" y="469" width="0.6" height="23.0" fill="rgb(248,177,47)" rx="2" ry="2" />
+<text  x="131.99" y="483.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (14,504,391 samples, 0.00%)</title><rect x="4070.1" y="1957" width="0.1" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4073.11" y="1971.5" ></text>
+</g>
+<g >
+<title>[bash] (53,227,163 samples, 0.01%)</title><rect x="12.0" y="229" width="0.5" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.02" y="243.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (56,933,371 samples, 0.01%)</title><rect x="264.6" y="709" width="0.4" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="267.55" y="723.5" ></text>
+</g>
+<g >
+<title>dispose_words (305,134,897 samples, 0.06%)</title><rect x="299.6" y="757" width="2.5" height="23.0" fill="rgb(241,177,39)" rx="2" ry="2" />
+<text  x="302.59" y="771.5" ></text>
+</g>
+<g >
+<title>malloc (118,829,835 samples, 0.02%)</title><rect x="161.6" y="589" width="1.0" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="164.62" y="603.5" ></text>
+</g>
+<g >
+<title>execute_command (42,857,611 samples, 0.01%)</title><rect x="14.6" y="373" width="0.3" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.57" y="387.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (37,678,435,309 samples, 7.75%)</title><rect x="13.9" y="1069" width="315.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.91" y="1083.5" >execute_command_internal</text>
+</g>
+<g >
+<title>_int_free (22,371,353 samples, 0.00%)</title><rect x="375.1" y="1789" width="0.1" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="378.06" y="1803.5" ></text>
+</g>
+<g >
+<title>array_to_word_list (784,526,851 samples, 0.16%)</title><rect x="156.1" y="613" width="6.6" height="23.0" fill="rgb(232,134,30)" rx="2" ry="2" />
+<text  x="159.09" y="627.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (33,460,401 samples, 0.01%)</title><rect x="21.2" y="349" width="0.2" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="24.16" y="363.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (83,245,683 samples, 0.02%)</title><rect x="12.8" y="349" width="0.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="15.79" y="363.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (146,202,186 samples, 0.03%)</title><rect x="180.7" y="589" width="1.2" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="183.68" y="603.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (87,272,789 samples, 0.02%)</title><rect x="757.0" y="1909" width="0.8" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="760.04" y="1923.5" ></text>
+</g>
+<g >
+<title>[bash] (1,238,185,575 samples, 0.25%)</title><rect x="165.7" y="589" width="10.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="168.71" y="603.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (68,719,106 samples, 0.01%)</title><rect x="10.5" y="181" width="0.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.52" y="195.5" ></text>
+</g>
+<g >
+<title>_dl_load_cache_lookup (24,608,924 samples, 0.01%)</title><rect x="4073.1" y="1813" width="0.2" height="23.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="4076.12" y="1827.5" ></text>
+</g>
+<g >
+<title>execute_command (38,155,320,552 samples, 7.84%)</title><rect x="10.1" y="1573" width="319.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1587.5" >execute_command</text>
+</g>
+<g >
+<title>realloc (69,987,063 samples, 0.01%)</title><rect x="224.4" y="709" width="0.6" height="23.0" fill="rgb(238,184,36)" rx="2" ry="2" />
+<text  x="227.43" y="723.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (37,202,530 samples, 0.01%)</title><rect x="14.6" y="301" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.60" y="315.5" ></text>
+</g>
+<g >
+<title>[bash] (38,161,350,756 samples, 7.85%)</title><rect x="10.1" y="1813" width="319.8" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.09" y="1827.5" >[bash]</text>
+</g>
+<g >
+<title>execute_command_internal (440,430,146 samples, 0.09%)</title><rect x="10.1" y="1165" width="3.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1179.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (35,867,897 samples, 0.01%)</title><rect x="13.5" y="445" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.50" y="459.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_write (25,496,995 samples, 0.01%)</title><rect x="4067.9" y="1933" width="0.2" height="23.0" fill="rgb(240,141,38)" rx="2" ry="2" />
+<text  x="4070.88" y="1947.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (11,681,602,693 samples, 2.40%)</title><rect x="48.1" y="757" width="97.9" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="51.14" y="771.5" >execute_com..</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (139,372,534 samples, 0.03%)</title><rect x="245.3" y="685" width="1.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="248.28" y="699.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (56,563,902 samples, 0.01%)</title><rect x="129.1" y="445" width="0.5" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="132.12" y="459.5" ></text>
+</g>
+<g >
+<title>_getopt_internal (25,186,410 samples, 0.01%)</title><rect x="761.0" y="1885" width="0.2" height="23.0" fill="rgb(229,153,27)" rx="2" ry="2" />
+<text  x="763.98" y="1899.5" ></text>
+</g>
+<g >
+<title>redirection_expand (19,362,651 samples, 0.00%)</title><rect x="47.7" y="613" width="0.1" height="23.0" fill="rgb(254,175,54)" rx="2" ry="2" />
+<text  x="50.65" y="627.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (44,838,907 samples, 0.01%)</title><rect x="193.0" y="589" width="0.4" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="195.99" y="603.5" ></text>
+</g>
+<g >
+<title>__GI___fileno (18,770,383 samples, 0.00%)</title><rect x="384.9" y="1909" width="0.2" height="23.0" fill="rgb(249,119,49)" rx="2" ry="2" />
+<text  x="387.91" y="1923.5" ></text>
+</g>
+<g >
+<title>__ctype_get_mb_cur_max (34,070,145 samples, 0.01%)</title><rect x="261.9" y="709" width="0.3" height="23.0" fill="rgb(244,144,43)" rx="2" ry="2" />
+<text  x="264.93" y="723.5" ></text>
+</g>
+<g >
+<title>_IO_do_write@@GLIBC_2.2.5 (17,486,016 samples, 0.00%)</title><rect x="382.1" y="1909" width="0.1" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="385.07" y="1923.5" ></text>
+</g>
+<g >
+<title>_int_free (82,886,954 samples, 0.02%)</title><rect x="300.2" y="709" width="0.7" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="303.23" y="723.5" ></text>
+</g>
+<g >
+<title>strcmp (95,479,600 samples, 0.02%)</title><rect x="4084.2" y="1837" width="0.8" height="23.0" fill="rgb(238,140,36)" rx="2" ry="2" />
+<text  x="4087.22" y="1851.5" ></text>
+</g>
+<g >
+<title>[bash] (19,877,263 samples, 0.00%)</title><rect x="10.3" y="397" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.26" y="411.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (21,587,447 samples, 0.00%)</title><rect x="145.0" y="421" width="0.2" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="148.02" y="435.5" ></text>
+</g>
+<g >
+<title>parse_and_execute (38,161,553,547 samples, 7.85%)</title><rect x="10.1" y="1885" width="319.8" height="23.0" fill="rgb(240,149,38)" rx="2" ry="2" />
+<text  x="13.09" y="1899.5" >parse_and_execute</text>
+</g>
+<g >
+<title>strchr@plt (339,211,223 samples, 0.07%)</title><rect x="111.2" y="445" width="2.9" height="23.0" fill="rgb(231,140,29)" rx="2" ry="2" />
+<text  x="114.23" y="459.5" ></text>
+</g>
+<g >
+<title>__GI__IO_un_link.part.0 (15,228,502 samples, 0.00%)</title><rect x="359.1" y="1885" width="0.1" height="23.0" fill="rgb(233,119,31)" rx="2" ry="2" />
+<text  x="362.06" y="1899.5" ></text>
+</g>
+<g >
+<title>__fread_unlocked_chk (1,224,712,340 samples, 0.25%)</title><rect x="360.2" y="1885" width="10.3" height="23.0" fill="rgb(235,135,33)" rx="2" ry="2" />
+<text  x="363.19" y="1899.5" ></text>
+</g>
+<g >
+<title>[bash] (14,553,592 samples, 0.00%)</title><rect x="13.1" y="229" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.10" y="243.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (88,285,662 samples, 0.02%)</title><rect x="12.8" y="397" width="0.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="15.76" y="411.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,155,832,306 samples, 7.84%)</title><rect x="10.1" y="1645" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1659.5" >execute_command_internal</text>
+</g>
+<g >
+<title>do_lookup_x (453,708,984 samples, 0.09%)</title><rect x="4081.2" y="1861" width="3.8" height="23.0" fill="rgb(244,189,43)" rx="2" ry="2" />
+<text  x="4084.22" y="1875.5" ></text>
+</g>
+<g >
+<title>_int_malloc (264,342,958 samples, 0.05%)</title><rect x="159.4" y="541" width="2.2" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="162.36" y="555.5" ></text>
+</g>
+<g >
+<title>_IO_file_stat (29,045,698 samples, 0.01%)</title><rect x="366.7" y="1813" width="0.2" height="23.0" fill="rgb(229,132,26)" rx="2" ry="2" />
+<text  x="369.67" y="1827.5" ></text>
+</g>
+<g >
+<title>alloc_word_desc (19,818,863 samples, 0.00%)</title><rect x="226.9" y="733" width="0.1" height="23.0" fill="rgb(230,128,27)" rx="2" ry="2" />
+<text  x="229.85" y="747.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (1,579,281,427 samples, 0.32%)</title><rect x="595.0" y="1837" width="13.2" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="597.96" y="1851.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,159,909,698 samples, 7.85%)</title><rect x="10.1" y="1765" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.10" y="1779.5" >execute_command_internal</text>
+</g>
+<g >
+<title>execute_command (3,938,861,518 samples, 0.81%)</title><rect x="14.4" y="757" width="33.0" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.37" y="771.5" >ex..</text>
+</g>
+<g >
+<title>_int_free (34,326,518 samples, 0.01%)</title><rect x="327.6" y="709" width="0.3" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="330.60" y="723.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (202,566,854 samples, 0.04%)</title><rect x="374.7" y="1813" width="1.7" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="377.71" y="1827.5" ></text>
+</g>
+<g >
+<title>[bash] (30,231,053 samples, 0.01%)</title><rect x="11.4" y="205" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="14.40" y="219.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (57,801,832 samples, 0.01%)</title><rect x="133.3" y="445" width="0.5" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="136.32" y="459.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (53,481,162 samples, 0.01%)</title><rect x="68.6" y="445" width="0.5" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="71.62" y="459.5" ></text>
+</g>
+<g >
+<title>dispose_word (174,405,634 samples, 0.04%)</title><rect x="206.1" y="637" width="1.5" height="23.0" fill="rgb(248,177,47)" rx="2" ry="2" />
+<text  x="209.15" y="651.5" ></text>
+</g>
+<g >
+<title>all (486,394,452,379 samples, 100%)</title><rect x="10.0" y="2053" width="4076.0" height="23.0" fill="rgb(255,230,55)" rx="2" ry="2" />
+<text  x="13.00" y="2067.5" ></text>
+</g>
+<g >
+<title>execute_command (86,422,418 samples, 0.02%)</title><rect x="12.8" y="373" width="0.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="15.77" y="387.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (184,402,049 samples, 0.04%)</title><rect x="282.6" y="757" width="1.6" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="285.61" y="771.5" ></text>
+</g>
+<g >
+<title>_int_malloc (103,614,910 samples, 0.02%)</title><rect x="365.8" y="1765" width="0.9" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="368.79" y="1779.5" ></text>
+</g>
+<g >
+<title>__GI___libc_write (79,398,188 samples, 0.02%)</title><rect x="384.0" y="1837" width="0.7" height="23.0" fill="rgb(240,119,38)" rx="2" ry="2" />
+<text  x="387.02" y="1851.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate.part.0 (277,818,990 samples, 0.06%)</title><rect x="202.0" y="637" width="2.4" height="23.0" fill="rgb(233,153,31)" rx="2" ry="2" />
+<text  x="205.03" y="651.5" ></text>
+</g>
+<g >
+<title>realloc (14,653,015 samples, 0.00%)</title><rect x="145.7" y="589" width="0.2" height="23.0" fill="rgb(238,184,36)" rx="2" ry="2" />
+<text  x="148.74" y="603.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (27,703,315 samples, 0.01%)</title><rect x="26.8" y="349" width="0.3" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="29.84" y="363.5" ></text>
+</g>
+<g >
+<title>malloc (16,347,678 samples, 0.00%)</title><rect x="126.6" y="469" width="0.1" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="129.56" y="483.5" ></text>
+</g>
+<g >
+<title>malloc (26,297,890 samples, 0.01%)</title><rect x="761.2" y="1909" width="0.2" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="764.19" y="1923.5" ></text>
+</g>
+<g >
+<title>_dl_map_object_deps (131,992,385 samples, 0.03%)</title><rect x="4072.9" y="1909" width="1.2" height="23.0" fill="rgb(240,184,39)" rx="2" ry="2" />
+<text  x="4075.95" y="1923.5" ></text>
+</g>
+<g >
+<title>execute_command (11,682,430,672 samples, 2.40%)</title><rect x="48.1" y="781" width="97.9" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="51.13" y="795.5" >execute_com..</text>
+</g>
+<g >
+<title>_int_free (28,142,086 samples, 0.01%)</title><rect x="180.9" y="565" width="0.2" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="183.90" y="579.5" ></text>
+</g>
+<g >
+<title>dispose_words (304,712,386 samples, 0.06%)</title><rect x="243.9" y="733" width="2.6" height="23.0" fill="rgb(241,177,39)" rx="2" ry="2" />
+<text  x="246.90" y="747.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (123,615,222 samples, 0.03%)</title><rect x="163.0" y="589" width="1.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="166.02" y="603.5" ></text>
+</g>
+<g >
+<title>__GI___libc_cleanup_pop_restore (16,801,507 samples, 0.00%)</title><rect x="356.0" y="1813" width="0.2" height="23.0" fill="rgb(246,119,45)" rx="2" ry="2" />
+<text  x="359.05" y="1827.5" ></text>
+</g>
+<g >
+<title>[unknown] (719,865,403 samples, 0.15%)</title><rect x="4062.5" y="1981" width="6.0" height="23.0" fill="rgb(242,180,40)" rx="2" ry="2" />
+<text  x="4065.48" y="1995.5" ></text>
+</g>
+<g >
+<title>__GI___fileno (110,165,801 samples, 0.02%)</title><rect x="359.2" y="1885" width="0.9" height="23.0" fill="rgb(249,119,49)" rx="2" ry="2" />
+<text  x="362.19" y="1899.5" ></text>
+</g>
+<g >
+<title>xstrmatch (15,538,041 samples, 0.00%)</title><rect x="178.8" y="613" width="0.1" height="23.0" fill="rgb(242,179,41)" rx="2" ry="2" />
+<text  x="181.76" y="627.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,158,044,672 samples, 7.85%)</title><rect x="10.1" y="1741" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.12" y="1755.5" >execute_command_internal</text>
+</g>
+<g >
+<title>array_to_word_list (498,873,113 samples, 0.10%)</title><rect x="134.8" y="517" width="4.2" height="23.0" fill="rgb(232,134,30)" rx="2" ry="2" />
+<text  x="137.81" y="531.5" ></text>
+</g>
+<g >
+<title>openaux (115,594,351 samples, 0.02%)</title><rect x="4073.0" y="1861" width="1.0" height="23.0" fill="rgb(246,195,45)" rx="2" ry="2" />
+<text  x="4076.05" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (43,850,965 samples, 0.01%)</title><rect x="13.1" y="301" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.06" y="315.5" ></text>
+</g>
+<g >
+<title>_int_malloc (165,614,634 samples, 0.03%)</title><rect x="265.8" y="661" width="1.4" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="268.80" y="675.5" ></text>
+</g>
+<g >
+<title>malloc (35,351,773 samples, 0.01%)</title><rect x="133.8" y="445" width="0.3" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="136.81" y="459.5" ></text>
+</g>
+<g >
+<title>execute_command (440,430,146 samples, 0.09%)</title><rect x="10.1" y="1237" width="3.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1251.5" ></text>
+</g>
+<g >
+<title>_IO_sgetn (39,001,346 samples, 0.01%)</title><rect x="358.6" y="1885" width="0.3" height="23.0" fill="rgb(244,132,43)" rx="2" ry="2" />
+<text  x="361.56" y="1899.5" ></text>
+</g>
+<g >
+<title>_int_malloc (264,952,773 samples, 0.05%)</title><rect x="130.3" y="469" width="2.2" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="133.25" y="483.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (80,989,845 samples, 0.02%)</title><rect x="181.2" y="565" width="0.7" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="184.21" y="579.5" ></text>
+</g>
+<g >
+<title>malloc (229,773,200 samples, 0.05%)</title><rect x="267.5" y="685" width="1.9" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="270.51" y="699.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (172,592,150 samples, 0.04%)</title><rect x="25.9" y="397" width="1.4" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="28.85" y="411.5" ></text>
+</g>
+<g >
+<title>array_create_element (463,673,223 samples, 0.10%)</title><rect x="17.6" y="421" width="3.9" height="23.0" fill="rgb(241,134,39)" rx="2" ry="2" />
+<text  x="20.59" y="435.5" ></text>
+</g>
+<g >
+<title>_IO_file_close (21,069,188 samples, 0.00%)</title><rect x="373.6" y="1861" width="0.2" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="376.62" y="1875.5" ></text>
+</g>
+<g >
+<title>__mempcpy_evex_unaligned_erms (436,300,114 samples, 0.09%)</title><rect x="691.3" y="1813" width="3.7" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="694.31" y="1827.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (15,719,029,106 samples, 3.23%)</title><rect x="14.3" y="829" width="131.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.30" y="843.5" >execute_command_..</text>
+</g>
+<g >
+<title>execute_command_internal (3,908,197,698 samples, 0.80%)</title><rect x="14.4" y="685" width="32.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.41" y="699.5" >ex..</text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (57,463,930 samples, 0.01%)</title><rect x="115.8" y="349" width="0.5" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="118.85" y="363.5" ></text>
+</g>
+<g >
+<title>execute_command (14,465,140 samples, 0.00%)</title><rect x="13.3" y="205" width="0.1" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="16.27" y="219.5" ></text>
+</g>
+<g >
+<title>__strchrnul_evex (3,850,499,004 samples, 0.79%)</title><rect x="708.7" y="1861" width="32.3" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="711.72" y="1875.5" >__..</text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (170,053,582 samples, 0.03%)</title><rect x="347.1" y="1885" width="1.4" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="350.12" y="1899.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (136,207,333 samples, 0.03%)</title><rect x="299.8" y="733" width="1.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="302.78" y="747.5" ></text>
+</g>
+<g >
+<title>_int_malloc (57,821,909 samples, 0.01%)</title><rect x="222.4" y="637" width="0.5" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="225.44" y="651.5" ></text>
+</g>
+<g >
+<title>_int_free (31,375,285 samples, 0.01%)</title><rect x="129.3" y="421" width="0.3" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="132.33" y="435.5" ></text>
+</g>
+<g >
+<title>[bash] (19,844,991 samples, 0.00%)</title><rect x="14.6" y="205" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="17.64" y="219.5" ></text>
+</g>
+<g >
+<title>builtin_find_indexed_array (535,432,381 samples, 0.11%)</title><rect x="22.9" y="469" width="4.5" height="23.0" fill="rgb(239,101,37)" rx="2" ry="2" />
+<text  x="25.88" y="483.5" ></text>
+</g>
+<g >
+<title>_IO_fflush (31,635,534 samples, 0.01%)</title><rect x="357.8" y="1885" width="0.2" height="23.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="360.77" y="1899.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_pad_1 (96,204,902 samples, 0.02%)</title><rect x="609.2" y="1837" width="0.8" height="23.0" fill="rgb(228,141,26)" rx="2" ry="2" />
+<text  x="612.16" y="1851.5" ></text>
+</g>
+<g >
+<title>_int_free (71,873,937 samples, 0.01%)</title><rect x="124.8" y="421" width="0.6" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="127.82" y="435.5" ></text>
+</g>
+<g >
+<title>[bash] (44,473,494 samples, 0.01%)</title><rect x="12.0" y="133" width="0.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.04" y="147.5" ></text>
+</g>
+<g >
+<title>__strcpy_chk (13,017,448 samples, 0.00%)</title><rect x="157.0" y="589" width="0.1" height="23.0" fill="rgb(235,132,33)" rx="2" ry="2" />
+<text  x="160.02" y="603.5" ></text>
+</g>
+<g >
+<title>__fread_unlocked_chk (70,871,951 samples, 0.01%)</title><rect x="389.2" y="1909" width="0.6" height="23.0" fill="rgb(235,135,33)" rx="2" ry="2" />
+<text  x="392.24" y="1923.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (31,219,558 samples, 0.01%)</title><rect x="15.7" y="517" width="0.2" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="18.67" y="531.5" ></text>
+</g>
+<g >
+<title>malloc (30,619,947 samples, 0.01%)</title><rect x="278.2" y="661" width="0.2" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="281.15" y="675.5" ></text>
+</g>
+<g >
+<title>[bash] (11,657,870,046 samples, 2.40%)</title><rect x="48.2" y="661" width="97.7" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="51.23" y="675.5" >[bash]</text>
+</g>
+<g >
+<title>_int_free (22,445,477 samples, 0.00%)</title><rect x="21.8" y="421" width="0.2" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="24.77" y="435.5" ></text>
+</g>
+<g >
+<title>execute_command (70,827,779 samples, 0.01%)</title><rect x="10.5" y="205" width="0.6" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.50" y="219.5" ></text>
+</g>
+<g >
+<title>[bash] (52,280,356 samples, 0.01%)</title><rect x="12.0" y="205" width="0.5" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.02" y="219.5" ></text>
+</g>
+<g >
+<title>__GI___libc_open (96,944,316 samples, 0.02%)</title><rect x="353.4" y="1789" width="0.8" height="23.0" fill="rgb(250,119,49)" rx="2" ry="2" />
+<text  x="356.36" y="1803.5" ></text>
+</g>
+<g >
+<title>redirection_expand (18,165,649 samples, 0.00%)</title><rect x="11.8" y="157" width="0.1" height="23.0" fill="rgb(254,175,54)" rx="2" ry="2" />
+<text  x="14.77" y="171.5" ></text>
+</g>
+<g >
+<title>execute_command (3,778,706,716 samples, 0.78%)</title><rect x="14.4" y="613" width="31.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.44" y="627.5" >ex..</text>
+</g>
+<g >
+<title>_IO_file_fopen@@GLIBC_2.2.5 (426,224,153 samples, 0.09%)</title><rect x="351.6" y="1837" width="3.6" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="354.62" y="1851.5" ></text>
+</g>
+<g >
+<title>_int_free (37,914,236 samples, 0.01%)</title><rect x="144.5" y="445" width="0.3" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="147.46" y="459.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (37,299,840 samples, 0.01%)</title><rect x="175.7" y="541" width="0.3" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="178.68" y="555.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (440,213,497 samples, 0.09%)</title><rect x="10.1" y="925" width="3.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="939.5" ></text>
+</g>
+<g >
+<title>malloc (211,503,674 samples, 0.04%)</title><rect x="219.2" y="637" width="1.8" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="222.18" y="651.5" ></text>
+</g>
+<g >
+<title>_int_malloc (113,200,139 samples, 0.02%)</title><rect x="381.1" y="1861" width="0.9" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="384.08" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (85,859,586 samples, 0.02%)</title><rect x="47.4" y="757" width="0.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="50.37" y="771.5" ></text>
+</g>
+<g >
+<title>_int_malloc (68,103,481 samples, 0.01%)</title><rect x="224.4" y="661" width="0.6" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="227.45" y="675.5" ></text>
+</g>
+<g >
+<title>__printf_chk (1,030,362,483 samples, 0.21%)</title><rect x="763.7" y="1933" width="8.7" height="23.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="766.74" y="1947.5" ></text>
+</g>
+<g >
+<title>__ctype_get_mb_cur_max (48,039,898 samples, 0.01%)</title><rect x="150.9" y="589" width="0.4" height="23.0" fill="rgb(244,144,43)" rx="2" ry="2" />
+<text  x="153.87" y="603.5" ></text>
+</g>
+<g >
+<title>[bash] (65,854,988 samples, 0.01%)</title><rect x="10.5" y="157" width="0.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.52" y="171.5" ></text>
+</g>
+<g >
+<title>[bash] (16,115,147 samples, 0.00%)</title><rect x="329.2" y="781" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="332.24" y="795.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (21,627,369 samples, 0.00%)</title><rect x="207.4" y="565" width="0.2" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="210.42" y="579.5" ></text>
+</g>
+<g >
+<title>[unknown] (332,092,635 samples, 0.07%)</title><rect x="4065.4" y="1957" width="2.8" height="23.0" fill="rgb(242,180,40)" rx="2" ry="2" />
+<text  x="4068.41" y="1971.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (54,190,592 samples, 0.01%)</title><rect x="388.6" y="1885" width="0.4" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="391.59" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,155,320,552 samples, 7.84%)</title><rect x="10.1" y="1453" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1467.5" >execute_command_internal</text>
+</g>
+<g >
+<title>dfs_traversal.part.0 (16,850,468 samples, 0.00%)</title><rect x="4070.0" y="1957" width="0.1" height="23.0" fill="rgb(233,192,31)" rx="2" ry="2" />
+<text  x="4072.97" y="1971.5" ></text>
+</g>
+<g >
+<title>[bash] (49,196,512 samples, 0.01%)</title><rect x="12.0" y="181" width="0.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.02" y="195.5" ></text>
+</g>
+<g >
+<title>dispose_words (385,683,295 samples, 0.08%)</title><rect x="204.4" y="661" width="3.2" height="23.0" fill="rgb(241,177,39)" rx="2" ry="2" />
+<text  x="207.38" y="675.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (440,279,469 samples, 0.09%)</title><rect x="10.1" y="1021" width="3.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1035.5" ></text>
+</g>
+<g >
+<title>_IO_file_write@@GLIBC_2.2.5 (24,498,673 samples, 0.01%)</title><rect x="383.1" y="1861" width="0.2" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="386.11" y="1875.5" ></text>
+</g>
+<g >
+<title>evalexp (18,543,317 samples, 0.00%)</title><rect x="13.1" y="277" width="0.1" height="23.0" fill="rgb(237,178,35)" rx="2" ry="2" />
+<text  x="16.09" y="291.5" ></text>
+</g>
+<g >
+<title>malloc (39,614,831 samples, 0.01%)</title><rect x="178.4" y="565" width="0.3" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="181.42" y="579.5" ></text>
+</g>
+<g >
+<title>[bash] (27,656,523 samples, 0.01%)</title><rect x="14.0" y="853" width="0.3" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="17.04" y="867.5" ></text>
+</g>
+<g >
+<title>parse_and_execute (37,699,352,704 samples, 7.75%)</title><rect x="13.9" y="1117" width="315.9" height="23.0" fill="rgb(240,149,38)" rx="2" ry="2" />
+<text  x="16.88" y="1131.5" >parse_and_execute</text>
+</g>
+<g >
+<title>[sha512sum] (1,090,556,826 samples, 0.22%)</title><rect x="348.5" y="1885" width="9.2" height="23.0" fill="rgb(232,171,30)" rx="2" ry="2" />
+<text  x="351.54" y="1899.5" ></text>
+</g>
+<g >
+<title>_int_malloc (94,326,088 samples, 0.02%)</title><rect x="200.3" y="589" width="0.8" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="203.27" y="603.5" ></text>
+</g>
+<g >
+<title>execute_command (45,622,966 samples, 0.01%)</title><rect x="14.5" y="421" width="0.4" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.55" y="435.5" ></text>
+</g>
+<g >
+<title>[bash] (435,952,040 samples, 0.09%)</title><rect x="10.2" y="637" width="3.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.16" y="651.5" ></text>
+</g>
+<g >
+<title>internal_strmatch (28,723,793 samples, 0.01%)</title><rect x="152.6" y="589" width="0.2" height="23.0" fill="rgb(242,164,41)" rx="2" ry="2" />
+<text  x="155.58" y="603.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_to_file_init (897,491,370 samples, 0.18%)</title><rect x="419.8" y="1885" width="7.5" height="23.0" fill="rgb(236,141,34)" rx="2" ry="2" />
+<text  x="422.77" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (172,904,638 samples, 0.04%)</title><rect x="14.5" y="541" width="1.4" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.49" y="555.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (20,829,187 samples, 0.00%)</title><rect x="118.9" y="445" width="0.2" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="121.88" y="459.5" ></text>
+</g>
+<g >
+<title>execute_command (246,035,477 samples, 0.05%)</title><rect x="10.4" y="349" width="2.1" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.45" y="363.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (14,005,753 samples, 0.00%)</title><rect x="328.8" y="685" width="0.1" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="331.79" y="699.5" ></text>
+</g>
+<g >
+<title>inotifywait (62,920,912 samples, 0.01%)</title><rect x="330.1" y="2029" width="0.5" height="23.0" fill="rgb(237,180,35)" rx="2" ry="2" />
+<text  x="333.12" y="2043.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (41,048,872 samples, 0.01%)</title><rect x="225.3" y="733" width="0.4" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="228.35" y="747.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (39,892,149 samples, 0.01%)</title><rect x="376.5" y="1837" width="0.3" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="379.49" y="1851.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (165,457,773 samples, 0.03%)</title><rect x="204.8" y="637" width="1.3" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="207.76" y="651.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (439,741,706 samples, 0.09%)</title><rect x="10.1" y="877" width="3.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="891.5" ></text>
+</g>
+<g >
+<title>_dl_new_object (38,009,851 samples, 0.01%)</title><rect x="4068.2" y="1957" width="0.3" height="23.0" fill="rgb(241,184,39)" rx="2" ry="2" />
+<text  x="4071.19" y="1971.5" ></text>
+</g>
+<g >
+<title>strvec_from_word_list (722,458,211 samples, 0.15%)</title><rect x="303.2" y="757" width="6.1" height="23.0" fill="rgb(232,140,30)" rx="2" ry="2" />
+<text  x="306.20" y="771.5" ></text>
+</g>
+<g >
+<title>[bash] (35,409,912 samples, 0.01%)</title><rect x="12.1" y="61" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.05" y="75.5" ></text>
+</g>
+<g >
+<title>_int_free (71,737,854 samples, 0.01%)</title><rect x="163.5" y="565" width="0.6" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="166.45" y="579.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (29,763,463 samples, 0.01%)</title><rect x="12.5" y="349" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="15.51" y="363.5" ></text>
+</g>
+<g >
+<title>_dl_check_all_versions (41,606,965 samples, 0.01%)</title><rect x="4074.1" y="1861" width="0.3" height="23.0" fill="rgb(244,184,43)" rx="2" ry="2" />
+<text  x="4077.08" y="1875.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (12,352,384 samples, 0.00%)</title><rect x="127.6" y="493" width="0.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="130.62" y="507.5" ></text>
+</g>
+<g >
+<title>_IO_do_write@@GLIBC_2.2.5 (194,759,713 samples, 0.04%)</title><rect x="383.1" y="1885" width="1.6" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="386.05" y="1899.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (26,332,297 samples, 0.01%)</title><rect x="161.4" y="517" width="0.2" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="164.35" y="531.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (179,491,829 samples, 0.04%)</title><rect x="116.7" y="469" width="1.5" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="119.66" y="483.5" ></text>
+</g>
+<g >
+<title>_IO_file_write@@GLIBC_2.2.5 (48,587,763 samples, 0.01%)</title><rect x="383.6" y="1837" width="0.4" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="386.61" y="1851.5" ></text>
+</g>
+<g >
+<title>[bash] (620,808,303 samples, 0.13%)</title><rect x="149.4" y="613" width="5.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="152.45" y="627.5" ></text>
+</g>
+<g >
+<title>dispose_words (271,107,466 samples, 0.06%)</title><rect x="124.2" y="469" width="2.3" height="23.0" fill="rgb(241,177,39)" rx="2" ry="2" />
+<text  x="127.24" y="483.5" ></text>
+</g>
+<g >
+<title>[bash] (18,495,263 samples, 0.00%)</title><rect x="15.5" y="397" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="18.48" y="411.5" ></text>
+</g>
+<g >
+<title>_dl_start (1,801,925,450 samples, 0.37%)</title><rect x="4070.9" y="1981" width="15.1" height="23.0" fill="rgb(239,184,37)" rx="2" ry="2" />
+<text  x="4073.87" y="1995.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (134,505,132 samples, 0.03%)</title><rect x="179.4" y="613" width="1.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="182.39" y="627.5" ></text>
+</g>
+<g >
+<title>_start (38,175,172,570 samples, 7.85%)</title><rect x="10.0" y="2005" width="319.9" height="23.0" fill="rgb(239,139,37)" rx="2" ry="2" />
+<text  x="13.00" y="2019.5" >_start</text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (1,090,277,872 samples, 0.22%)</title><rect x="680.9" y="1813" width="9.2" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="683.94" y="1827.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (30,112,070 samples, 0.01%)</title><rect x="208.3" y="709" width="0.3" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="211.33" y="723.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (202,941,645 samples, 0.04%)</title><rect x="114.6" y="373" width="1.7" height="23.0" fill="rgb(245,112,45)" rx="2" ry="2" />
+<text  x="117.63" y="387.5" ></text>
+</g>
+<g >
+<title>__strchr_evex (202,097,885 samples, 0.04%)</title><rect x="262.7" y="709" width="1.7" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="265.69" y="723.5" ></text>
+</g>
+<g >
+<title>execute_command (21,504,762 samples, 0.00%)</title><rect x="47.2" y="685" width="0.2" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="50.18" y="699.5" ></text>
+</g>
+<g >
+<title>[bash] (1,196,165,790 samples, 0.25%)</title><rect x="184.4" y="613" width="10.0" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="187.38" y="627.5" ></text>
+</g>
+<g >
+<title>[bash] (37,678,147,319 samples, 7.75%)</title><rect x="13.9" y="1045" width="315.8" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.91" y="1059.5" >[bash]</text>
+</g>
+<g >
+<title>_int_free (54,936,670 samples, 0.01%)</title><rect x="379.1" y="1837" width="0.4" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="382.09" y="1851.5" ></text>
+</g>
+<g >
+<title>malloc (40,013,817 samples, 0.01%)</title><rect x="243.3" y="685" width="0.4" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="246.33" y="699.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (28,468,187 samples, 0.01%)</title><rect x="181.5" y="541" width="0.3" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="184.52" y="555.5" ></text>
+</g>
+<g >
+<title>[bash] (687,137,899 samples, 0.14%)</title><rect x="272.7" y="685" width="5.7" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="275.65" y="699.5" ></text>
+</g>
+<g >
+<title>[bash] (1,004,386,047 samples, 0.21%)</title><rect x="166.3" y="565" width="8.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="169.29" y="579.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (80,578,047 samples, 0.02%)</title><rect x="164.7" y="541" width="0.7" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="167.71" y="555.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (25,040,091 samples, 0.01%)</title><rect x="47.9" y="661" width="0.2" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="50.88" y="675.5" ></text>
+</g>
+<g >
+<title>_int_malloc (161,811,055 samples, 0.03%)</title><rect x="260.5" y="637" width="1.4" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="263.54" y="651.5" ></text>
+</g>
+<g >
+<title>execute_command (16,742,582 samples, 0.00%)</title><rect x="13.2" y="277" width="0.2" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="16.25" y="291.5" ></text>
+</g>
+<g >
+<title>unquoted_glob_pattern_p (1,722,498,223 samples, 0.35%)</title><rect x="309.3" y="757" width="14.4" height="23.0" fill="rgb(242,157,41)" rx="2" ry="2" />
+<text  x="312.26" y="771.5" ></text>
+</g>
+<g >
+<title>execute_command (38,155,320,552 samples, 7.84%)</title><rect x="10.1" y="1525" width="319.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1539.5" >execute_command</text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (349,762,917 samples, 0.07%)</title><rect x="4062.5" y="1957" width="2.9" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4065.48" y="1971.5" ></text>
+</g>
+<g >
+<title>read_builtin (14,710,924 samples, 0.00%)</title><rect x="11.5" y="181" width="0.1" height="23.0" fill="rgb(242,184,41)" rx="2" ry="2" />
+<text  x="14.51" y="195.5" ></text>
+</g>
+<g >
+<title>inotifytools_next_events (14,383,239 samples, 0.00%)</title><rect x="330.4" y="1909" width="0.2" height="23.0" fill="rgb(238,180,36)" rx="2" ry="2" />
+<text  x="333.43" y="1923.5" ></text>
+</g>
+<g >
+<title>malloc (20,997,422 samples, 0.00%)</title><rect x="224.0" y="685" width="0.1" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="226.95" y="699.5" ></text>
+</g>
+<g >
+<title>internal_strmatch (11,963,683 samples, 0.00%)</title><rect x="109.6" y="445" width="0.1" height="23.0" fill="rgb(242,164,41)" rx="2" ry="2" />
+<text  x="112.60" y="459.5" ></text>
+</g>
+<g >
+<title>string_list_dollar_at (1,167,867,812 samples, 0.24%)</title><rect x="272.0" y="733" width="9.8" height="23.0" fill="rgb(226,140,24)" rx="2" ry="2" />
+<text  x="275.01" y="747.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (36,619,542 samples, 0.01%)</title><rect x="199.4" y="613" width="0.4" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="202.45" y="627.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (436,091,265 samples, 0.09%)</title><rect x="10.2" y="757" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.16" y="771.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (58,264,246 samples, 0.01%)</title><rect x="257.8" y="685" width="0.5" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="260.80" y="699.5" ></text>
+</g>
+<g >
+<title>malloc (92,501,790 samples, 0.02%)</title><rect x="201.1" y="637" width="0.8" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="204.09" y="651.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (89,007,096 samples, 0.02%)</title><rect x="375.6" y="1789" width="0.7" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="378.60" y="1803.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (37,709,604,529 samples, 7.75%)</title><rect x="13.9" y="1285" width="316.0" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.86" y="1299.5" >execute_command_internal</text>
+</g>
+<g >
+<title>[sha512sum] (51,460,976,408 samples, 10.58%)</title><rect x="331.3" y="1933" width="431.2" height="23.0" fill="rgb(232,171,30)" rx="2" ry="2" />
+<text  x="334.27" y="1947.5" >[sha512sum]</text>
+</g>
+<g >
+<title>_int_free (27,621,036 samples, 0.01%)</title><rect x="245.5" y="661" width="0.3" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="248.54" y="675.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (12,910,224 samples, 0.00%)</title><rect x="220.8" y="589" width="0.1" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="223.82" y="603.5" ></text>
+</g>
+<g >
+<title>getopt_long (25,719,002 samples, 0.01%)</title><rect x="761.0" y="1909" width="0.2" height="23.0" fill="rgb(247,170,46)" rx="2" ry="2" />
+<text  x="763.98" y="1923.5" ></text>
+</g>
+<g >
+<title>_dl_start_user (20,222,517 samples, 0.00%)</title><rect x="329.9" y="2005" width="0.2" height="23.0" fill="rgb(240,184,39)" rx="2" ry="2" />
+<text  x="332.95" y="2019.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (100,432,353 samples, 0.02%)</title><rect x="194.4" y="613" width="0.8" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="197.41" y="627.5" ></text>
+</g>
+<g >
+<title>[bash] (17,235,864 samples, 0.00%)</title><rect x="47.2" y="637" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="50.19" y="651.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (42,947,248 samples, 0.01%)</title><rect x="21.6" y="445" width="0.4" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="24.63" y="459.5" ></text>
+</g>
+<g >
+<title>bash (38,175,213,825 samples, 7.85%)</title><rect x="10.0" y="2029" width="319.9" height="23.0" fill="rgb(241,98,40)" rx="2" ry="2" />
+<text  x="13.00" y="2043.5" >bash</text>
+</g>
+<g >
+<title>dispose_words (220,991,667 samples, 0.05%)</title><rect x="127.7" y="493" width="1.9" height="23.0" fill="rgb(241,177,39)" rx="2" ry="2" />
+<text  x="130.75" y="507.5" ></text>
+</g>
+<g >
+<title>_IO_new_file_init_internal (126,730,969 samples, 0.03%)</title><rect x="355.3" y="1837" width="1.1" height="23.0" fill="rgb(229,132,27)" rx="2" ry="2" />
+<text  x="358.31" y="1851.5" ></text>
+</g>
+<g >
+<title>[bash] (12,948,758 samples, 0.00%)</title><rect x="11.2" y="133" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="14.17" y="147.5" ></text>
+</g>
+<g >
+<title>__strcpy_chk (16,936,666 samples, 0.00%)</title><rect x="154.9" y="613" width="0.2" height="23.0" fill="rgb(235,132,33)" rx="2" ry="2" />
+<text  x="157.94" y="627.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (159,672,420 samples, 0.03%)</title><rect x="142.6" y="493" width="1.3" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="145.60" y="507.5" ></text>
+</g>
+<g >
+<title>[bash] (13,830,043 samples, 0.00%)</title><rect x="47.4" y="661" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="50.44" y="675.5" ></text>
+</g>
+<g >
+<title>execute_command (432,688,830 samples, 0.09%)</title><rect x="10.2" y="493" width="3.6" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.19" y="507.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (37,680,792,920 samples, 7.75%)</title><rect x="13.9" y="1093" width="315.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.89" y="1107.5" >execute_command_internal</text>
+</g>
+<g >
+<title>_int_free (36,550,744 samples, 0.01%)</title><rect x="279.0" y="661" width="0.3" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="282.00" y="675.5" ></text>
+</g>
+<g >
+<title>_IO_setb (234,544,940 samples, 0.05%)</title><rect x="374.4" y="1837" width="2.0" height="23.0" fill="rgb(230,132,28)" rx="2" ry="2" />
+<text  x="377.44" y="1851.5" ></text>
+</g>
+<g >
+<title>fclose@@GLIBC_2.2.5 (813,797,489 samples, 0.17%)</title><rect x="372.7" y="1885" width="6.8" height="23.0" fill="rgb(246,213,45)" rx="2" ry="2" />
+<text  x="375.73" y="1899.5" ></text>
+</g>
+<g >
+<title>_int_malloc (130,691,410 samples, 0.03%)</title><rect x="153.2" y="565" width="1.1" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="156.16" y="579.5" ></text>
+</g>
+<g >
+<title>posix_fadvise (92,898,629 samples, 0.02%)</title><rect x="761.4" y="1909" width="0.8" height="23.0" fill="rgb(241,186,40)" rx="2" ry="2" />
+<text  x="764.41" y="1923.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (60,735,462 samples, 0.01%)</title><rect x="12.0" y="301" width="0.5" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="15.00" y="315.5" ></text>
+</g>
+<g >
+<title>[bash] (38,157,961,704 samples, 7.85%)</title><rect x="10.1" y="1717" width="319.8" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.12" y="1731.5" >[bash]</text>
+</g>
+<g >
+<title>execute_command_internal (38,159,909,698 samples, 7.85%)</title><rect x="10.1" y="1789" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.10" y="1803.5" >execute_command_internal</text>
+</g>
+<g >
+<title>_int_free_merge_chunk (53,192,017 samples, 0.01%)</title><rect x="126.1" y="397" width="0.4" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="129.05" y="411.5" ></text>
+</g>
+<g >
+<title>[inotifywait] (62,920,912 samples, 0.01%)</title><rect x="330.1" y="2005" width="0.5" height="23.0" fill="rgb(236,185,35)" rx="2" ry="2" />
+<text  x="333.12" y="2019.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (27,846,616 samples, 0.01%)</title><rect x="4069.6" y="1957" width="0.2" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4072.61" y="1971.5" ></text>
+</g>
+<g >
+<title>execute_command (4,032,005,826 samples, 0.83%)</title><rect x="14.3" y="805" width="33.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.32" y="819.5" >ex..</text>
+</g>
+<g >
+<title>malloc (60,269,478 samples, 0.01%)</title><rect x="356.9" y="1837" width="0.5" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="359.90" y="1851.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (19,372,343 samples, 0.00%)</title><rect x="17.7" y="397" width="0.2" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="20.73" y="411.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (28,648,116 samples, 0.01%)</title><rect x="15.7" y="469" width="0.2" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="18.69" y="483.5" ></text>
+</g>
+<g >
+<title>[bash] (43,571,277 samples, 0.01%)</title><rect x="46.8" y="637" width="0.3" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="49.78" y="651.5" ></text>
+</g>
+<g >
+<title>__vfprintf_internal (38,814,490,937 samples, 7.98%)</title><rect x="431.7" y="1885" width="325.3" height="23.0" fill="rgb(229,122,27)" rx="2" ry="2" />
+<text  x="434.74" y="1899.5" >__vfprintf_internal</text>
+</g>
+<g >
+<title>execute_command_internal (244,154,470 samples, 0.05%)</title><rect x="10.5" y="325" width="2.0" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.46" y="339.5" ></text>
+</g>
+<g >
+<title>remove_quoted_nulls (47,764,568 samples, 0.01%)</title><rect x="270.1" y="709" width="0.4" height="23.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="273.05" y="723.5" ></text>
+</g>
+<g >
+<title>read_int (499,752,169 samples, 0.10%)</title><rect x="752.8" y="1861" width="4.2" height="23.0" fill="rgb(238,184,36)" rx="2" ry="2" />
+<text  x="755.81" y="1875.5" ></text>
+</g>
+<g >
+<title>__GI___fputs_unlocked (28,343,122 samples, 0.01%)</title><rect x="762.9" y="1933" width="0.2" height="23.0" fill="rgb(245,119,44)" rx="2" ry="2" />
+<text  x="765.89" y="1947.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (69,904,571 samples, 0.01%)</title><rect x="46.2" y="517" width="0.5" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="49.16" y="531.5" ></text>
+</g>
+<g >
+<title>dispose_words (550,661,867 samples, 0.11%)</title><rect x="324.3" y="781" width="4.6" height="23.0" fill="rgb(241,177,39)" rx="2" ry="2" />
+<text  x="327.30" y="795.5" ></text>
+</g>
+<g >
+<title>execute_command (3,860,945,762 samples, 0.79%)</title><rect x="14.4" y="661" width="32.4" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.42" y="675.5" >ex..</text>
+</g>
+<g >
+<title>_int_free (32,014,464 samples, 0.01%)</title><rect x="125.8" y="397" width="0.2" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="128.77" y="411.5" ></text>
+</g>
+<g >
+<title>SHA512_Final (242,615,794 samples, 0.05%)</title><rect x="343.5" y="1885" width="2.0" height="23.0" fill="rgb(229,159,27)" rx="2" ry="2" />
+<text  x="346.45" y="1899.5" ></text>
+</g>
+<g >
+<title>main (38,175,170,060 samples, 7.85%)</title><rect x="10.0" y="1933" width="319.9" height="23.0" fill="rgb(247,83,46)" rx="2" ry="2" />
+<text  x="13.00" y="1947.5" >main</text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (27,082,321 samples, 0.01%)</title><rect x="27.1" y="373" width="0.2" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="30.07" y="387.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (13,251,734 samples, 0.00%)</title><rect x="134.4" y="469" width="0.1" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="137.39" y="483.5" ></text>
+</g>
+<g >
+<title>[bash] (37,661,411,881 samples, 7.74%)</title><rect x="14.0" y="925" width="315.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.96" y="939.5" >[bash]</text>
+</g>
+<g >
+<title>_IO_doallocbuf (377,129,476 samples, 0.08%)</title><rect x="364.6" y="1837" width="3.1" height="23.0" fill="rgb(242,132,41)" rx="2" ry="2" />
+<text  x="367.57" y="1851.5" ></text>
+</g>
+<g >
+<title>[bash] (24,076,910 samples, 0.00%)</title><rect x="46.8" y="613" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="49.79" y="627.5" ></text>
+</g>
+<g >
+<title>sha512sum (448,122,148,733 samples, 92.13%)</title><rect x="330.7" y="2029" width="3755.3" height="23.0" fill="rgb(226,161,23)" rx="2" ry="2" />
+<text  x="333.72" y="2043.5" >sha512sum</text>
+</g>
+<g >
+<title>SHA512_Final (36,738,036 samples, 0.01%)</title><rect x="339.6" y="1909" width="0.4" height="23.0" fill="rgb(229,159,27)" rx="2" ry="2" />
+<text  x="342.65" y="1923.5" ></text>
+</g>
+<g >
+<title>_int_free (230,672,596 samples, 0.05%)</title><rect x="325.2" y="733" width="1.9" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="328.18" y="747.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (436,091,265 samples, 0.09%)</title><rect x="10.2" y="853" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.16" y="867.5" ></text>
+</g>
+<g >
+<title>search_for_command (14,368,465 samples, 0.00%)</title><rect x="303.0" y="757" width="0.1" height="23.0" fill="rgb(254,176,54)" rx="2" ry="2" />
+<text  x="306.01" y="771.5" ></text>
+</g>
+<g >
+<title>_dl_init (44,403,147 samples, 0.01%)</title><rect x="4070.5" y="1981" width="0.4" height="23.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="4073.49" y="1995.5" ></text>
+</g>
+<g >
+<title>__overflow (31,677,091 samples, 0.01%)</title><rect x="389.9" y="1909" width="0.2" height="23.0" fill="rgb(238,144,36)" rx="2" ry="2" />
+<text  x="392.86" y="1923.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (435,620,729 samples, 0.09%)</title><rect x="10.2" y="565" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.17" y="579.5" ></text>
+</g>
+<g >
+<title>_IO_un_link (19,957,006 samples, 0.00%)</title><rect x="358.9" y="1885" width="0.2" height="23.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="361.89" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,155,803,241 samples, 7.84%)</title><rect x="10.1" y="1597" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1611.5" >execute_command_internal</text>
+</g>
+<g >
+<title>execute_command (436,091,265 samples, 0.09%)</title><rect x="10.2" y="781" width="3.6" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.16" y="795.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (107,430,446 samples, 0.02%)</title><rect x="328.0" y="709" width="0.9" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="331.01" y="723.5" ></text>
+</g>
+<g >
+<title>dispose_word (161,777,678 samples, 0.03%)</title><rect x="164.1" y="589" width="1.3" height="23.0" fill="rgb(248,177,47)" rx="2" ry="2" />
+<text  x="167.05" y="603.5" ></text>
+</g>
+<g >
+<title>__libc_start_call_main (38,175,170,060 samples, 7.85%)</title><rect x="10.0" y="1957" width="319.9" height="23.0" fill="rgb(247,154,46)" rx="2" ry="2" />
+<text  x="13.00" y="1971.5" >__libc_start_call_main</text>
+</g>
+<g >
+<title>execute_command_internal (21,880,982,830 samples, 4.50%)</title><rect x="146.2" y="829" width="183.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="149.17" y="843.5" >execute_command_internal</text>
+</g>
+<g >
+<title>_IO_file_open (205,265,000 samples, 0.04%)</title><rect x="352.5" y="1813" width="1.7" height="23.0" fill="rgb(250,132,49)" rx="2" ry="2" />
+<text  x="355.45" y="1827.5" ></text>
+</g>
+<g >
+<title>dispose_word (129,037,687 samples, 0.03%)</title><rect x="125.4" y="445" width="1.1" height="23.0" fill="rgb(248,177,47)" rx="2" ry="2" />
+<text  x="128.42" y="459.5" ></text>
+</g>
+<g >
+<title>execute_command (34,816,035 samples, 0.01%)</title><rect x="14.6" y="277" width="0.3" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.62" y="291.5" ></text>
+</g>
+<g >
+<title>malloc (86,325,639 samples, 0.02%)</title><rect x="222.2" y="661" width="0.7" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="225.22" y="675.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (59,878,416 samples, 0.01%)</title><rect x="257.2" y="685" width="0.5" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="260.20" y="699.5" ></text>
+</g>
+<g >
+<title>[bash] (23,898,384 samples, 0.00%)</title><rect x="46.2" y="469" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="49.22" y="483.5" ></text>
+</g>
+<g >
+<title>execute_command (11,677,507,500 samples, 2.40%)</title><rect x="48.2" y="709" width="97.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="51.16" y="723.5" >execute_com..</text>
+</g>
+<g >
+<title>_IO_file_xsputn@@GLIBC_2.2.5 (18,113,338 samples, 0.00%)</title><rect x="384.8" y="1909" width="0.1" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="387.75" y="1923.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (53,287,831 samples, 0.01%)</title><rect x="207.2" y="589" width="0.4" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="210.16" y="603.5" ></text>
+</g>
+<g >
+<title>_IO_old_init (19,597,457 samples, 0.00%)</title><rect x="356.6" y="1837" width="0.1" height="23.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="359.58" y="1851.5" ></text>
+</g>
+<g >
+<title>[bash] (974,949,049 samples, 0.20%)</title><rect x="184.8" y="589" width="8.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="187.82" y="603.5" ></text>
+</g>
+<g >
+<title>remove_quoted_nulls (17,972,496 samples, 0.00%)</title><rect x="134.6" y="469" width="0.1" height="23.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="137.60" y="483.5" ></text>
+</g>
+<g >
+<title>[bash] (37,674,564,336 samples, 7.75%)</title><rect x="13.9" y="1021" width="315.7" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.91" y="1035.5" >[bash]</text>
+</g>
+<g >
+<title>_IO_link_in (18,170,813 samples, 0.00%)</title><rect x="353.2" y="1789" width="0.2" height="23.0" fill="rgb(240,132,39)" rx="2" ry="2" />
+<text  x="356.21" y="1803.5" ></text>
+</g>
+<g >
+<title>execute_command (37,709,604,529 samples, 7.75%)</title><rect x="13.9" y="1309" width="316.0" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="16.86" y="1323.5" >execute_command</text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate.part.0 (375,350,441 samples, 0.08%)</title><rect x="139.2" y="493" width="3.1" height="23.0" fill="rgb(233,153,31)" rx="2" ry="2" />
+<text  x="142.16" y="507.5" ></text>
+</g>
+<g >
+<title>[bash] (15,345,283 samples, 0.00%)</title><rect x="47.9" y="613" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="50.89" y="627.5" ></text>
+</g>
+<g >
+<title>malloc (42,016,577 samples, 0.01%)</title><rect x="299.2" y="733" width="0.4" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="302.23" y="747.5" ></text>
+</g>
+<g >
+<title>[bash] (163,737,200 samples, 0.03%)</title><rect x="132.7" y="469" width="1.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="135.73" y="483.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (125,742,339 samples, 0.03%)</title><rect x="127.9" y="469" width="1.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="130.93" y="483.5" ></text>
+</g>
+<g >
+<title>init_cpu_features.constprop.0 (69,611,063 samples, 0.01%)</title><rect x="4085.3" y="1933" width="0.6" height="23.0" fill="rgb(236,161,34)" rx="2" ry="2" />
+<text  x="4088.35" y="1947.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (13,542,150 samples, 0.00%)</title><rect x="328.7" y="661" width="0.1" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="331.68" y="675.5" ></text>
+</g>
+<g >
+<title>_IO_unsave_markers (16,477,030 samples, 0.00%)</title><rect x="377.1" y="1861" width="0.1" height="23.0" fill="rgb(238,132,36)" rx="2" ry="2" />
+<text  x="380.05" y="1875.5" ></text>
+</g>
+<g >
+<title>realloc (145,599,839 samples, 0.03%)</title><rect x="270.6" y="733" width="1.3" height="23.0" fill="rgb(238,184,36)" rx="2" ry="2" />
+<text  x="273.65" y="747.5" ></text>
+</g>
+<g >
+<title>execute_command (47,145,660 samples, 0.01%)</title><rect x="13.0" y="325" width="0.4" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="16.03" y="339.5" ></text>
+</g>
+<g >
+<title>_dl_sysdep_start (1,785,040,138 samples, 0.37%)</title><rect x="4071.0" y="1957" width="14.9" height="23.0" fill="rgb(239,184,37)" rx="2" ry="2" />
+<text  x="4073.98" y="1971.5" ></text>
+</g>
+<g >
+<title>__GI___fstatat64 (60,516,015 samples, 0.01%)</title><rect x="367.0" y="1813" width="0.5" height="23.0" fill="rgb(234,119,32)" rx="2" ry="2" />
+<text  x="369.99" y="1827.5" ></text>
+</g>
+<g >
+<title>_int_free (23,886,577 samples, 0.00%)</title><rect x="371.8" y="1861" width="0.2" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="374.81" y="1875.5" ></text>
+</g>
+<g >
+<title>__printf_chk (43,779,867,875 samples, 9.00%)</title><rect x="390.1" y="1909" width="366.9" height="23.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="393.13" y="1923.5" >__printf_chk</text>
+</g>
+<g >
+<title>__printf_buffer (21,067,431,162 samples, 4.33%)</title><rect x="454.0" y="1861" width="176.5" height="23.0" fill="rgb(241,141,40)" rx="2" ry="2" />
+<text  x="456.98" y="1875.5" >__printf_buffer</text>
+</g>
+<g >
+<title>string_list_internal (100,364,609 samples, 0.02%)</title><rect x="196.6" y="613" width="0.9" height="23.0" fill="rgb(229,140,27)" rx="2" ry="2" />
+<text  x="199.62" y="627.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (446,570,130 samples, 0.09%)</title><rect x="305.5" y="685" width="3.7" height="23.0" fill="rgb(245,112,45)" rx="2" ry="2" />
+<text  x="308.47" y="699.5" ></text>
+</g>
+<g >
+<title>__libc_start_main@@GLIBC_2.34 (62,920,912 samples, 0.01%)</title><rect x="330.1" y="1981" width="0.5" height="23.0" fill="rgb(236,154,35)" rx="2" ry="2" />
+<text  x="333.12" y="1995.5" ></text>
+</g>
+<g >
+<title>malloc (103,926,463 samples, 0.02%)</title><rect x="223.1" y="661" width="0.9" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="226.08" y="675.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (18,462,616 samples, 0.00%)</title><rect x="127.2" y="493" width="0.1" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="130.19" y="507.5" ></text>
+</g>
+<g >
+<title>inotifytools_fprintf (17,743,554 samples, 0.00%)</title><rect x="330.3" y="1909" width="0.1" height="23.0" fill="rgb(243,180,42)" rx="2" ry="2" />
+<text  x="333.28" y="1923.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (134,940,259 samples, 0.03%)</title><rect x="151.4" y="589" width="1.1" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="154.40" y="603.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (276,186,369 samples, 0.06%)</title><rect x="10.4" y="373" width="2.4" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.44" y="387.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (104,014,873 samples, 0.02%)</title><rect x="10.5" y="229" width="0.9" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.49" y="243.5" ></text>
+</g>
+<g >
+<title>__bindtextdomain (16,644,793 samples, 0.00%)</title><rect x="389.1" y="1909" width="0.1" height="23.0" fill="rgb(247,148,46)" rx="2" ry="2" />
+<text  x="392.10" y="1923.5" ></text>
+</g>
+<g >
+<title>dispose_word (159,235,457 samples, 0.03%)</title><rect x="245.1" y="709" width="1.3" height="23.0" fill="rgb(248,177,47)" rx="2" ry="2" />
+<text  x="248.11" y="723.5" ></text>
+</g>
+<g >
+<title>__GI___fputs_unlocked (481,848,212 samples, 0.10%)</title><rect x="385.1" y="1909" width="4.0" height="23.0" fill="rgb(245,119,44)" rx="2" ry="2" />
+<text  x="388.06" y="1923.5" ></text>
+</g>
+<g >
+<title>__ctype_get_mb_cur_max (17,993,921 samples, 0.00%)</title><rect x="68.1" y="445" width="0.1" height="23.0" fill="rgb(244,144,43)" rx="2" ry="2" />
+<text  x="71.06" y="459.5" ></text>
+</g>
+<g >
+<title>[bash] (435,859,637 samples, 0.09%)</title><rect x="10.2" y="613" width="3.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.16" y="627.5" ></text>
+</g>
+<g >
+<title>execute_command (277,332,293 samples, 0.06%)</title><rect x="10.4" y="397" width="2.4" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.44" y="411.5" ></text>
+</g>
+<g >
+<title>malloc (31,208,793 samples, 0.01%)</title><rect x="22.2" y="421" width="0.3" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="25.20" y="435.5" ></text>
+</g>
+<g >
+<title>cond_expand_word (19,099,554 samples, 0.00%)</title><rect x="46.5" y="469" width="0.2" height="23.0" fill="rgb(248,146,47)" rx="2" ry="2" />
+<text  x="49.50" y="483.5" ></text>
+</g>
+<g >
+<title>_int_free (40,712,767 samples, 0.01%)</title><rect x="175.3" y="541" width="0.3" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="178.30" y="555.5" ></text>
+</g>
+<g >
+<title>_IO_file_sync@@GLIBC_2.2.5 (18,019,732 samples, 0.00%)</title><rect x="350.5" y="1837" width="0.1" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="353.48" y="1851.5" ></text>
+</g>
+<g >
+<title>malloc (18,497,492 samples, 0.00%)</title><rect x="165.5" y="613" width="0.2" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="168.52" y="627.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (203,659,562 samples, 0.04%)</title><rect x="371.0" y="1885" width="1.7" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="374.02" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command (34,560,170 samples, 0.01%)</title><rect x="13.5" y="421" width="0.3" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="16.51" y="435.5" ></text>
+</g>
+<g >
+<title>__strchr_evex (33,613,945 samples, 0.01%)</title><rect x="134.1" y="469" width="0.3" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="137.11" y="483.5" ></text>
+</g>
+<g >
+<title>memcpy@@GLIBC_2.14@plt (180,462,467 samples, 0.04%)</title><rect x="628.9" y="1837" width="1.6" height="23.0" fill="rgb(231,144,29)" rx="2" ry="2" />
+<text  x="631.94" y="1851.5" ></text>
+</g>
+<g >
+<title>remove_quoted_nulls (19,867,118 samples, 0.00%)</title><rect x="224.2" y="685" width="0.1" height="23.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="227.16" y="699.5" ></text>
+</g>
+<g >
+<title>dispose_words (344,996,896 samples, 0.07%)</title><rect x="142.3" y="517" width="2.9" height="23.0" fill="rgb(241,177,39)" rx="2" ry="2" />
+<text  x="145.33" y="531.5" ></text>
+</g>
+<g >
+<title>execute_command (440,352,648 samples, 0.09%)</title><rect x="10.1" y="1093" width="3.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1107.5" ></text>
+</g>
+<g >
+<title>malloc (15,642,770 samples, 0.00%)</title><rect x="21.5" y="421" width="0.1" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="24.47" y="435.5" ></text>
+</g>
+<g >
+<title>__libc_start_call_main (62,920,912 samples, 0.01%)</title><rect x="330.1" y="1957" width="0.5" height="23.0" fill="rgb(247,154,46)" rx="2" ry="2" />
+<text  x="333.12" y="1971.5" ></text>
+</g>
+<g >
+<title>execute_command (3,910,912,090 samples, 0.80%)</title><rect x="14.4" y="709" width="32.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.40" y="723.5" >ex..</text>
+</g>
+<g >
+<title>make_word_list (120,342,352 samples, 0.02%)</title><rect x="222.9" y="685" width="1.1" height="23.0" fill="rgb(232,77,30)" rx="2" ry="2" />
+<text  x="225.94" y="699.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (137,645,480 samples, 0.03%)</title><rect x="164.3" y="565" width="1.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="167.25" y="579.5" ></text>
+</g>
+<g >
+<title>openaux (14,504,391 samples, 0.00%)</title><rect x="4070.1" y="1981" width="0.1" height="23.0" fill="rgb(246,195,45)" rx="2" ry="2" />
+<text  x="4073.11" y="1995.5" ></text>
+</g>
+<g >
+<title>[bash] (1,356,162,650 samples, 0.28%)</title><rect x="209.6" y="685" width="11.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="212.59" y="699.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (23,585,661 samples, 0.00%)</title><rect x="174.5" y="493" width="0.2" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="177.46" y="507.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,155,213,835 samples, 7.84%)</title><rect x="10.1" y="1357" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1371.5" >execute_command_internal</text>
+</g>
+<g >
+<title>[bash] (23,117,371 samples, 0.00%)</title><rect x="12.8" y="325" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.80" y="339.5" ></text>
+</g>
+<g >
+<title>_IO_file_doallocate (229,798,596 samples, 0.05%)</title><rect x="364.7" y="1813" width="2.0" height="23.0" fill="rgb(245,132,45)" rx="2" ry="2" />
+<text  x="367.75" y="1827.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (36,877,709 samples, 0.01%)</title><rect x="156.7" y="589" width="0.3" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="159.71" y="603.5" ></text>
+</g>
+<g >
+<title>[bash] (16,289,915 samples, 0.00%)</title><rect x="13.6" y="325" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.57" y="339.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (266,930,656 samples, 0.05%)</title><rect x="202.0" y="613" width="2.3" height="23.0" fill="rgb(245,112,45)" rx="2" ry="2" />
+<text  x="205.03" y="627.5" ></text>
+</g>
+<g >
+<title>array_to_word_list (707,073,945 samples, 0.15%)</title><rect x="118.2" y="469" width="5.9" height="23.0" fill="rgb(232,134,30)" rx="2" ry="2" />
+<text  x="121.17" y="483.5" ></text>
+</g>
+<g >
+<title>[bash] (42,204,339 samples, 0.01%)</title><rect x="12.0" y="109" width="0.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.04" y="123.5" ></text>
+</g>
+<g >
+<title>execute_command (440,213,497 samples, 0.09%)</title><rect x="10.1" y="949" width="3.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="963.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (27,371,259 samples, 0.01%)</title><rect x="120.5" y="421" width="0.2" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="123.49" y="435.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (97,634,747 samples, 0.02%)</title><rect x="271.0" y="661" width="0.8" height="23.0" fill="rgb(245,112,45)" rx="2" ry="2" />
+<text  x="274.01" y="675.5" ></text>
+</g>
+<g >
+<title>_int_malloc (146,668,008 samples, 0.03%)</title><rect x="110.0" y="421" width="1.2" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="112.97" y="435.5" ></text>
+</g>
+<g >
+<title>_int_free (32,892,975 samples, 0.01%)</title><rect x="133.5" y="421" width="0.3" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="136.53" y="435.5" ></text>
+</g>
+<g >
+<title>[inotifywait] (56,722,807 samples, 0.01%)</title><rect x="330.1" y="1933" width="0.5" height="23.0" fill="rgb(236,185,35)" rx="2" ry="2" />
+<text  x="333.12" y="1947.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_to_file_done (475,291,839 samples, 0.10%)</title><rect x="415.8" y="1885" width="4.0" height="23.0" fill="rgb(251,141,50)" rx="2" ry="2" />
+<text  x="418.78" y="1899.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (44,569,219 samples, 0.01%)</title><rect x="158.5" y="565" width="0.4" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="161.49" y="579.5" ></text>
+</g>
+<g >
+<title>llseek@GLIBC_2.2.5 (89,715,675 samples, 0.02%)</title><rect x="379.8" y="1885" width="0.8" height="23.0" fill="rgb(246,98,45)" rx="2" ry="2" />
+<text  x="382.81" y="1899.5" ></text>
+</g>
+<g >
+<title>_IO_default_finish (17,152,613 samples, 0.00%)</title><rect x="373.5" y="1861" width="0.1" height="23.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="376.48" y="1875.5" ></text>
+</g>
+<g >
+<title>malloc (343,025,818 samples, 0.07%)</title><rect x="129.6" y="493" width="2.9" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="132.63" y="507.5" ></text>
+</g>
+<g >
+<title>[bash] (120,838,696 samples, 0.02%)</title><rect x="149.9" y="589" width="1.0" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="152.86" y="603.5" ></text>
+</g>
+<g >
+<title>dequote_string (1,741,492,773 samples, 0.36%)</title><rect x="285.0" y="757" width="14.6" height="23.0" fill="rgb(243,203,42)" rx="2" ry="2" />
+<text  x="287.99" y="771.5" ></text>
+</g>
+<g >
+<title>string_list_dollar_at (1,557,159,366 samples, 0.32%)</title><rect x="165.7" y="613" width="13.1" height="23.0" fill="rgb(226,140,24)" rx="2" ry="2" />
+<text  x="168.70" y="627.5" ></text>
+</g>
+<g >
+<title>source_builtin (37,699,911,210 samples, 7.75%)</title><rect x="13.9" y="1189" width="315.9" height="23.0" fill="rgb(242,155,41)" rx="2" ry="2" />
+<text  x="16.87" y="1203.5" >source_builtin</text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (25,496,995 samples, 0.01%)</title><rect x="4067.9" y="1909" width="0.2" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4070.88" y="1923.5" ></text>
+</g>
+<g >
+<title>[bash] (7,952,171,325 samples, 1.63%)</title><rect x="49.9" y="469" width="66.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="52.87" y="483.5" >[bash]</text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (130,771,651 samples, 0.03%)</title><rect x="4068.5" y="1957" width="1.1" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4071.51" y="1971.5" ></text>
+</g>
+<g >
+<title>fopen@@GLIBC_2.2.5 (29,014,806 samples, 0.01%)</title><rect x="379.5" y="1885" width="0.3" height="23.0" fill="rgb(246,196,45)" rx="2" ry="2" />
+<text  x="382.55" y="1899.5" ></text>
+</g>
+<g >
+<title>[bash] (13,095,242 samples, 0.00%)</title><rect x="329.7" y="1045" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="332.67" y="1059.5" ></text>
+</g>
+<g >
+<title>[bash] (12,688,474 samples, 0.00%)</title><rect x="12.8" y="301" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.83" y="315.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (12,525,373 samples, 0.00%)</title><rect x="13.3" y="157" width="0.1" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.27" y="171.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (440,213,497 samples, 0.09%)</title><rect x="10.1" y="973" width="3.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="987.5" ></text>
+</g>
+<g >
+<title>execute_command (444,688,603 samples, 0.09%)</title><rect x="10.1" y="1285" width="3.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1299.5" ></text>
+</g>
+<g >
+<title>[bash] (16,180,386 samples, 0.00%)</title><rect x="16.0" y="493" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="19.02" y="507.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (16,850,468 samples, 0.00%)</title><rect x="4070.0" y="1933" width="0.1" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4072.97" y="1947.5" ></text>
+</g>
+<g >
+<title>make_bare_word (438,289,436 samples, 0.09%)</title><rect x="158.0" y="589" width="3.6" height="23.0" fill="rgb(248,77,47)" rx="2" ry="2" />
+<text  x="160.95" y="603.5" ></text>
+</g>
+<g >
+<title>_IO_setb (30,201,850 samples, 0.01%)</title><rect x="365.1" y="1789" width="0.3" height="23.0" fill="rgb(230,132,28)" rx="2" ry="2" />
+<text  x="368.14" y="1803.5" ></text>
+</g>
+<g >
+<title>malloc (149,811,772 samples, 0.03%)</title><rect x="365.4" y="1789" width="1.3" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="368.42" y="1803.5" ></text>
+</g>
+<g >
+<title>[bash] (22,980,045 samples, 0.00%)</title><rect x="47.9" y="637" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="50.88" y="651.5" ></text>
+</g>
+<g >
+<title>execute_command (436,022,334 samples, 0.09%)</title><rect x="10.2" y="733" width="3.6" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.16" y="747.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (4,027,126,319 samples, 0.83%)</title><rect x="14.4" y="781" width="33.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.35" y="795.5" >ex..</text>
+</g>
+<g >
+<title>execute_command (440,430,146 samples, 0.09%)</title><rect x="10.1" y="1189" width="3.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1203.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,155,320,552 samples, 7.84%)</title><rect x="10.1" y="1405" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1419.5" >execute_command_internal</text>
+</g>
+<g >
+<title>_dl_start (19,754,087 samples, 0.00%)</title><rect x="329.9" y="1981" width="0.2" height="23.0" fill="rgb(239,184,37)" rx="2" ry="2" />
+<text  x="332.95" y="1995.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (35,707,109 samples, 0.01%)</title><rect x="246.1" y="637" width="0.3" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="249.12" y="651.5" ></text>
+</g>
+<g >
+<title>__strchrnul_ifunc@plt (169,809,115 samples, 0.03%)</title><rect x="741.0" y="1861" width="1.4" height="23.0" fill="rgb(231,132,29)" rx="2" ry="2" />
+<text  x="743.99" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (14,348,063 samples, 0.00%)</title><rect x="11.2" y="157" width="0.1" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="14.17" y="171.5" ></text>
+</g>
+<g >
+<title>_int_free (30,146,127 samples, 0.01%)</title><rect x="228.8" y="685" width="0.3" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="231.83" y="699.5" ></text>
+</g>
+<g >
+<title>[bash] (59,408,507 samples, 0.01%)</title><rect x="67.6" y="421" width="0.5" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="70.55" y="435.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (294,796,009 samples, 0.06%)</title><rect x="201.9" y="661" width="2.5" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="204.89" y="675.5" ></text>
+</g>
+<g >
+<title>[bash] (13,195,774 samples, 0.00%)</title><rect x="46.5" y="445" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="49.50" y="459.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (24,182,294 samples, 0.00%)</title><rect x="17.4" y="421" width="0.2" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="20.38" y="435.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (18,332,882 samples, 0.00%)</title><rect x="25.7" y="373" width="0.2" height="23.0" fill="rgb(245,112,45)" rx="2" ry="2" />
+<text  x="28.70" y="387.5" ></text>
+</g>
+<g >
+<title>[bash] (63,411,924 samples, 0.01%)</title><rect x="46.2" y="493" width="0.5" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="49.18" y="507.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (41,053,666 samples, 0.01%)</title><rect x="281.9" y="757" width="0.3" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="284.91" y="771.5" ></text>
+</g>
+<g >
+<title>__vfprintf_internal (317,706,372 samples, 0.07%)</title><rect x="757.8" y="1909" width="2.6" height="23.0" fill="rgb(229,122,27)" rx="2" ry="2" />
+<text  x="760.78" y="1923.5" ></text>
+</g>
+<g >
+<title>_int_malloc (17,348,199 samples, 0.00%)</title><rect x="134.0" y="421" width="0.1" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="136.96" y="435.5" ></text>
+</g>
+<g >
+<title>[bash] (12,540,843 samples, 0.00%)</title><rect x="47.7" y="589" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="50.65" y="603.5" ></text>
+</g>
+<g >
+<title>SHA512_Update (194,736,687 samples, 0.04%)</title><rect x="345.5" y="1885" width="1.6" height="23.0" fill="rgb(245,159,45)" rx="2" ry="2" />
+<text  x="348.48" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command (29,328,347 samples, 0.01%)</title><rect x="15.7" y="493" width="0.2" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="18.68" y="507.5" ></text>
+</g>
+<g >
+<title>wait_for (38,812,974 samples, 0.01%)</title><rect x="329.2" y="805" width="0.3" height="23.0" fill="rgb(242,83,41)" rx="2" ry="2" />
+<text  x="332.21" y="819.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (58,603,849 samples, 0.01%)</title><rect x="330.8" y="1933" width="0.5" height="23.0" fill="rgb(231,147,29)" rx="2" ry="2" />
+<text  x="333.78" y="1947.5" ></text>
+</g>
+<g >
+<title>__printf_buffer (328,714,455 samples, 0.07%)</title><rect x="406.1" y="1885" width="2.8" height="23.0" fill="rgb(241,141,40)" rx="2" ry="2" />
+<text  x="409.14" y="1899.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_write (2,264,235,567 samples, 0.47%)</title><rect x="610.0" y="1837" width="18.9" height="23.0" fill="rgb(240,141,38)" rx="2" ry="2" />
+<text  x="612.97" y="1851.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (12,429,625 samples, 0.00%)</title><rect x="261.8" y="613" width="0.1" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="264.79" y="627.5" ></text>
+</g>
+<g >
+<title>fallocate (23,517,022 samples, 0.00%)</title><rect x="329.9" y="2029" width="0.2" height="23.0" fill="rgb(245,168,45)" rx="2" ry="2" />
+<text  x="332.92" y="2043.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (108,117,937 samples, 0.02%)</title><rect x="14.5" y="445" width="0.9" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.53" y="459.5" ></text>
+</g>
+<g >
+<title>[bash] (9,175,115,664 samples, 1.89%)</title><rect x="148.2" y="733" width="76.9" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="151.20" y="747.5" >[bash]</text>
+</g>
+<g >
+<title>_int_free (96,277,200 samples, 0.02%)</title><rect x="205.3" y="613" width="0.8" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="208.34" y="627.5" ></text>
+</g>
+<g >
+<title>[bash] (11,638,099,242 samples, 2.39%)</title><rect x="48.3" y="613" width="97.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="51.33" y="627.5" >[bash]</text>
+</g>
+<g >
+<title>__strlen_evex (74,357,078 samples, 0.02%)</title><rect x="228.0" y="709" width="0.6" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="230.98" y="723.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (16,742,582 samples, 0.00%)</title><rect x="13.2" y="253" width="0.2" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.25" y="267.5" ></text>
+</g>
+<g >
+<title>execute_command (38,155,803,241 samples, 7.84%)</title><rect x="10.1" y="1621" width="319.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1635.5" >execute_command</text>
+</g>
+<g >
+<title>_int_free_create_chunk (33,101,193 samples, 0.01%)</title><rect x="165.0" y="517" width="0.3" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="168.02" y="531.5" ></text>
+</g>
+<g >
+<title>substring (241,046,721 samples, 0.05%)</title><rect x="259.9" y="685" width="2.0" height="23.0" fill="rgb(243,148,42)" rx="2" ry="2" />
+<text  x="262.91" y="699.5" ></text>
+</g>
+<g >
+<title>malloc (29,791,925 samples, 0.01%)</title><rect x="357.4" y="1861" width="0.3" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="360.40" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (23,437,328 samples, 0.00%)</title><rect x="15.5" y="421" width="0.2" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="18.47" y="435.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (54,432,746 samples, 0.01%)</title><rect x="262.2" y="709" width="0.5" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="265.23" y="723.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (62,020,100 samples, 0.01%)</title><rect x="278.8" y="685" width="0.5" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="281.79" y="699.5" ></text>
+</g>
+<g >
+<title>_IO_file_xsputn@@GLIBC_2.2.5 (2,479,646,051 samples, 0.51%)</title><rect x="660.2" y="1813" width="20.7" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="663.16" y="1827.5" ></text>
+</g>
+<g >
+<title>execute_command (25,670,035 samples, 0.01%)</title><rect x="47.9" y="685" width="0.2" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="50.87" y="699.5" ></text>
+</g>
+<g >
+<title>malloc (321,361,318 samples, 0.07%)</title><rect x="158.9" y="565" width="2.7" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="161.90" y="579.5" ></text>
+</g>
+<g >
+<title>_int_realloc (144,625,918 samples, 0.03%)</title><rect x="270.7" y="709" width="1.2" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="273.66" y="723.5" ></text>
+</g>
+<g >
+<title>_IO_file_overflow@@GLIBC_2.2.5 (303,235,521 samples, 0.06%)</title><rect x="382.2" y="1909" width="2.6" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="385.21" y="1923.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (435,620,729 samples, 0.09%)</title><rect x="10.2" y="589" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.17" y="603.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_flush_to_file (409,063,909 samples, 0.08%)</title><rect x="630.5" y="1861" width="3.5" height="23.0" fill="rgb(237,141,35)" rx="2" ry="2" />
+<text  x="633.53" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (435,952,040 samples, 0.09%)</title><rect x="10.2" y="685" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.16" y="699.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (138,324,162 samples, 0.03%)</title><rect x="225.7" y="733" width="1.2" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="228.69" y="747.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (138,068,849 samples, 0.03%)</title><rect x="14.5" y="493" width="1.2" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.51" y="507.5" ></text>
+</g>
+<g >
+<title>_int_malloc (361,803,012 samples, 0.07%)</title><rect x="18.4" y="373" width="3.0" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="21.41" y="387.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (83,032,722 samples, 0.02%)</title><rect x="123.0" y="373" width="0.7" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="126.03" y="387.5" ></text>
+</g>
+<g >
+<title>execute_command (38,155,213,835 samples, 7.84%)</title><rect x="10.1" y="1381" width="319.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1395.5" >execute_command</text>
+</g>
+<g >
+<title>[bash] (3,560,184,082 samples, 0.73%)</title><rect x="149.1" y="637" width="29.8" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="152.06" y="651.5" >[b..</text>
+</g>
+<g >
+<title>zreadc (277,801,569 samples, 0.06%)</title><rect x="43.5" y="469" width="2.4" height="23.0" fill="rgb(237,177,35)" rx="2" ry="2" />
+<text  x="46.54" y="483.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (78,065,195 samples, 0.02%)</title><rect x="46.1" y="613" width="0.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="49.11" y="627.5" ></text>
+</g>
+<g >
+<title>[bash] (38,172,534,894 samples, 7.85%)</title><rect x="10.0" y="1909" width="319.9" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.00" y="1923.5" >[bash]</text>
+</g>
+<g >
+<title>substring (233,911,000 samples, 0.05%)</title><rect x="219.0" y="661" width="2.0" height="23.0" fill="rgb(243,148,42)" rx="2" ry="2" />
+<text  x="221.99" y="675.5" ></text>
+</g>
+<g >
+<title>_int_free (79,695,207 samples, 0.02%)</title><rect x="179.8" y="589" width="0.7" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="182.84" y="603.5" ></text>
+</g>
+<g >
+<title>_dl_map_object (111,273,987 samples, 0.02%)</title><rect x="4073.1" y="1837" width="0.9" height="23.0" fill="rgb(241,184,39)" rx="2" ry="2" />
+<text  x="4076.06" y="1851.5" ></text>
+</g>
+<g >
+<title>execute_command (24,279,008 samples, 0.00%)</title><rect x="15.5" y="445" width="0.2" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="18.46" y="459.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (67,481,327 samples, 0.01%)</title><rect x="203.7" y="589" width="0.6" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="206.70" y="603.5" ></text>
+</g>
+<g >
+<title>[bash] (18,180,149 samples, 0.00%)</title><rect x="13.1" y="253" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.09" y="267.5" ></text>
+</g>
+<g >
+<title>malloc (294,604,401 samples, 0.06%)</title><rect x="190.5" y="565" width="2.5" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="193.52" y="579.5" ></text>
+</g>
+<g >
+<title>[bash] (21,813,060,121 samples, 4.48%)</title><rect x="146.2" y="805" width="182.8" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="149.23" y="819.5" >[bash]</text>
+</g>
+<g >
+<title>__GI___libc_cleanup_pop_restore (14,865,999 samples, 0.00%)</title><rect x="377.9" y="1861" width="0.1" height="23.0" fill="rgb(246,119,45)" rx="2" ry="2" />
+<text  x="380.92" y="1875.5" ></text>
+</g>
+<g >
+<title>__overflow (72,122,527 samples, 0.01%)</title><rect x="763.1" y="1933" width="0.6" height="23.0" fill="rgb(238,144,36)" rx="2" ry="2" />
+<text  x="766.14" y="1947.5" ></text>
+</g>
+<g >
+<title>_int_free (96,842,781 samples, 0.02%)</title><rect x="143.1" y="469" width="0.8" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="146.13" y="483.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (181,327,327 samples, 0.04%)</title><rect x="10.5" y="277" width="1.5" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.48" y="291.5" ></text>
+</g>
+<g >
+<title>_int_free (73,722,513 samples, 0.02%)</title><rect x="128.4" y="445" width="0.6" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="131.37" y="459.5" ></text>
+</g>
+<g >
+<title>_int_malloc (202,504,785 samples, 0.04%)</title><rect x="182.6" y="613" width="1.7" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="185.63" y="627.5" ></text>
+</g>
+<g >
+<title>_int_malloc (13,574,947 samples, 0.00%)</title><rect x="145.7" y="541" width="0.2" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="148.74" y="555.5" ></text>
+</g>
+<g >
+<title>malloc (533,355,583 samples, 0.11%)</title><rect x="304.8" y="733" width="4.5" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="307.79" y="747.5" ></text>
+</g>
+<g >
+<title>malloc (180,263,634 samples, 0.04%)</title><rect x="109.7" y="445" width="1.5" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="112.70" y="459.5" ></text>
+</g>
+<g >
+<title>_IO_file_xsputn@@GLIBC_2.2.5 (1,009,839,437 samples, 0.21%)</title><rect x="637.0" y="1837" width="8.5" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="640.01" y="1851.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (72,382,774 samples, 0.01%)</title><rect x="135.7" y="493" width="0.6" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="138.66" y="507.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (19,250,449 samples, 0.00%)</title><rect x="178.6" y="517" width="0.1" height="23.0" fill="rgb(245,112,45)" rx="2" ry="2" />
+<text  x="181.58" y="531.5" ></text>
+</g>
+<g >
+<title>do_redirections (27,738,293 samples, 0.01%)</title><rect x="47.6" y="661" width="0.2" height="23.0" fill="rgb(244,189,43)" rx="2" ry="2" />
+<text  x="50.59" y="675.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (11,684,697,915 samples, 2.40%)</title><rect x="48.1" y="805" width="97.9" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="51.11" y="819.5" >execute_com..</text>
+</g>
+<g >
+<title>__GI___tunables_init (95,347,976 samples, 0.02%)</title><rect x="4071.0" y="1933" width="0.8" height="23.0" fill="rgb(236,119,34)" rx="2" ry="2" />
+<text  x="4073.98" y="1947.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (13,994,800 samples, 0.00%)</title><rect x="281.3" y="709" width="0.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="284.27" y="723.5" ></text>
+</g>
+<g >
+<title>mapfile_builtin (3,534,250,142 samples, 0.73%)</title><rect x="16.3" y="493" width="29.6" height="23.0" fill="rgb(242,99,41)" rx="2" ry="2" />
+<text  x="19.25" y="507.5" >ma..</text>
+</g>
+<g >
+<title>_int_malloc (277,913,604 samples, 0.06%)</title><rect x="172.3" y="517" width="2.4" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="175.33" y="531.5" ></text>
+</g>
+<g >
+<title>dispose_words (311,220,223 samples, 0.06%)</title><rect x="162.8" y="613" width="2.6" height="23.0" fill="rgb(241,177,39)" rx="2" ry="2" />
+<text  x="165.81" y="627.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (3,775,041,992 samples, 0.78%)</title><rect x="14.5" y="589" width="31.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.45" y="603.5" >ex..</text>
+</g>
+<g >
+<title>[bash] (58,803,150 samples, 0.01%)</title><rect x="12.0" y="277" width="0.5" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.00" y="291.5" ></text>
+</g>
+<g >
+<title>expand_string_assignment (46,213,060 samples, 0.01%)</title><rect x="12.0" y="157" width="0.4" height="23.0" fill="rgb(241,158,39)" rx="2" ry="2" />
+<text  x="15.03" y="171.5" ></text>
+</g>
+<g >
+<title>_int_free (44,809,483 samples, 0.01%)</title><rect x="284.6" y="733" width="0.4" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="287.59" y="747.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,155,872,622 samples, 7.84%)</title><rect x="10.1" y="1693" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1707.5" >execute_command_internal</text>
+</g>
+<g >
+<title>make_word_list (264,004,846 samples, 0.05%)</title><rect x="267.2" y="709" width="2.2" height="23.0" fill="rgb(232,77,30)" rx="2" ry="2" />
+<text  x="270.22" y="723.5" ></text>
+</g>
+<g >
+<title>cond_expand_word (11,644,873,519 samples, 2.39%)</title><rect x="48.3" y="637" width="97.6" height="23.0" fill="rgb(248,146,47)" rx="2" ry="2" />
+<text  x="51.32" y="651.5" >cond_expand..</text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (56,850,563 samples, 0.01%)</title><rect x="279.4" y="709" width="0.5" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="282.42" y="723.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (430,472,362 samples, 0.09%)</title><rect x="10.2" y="469" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.20" y="483.5" ></text>
+</g>
+<g >
+<title>_IO_file_sync@@GLIBC_2.2.5 (30,000,738 samples, 0.01%)</title><rect x="350.7" y="1861" width="0.3" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="353.73" y="1875.5" ></text>
+</g>
+<g >
+<title>[bash] (37,699,776,045 samples, 7.75%)</title><rect x="13.9" y="1141" width="315.9" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.87" y="1155.5" >[bash]</text>
+</g>
+<g >
+<title>execute_command_internal (440,430,146 samples, 0.09%)</title><rect x="10.1" y="1213" width="3.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1227.5" ></text>
+</g>
+<g >
+<title>[bash] (40,512,275 samples, 0.01%)</title><rect x="15.0" y="373" width="0.3" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="17.95" y="387.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (25,746,740 samples, 0.01%)</title><rect x="4070.2" y="1981" width="0.2" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4073.23" y="1995.5" ></text>
+</g>
+<g >
+<title>[bash] (71,200,061 samples, 0.01%)</title><rect x="11.4" y="229" width="0.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="14.38" y="243.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (163,256,761 samples, 0.03%)</title><rect x="279.9" y="709" width="1.4" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="282.90" y="723.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (26,578,572 samples, 0.01%)</title><rect x="15.4" y="469" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="18.44" y="483.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (30,615,999 samples, 0.01%)</title><rect x="4070.5" y="1957" width="0.2" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4073.49" y="1971.5" ></text>
+</g>
+<g >
+<title>__libc_start_main@@GLIBC_2.34 (38,175,170,060 samples, 7.85%)</title><rect x="10.0" y="1981" width="319.9" height="23.0" fill="rgb(236,154,35)" rx="2" ry="2" />
+<text  x="13.00" y="1995.5" >__libc_start_main@@GLIBC_2.34</text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (59,495,213 samples, 0.01%)</title><rect x="176.1" y="589" width="0.5" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="179.09" y="603.5" ></text>
+</g>
+<g >
+<title>_int_malloc (48,454,996 samples, 0.01%)</title><rect x="197.1" y="565" width="0.4" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="200.05" y="579.5" ></text>
+</g>
+<g >
+<title>[bash] (883,932,853 samples, 0.18%)</title><rect x="272.0" y="709" width="7.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="275.01" y="723.5" ></text>
+</g>
+<g >
+<title>string_list_internal (96,941,970 samples, 0.02%)</title><rect x="177.9" y="589" width="0.8" height="23.0" fill="rgb(229,140,27)" rx="2" ry="2" />
+<text  x="180.94" y="603.5" ></text>
+</g>
+<g >
+<title>string_list_internal (274,735,567 samples, 0.06%)</title><rect x="114.1" y="445" width="2.3" height="23.0" fill="rgb(229,140,27)" rx="2" ry="2" />
+<text  x="117.07" y="459.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (17,114,221 samples, 0.00%)</title><rect x="376.2" y="1765" width="0.1" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="379.20" y="1779.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (34,881,683 samples, 0.01%)</title><rect x="198.0" y="637" width="0.3" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="200.96" y="651.5" ></text>
+</g>
+<g >
+<title>_IO_file_xsputn@@GLIBC_2.2.5 (393,819,693 samples, 0.08%)</title><rect x="385.3" y="1885" width="3.3" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="388.29" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (37,661,425,034 samples, 7.74%)</title><rect x="14.0" y="949" width="315.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.96" y="963.5" >execute_command_internal</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (38,565,460 samples, 0.01%)</title><rect x="323.9" y="781" width="0.3" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="326.92" y="795.5" ></text>
+</g>
+<g >
+<title>_int_malloc (160,124,105 samples, 0.03%)</title><rect x="219.6" y="613" width="1.3" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="222.59" y="627.5" ></text>
+</g>
+<g >
+<title>[bash] (5,855,655,849 samples, 1.20%)</title><rect x="148.4" y="661" width="49.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="151.41" y="675.5" >[bash]</text>
+</g>
+<g >
+<title>dispose_word (166,609,176 samples, 0.03%)</title><rect x="180.5" y="613" width="1.4" height="23.0" fill="rgb(248,177,47)" rx="2" ry="2" />
+<text  x="183.51" y="627.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (51,296,822 samples, 0.01%)</title><rect x="16.5" y="445" width="0.5" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="19.53" y="459.5" ></text>
+</g>
+<g >
+<title>execute_command (440,279,469 samples, 0.09%)</title><rect x="10.1" y="1045" width="3.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1059.5" ></text>
+</g>
+<g >
+<title>__strchr_evex (70,940,068 samples, 0.01%)</title><rect x="354.2" y="1813" width="0.6" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="357.25" y="1827.5" ></text>
+</g>
+<g >
+<title>__run_exit_handlers (54,427,403 samples, 0.01%)</title><rect x="330.8" y="1909" width="0.4" height="23.0" fill="rgb(238,135,36)" rx="2" ry="2" />
+<text  x="333.79" y="1923.5" ></text>
+</g>
+<g >
+<title>[bash] (13,216,165 samples, 0.00%)</title><rect x="10.3" y="373" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.27" y="387.5" ></text>
+</g>
+<g >
+<title>execute_command (182,386,736 samples, 0.04%)</title><rect x="10.5" y="301" width="1.5" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.47" y="315.5" ></text>
+</g>
+<g >
+<title>_itoa_word (1,241,095,771 samples, 0.26%)</title><rect x="742.4" y="1861" width="10.4" height="23.0" fill="rgb(248,133,47)" rx="2" ry="2" />
+<text  x="745.41" y="1875.5" ></text>
+</g>
+<g >
+<title>intel_check_word.constprop.0 (34,059,970 samples, 0.01%)</title><rect x="4085.6" y="1885" width="0.3" height="23.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="4088.57" y="1899.5" ></text>
+</g>
+<g >
+<title>__strncmp_evex (11,999,281 samples, 0.00%)</title><rect x="762.3" y="1861" width="0.1" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="765.29" y="1875.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (51,333,835 samples, 0.01%)</title><rect x="218.4" y="661" width="0.4" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="221.41" y="675.5" ></text>
+</g>
+<g >
+<title>_dl_receive_error (41,935,834 samples, 0.01%)</title><rect x="4074.1" y="1909" width="0.3" height="23.0" fill="rgb(242,184,41)" rx="2" ry="2" />
+<text  x="4077.08" y="1923.5" ></text>
+</g>
+<g >
+<title>_int_realloc (14,137,026 samples, 0.00%)</title><rect x="145.7" y="565" width="0.2" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="148.74" y="579.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (22,791,385 samples, 0.00%)</title><rect x="47.2" y="709" width="0.2" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="50.17" y="723.5" ></text>
+</g>
+<g >
+<title>execute_command (76,626,971 samples, 0.02%)</title><rect x="46.1" y="589" width="0.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="49.12" y="603.5" ></text>
+</g>
+<g >
+<title>malloc (422,721,722 samples, 0.09%)</title><rect x="17.9" y="397" width="3.6" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="20.91" y="411.5" ></text>
+</g>
+<g >
+<title>__strstr_generic (17,685,204 samples, 0.00%)</title><rect x="356.7" y="1837" width="0.2" height="23.0" fill="rgb(228,132,25)" rx="2" ry="2" />
+<text  x="359.75" y="1851.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (3,935,045,570 samples, 0.81%)</title><rect x="14.4" y="733" width="33.0" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.38" y="747.5" >ex..</text>
+</g>
+<g >
+<title>cond_expand_word (22,429,381 samples, 0.00%)</title><rect x="13.6" y="349" width="0.2" height="23.0" fill="rgb(248,146,47)" rx="2" ry="2" />
+<text  x="16.57" y="363.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (392,353,492,872 samples, 80.67%)</title><rect x="774.5" y="1981" width="3288.0" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="777.55" y="1995.5" >[libcrypto.so.3.1.1]</text>
+</g>
+<g >
+<title>_int_free_create_chunk (63,068,308 samples, 0.01%)</title><rect x="328.3" y="685" width="0.5" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="331.26" y="699.5" ></text>
+</g>
+<g >
+<title>_nl_find_locale (21,032,856 samples, 0.00%)</title><rect x="762.3" y="1885" width="0.1" height="23.0" fill="rgb(242,189,41)" rx="2" ry="2" />
+<text  x="765.27" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (435,620,729 samples, 0.09%)</title><rect x="10.2" y="541" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.17" y="555.5" ></text>
+</g>
+<g >
+<title>malloc (15,155,054 samples, 0.00%)</title><rect x="243.7" y="709" width="0.1" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="246.67" y="723.5" ></text>
+</g>
+<g >
+<title>__GI___libc_cleanup_push_defer (22,615,607 samples, 0.00%)</title><rect x="356.2" y="1813" width="0.2" height="23.0" fill="rgb(241,119,40)" rx="2" ry="2" />
+<text  x="359.19" y="1827.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (124,084,550 samples, 0.03%)</title><rect x="244.1" y="709" width="1.0" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="247.07" y="723.5" ></text>
+</g>
+<g >
+<title>setlocale (35,310,048 samples, 0.01%)</title><rect x="762.2" y="1909" width="0.3" height="23.0" fill="rgb(242,154,41)" rx="2" ry="2" />
+<text  x="765.20" y="1923.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (15,124,489 samples, 0.00%)</title><rect x="181.8" y="541" width="0.1" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="184.76" y="555.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (82,681,108 samples, 0.02%)</title><rect x="378.9" y="1861" width="0.6" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="381.86" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (60,672,780 samples, 0.01%)</title><rect x="14.9" y="421" width="0.5" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.93" y="435.5" ></text>
+</g>
+<g >
+<title>_int_free (36,767,135 samples, 0.01%)</title><rect x="206.8" y="589" width="0.4" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="209.84" y="603.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (15,337,313 samples, 0.00%)</title><rect x="4069.8" y="1957" width="0.2" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4072.84" y="1971.5" ></text>
+</g>
+<g >
+<title>[bash] (11,612,983,000 samples, 2.39%)</title><rect x="48.4" y="565" width="97.3" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="51.38" y="579.5" >[bash]</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (13,078,278 samples, 0.00%)</title><rect x="162.7" y="613" width="0.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="165.67" y="627.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (286,222,239 samples, 0.06%)</title><rect x="4065.4" y="1933" width="2.4" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4068.41" y="1947.5" ></text>
+</g>
+<g >
+<title>string_list_dollar_at (1,561,671,289 samples, 0.32%)</title><rect x="184.4" y="637" width="13.1" height="23.0" fill="rgb(226,140,24)" rx="2" ry="2" />
+<text  x="187.37" y="651.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (16,699,109 samples, 0.00%)</title><rect x="142.2" y="469" width="0.1" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="145.17" y="483.5" ></text>
+</g>
+<g >
+<title>do_redirections (27,473,488 samples, 0.01%)</title><rect x="11.7" y="205" width="0.2" height="23.0" fill="rgb(244,189,43)" rx="2" ry="2" />
+<text  x="14.71" y="219.5" ></text>
+</g>
+<g >
+<title>_int_malloc (144,031,686 samples, 0.03%)</title><rect x="270.7" y="685" width="1.2" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="273.66" y="699.5" ></text>
+</g>
+<g >
+<title>[bash] (24,124,935 samples, 0.00%)</title><rect x="15.7" y="445" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="18.71" y="459.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (84,749,362 samples, 0.02%)</title><rect x="26.4" y="373" width="0.7" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="29.36" y="387.5" ></text>
+</g>
+<g >
+<title>_int_free (22,291,872 samples, 0.00%)</title><rect x="301.4" y="685" width="0.2" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="304.39" y="699.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (435,952,040 samples, 0.09%)</title><rect x="10.2" y="661" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.16" y="675.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (74,754,670 samples, 0.02%)</title><rect x="245.8" y="661" width="0.6" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="248.82" y="675.5" ></text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (18,234,010 samples, 0.00%)</title><rect x="4070.6" y="1933" width="0.1" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4073.58" y="1947.5" ></text>
+</g>
+<g >
+<title>_dl_lookup_symbol_x (12,700,909 samples, 0.00%)</title><rect x="4072.8" y="1909" width="0.1" height="23.0" fill="rgb(247,184,46)" rx="2" ry="2" />
+<text  x="4075.84" y="1923.5" ></text>
+</g>
+<g >
+<title>alloc_word_desc (262,032,674 samples, 0.05%)</title><rect x="265.0" y="709" width="2.2" height="23.0" fill="rgb(230,128,27)" rx="2" ry="2" />
+<text  x="268.03" y="723.5" ></text>
+</g>
+<g >
+<title>_IO_fflush (71,177,319 samples, 0.01%)</title><rect x="350.0" y="1861" width="0.6" height="23.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="353.03" y="1875.5" ></text>
+</g>
+<g >
+<title>__strchr_evex (251,959,104 samples, 0.05%)</title><rect x="772.4" y="1933" width="2.1" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="775.38" y="1947.5" ></text>
+</g>
+<g >
+<title>_dl_sysdep_start (19,603,853 samples, 0.00%)</title><rect x="330.0" y="1957" width="0.1" height="23.0" fill="rgb(239,184,37)" rx="2" ry="2" />
+<text  x="332.95" y="1971.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (242,690,051 samples, 0.05%)</title><rect x="307.2" y="661" width="2.0" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="310.18" y="675.5" ></text>
+</g>
+<g >
+<title>execute_command (14,840,339 samples, 0.00%)</title><rect x="11.2" y="181" width="0.1" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="14.17" y="195.5" ></text>
+</g>
+<g >
+<title>[bash] (1,653,084,359 samples, 0.34%)</title><rect x="248.1" y="709" width="13.8" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="251.08" y="723.5" ></text>
+</g>
+<g >
+<title>malloc (75,508,724 samples, 0.02%)</title><rect x="138.3" y="493" width="0.7" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="141.33" y="507.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (94,700,154 samples, 0.02%)</title><rect x="284.2" y="757" width="0.8" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="287.18" y="771.5" ></text>
+</g>
+<g >
+<title>[bash] (16,013,056,609 samples, 3.29%)</title><rect x="147.6" y="757" width="134.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="150.63" y="771.5" >[bash]</text>
+</g>
+<g >
+<title>malloc (328,252,766 samples, 0.07%)</title><rect x="172.0" y="541" width="2.7" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="174.96" y="555.5" ></text>
+</g>
+<g >
+<title>malloc (18,605,985 samples, 0.00%)</title><rect x="302.7" y="757" width="0.2" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="305.73" y="771.5" ></text>
+</g>
+<g >
+<title>alloc_word_desc (91,511,349 samples, 0.02%)</title><rect x="222.2" y="685" width="0.7" height="23.0" fill="rgb(230,128,27)" rx="2" ry="2" />
+<text  x="225.17" y="699.5" ></text>
+</g>
+<g >
+<title>__strcpy_chk (11,953,671 samples, 0.00%)</title><rect x="127.3" y="493" width="0.1" height="23.0" fill="rgb(235,132,33)" rx="2" ry="2" />
+<text  x="130.35" y="507.5" ></text>
+</g>
+<g >
+<title>_int_malloc (38,896,553 samples, 0.01%)</title><rect x="178.4" y="541" width="0.3" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="181.42" y="555.5" ></text>
+</g>
+<g >
+<title>_dl_start_user (1,848,893,454 samples, 0.38%)</title><rect x="4070.5" y="2005" width="15.5" height="23.0" fill="rgb(240,184,39)" rx="2" ry="2" />
+<text  x="4073.48" y="2019.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (358,092,882 samples, 0.07%)</title><rect x="139.2" y="469" width="3.0" height="23.0" fill="rgb(245,112,45)" rx="2" ry="2" />
+<text  x="142.17" y="483.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (81,610,709 samples, 0.02%)</title><rect x="141.5" y="445" width="0.7" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="144.48" y="459.5" ></text>
+</g>
+<g >
+<title>_int_malloc (69,828,054 samples, 0.01%)</title><rect x="223.4" y="637" width="0.5" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="226.35" y="651.5" ></text>
+</g>
+<g >
+<title>malloc (38,001,959 samples, 0.01%)</title><rect x="207.6" y="661" width="0.4" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="210.65" y="675.5" ></text>
+</g>
+<g >
+<title>__strcpy_chk (11,970,016 samples, 0.00%)</title><rect x="135.6" y="493" width="0.1" height="23.0" fill="rgb(235,132,33)" rx="2" ry="2" />
+<text  x="138.55" y="507.5" ></text>
+</g>
+<g >
+<title>string_list_pos_params (266,162,143 samples, 0.05%)</title><rect x="132.5" y="493" width="2.3" height="23.0" fill="rgb(234,140,32)" rx="2" ry="2" />
+<text  x="135.53" y="507.5" ></text>
+</g>
+<g >
+<title>_IO_file_read (60,130,729 samples, 0.01%)</title><rect x="361.2" y="1861" width="0.5" height="23.0" fill="rgb(241,132,40)" rx="2" ry="2" />
+<text  x="364.17" y="1875.5" ></text>
+</g>
+<g >
+<title>dl_main (13,885,753 samples, 0.00%)</title><rect x="330.0" y="1933" width="0.1" height="23.0" fill="rgb(247,149,46)" rx="2" ry="2" />
+<text  x="332.98" y="1947.5" ></text>
+</g>
+<g >
+<title>dispose_word (152,845,079 samples, 0.03%)</title><rect x="143.9" y="493" width="1.3" height="23.0" fill="rgb(248,177,47)" rx="2" ry="2" />
+<text  x="146.94" y="507.5" ></text>
+</g>
+<g >
+<title>_dl_add_to_namespace_list (25,746,740 samples, 0.01%)</title><rect x="4070.2" y="2005" width="0.2" height="23.0" fill="rgb(232,184,30)" rx="2" ry="2" />
+<text  x="4073.23" y="2019.5" ></text>
+</g>
+<g >
+<title>[bash] (55,443,383 samples, 0.01%)</title><rect x="12.0" y="253" width="0.5" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.01" y="267.5" ></text>
+</g>
+<g >
+<title>make_variable_value (48,450,846 samples, 0.01%)</title><rect x="22.1" y="445" width="0.4" height="23.0" fill="rgb(245,77,44)" rx="2" ry="2" />
+<text  x="25.06" y="459.5" ></text>
+</g>
+<g >
+<title>check_match (66,865,020 samples, 0.01%)</title><rect x="4083.7" y="1837" width="0.5" height="23.0" fill="rgb(242,116,41)" rx="2" ry="2" />
+<text  x="4086.66" y="1851.5" ></text>
+</g>
+<g >
+<title>update_export_env_inplace (12,403,639 samples, 0.00%)</title><rect x="323.7" y="757" width="0.1" height="23.0" fill="rgb(252,150,52)" rx="2" ry="2" />
+<text  x="326.69" y="771.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (37,653,633,525 samples, 7.74%)</title><rect x="14.0" y="877" width="315.5" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.01" y="891.5" >execute_command_internal</text>
+</g>
+<g >
+<title>execute_command (38,155,320,552 samples, 7.84%)</title><rect x="10.1" y="1429" width="319.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1443.5" >execute_command</text>
+</g>
+<g >
+<title>[bash] (10,299,888,717 samples, 2.12%)</title><rect x="48.5" y="517" width="86.3" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="51.47" y="531.5" >[bash]</text>
+</g>
+<g >
+<title>malloc (289,252,561 samples, 0.06%)</title><rect x="181.9" y="637" width="2.5" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="184.94" y="651.5" ></text>
+</g>
+<g >
+<title>[bash] (435,620,729 samples, 0.09%)</title><rect x="10.2" y="517" width="3.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.17" y="531.5" ></text>
+</g>
+<g >
+<title>__ctype_get_mb_cur_max (32,086,137 samples, 0.01%)</title><rect x="221.0" y="685" width="0.2" height="23.0" fill="rgb(244,144,43)" rx="2" ry="2" />
+<text  x="223.95" y="699.5" ></text>
+</g>
+<g >
+<title>[bash] (21,168,969,148 samples, 4.35%)</title><rect x="146.4" y="781" width="177.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="149.40" y="795.5" >[bash]</text>
+</g>
+<g >
+<title>__libc_start_main@@GLIBC_2.34 (52,956,087,376 samples, 10.89%)</title><rect x="330.8" y="1981" width="443.7" height="23.0" fill="rgb(236,154,35)" rx="2" ry="2" />
+<text  x="333.77" y="1995.5" >__libc_start_main@@GLIBC_2.34</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (121,308,420 samples, 0.02%)</title><rect x="124.4" y="445" width="1.0" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="127.41" y="459.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_pad_1 (42,507,605 samples, 0.01%)</title><rect x="634.0" y="1861" width="0.3" height="23.0" fill="rgb(228,141,26)" rx="2" ry="2" />
+<text  x="636.95" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (76,027,608 samples, 0.02%)</title><rect x="46.1" y="565" width="0.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="49.12" y="579.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (31,535,486 samples, 0.01%)</title><rect x="11.1" y="205" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="14.10" y="219.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (56,795,318 samples, 0.01%)</title><rect x="228.6" y="709" width="0.5" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="231.61" y="723.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (25,832,605 samples, 0.01%)</title><rect x="135.3" y="493" width="0.3" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="138.34" y="507.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (20,720,044 samples, 0.00%)</title><rect x="47.2" y="661" width="0.2" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="50.19" y="675.5" ></text>
+</g>
+<g >
+<title>execute_command (176,944,138 samples, 0.04%)</title><rect x="14.5" y="565" width="1.5" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.47" y="579.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (73,063,042 samples, 0.02%)</title><rect x="198.4" y="637" width="0.6" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="201.37" y="651.5" ></text>
+</g>
+<g >
+<title>zreadc (1,097,417,540 samples, 0.23%)</title><rect x="34.3" y="445" width="9.2" height="23.0" fill="rgb(237,177,35)" rx="2" ry="2" />
+<text  x="37.35" y="459.5" ></text>
+</g>
+<g >
+<title>_int_malloc (249,662,898 samples, 0.05%)</title><rect x="190.8" y="541" width="2.1" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="193.85" y="555.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (22,454,745 samples, 0.00%)</title><rect x="372.5" y="1837" width="0.2" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="375.54" y="1851.5" ></text>
+</g>
+<g >
+<title>_IO_file_xsgetn (756,532,557 samples, 0.16%)</title><rect x="361.7" y="1861" width="6.3" height="23.0" fill="rgb(244,132,43)" rx="2" ry="2" />
+<text  x="364.68" y="1875.5" ></text>
+</g>
+<g >
+<title>_IO_file_fopen@@GLIBC_2.2.5 (12,233,824 samples, 0.00%)</title><rect x="350.6" y="1861" width="0.1" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="353.63" y="1875.5" ></text>
+</g>
+<g >
+<title>malloc (179,705,903 samples, 0.04%)</title><rect x="380.6" y="1885" width="1.5" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="383.56" y="1899.5" ></text>
+</g>
+<g >
+<title>__strcpy_chk (13,109,362 samples, 0.00%)</title><rect x="151.3" y="589" width="0.1" height="23.0" fill="rgb(235,132,33)" rx="2" ry="2" />
+<text  x="154.29" y="603.5" ></text>
+</g>
+<g >
+<title>__memset_evex_unaligned_erms (115,396,259 samples, 0.02%)</title><rect x="608.2" y="1837" width="1.0" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="611.19" y="1851.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (95,350,274 samples, 0.02%)</title><rect x="157.1" y="589" width="0.8" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="160.14" y="603.5" ></text>
+</g>
+<g >
+<title>__strcpy_chk (17,306,012 samples, 0.00%)</title><rect x="264.4" y="709" width="0.1" height="23.0" fill="rgb(235,132,33)" rx="2" ry="2" />
+<text  x="267.38" y="723.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (37,129,905 samples, 0.01%)</title><rect x="174.7" y="565" width="0.3" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="177.71" y="579.5" ></text>
+</g>
+<g >
+<title>_dl_map_object (130,771,651 samples, 0.03%)</title><rect x="4068.5" y="1981" width="1.1" height="23.0" fill="rgb(241,184,39)" rx="2" ry="2" />
+<text  x="4071.51" y="1995.5" ></text>
+</g>
+<g >
+<title>_IO_link_in (69,860,929 samples, 0.01%)</title><rect x="355.5" y="1813" width="0.5" height="23.0" fill="rgb(240,132,39)" rx="2" ry="2" />
+<text  x="358.46" y="1827.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (436,022,334 samples, 0.09%)</title><rect x="10.2" y="709" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.16" y="723.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (85,082,693 samples, 0.02%)</title><rect x="119.1" y="445" width="0.7" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="122.11" y="459.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (3,596,180,714 samples, 0.74%)</title><rect x="16.0" y="565" width="30.1" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="18.95" y="579.5" >ex..</text>
+</g>
+<g >
+<title>_IO_file_overflow@@GLIBC_2.2.5 (41,227,488 samples, 0.01%)</title><rect x="762.5" y="1933" width="0.4" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="765.52" y="1947.5" ></text>
+</g>
+<g >
+<title>__close_nocancel (67,322,507 samples, 0.01%)</title><rect x="378.3" y="1861" width="0.5" height="23.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="381.29" y="1875.5" ></text>
+</g>
+<g >
+<title>[bash] (14,920,497 samples, 0.00%)</title><rect x="12.6" y="253" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.56" y="267.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,155,320,552 samples, 7.84%)</title><rect x="10.1" y="1501" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1515.5" >execute_command_internal</text>
+</g>
+<g >
+<title>dequote_string (1,739,824,554 samples, 0.36%)</title><rect x="229.1" y="709" width="14.6" height="23.0" fill="rgb(243,203,42)" rx="2" ry="2" />
+<text  x="232.09" y="723.5" ></text>
+</g>
+<g >
+<title>__strchr_evex (42,021,136 samples, 0.01%)</title><rect x="282.3" y="757" width="0.3" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="285.25" y="771.5" ></text>
+</g>
+<g >
+<title>[bash] (7,119,126,224 samples, 1.46%)</title><rect x="148.4" y="685" width="59.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="151.37" y="699.5" >[bash]</text>
+</g>
+<g >
+<title>_int_free_create_chunk (33,431,990 samples, 0.01%)</title><rect x="301.8" y="661" width="0.3" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="304.85" y="675.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (14,663,398 samples, 0.00%)</title><rect x="13.3" y="229" width="0.1" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.26" y="243.5" ></text>
+</g>
+<g >
+<title>execute_command (439,741,706 samples, 0.09%)</title><rect x="10.1" y="901" width="3.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="915.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (444,688,603 samples, 0.09%)</title><rect x="10.1" y="1261" width="3.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1275.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (444,688,603 samples, 0.09%)</title><rect x="10.1" y="1309" width="3.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1323.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (21,491,532 samples, 0.00%)</title><rect x="271.6" y="637" width="0.2" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="274.64" y="651.5" ></text>
+</g>
+<g >
+<title>[bash] (14,112,770 samples, 0.00%)</title><rect x="11.8" y="133" width="0.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="14.77" y="147.5" ></text>
+</g>
+<g >
+<title>_int_free (45,771,785 samples, 0.01%)</title><rect x="193.6" y="565" width="0.4" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="196.61" y="579.5" ></text>
+</g>
+<g >
+<title>execute_command (72,455,673 samples, 0.01%)</title><rect x="46.1" y="541" width="0.6" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="49.14" y="555.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (11,678,755,256 samples, 2.40%)</title><rect x="48.2" y="733" width="97.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="51.15" y="747.5" >execute_com..</text>
+</g>
+<g >
+<title>[bash] (40,772,706 samples, 0.01%)</title><rect x="12.0" y="85" width="0.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.04" y="99.5" ></text>
+</g>
+<g >
+<title>parse_command (16,542,188 samples, 0.00%)</title><rect x="329.7" y="1093" width="0.1" height="23.0" fill="rgb(254,149,54)" rx="2" ry="2" />
+<text  x="332.66" y="1107.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (63,711,672 samples, 0.01%)</title><rect x="301.6" y="685" width="0.5" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="304.61" y="699.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (395,041,598 samples, 0.08%)</title><rect x="139.0" y="517" width="3.3" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="142.00" y="531.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (436,957,740 samples, 0.09%)</title><rect x="23.6" y="421" width="3.7" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="26.64" y="435.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (63,778,767 samples, 0.01%)</title><rect x="131.9" y="445" width="0.6" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="134.94" y="459.5" ></text>
+</g>
+<g >
+<title>_int_malloc (248,546,136 samples, 0.05%)</title><rect x="114.3" y="397" width="2.1" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="117.29" y="411.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (116,952,338 samples, 0.02%)</title><rect x="155.1" y="613" width="1.0" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="158.11" y="627.5" ></text>
+</g>
+<g >
+<title>[bash] (741,936,921 samples, 0.15%)</title><rect x="16.4" y="469" width="6.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="19.35" y="483.5" ></text>
+</g>
+<g >
+<title>[bash] (7,128,630,641 samples, 1.47%)</title><rect x="148.3" y="709" width="59.8" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="151.31" y="723.5" >[bash]</text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (19,108,535 samples, 0.00%)</title><rect x="17.2" y="421" width="0.1" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="20.15" y="435.5" ></text>
+</g>
+<g >
+<title>malloc (63,831,273 samples, 0.01%)</title><rect x="269.4" y="709" width="0.6" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="272.44" y="723.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (23,718,588 samples, 0.00%)</title><rect x="197.3" y="541" width="0.2" height="23.0" fill="rgb(245,112,45)" rx="2" ry="2" />
+<text  x="200.26" y="555.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (110,883,194 samples, 0.02%)</title><rect x="125.6" y="421" width="0.9" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="128.58" y="435.5" ></text>
+</g>
+<g >
+<title>execute_command (440,430,146 samples, 0.09%)</title><rect x="10.1" y="1141" width="3.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1155.5" ></text>
+</g>
+<g >
+<title>_IO_no_init (24,626,119 samples, 0.01%)</title><rect x="356.4" y="1837" width="0.2" height="23.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="359.38" y="1851.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,155,320,552 samples, 7.84%)</title><rect x="10.1" y="1549" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1563.5" >execute_command_internal</text>
+</g>
+<g >
+<title>[bash] (48,288,697 samples, 0.01%)</title><rect x="10.5" y="133" width="0.4" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.54" y="147.5" ></text>
+</g>
+<g >
+<title>[bash] (11,602,824,098 samples, 2.39%)</title><rect x="48.4" y="541" width="97.3" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="51.42" y="555.5" >[bash]</text>
+</g>
+<g >
+<title>execute_command_internal (42,000,861 samples, 0.01%)</title><rect x="14.6" y="349" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.57" y="363.5" ></text>
+</g>
+<g >
+<title>_dl_map_object_from_fd (27,846,616 samples, 0.01%)</title><rect x="4069.6" y="1981" width="0.2" height="23.0" fill="rgb(244,184,42)" rx="2" ry="2" />
+<text  x="4072.61" y="1995.5" ></text>
+</g>
+<g >
+<title>_int_malloc (104,663,910 samples, 0.02%)</title><rect x="137.4" y="445" width="0.9" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="140.42" y="459.5" ></text>
+</g>
+<g >
+<title>set_binding_values.part.0 (13,888,125 samples, 0.00%)</title><rect x="389.1" y="1885" width="0.1" height="23.0" fill="rgb(233,154,31)" rx="2" ry="2" />
+<text  x="392.13" y="1899.5" ></text>
+</g>
+<g >
+<title>make_bare_word (244,798,002 samples, 0.05%)</title><rect x="136.3" y="493" width="2.0" height="23.0" fill="rgb(248,77,47)" rx="2" ry="2" />
+<text  x="139.28" y="507.5" ></text>
+</g>
+<g >
+<title>[bash] (27,964,037 samples, 0.01%)</title><rect x="13.5" y="373" width="0.3" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.54" y="387.5" ></text>
+</g>
+<g >
+<title>_dl_lookup_symbol_x (587,178,094 samples, 0.12%)</title><rect x="4080.1" y="1885" width="4.9" height="23.0" fill="rgb(247,184,46)" rx="2" ry="2" />
+<text  x="4083.10" y="1899.5" ></text>
+</g>
+<g >
+<title>_IO_file_doallocate (29,342,175 samples, 0.01%)</title><rect x="367.7" y="1837" width="0.3" height="23.0" fill="rgb(245,132,45)" rx="2" ry="2" />
+<text  x="370.73" y="1851.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_write (999,753,912 samples, 0.21%)</title><rect x="700.3" y="1861" width="8.4" height="23.0" fill="rgb(240,141,38)" rx="2" ry="2" />
+<text  x="703.35" y="1875.5" ></text>
+</g>
+<g >
+<title>array_insert (554,075,965 samples, 0.11%)</title><rect x="17.0" y="445" width="4.6" height="23.0" fill="rgb(236,134,34)" rx="2" ry="2" />
+<text  x="19.98" y="459.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (436,091,265 samples, 0.09%)</title><rect x="10.2" y="805" width="3.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.16" y="819.5" ></text>
+</g>
+<g >
+<title>_IO_file_xsgetn (31,732,401 samples, 0.01%)</title><rect x="358.3" y="1885" width="0.3" height="23.0" fill="rgb(244,132,43)" rx="2" ry="2" />
+<text  x="361.30" y="1899.5" ></text>
+</g>
+<g >
+<title>_int_realloc (69,240,999 samples, 0.01%)</title><rect x="224.4" y="685" width="0.6" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="227.44" y="699.5" ></text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (23,253,220 samples, 0.00%)</title><rect x="22.6" y="469" width="0.2" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="25.58" y="483.5" ></text>
+</g>
+<g >
+<title>execute_command (106,029,173 samples, 0.02%)</title><rect x="10.5" y="253" width="0.9" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.49" y="267.5" ></text>
+</g>
+<g >
+<title>malloc (36,839,462 samples, 0.01%)</title><rect x="123.8" y="445" width="0.3" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="126.76" y="459.5" ></text>
+</g>
+<g >
+<title>zgetline (1,916,501,472 samples, 0.39%)</title><rect x="27.5" y="469" width="16.0" height="23.0" fill="rgb(246,177,46)" rx="2" ry="2" />
+<text  x="30.48" y="483.5" ></text>
+</g>
+<g >
+<title>string_list_internal (47,976,810 samples, 0.01%)</title><rect x="281.4" y="709" width="0.4" height="23.0" fill="rgb(229,140,27)" rx="2" ry="2" />
+<text  x="284.39" y="723.5" ></text>
+</g>
+<g >
+<title>malloc (183,111,523 samples, 0.04%)</title><rect x="258.3" y="685" width="1.5" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="261.31" y="699.5" ></text>
+</g>
+<g >
+<title>SHA512_Init (71,940,212 samples, 0.01%)</title><rect x="340.0" y="1909" width="0.6" height="23.0" fill="rgb(236,159,34)" rx="2" ry="2" />
+<text  x="342.96" y="1923.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (37,710,391,200 samples, 7.75%)</title><rect x="13.9" y="1333" width="316.0" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.86" y="1347.5" >execute_command_internal</text>
+</g>
+<g >
+<title>execute_command (37,659,812,929 samples, 7.74%)</title><rect x="14.0" y="901" width="315.6" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="16.97" y="915.5" >execute_command</text>
+</g>
+<g >
+<title>execute_command_internal (37,664,629,450 samples, 7.74%)</title><rect x="13.9" y="973" width="315.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.93" y="987.5" >execute_command_internal</text>
+</g>
+<g >
+<title>__memmove_evex_unaligned_erms (33,905,360 samples, 0.01%)</title><rect x="154.7" y="613" width="0.2" height="23.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="157.66" y="627.5" ></text>
+</g>
+<g >
+<title>_int_free (26,406,226 samples, 0.01%)</title><rect x="164.5" y="541" width="0.2" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="167.46" y="555.5" ></text>
+</g>
+<g >
+<title>[bash] (3,592,954,939 samples, 0.74%)</title><rect x="16.0" y="541" width="30.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="18.96" y="555.5" >[b..</text>
+</g>
+<g >
+<title>execute_command_internal (45,671,274 samples, 0.01%)</title><rect x="46.8" y="661" width="0.4" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="49.78" y="675.5" ></text>
+</g>
+<g >
+<title>execute_command (83,932,485 samples, 0.02%)</title><rect x="47.4" y="733" width="0.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="50.39" y="747.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (25,984,987 samples, 0.01%)</title><rect x="12.5" y="301" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="15.54" y="315.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (3,858,098,677 samples, 0.79%)</title><rect x="14.4" y="637" width="32.4" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.43" y="651.5" >ex..</text>
+</g>
+<g >
+<title>__GI___libc_cleanup_push_defer (28,503,936 samples, 0.01%)</title><rect x="378.0" y="1861" width="0.3" height="23.0" fill="rgb(241,119,40)" rx="2" ry="2" />
+<text  x="381.05" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command (38,155,320,552 samples, 7.84%)</title><rect x="10.1" y="1477" width="319.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1491.5" >execute_command</text>
+</g>
+<g >
+<title>execute_command_internal (80,736,503 samples, 0.02%)</title><rect x="47.4" y="709" width="0.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="50.41" y="723.5" ></text>
+</g>
+<g >
+<title>_int_malloc (310,358,148 samples, 0.06%)</title><rect x="121.1" y="397" width="2.6" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="124.12" y="411.5" ></text>
+</g>
+<g >
+<title>__freading (63,537,246 samples, 0.01%)</title><rect x="370.5" y="1885" width="0.5" height="23.0" fill="rgb(243,135,42)" rx="2" ry="2" />
+<text  x="373.45" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (33,370,286 samples, 0.01%)</title><rect x="13.5" y="397" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.52" y="411.5" ></text>
+</g>
+<g >
+<title>malloc (32,672,112 samples, 0.01%)</title><rect x="145.3" y="517" width="0.3" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="148.30" y="531.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (21,897,628,434 samples, 4.50%)</title><rect x="146.0" y="853" width="183.5" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="149.04" y="867.5" >execute_command_internal</text>
+</g>
+<g >
+<title>read_builtin (19,952,652 samples, 0.00%)</title><rect x="10.8" y="109" width="0.1" height="23.0" fill="rgb(242,184,41)" rx="2" ry="2" />
+<text  x="13.76" y="123.5" ></text>
+</g>
+<g >
+<title>__fopen_internal (757,693,403 samples, 0.16%)</title><rect x="351.1" y="1861" width="6.3" height="23.0" fill="rgb(229,135,27)" rx="2" ry="2" />
+<text  x="354.05" y="1875.5" ></text>
+</g>
+<g >
+<title>_int_free (74,402,230 samples, 0.02%)</title><rect x="244.5" y="685" width="0.6" height="23.0" fill="rgb(246,153,46)" rx="2" ry="2" />
+<text  x="247.49" y="699.5" ></text>
+</g>
+<g >
+<title>_int_malloc (33,859,265 samples, 0.01%)</title><rect x="138.7" y="469" width="0.3" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="141.68" y="483.5" ></text>
+</g>
+<g >
+<title>array_to_word_list (525,711,034 samples, 0.11%)</title><rect x="197.5" y="661" width="4.4" height="23.0" fill="rgb(232,134,30)" rx="2" ry="2" />
+<text  x="200.49" y="675.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (37,665,152,639 samples, 7.74%)</title><rect x="13.9" y="997" width="315.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.93" y="1011.5" >execute_command_internal</text>
+</g>
+<g >
+<title>[libcrypto.so.3.1.1] (38,009,851 samples, 0.01%)</title><rect x="4068.2" y="1933" width="0.3" height="23.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="4071.19" y="1947.5" ></text>
+</g>
+<g >
+<title>_dl_map_object_from_fd (53,551,187 samples, 0.01%)</title><rect x="4073.3" y="1813" width="0.5" height="23.0" fill="rgb(244,184,42)" rx="2" ry="2" />
+<text  x="4076.33" y="1827.5" ></text>
+</g>
+<g >
+<title>source_file (37,699,911,210 samples, 7.75%)</title><rect x="13.9" y="1165" width="315.9" height="23.0" fill="rgb(237,155,35)" rx="2" ry="2" />
+<text  x="16.87" y="1179.5" >source_file</text>
+</g>
+<g >
+<title>dispose_word (213,447,465 samples, 0.04%)</title><rect x="327.1" y="757" width="1.8" height="23.0" fill="rgb(248,177,47)" rx="2" ry="2" />
+<text  x="330.12" y="771.5" ></text>
+</g>
+<g >
+<title>execute_command (440,213,497 samples, 0.09%)</title><rect x="10.1" y="997" width="3.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1011.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_to_file_switch (530,830,447 samples, 0.11%)</title><rect x="427.3" y="1885" width="4.4" height="23.0" fill="rgb(242,141,41)" rx="2" ry="2" />
+<text  x="430.29" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command (38,155,832,306 samples, 7.84%)</title><rect x="10.1" y="1669" width="319.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1683.5" >execute_command</text>
+</g>
+<g >
+<title>dequote_list (1,985,709,821 samples, 0.41%)</title><rect x="227.2" y="733" width="16.6" height="23.0" fill="rgb(232,203,30)" rx="2" ry="2" />
+<text  x="230.20" y="747.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (440,430,146 samples, 0.09%)</title><rect x="10.1" y="1117" width="3.7" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.13" y="1131.5" ></text>
+</g>
+<g >
+<title>malloc (172,799,810 samples, 0.04%)</title><rect x="152.8" y="589" width="1.5" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="155.82" y="603.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (81,030,490 samples, 0.02%)</title><rect x="372.1" y="1861" width="0.6" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="375.05" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command (28,185,366 samples, 0.01%)</title><rect x="12.5" y="325" width="0.3" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="15.52" y="339.5" ></text>
+</g>
+<g >
+<title>_dl_fini (38,515,529 samples, 0.01%)</title><rect x="330.9" y="1885" width="0.3" height="23.0" fill="rgb(240,184,38)" rx="2" ry="2" />
+<text  x="333.90" y="1899.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (13,340,859 samples, 0.00%)</title><rect x="179.1" y="637" width="0.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="182.08" y="651.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (15,334,383 samples, 0.00%)</title><rect x="376.1" y="1765" width="0.1" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="379.08" y="1779.5" ></text>
+</g>
+<g >
+<title>malloc (248,943,102 samples, 0.05%)</title><rect x="114.3" y="421" width="2.1" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="117.29" y="435.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (147,042,562 samples, 0.03%)</title><rect x="206.4" y="613" width="1.2" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="209.38" y="627.5" ></text>
+</g>
+<g >
+<title>[bash] (37,700,181,330 samples, 7.75%)</title><rect x="13.9" y="1213" width="315.9" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.87" y="1227.5" >[bash]</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (114,293,660 samples, 0.02%)</title><rect x="175.0" y="565" width="1.0" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="178.04" y="579.5" ></text>
+</g>
+<g >
+<title>_dl_check_map_versions (32,180,478 samples, 0.01%)</title><rect x="4074.1" y="1837" width="0.3" height="23.0" fill="rgb(244,184,43)" rx="2" ry="2" />
+<text  x="4077.09" y="1851.5" ></text>
+</g>
+<g >
+<title>[bash] (38,161,553,547 samples, 7.85%)</title><rect x="10.1" y="1837" width="319.8" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="13.09" y="1851.5" >[bash]</text>
+</g>
+<g >
+<title>execute_command_internal (33,332,684 samples, 0.01%)</title><rect x="14.6" y="253" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.63" y="267.5" ></text>
+</g>
+<g >
+<title>__strchr_evex (45,142,101 samples, 0.01%)</title><rect x="227.6" y="709" width="0.4" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="230.60" y="723.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_to_file_done (7,238,626,758 samples, 1.49%)</title><rect x="634.3" y="1861" width="60.7" height="23.0" fill="rgb(251,141,50)" rx="2" ry="2" />
+<text  x="637.31" y="1875.5" >__prin..</text>
+</g>
+<g >
+<title>stop_pipeline (13,484,003 samples, 0.00%)</title><rect x="329.1" y="805" width="0.1" height="23.0" fill="rgb(246,150,46)" rx="2" ry="2" />
+<text  x="332.10" y="819.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (150,541,339 samples, 0.03%)</title><rect x="176.6" y="589" width="1.2" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="179.58" y="603.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (73,796,483 samples, 0.02%)</title><rect x="11.4" y="253" width="0.6" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="14.37" y="267.5" ></text>
+</g>
+<g >
+<title>make_bare_word (469,209,552 samples, 0.10%)</title><rect x="119.8" y="445" width="4.0" height="23.0" fill="rgb(248,77,47)" rx="2" ry="2" />
+<text  x="122.83" y="459.5" ></text>
+</g>
+<g >
+<title>malloc (12,834,151 samples, 0.00%)</title><rect x="389.1" y="1861" width="0.1" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="392.13" y="1875.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (44,851,278 samples, 0.01%)</title><rect x="14.6" y="397" width="0.3" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="17.55" y="411.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (109,267,009 samples, 0.02%)</title><rect x="193.4" y="589" width="0.9" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="196.38" y="603.5" ></text>
+</g>
+<g >
+<title>dispose_word (146,026,771 samples, 0.03%)</title><rect x="300.9" y="733" width="1.2" height="23.0" fill="rgb(248,177,47)" rx="2" ry="2" />
+<text  x="303.92" y="747.5" ></text>
+</g>
+<g >
+<title>execute_command (140,224,070 samples, 0.03%)</title><rect x="14.5" y="517" width="1.2" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.49" y="531.5" ></text>
+</g>
+<g >
+<title>__ctype_b_loc (28,165,488 samples, 0.01%)</title><rect x="225.1" y="733" width="0.2" height="23.0" fill="rgb(238,144,36)" rx="2" ry="2" />
+<text  x="228.09" y="747.5" ></text>
+</g>
+<g >
+<title>[bash] (1,558,293,744 samples, 0.32%)</title><rect x="55.0" y="445" width="13.1" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="58.00" y="459.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (44,538,727 samples, 0.01%)</title><rect x="278.4" y="685" width="0.4" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="281.41" y="699.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (152,689,551 samples, 0.03%)</title><rect x="108.3" y="445" width="1.3" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="111.29" y="459.5" ></text>
+</g>
+<g >
+<title>_int_malloc (121,011,325 samples, 0.02%)</title><rect x="258.8" y="661" width="1.0" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="261.81" y="675.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_done (822,209,054 samples, 0.17%)</title><rect x="408.9" y="1885" width="6.9" height="23.0" fill="rgb(251,141,50)" rx="2" ry="2" />
+<text  x="411.89" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command (15,721,298,795 samples, 3.23%)</title><rect x="14.3" y="853" width="131.7" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.29" y="867.5" >execute_command</text>
+</g>
+<g >
+<title>[bash] (23,178,780 samples, 0.00%)</title><rect x="12.5" y="277" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.54" y="291.5" ></text>
+</g>
+<g >
+<title>new_do_write (164,184,269 samples, 0.03%)</title><rect x="383.3" y="1861" width="1.4" height="23.0" fill="rgb(240,184,38)" rx="2" ry="2" />
+<text  x="386.31" y="1875.5" ></text>
+</g>
+<g >
+<title>[unknown] (393,278,668,714 samples, 80.86%)</title><rect x="774.5" y="2005" width="3295.7" height="23.0" fill="rgb(242,180,40)" rx="2" ry="2" />
+<text  x="777.55" y="2019.5" >[unknown]</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (36,571,575 samples, 0.01%)</title><rect x="760.5" y="1909" width="0.3" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="763.45" y="1923.5" ></text>
+</g>
+<g >
+<title>remove_quoted_nulls (16,618,004 samples, 0.00%)</title><rect x="271.9" y="733" width="0.1" height="23.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="274.87" y="747.5" ></text>
+</g>
+<g >
+<title>[bash] (11,616,784,930 samples, 2.39%)</title><rect x="48.4" y="589" width="97.3" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="51.36" y="603.5" >[bash]</text>
+</g>
+<g >
+<title>[bash] (51,992,490 samples, 0.01%)</title><rect x="47.4" y="685" width="0.5" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="50.43" y="699.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (189,390,199 samples, 0.04%)</title><rect x="327.3" y="733" width="1.6" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="330.32" y="747.5" ></text>
+</g>
+<g >
+<title>SHA512_Update (71,384,511 samples, 0.01%)</title><rect x="340.6" y="1909" width="0.6" height="23.0" fill="rgb(245,159,45)" rx="2" ry="2" />
+<text  x="343.56" y="1923.5" ></text>
+</g>
+<g >
+<title>yyparse (16,542,188 samples, 0.00%)</title><rect x="329.7" y="1069" width="0.1" height="23.0" fill="rgb(243,209,42)" rx="2" ry="2" />
+<text  x="332.66" y="1083.5" ></text>
+</g>
+<g >
+<title>_int_malloc (46,481,229 samples, 0.01%)</title><rect x="201.5" y="613" width="0.4" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="204.48" y="627.5" ></text>
+</g>
+<g >
+<title>malloc (15,270,919 samples, 0.00%)</title><rect x="218.8" y="661" width="0.2" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="221.84" y="675.5" ></text>
+</g>
+<g >
+<title>__strchr_evex (111,583,081 samples, 0.02%)</title><rect x="221.2" y="685" width="1.0" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="224.24" y="699.5" ></text>
+</g>
+<g >
+<title>__GI__IO_un_link.part.0 (87,529,454 samples, 0.02%)</title><rect x="377.2" y="1861" width="0.7" height="23.0" fill="rgb(233,119,31)" rx="2" ry="2" />
+<text  x="380.19" y="1875.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (27,729,012 samples, 0.01%)</title><rect x="126.2" y="373" width="0.2" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="129.21" y="387.5" ></text>
+</g>
+<g >
+<title>dl_main (1,595,909,706 samples, 0.33%)</title><rect x="4072.0" y="1933" width="13.3" height="23.0" fill="rgb(247,149,46)" rx="2" ry="2" />
+<text  x="4074.97" y="1947.5" ></text>
+</g>
+<g >
+<title>[bash] (25,613,778 samples, 0.01%)</title><rect x="12.1" y="37" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="15.08" y="51.5" ></text>
+</g>
+<g >
+<title>__strstr_generic (38,929,613 samples, 0.01%)</title><rect x="354.8" y="1813" width="0.4" height="23.0" fill="rgb(228,132,25)" rx="2" ry="2" />
+<text  x="357.84" y="1827.5" ></text>
+</g>
+<g >
+<title>read (220,655,994 samples, 0.05%)</title><rect x="368.6" y="1861" width="1.9" height="23.0" fill="rgb(241,184,40)" rx="2" ry="2" />
+<text  x="371.61" y="1875.5" ></text>
+</g>
+<g >
+<title>fclose@@GLIBC_2.2.5 (25,475,895 samples, 0.01%)</title><rect x="760.8" y="1909" width="0.2" height="23.0" fill="rgb(246,213,45)" rx="2" ry="2" />
+<text  x="763.76" y="1923.5" ></text>
+</g>
+<g >
+<title>__memchr_evex (47,394,237 samples, 0.01%)</title><rect x="68.2" y="445" width="0.4" height="23.0" fill="rgb(245,151,44)" rx="2" ry="2" />
+<text  x="71.22" y="459.5" ></text>
+</g>
+<g >
+<title>[bash] (37,709,074,423 samples, 7.75%)</title><rect x="13.9" y="1237" width="316.0" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="16.87" y="1251.5" >[bash]</text>
+</g>
+<g >
+<title>array_flush (527,248,835 samples, 0.11%)</title><rect x="22.9" y="445" width="4.4" height="23.0" fill="rgb(236,134,34)" rx="2" ry="2" />
+<text  x="25.88" y="459.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (387,525,797 samples, 0.08%)</title><rect x="10.3" y="421" width="3.2" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.25" y="435.5" ></text>
+</g>
+<g >
+<title>__printf_buffer_flush_to_file (5,906,256,209 samples, 1.21%)</title><rect x="645.5" y="1837" width="49.5" height="23.0" fill="rgb(237,141,35)" rx="2" ry="2" />
+<text  x="648.47" y="1851.5" >__pr..</text>
+</g>
+<g >
+<title>handle_intel.constprop.0 (42,832,332 samples, 0.01%)</title><rect x="4085.5" y="1909" width="0.4" height="23.0" fill="rgb(236,146,34)" rx="2" ry="2" />
+<text  x="4088.49" y="1923.5" ></text>
+</g>
+<g >
+<title>[bash] (26,717,716 samples, 0.01%)</title><rect x="47.6" y="637" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="50.59" y="651.5" ></text>
+</g>
+<g >
+<title>execute_command (110,466,571 samples, 0.02%)</title><rect x="14.5" y="469" width="0.9" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="17.51" y="483.5" ></text>
+</g>
+<g >
+<title>malloc (358,443,326 samples, 0.07%)</title><rect x="120.7" y="421" width="3.0" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="123.74" y="435.5" ></text>
+</g>
+<g >
+<title>malloc (153,781,167 samples, 0.03%)</title><rect x="199.8" y="613" width="1.3" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="202.77" y="627.5" ></text>
+</g>
+<g >
+<title>_dl_relocate_object (1,270,384,816 samples, 0.26%)</title><rect x="4074.4" y="1909" width="10.7" height="23.0" fill="rgb(241,184,39)" rx="2" ry="2" />
+<text  x="4077.43" y="1923.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (124,629,026 samples, 0.03%)</title><rect x="301.1" y="709" width="1.0" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="304.10" y="723.5" ></text>
+</g>
+<g >
+<title>malloc (18,639,435 samples, 0.00%)</title><rect x="367.6" y="1813" width="0.1" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="370.55" y="1827.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (30,906,220 samples, 0.01%)</title><rect x="194.0" y="565" width="0.3" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="197.04" y="579.5" ></text>
+</g>
+<g >
+<title>list_string (2,870,356,294 samples, 0.59%)</title><rect x="246.5" y="733" width="24.0" height="23.0" fill="rgb(243,113,42)" rx="2" ry="2" />
+<text  x="249.49" y="747.5" >l..</text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate.part.0 (18,480,731 samples, 0.00%)</title><rect x="25.7" y="397" width="0.2" height="23.0" fill="rgb(233,153,31)" rx="2" ry="2" />
+<text  x="28.70" y="411.5" ></text>
+</g>
+<g >
+<title>_IO_file_close_it@@GLIBC_2.2.5 (367,474,848 samples, 0.08%)</title><rect x="373.8" y="1861" width="3.1" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="376.80" y="1875.5" ></text>
+</g>
+<g >
+<title>__strchr_evex (4,681,004,168 samples, 0.96%)</title><rect x="69.1" y="445" width="39.2" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="72.07" y="459.5" >__s..</text>
+</g>
+<g >
+<title>[bash] (3,570,943,224 samples, 0.73%)</title><rect x="16.0" y="517" width="29.9" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="18.98" y="531.5" >[b..</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (14,586,361 samples, 0.00%)</title><rect x="124.1" y="469" width="0.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="127.10" y="483.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (15,591,776 samples, 0.00%)</title><rect x="192.8" y="517" width="0.1" height="23.0" fill="rgb(238,173,36)" rx="2" ry="2" />
+<text  x="195.81" y="531.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (31,587,472 samples, 0.01%)</title><rect x="136.7" y="469" width="0.3" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="139.73" y="483.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (15,687,550 samples, 0.00%)</title><rect x="175.9" y="517" width="0.1" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="178.86" y="531.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (14,383,808 samples, 0.00%)</title><rect x="13.3" y="181" width="0.1" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="16.27" y="195.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (38,161,553,547 samples, 7.85%)</title><rect x="10.1" y="1861" width="319.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="13.09" y="1875.5" >execute_command_internal</text>
+</g>
+<g >
+<title>list_string (1,874,497,590 samples, 0.39%)</title><rect x="208.7" y="709" width="15.7" height="23.0" fill="rgb(243,113,42)" rx="2" ry="2" />
+<text  x="211.68" y="723.5" ></text>
+</g>
+<g >
+<title>[bash] (24,890,921 samples, 0.01%)</title><rect x="11.7" y="181" width="0.2" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="14.71" y="195.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (49,771,561 samples, 0.01%)</title><rect x="144.8" y="445" width="0.4" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="147.80" y="459.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (302,651,774 samples, 0.06%)</title><rect x="324.6" y="757" width="2.5" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="327.58" y="771.5" ></text>
+</g>
+<g >
+<title>__strlen_evex (148,145,440 samples, 0.03%)</title><rect x="195.2" y="613" width="1.3" height="23.0" fill="rgb(245,132,44)" rx="2" ry="2" />
+<text  x="198.25" y="627.5" ></text>
+</g>
+<g >
+<title>execute_command (436,091,265 samples, 0.09%)</title><rect x="10.2" y="829" width="3.6" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.16" y="843.5" ></text>
+</g>
+<g >
+<title>_int_malloc (151,435,959 samples, 0.03%)</title><rect x="268.1" y="661" width="1.3" height="23.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="271.12" y="675.5" ></text>
+</g>
+<g >
+<title>[sha512sum] (4,881,799,966 samples, 1.00%)</title><rect x="341.2" y="1909" width="40.9" height="23.0" fill="rgb(232,171,30)" rx="2" ry="2" />
+<text  x="344.16" y="1923.5" >[sh..</text>
+</g>
+<g >
+<title>make_child (57,730,655 samples, 0.01%)</title><rect x="302.2" y="757" width="0.5" height="23.0" fill="rgb(238,77,37)" rx="2" ry="2" />
+<text  x="305.22" y="771.5" ></text>
+</g>
+<g >
+<title>[bash] (31,729,673 samples, 0.01%)</title><rect x="14.6" y="229" width="0.3" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="17.63" y="243.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (130,278,735 samples, 0.03%)</title><rect x="144.1" y="469" width="1.1" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="147.13" y="483.5" ></text>
+</g>
+<g >
+<title>malloc (48,459,271 samples, 0.01%)</title><rect x="197.1" y="589" width="0.4" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="200.05" y="603.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (22,124,236 samples, 0.00%)</title><rect x="227.0" y="733" width="0.2" height="23.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="230.02" y="747.5" ></text>
+</g>
+<g >
+<title>string_list_internal (32,922,692 samples, 0.01%)</title><rect x="126.7" y="469" width="0.3" height="23.0" fill="rgb(229,140,27)" rx="2" ry="2" />
+<text  x="129.73" y="483.5" ></text>
+</g>
+<g >
+<title>[sha512sum] (52,961,911,998 samples, 10.89%)</title><rect x="330.7" y="2005" width="443.8" height="23.0" fill="rgb(232,171,30)" rx="2" ry="2" />
+<text  x="333.72" y="2019.5" >[sha512sum]</text>
+</g>
+<g >
+<title>malloc (155,236,837 samples, 0.03%)</title><rect x="137.0" y="469" width="1.3" height="23.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="140.00" y="483.5" ></text>
+</g>
+<g >
+<title>_int_free_create_chunk (14,146,119 samples, 0.00%)</title><rect x="194.2" y="541" width="0.1" height="23.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="197.18" y="555.5" ></text>
+</g>
+<g >
+<title>[bash] (9,264,326,009 samples, 1.90%)</title><rect x="49.5" y="493" width="77.6" height="23.0" fill="rgb(239,168,37)" rx="2" ry="2" />
+<text  x="52.46" y="507.5" >[bash]</text>
+</g>
+<g >
+<title>version_check_doit (41,632,338 samples, 0.01%)</title><rect x="4074.1" y="1885" width="0.3" height="23.0" fill="rgb(235,136,33)" rx="2" ry="2" />
+<text  x="4077.08" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command (444,688,603 samples, 0.09%)</title><rect x="10.1" y="1333" width="3.8" height="23.0" fill="rgb(254,155,54)" rx="2" ry="2" />
+<text  x="13.13" y="1347.5" ></text>
+</g>
+<g >
+<title>read_builtin (26,039,225 samples, 0.01%)</title><rect x="15.1" y="349" width="0.2" height="23.0" fill="rgb(242,184,41)" rx="2" ry="2" />
+<text  x="18.06" y="363.5" ></text>
+</g>
+<g >
+<title>make_bare_word (250,441,514 samples, 0.05%)</title><rect x="199.0" y="637" width="2.1" height="23.0" fill="rgb(248,77,47)" rx="2" ry="2" />
+<text  x="201.99" y="651.5" ></text>
+</g>
+<g >
+<title>_IO_file_finish@@GLIBC_2.2.5 (25,295,174 samples, 0.01%)</title><rect x="358.1" y="1885" width="0.2" height="23.0" fill="rgb(246,132,45)" rx="2" ry="2" />
+<text  x="361.09" y="1899.5" ></text>
+</g>
+<g >
+<title>execute_command_internal (11,673,014,672 samples, 2.40%)</title><rect x="48.2" y="685" width="97.8" height="23.0" fill="rgb(229,155,27)" rx="2" ry="2" />
+<text  x="51.20" y="699.5" >execute_com..</text>
+</g>
+<g >
+<title>__mempcpy@plt (147,910,407 samples, 0.03%)</title><rect x="690.1" y="1813" width="1.2" height="23.0" fill="rgb(231,151,29)" rx="2" ry="2" />
+<text  x="693.07" y="1827.5" ></text>
+</g>
+</g>
+</svg>
