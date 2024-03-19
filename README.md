@@ -9,11 +9,13 @@
 
 <sup>1: bash 5.1+ is preffered and much better tested. A few basic filesystem operations (`rm`, `mkdir`) must also be available. `fallocate` and `inotifywait` are not required; but, if present, will be used to lower runtime resource usage. `bash-completion` is required to enable automatic completion (on `<TAB>` press) when typing the forkrun cmdline.</sup>
 
-**CURRENT VERSION**: forkrun v1.2.0
+**CURRENT VERSION**: forkrun v1.3.0
 
-**PREVIOUS VERION**: forkrun v1.1.2
+**PREVIOUS VERION**: forkrun v1.2.0
 
 # CHANGELOG
+
+**forkrun v1.3**: forkrun {-z|-0|--null} has been fixed and now works 100% reliably with NULL-delimited input! However, [only] when using NULL-delimited input `dd` is now a required dependency.
 
 **forkrun v1.2**: forkrun now supports bash automatic completion. Pressing `<TAB>` while typing out the forkrun commandline will auto-complete (when possible) forkrun options, command names, and command options. If no unique auto-complete result is available, pressing `<TAB>` a second time will bring up a list of possibilities. The code required for this functionality is loaded (via the `_forkrun_complete` function) and registered (via the `complete` builtin) when `forkrun.bash` is sourced.
 
@@ -130,6 +132,8 @@ To overrule this logic and set a static batch size use the '-l' flag. Alternatel
 Bash 4+ :             This is when coprocs were added. NOTE: `forkrun` will be much faster on bash 5.1+, since it healivy relies of arrays and the `mapfile` command which got a major overhaul in bash 5.1. The vast majority of testing has been done on bash 5.2 so while bash 4-5.0 *should* work it is not well tested.
 
 `rm` and `mkdir`:     For some basic filesystem operations. I couldnt figure out how to re-implement these in pure bash. Either the GNU or the busybox versions of these will both work.
+
+`dd`:                 Only when using NULL-delimited input (flag `-z` or `-0` or `--null`), `dd` is required. It is used to quickly seek to a specific byte locaion in the file caching stdin and check it that byte is a NULL to detect and correct for partial line reads.
 
 ***
 

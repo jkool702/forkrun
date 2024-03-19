@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local  tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 nBytesRead v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -446,7 +446,7 @@ forkrun() {
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
-[[ -z $(echo "'"${tmpDir}"'"/.run/p*) ]] || kill $(cat "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+[[ -d  "'"${tmpDir}"'"/.run ]] && [[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill $(<"'"${tmpDir}"'"/.run/p*) 2>/dev/null; '$'\n'
 
        ${pipeReadFlag} && {
             # '.done'  file makes no sense when reading from a pipe
@@ -618,7 +618,9 @@ forkrun() {
 
         ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
 
-        trap "${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n''return ${returnVal}' EXIT
+        exitTrapStr="${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n''return ${returnVal:-0}'
+        
+        trap "${exitTrapStr}" EXIT
         trap 'kill "${p_PID[@]}" 2>/dev/null'$'\n''returnVal=1'$'\n''return 1' INT TERM HUP
 
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
@@ -645,14 +647,20 @@ forkrun() {
         # To see the resulting coproc code for a given set of forkrun options, run:   `echo | forkrun -vvvv <FLAGS> :`
 
         coprocSrcCode="$( echo """
+local p{<#>} p{<#>}_PID
+
 { coproc p{<#>} {
 LC_ALL=C
 LANG=C
 IFS=
 export LC_ALL LANG IFS
-trap - EXIT
+
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
-trap '\\rm -f \"${tmpDir}\"/.run/p{<#>}' EXIT
+
+trap ': >\"${tmpDir}\"/.quit; 
+[[ -f \"${tmpDir}\"/.run/p{<#>} ]] && \\rm -f \"${tmpDir}\"/.run/p{<#>}; 
+printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT
+
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
 echo """
@@ -742,12 +750,11 @@ else
     { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
     echo "${delimiterReadStr} A"
     ${pipeReadFlag} || {
-        echo "[[ \${#A[@]} == 0 ]] || {"
+        echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
         if ${nullDelimiterFlag}; then
             echo """
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}
-                { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -r -d ''; } || {"""
-
+                { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -t 1 -r -d ''; } || {"""
         else
             echo "[[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"
         fi
@@ -765,18 +772,32 @@ fi
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
 ${pipeReadFlag} || ${readBytesFlag} || echo "}"
 echo """
-    printf '\\n' >&${fd_continue}
-    [[ \${#A[@]} == 0 ]] && {
+    printf '\\n' >&${fd_continue}"""
+
+echo """
+    [[ \${#A[@]} == 0 ]] && {"""
+${nullDelimiterFlag} && {
+echo """
+    [[ -f \"${tmpDir}\"/.done ]] && {
+        read -r fd_read_pos </proc/self/fdinfo/${fd_read}
+        read -r fd_write_pos </proc/self/fdinfo/${fd_write}
+        [[ \"\${fd_read_pos##*$'\t'}\" == \"\${fd_write_pos##*$'\t'}\" ]] && {
+            doneIndicatorFlag=true
+            : >\"${tmpDir}\"/.quit
+        }
+    }"""
+}
+echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
 echo """
             : >\"${tmpDir}\"/.quit
             printf '\\n' >&${fd_continue}
-        break"""
+            break"""
 { ${inotifyFlag} || ${nOrderFlag}; } && echo "else"
 ${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
-${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify} -t 0.1"
+${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify} -t 1"
 echo """
         fi
         continue
