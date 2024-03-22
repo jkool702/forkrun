@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local tmpDir fPath outStr xxdDelimiterVal delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag xxdFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 nBytesRead v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -367,6 +367,9 @@ forkrun() {
         # check for fallocate
         type -a fallocate &>/dev/null && ! ${pipeReadFlag} && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
+        # check for xxd
+        type -a xxd &>/dev/null && ! ${pipeReadFlag} && : "${xxdFlag:=true}" || : "${xxdFlag:=false}"
+
         # check for conflict in flags that were  defined on the commandline when forkrun was called
         ${pipeReadFlag} && ${nLinesAutoFlag} && (( ${verboseLevel} >= 0 )) && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
 
@@ -376,11 +379,14 @@ forkrun() {
         # setup delimiter
         ${readBytesFlag} || {
             if ${nullDelimiterFlag}; then
+                xxdDelimiterVal='00'
                 delimiterReadStr="-d ''"
             elif [[ -z ${delimiterVal} ]]; then
+                xxdDelimiterVal='0a'
                 delimiterVal='$'"'"'\n'"'"
                 ${noFuncFlag} || delimiterRemoveStr='%$'"'"'\n'"'"
             else
+                xxdDelimiterVal="$(xxd -g 1 -l 1 -ps <<<"${delimiterVal}")"
                 delimiterVal="$(printf '%q' "${delimiterVal}")"
                  ${noFuncFlag} && delimiterRemoveStr='//'"{delimiterVal}"'/\$'"'"'\n'"'" || delimiterRemoveStr="%${delimiterVal}"
                 delimiterReadStr="-d ${delimiterVal}"
@@ -751,7 +757,10 @@ else
     echo "${delimiterReadStr} A"
     ${pipeReadFlag} || {
         echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
-        if ${nullDelimiterFlag}; then
+        if ${xxdFlag}; then
+            echo """
+                 [[ \"\$(xxd -s +-1 -l 1 -g 1 -ps <&${fd_read})\" == \"${xxdDelimiterVal}\" ]] || {"""
+        elif ${nullDelimiterFlag}; then
             echo """
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}
                 { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -t 1 -r -d ''; } || {"""
