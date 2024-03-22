@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr xxdDelimiterVal delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag xxdFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag xxdFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i nLines nLinesCur nLinesNew nLinesMax nRead nProcs nWait nOrder0 nBytesRead v9 kkMax kkCur kk verboseLevel
     local -a A p_PID runCmd outHave
 
@@ -379,16 +379,13 @@ forkrun() {
         # setup delimiter
         ${readBytesFlag} || {
             if ${nullDelimiterFlag}; then
-                xxdDelimiterVal='00'
                 delimiterReadStr="-d ''"
             elif [[ -z ${delimiterVal} ]]; then
-                xxdDelimiterVal='0a'
                 delimiterVal='$'"'"'\n'"'"
-                ${noFuncFlag} || delimiterRemoveStr='%$'"'"'\n'"'"
+                ${xxdFlag} || ${noFuncFlag} || delimiterRemoveStr='%$'"'"'\n'"'"
             else
-                xxdDelimiterVal="$(xxd -g 1 -l 1 -ps <<<"${delimiterVal}")"
                 delimiterVal="$(printf '%q' "${delimiterVal}")"
-                 ${noFuncFlag} && delimiterRemoveStr='//'"{delimiterVal}"'/\$'"'"'\n'"'" || delimiterRemoveStr="%${delimiterVal}"
+                ${xxdFlag} || { ${noFuncFlag} && delimiterRemoveStr='//'"{delimiterVal}"'/\$'"'"'\n'"'" || delimiterRemoveStr="%${delimiterVal}"; }
                 delimiterReadStr="-d ${delimiterVal}"
             fi
         }
@@ -753,14 +750,14 @@ if ${readBytesFlag}; then
 else
     printf '%s ' "mapfile -n \${nLinesCur} -u"
     ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
-    { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
+    { ${pipeReadFlag} || ${nullDelimiterFlag} | ${xxdFlag}; } && printf '%s ' '-t'
     echo "${delimiterReadStr} A"
     ${pipeReadFlag} || {
         echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
         if ${xxdFlag}; then
             echo """
               xxd -g 0 -l 0 -s +-1 <&${fd_read}
-              read -r -n 1 -u ${fd_read} ${delimiterReadStr} 
+              read -r -N 1 -u ${fd_read} ${delimiterReadStr} 
               [[ \${REPLY} ]] && {"""
         elif ${nullDelimiterFlag}; then
             echo """
