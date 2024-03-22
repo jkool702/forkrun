@@ -759,7 +759,7 @@ else
         echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
         if ${xxdFlag}; then
             echo """
-              xxd -g 0 -l 0 -s +-1 <&${fd_read})
+              xxd -g 0 -l 0 -s +-1 <&${fd_read}
               read -r -n 1 -u ${fd_read} ${delimiterReadStr} 
               [[ \${REPLY} ]] && {"""
         elif ${nullDelimiterFlag}; then
