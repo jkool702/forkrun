@@ -355,7 +355,7 @@ forkrun() {
         # set number of coproc workers and (if enabled) minimim worker read queue length
         if [[ "${nProcs}" == '-'* ]]; then
             nQueueMin="${nProcs#'-'}"
-            nProcs="$(( ${nQueueMin} * 2 ))"
+            nProcs="$(( ${nQueueMin} * 4 ))"
             : "${nQueueFlag:=true}"
             nQueue=0
         else
@@ -365,9 +365,9 @@ forkrun() {
         { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || {
             nProcs="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')"
             ${nQueueFlag} && {
-                nQueueMin="$(( ${nProcs} / 4 ))"
-                nProcs="$(( ${nProcs} / 2 ))"
-                (( ${nQueueMin} < 4 )) && nQueueMin=4
+                nQueueMin=4
+                (( ${nQueueMin} < ${nProcs} )) || nQueueMin=$(( nProcs - 1 ))
+                (( ${nQueueMin} > 0 )) || nQueueFlag=false
             }
         }
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
@@ -475,7 +475,7 @@ forkrun() {
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
-[[ -d  "'"${tmpDir}"'"/.run ]] && [[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill $(<"'"${tmpDir}"'"/.run/p*) 2>/dev/null; '$'\n'
+[[ -d  "'"${tmpDir}"'"/.run ]] && [[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill $(cat "'"${tmpDir}"'"/.run/p*) 2>/dev/null; '$'\n'
 
        ${pipeReadFlag} && {
             # '.done'  file makes no sense when reading from a pipe
@@ -643,53 +643,6 @@ forkrun() {
             exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
         }
 
-        # setup dynamically spawning new workers based on read queue length
-        ${nQueueFlag} && {
-            { coproc pQueue {
-                # set -xv
-                # first read will always be adding 1 to the queue
-                kk=1
-                nQueue=1
-                read -r -u ${fd_nQueue}
-
-                until [[ -f "${tmpDir}"/.quit ]] || { [[ -f "${tmpDir}"/.done ]] && (( ${nQueue} >= ${nQueueMin} )); }; do
-                    # read from fd_queue pipe. 
-                    #    $'\n' --> increase queue depth by 1. 
-                    #      '-' --> decrease queue depth by 1.
-                    #      '0' --> quit
-                    read -r -u ${fd_nQueue} -t 0.1 || continue
-                    [[ ${REPLY} == '0' ]] && break
-                    nQueue+=${REPLY}1
-
-                    if (( ${kk} < ${nProcs} )); then
-                        # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
-                        [[ $REPLY ]] || ((kk++))
-                    else
-                        # trigger spawning another worker (by sending main process a USR1 signal) if the read queue depth is less than the specified minimum
-                        (( ${nQueue} < ${nQueueMin} )) && { kill -USR1 "${PID0}"; (( ${verboseLevel} > 1 )) && printf 'SENDING SIGUSR1 TO TRIGGER SPAWNING A NEW WORKER THREAD' >&${fd_stderr} && ((kk++)); }
-                    fi
-                done
-
-              } 2>&${fd_stderr}
-            } 2>/dev/null
-
-            exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
-            exitTrapStr_kill+='kill -9 '"${pQueue_PID}"' 2>/dev/null; '$'\n'
-        }
-
-        # set EXIT trap (dynamically determined based on which option flags were active)
-
-        ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
-
-        exitTrapStr="${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n''return ${returnVal:-0}'
-        
-        trap "${exitTrapStr}" EXIT
-        trap 'kill "${p_PID[@]}" 2>/dev/null'$'\n''returnVal=1'$'\n''return 1' INT TERM HUP
-
-        (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
-        (( ${verboseLevel} > 3 )) && printf '\n\nEXIT TRAP:\n\n%s\n\n' "${exitTrapStr}" >&${fd_stderr}
-
-
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
         # Due to how the coproc code is dynamically generated and sourced, it cannot directly contain comments. A very brief overview of their function is below.
@@ -813,7 +766,7 @@ else
     ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
     { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
     echo "${delimiterReadStr} A"
-    ${pipeReadFlag} || { ! ${nullDelimiterFlag} || { ${nullDelimiterFlag} && [[ ${nullDelimiterProg} ]]; }; } || {
+    ${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || {
         echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
         if ${nullDelimiterFlag}; then
              echo """
@@ -848,17 +801,18 @@ ${nQueueFlag} && echo "echo '-' >&${fd_nQueue}"
 echo """
     [[ \${#A[@]} == 0 ]] && {
     \${doneIndicatorFlag} || { 
-      [ -f \"${tmpDir}\"/.done ]] && {
+      [[ -f \"${tmpDir}\"/.done ]] && {
         read -r fd_read_pos </proc/self/fdinfo/${fd_read}
         read -r fd_write_pos </proc/self/fdinfo/${fd_write}
         [[ \"\${fd_read_pos##*$'\t'}\" == \"\${fd_write_pos##*$'\t'}\" ]] && doneIndicatorFlag=true
       }
     }"""
 echo """
-        if \${doneIndicatorFlag}; then"""
+        if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
 ${nQueueFlag} && echo "echo 0 >&${fd_nQueue}"
+${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' 2>/dev/null'
 echo """
             : >\"${tmpDir}\"/.quit
             printf '%.0s\\n' \"${tmpDir}\"/.run/p* >&${fd_continue}
@@ -931,6 +885,55 @@ done
 } 2>/dev/null
 p_PID+=(\${p{<#>}_PID})""" )"
 
+        # setup dynamically coproc to spawn new workers based on read queue length
+        ${nQueueFlag} && {
+            { coproc pQueue {
+                # set -xv
+                # first read will always be adding 1 to the queue
+                kkProcs=${nProcs}
+                nQueue=1
+                read -r -u ${fd_nQueue}
+
+                until [[ -f "${tmpDir}"/.quit ]] || { [[ -f "${tmpDir}"/.done ]] && (( ${nQueue} >= ${nQueueMin} )); }; do
+                    # read from fd_queue pipe. 
+                    #    $'\n' --> increase queue depth by 1. 
+                    #      '-' --> decrease queue depth by 1.
+                    #      '0' --> quit
+                    read -r -u ${fd_nQueue} -t 0.1 || continue
+                    [[ ${REPLY} == '0' ]] && break
+                    nQueue+=${REPLY}1
+
+                    # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
+                    # trigger spawning another worker (by sending main process a USR1 signal) if the read queue depth is less than the specified minimum
+                    [[ -f "${tmpDir}"/.spawned ]] && (( ${nQueue} < ${nQueueMin} )) && { 
+                        source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
+                            (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (read queue depth = %s)\n' "${nQueue}" >&${fd_stderr}
+                        ((kkProcs++))
+                        echo "${kkProcs}" >"${tmpDir}"/.numWorkersSpawned
+                    }
+                    
+                done
+
+              } 2>&${fd_stderr}
+            } 2>/dev/null
+
+            exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
+            exitTrapStr_kill+='kill -9 '"${pQueue_PID}"' 2>/dev/null; '$'\n'
+        }
+
+        # set EXIT trap (dynamically determined based on which option flags were active)
+        exitTrapStr_kill+='[[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill -9 $(cat "'"${tmpDir}"'"/.run/p*) 2>/dev/null; '$'\n'
+        ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
+
+        exitTrapStr="${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n''return ${returnVal:-0}'
+        
+        trap "${exitTrapStr}" EXIT
+        trap 'kill "${p_PID[@]}" 2>/dev/null'$'\n''returnVal=1'$'\n''return 1' INT TERM HUP
+        #${nQueueFlag} && trap '((kkProcs++))'$'\n''[[ -f "'"${tfmpDir}"'/.run/p${kkProcs}" ]] && p_PID+=("$(<"'"${tfmpDir}"'/.run/p${kkProcs}")")' USR1
+
+        (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
+        (( ${verboseLevel} > 3 )) && { printf '\nSET TRAPS:\n\n'; trap -p; } >&${fd_stderr}
+
         # # # # # FORK COPROC "WORKERS" # # # # #
 
         # initialize read lock {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
@@ -939,18 +942,19 @@ p_PID+=(\${p{<#>}_PID})""" )"
         #     when that process writes a '\n' back to the pipe it releases the read lock
         printf '\n' >&${fd_continue};
 
-        ${nQueueFlag} && trap '((kk++)); source /proc/self/fd/0 <<<"${coprocSrcCode//'"'"'{<#>}'"'"'/${kk}}"' USR1
 
         # source the coproc code for each coproc worker
-        for (( kk=0 ; kk<${nProcs} ; kk++ )); do
+        for (( kkProcs=0 ; kkProcs<${nProcs} ; kkProcs++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
-            source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/${kk}}"
+            source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
         done
+        echo "${kkProcs}" >"${tmpDir}"/.numWorkersSpawned                    }
+        : >"${tmpDir}"/.spawned
 
-        (( ${verboseLevel} > 1 )) && printf '\n\nALL WORKER COPROCS FORKED\n\n' >&${fd_stderr}
+        (( ${verboseLevel} > 1 )) && printf '\n\n%s WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && { 
             printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}"
-            declare -p fd_continue fd_inotify fd_nAuto fd_nOrder fd_nOrder0 fd_read fd_write fd_stdin fd_stdout fd_stderr 
+            declare -p fd_continue fd_inotify fd_nAuto fd_nOrder fd_nOrder0 fd_nQueue fd_read fd_write fd_stdin fd_stdout fd_stderr 
         } >&${fd_stderr}
 
         # # # # # WAIT FOR THEM TO FINISH # # # # #
@@ -1008,7 +1012,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
         # wait for coprocs to finish
         (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
-        wait "${p_PID[@]}"
+        [[ $(echo "${tmpDir}"/.run/p*) ]] && { p_PID=($(cat "${tmpDir}"/.run/p*)); wait "${p_PID[@]}"; }
 
         # if ordering output print the remaining ones
         ${nOrderFlag} && [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x* >&${fd_stdout}
@@ -1016,7 +1020,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         # print final nLines count
         (( ${verboseLevel} > 1 )) && {
             ${nLinesAutoFlag} && printf 'nLines (final) = %s    ( max = %s )\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}" 
-            ${nQueueFlag} && printf 'final worker process count: %s    ( min read queue: %s )\n' "${kk}" "${nQueueMin}" 
+            ${nQueueFlag} && printf 'final worker process count: %s    ( min read queue: %s )\n' "$(<"${tmpDir}"/.numWorkersSpawned)" "${nQueueMin}" 
         } >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
