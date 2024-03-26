@@ -847,21 +847,21 @@ echo """
 ${nQueueFlag} && echo "echo '-' >&${fd_nQueue}"
 echo """
     [[ \${#A[@]} == 0 ]] && {
-    [[ -f \"${tmpDir}\"/.done ]] && {
+    \${doneIndicatorFlag} || { 
+      [ -f \"${tmpDir}\"/.done ]] && {
         read -r fd_read_pos </proc/self/fdinfo/${fd_read}
         read -r fd_write_pos </proc/self/fdinfo/${fd_write}
-        [[ \"\${fd_read_pos##*$'\t'}\" == \"\${fd_write_pos##*$'\t'}\" ]] && {
-            doneIndicatorFlag=true
-            : >\"${tmpDir}\"/.quit
-        }
+        [[ \"\${fd_read_pos##*$'\t'}\" == \"\${fd_write_pos##*$'\t'}\" ]] && doneIndicatorFlag=true
+      }
     }"""
 echo """
-        if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
+        if \${doneIndicatorFlag}; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
+${nQueueFlag} && echo "echo 0 >&${fd_nQueue}"
 echo """
             : >\"${tmpDir}\"/.quit
-            printf '\\n' >&${fd_continue}
+            printf '%.0s\\n' \"${tmpDir}\"/.run/p* >&${fd_continue}
             break"""
 { ${inotifyFlag} || ${nOrderFlag}; } && echo "else"
 ${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
