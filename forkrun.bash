@@ -27,8 +27,8 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag readBytesProg nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueMin v9 kkMax kkCur kk verboseLevel
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag FORCE_allowUnsafeNullDelimiterFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueMin v9 kkMax kkCur kk kkProcs verboseLevel
     local -a A p_PID runCmd outHave
 
     # # # # # PARSE OPTIONS # # # # #
@@ -393,6 +393,19 @@ forkrun() {
         ${readBytesFlag} || {
             if ${nullDelimiterFlag}; then
                 delimiterReadStr="-d ''"
+                if type -p dd &>/dev/null; then
+                    nullDelimiterProg='dd'
+                    if dd --version | grep -qF 'coreutils'; then
+                        ddQuietStr='status=none'
+                    else
+                        ddQuietStr='2>/dev/null'
+                    fi
+                elif type -p head &>/dev/null && type -p tail &>/dev/null; then
+                    nullDelimiterProg='head_tail'
+                else
+                    printf '\n\nWARNING: to ensure that lines passed an stdin are not split when using a NULL delimiter without the '-p' flag, \nbinaries for either "dd" --OR-- both "head" and "tail" must be available for use, or the "-p" flag must be passed. \nThis system does not meet either of these reqirements, and as such the '-p' flag (which implies the `-l 1` flag) will be automatically used.\nThis will result in a *SIGNIFICANT SLOWDOWN*. To make forkrun run normally and potentially split lines from stdin, set "FORCE_allowUnsafeNullDelimiterFlag" to a non-empty value in the environment.\n\n'
+                    [[ ${FORCE_allowUnsafeNullDelimiterFlag} ]] || { pipeReadFlag=true; nLinesAutoFlag=false; nLines=1; }
+                fi
             elif [[ -z ${delimiterVal} ]]; then
                 delimiterVal='$'"'"'\n'"'"
                 ${noFuncFlag} || delimiterRemoveStr='%$'"'"'\n'"'"
@@ -631,23 +644,28 @@ forkrun() {
         }
 
         # setup dynamically spawning new workers based on read queue length
-        if ${nQueueFlag}; then 
+        ${nQueueFlag} && {
             { coproc pQueue {
-                set -xv
+                # set -xv
                 # first read will always be adding 1 to the queue
                 kk=1
                 nQueue=1
                 read -r -u ${fd_nQueue}
 
-                # dont trigger spawning more until the main thread is done spawning the 1st $nProc workers
-                until [[ -f "${tmpDir}"/.quit ]]; do
-                    read -r -u ${fd_nQueue}
+                until [[ -f "${tmpDir}"/.quit ]] || { [[ -f "${tmpDir}"/.done ]] && (( ${nQueue} >= ${nQueueMin} )); }; do
+                    # read from fd_queue pipe. 
+                    #    $'\n' --> increase queue depth by 1. 
+                    #      '-' --> decrease queue depth by 1.
+                    #      '0' --> quit
+                    read -r -u ${fd_nQueue} -t 0.1 || continue
                     [[ ${REPLY} == '0' ]] && break
                     nQueue+=${REPLY}1
 
                     if (( ${kk} < ${nProcs} )); then
+                        # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
                         [[ $REPLY ]] || ((kk++))
                     else
+                        # trigger spawning another worker (by sending main process a USR1 signal) if the read queue depth is less than the specified minimum
                         (( ${nQueue} < ${nQueueMin} )) && { kill -USR1 "${PID0}"; (( ${verboseLevel} > 1 )) && printf 'SENDING SIGUSR1 TO TRIGGER SPAWNING A NEW WORKER THREAD' >&${fd_stderr} && ((kk++)); }
                     fi
                 done
@@ -657,7 +675,7 @@ forkrun() {
 
             exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
             exitTrapStr_kill+='kill -9 '"${pQueue_PID}"' 2>/dev/null; '$'\n'
-        fi
+        }
 
         # set EXIT trap (dynamically determined based on which option flags were active)
 
@@ -689,7 +707,7 @@ forkrun() {
         # this contains the code for the coprocs but has the worker ID represented using {<#>}. coprocs will be sourced via source<<<"${coprocSrcCode//'{<#>}'/${kk}}"
         #
         # NOTE: because the (uncommented) coproc code generation dynamically adapts to all of forkrun's possible options, this part is...well...hard to follow. 
-        # To see the resulting coproc code for a given set of forkrun options, run:   `echo | forkrun -vvvv <FLAGS> :`
+        # To see the resulting coproc code for a given set of forkrun options, run:  `echo | forkrun -vvvv <FLAGS> :`
 
         coprocSrcCode="$( echo """
 local p{<#>} p{<#>}_PID
@@ -795,12 +813,19 @@ else
     ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
     { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
     echo "${delimiterReadStr} A"
-    ${pipeReadFlag} || {
+    ${pipeReadFlag} || { ! ${nullDelimiterFlag} || { ${nullDelimiterFlag} && [[ ${nullDelimiterProg} ]]; }; } || {
         echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
         if ${nullDelimiterFlag}; then
-            echo """
-                read -r fd_read_pos </proc/self/fdinfo/${fd_read}
-                { dd if=\"${fPath}\" bs=1 count=1 status=none skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -t 1 -r -d ''; } || {"""
+             echo """
+                read -r fd_read_pos </proc/self/fdinfo/${fd_read}"""
+            case "${nullDelimiterProg}" in
+              'dd') echo """
+                { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -t 1 -r -d ''; } || {"""
+              ;;
+              'head_tail') echo """
+                { head -c \${fd_read_pos##*$'\t'} <\"${fPath}\" | tail -c 1 | read -t 1 -r -d ''; } || {"""
+              ;;
+            esac
         else
             echo "[[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {"
         fi
@@ -821,9 +846,7 @@ echo """
     printf '\\n' >&${fd_continue}"""
 ${nQueueFlag} && echo "echo '-' >&${fd_nQueue}"
 echo """
-    [[ \${#A[@]} == 0 ]] && {"""
-${nullDelimiterFlag} && {
-echo """
+    [[ \${#A[@]} == 0 ]] && {
     [[ -f \"${tmpDir}\"/.done ]] && {
         read -r fd_read_pos </proc/self/fdinfo/${fd_read}
         read -r fd_write_pos </proc/self/fdinfo/${fd_write}
@@ -832,7 +855,6 @@ echo """
             : >\"${tmpDir}\"/.quit
         }
     }"""
-}
 echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
