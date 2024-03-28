@@ -28,8 +28,8 @@ forkrun() {
 
     # make all variables local
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag FORCE_allowUnsafeNullDelimiterFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueMin v9 kkMax kkCur kk kkProcs verboseLevel
-    local -a A p_PID runCmd outHave
+    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueMin v9 kkMax kkCur kk kkProcs kk1 kk2 kk3 verboseLevel
+    local -a A p_PID runCmd outHave kkA
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -40,10 +40,10 @@ forkrun() {
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?(?([= ])?([+-])+([0-9])))
-                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?([+-])+([0-9]) ]]; then
+            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?(?([= ])?([+-])+([0-9])?(,+([0-9]))?(,+([0-9]))))
+                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?([+-])+([0-9])?(,+([0-9]))?(,+([0-9])) ]]; then
                     nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?(+))}"
-                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?) ]] && [[ "$2" == ?([+-])+([0-9]) ]]; then
+                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?) ]] && [[ "$2" == ?([+-])+([0-9])?(,+([0-9]))?(,+([0-9])) ]]; then
                     nProcs="${2#'+'}"
                     shift 1
                 fi
@@ -353,23 +353,32 @@ forkrun() {
         fi
 
         # set number of coproc workers and (if enabled) minimim worker read queue length
-        if [[ "${nProcs}" == '-'* ]]; then
-            nQueueMin="${nProcs#'-'}"
-            nProcs="$(( ${nQueueMin} * 4 ))"
+        [[ "${nProcs}" == '-'* ]] && {
             : "${nQueueFlag:=true}"
-            nQueue=0
-        else
-            : "${nQueueFlag:=false}"
-        fi        
-        declare -i nProcs="${nProcs}"
-        { [[ ${nProcs} ]]  && (( ${nProcs} > 0 )); } || {
-            nProcs="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')"
-            ${nQueueFlag} && {
-                nQueueMin=4
-                (( ${nQueueMin} < ${nProcs} )) || nQueueMin=$(( nProcs - 1 ))
-                (( ${nQueueMin} > 0 )) || nQueueFlag=false
+            nProcs="${nProcs#'-'}"
+        }
+
+        [[ "${nProcs}" == *','* ]] && {
+            : "${nQueueFlag:=true}"
+            nProcsMax="${nProcs#*,}"
+            nProcs="${nProcs%%,*}"
+            [[ "${nProcsMax}" == *','* ]] && {
+                nQueueMin="${nProcsMax#*,}"
+                nProcsMax="${nProcsMax%%,*}"
             }
         }
+
+        : "${nQueueFlag:=false}"
+        { ${nQueueFlag} && (( ${nQueueMin} > 0 )) && (( ${nProcs} < ${nProcsMax} )); } || : "${nQueueFlag:=false}"
+
+        declare -i nProcs="${nProcs}"
+        { [[ ${nProcs} ]] && (( ${nProcs} > 0 )); } || { nProcs="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')"; }
+
+        ${nQueueFlag} && { 
+            [[ ${nProcsMax//0/} ]] || nProcsMax=$(( ${nProcs} * 5 ));
+            [[ ${nQueueMin//0/} ]] || nQueueMin=1
+        }
+
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
@@ -447,7 +456,7 @@ forkrun() {
             printf '\n\n------------------- FLAGS INFO -------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")"
             ${inotifyFlag} && echo 'using inotify to efficiently wait for slow inputs on stdin'
             ${fallocateFlag} && echo 'using fallocate to shrink the tmpfile containing stdin as forkrun runs'
-            ${nQueueFlag} && printf '(-j|-P) initially %s workers will be spawned, then workers will be dynamically spawned until the read wait queue is at least %s long at all times\n' "${nProcs}" "${nQueueMin}" || printf '(-j|-P) using %s coproc workers\n' ${nProcs}
+            ${nQueueFlag} && printf '(-j|-P) initial / max workers: %s / %s. workers will be dynamically spawned (up to a %s workers max) whenever read queue depth is less than %s\n' "${nProcs}" "${nProcsMax}" "${nProcsMax}" "${nQueueMin}" || printf '(-j|-P) using %s coproc workers\n' ${nProcs}
             ${nLinesAutoFlag} && printf '(-L) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
             printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
             ${readBytesFlag} && printf '(-%s) data will be read in chunks of %s %s bytes using %s\n' "$(${readBytesExactFlag} && echo 'B' || echo 'b')" "$(${readBytesExactFlag} && echo 'exactly' || echo 'up to')" "${nBytes}" "${readBytesProg}"
@@ -910,6 +919,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                             (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (read queue depth = %s)\n' "${nQueue}" >&${fd_stderr}
                         ((kkProcs++))
                         echo "${kkProcs}" >"${tmpDir}"/.numWorkersSpawned
+                        (( ${kkProcs} >= ${nProcsMax} )) && break
                     }
                     
                 done
