@@ -375,7 +375,7 @@ forkrun() {
         { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { nProcs="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')"; }
 
         ${nQueueFlag} && { 
-            [[ ${nProcsMax//0/} ]] || nProcsMax=$(( ${nProcs} * 5 ));
+            [[ ${nProcsMax//0/} ]] || nProcsMax=$(( ${nProcs} * 2 ));
             [[ ${nQueueMin//0/} ]] || nQueueMin=1
         }
 
