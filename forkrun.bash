@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag FORCE_allowUnsafeNullDelimiterFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag FORCE_allowUnsafeNullDelimiterFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueMin v9 kkMax kkCur kk kkProcs kk1 kk2 kk3 verboseLevel
     local -a A p_PID runCmd outHave kkA
 
@@ -403,17 +403,14 @@ forkrun() {
             if ${nullDelimiterFlag}; then
                 delimiterReadStr="-d ''"
                 if type -p dd &>/dev/null; then
-                    nullDelimiterProg='dd'
+                    : "${nullDelimiterProg:=dd}"
                     if dd --version | grep -qF 'coreutils'; then
                         ddQuietStr='status=none'
                     else
                         ddQuietStr='2>/dev/null'
                     fi
-                elif type -p head &>/dev/null && type -p tail &>/dev/null; then
-                    nullDelimiterProg='head_tail'
                 else
-                    printf '\n\nWARNING: to ensure that lines passed an stdin are not split when using a NULL delimiter without the '-p' flag, \nbinaries for either "dd" --OR-- both "head" and "tail" must be available for use, or the "-p" flag must be passed. \nThis system does not meet either of these reqirements, and as such the '-p' flag (which implies the `-l 1` flag) will be automatically used.\nThis will result in a *SIGNIFICANT SLOWDOWN*. To make forkrun run normally and potentially split lines from stdin, set "FORCE_allowUnsafeNullDelimiterFlag" to a non-empty value in the environment.\n\n'
-                    [[ ${FORCE_allowUnsafeNullDelimiterFlag} ]] || { pipeReadFlag=true; nLinesAutoFlag=false; nLines=1; }
+                    : "${nullDelimiterProg=bash}"
                 fi
             elif [[ -z ${delimiterVal} ]]; then
                 delimiterVal='$'"'"'\n'"'"
@@ -467,9 +464,9 @@ forkrun() {
             ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
             ${pipeReadFlag} && echo '(-p) worker coprocs will read directly from stdin pipe, not from a tmpfile'
             if ${nullDelimiterFlag}; then
-                echo '((-0|-z)|(-d)) stdin will be parsed using nulls as delimiter (instead of newlines)'
+                printf '((-0|-z)|(-d)) stdin will be parsed using nulls as delimiter (instead of newlines) (helper: %s)\n' "${nullDelimiterProg}"
             else
-                printf '(%s) delimiter: %q\n' "$([[ "${delimiterVal}" == '$'"'"'\n'"'" ]] && echo '--' || echo '-d')" "${delimiterVal}"
+                printf '(%s) delimiter: %s\n' "$([[ "${delimiterVal}" == '$'"'"'\n'"'" ]] && echo '--' || echo '-d')" "${delimiterVal}"
             fi
             ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automatically removed\n' "${tmpDir}"
             ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
@@ -671,6 +668,8 @@ forkrun() {
         # NOTE: because the (uncommented) coproc code generation dynamically adapts to all of forkrun's possible options, this part is...well...hard to follow. 
         # To see the resulting coproc code for a given set of forkrun options, run:  `echo | forkrun -vvvv <FLAGS> :`
 
+        echo '0' >"${tmpDir}"/.lastReadPos
+
         coprocSrcCode="$( echo """
 local p{<#>} p{<#>}_PID
 
@@ -782,10 +781,13 @@ else
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}"""
             case "${nullDelimiterProg}" in
               'dd') echo """
-                { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -t 1 -r -d ''; } || {"""
+                { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( \${fd_read_pos##*\$'\t'} - 1 )) | read -t 1 -r -d ''; } || {"""
               ;;
-              'head_tail') echo """
-                { head -c \${fd_read_pos##*$'\t'} <\"${fPath}\" | tail -c 1 | read -t 1 -r -d ''; } || {"""
+              'bash') echo """
+                read -r fd_read_pos0 </proc/self/fdinfo/${fd_read0}
+                read -r -u ${fd_read0} -N \$(( \${fd_read_pos##*\$'\t'} - \${fd_read_pos0##*\$'\t'} - 1 ))
+                read -r -u ${fd_read0} -d '' 
+                [[ \${#REPLY} == 0 ]] || {"""
               ;;
             esac
         else
@@ -1037,7 +1039,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         } >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read0}<"${fPath}" {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
