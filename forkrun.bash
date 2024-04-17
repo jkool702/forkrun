@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag FORCE_allowUnsafeNullDelimiterFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueMin v9 kkMax kkCur kk kkProcs kk1 kk2 kk3 verboseLevel
     local -a A p_PID runCmd outHave kkA
 
@@ -383,7 +383,7 @@ forkrun() {
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # set defaults for control flags/parameters
-        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=512}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" "${stdinRunFlag:=false}" 
+        : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=1024}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" "${stdinRunFlag:=false}" 
         doneIndicatorFlag=false
 
         # check for inotifywait
@@ -402,19 +402,24 @@ forkrun() {
         ${readBytesFlag} || {
             if ${nullDelimiterFlag}; then
                 delimiterReadStr="-d ''"
+                : "${nullDelimiterProg=bash}"
                 if type -p dd &>/dev/null; then
-                    nullDelimiterProg='dd'
+                    ddAvailableFlag=true
                     if dd --version | grep -qF 'coreutils'; then
                         ddQuietStr='status=none'
                     else
                         ddQuietStr='2>/dev/null'
                     fi
-                elif type -p head &>/dev/null && type -p tail &>/dev/null; then
-                    nullDelimiterProg='head_tail'
                 else
-                    printf '\n\nWARNING: to ensure that lines passed an stdin are not split when using a NULL delimiter without the '-p' flag, \nbinaries for either "dd" --OR-- both "head" and "tail" must be available for use, or the "-p" flag must be passed. \nThis system does not meet either of these reqirements, and as such the '-p' flag (which implies the `-l 1` flag) will be automatically used.\nThis will result in a *SIGNIFICANT SLOWDOWN*. To make forkrun run normally and potentially split lines from stdin, set "FORCE_allowUnsafeNullDelimiterFlag" to a non-empty value in the environment.\n\n'
-                    [[ ${FORCE_allowUnsafeNullDelimiterFlag} ]] || { pipeReadFlag=true; nLinesAutoFlag=false; nLines=1; }
+                    : "${ddAvailableFlag=false}"
                 fi
+                [[ "${nullDelimiterProg}" == @(dd|bash) ]] || {
+                    if ${FORCE_allowUnsafeNullDelimiterFlag}; then
+                        nullDelimiterProg=''
+                    else
+                        nullDelimiterProg='bash'
+                    fi
+                }
             elif [[ -z ${delimiterVal} ]]; then
                 delimiterVal='$'"'"'\n'"'"
                 ${noFuncFlag} || delimiterRemoveStr='%$'"'"'\n'"'"
@@ -467,9 +472,9 @@ forkrun() {
             ${unescapeFlag} && echo '(-u) not escaping special characters in ${runCmd}'
             ${pipeReadFlag} && echo '(-p) worker coprocs will read directly from stdin pipe, not from a tmpfile'
             if ${nullDelimiterFlag}; then
-                echo '((-0|-z)|(-d)) stdin will be parsed using nulls as delimiter (instead of newlines)'
+                printf '((-0|-z)|(-d)) stdin will be parsed using nulls as delimiter (instead of newlines) (helper: %s)\n' "${nullDelimiterProg}"
             else
-                printf '(%s) delimiter: %q\n' "$([[ "${delimiterVal}" == '$'"'"'\n'"'" ]] && echo '--' || echo '-d')" "${delimiterVal}"
+                printf '(%s) delimiter: %s\n' "$([[ "${delimiterVal}" == '$'"'"'\n'"'" ]] && echo '--' || echo '-d')" "${delimiterVal}"
             fi
             ${rmTmpDirFlag} || printf '(-r) tmpdir (%s) will NOT be automatically removed\n' "${tmpDir}"
             ${subshellRunFlag} && echo '(-s) coproc workers will run each group of N lines in a subshell'
@@ -671,6 +676,8 @@ forkrun() {
         # NOTE: because the (uncommented) coproc code generation dynamically adapts to all of forkrun's possible options, this part is...well...hard to follow. 
         # To see the resulting coproc code for a given set of forkrun options, run:  `echo | forkrun -vvvv <FLAGS> :`
 
+        echo '0' >"${tmpDir}"/.lastReadPos
+
         coprocSrcCode="$( echo """
 local p{<#>} p{<#>}_PID
 
@@ -782,10 +789,28 @@ else
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}"""
             case "${nullDelimiterProg}" in
               'dd') echo """
-                { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$((\${fd_read_pos##*$'\t'}-1)) | read -t 1 -r -d ''; } || {"""
+                { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( \${fd_read_pos##*\$'\t'} - 1 )) | read -t 1 -r -d ''; } || {"""
               ;;
-              'head_tail') echo """
-                { head -c \${fd_read_pos##*$'\t'} <\"${fPath}\" | tail -c 1 | read -t 1 -r -d ''; } || {"""
+              'bash') echo """
+                read -r fd_read_pos0 </proc/self/fdinfo/${fd_read0}
+                nBytes=\$(( \${fd_read_pos##*\$'\t'} - \${fd_read_pos0##*\$'\t'} - \${#A[@]} ))"""
+                if ${ddAvailableFlag}; then 
+                  echo """
+                    {
+                        if (( \${nBytes}  > 65535 )); then
+                            { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( \${fd_read_pos##*\$'\t'} - 1 )) | read -t 1 -r -d ''; } 
+                        else
+                            read -r -u ${fd_read0} -N \${nBytes}
+                            read -r -u ${fd_read0} -d ''
+                            [[ \${#REPLY} == 0 ]]
+                        fi
+                    } || {"""
+                else
+                  echo """
+                    read -r -u ${fd_read0} -N \${nBytes}
+                    read -r -u ${fd_read0} -d ''
+                    [[ \${#REPLY} == 0 ]] || {"""
+                fi
               ;;
             esac
         else
@@ -828,7 +853,7 @@ echo """
             break"""
 { ${inotifyFlag} || ${nOrderFlag}; } && echo "else"
 ${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
-${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify} -t 1"
+${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify}"
 echo """
         fi
         continue
@@ -1037,7 +1062,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         } >&${fd_stderr}
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read0}<"${fPath}" {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
@@ -1245,7 +1270,7 @@ cat<<'EOF' >&2
         -->  Pass newline-separated (or null-separated with `-z` flag) inputs to parallelize over on stdin.
         -->  Provide function/script/binary to parallelize and initial args as function inputs.
     `forkrun` will then call the function/script/binary in parallel on several coproc "workers" (default is to use $(nproc) workers)
-    Each time a worker runs the function/script/binary it will use the initial args and N lines from stdin (default: `N` is between 1-512 lines and is automatically dynamically adjusted)
+    Each time a worker runs the function/script/binary it will use the initial args and N lines from stdin (default: `N` is between 1-1024 lines and is automatically dynamically adjusted)
         --> i.e., it will run (in parallel on each "worker"):     parFunc "${args0[@]}" "${args[@]:m:N}"    # m = number of lines from stdin already processed
     `parFunc` can be an executable binary or bash script, a bash builtin, a declared bash function / alias, or *omitted entirely* (*requires -N [-NO-FUNC] flag. See flag descriptions below for more info.*)
 
@@ -1305,7 +1330,7 @@ FLAGS WITH ARGUMENTS
 
     (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc).
     -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
-    -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,512'
+    -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,1024'
     -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm', or (if unavailable) '/tmp'
     -b <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL NOT wait and will continue with fewer bytes of data read. Automatically enables `-S` flag...disable with `+S` flag.
 -B <#>[,<time>] : instead of reading data using a delimiter, read up to this many ( -B <#> )bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. example: `-B 4mb`. You may optionally pass a time as another input (-B <#>,<time>) which will set a timeout on how long the read commands will wait to accumulate input (if not used, they wait indefinately). example: `-B 4096k,3.5` sets 4 mb reads with a 3.5 sec timeout.
@@ -1370,7 +1395,7 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
    ---->  default  : n/a (by default automatic dynamic batch size adjustment is enabled)
 
 -L | --NLINES  <#[,#]>  : tweak the initial (<#>) or initial+maximum (<#,#>) number of lines per batch while keeping the automatic dynamic batch size logic enabled. <#>: sets the number of lines to pass coprocs to initially use for each function call.
-   ---->  default  : 1,512
+   ---->  default  : 1,1024
 
     NOTE: the automatic dynamic batch size logic will only ever maintain or increase batch size...it will never decrease batch size.
 
