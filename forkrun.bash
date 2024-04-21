@@ -274,7 +274,7 @@ forkrun() {
         (( ${#runCmd[@]} > 0 )) || ${noFuncFlag} || runCmd=(printf '%s\n')
         (( ${#runCmd[@]} > 0 )) && noFuncFlag=false
         ${noFuncFlag} && runCmd=('source' '/proc/self/fd/0')
-        hash "${runCmd[0]}"
+        hash "${runCmd[0]}" &>/dev/null || hash "${runCmd[0]%% *}" &>/dev/null
 
         # setup byte reading if passed -b or -B
         
