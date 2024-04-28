@@ -800,14 +800,14 @@ else
                         if (( \${nBytes}  > 65535 )); then
                             { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( \${fd_read_pos##*\$'\t'} - 1 )) | read -t 1 -r -d ''; } 
                         else
-                            read -r -u ${fd_read0} -N \${nBytes}
+                            read -r -u ${fd_read0} -N \${nBytes} _
                             read -r -u ${fd_read0} -d ''
                             [[ \${#REPLY} == 0 ]]
                         fi
                     } || {"""
                 else
                   echo """
-                    read -r -u ${fd_read0} -N \${nBytes}
+                    read -r -u ${fd_read0} -N \${nBytes} _
                     read -r -u ${fd_read0} -d ''
                     [[ \${#REPLY} == 0 ]] || {"""
                 fi
