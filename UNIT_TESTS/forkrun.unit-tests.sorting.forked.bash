@@ -3,18 +3,38 @@
 shopt -s extglob
 set -m
 
+
+# USER SETTABLE OPTIONS
+# testDir: the directory where files to be checksummed will be drawn from. Default is /usr
+# useRamdiskFlag: set to 'true' to automatically copy the contents of $testDir to a ramdisk that will be auto-mounted at /mnt/ramdisk. Default is false.
+
+#testDir='/usr'
+useRamdiskFlag=true
+
+################################################################################
+
+: "${testDir:=/usr}" "${useRamdiskFlag:=false}"
+
+[[ ${useRamdiskFlag} == 'true' ]] || useRamdiskFlag=false
+[[ -d "${testDir}" ]] || { printf '\n\nERROR: can not access "%s". Perhaps due to permissions issues?\n\nABORTING\n\n' "${testDir}"; exit 1; }
+
 unset forkrun
-declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/forkrun-v2_RC/forkrun.bash)
-declare -F forkrun &>/dev/null || source ./forkrun.bash
+[[ -f ./forkrun.bash ]] && source ./forkrun.bash 
+declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)
+declare -F forkrun &>/dev/null || { [[ -f ./forkrun.bash ]] && source ./forkrun.bash; }
 
-mkdir -p /mnt/ramdisk
-cat /proc/mounts | grep -F '/mnt/ramdisk' || mount -t tmpfs tmpfs /mnt/ramdisk
+if ${useRamdiskFlag}; then
+	mkdir -p /mnt/ramdisk/
+	cat /proc/mounts | grep -F '/mnt/ramdisk' || mount -t tmpfs tmpfs /mnt/ramdisk
 
-rsync -a /usr /mnt/ramdisk
-which nproc 1>/dev/null 2>/dev/null && nProcs=$(nproc) || nProcs=8
+    mkdir -p /mnt/ramdisk/forkrun_unit-tests_data
+	rsync -a "${testDir}" /mnt/ramdisk/forkrun_unit-tests_data
+	which nproc 1>/dev/null 2>/dev/null && nProcs=$(nproc) || nProcs=8
 
-mapfile -t A0 < <(find /mnt/ramdisk -type f | head -n $(( ${nProcs} * 512 )))
-mapfile -t A0 < <(printf '%s\n' "${A0[@]}" )
+	mapfile -t A0 < <(find /mnt/ramdisk/forkrun_unit-tests_data -type f | head -n $(( ${nProcs} * 1024 )))
+else
+	mapfile -t A0 < <(find "${testDir}" -type f | head -n $(( ${nProcs} * 1024 )))
+fi
 mapfile -t A1 < <(printf '%s\n' "${A0[@]}" | head -n $(( ${nProcs} * 128 )))
 mapfile -t A2 < <(printf '%s\n' "${A1[@]}" | head -n  $(( ${nProcs} + 2 )))
 mapfile -t A3 < <(printf '%s\n' "${A2[@]}" | head -n  $(( ${nProcs} - 2 )))
@@ -34,7 +54,7 @@ declare -n C="$nn"
 
 unset forkrun
 declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/forkrun-v2_RC/forkrun.bash)
-declare -F forkrun &>/dev/null || source ./forkrun.bash
+declare -F forkrun &>/dev/null || { [[ -f ./forkrun.bash ]] && source ./forkrun.bash; }
 
 nMax=$(( 1 + ( ( ${nMax0} - 1  )  / $kk ) ))
 
