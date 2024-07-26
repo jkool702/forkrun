@@ -489,7 +489,7 @@ forkrun() {
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
-[[ -d  "'"${tmpDir}"'"/.run ]] && [[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill $(cat "'"${tmpDir}"'"/.run/p*) 2>/dev/null; '$'\n'
+[[ -d  "'"${tmpDir}"'"/.run ]] && [[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill -USR1 $(cat "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
 
        ${pipeReadFlag} && {
             # '.done'  file makes no sense when reading from a pipe
@@ -498,6 +498,18 @@ forkrun() {
             # spawn a coproc to write stdin to a tmpfile
             # After we are done reading all of stdin indicate this by touching .done
             { coproc pWrite {
+
+                LC_ALL=C
+                LANG=C
+                IFS=
+                export LC_ALL LANG IFS
+
+                trap - EXIT
+                trap 'kill -INT '"${PID0}" INT
+                trap 'kill -TERM '"${PID0}" TERM
+                trap 'kill -HUP '"${PID0}" HUP
+                trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
+
                 cat <&${fd_stdin} >&${fd_write}
                 : >"${tmpDir}"/.done
                 (( ${verboseLevel} > 1 )) && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
@@ -508,7 +520,7 @@ forkrun() {
                 }
               }
             }
-            exitTrapStr_kill+='kill -9 '"${pWrite_PID}"' 2>/dev/null; '$'\n'
+            exitTrapStr_kill+="${pWrite_PID} "
         }
 
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
@@ -521,6 +533,17 @@ forkrun() {
 
             # fork coproc to populate a pipe (fd_nOrder) with ordered output file name indicies for the worker copropcs to use
             { coproc pOrder {
+
+                LC_ALL=C
+                LANG=C
+                IFS=
+                export LC_ALL LANG IFS
+
+                trap - EXIT
+                trap 'kill -INT '"${PID0}" INT
+                trap 'kill -TERM '"${PID0}" TERM
+                trap 'kill -HUP '"${PID0}" HUP
+                trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
@@ -542,7 +565,7 @@ forkrun() {
               }
             } 2>/dev/null
 
-            exitTrapStr_kill+='kill -9 '"${pOrder_PID}"' 2>/dev/null; '$'\n'
+            exitTrapStr_kill+="${pOrder_PID} "
         else
             outStr='>&'"${fd_stdout}";
         fi
@@ -559,6 +582,17 @@ forkrun() {
             # --> if proposed new 'nLines' is less than or equal to current 'nLines' ignore it (i.e., nLines can only ever increase...it will never decrease)
             # --> if the new 'nLines' is greater than or equal to 'nLinesMax' or the .quit file has appeared, then break after the current iteratrion is finished
             { coproc pAuto {
+
+                LC_ALL=C
+                LANG=C
+                IFS=
+                export LC_ALL LANG IFS
+
+                trap - EXIT
+                trap 'kill -INT '"${PID0}" INT
+                trap 'kill -TERM '"${PID0}" TERM
+                trap 'kill -HUP '"${PID0}" HUP
+                trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
 
                 ${fallocateFlag} && {
                     nWait=$(( 16 + ( ${nProcs} / 2 ) ))
@@ -635,7 +669,6 @@ forkrun() {
             } 2>/dev/null
 
             exitTrapStr+='( printf '"'"'0\n'"'"' >&${fd_nAuto0}; ) {fd_nAuto0}>&'"${fd_nAuto}"'; '$'\n'
-            exitTrapStr_kill+='kill -9 '"${pAuto_PID}"' 2>/dev/null; '$'\n'
 
         fi
 
@@ -654,7 +687,7 @@ forkrun() {
 
             exitTrapStr+=': > "'"${tmpDir}"'"/.stdin; '$'\n'
             ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
-            exitTrapStr_kill+='kill -9 '"${pNotify_PID}"' 2>/dev/null; '$'\n'
+            exitTrapStr_kill+="${pNotify_PID} "
         }
 
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
@@ -692,6 +725,11 @@ echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 trap ': >\"${tmpDir}\"/.quit; 
 [[ -f \"${tmpDir}\"/.run/p{<#>} ]] && \\rm -f \"${tmpDir}\"/.run/p{<#>}; 
 printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT
+
+trap 'kill -INT ${PID0}' INT
+trap 'kill -TERM ${PID0}' TERM
+trap 'kill -HUP ${PID0}' HUP
+trap 'trap - TERM; kill -TERM \${BASH_PID}' USR1
 
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
@@ -922,7 +960,17 @@ p_PID+=(\${p{<#>}_PID})""" )"
         # setup dynamically coproc to spawn new workers based on read queue length
         ${nQueueFlag} && {
             { coproc pQueue {
-                # set -xv
+
+                LC_ALL=C
+                LANG=C
+                IFS=
+                export LC_ALL LANG IFS
+
+                trap - EXIT
+                trap 'kill -INT '"${PID0}" INT
+                trap 'kill -TERM '"${PID0}" TERM
+                trap 'kill -HUP '"${PID0}" HUP
+                trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
 
                 # start spawning after nProcs workers already forked
                 kkProcs=${nProcs}                
@@ -941,7 +989,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                     nQueue+=${REPLY}1
 
                     # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
-                    # trigger spawning another worker (by sending main process a USR2 signal) if the read queue depth is less than the specified minimum
+
                     [[ -f "${tmpDir}"/.spawned ]] && (( ${nQueue} < ${nQueueMin} )) && { 
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
                         (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (read queue depth = %s)\n' "${nQueue}" >&${fd_stderr}
@@ -956,17 +1004,16 @@ p_PID+=(\${p{<#>}_PID})""" )"
             } 2>/dev/null
 
             exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
-            exitTrapStr_kill+='kill -9 '"${pQueue_PID}"' 2>/dev/null; '$'\n'
         }
         
         # set traps (dynamically determined based on which option flags were active)
-        exitTrapStr_kill+='[[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill -9 $(cat "'"${tmpDir}"'"/.run/p*) 2>/dev/null; '$'\n'
-        ${rmTmpDirFlag} && exitTrapStr_kill+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
 
-        exitTrapStr="${exitTrapStr}"$'\n'"${exitTrapStr_kill}"$'\n''return ${returnVal:-0}'
+        exitTrapStr+='kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '$'\n''[[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill -9 $(cat "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+        ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
+        exitTrapStr+='return ${returnVal:-0}'
         
         trap "${exitTrapStr}" EXIT
-        trap 'kill "${p_PID[@]}" 2>/dev/null'$'\n''returnVal=1'$'\n''return 1' INT TERM HUP
+        #trap 'kill "${p_PID[@]}" 2>/dev/null'$'\n''returnVal=1'$'\n''return 1' INT TERM HUP
         #${nQueueFlag} && trap '${coprocSrcCode//'"'"'{<#>}'"'"'/"${kkProcs}"}' USR2
 
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
