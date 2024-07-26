@@ -47,7 +47,7 @@ unset C
 declare -n C="$nn"
 
 unset forkrun
-declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/forkrun-v2_RC/forkrun.bash)
+declare -F forkrun &>/dev/null || source <(curl https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash)
 declare -F forkrun &>/dev/null || { [[ -f ./forkrun.bash ]] && source ./forkrun.bash; }
 
 echo "BEGINNING TEST CASE FOR STDIN LENGTH = ${#C[@]}"
