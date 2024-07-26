@@ -1097,7 +1097,8 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
         # wait for coprocs to finish
         (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
-        [[ $(echo "${tmpDir}"/.run/p[0-9]*) ]] && { p_PID=($(cat "${tmpDir}"/.run/p[0-9]*)); wait "${p_PID[@]}"; }
+        p_PID=($(cat <(:) "${tmpDir}"/.run/p[0-9]* 2>/dev/null)); 
+        [[ "${#p_PID[@]}" == '0' ]] || wait "${p_PID[@]}"; 
 
         # if ordering output print the remaining ones
         ${nOrderFlag} && [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x* >&${fd_stdout}
