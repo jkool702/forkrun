@@ -489,7 +489,7 @@ forkrun() {
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
-kill -USR1 $(cat <(:) "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
 
        ${pipeReadFlag} && {
             # '.done'  file makes no sense when reading from a pipe
@@ -505,9 +505,9 @@ kill -USR1 $(cat <(:) "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
                 export LC_ALL LANG IFS
 
                 trap - EXIT
-                trap 'kill -INT '"${PID0}" INT
-                trap 'kill -TERM '"${PID0}" TERM
-                trap 'kill -HUP '"${PID0}" HUP
+                trap 'trap - INT; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - HUP; kill -HUP '"${PID0}"' ${BASHPID}' HUP
                 trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
 
                 cat <&${fd_stdin} >&${fd_write}
@@ -540,9 +540,9 @@ kill -USR1 $(cat <(:) "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
                 export LC_ALL LANG IFS
 
                 trap - EXIT
-                trap 'kill -INT '"${PID0}" INT
-                trap 'kill -TERM '"${PID0}" TERM
-                trap 'kill -HUP '"${PID0}" HUP
+                trap 'trap - INT; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - HUP; kill -HUP '"${PID0}"' ${BASHPID}' HUP
                 trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
@@ -589,9 +589,9 @@ kill -USR1 $(cat <(:) "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
                 export LC_ALL LANG IFS
 
                 trap - EXIT
-                trap 'kill -INT '"${PID0}" INT
-                trap 'kill -TERM '"${PID0}" TERM
-                trap 'kill -HUP '"${PID0}" HUP
+                trap 'trap - INT; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - HUP; kill -HUP '"${PID0}"' ${BASHPID}' HUP
                 trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
 
                 ${fallocateFlag} && {
@@ -726,9 +726,9 @@ trap ': >\"${tmpDir}\"/.quit;
 [[ -f \"${tmpDir}\"/.run/p{<#>} ]] && \\rm -f \"${tmpDir}\"/.run/p{<#>}; 
 printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT
 
-trap 'kill -INT ${PID0}' INT
-trap 'kill -TERM ${PID0}' TERM
-trap 'kill -HUP ${PID0}' HUP
+trap 'trap - INT; kill -INT ${PID0} \${BASHPID}' INT
+trap 'trap - TERM; kill -TERM ${PID0} \${BASHPID}' TERM
+trap 'trap - HUP; kill -HUP ${PID0} \${BASHPID}' HUP
 trap 'trap - TERM; kill -TERM \${BASH_PID}' USR1
 
 while true; do"""
@@ -865,8 +865,8 @@ else
         echo "}"
     }
 fi
+${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || ${readBytesFlag} || echo "}"
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
-${pipeReadFlag} || ${readBytesFlag} || echo "}"
 echo """
     printf '\\n' >&${fd_continue}"""
 ${nQueueFlag} && echo "echo '-' >&${fd_nQueue}"
@@ -967,9 +967,9 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 export LC_ALL LANG IFS
 
                 trap - EXIT
-                trap 'kill -INT '"${PID0}" INT
-                trap 'kill -TERM '"${PID0}" TERM
-                trap 'kill -HUP '"${PID0}" HUP
+                trap 'trap - INT; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - HUP; kill -HUP '"${PID0}"' ${BASHPID}' HUP
                 trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
 
                 # start spawning after nProcs workers already forked
@@ -1008,7 +1008,12 @@ p_PID+=(\${p{<#>}_PID})""" )"
         
         # set traps (dynamically determined based on which option flags were active)
 
-	exitTrapStr+='kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '$'\n''kill -9 $(cat <(:) "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+        exitTrapStr+='kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '$'\n''kill -9 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+        
+        # if ordering output print the remaining ones in trap
+        ${nOrderFlag} && exitTrapStr+='cat </dev/null "'"${tmpDir}"'"/.out/x* >&'"${fd_stdout}"'; '$'\n'
+
+        # if removiung tmpdir delete it in trap
         ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
         exitTrapStr+='return ${returnVal:-0}'
         
@@ -1057,7 +1062,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 case "${REPLY}" in
                     +([0-9]))
                         # index has an output file
-                        outHave[$REPLY]=1
+                        outHave[${REPLY}]=1
                     ;;
                     x+([0-9]))
                         # index was empty
@@ -1066,6 +1071,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                     '')
                         # end condition was met
                         continueFlag=false
+                        break
                     ;;
                 esac
 
@@ -1078,7 +1084,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                                 \rm  -f "${tmpDir}"/.out/x"${outCur}"
                             }
 
-                            unset "outHave[$outCur]"
+                            unset "outHave["${outCur}"]"
 
                             # advance outCur by 1
                             ((outCur++))
@@ -1097,11 +1103,8 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
         # wait for coprocs to finish
         (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
-        p_PID=($(cat <(:) "${tmpDir}"/.run/p[0-9]* 2>/dev/null)); 
-        [[ "${#p_PID[@]}" == '0' ]] || wait "${p_PID[@]}"; 
-
-        # if ordering output print the remaining ones
-        ${nOrderFlag} && [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x* >&${fd_stdout}
+        p_PID+=($(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null)); 
+        wait "${p_PID[@]}" 2>/dev/null; 
 
         # print final nLines count
         (( ${verboseLevel} > 1 )) && {
