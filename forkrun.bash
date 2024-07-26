@@ -489,7 +489,7 @@ forkrun() {
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
-[[ -d  "'"${tmpDir}"'"/.run ]] && [[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill -USR1 $(cat "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+kill -USR1 $(cat <(:) "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
 
        ${pipeReadFlag} && {
             # '.done'  file makes no sense when reading from a pipe
@@ -1008,7 +1008,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         
         # set traps (dynamically determined based on which option flags were active)
 
-        exitTrapStr+='kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '$'\n''[[ $(echo "'"${tmpDir}"'"/.run/p*) ]] && kill -9 $(cat "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+	exitTrapStr+='kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '$'\n''kill -9 $(cat <(:) "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
         ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
         exitTrapStr+='return ${returnVal:-0}'
         
@@ -1097,7 +1097,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
         # wait for coprocs to finish
         (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
-        [[ $(echo "${tmpDir}"/.run/p*) ]] && { p_PID=($(cat "${tmpDir}"/.run/p*)); wait "${p_PID[@]}"; }
+        [[ $(echo "${tmpDir}"/.run/p[0-9]*) ]] && { p_PID=($(cat "${tmpDir}"/.run/p[0-9]*)); wait "${p_PID[@]}"; }
 
         # if ordering output print the remaining ones
         ${nOrderFlag} && [[ -f "${tmpDir}"/.out/x${outCur} ]] && cat "${tmpDir}"/.out/x* >&${fd_stdout}
