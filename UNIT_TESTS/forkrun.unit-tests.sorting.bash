@@ -8,7 +8,7 @@ set -m
 # useRamdiskFlag: set to 'true' to automatically copy the contents of $testDir to a ramdisk that will be auto-mounted at /mnt/ramdisk. Default is false.
 
 #testDir='/usr'
-#useRamdiskFlag=true
+useRamdiskFlag=true
 
 ################################################################################
 
