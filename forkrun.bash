@@ -508,7 +508,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - INT; kill -INT '"${PID0}"' ${BASHPID}' INT
                 trap 'trap - TERM; kill -TERM '"${PID0}"' ${BASHPID}' TERM
                 trap 'trap - HUP; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
+                trap 'trap - TERM INT HUP' USR1
 
                 cat <&${fd_stdin} >&${fd_write}
                 : >"${tmpDir}"/.done
@@ -521,6 +521,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
               }
             }
             exitTrapStr_kill+="${pWrite_PID} "
+
         }
 
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
@@ -543,7 +544,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - INT; kill -INT '"${PID0}"' ${BASHPID}' INT
                 trap 'trap - TERM; kill -TERM '"${PID0}"' ${BASHPID}' TERM
                 trap 'trap - HUP; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
+                trap 'trap - TERM INT HUP' USR1
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
@@ -588,11 +589,11 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 IFS=
                 export LC_ALL LANG IFS
 
-                trap - EXIT
+                trap '[[ -f "'"${tmpDir}"'"/.run/pAuto ]] && \rm -f "'"${tmpDir}"'"/.run/pAuto' EXIT
                 trap 'trap - INT; kill -INT '"${PID0}"' ${BASHPID}' INT
                 trap 'trap - TERM; kill -TERM '"${PID0}"' ${BASHPID}' TERM
                 trap 'trap - HUP; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
+                trap 'trap - TERM INT HUP' USR1
 
                 ${fallocateFlag} && {
                     nWait=$(( 16 + ( ${nProcs} / 2 ) ))
@@ -669,6 +670,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
             } 2>/dev/null
 
             exitTrapStr+='( printf '"'"'0\n'"'"' >&${fd_nAuto0}; ) {fd_nAuto0}>&'"${fd_nAuto}"'; '$'\n'
+            printf '%s\n' "${pAuto_PID}" > "${tmpDir}"/.run/pAuto
 
         fi
 
@@ -729,7 +731,7 @@ printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT
 trap 'trap - INT; kill -INT ${PID0} \${BASHPID}' INT
 trap 'trap - TERM; kill -TERM ${PID0} \${BASHPID}' TERM
 trap 'trap - HUP; kill -HUP ${PID0} \${BASHPID}' HUP
-trap 'trap - TERM; kill -TERM \${BASH_PID}' USR1
+trap 'trap - TERM INT HUP' USR1
 
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
@@ -966,11 +968,11 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 IFS=
                 export LC_ALL LANG IFS
 
-                trap - EXIT
+                trap '[[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
                 trap 'trap - INT; kill -INT '"${PID0}"' ${BASHPID}' INT
                 trap 'trap - TERM; kill -TERM '"${PID0}"' ${BASHPID}' TERM
                 trap 'trap - HUP; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM; kill -TERM ${BASH_PID}' USR1
+                trap 'trap - TERM INT HUP' USR1
 
                 # start spawning after nProcs workers already forked
                 kkProcs=${nProcs}                
@@ -1004,20 +1006,43 @@ p_PID+=(\${p{<#>}_PID})""" )"
             } 2>/dev/null
 
             exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
+            printf '%s\n' "${pAuto_PID}" > "${tmpDir}"/.run/pQueue
+
         }
         
         # set traps (dynamically determined based on which option flags were active)
 
-        exitTrapStr+='kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; '$'\n''kill -9 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
-        
         # if ordering output print the remaining ones in trap
         ${nOrderFlag} && exitTrapStr+='cat </dev/null "'"${tmpDir}"'"/.out/x* >&'"${fd_stdout}"'; '$'\n'
-
+    
+        # make sure asll rocesses are dead
+        exitTrapStr+='kill $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null;
+        kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; 
+        kill -9 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
+        
+    
         # if removiung tmpdir delete it in trap
         ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
-        exitTrapStr+='return ${returnVal:-0}'
+        exitTrapStr+='trap - INT TERM HUP USR1; 
+        return ${returnVal:-0}'
         
         trap "${exitTrapStr}" EXIT
+
+        trap 'trap - INT; 
+        returnVal=1; 
+        kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
+        kill -INT $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PIDO}" INT
+
+        trap 'trap - TERM; 
+        returnVal=1; 
+        kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
+        kill -TERM $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PIDO}" TERM
+
+        trap 'trap - HUP; 
+        returnVal=1; 
+        kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
+        kill -HUP $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PIDO}" HUP
+        
         #trap 'kill "${p_PID[@]}" 2>/dev/null'$'\n''returnVal=1'$'\n''return 1' INT TERM HUP
         #${nQueueFlag} && trap '${coprocSrcCode//'"'"'{<#>}'"'"'/"${kkProcs}"}' USR2
 
