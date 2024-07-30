@@ -19,9 +19,9 @@ which nproc 1>/dev/null 2>/dev/null && nProcs=$(nproc) || nProcs=8
 
 if ${useRamdiskFlag}; then
 	mkdir -p /mnt/ramdisk/
-	grep -qF '/mnt/ramdisk' <<</proc/mounts || mount -t tmpfs tmpfs /mnt/ramdisk
+	grep -qF '/mnt/ramdisk' </proc/mounts || mount -t tmpfs tmpfs /mnt/ramdisk
 
-    mkdir -p /mnt/ramdisk/forkrun_unit-tests_data
+        mkdir -p /mnt/ramdisk/forkrun_unit-tests_data
 	rsync -a --max-size=$((1<<20)) "${testDir}" /mnt/ramdisk/forkrun_unit-tests_data
 
 	mapfile -t -d '' A < <(find /mnt/ramdisk/forkrun_unit-tests_data -type f -print0)
@@ -36,8 +36,9 @@ kFix=('| sort' '')
 fFix=('' '| sed -E s/'"'"'^[0-9a-f]{40}[ \t]*'"'"'//' '| sed -E s/'"'"'^[0-9a-f]{64}[ \t]*'"'"'//')
 
 mapfile -t runArgsA < <(echo {-k\ ,}{-j\ 27\ ,}{-l\ 1\ ,}{-t\ \/tmp\ ,}{-D\ ,}{"${fStr[$fInd]}"\ ,--\ "${fStr[$fInd]}"\ ,-i\ "${fStr[$fInd]}"\ \{\}\ ,-i\ --\ "${fStr[$fInd]}"\ \{\}\ }$'\n')
+runArgsA=("${runArgsA[@]# }")
 
-for nArgs in $(( ${nProcs} - 2 )) $(( ${nProcs} + 2 )) $(( ${nProcs} * 128 )) $(( ${nProcs} * 1024 )) ; do
+for nArgs in $(( ${nProcs} - 2 )) $(( ${nProcs} + 2 )) $(( ${nProcs} * 128 )) $(( ${nProcs} * 1024 )); do
 	printf  '\n\n--------------------------------------------------\nBEGINNING TEST CASE FOR STDIN LENGTH = %s\n\n' "${nArgs[$nn]}"
 
 	for fInd in 0 1 2; do 
