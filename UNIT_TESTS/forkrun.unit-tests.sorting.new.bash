@@ -51,9 +51,9 @@ for nArgs in $(( ${nProcs} - 2 )) $(( ${nProcs} + 2 )) $(( ${nProcs} * 128 )) $(
 
             [[ "${runArgs}" == '-k'* ]] && kInd=1 || kInd=0
 
-            source <(printf '%s' \(\ \{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(printf\ \'%s\\n\'\ \"\$\{C\[@\]\}\"\ \|\ forkrun\ 2\>/dev/null\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(printf\ \'%s\\n\'\ \"\$\{C\[@\]\}\"\ "${kFix[$kInd]}"\)\ \&\&\ printf\ \'%s\'\ \"PASS\"\ \|\|\ printf\ \'%s\'\ \"FAIL\"\;\ printf\ \'\:\ %s\\n\'\ \'printf\ \'\"\'\"\'%s\\n\'\"\'\"\'\ \"\$\{C\[@\]\}\"\ \|\ forkrun\ 2\>/dev/null\ "${runArgs@Q}"\ \'\;\ \}\ \|\ tee\ -a\ /tmp/.forkrun.log\;\ \)$'\n';)
+            source <(printf '%s' \(\ \{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(printf\ \'%s\\n\'\ \"\$\{C\[@\]\}\"\ \|\ forkrun\ 2\>/dev/null\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(printf\ \'%s\\n\'\ \"\$\{C\[@\]\}\"\ "${kFix[$kInd]}"\)\ \&\&\ printf\ \'%s\'\ \"PASS\"\ \|\|\ printf\ \'%s\'\ \"FAIL\"\;\ printf\ \'\:\ %s\\n\'\ \'printf\ \'\"\'\"\'%s\\n\'\"\'\"\'\ \"\$\{C\[@\]\}\"\ \|\ forkrun\ 2\>/dev/null\ "${runArgs//%s/%s\\}"\ \'\;\ \}\ \|\ tee\ -a\ /tmp/.forkrun.log\;\ \)$'\n';)
 
-            source <(printf '%s' \(\ \{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(printf\ \'%s\\x00\'\ \"\$\{C\[@\]\}\"\ \|\ forkrun\ 2\>/dev/null\ -z\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(printf\ \'%s\\n\'\ \"\$\{C\[@\]\}\"\ "${kFix[$kInd]}"\)\ \&\&\ printf\ \'%s\'\ \"PASS\"\ \|\|\ printf\ \'%s\'\ \"FAIL\"\;\ printf\ \'\:\ %s\\n\'\ \'printf\ \'\"\'\"\'%s\\0\'\"\'\"\'\ \"\$\{C\[@\]\}\"\ \|\ forkrun\ 2\>/dev/null\ -z\ "${runArgs@Q}"\ \'\;\ \}\ \|\ tee\ -a\ /tmp/.forkrun.log\;\ \)$'\n';)
+            source <(printf '%s' \(\ \{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(printf\ \'%s\\x00\'\ \"\$\{C\[@\]\}\"\ \|\ forkrun\ 2\>/dev/null\ -z\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(printf\ \'%s\\n\'\ \"\$\{C\[@\]\}\"\ "${kFix[$kInd]}"\)\ \&\&\ printf\ \'%s\'\ \"PASS\"\ \|\|\ printf\ \'%s\'\ \"FAIL\"\;\ printf\ \'\:\ %s\\n\'\ \'printf\ \'\"\'\"\'%s\\0\'\"\'\"\'\ \"\$\{C\[@\]\}\"\ \|\ forkrun\ 2\>/dev/null\ -z\ "${runArgs//%s/%s\\}"\ \'\;\ \}\ \|\ tee\ -a\ /tmp/.forkrun.log\;\ \)$'\n';)
         done
     done
 done
