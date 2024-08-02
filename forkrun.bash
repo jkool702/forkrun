@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueMin v9 kkMax kkCur kk kkProcs kk1 kk2 kk3 verboseLevel
     local -a A p_PID runCmd outHave kkA
 
@@ -262,6 +262,12 @@ forkrun() {
 
         # dynamically set defaults for a few flags
         : "${noFuncFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}"
+
+        if enable lseek 2>/dev/null; then
+            : "${lseekFlag:=true}"
+        else
+            : "${lseekFlag:=false}"
+        fi
 
         # determine what forkrun is using lines on stdin for
         if ${FORCE_allowCarriageReturnsFlag}; then
@@ -818,13 +824,24 @@ if ${readBytesFlag}; then
         ;;
     esac
 else
-    printf '%s ' "mapfile -n \${nLinesCur} -u"
+    printf '%s ' "mapfile"
+    ${lseekFlag} && printf '%s ' '-t'
+    printf '%s ' '-n' "\${nLinesCur}" '-u'
     ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
     { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
     echo "${delimiterReadStr} A"
     ${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || {
         echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
-        if ${nullDelimiterFlag}; then
+        if ${lseekFlag}; then
+            echo """
+                lseek ${fd_read} -1
+                read -r -u ${fd_read} -N 1"""
+                if ${nullDelimiterFlag}; then
+                    echo "[[ \${#REPLY} == 0 ]] || {"
+                else
+                    echo "[[ \"\${REPLY}\" == ${delimiterVal} ]] || {"
+                fi
+        elif ${nullDelimiterFlag}; then
              echo """
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}"""
             case "${nullDelimiterProg}" in
@@ -906,7 +923,7 @@ ${nLinesAutoFlag} && { printf '%s' """
     ${fallocateFlag} && printf '%s' ' || ' || echo
 }
 ${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
-${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || {
+${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || ${lseekFlag} || {
     echo """
         { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {"""
     (( ${verboseLevel} > 2 )) && echo "echo \"FIXING SPLIT READ\" >&${fd_stderr}"
@@ -1583,4 +1600,32 @@ EOF
 }
 
 }
+
+forkrun_lseek_setup() {
+    ## sets up a "lseek" bash builtin for x86_64 machines
+
+    [[ $(type lseek &>/dev/null) == 'lseek is a shell builtin' ]] && return 0
+
+    [[ "${BASH_LOADABLES_PATH}" == *'/usr/local/lib/bash'* ]] || export BASH_LOADABLES_PATH=/usr/local/lib/bash:${BASH_LOADABLES_PATH}
+    enable lseek 2>/dev/null && return 0
+   
+    [[ $(uname -m) == 'x86_64' ]] || return 1
+
+    case "${USER}" in
+        root)
+            mkdir -p /usr/local/lib/bash
+            curl -o /usr/local/lib/bash/lseek 'https://github.com/jkool702/forkrun/raw/main/lseek'
+        ;;
+        *)
+            mkdir -p /dev/shm/.forkrun.lseek
+            export BASH_LOADABLES_PATH=/dev/shm/.forkrun.lseek:${BASH_LOADABLES_PATH}
+            curl -o /dev/shm/.forkrun.lseek/lseek 'https://github.com/jkool702/forkrun/raw/main/lseek'
+        ;;
+    esac
+
+    enable lseek 2>/dev/null && return 0 || return 1
+
+}
+
+forkrun_lseek_setup
 
