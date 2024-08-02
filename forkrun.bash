@@ -1614,12 +1614,12 @@ forkrun_lseek_setup() {
     case "${USER}" in
         root)
             mkdir -p /usr/local/lib/bash
-            curl -o /usr/local/lib/bash/lseek 'https://github.com/jkool702/forkrun/raw/main/lseek_builtin/lseek'
+            curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/lseek'
         ;;
         *)
             mkdir -p /dev/shm/.forkrun.lseek
             export BASH_LOADABLES_PATH=/dev/shm/.forkrun.lseek:${BASH_LOADABLES_PATH}
-            curl -o /dev/shm/.forkrun.lseek/lseek 'https://github.com/jkool702/forkrun/raw/main/lseek_builtin/lseek'
+            curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/lseek'
         ;;
     esac
 
