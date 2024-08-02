@@ -11,7 +11,7 @@ renice --priority -20 --pid $$
 }
 
 declare -F forkrun 1>/dev/null 2>&1 || { 
-    [[ -f ./forkrun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/forkrun/forkrun-testing/forkrun.bash
+    [[ -f ./forkrun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash
     . ./forkrun.bash
 }
 
