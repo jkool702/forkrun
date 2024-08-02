@@ -11,20 +11,8 @@
 #include "bashgetopt.h"
 #include "xmalloc.h"
 
-#ifdef USING_BASH_MALLOC
-#include "malloc/shmalloc.h"
-#endif
-
 #ifdef HAVE_CONFIG_H
 #include <config.h>
-#endif
-
-#ifdef MAJOR_IN_MKDEV
-#  include <sys/mkdev.h>
-#endif
-
-#ifdef MAJOR_IN_SYSMACROS
-#  include <sys/sysmacros.h>
 #endif
 
 #ifndef errno
@@ -62,33 +50,40 @@ struct builtin lseek_struct = {
     0                     // Number of long options
 };
 
+// main function
 static int lseek_main(int argc, char **argv) {
+    // check for exactly 2 args passed to lseek
     if (argc != 3) {
         fprintf(stderr, "\nIncorrect number of arguments.\nUSAGE: lseek <FD> <REL_OFFSET>\n");
         return 1;
     }
 
+    // get + validate file descriptor
     int fd = atoi(argv[1]);
     if (fd == 0 && strcmp(argv[1], "0") != 0) {
-        fprintf(stderr, "\nInvalid file descriptor.\n");
+        fprintf(stderr, "\nERROR: Invalid file descriptor.\n");
         return 1;
     }
 
-    errno = 0; // Reset errno before the conversion
+     // get + validate (relative) offset
+    errno = 0;
     off_t offset = atoll(argv[2]);
     if (errno == ERANGE) {
-        fprintf(stderr, "\nOffset out of range.\n");
+        fprintf(stderr, "\nERROR: Offset out of range.\n");
         return 1;
     }
 
+    // call lseek to move fd byte offset 
     if (lseek(fd, offset, SEEK_CUR) == (off_t) -1) {
-        fprintf(stderr, "%s\n", strerror(errno));
+        fprintf(stderr, "\nERROR: %s\n", strerror(errno));
         return 1;
     }
 
     return 0;
 }
 
+// func to convert WORD_LIST to argc + argv 
+// (this one is called by the builtin)
 int lseek_builtin(WORD_LIST *list) {
     int c, r;
     char **v;
