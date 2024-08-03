@@ -1604,28 +1604,52 @@ EOF
 forkrun_lseek_setup() {
     ## sets up a "lseek" bash builtin for x86_64 machines
 
-    [[ $(type lseek &>/dev/null) == 'lseek is a shell builtin' ]] && return 0
+    type uname &>/dev/null && { [[ $(uname -m) == 'x86_64' ]] || return 1; }
+    [[ -f /proc/sys/kernel/arch ]] && { [[ "$(</proc/sys/kernel/arch)" == 'x86_64' ]] || return 1; }
 
-    [[ "${BASH_LOADABLES_PATH}" == *'/usr/local/lib/bash'* ]] || export BASH_LOADABLES_PATH=/usr/local/lib/bash:${BASH_LOADABLES_PATH}
-    enable lseek 2>/dev/null && return 0
-   
-    [[ $(uname -m) == 'x86_64' ]] || return 1
+    enable lseek 2>/dev/null || {
+        case "${USER}" in
+            root)
+                mkdir -p /usr/local/lib/bash
+                [[ -f /usr/local/lib/bash/lseek  ]] && mv /usr/local/lib/bash/lseek /usr/local/lib/bash/lseek.old
+                [[ "${BASH_LOADABLES_PATH}" == */usr/local/lib/bash* ]] || export BASH_LOADABLES_PATH=/usr/local/lib/bash:${BASH_LOADABLES_PATH}
+                curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/lseek'
+            ;;
+            *)
+                mkdir -p /dev/shm/.forkrun.lseek
+                [[ -f /dev/shm/.forkrun.lseek/lseek  ]] && mv /dev/shm/.forkrun.lseek/lseek /dev/shm/.forkrun.lseek/lseek.old
+                [[ "${BASH_LOADABLES_PATH}" == */dev/shm/.forkrun.lseek* ]] || export BASH_LOADABLES_PATH=/dev/shm/.forkrun.lseek:${BASH_LOADABLES_PATH}
+                curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/lseek'
+            ;;
+        esac
 
-    case "${USER}" in
-        root)
-            mkdir -p /usr/local/lib/bash
-            curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/lseek'
+        enable lseek 2>/dev/null || return 1
+    }
+
+    echo 'abc' >/dev/shm/.forkrun.lseek.test
+    {
+        read -r -u $fd -N 1
+        lseek $fd -1
+        read -r -u $fd -N 1
+        exec {fd}>&-
+    } {fd}</dev/shm/.forkrun.lseek.test
+    \rm -f /dev/shm/.forkrun.lseek.test
+
+    case "$REPLY" in
+        a)
+            return 0
         ;;
         *)
-            mkdir -p /dev/shm/.forkrun.lseek
-            export BASH_LOADABLES_PATH=/dev/shm/.forkrun.lseek:${BASH_LOADABLES_PATH}
-            curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/lseek'
+            enable -d lseek
+            printf '\nWARNING: lseek functionality has not been enabled due to an unknown runtime error.\nIf you are on x86_64 and are using bash 4.0 or later, please file a github issue in the forkrun repo describing this error.\n' >&2
+            if [[ "${USER}" == 'root' ]]; then
+                \rm -f /usr/local/lib/bash/lseek
+            else
+                \rm -f /dev/shm/.forkrun.lseek/lseek
+            fi
+            return 1
         ;;
     esac
-
-    enable lseek 2>/dev/null && return 0 || return 1
-
 }
 
 forkrun_lseek_setup
-
