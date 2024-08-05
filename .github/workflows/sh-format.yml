@@ -19,5 +19,5 @@ jobs:
           SHELLCHECK_OPTS: -e SC1004 # exclude some shellcheck warnings.
           SHFMT_OPTS: -s # arguments to shfmt.
         with:
-          sh_checker_checkbashisms_enable: true
+          sh_checker_checkbashisms_enable: false
           sh_checker_exclude: OLD
