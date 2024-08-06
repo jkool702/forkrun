@@ -11,12 +11,16 @@ renice --priority -20 --pid $$
 	for nn in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo 'performance' >"${nn}"; done
 }
 
-declare -F forkrun 1>/dev/null 2>&1 || { 
+declare -F forkrun &>/dev/null || { 
     [[ -f ./forkrun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash
     . ./forkrun.bash
 }
+export -f forkrun
 
 findDirDefault='/usr'
+
+findDir='/mnt/ramdisk/usr'
+ramdiskTransferFlag=false
 
 [[ -n "$1" ]] && [[ -d "$1" ]] && findDir="$1"
 : ${findDir:="${findDirDefault}"} ${ramdiskTransferFlag:=true}
@@ -42,11 +46,11 @@ if ${ramdiskTransferFlag}; then
 
 else
 
-  hfdir0="${PWD}/hyperfine"
+  hfdir0="${findDir%/*}/hyperfine"
 
 fi
 "${testParallelFlag:=true}"
-
+testParallelFlag=false
 declare -a C0 C1
 
 C0[0]=''
@@ -69,9 +73,16 @@ C1[5]=' >/dev/null'
 
 mkdir -p "${hfdir0}"/file_lists
 
+nArgs=(1024 4096 16384 65536 262144 1048576)
+
 for kk in {1..6}; do
-    find "${findDir}" -type f | head -n $(( 10 ** $kk )) >"${hfdir0}"/file_lists/f${kk}
+	find "${findDir}" -type f | head -n ${nArgs[$(($kk-1))]} >"${hfdir0}"/file_lists/f${kk}
 done
+
+shopt -s extglob
+
+export -nf forkrun
+export -f forkrun
 
 for jj in ${!C0[@]}; do
         
@@ -86,9 +97,9 @@ for jj in ${!C0[@]}; do
             printf '\n---------------- %s ----------------\n\n' "$c"; 
 
             if ${testParallelFlag}; then
-               hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --','parallel -m --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' --prepare 'renice --priority -20 --pid $$' 'source '"${PWD}"'/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
+               hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -j - --','forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --','parallel -m --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
             else
-                hyperfine -w 1 -i --shell /usr/bin/bash --parameter-list cmd 'source '"${PWD}"'/forkrun.bash && forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob' --prepare 'renice --priority -20 --pid $$' 'source '"${PWD}"'/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
+               hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -j - --','forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
             fi
 
         done
@@ -146,6 +157,20 @@ for jj in ${!C0[@]}; do
 
     }
 
+    myMin() {
+	if (( ${1%.*} < ${2%.*} )); then 
+		echo "$1"
+	elif (( ${1%.*} > ${2%.*} )); then 
+		echo "$2"
+	elif (( ${1#*.} < ${2#*.} )); then 
+		echo "$1"
+	elif (( ${1#*.} > ${2#*.} )); then 
+		echo "$2"
+	else
+		echo "$1"
+	fi
+    }
+
     {
     printf '\n\n||-----------------------------------------------------------------------------------------------------------------------------------------------------------||\n||------------------------------------------------------------------- RUN_TIME_IN_SECONDS -------------------------------------------------------------------||\n||-----------------------------------------------------------------------------------------------------------------------------------------------------------||\n'  
 
@@ -154,13 +179,13 @@ for jj in ${!C0[@]}; do
         printf '\n\n\n%.157s|| \n\n' "$(printf '||----------------------------------------------------------------- NUM_CHECKSUMS=%s -------------------------------------------------------------------------' $(wc -l <"${hfdir0}/file_lists/f${kk}"))"
         printf0 8:'(algorithm)' 
         if ${testParallelFlag}; then
-            printf0 12:'(forkrun)' 12:'(xargs)' 12:'(parallel)' 44:'(relative performance vs xargs)' 44:'(relative performance vs parallel)'
+		printf0 12:'(forkrun-nq)' 12:'(forkrun)' 12:'(xargs)' 12:'(parallel)' 44:'(relative performance vs xargs)' 44:'(relative performance vs parallel)'
         else
             printf0 12:'(forkrun)' 12:'(xargs)' 44:'(relative performance vs xargs)'
         fi
         printf '\n%s\t' '------------'
         if ${testParallelFlag}; then
-            printf0 12:'------------' '------------' '------------' 44:'--------------------------------------------' 44:'-----------------------------------------------'
+            printf0 12:'------------' '------------' '------------'  '------------' 44:'--------------------------------------------' 44:'-----------------------------------------------'
         else
             printf0 12:'------------' '------------' 44:'--------------------------------------------'
         fi
@@ -168,13 +193,14 @@ for jj in ${!C0[@]}; do
         declare -a A0 
         T0=0.0
         T1=0.0
-        ${testParallelFlag} && T2=0.0
+        T2=0.0
+        ${testParallelFlag} && T3=0.0
         for c in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" OVERALL; do
             if [[ "${c}" == 'OVERALL' ]]; then
                 if ${testParallelFlag}; then
-                    A0=(${T0} ${T1} ${T2})
+		    A0=(${T0} ${T1} ${T2} ${T3})
                 else
-                    A0=(${T0} ${T1})
+                    A0=(${T0} ${T1} ${T2})
                 fi
                 printf '\n'
             else
@@ -183,10 +209,13 @@ for jj in ${!C0[@]}; do
 
                 T0="$(bc <<<"${T0} + ${A0[0]}")"
                 T1="$(bc <<<"${T1} + ${A0[1]}")"
-                ${testParallelFlag} && T2="$(bc <<<"${T2} + ${A0[2]}")"  
+                T2="$(bc <<<"${T2} + ${A0[2]}")"
+                ${testParallelFlag} && T3="$(bc <<<"${T3} + ${A0[3]}")"  
             fi
                 
             printf0 12:"$c" $(printf '%.12s ' "${A0[@]}")
+	    A0=($(myMin "${A0[@]:0:2}") "${A0[@]:2}")
+
            
             if [[ $(bc <<< "${A0[0]} / ${A0[1]}") == '0' ]]; then
                 ratio="$(bc <<<"scale=10; ${A0[1]} / ${A0[0]}")"
