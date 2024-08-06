@@ -1,0 +1,131 @@
+
+
+||-----------------------------------------------------------------------------------------------------------------------------------------------------------||
+||------------------------------------------------------------------- RUN_TIME_IN_SECONDS -------------------------------------------------------------------||
+||-----------------------------------------------------------------------------------------------------------------------------------------------------------||
+
+
+
+||----------------------------------------------------------------- NUM_CHECKSUMS=1024 ----------------------------------------------------------------------|| 
+
+(algorithm)	(forkrun -j -)	(forkrun)   	(xargs)     	(parallel)  	(relative performance vs xargs)             	(relative performance vs parallel)          	
+------------	------------	------------	------------	------------	--------------------------------------------	-----------------------------------------------	
+sha1sum     	0.0725585474	0.0720929557	0.0788001077	0.1979509852	forkrun is 9.303% faster than xargs (1.0930x)	forkrun is 174.5% faster than parallel (2.7457x)	
+sha256sum   	0.1176360906	0.1167646198	0.1457442108	0.2639306147	forkrun is 24.81% faster than xargs (1.2481x)	forkrun is 126.0% faster than parallel (2.2603x)	
+sha512sum   	0.0911017573	0.0900386156	0.1073541361	0.2251327879	forkrun is 19.23% faster than xargs (1.1923x)	forkrun is 150.0% faster than parallel (2.5004x)	
+sha224sum   	0.1175866648	0.1166149133	0.1455646789	0.2624057001	forkrun is 24.82% faster than xargs (1.2482x)	forkrun is 125.0% faster than parallel (2.2501x)	
+sha384sum   	0.0909394508	0.0900077079	0.1064774848	0.2247994134	forkrun is 18.29% faster than xargs (1.1829x)	forkrun is 149.7% faster than parallel (2.4975x)	
+md5sum      	0.0885755041	0.0881463407	0.1019697132	0.2205417194	forkrun is 15.68% faster than xargs (1.1568x)	forkrun is 150.1% faster than parallel (2.5019x)	
+sum -s      	0.0377489504	0.0369515333	0.0289429940	0.1746979773	xargs is 27.67% faster than forkrun (1.2767x)	forkrun is 372.7% faster than parallel (4.7277x)	
+sum -r      	0.0899070054	0.0885255944	0.1030114130	0.2227593301	forkrun is 16.36% faster than xargs (1.1636x)	forkrun is 151.6% faster than parallel (2.5163x)	
+cksum       	0.0351437667	0.0352322614	0.0246590697	0.1744455326	xargs is 42.51% faster than forkrun (1.4251x)	forkrun is 396.3% faster than parallel (4.9637x)	
+b2sum       	0.0831865434	0.0820973445	0.0952235200	0.2136706209	forkrun is 15.98% faster than xargs (1.1598x)	forkrun is 160.2% faster than parallel (2.6026x)	
+cksum -a sm3	0.1889330552	0.1875064983	0.2515206285	0.3644831379	forkrun is 33.12% faster than xargs (1.3312x)	forkrun is 92.91% faster than parallel (1.9291x)	
+
+OVERALL     	1.0133173366	1.0039783854	1.1892679571	2.5448178201	forkrun is 18.45% faster than xargs (1.1845x)	forkrun is 153.4% faster than parallel (2.5347x)	
+
+
+
+
+||----------------------------------------------------------------- NUM_CHECKSUMS=4096 ----------------------------------------------------------------------|| 
+
+(algorithm)	(forkrun -j -)	(forkrun)   	(xargs)     	(parallel)  	(relative performance vs xargs)             	(relative performance vs parallel)          	
+------------	------------	------------	------------	------------	--------------------------------------------	-----------------------------------------------	
+sha1sum     	0.0657043025	0.0622539853	0.0587040249	0.2225878846	xargs is 11.92% faster than forkrun (1.1192x)	forkrun is 238.7% faster than parallel (3.3877x)	
+sha256sum   	0.0963533337	0.0901931893	0.0973709885	0.2296014789	forkrun is 1.056% faster than xargs (1.0105x)	forkrun is 138.2% faster than parallel (2.3829x)	
+sha512sum   	0.0796251343	0.0752700382	0.0772503854	0.2230447776	xargs is 3.074% faster than forkrun (1.0307x)	forkrun is 180.1% faster than parallel (2.8011x)	
+sha224sum   	0.0953938574	0.0906050505	0.0971342035	0.2292712747	forkrun is 7.206% faster than xargs (1.0720x)	forkrun is 153.0% faster than parallel (2.5304x)	
+sha384sum   	0.0792331150	0.0743581341	0.0760410250	0.2242969969	xargs is 4.197% faster than forkrun (1.0419x)	forkrun is 183.0% faster than parallel (2.8308x)	
+md5sum      	0.0764554407	0.0721325985	0.0719504217	0.2225285992	xargs is 6.261% faster than forkrun (1.0626x)	forkrun is 191.0% faster than parallel (2.9105x)	
+sum -s      	0.0437055571	0.0415440609	0.0303103379	0.2243049652	xargs is 37.06% faster than forkrun (1.3706x)	forkrun is 439.9% faster than parallel (5.3992x)	
+sum -r      	0.0765108093	0.0729445631	0.0718773724	0.2227912818	xargs is 1.484% faster than forkrun (1.0148x)	forkrun is 205.4% faster than parallel (3.0542x)	
+cksum       	0.0412267145	0.0393255141	0.0268335436	0.2247335066	xargs is 46.55% faster than forkrun (1.4655x)	forkrun is 471.4% faster than parallel (5.7146x)	
+b2sum       	0.0747154217	0.0707681028	0.0701579399	0.2224140355	xargs is .8696% faster than forkrun (1.0086x)	forkrun is 214.2% faster than parallel (3.1428x)	
+cksum -a sm3	0.1430648979	0.1335950296	0.1570131829	0.2683157350	forkrun is 17.52% faster than xargs (1.1752x)	forkrun is 100.8% faster than parallel (2.0084x)	
+
+OVERALL     	.87198858460	.82299026678	.83464342627	2.5138905363	xargs is 4.474% faster than forkrun (1.0447x)	forkrun is 188.2% faster than parallel (2.8829x)	
+
+
+
+
+||----------------------------------------------------------------- NUM_CHECKSUMS=16384 ---------------------------------------------------------------------|| 
+
+(algorithm)	(forkrun -j -)	(forkrun)   	(xargs)     	(parallel)  	(relative performance vs xargs)             	(relative performance vs parallel)          	
+------------	------------	------------	------------	------------	--------------------------------------------	-----------------------------------------------	
+sha1sum     	0.1867015253	0.1969434563	0.2386977186	0.4715072541	forkrun is 27.84% faster than xargs (1.2784x)	forkrun is 152.5% faster than parallel (2.5254x)	
+sha256sum   	0.3322351298	0.3583199901	0.4681176950	0.5537797738	forkrun is 40.89% faster than xargs (1.4089x)	forkrun is 66.68% faster than parallel (1.6668x)	
+sha512sum   	0.2467307059	0.2561876953	0.3326483924	0.5018347472	forkrun is 29.84% faster than xargs (1.2984x)	forkrun is 95.88% faster than parallel (1.9588x)	
+sha224sum   	0.3325379478	0.3581663335	0.4685610028	0.5520236175	forkrun is 40.90% faster than xargs (1.4090x)	forkrun is 66.00% faster than parallel (1.6600x)	
+sha384sum   	0.2457841650	0.2606458978	0.3298648045	0.5025861434	forkrun is 26.55% faster than xargs (1.2655x)	forkrun is 92.82% faster than parallel (1.9282x)	
+md5sum      	0.2357228265	0.2354668025	0.3183990356	0.4981314302	forkrun is 35.22% faster than xargs (1.3522x)	forkrun is 111.5% faster than parallel (2.1155x)	
+sum -s      	0.0807566526	0.0752002162	0.0683035072	0.4497789642	xargs is 18.23% faster than forkrun (1.1823x)	forkrun is 456.9% faster than parallel (5.5695x)	
+sum -r      	0.2385188904	0.2423304082	0.3236779935	0.4994696362	forkrun is 35.70% faster than xargs (1.3570x)	forkrun is 109.4% faster than parallel (2.0940x)	
+cksum       	0.0722047824	0.0668172833	0.0547409313	0.4487276400	xargs is 22.06% faster than forkrun (1.2206x)	forkrun is 571.5% faster than parallel (6.7157x)	
+b2sum       	0.2219382671	0.2431867819	0.2918487350	0.4871172812	forkrun is 31.49% faster than xargs (1.3149x)	forkrun is 119.4% faster than parallel (2.1948x)	
+cksum -a sm3	0.5732426427	0.5976080648	0.8362951948	0.7714800347	forkrun is 45.88% faster than xargs (1.4588x)	forkrun is 34.58% faster than parallel (1.3458x)	
+
+OVERALL     	2.7663735360	2.8908729306	3.7311550111	5.7364365229	forkrun is 34.87% faster than xargs (1.3487x)	forkrun is 107.3% faster than parallel (2.0736x)	
+
+
+
+
+||----------------------------------------------------------------- NUM_CHECKSUMS=65536 ---------------------------------------------------------------------|| 
+
+(algorithm)	(forkrun -j -)	(forkrun)   	(xargs)     	(parallel)  	(relative performance vs xargs)             	(relative performance vs parallel)          	
+------------	------------	------------	------------	------------	--------------------------------------------	-----------------------------------------------	
+sha1sum     	0.3166234583	0.3081969813	0.2892968194	1.3709664832	xargs is 6.533% faster than forkrun (1.0653x)	forkrun is 344.8% faster than parallel (4.4483x)	
+sha256sum   	0.5588102563	0.5361554151	0.5634634153	1.4267971958	forkrun is 5.093% faster than xargs (1.0509x)	forkrun is 166.1% faster than parallel (2.6611x)	
+sha512sum   	0.4208754423	0.4118677542	0.4241373676	1.3731973373	forkrun is .7750% faster than xargs (1.0077x)	forkrun is 226.2% faster than parallel (3.2627x)	
+sha224sum   	0.5501920427	0.5234951369	0.5569853392	1.4289820404	forkrun is 6.397% faster than xargs (1.0639x)	forkrun is 172.9% faster than parallel (2.7296x)	
+sha384sum   	0.4157531883	0.3982773591	0.4202099000	1.3734294131	forkrun is 5.506% faster than xargs (1.0550x)	forkrun is 244.8% faster than parallel (3.4484x)	
+md5sum      	0.3948152193	0.3225332777	0.3230644961	1.3656759629	forkrun is .1647% faster than xargs (1.0016x)	forkrun is 323.4% faster than parallel (4.2342x)	
+sum -s      	0.1450227967	0.1265254470	0.1112041135	1.3396630351	xargs is 30.41% faster than forkrun (1.3041x)	forkrun is 823.7% faster than parallel (9.2376x)	
+sum -r      	0.3994018897	0.3210762502	0.3285114489	1.3695607271	xargs is 21.57% faster than forkrun (1.2157x)	forkrun is 242.9% faster than parallel (3.4290x)	
+cksum       	0.1309943854	0.1192536441	0.0987002132	1.3302864768	xargs is 32.71% faster than forkrun (1.3271x)	forkrun is 915.5% faster than parallel (10.155x)	
+b2sum       	0.379415918 	0.3492759867	0.3717721853	1.3641621178	xargs is 2.056% faster than forkrun (1.0205x)	forkrun is 259.5% faster than parallel (3.5954x)	
+cksum -a sm3	0.9215685345	0.9128113504	0.9739906008	1.5556143428	forkrun is 6.702% faster than xargs (1.0670x)	forkrun is 70.42% faster than parallel (1.7042x)	
+
+OVERALL     	4.6334731319	4.3294686032	4.4613358997	15.298335132	forkrun is 3.045% faster than xargs (1.0304x)	forkrun is 253.3% faster than parallel (3.5335x)	
+
+
+
+
+||----------------------------------------------------------------- NUM_CHECKSUMS=262144 --------------------------------------------------------------------|| 
+
+(algorithm)	(forkrun -j -)	(forkrun)   	(xargs)     	(parallel)  	(relative performance vs xargs)             	(relative performance vs parallel)          	
+------------	------------	------------	------------	------------	--------------------------------------------	-----------------------------------------------	
+sha1sum     	1.1691990819	1.1143811324	1.0678331323	5.1917066165	xargs is 4.359% faster than forkrun (1.0435x)	forkrun is 365.8% faster than parallel (4.6588x)	
+sha256sum   	2.0756542913	2.1749040468	2.1260143537	5.5108992503	xargs is 2.299% faster than forkrun (1.0229x)	forkrun is 153.3% faster than parallel (2.5338x)	
+sha512sum   	1.5682774363	1.5860477947	1.5453862143	5.3672893988	xargs is 2.631% faster than forkrun (1.0263x)	forkrun is 238.4% faster than parallel (3.3840x)	
+sha224sum   	2.0726675314	2.1845690247	2.1302818910	5.5215304415	xargs is 2.548% faster than forkrun (1.0254x)	forkrun is 152.7% faster than parallel (2.5275x)	
+sha384sum   	1.5533092229	1.5852053605	1.5408653424	5.3432020748	xargs is .8075% faster than forkrun (1.0080x)	forkrun is 243.9% faster than parallel (3.4398x)	
+md5sum      	1.4656343381	1.1748666538	1.1325501433	5.2998418160	xargs is 3.736% faster than forkrun (1.0373x)	forkrun is 351.1% faster than parallel (4.5110x)	
+sum -s      	0.4941002657	0.3930854348	0.3464444167	4.8966754667	xargs is 13.46% faster than forkrun (1.1346x)	forkrun is 1145.% faster than parallel (12.457x)	
+sum -r      	1.4812141555	1.1980802051	1.1455858101	5.2912711698	xargs is 29.29% faster than forkrun (1.2929x)	forkrun is 257.2% faster than parallel (3.5722x)	
+cksum       	0.4389497101	0.3772458474	0.3323412783	4.8892325534	xargs is 32.07% faster than forkrun (1.3207x)	forkrun is 1013.% faster than parallel (11.138x)	
+b2sum       	1.4064487610	1.3383431377	1.3022433907	5.2526404905	xargs is 8.001% faster than forkrun (1.0800x)	forkrun is 273.4% faster than parallel (3.7346x)	
+cksum -a sm3	3.5168986116	3.9799941909	3.9605970642	5.9331419742	forkrun is 12.61% faster than xargs (1.1261x)	forkrun is 68.70% faster than parallel (1.6870x)	
+
+OVERALL     	17.242353406	17.106722829	16.630143037	58.497431252	xargs is 2.865% faster than forkrun (1.0286x)	forkrun is 241.9% faster than parallel (3.4195x)	
+
+
+
+
+||----------------------------------------------------------------- NUM_CHECKSUMS=586011 --------------------------------------------------------------------|| 
+
+(algorithm)	(forkrun -j -)	(forkrun)   	(xargs)     	(parallel)  	(relative performance vs xargs)             	(relative performance vs parallel)          	
+------------	------------	------------	------------	------------	--------------------------------------------	-----------------------------------------------	
+sha1sum     	2.6989329360	3.1175157159	2.9904085499	12.434668815	forkrun is 10.79% faster than xargs (1.1079x)	forkrun is 360.7% faster than parallel (4.6072x)	
+sha256sum   	5.1956187172	6.2479048200	5.9725777802	13.392190694	forkrun is 14.95% faster than xargs (1.1495x)	forkrun is 157.7% faster than parallel (2.5775x)	
+sha512sum   	3.9128132755	4.4216966319	4.2344596606	13.013352871	forkrun is 8.220% faster than xargs (1.0822x)	forkrun is 232.5% faster than parallel (3.3258x)	
+sha224sum   	5.3326558179	6.1593330569	5.9391213842	12.798612435	forkrun is 11.37% faster than xargs (1.1137x)	forkrun is 140.0% faster than parallel (2.4000x)	
+sha384sum   	3.6970332571	4.3892427704	4.1878367560	12.546256798	forkrun is 13.27% faster than xargs (1.1327x)	forkrun is 239.3% faster than parallel (3.3936x)	
+md5sum      	3.4040184367	3.5744967019	3.5274427026	12.665717266	forkrun is 3.625% faster than xargs (1.0362x)	forkrun is 272.0% faster than parallel (3.7208x)	
+sum -s      	0.9508656814	0.8673272787	0.8216162715	11.499220428	xargs is 5.563% faster than forkrun (1.0556x)	forkrun is 1225.% faster than parallel (13.258x)	
+sum -r      	3.4640789743	3.7169466691	3.6217599301	12.683057313	forkrun is 4.551% faster than xargs (1.0455x)	forkrun is 266.1% faster than parallel (3.6613x)	
+cksum       	0.8317092173	0.7979606116	0.7386253343	11.501837499	xargs is 12.60% faster than forkrun (1.1260x)	forkrun is 1282.% faster than parallel (13.829x)	
+b2sum       	3.3318977637	3.7699765853	3.6460292450	12.563921917	forkrun is 9.428% faster than xargs (1.0942x)	forkrun is 277.0% faster than parallel (3.7708x)	
+cksum -a sm3	9.6956941663	11.295862557	10.914177753	14.661217500	forkrun is 12.56% faster than xargs (1.1256x)	forkrun is 51.21% faster than parallel (1.5121x)	
+
+OVERALL     	42.515318244	48.358263399	46.594055368	139.76005354	forkrun is 9.593% faster than xargs (1.0959x)	forkrun is 228.7% faster than parallel (3.2872x)	
+

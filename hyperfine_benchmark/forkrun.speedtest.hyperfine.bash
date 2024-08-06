@@ -49,7 +49,6 @@ else
 
 fi
 "${testParallelFlag:=true}"
-testParallelFlag=false
 declare -a C0 C1
 
 C0[0]=''
@@ -74,14 +73,10 @@ mkdir -p "${hfdir0}"/file_lists
 
 nArgs=(1024 4096 16384 65536 262144 1048576)
 
-for kk in {1..6}; do
-	find "${findDir}" -type f | head -n ${nArgs[$(($kk-1))]} >"${hfdir0}"/file_lists/f${kk}
+find "${findDir}" -type f >"${hfdir0}"/file_lists/f6
+for kk in {1..5}; do
+	shuf -n ${nArgs[$(($kk-1))]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f6
 done
-
-shopt -s extglob
-
-export -nf forkrun
-export -f forkrun
 
 for jj in ${!C0[@]}; do
         
