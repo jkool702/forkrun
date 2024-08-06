@@ -384,8 +384,8 @@ forkrun() {
         { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nQueueFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
 
         ${nQueueFlag} && { 
-            [[ ${nProcsMax} == 0 ]] && nProcsMax=$(( ${nCPU} * 2 ));
-            [[ ${nQueueMin} == 0 ]] && nQueueMin=1
+            [[ ${nProcsMax//0/} ]] || nProcsMax=$(( ${nCPU} * 2 ));
+            [[ ${nQueueMin//0/} ]] || nQueueMin=1
         }
 
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe

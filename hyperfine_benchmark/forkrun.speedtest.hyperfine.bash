@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 
 ############################################## BEGIN CODE ##############################################
 
@@ -156,15 +155,17 @@ for jj in ${!C0[@]}; do
         printf '%s\t' "${val[@]}"
 
     }
-
+    
+    shopt -s extglob
     myMin() {
-	if (( ${1%.*} < ${2%.*} )); then 
+        shopt -s extglob
+	if (( $([[ "$1" == .* ]] && printf '0')${1%.*} < $([[ "$2" == .* ]] && printf '0')${2%.*} )); then 
 		echo "$1"
-	elif (( ${1%.*} > ${2%.*} )); then 
+    elif (( $([[ "$1" == .* ]] && printf '0')${1%.*} > $([[ "$2" == .* ]] && printf '0')${2%.*} )); then 
 		echo "$2"
-	elif (( ${1#*.} < ${2#*.} )); then 
+	elif (( ${1##*.*(0)} < ${2##*.*(0)} )); then 
 		echo "$1"
-	elif (( ${1#*.} > ${2#*.} )); then 
+	elif (( ${1##*.*(0)} > ${2##*.*(0)} )); then 
 		echo "$2"
 	else
 		echo "$1"
@@ -179,15 +180,15 @@ for jj in ${!C0[@]}; do
         printf '\n\n\n%.157s|| \n\n' "$(printf '||----------------------------------------------------------------- NUM_CHECKSUMS=%s -------------------------------------------------------------------------' $(wc -l <"${hfdir0}/file_lists/f${kk}"))"
         printf0 8:'(algorithm)' 
         if ${testParallelFlag}; then
-		printf0 12:'(forkrun-nq)' 12:'(forkrun)' 12:'(xargs)' 12:'(parallel)' 44:'(relative performance vs xargs)' 44:'(relative performance vs parallel)'
+		printf0 12:'(forkrun -j -)' 12:'(forkrun)' 12:'(xargs)' 12:'(parallel)' 44:'(relative performance vs xargs)' 44:'(relative performance vs parallel)'
         else
-            printf0 12:'(forkrun)' 12:'(xargs)' 44:'(relative performance vs xargs)'
+            printf0 12:'(forkrun -j -)' 12:'(forkrun)' 12:'(xargs)' 44:'(relative performance vs xargs)'
         fi
         printf '\n%s\t' '------------'
         if ${testParallelFlag}; then
             printf0 12:'------------' '------------' '------------'  '------------' 44:'--------------------------------------------' 44:'-----------------------------------------------'
         else
-            printf0 12:'------------' '------------' 44:'--------------------------------------------'
+            printf0 12:'------------' '------------' '------------' 44:'--------------------------------------------'
         fi
         printf '\n'
         declare -a A0 
