@@ -693,7 +693,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
                     trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
                     trap 'trap - TERM INT HUP USR1' USR1
-                    inotifywait -q -m --format '' "${fPath}" >&${fd_inotify0} &
+                    inotifywait -q -m -e modify,close --format '' "${fPath}" >&${fd_inotify0} &
                     printf '%s\n' "${!}" >"${tmpDir}"/.run/pNotify
                 )
 
@@ -1000,6 +1000,8 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 nQueue=1
                 read -r -u ${fd_nQueue}
 
+		        p_PID=()
+
                 until [[ -f "${tmpDir}"/.quit ]] || { [[ -f "${tmpDir}"/.done ]] && (( ${nQueue} >= ${nQueueMin} )); }; do
                     # read from fd_queue pipe. 
                     #    $'\n' --> increase queue depth by 1. 
@@ -1020,6 +1022,8 @@ p_PID+=(\${p{<#>}_PID})""" )"
                     }
                     
                 done
+
+		        [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
 
               } 2>&${fd_stderr}
             } 2>/dev/null
