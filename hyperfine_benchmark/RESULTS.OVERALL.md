@@ -1,4 +1,9 @@
 ## RESULTS OF HYPERFINE BENCHMARK COMPARING FORKRUN TO XARGS AND PARALLEL  
+
+* the 1st (leftmost) column show how many files were checksummed in that group.
+* the 2nd column shiow which checksum algorithm was used
+* the remaining colums show "wall clock" run time, averaged across all benchmarks for that test case (each has a minimum of at least 50 individual trials being averaged)
+
 ```
 	Checksum	forkrun -j -	forkrun	        xargs -P	parallel
 
