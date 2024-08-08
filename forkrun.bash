@@ -377,9 +377,8 @@ forkrun() {
         }
 
         : "${nQueueFlag:=false}"
-        { ${nQueueFlag} && (( ${nQueueMin:-0} > 0 )) && { [[ ${nProcsMax:-0} == '0' ]] || (( ${nProcs} < ${nProcsMax} )); }; } || : "${nQueueFlag:=false}"
 
-        declare -i nProcs="${nProcs}"
+        local -i nProcs="${nProcs}"
         nCPU="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')";
         { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nQueueFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
 
@@ -387,6 +386,8 @@ forkrun() {
             [[ ${nProcsMax//0/} ]] || nProcsMax=$(( ${nCPU} * 2 ));
             [[ ${nQueueMin//0/} ]] || nQueueMin=1
         }
+
+        { ${nQueueFlag} && (( ${nQueueMin:-0} > 0 )) && { [[ ${nProcsMax:-0} == '0' ]] || (( ${nProcs} < ${nProcsMax} )); }; } || : "${nQueueFlag:=false}"
 
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
@@ -746,7 +747,7 @@ trap 'trap - TERM INT HUP USR1' USR1
 
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
-${nQueueFlag} && echo "printf '\n' >&${fd_nQueue}"
+${nQueueFlag} && ${pipeReadFlag} && echo "printf '\\n' >&${fd_nQueue}"
 echo """
     read -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
@@ -893,16 +894,17 @@ ${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } ||
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
 echo """
     printf '\\n' >&${fd_continue}"""
-${nQueueFlag} && echo "echo '-' >&${fd_nQueue}"
+${nQueueFlag} && ${pipeReadFlag} && echo "echo '-' >&${fd_nQueue}"
 echo """
-    [[ \${#A[@]} == 0 ]] && {
-    \${doneIndicatorFlag} || { 
-      [[ -f \"${tmpDir}\"/.done ]] && {
-        read -r fd_read_pos </proc/self/fdinfo/${fd_read}
-        read -r fd_write_pos </proc/self/fdinfo/${fd_write}
-        [[ \"\${fd_read_pos##*$'\t'}\" == \"\${fd_write_pos##*$'\t'}\" ]] && doneIndicatorFlag=true
-      }
-    }"""
+    if [[ \${#A[@]} == 0 ]]; then
+        \${doneIndicatorFlag} || { 
+          [[ -f \"${tmpDir}\"/.done ]] && {
+            read -r fd_read_pos </proc/self/fdinfo/${fd_read}
+            read -r fd_write_pos </proc/self/fdinfo/${fd_write}
+            [[ \"\${fd_read_pos##*$'\t'}\" == \"\${fd_write_pos##*$'\t'}\" ]] && doneIndicatorFlag=true
+          }
+        }"""
+${nQueueFlag} && ! ${pipeReadFlag} && echo "echo '-' >&${fd_nQueue}"
 echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
@@ -918,8 +920,11 @@ ${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
 ${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify}"
 echo """
         fi
-        continue
-    }"""
+        continue"""
+${nQueueFlag} && ! ${pipeReadFlag} && echo """
+    else
+        printf '\\n' >&${fd_nQueue}"""
+echo "fi"
 ${nLinesAutoFlag} && { printf '%s' """
     \${nLinesAutoFlag} && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
@@ -1010,6 +1015,9 @@ p_PID+=(\${p{<#>}_PID})""" )"
                     read -r -u ${fd_nQueue} -t 0.1 || continue
                     [[ ${REPLY} == '0' ]] && break
                     nQueue+=${REPLY}1
+                    ${pipeReadFlag} || {
+                        (( ${nQueue} < 0 )) && nQueue=0
+                    }
 
                     # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
 
