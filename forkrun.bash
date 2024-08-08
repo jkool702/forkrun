@@ -376,7 +376,7 @@ forkrun() {
             }
         }
 
-        : "${nQueueFlag:=false}"
+        : "${nQueueFlag:=false}"  "${nQueueMin:=1}"
 
         local -i nProcs="${nProcs}"
         nCPU="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')";
@@ -1019,13 +1019,14 @@ p_PID+=(\${p{<#>}_PID})""" )"
                      (( ${verboseLevel} > 3 )) && printf '\nnQueue  = %s (nProcs = %s)\n' "${nQueue}" "${kkProcs}" >&${fd_stderr}
 
                     # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
-		    if (( ${nQueue} < ${nQueueMin:=1} )); then
+		    if (( ${nQueue} <= ${nQueueMin:=1} )); then
 			    ((nQueueCount++))
-		    elif (( ${nQueueCount} < 0 )); then
-			    nQueueCount=0
+		    else
+			    ((nQueueCount--))
+			    (( ${nQueueCount} < 0 )) && nQueueCount=0
 		    fi
 
-		    [[ -f "${tmpDir}"/.spawned ]] && (( ${nQueueCount} >= 3 )) && { 
+		    [[ -f "${tmpDir}"/.spawned ]] && (( ${nQueueCount} >= 1 )) && { 
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
                         (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (read queue depth = %s)\n' "${nQueue}" >&${fd_stderr}
                         ((kkProcs++))
