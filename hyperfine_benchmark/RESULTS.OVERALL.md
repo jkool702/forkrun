@@ -3,6 +3,11 @@
 * the 1st (leftmost) column show how many files were checksummed in that group.
 * the 2nd column shiow which checksum algorithm was used
 * the remaining colums show "wall clock" run time, averaged across all benchmarks for that test case (each has a minimum of at least 50 individual trials being averaged)
+* the bottommost line on the entire table shows the total cummulative time spend for all checksums on all 6 different sized batches of files.
+	* `forkrun -j -` (col 3) was fastest (this forkrun invocation attempts to dynamically determine COPROC count at runtime)
+ 	* `xargs -P $(nproc) -d 0$'\n'` (col5) was about 5% slower than `forkrun`
+  	* `forkrun -j $(nproc)` (col 4) was a couple percent slower than `xargs`
+  	*  `parallel -m -j $(nproc)` (col 6) was roughly 3x slower than `forkrun` and `xargs`.
 
 ```
 	Checksum	forkrun -j -	forkrun	        xargs -P	parallel
