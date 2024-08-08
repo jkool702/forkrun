@@ -27,8 +27,8 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite_PID pNotify_PID pOrder_PID pAuto_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueMin nCPU v9 kkMax kkCur kk kkProcs verboseLevel
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueCount nQueueMin nCPU v9 kkMax kkCur kk kkProcs verboseLevel
     local -a A p_PID runCmd outHave 
 
     # # # # # PARSE OPTIONS # # # # #
@@ -747,7 +747,7 @@ trap 'trap - TERM INT HUP USR1' USR1
 
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
-${nQueueFlag} && ${pipeReadFlag} && echo "printf '\\n' >&${fd_nQueue}"
+${nQueueFlag}  && echo "printf '%s' '+' >&${fd_nQueue}"
 echo """
     read -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
@@ -848,7 +848,7 @@ else
                     echo "[[ \"\${REPLY}\" == ${delimiterVal} ]] || {"
                 fi
         elif ${nullDelimiterFlag}; then
-             echo """
+            echo """
                 read -r fd_read_pos </proc/self/fdinfo/${fd_read}"""
             case "${nullDelimiterProg}" in
               'dd') echo """
@@ -884,9 +884,10 @@ else
         echo """
                 until read -r -u ${fd_read} ${delimiterReadStr}; do 
                     A[-1]+=\"\${REPLY}\"; 
-                done
-                A[-1]+=\"\${REPLY}\"${delimiterVal}"""
-        (( ${verboseLevel} > 2 )) && echo "echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}"
+                done"""
+        printf '%s' "A[-1]+=\"\${REPLY}\""
+	${lseekFlag} && printf '\n' || printf '%s\n' "${delimiterVal}"
+	(( ${verboseLevel} > 2 )) && echo "echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}"
         echo "}"
     }
 fi
@@ -894,22 +895,20 @@ ${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } ||
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
 echo """
     printf '\\n' >&${fd_continue}"""
-${nQueueFlag} && ${pipeReadFlag} && echo "echo '-' >&${fd_nQueue}"
+${nQueueFlag} && echo "printf '%s' '-' >&${fd_nQueue}"
 echo """
-    if [[ \${#A[@]} == 0 ]]; then
+    [[ \${#A[@]} == 0 ]] && {
         \${doneIndicatorFlag} || { 
           [[ -f \"${tmpDir}\"/.done ]] && {
             read -r fd_read_pos </proc/self/fdinfo/${fd_read}
             read -r fd_write_pos </proc/self/fdinfo/${fd_write}
             [[ \"\${fd_read_pos##*$'\t'}\" == \"\${fd_write_pos##*$'\t'}\" ]] && doneIndicatorFlag=true
           }
-        }"""
-${nQueueFlag} && ! ${pipeReadFlag} && echo "echo '-' >&${fd_nQueue}"
-echo """
+        }
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
-${nQueueFlag} && echo "echo 0 >&${fd_nQueue}"
+${nQueueFlag} && echo "\printf '%s' '0' >&${fd_nQueue}"
 ${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' 2>/dev/null'
 echo """
             : >\"${tmpDir}\"/.quit
@@ -920,11 +919,8 @@ ${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
 ${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify}"
 echo """
         fi
-        continue"""
-${nQueueFlag} && ! ${pipeReadFlag} && echo """
-    else
-        printf '\\n' >&${fd_nQueue}"""
-echo "fi"
+        continue
+    }"""
 ${nLinesAutoFlag} && { printf '%s' """
     \${nLinesAutoFlag} && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
@@ -1001,37 +997,46 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 # start spawning after nProcs workers already forked
                 kkProcs=${nProcs}                
 
-                # first read will always be adding 1 to the queue 
-                nQueue=1
-                read -r -u ${fd_nQueue}
+		p_PID=()
 
-		        p_PID=()
+		nQueueCount=0
 
                 until [[ -f "${tmpDir}"/.quit ]] || { [[ -f "${tmpDir}"/.done ]] && (( ${nQueue} >= ${nQueueMin} )); }; do
+
+
                     # read from fd_queue pipe. 
-                    #    $'\n' --> increase queue depth by 1. 
+                    #      '+' --> increase queue depth by 1. 
                     #      '-' --> decrease queue depth by 1.
                     #      '0' --> quit
-                    read -r -u ${fd_nQueue} -t 0.1 || continue
-                    [[ ${REPLY} == '0' ]] && break
-                    nQueue+=${REPLY}1
-                    ${pipeReadFlag} || {
-                        (( ${nQueue} < 0 )) && nQueue=0
-                    }
+                    read -r -u ${fd_nQueue} -N 1 
+                    case "${REPLY}" in
+			    '+')  ((nQueue++))  ;;
+			    '-')  ((nQueue--)); nQueueLast="${nQueue}"  ;;
+			    0)      break       ;;
+			    *)     continue     ;;
+		    esac
+
+                     (( ${verboseLevel} > 3 )) && printf '\nnQueue  = %s (nProcs = %s)\n' "${nQueue}" "${kkProcs}" >&${fd_stderr}
 
                     # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
+		    if (( ${nQueue} < ${nQueueMin:=1} )); then
+			    ((nQueueCount++))
+		    elif (( ${nQueueCount} < 0 )); then
+			    nQueueCount=0
+		    fi
 
-                    [[ -f "${tmpDir}"/.spawned ]] && (( ${nQueue} < ${nQueueMin} )) && { 
+		    [[ -f "${tmpDir}"/.spawned ]] && (( ${nQueueCount} >= 3 )) && { 
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
                         (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (read queue depth = %s)\n' "${nQueue}" >&${fd_stderr}
                         ((kkProcs++))
+			nQueueCount=0
                         echo "${kkProcs}" >"${tmpDir}"/.nWorkers
                         (( ${kkProcs} >= ${nProcsMax} )) && break
                     }
                     
                 done
 
-		        [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
+		        [[ ${#p_PID[@]} == 0 ]] || wait -f "${p_PID[@]}"
 
               } 2>&${fd_stderr}
             } 2>/dev/null

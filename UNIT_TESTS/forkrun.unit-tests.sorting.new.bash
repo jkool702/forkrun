@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#testDir='/usr'
-useRamdiskFlag=true
+testDir='/mnt/ramdisk/usr'
+#useRamdiskFlag=true
 
 ################################################################################
 
