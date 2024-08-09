@@ -64,7 +64,7 @@ C0[3]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
 C1[3]=' | wc -l'
 
 C0[4]=''
-C1[4]=' <"'"${hfdir0}"'"/file_lists/f${kk} | >/dev/null'
+C1[4]=' <"'"${hfdir0}"'"/file_lists/f${kk} >/dev/null'
 
 C0[5]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
 C1[5]=' >/dev/null'
