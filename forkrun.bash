@@ -1681,3 +1681,51 @@ _forkrun_lseek_setup() {
 }
 
 _forkrun_lseek_setup
+
+load_tic() {
+    # run this to set start time for recording the average load
+    local cpu_user0 cpu_nice0 cpu_system0 cpu_idle0 cpu_IOwait0 cpu_irq0 cpu_softirq0 cpu_steal0 cpu_guest0 cpu_guestnice0
+    declare -ig tALL00
+    
+    read -r _ cpu_user0 cpu_nice0 cpu_system0 cpu_idle0 cpu_IOwait0 cpu_irq0 cpu_softirq0 cpu_steal0 cpu_guest0 cpu_guestnice0 </proc/stat; 
+    
+    cpu_LOAD0=$(( cpu_user0 + cpu_nice0 + cpu_system0 + cpu_irq0 + cpu_softirq0 + cpu_steal0 + cpu_guest0 + cpu_guestnice0 ));    
+    cpu_ALL0=$(( cpu_LOAD0 + cpu_idle0 + cpu_IOwait0 ));
+
+    tALL00=0
+    pLOAD0=0
+    
+}
+
+load_toc() {
+    # run this to print average load since `load_tic` was last run
+    # output icpu_irq0 cpu_softirq0 cpu_steal0 cpu_guest0 cpu_guestnice0s a number between 0 - 1000000 (1 million) that
+    # represents the average load between all logical CPU cores
+    #      0 --> no load        1000000 --> 100% load
+    # optional: pass argument to use a different number for 100% load
+
+    local -i loadMaxVal="${1:-1000000}"
+    (( ${loadMaxVal} > 0 )) || loadMaxVal=1000000
+
+       local cpu_user1 cpu_nice1 cpu_system1 cpu_idle1 cpu_IOwait1 cpu_irq1 cpu_softirq1 cpu_steal1 cpu_guest1 cpu_guestnice1 
+    
+    read -r _ cpu_user1 cpu_nice1 cpu_system1 cpu_idle1 cpu_IOwait1 cpu_irq1 cpu_softirq1 cpu_steal1 cpu_guest1 cpu_guestnice1 </proc/stat; 
+    
+    cpu_LOAD1=$(( cpu_user1 + cpu_nice1 + cpu_system1 + cpu_irq1 + cpu_softirq1 + cpu_steal1 + cpu_guest1 + cpu_guestnice1 ));    
+    cpu_ALL1=$(( cpu_LOAD1 + cpu_idle1 + cpu_IOwait1 ));
+    
+    tLOAD1=$(( cpu_LOAD1 - cpu_LOAD0 ))
+    tALL1=$(( cpu_ALL1 - cpu_ALL0 ))
+    
+    (( tALL00 > ( 10 * tALL1 ) )) && tALL00=$(( 10 * tALL1 ))
+
+    pLOAD=$(( ( loadMaxVal * tLOAD1 ) / tALL1 ))
+    pLOAD=$(( ( ( ( tALL00 + tALL1 ) * pLOAD ) + ( tALL00 * pLOAD0 ) ) / ( 1 + tALL1 + ( 2 * tALL00 ) ) ))
+    
+    echo ${pLOAD}
+    
+    cpu_LOAD0=${cpu_LOAD1}        
+    cpu_ALL0=${cpu_ALL1}
+    tALL00+=${tALL1}
+    pLOAD0=${pLOAD}
+}
