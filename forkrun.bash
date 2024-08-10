@@ -28,7 +28,7 @@ forkrun() {
 
     # make all variables local
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nCPU v9 kkMax kkCur kk kkProcs verboseLevel cpu_LOAD1 cpu_ALL1 tLOAD1 tALL1 pLOAD cpu_LOAD0 cpu_ALL0 tALL0 pLOAD0 pLOAD00 pLOAD_max pAdd
+    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nCPU v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel cpu_LOAD0 cpu_ALL0 pLOAD pLOAD0 pLOAD_max pAdd
     local -a A p_PID runCmd outHave 
 
     # # # # # PARSE OPTIONS # # # # #
@@ -505,7 +505,6 @@ forkrun() {
         # get baseline cpuload
         ${nQueueFlag} && {
             _forkrun_get_load 
-            pLOAD00=${pLOAD}
         }
 
         # start building exit trap string
@@ -1010,12 +1009,16 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 nQueue=0
                 
                 (( "${nQueueMin}" <= 0 )) && nQueueMin=1
-                : "${pLOAD_max:=900000}"
+                : "${pLOAD_max:=900}"
+
+                _forkrun_get_load
+                ((${nProcsMax} > ( ${nProcs} + ( ${nProcs} * ( ${pLOAD_MAX} - ${pLOAD} ) ) / ( ${pLOAD} - ${pLOAD0} ) ) )) && nProcsMax=$(( ${nProcs} + ( ${nProcs} * ( ${pLOAD_MAX} - ${pLOAD} ) ) / ( ${pLOAD} - ${pLOAD0} ) ))
+                kkProcs0=${nProcs}
 
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
                 nQueueLast=${nQueue}
 
-                # read from fd_queue pipe. 
+                # read from fd_queue pipe. =${
                 #      '+' --> increase queue depth by 1. 
                 #      '-' --> decrease queue depth by 1.
                 #      '0' --> quit
@@ -1034,7 +1037,9 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
 		[[ -f "${tmpDir}"/.spawned ]] && (( ( ( 2 * ${nQueue} ) + ${nQueueLast} + 1 ) < ( 3 * ${nQueueMin:=1} ) )) && { 
                     _forkrun_get_load
-                    pAdd=$(( 1 + (  ${kkProcs} * ( ${pLOAD_max} - ${pLOAD} ) ) / ( ( 1 + ${pLOAD} - ${pLOAD00} ) ) ))
+                    (( ${pLOAD} >= ${pLOAD_max} )) && break
+                    pAdd=$(( 1 + (  ( ${kkProcs} - ${kkProcs0} ) * ( ${pLOAD_max} - ${pLOAD} ) ) / ( ( 1 + ${pLOAD} - ${pLOAD0} ) ) ))
+                    kkProcs0=${kkProcs}
 		    (( ${pAdd} > ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) ) )) && pAdd=$(( ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) ) ))
 		    (( ${pAdd} > ( 1 + ( ${nCPU} / 8 ) ) )) && pAdd=$(( 1 + ( ${nCPU} / 8 ) ))
                     for (( kk=0; kk<${pAdd}; kk++ )); do
@@ -1699,21 +1704,6 @@ _forkrun_lseek_setup() {
 
 _forkrun_lseek_setup
 
-load_tic() {
-    # run this to set start time for recording the average load
-    local cpu_user0 cpu_nice0 cpu_system0 cpu_idle0 cpu_IOwait0 cpu_irq0 cpu_softirq0 cpu_steal0 cpu_guest0 cpu_guestnice0
-    declare -ig tALL0
-    
-    read -r _ cpu_user0 cpu_nice0 cpu_system0 cpu_idle0 cpu_IOwait0 cpu_irq0 cpu_softirq0 cpu_steal0 cpu_guest0 cpu_guestnice0 </proc/stat; 
-    
-    cpu_LOAD0=$(( cpu_user0 + cpu_nice0 + cpu_system0 + cpu_irq0 + cpu_softirq0 + cpu_steal0 + cpu_guest0 + cpu_guestnice0 ));    
-    cpu_ALL0=$(( cpu_LOAD0 + cpu_idle0 + cpu_IOwait0 ));
-
-    tALL0=0
-    pLOAD0=0
-    
-}
-
 _forkrun_get_load() {
     # prints average load gathered from /proc/stat 
     #
@@ -1730,51 +1720,55 @@ _forkrun_get_load() {
     # NOTE: requires the following variables be stored without modification by the caller between calls to _forkrun_get_load:
     #       cpu_LOAD1  cpu_ALL1  tLOAD1  tALL1  pLOAD  cpu_LOAD0  cpu_ALL0  tALL0  cpu_LOAD0
 
-    local -i loadMaxVal cpu_user1 cpu_nice1 cpu_system1 cpu_idle1 cpu_IOwait1 cpu_irq1 cpu_softirq1 cpu_steal1 cpu_guest1 cpu_guestnice1 
+    local -i loadMaxVal cpu_user1 cpu_nice1 cpu_system1 cpu_idle1 cpu_IOwait1 cpu_irq1 cpu_softirq1 cpu_steal1 cpu_guest1 cpu_guestnice1 cpu_LOAD1 cpu_ALL1 
     local nn echoFlag initFlag
-    declare -ig cpu_LOAD1 cpu_ALL1 tLOAD1 tALL1 pLOAD cpu_LOAD0 cpu_ALL0 tALL0 pLOAD0
+    declare -ig pLOAD pLOAD0 cpu_LOAD0 cpu_ALL0 
 
     echoFlag=false
     initFlag=false
-    loadMaxVal=1000000
+    loadMaxVal=1000
     for nn in "${@}"; do
         case "${nn}" in
             '-i'|'--init')
-                unset cpu_LOAD1 cpu_ALL1 tLOAD1 tALL1 pLOAD cpu_LOAD0 cpu_ALL0 tALL0 cpu_LOAD0
-                declare -ig cpu_LOAD1 cpu_ALL1 tLOAD1 tALL1 pLOAD cpu_LOAD0 cpu_ALL0 tALL0 cpu_LOAD0
+                unset pLOAD pLOAD0 cpu_LOAD0 cpu_ALL0 
+                declare  pLOAD pLOAD0 cpu_LOAD0 cpu_ALL0 
                 initFlag=true
             ;;
             '-e'|'--echo')
                 echoFlag=true
             ;;
             [0-9]*)
-                loadMaxVal="${1:-1000000}"
-                (( ${loadMaxVal} > 0 )) || loadMaxVal=1000000
-            esac
-        done
+                loadMaxVal="${1}"
+                (( ${loadMaxVal} > 0 )) || loadMaxVal=1000
+            ;;
+        esac
+    done
+
+    pLoad0=${pLOAD:-0}
 
     read -r _ cpu_user1 cpu_nice1 cpu_system1 cpu_idle1 cpu_IOwait1 cpu_irq1 cpu_softirq1 cpu_steal1 cpu_guest1 cpu_guestnice1 </proc/stat; 
     
     cpu_LOAD1=$(( cpu_user1 + cpu_nice1 + cpu_system1 + cpu_irq1 + cpu_softirq1 + cpu_steal1 + cpu_guest1 + cpu_guestnice1 ));    
     cpu_ALL1=$(( cpu_LOAD1 + cpu_idle1 + cpu_IOwait1 ));
-    
-    tLOAD1=$(( cpu_LOAD1 - ${cpu_LOAD0:-${cpu_LOAD1}} ))
-    tALL1=$(( cpu_ALL1 - ${cpu_ALL0:-${cpu_ALL1}} ))
-    
-    (( ${tALL0:-${tALL1}} > ( 10 * ${tALL1} ) )) && tALL0=$(( 10 * tALL1 ))
 
-    pLOAD=$(( ( loadMaxVal * tLOAD1 ) / ( 1 + tALL1 ) ))
-    pLOAD=$(( ( ( ( ${tALL0:-${tALL1}} + tALL1 ) * pLOAD ) + ( ${tALL0:-${tALL1}} * ${pLOAD0:-${pLOAD}} ) ) / ( 1 + tALL1 + ( 2 * ${tALL0:-${tALL1}} ) ) ))
+    pLOAD=$(( ( loadMaxVal * ( cpu_LOAD1 - ${cpu_LOAD0:-${cpu_LOAD1}} ) ) / ( 1 + cpu_ALL1 - ${cpu_ALL0:-${cpu_ALL1}} ) ))
+    
+#    tLOAD1=$(( cpu_LOAD1 - ${cpu_LOAD0:-${cpu_LOAD1}} ))
+#    tALL1=$(( cpu_ALL1 - ${cpu_ALL0:-${cpu_ALL1}} ))
+#    
+#    (( ${tALL0:-${tALL1}} > ( 10 * ${tALL1} ) )) && tALL0=$(( 10 * tALL1 ))
+#
+#    pLOAD=$(( ( loadMaxVal * tLOAD1 ) / ( 1 + tALL1 ) ))
+#    pLOAD=$(( ( ( ( ${tALL0:-${tALL1}} + tALL1 ) * pLOAD ) + ( ${tALL0:-${tALL1}} * ${pLOAD0:-${pLOAD}} ) ) / ( 1 + tALL1 + ( 2 * ${tALL0:-${tALL1}} ) ) ))
 
     cpu_LOAD0=${cpu_LOAD1}        
     cpu_ALL0=${cpu_ALL1}
-    tALL0+=${tALL1}
-    pLOAD0=${pLOAD}
+#    tALL0+=${tALL1}
+#    pLOAD0=${pLOAD}
 
     ${initFlag} && {
         _forkrun_get_load
-        pLOAD0=${pLOAD}
     }
     
-    ${echoFlag} && echo "${pLOAD0}"
+    ${echoFlag} && echo "${pLOAD}"
 }
