@@ -1032,14 +1032,14 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
                 # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
 
-                [[ -f "${tmpDir}"/.spawned ]] && (( ( ${nQueue} + ${nQueueLast} ) < ( 2 * ${nQueueMin:=1} ) )) && { 
+		[[ -f "${tmpDir}"/.spawned ]] && (( ( ( 2 * ${nQueue} ) + ${nQueueLast} + 1 ) < ( 3 * ${nQueueMin:=1} ) )) && { 
                     _forkrun_get_load
-                    pAdd=$(( ( ( ${nQueue} + ${nQueueLast} ) * ${kkProcs} * ( ${pLOAD_max} - ${pLOAD} ) ) / ( 2 * ${nQueueMin:=1} * ( 1 + ${pLOAD} - ${pLOAD00} ) ) ))
-                    [[ "${pAdd}" == 0 ]] && pAdd=1
-                    (( ${pAdd} > ( ${nProcsMax} - ${kkProcs} ) )) && pAdd=$(( ${nProcsMax} - ${kkProcs} ))
+                    pAdd=$(( 1 + (  ${kkProcs} * ( ${pLOAD_max} - ${pLOAD} ) ) / ( ( 1 + ${pLOAD} - ${pLOAD00} ) ) ))
+		    (( ${pAdd} > ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) ) )) && pAdd=$(( ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) ) ))
+		    (( ${pAdd} > ( ${nCPU} / 4 ) )) && pAdd=$(( ${nCPU} / 4 ))
                     for (( kk=0; kk<${pAdd}; kk++ )); do
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
-                        (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC. There are now %s coprocs. (read queue depth = %s)\n' "${nQueue}" "${kkProcs}" >&${fd_stderr}
+			(( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs. (read queue depth = %s)\n' "${kk}" "${pAdd}" "${kkProcs}" "${nQueue}" >&${fd_stderr}
                         ((kkProcs++))
                     done
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
