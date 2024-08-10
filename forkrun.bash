@@ -28,7 +28,7 @@ forkrun() {
 
     # make all variables local
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nCPU v9 kkMax kkCur kk kkProcs verboseLevel cpu_LOAD1 cpu_ALL1 tLOAD1 tALL1 pLOAD cpu_LOAD0 cpu_ALL0 tALL0 pLOAD0 pLOAD00
+    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nCPU v9 kkMax kkCur kk kkProcs verboseLevel cpu_LOAD1 cpu_ALL1 tLOAD1 tALL1 pLOAD cpu_LOAD0 cpu_ALL0 tALL0 pLOAD0 pLOAD00 pLOAD_max pAdd
     local -a A p_PID runCmd outHave 
 
     # # # # # PARSE OPTIONS # # # # #
@@ -1008,6 +1008,9 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 p_PID=()
 
                 nQueue=0
+                
+                (( "${nQueueMin}" <= 0 )) && nQueueMin=1
+                : "${pLOAD_max:=900000}"
 
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
                 nQueueLast=${nQueue}
@@ -1018,7 +1021,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 #      '0' --> quit
                 read -r -u ${fd_nQueue} -N 1 
     
-    		case "${REPLY}" in
+    		    case "${REPLY}" in
                     '+')  ((nQueue++))  ;;
                     '-')  ((nQueue--))  ;;
                     0)      break       ;;
@@ -1030,9 +1033,15 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
 
                 [[ -f "${tmpDir}"/.spawned ]] && (( ( ${nQueue} + ${nQueueLast} ) < ( 2 * ${nQueueMin:=1} ) )) && { 
-                    source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
-                    (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC. There are now %s coprocs. (read queue depth = %s)\n' "${nQueue}" "${kkProcs}" >&${fd_stderr}
-                    ((kkProcs++))
+                    _forkrun_get_load
+                    pAdd=$(( ( ( ${nQueue} + ${nQueueLast} ) * ${kkProcs} * ( ${pLOAD_max} - ${pLOAD} ) ) / ( 2 * ${nQueueMin:=1} * ( 1 + ${pLOAD} - ${pLOAD00} ) ) ))
+                    [[ "${pAdd}" == 0 ]] && pAdd=1
+                    (( ${pAdd} > ( ${nProcsMax} - ${kkProcs} ) )) && pAdd=$(( ${nProcsMax} - ${kkProcs} ))
+                    for (( kk=0; kk<${pAdd}; kk++ )); do
+                        source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
+                        (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC. There are now %s coprocs. (read queue depth = %s)\n' "${nQueue}" "${kkProcs}" >&${fd_stderr}
+                        ((kkProcs++))
+                    done
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
                 }
                     
