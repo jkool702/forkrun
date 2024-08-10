@@ -1036,7 +1036,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                     _forkrun_get_load
                     pAdd=$(( 1 + (  ${kkProcs} * ( ${pLOAD_max} - ${pLOAD} ) ) / ( ( 1 + ${pLOAD} - ${pLOAD00} ) ) ))
 		    (( ${pAdd} > ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) ) )) && pAdd=$(( ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) ) ))
-		    (( ${pAdd} > ( ${nCPU} / 4 ) )) && pAdd=$(( ${nCPU} / 4 ))
+		    (( ${pAdd} > ( 1 + ( ${nCPU} / 8 ) ) )) && pAdd=$(( 1 + ( ${nCPU} / 8 ) ))
                     for (( kk=0; kk<${pAdd}; kk++ )); do
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
 			(( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs. (read queue depth = %s)\n' "${kk}" "${pAdd}" "${kkProcs}" "${nQueue}" >&${fd_stderr}
