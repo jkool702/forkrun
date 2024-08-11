@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nProcsMax nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nCPU v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel cpu_LOAD0 cpu_ALL0 pLOAD pLOAD0 pLOAD_max pAdd
     local -a A p_PID runCmd outHave 
 
@@ -378,9 +378,9 @@ forkrun() {
             }
         }
 
-        : "${nQueueFlag:=false}"  "${nQueueMin:=1}"
+        : "${nQueueFlag:=false}" "${nQueueMin:=1}"
 
-        local -i nProcs="${nProcs}"
+        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}"
         nCPU="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')";
         { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nQueueFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
 
@@ -996,9 +996,9 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 export LC_ALL=C LANG=C IFS=
 
                 trap '[[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
-                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
-                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
                 trap 'trap - TERM INT HUP USR1' USR1
 
                 # start spawning after nProcs workers already forked
@@ -1009,10 +1009,16 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 nQueue=0
                 
                 (( "${nQueueMin}" <= 0 )) && nQueueMin=1
+                
                 : "${pLOAD_max:=900}"
+                
+                pLOAD=${pLOAD}
+                pLOAD0=${pLOAD0}
+                cpu_LOAD0=${cpu_LOAD0}
+                cpu_ALL0=${cpu_ALL0}
 
                 _forkrun_get_load
-                ((${nProcsMax} > ( ${nProcs} + ( ${nProcs} * ( ${pLOAD_MAX} - ${pLOAD} ) ) / ( ${pLOAD} - ${pLOAD0} ) ) )) && nProcsMax=$(( ${nProcs} + ( ${nProcs} * ( ${pLOAD_MAX} - ${pLOAD} ) ) / ( ${pLOAD} - ${pLOAD0} ) ))
+                (( ${nProcsMax} > ( ${nProcs} + ( ${nProcs} * ( ${pLOAD_max} - ${pLOAD} ) ) / ( 1 + ${pLOAD} - ${pLOAD0} ) ) )) && nProcsMax=$(( ${nProcs} + ( ${nProcs} * ( ${pLOAD_max} - ${pLOAD} ) ) / ( 1 + ${pLOAD} - ${pLOAD0} ) ))
                 kkProcs0=${nProcs}
 
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
@@ -1035,16 +1041,21 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
                 # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
 
-		[[ -f "${tmpDir}"/.spawned ]] && (( ( ( 2 * ${nQueue} ) + ${nQueueLast} + 1 ) < ( 3 * ${nQueueMin:=1} ) )) && { 
+        		[[ -f "${tmpDir}"/.spawned ]] && (( ( ( 2 * ${nQueue} ) + ${nQueueLast} + 1 ) < ( 3 * ${nQueueMin:=1} ) )) && { 
                     _forkrun_get_load
                     (( ${pLOAD} >= ${pLOAD_max} )) && break
-                    pAdd=$(( 1 + (  ( ${kkProcs} - ${kkProcs0} ) * ( ${pLOAD_max} - ${pLOAD} ) ) / ( ( 1 + ${pLOAD} - ${pLOAD0} ) ) ))
+                    pAdd=$(( 1 + ( ( ${kkProcs} - ${kkProcs0} ) * ( ${pLOAD_max} - ${pLOAD} ) ) / ( 1 + ${pLOAD} - ${pLOAD0} ) ))
                     kkProcs0=${kkProcs}
-		    (( ${pAdd} > ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) ) )) && pAdd=$(( ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) ) ))
-		    (( ${pAdd} > ( 1 + ( ${nCPU} / 8 ) ) )) && pAdd=$(( 1 + ( ${nCPU} / 8 ) ))
+        		    
+                    (( ${pAdd} > ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) )) && pAdd=$(( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ))
+                    (( ${verboseLevel} > 3 )) && printf '(pLOAD=%s, pLOAD0=%s   --   initial pAdd: %s   --   ' "${pLOAD}" "${pLOAD0}" "${pAdd}" >&${fd_stderr}
+        		    (( ${pAdd} > ( 1 + ( ${nCPU} / 8 ) ) )) && pAdd=$(( 1 + ( ${nCPU} / 8 ) ))
+                    (( ${pAdd} <= 0 )) && pAdd=1
+                    (( ${verboseLevel} > 3 )) && printf 'final pAdd: %s \n' "${pAdd}" >&${fd_stderr}
+
                     for (( kk=0; kk<${pAdd}; kk++ )); do
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
-			(( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs. (read queue depth = %s)\n' "${kk}" "${pAdd}" "${kkProcs}" "${nQueue}" >&${fd_stderr}
+            			(( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs. (read queue depth = %s)\n' "${kk}" "${pAdd}" "${kkProcs}" "${nQueue}" >&${fd_stderr}
                         ((kkProcs++))
                     done
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
@@ -1052,7 +1063,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                     
                 done
 
-                [[ ${#p_PID[@]} == 0 ]] || wait -f "${p_PID[@]}"
+                [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
 
               } 2>&${fd_stderr}
             } 2>/dev/null
@@ -1114,7 +1125,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
             [[ -f "${tmpDir}"/.quit ]] && break
             source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
         done
-        echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    }
+        echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    
         : >"${tmpDir}"/.spawned
 
         (( ${verboseLevel} > 1 )) && printf '\n\n%s WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr}
@@ -1160,7 +1171,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                                 \rm  -f "${tmpDir}"/.out/x"${outCur}"
                             }
 
-                            unset "outHave["${outCur}"]"
+                            unset "outHave[${outCur}]"
 
                             # advance outCur by 1
                             ((outCur++))
@@ -1721,18 +1732,20 @@ _forkrun_get_load() {
     #       cpu_LOAD1  cpu_ALL1  tLOAD1  tALL1  pLOAD  cpu_LOAD0  cpu_ALL0  tALL0  cpu_LOAD0
 
     local -i loadMaxVal cpu_user1 cpu_nice1 cpu_system1 cpu_idle1 cpu_IOwait1 cpu_irq1 cpu_softirq1 cpu_steal1 cpu_guest1 cpu_guestnice1 cpu_LOAD1 cpu_ALL1 
-    local nn echoFlag initFlag
-    declare -ig pLOAD pLOAD0 cpu_LOAD0 cpu_ALL0 
+    local nn echoFlag 
+#    declare -ig pLOAD pLOAD0 cpu_LOAD0 cpu_ALL0 
 
     echoFlag=false
-    initFlag=false
     loadMaxVal=1000
     for nn in "${@}"; do
         case "${nn}" in
             '-i'|'--init')
-                unset pLOAD pLOAD0 cpu_LOAD0 cpu_ALL0 
-                declare  pLOAD pLOAD0 cpu_LOAD0 cpu_ALL0 
-                initFlag=true
+#                unset pLOAD pLOAD0 cpu_LOAD0 cpu_ALL0 
+#                declare  pLOAD pLOAD0 cpu_LOAD0 cpu_ALL0 
+                pLOAD=''
+                pLOAD0=''
+                cpu_LOAD0=''
+                cpu_ALL0=''
             ;;
             '-e'|'--echo')
                 echoFlag=true
@@ -1744,7 +1757,7 @@ _forkrun_get_load() {
         esac
     done
 
-    pLoad0=${pLOAD:-0}
+#   pLOAD0=${pLOAD:-0}
 
     read -r _ cpu_user1 cpu_nice1 cpu_system1 cpu_idle1 cpu_IOwait1 cpu_irq1 cpu_softirq1 cpu_steal1 cpu_guest1 cpu_guestnice1 </proc/stat; 
     
@@ -1764,11 +1777,9 @@ _forkrun_get_load() {
     cpu_LOAD0=${cpu_LOAD1}        
     cpu_ALL0=${cpu_ALL1}
 #    tALL0+=${tALL1}
-#    pLOAD0=${pLOAD}
+    pLOAD0=${pLOAD}
 
-    ${initFlag} && {
-        _forkrun_get_load
-    }
+
     
     ${echoFlag} && echo "${pLOAD}"
 }
