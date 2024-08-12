@@ -72,7 +72,7 @@ C1[5]=' >/dev/null'
 mkdir -p "${hfdir0}"/file_lists
 
 nArgs=(1024 4096 16384 65536 262144 1048576)
-
+cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3")
 find "${findDir}" -type f >"${hfdir0}"/file_lists/f6
 for kk in {1..5}; do
 	shuf -n ${nArgs[$(($kk-1))]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f6
@@ -87,7 +87,7 @@ for jj in ${!C0[@]}; do
     for kk in {1..6}; do 
         printf '\n-------------------------------- %s values --------------------------------\n\n' $(wc -l <"${hfdir0}"/file_lists/f${kk}); 
 
-        for c in  sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3"; do 
+        for c in "${cksumAlgsA[@]}"; do 
             printf '\n---------------- %s ----------------\n\n' "$c"; 
 
             if ${testParallelFlag}; then
@@ -103,13 +103,15 @@ for jj in ${!C0[@]}; do
 
     for t in '"min"' '"mean"' '"max"'; do
         printf '\n-----------------------------------------------------\n-------------------- %s TIMES --------------------\n-----------------------------------------------------\n\n' "$t"
-        printf '%0.11s    \t' '#' sha1sum sha1sum sha256sum sha256sum sha512sum sha512sum sha224sum sha224sum sha384sum sha384sum md5sum md5sum  "sum -s" "sum -s" "sum -r" "sum -r" cksum cksum b2sum b2sum "cksum -a sm3" "cksum -a sm3" 
+	printf "$(printf '%0.11s    \t%%0.11s    \t' '#' "${cksumAlgsA[@]}" )" "${cksumAlgsA[@]}"
         printf '\n(stdin)\t'; 
-        for kk in {1..11}; do printf '%0.12s    \t' '(forkrun)' '(xargs)' "$(${testParallelFlag} && echo '(parallel)')"; done; 
-            printf '\n\n'; 
-            for kk in {1..6}; do
-                printf '%s\t' $(wc -l <"${hfdir0}"/file_lists/f$kk)
-                for c in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3"; do
+        for kk in {1..${#cksumAlgsA[@]}}; do 
+	    printf '%0.12s    \t' '(forkrun)' '(xargs)' "$(${testParallelFlag} && echo '(parallel)')"; 
+        done; 
+        printf '\n\n'; 
+        for kk in {1..6}; do
+            printf '%s\t' $(wc -l <"${hfdir0}"/file_lists/f$kk)
+            for c in "${cksumAlgsA[@]}"; do
                 printf '%0.12s\t' $(grep -F "$t" < "${hfdir}"/results/forkrun."${c// /_}".f${kk}.hyperfine.results | sed -E s/'^.*\:'//)
             done
             printf '\n'
@@ -191,7 +193,7 @@ for jj in ${!C0[@]}; do
         T1=0.0
         T2=0.0
         ${testParallelFlag} && T3=0.0
-        for c in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" OVERALL; do
+        for c in "${cksumAlgsA[@]}"; do
             if [[ "${c}" == 'OVERALL' ]]; then
                 if ${testParallelFlag}; then
 		    A0=(${T0} ${T1} ${T2} ${T3})
