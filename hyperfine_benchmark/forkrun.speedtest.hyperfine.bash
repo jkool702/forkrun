@@ -14,7 +14,27 @@ declare -F forkrun &>/dev/null || {
     [[ -f ./forkrun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash
     . ./forkrun.bash
 }
+#export -f forkrun
+source /proc/self/fd/0 <<EOI
+_forkrun_export() {
+shopt -s extglob
+source /proc/self/fd/0 <<'EeEOoOFfF'
+$(declare -f forkrun)
+$(declare -f _forkrun_complete)
+$(declare -f _forkrun_displayHelp)
+$(declare -f _forkrun_lseek_setup)
+complete -o bashdefault -o nosort -F _forkrun_complete forkrun
+_forkrun_lseek_setup
 export -f forkrun
+export -f _forkrun_complete
+export -f _forkrun_displayHelp
+export -f _forkrun_lseek_setup
+EeEOoOFfF
+}
+EOI
+
+export -f _forkrun_export
+
 
 findDirDefault='/usr'
 
