@@ -3,7 +3,7 @@
 `forkrun` is an *extremely* fast pure-bash function that leverages bash coprocs to efficiently run several commands simultaneously in parallel (i.e., it's a "loop parallelizer"). 
 
 `forkrun` is used in much the same way that `xargs` or `parallel` are, but is faster (see the `hyperfine_benchmark` subdirectory for benchmarks) while still being full-featured and only requires having a fairly recent `bash` version (4.0+) to run<sup>1</sup>. `forkrun`:
-* offers more features than `xargsd` and is mildly faster than it's fastest invocation (`forkrun` without any flags is functionally equivilant to `xargs -P $*(nproc) -d $'\n'`),
+* offers more features than `xargs` and is mildly faster than it's fastest invocation (`forkrun` without any flags is functionally equivalent to `xargs -P $*(nproc) -d $'\n'`),
 * is considerably faster than `parallel` (over an order of magnitude faster in some cases) while still supporting many of the particularly useful "core" `parallel` features,
 * can be easily and efficiently be adapted to parallelize complex tasks without penalty by using shell functions (unlike `xargs` and `parallel`, `forkrun` doesn't need to call a new instance of `/bin/bash -c` on every loop iteration when the shell function is run).
 
