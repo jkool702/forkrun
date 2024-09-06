@@ -1550,7 +1550,7 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
     EXAMPLES: `-j -` or `-j -,` or `-j -,,`: sets defaults for all 3 parameters
               `-j -10,,2`: sets initial coproc count to 10, max coproc count to default (2 * nCPU) and min wait queue depth to 2
 
-    NOTE: dont set max number of coprocs too high...on larger problems it will *probably* reach hit this maximum. This is based on the idea that only one coproc can read data at a time, and this keeps spawning more coprocs until there is always (at least 1) waiting in line to read data. Thing is, forkrun (especially when lseek is being used) reads data *really* fast (typically measured in 100's of micro-seconds for a single coproc read operation to read ${nLines} lines), making it hard to build up much of a read wait queue.
+NOTE: Don't set max number of coprocs too high. On larger problems, it will likely hit this maximum. Setting it too high can lead to excessive resource consumption and potential performance degradation. This limit is based on the idea that only one coproc can read data at a time, spawning more until there's always at least one waiting. However, forkrun (especially with lseek) reads data very quickly (typically 100's of microseconds per operation), making it challenging to build a significant read wait queue.
 
 ----------------------------------------------------------
 
