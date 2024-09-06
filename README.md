@@ -16,8 +16,8 @@
 # CHANGELOG
 
 **forkrun v1.4**: 2 new features have been added:
-    1) forkrun can now dynamically determine how many coprocs to spawn based on runtime conditions (CPU usage and whether or not coprocs are waiting in a read queue to read data). To use this functionality, pass the ;-j; flag a negative number (just passing `-j -` works too). See the help (`forkrun --help` or `forkrun --help=all`) for additional info.
-    2) forkrun can now read its input from a file descriptor other than stdin using the `-u` flag (which is standard in bash's `read` and `mapfile` commands). MINOR API CHANGE: the existing `-u` flag, which prevents escaping the commands given on forkrun's commandline, has been changed to use `-U` or `--UNESCAPE` (i.e., it is not uppercase instead of lowercase)
+1. forkrun can now dynamically determine how many coprocs to spawn based on runtime conditions (CPU usage and whether or not coprocs are waiting in a read queue to read data). To use this functionality, pass the ;-j; flag a negative number (just passing `-j -` works too). See the help (`forkrun --help` or `forkrun --help=all`) for additional info.
+2. forkrun can now read its input from a file descriptor other than stdin using the `-u` flag (which is standard in bash's `read` and `mapfile` commands). MINOR API CHANGE: the existing `-u` flag, which prevents escaping the commands given on forkrun's commandline, has been changed to use `-U` or `--UNESCAPE` (i.e., it is not uppercase instead of lowercase)
 
 **forkrun v1.3**: forkrun {-z|-0|--null} has been fixed and now works 100% reliably with NULL-delimited input! However, [only] when using NULL-delimited input `dd` is now a required dependency.
 
