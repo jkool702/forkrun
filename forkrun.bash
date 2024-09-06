@@ -1,4 +1,4 @@
-#!/usr/bin/env bash -O extglob
+#!/usr/bin/env bash
 # shellcheck disable=SC2004,SC2015,SC2016,SC2028,SC2162 source=/dev/null
 
 shopt -s extglob
@@ -8,7 +8,7 @@ forkrun() {
 #
 # USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
 #
-# LIST OF FLAGS: [-j|-P [-]<#>] [-t <path>] ( [-l <#>] | [-L <#[,#]>]] ) ( [-b <#>] | [-B <#>[,<#>]] ) [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+# LIST OF FLAGS: [-j|-P [-]<#>[,<#>,<#>]] [-t <path>] ( [-l <#>] | [-L <#[,#]>]] ) ( [-b <#>] | [-B <#>[,<#>]] ) [-d <char>] [-u <fd>]  [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-U] [-v] [-h|-?]
 #
 # For help / usage info, call forkrun with one of the following flags:
 #
@@ -18,7 +18,7 @@ forkrun() {
 # --help=f[lags]       :  display detailed info about flags (longer descriptions, short + long names)
 # --help=a[ll]         :  display all help (includes detailed descriptions for flags)
 #
-# NOTE: the `?` may need to be escaped for `-?` to trigger the help (i.e., use `forkrun '-?'` or `forkrun -\?`)
+# NOTE: the `?` may need to be escaped for `-?` to trigger the help (i.e., use `forkrun '-?'` or `forkrun -\?`) (otherwise bash will parse the '?' as a special char)
 
 ############################ BEGIN FUNCTION ############################
 
@@ -27,13 +27,13 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nCPU v9 kkMax kkCur kk kkProcs verboseLevel
-    local -a A p_PID runCmd outHave 
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nProcsMax nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
+    local -a A p_PID runCmd outHave pLOADA
 
     # # # # # PARSE OPTIONS # # # # #
 
-    : "${verboseLevel:=0}" "${returnVal:=0}"
+    : "${verboseLevel:=0}" "${returnVal:=0}" "${fd_stdin0:=0}"
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
@@ -43,7 +43,7 @@ forkrun() {
             -?(-)@([jP]|?(n)[Pp]roc?(s)?)?(?([= ])?([+-])*([0-9])@([0-9,])*([0-9])?(,*([0-9]))))
                 if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?([+-])*([0-9])@([0-9,])*([0-9])?(,*([0-9])) ]]; then
                     nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?(+))}"
-                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?) ]] && [[ "$2" == ?([+-])*([0-9])@([0-9,-])*([0-9])?(,*([0-9])) ]]; then
+                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?) ]] && [[ "${2}" == ?([+-])*([0-9])@([0-9,-])*([0-9])?(,*([0-9])) ]]; then
                     nProcs="${2#'+'}"
                     shift 1
                 fi
@@ -53,7 +53,7 @@ forkrun() {
                 if [[ "${1}" == -?(-)?(n)l?(ine?(s))?([= ])+([0-9]) ]]; then
                     nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
                     nLinesAutoFlag=false
-                elif [[ "${1}" == -?(-)?(n)l?(ine?(s)) ]] && [[ "$2" == +([0-9]) ]]; then
+                elif [[ "${1}" == -?(-)?(n)l?(ine?(s)) ]] && [[ "${2}" == +([0-9]) ]]; then
                     nLines="${2}"
                     nLinesAutoFlag=false
                     shift 1
@@ -64,7 +64,7 @@ forkrun() {
                 if [[ "${1}" == -?(-)?(N)L?(INE?(S))?([= ])+([0-9])?(,+([0-9])) ]]; then
                     nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
                     nLinesAutoFlag=true
-                elif [[ "${1}" == -?(-)?(N)L?(INE?(S)) ]] && [[ "$2" == +([0-9])?(,+([0-9])) ]]; then
+                elif [[ "${1}" == -?(-)?(N)L?(INE?(S)) ]] && [[ "${2}" == +([0-9])?(,+([0-9])) ]]; then
                     nLines0="${2}"
                     nLinesAutoFlag=true
                     shift 1
@@ -84,7 +84,7 @@ forkrun() {
                     nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))}"
                     readBytesFlag=true
                     readBytesExactFlag=false
-                elif [[ "${1}" == -?(-)b?(yte?(s)) ]] && [[ "$2" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]) ]]; then
+                elif [[ "${1}" == -?(-)b?(yte?(s)) ]] && [[ "${2}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]) ]]; then
                     nBytes="${2}"
                     readBytesFlag=true
                     readBytesExactFlag=false
@@ -97,7 +97,7 @@ forkrun() {
                     nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))))}"
                     readBytesFlag=true
                     readBytesExactFlag=true
-                elif [[ "${1}" == -?(-)B?(YTE?(S)) ]] && [[ "$2" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))) ]]; then
+                elif [[ "${1}" == -?(-)B?(YTE?(S)) ]] && [[ "${2}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))) ]]; then
                     nBytes="${2}"
                     readBytesFlag=true
                     readBytesExactFlag=true
@@ -109,7 +109,7 @@ forkrun() {
                 if [[ "${1}" == -?(-)t?(mp?(?(-)dir))?([= ])*@([[:graph:]])* ]]; then
                     tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
                     mkdir -p "${tmpDirRoot}"
-                elif [[ "${1}" == -?(-)t?(mp?(?(-)dir)) ]] && [[ "$2" == *@([[:graph:]])* ]]; then
+                elif [[ "${1}" == -?(-)t?(mp?(?(-)dir)) ]] && [[ "${2}" == *@([[:graph:]])* ]]; then
                     tmpDirRoot="${2}"
                     mkdir -p "${tmpDirRoot}"
                     shift 1
@@ -121,9 +121,18 @@ forkrun() {
                     delimiterVal="${1##@(-?(-)d?(elim?(iter))?([= ]))}"
                     (( ${#delimiterVal} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
                     (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
-                elif [[ "${1}" == -?(-)d?(elim?(iter)) ]] && [[ "$2" == @([[:graph:]])* ]]; then
+                elif [[ "${1}" == -?(-)d?(elim?(iter)) ]] && [[ "${2}" == @([[:graph:]])* ]]; then
                     (( ${#2} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
                     (( ${#2} == 0 )) && nullDelimiterFlag=true || delimiterVal="${2:0:1}"
+                    shift 1
+                fi
+            ;;
+
+            -?(-)@(u|fd|file?(-)descriptor)?(?([= ])+([0-9])))
+                if [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor)?([= ])+([0-9]) ]]; then
+                    fd_stdin0="${1##@(-?(-)@(u|fd|file?(-)descriptor)?([= ]))}"
+                elif [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor) ]] && [[ "${2}" == +([0-9]) ]]; then
+                    fd_stdin0="${2}"
                     shift 1
                 fi
             ;;
@@ -168,7 +177,7 @@ forkrun() {
                 [[ "${1:0:1}" == '-' ]] && noFuncFlag=true || noFuncFlag=false
             ;;
 
-            [+-]?([+-])u?(nescape))
+            [+-]?([+-])U?(NESCAPE))
                 [[ "${1:0:1}" == '-' ]] && unescapeFlag=true || unescapeFlag=false
             ;;
 
@@ -214,7 +223,7 @@ forkrun() {
 
     done
 
-    [ -t 0 ] && {
+    [ -t "${fd_stdin0}" ] && {
         (( ${verboseLevel} > 0 )) && printf '\n\nERROR: STDIN is a terminal. \n\nforkrun requires STDIN to be a pipe \n(containing the inputs to parallelize over); e.g.: \n\nprintf '"'"'%%s\\n'"'"' "${args[@]}" | forkrun parFunc \n\nABORTING! \n\n'
         returnVal=1
         return 1
@@ -376,9 +385,9 @@ forkrun() {
             }
         }
 
-        : "${nQueueFlag:=false}"  "${nQueueMin:=1}"
+        : "${nQueueFlag:=false}" "${nQueueMin:=1}"
 
-        local -i nProcs="${nProcs}"
+        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}"
         nCPU="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')";
         { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nQueueFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
 
@@ -981,64 +990,6 @@ done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
 } 2>/dev/null
 p_PID+=(\${p{<#>}_PID})""" )"
-
-        # setup dynamically coproc to spawn new workers based on read queue length
-        ${nQueueFlag} && ! [[ -f "${tmpDir}"/.quit ]] && {
-            { coproc pQueue {
-
-                export LC_ALL=C LANG=C IFS=
-
-                trap '[[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
-                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
-                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM INT HUP USR1' USR1
-
-                # start spawning after nProcs workers already forked
-                kkProcs=${nProcs}                
-
-                p_PID=()
-
-                nQueue=0
-
-                until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
-                nQueueLast=${nQueue}
-
-                # read from fd_queue pipe. 
-                #      '+' --> increase queue depth by 1. 
-                #      '-' --> decrease queue depth by 1.
-                #      '0' --> quit
-                read -r -u ${fd_nQueue} -N 1 
-    
-    		case "${REPLY}" in
-                    '+')  ((nQueue++))  ;;
-                    '-')  ((nQueue--))  ;;
-                    0)      break       ;;
-                    *)     continue     ;;
-                esac
-
-                #(( ${verboseLevel} > 3 )) && { printf '\nnQueue  = %s (nProcs = %s)\n' "${nQueue}" "${kkProcs}"; cat /proc/self/schedstat; } >&${fd_stderr}
-
-                # dont trigger spawning more workers until the main thread is done spawning the initial $nProcs workers
-
-                [[ -f "${tmpDir}"/.spawned ]] && (( ( ${nQueue} + ${nQueueLast} ) < ( 2 * ${nQueueMin:=1} ) )) && { 
-                    source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
-                    (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC. There are now %s coprocs. (read queue depth = %s)\n' "${nQueue}" "${kkProcs}" >&${fd_stderr}
-                    ((kkProcs++))
-                    echo "${kkProcs}" >"${tmpDir}"/.nWorkers
-                }
-                    
-                done
-
-                [[ ${#p_PID[@]} == 0 ]] || wait -f "${p_PID[@]}"
-
-              } 2>&${fd_stderr}
-            } 2>/dev/null
-
-            exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
-            printf '%s\n' "${pQueue_PID}" > "${tmpDir}"/.run/pQueue
-
-        }
         
         # set traps (dynamically determined based on which option flags were active)
 
@@ -1073,8 +1024,6 @@ p_PID+=(\${p{<#>}_PID})""" )"
         kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
         kill -HUP $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" HUP
                     
-	#trap 'source /proc/self/fd/0 <<<"${coprocSrcCode//'"'"'{<#>}'"'"'/"${kkProcs}"}"' USR2
-        
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && { printf '\nSET TRAPS:\n\n'; trap -p; } >&${fd_stderr}
 
@@ -1092,17 +1041,119 @@ p_PID+=(\${p{<#>}_PID})""" )"
             [[ -f "${tmpDir}"/.quit ]] && break
             source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
         done
-        echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    }
+        echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    
         : >"${tmpDir}"/.spawned
 
         (( ${verboseLevel} > 1 )) && printf '\n\n%s WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr}
+
+        # setup dynamically coproc to spawn new workers based on read queue length
+        ${nQueueFlag} && ! [[ -f "${tmpDir}"/.quit ]] && {
+            export -f _forkrun_get_load
+            { coproc pQueue {
+
+                export LC_ALL=C LANG=C IFS=
+
+                trap '[[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
+                trap 'trap - TERM INT HUP USR1' USR1
+
+                # start spawning after nProcs workers already forked
+                kkProcs=${nProcs}                
+
+                p_PID=()
+		pLOADA=()
+
+                nQueue=0
+		nQueueLastCount=0
+                
+                (( "${nQueueMin}" <= 0 )) && nQueueMin=1
+                
+                : "${pLOAD_max:=9500}" "${nProcsMax:=$((2*${nCPU}))}" "${nQueueLastCountGoal:=5}"
+
+                mapfile -t pLOADA < <(_forkrun_get_load -i)
+                            
+		(( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
+
+                until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
+                    nQueueLast=${nQueue}
+
+                    # read from fd_queue pipe. 
+                    #      '+' --> increase queue depth by 1. 
+                    #      '-' --> decrease queue depth by 1.
+                    #      '0' --> quit
+                    read -r -u ${fd_nQueue} -N 1 
+        
+                    case "${REPLY}" in
+                        '+')  ((nQueue++))  ;;
+                        '-')  ((nQueue--))  ;;
+                        0)      break       ;;
+                        *)     continue     ;;
+                    esac
+
+                    # (( ${verboseLevel} > 3 )) && { printf '\nnQueue  = %s (nProcs = %s)\n' "${nQueue}" "${kkProcs}"; cat /proc/self/schedstat; } >&${fd_stderr}
+
+                    if (( ( ${nQueue} + ${nQueueLast} ) < ( 2 * ${nQueueMin} ) )); then
+
+			    if (( ${nQueueLastCount} < ( ${nQueueLastCountGoal} * ( 1 + ( kkProcs /  nCPU ) ) ) )); then
+                            ((nQueueLastCount++))
+                        else
+                            nQueueLastCount=0
+
+                            mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA[@]}")
+
+		            (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
+
+                            (( ${pLOADA} >= ${pLOAD_max} )) || {
+
+                                if (( ${nCPU} > ${kkProcs} )); then
+
+                                    pAdd=$(( 1 + ( ( ${nCPU} - ${kkProcs} ) * ( ${pLOAD_max} - ${pLOADA} ) ) / ( 1 + ${pLOADA} ) ))
+
+                                    (( ${verboseLevel} > 3 )) && printf '(pLOAD=%s  --  initial pAdd: %s ' "${pLOADA}" "${pAdd}" >&${fd_stderr}
+
+                                    (( ${pAdd} > ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) )) && pAdd=$(( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ))
+                                    (( ${pAdd} > ( 1 + ( ${nCPU} / 16 ) ) )) && pAdd=$(( 1 + ( ${nCPU} / 16 ) ))
+
+                                    (( ${pAdd} < 1 )) && pAdd=1
+                                else
+                                    pAdd=1
+                                fi
+
+                                (( ${verboseLevel} > 3 )) && printf 'final pAdd: %s \n' "${pAdd}" >&${fd_stderr}
+
+                                for (( kk=0; kk<${pAdd}; kk++ )); do
+                                    source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
+                                    (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs. (read queue depth = %s)\n' "${kk}" "${pAdd}" "${kkProcs}" "${nQueue}" >&${fd_stderr}
+                                    ((kkProcs++))
+                                done
+                                echo "${kkProcs}" >"${tmpDir}"/.nWorkers
+                            }
+                        fi
+                    else
+			    nQueueLastCount=0
+                    fi
+                    
+                done
+
+                [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
+
+              } 2>&${fd_stderr}
+            } 2>/dev/null
+
+            exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
+            printf '%s\n' "${pQueue_PID}" > "${tmpDir}"/.run/pQueue
+
+        }
+
         (( ${verboseLevel} > 3 )) && { 
             printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}"
             declare -p fd_continue fd_inotify fd_nAuto fd_nOrder fd_nOrder0 fd_nQueue fd_read fd_write fd_stdin fd_stdout fd_stderr 
         } >&${fd_stderr}
 
         # # # # # WAIT FOR THEM TO FINISH # # # # #
-          #   #   PRINT OUTPUT IF ORDERED   #   #
+        #  #  #   PRINT OUTPUT IF ORDERED   #  #  #
 
         if ${nOrderFlag}; then
             # initialize real-time printing of ordered output as forkrun runs
@@ -1138,7 +1189,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                                 \rm  -f "${tmpDir}"/.out/x"${outCur}"
                             }
 
-                            unset "outHave["${outCur}"]"
+                            unset "outHave[${outCur}]"
 
                             # advance outCur by 1
                             ((outCur++))
@@ -1168,7 +1219,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         } >&${fd_stderr} 
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read0}<"${fPath}" {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&0 {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read0}<"${fPath}" {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
@@ -1244,6 +1295,7 @@ echo -t{,=} --{tmp,tmpdir}{,=} --t{,=} -{tmp,tmpdir}{,=} $'\n' \
 -b{,=} --byte{s,}{,=} --b{,=} -byte{s,}{,=} $'\n' \
 -B{,=} --BYTE{S,}{,=} --B{,=} -BYTE{S,}{,=} $'\n' \
 -d{,=} --{delim,delimiter}{,=} --d{,=} -{delim,delimiter}{,=} $'\n' \
+-u{,=} --{fd,filedescriptor,file-descriptor}{,=} --u{,=} -{fd,filedescriptor,file-descriptor}{,=} $'\n' \
 {-,+}i {--,++}insert {--,++}i {-,+}insert {-+,+-}i {-+,+-}insert $'\n' \
 {-,+}I {--,++}INSERT{,-ID,ID} {--,++}I {-,+}INSERT{,-ID,ID}{-+,+-}I {-+,+-}INSERT{,-ID,ID} $'\n' \
 {-,+}k {--,++}keep{,-order,order} {--,++}k {-,+}keep{,-order,order} {-+,+-}k {-+,+-}keep{,-order,order} $'\n' \
@@ -1254,7 +1306,7 @@ echo -t{,=} --{tmp,tmpdir}{,=} --t{,=} -{tmp,tmpdir}{,=} $'\n' \
 {-,+}p {--,++}pipe{,-read,read} {--,++}p {-,+}pipe{,-read,read} {-+,+-}p {-+,+-}pipe{,-read,read} $'\n' \
 {-,+}D {--,++}{D,d}elete {--,++}D {-,+}{D,d}elete {-+,+-}D {-+,+-}{D,d}elete $'\n' \
 {-,+}N {--,++}{No,no,NO,nO}{,-}func {--,++}N {-,+}{No,no,NO,nO}{,-}func {-+,+-}N {-+,+-}{No,no,NO,nO}{,-}func {--,++}{No,no,NO,nO} {-,+}{No,no,NO,nO} {-+,+-}{No,no,NO,nO} $'\n' \
-{-,+}u {--,++}unescape {--,++}u {-,+}unescape {-+,+-}u {-+,+-}unescape $'\n' \
+{-,+}U {--,++}UNESCAPE {--,++}U {-,+}UNESCAPE {-+,+-}U {-+,+-}UNESCAPE $'\n' \
 {-,+}{v,vv,vvv,vvvv} {--,++}verbose {--,++}{v,vv,vvv,vvvv} {-,+}verbose {-+,+-}{v,vv,vvv,vvvv} {-+,+-}verbose $'\n' \
 {--,-}usage $'\n' \
 -{\?,h} --help --{\?,h} -help $'\n' \
@@ -1365,7 +1417,7 @@ cat<<'EOF' >&2
 
 USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
 
-# LIST OF FLAGS: [-j|-P <#>] [-t <path>] ( [-l <#>] | [-L <#[,#]>]] ) ( [-b <#>] | [-B <#>[,<#>]] ) [-d <char>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+# LIST OF FLAGS: [-j|-P [-]<#>[,<#>,<#>]] [-t <path>] ( [-l <#>] | [-L <#[,#]>]] ) ( [-b <#>] | [-B <#>[,<#>]] ) [-d <char>] [-u <fd>] [-i] [-I] [-k] [-n] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
 
 EOF
 
@@ -1435,13 +1487,14 @@ FLAGS WITH ARGUMENTS
 --------------------
 
     (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc). If the number is negative (begins with a '-') then the numbner of coprocs used will be determined dynamically based on read wait queue length (see "alt syntax" below).
-    (-j|-P) -[<#1>[,<#2>[,<#3>]]]: (alt syntax - dynamic coproc count). <#1> is the initial number of coprocs spawned (default: num CPUs / 2). <#2> is the maximum number of coprocs to be spawned (default: num CPUs * 2). <#3> is the minimum read wait queue depth - if fewer than this many processes are waiting in line to read data another will be spawned (default: 1). All values are optional, and may be omitted (leaving just a comma) to just set max coproc count or min wait queue depth.
+    (-j|-P) -[<#1>[,<#2>[,<#3>]]]: alternate syntax to enable dynamically determining coproc count. <#1> is the initial number of coprocs spawned (default: num CPUs / 2). <#2> is the maximum number of coprocs to be spawned (default: num CPUs * 2). <#3> is the minimum read wait queue depth - if fewer than this many processes are waiting in line to read data another will be spawned (default: 1). All values (except for the '-' / negative sign) are optional, and may be omitted (leaving just a '-') to just set max coproc count or min wait queue depth.
     -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
     -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,1024'
     -t <path>   : set tmp directory. set the directory where the temp files containing lines from stdin will be kept. These files will be saved inside a new mktemp-generated directory created under the directory specified here. Default is '/dev/shm', or (if unavailable) '/tmp'
     -b <bytes>  : instead of reading data using a delimiter, read up to this many bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL NOT wait and will continue with fewer bytes of data read. Automatically enables `-S` flag...disable with `+S` flag.
 -B <#>[,<time>] : instead of reading data using a delimiter, read up to this many ( -B <#> )bytes at a time. If fewer than this many bytes are available when a worker coproc calls `read`, then it WILL wait and continue re-reading until it accumulates this many bytes or until stdin has been fully read. example: `-B 4mb`. You may optionally pass a time as another input (-B <#>,<time>) which will set a timeout on how long the read commands will wait to accumulate input (if not used, they wait indefinately). example: `-B 4096k,3.5` sets 4 mb reads with a 3.5 sec timeout.
- -d <delimiter> : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). must be a single character.
+    -d <delim>  : set the delimiter to something other than a newline (default) or NULL ((-z|-0) flag). <delim> must be a single character.
+    -u <fd>     : read data from file descriptor <fd> instead of from stdin (i.e., file descriptor 0). <fd> must be a positive integer,
     
 FLAGS WITHOUT ARGUMENTS
 -----------------------
@@ -1458,7 +1511,7 @@ SYNTAX NOTE: for each of these passing `-<FLAG>` enables the feasture, and passi
     -p          : pipe read. dont use a tmpfile and have coprocs read (via shared file descriptor) directly from stdin. Enabled by default only when `-l 1` is passed.
     -D          : delete tmpdir. Remove the tmp dir used by `forkrun` when `forkrun` exits. NOTE: the `-D` flag is enabled by default...disable with flag `+D`.
     -N          : enable no func mode. Only has an effect when `parFunc` and `initialArgs` were not given. If `-N` is not passed and `parFunc` and `initialArgs` are missing, `forkrun` will silently set `parFunc` to `printf '%s\n'`, which will basically just copy stdin to stdout.
-    -u          : unescape redirects/pipes/forks/logical operators. Typically `parFunc` and `initialArgs` are run through `printf '%q'` making things like `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` appear as literal characters. This flag skips the `printf '%q'` call, meaning that these operators can be used to allow for piping, redirection, forking, logical comparrison, etc. to occur *inside the coproc*. 
+    -U          : unescape redirects/pipes/forks/logical operators. Typically `parFunc` and `initialArgs` are run through `printf '%q'` making things like `<` , `<<` , `<<<` , `>` , `>>` , `|` , `&&` , and `||` appear as literal characters. This flag skips the `printf '%q'` call, meaning that these operators can be used to allow for piping, redirection, forking, logical comparrison, etc. to occur *inside the coproc*. 
     --          : end of forkrun options indicator. indicate that all remaining arguments are for the function being parallelized and are not forkrun inputs. This allows using a `parFunc` that begins with a `-`. NOTE: there is no `+<FLAG>` equivilant for `--`.
     -v          : increase verbosity level by 1. Higher levels give progressively more verbose output. Default level is 0. Meaningful levels range from -1 to 4. +v decreases the verbosity level by 1.
     (-h|-?)     : display help text. use `--help=f[lags]` or `--help=a[ll]` for more details about flags that `forkrun` supports. NOTE: you must escape the `?` otherwise the shell can interpret it before passing it to forkrun.
@@ -1493,11 +1546,11 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
         <#1> is the initial number of coprocs spawned (--> default: num CPUs / 2). 
         <#2> is the maximum number of coprocs to be spawned (--> default: num CPUs * 2). 
         <#3> is the minimum read wait queue depth - if fewer than this many processes are waiting in line to read data another will be spawned (--> default: 1). 
-    All values are optional, and may be omitted (leaving just a comma) to just set max coproc count or min wait queue depth.
+    All values (except the '-' / negative sign) are optional, and may be omitted (leaving just a '-') to just set max coproc count or min wait queue depth.
     EXAMPLES: `-j -` or `-j -,` or `-j -,,`: sets defaults for all 3 parameters
               `-j -10,,2`: sets initial coproc count to 10, max coproc count to default (2 * nCPU) and min wait queue depth to 2
 
-    NOTE: dont set max number of coprocs too high...on larger problems it will *probably* reach hit this maximum. This is based on the idea that only one coproc can read data at a time, and this keeps spawning more coprocs until there is always (at least 1) waiting in line to read data. Thing is, forkrun (especially when lseek is being used) reads data *really* fast (measured in 100's of micro-seconds), making it hard to build up much of a read wait queue.
+NOTE: Don't set max number of coprocs too high. On larger problems, it will likely hit this maximum. Setting it too high can lead to excessive resource consumption and potential performance degradation. This limit is based on the idea that only one coproc can read data at a time, spawning more until there's always at least one waiting. However, forkrun (especially with lseek) reads data very quickly (typically 100's of microseconds per operation), making it challenging to build a significant read wait queue.
 
 ----------------------------------------------------------
 
@@ -1528,9 +1581,13 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
     NOTE: if either (-b|-B) is passed, then -S will automatically be enabled, meaning that the function being parallelied will be passed data on its stdin, not its command-line input. This is required to avoid mangling stdin if it contains NULLs (which is likely if stdin is binary data). This can be overridden by passing the `+S` flag at the cost of all NULLs being dropped from stdin.
 
 ----------------------------------------------------------
-
--d | --delimiter <delim> : sets the delimiter used to separate inputs passed on stdin. must be a single character.
+ 
+-d | --delimiter <delim> : sets the delimiter used to separate inputs passed on stdin. <delim> must be a single character.
    ---->  default  : newline ($'\n') 
+
+----------------------------------------------------------
+
+-u | --fd | --file-descriptor <fd> : read data from file descriptor <fd> instead of from stdin (i.e., file descriptor 0). <fd> must be a positive integer,
 
 --------------------------------------------------------------------------------------------------------------------
 
@@ -1590,7 +1647,7 @@ SYNTAX NOTE: These flags serve to enable various optional subroutines. All flags
 
 ----------------------------------------------------------
 
--u | --unescape      : dont escape `parFunc [${args0[@]}]` before having the coprocs run it. Typically, `parFunc [${args0[@]}]` is run through `printf '%q '`, making such that pipes and redirects and logical operators similiar ('|' '<<<' '<<' '<' '>' '>>' '&' '&&' '||') are treated as literal characters and dont pipe / redirect / logical operators / whatever. This flag makes forkrun skip running these through `printf '%q'`, making pipes and redirects work normally. This flag is particuarly useful in combination with the `-i` flag.
+-U | --UNESCAPE      : dont escape the command forkrun will be running (i.e., `parFunc [${args0[@]}]`) before having the coprocs run it. Typically, `parFunc [${args0[@]}]` is run through `printf '%q '`, making such that pipes and redirects and logical operators similiar ('|' '<<<' '<<' '<' '>' '>>' '&' '&&' '||') are treated as literal characters and dont pipe / redirect / logical operators / whatever. This flag makes forkrun skip running these through `printf '%q'`, making pipes and redirects work normally. This flag is particuarly useful in combination with the `-i` flag.
 
     NOTE: keep in mind that the shell will interpret the commandline before forkrun gets it, so pipes and redirects must still be passed either escaped or quoted otherwise the shell will interpret+implemnt them before forkrun does.
     EXAMPLE: the following will scan files whose paths are given on stdin and search them, for some string and, only if found, print the filename:  
@@ -1681,3 +1738,114 @@ _forkrun_lseek_setup() {
 }
 
 _forkrun_lseek_setup
+
+
+export -fp _forkrun_get_load &>/dev/null && export -nf _forkrun_get_load
+
+_forkrun_get_load() (
+    ## computes a "smoothed average system CPU load" using info gathered from /proc/stat
+    #
+    # USAGE:  
+    #     mapfile -t -n 4 pLOADA  < <(_forkrun_get_load [-i|--init] [-e|--echo] [-m|--max|--max-load maxLoadNum] )
+    #     mapfile -t -n 4 pLOADA  < <(_forkrun_get_load [-e|--echo] [-m|--max|--max-load maxLoadNum] "${pLOADA[@]}")
+    #
+    # FLAGS:  
+    #    '-i'|'--init':  initialize/reset load calculation. 
+    #    '-e'|'--echo':  print average load to stderr in addition to printing pLOAD + cpu_ALL + cpu_LOAD to stdout
+    #    '-m'|'--max'|'--max-load' maxloadNum:  positive integer (maxLoadNum) that replaces 10000 as the number that repesents 100% load. 
+    #
+    # OUTPUTS:          pLOAD  cpu_ALL  cpu_LOAD  tALL
+    #     --> pLOAD:    represents the current average load level estimate between all logical CPU cores ( scaled between 0 - 10000, or (if set) between 0 - $maxLoadNum )  
+    #     --> cpu_ALL:  total sum of ALL components from /proc/stats when the last pLOAD was computed
+    #     --> cpu_LOAD: total sum of the components that represent CPU load (everything except idle time and IOwait time) when the last pLOAD was computed
+    #     --> tALL:     total time difference used in the last call to _forkrun_get_load  (i.e., $(( CPU_ALL - CPU_ALL0 )) from previous run) 
+    #
+    # INPUTS:           pLOADA=( $pLOAD  $cpu_ALL  $cpu_LOAD  $tALL )
+    #     --> Input the 3 values that were output last time _forkrun_get_load was called. 
+    #     --> Not required if using -i flag. If any of these 3 values are not given then `-i` flag is implied
+
+    unset IFS
+
+    local -i loadMaxVal cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice tLOAD tALL tALL0 cpu_ALL cpu_ALL0 cpu_LOAD cpu_LOAD0 pLOAD pLOAD0 argCount
+    local initFlag echoFlag
+    
+    loadMaxVal=10000
+    initFlag=false
+    echoFlag=false
+    argCount=0
+
+    pLOAD0="${pLOADA[0]}"
+    cpu_ALL0="${pLOADA[1]}"
+    cpu_LOAD0="${pLOADA[2]}"
+    tALL0="${pLOADA[3]}"
+
+
+    while (( ${#} > 0 )); do
+        case "${1}" in
+            '-i'|'--init')
+                initFlag=true
+            ;;
+            '-e'|'--echo')
+                echoFlag=true
+            ;;
+            '-m'|'--max'|'--max-load')
+                [[ "${2}" == [0-9]* ]] && {
+                    loadMaxVal="${2}"
+                    (( ${loadMaxVal} > 0 )) || loadMaxVal=10000
+                    shift 1
+                }
+            ;;
+            [0-9]*)
+		    case "${argCount}" in
+			    0)  [[ ${1} == 0 ]] && pLOAD0=1 || pLOAD0="${1}"  ;;
+			    1)  cpu_ALL0="${1}"  ;;
+			    2)  cpu_LOAD0="${1}"  ;;
+			    3)  tALL0="${1}"  ;;
+		    esac
+		    ((argCount++))
+            ;;
+        esac
+        shift 1
+    done
+
+#    if [[ ${pLOAD0} == 0 ]] || [[ ${cpu_ALL0} == 0 ]] || [[ ${cpu_LOAD0} == 0 ]] || [[ ${tALL0} == 0 ]] || [[ -z ${pLOAD0} ]] || [[ -z ${cpu_ALL0} ]] || [[ -z ${cpu_LOAD0} ]] || [[ -z ${tALL0} ]]; then
+#        initFlag=true
+#    fi
+
+    read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice </proc/stat
+    
+    cpu_LOAD=$(( cpu_user + cpu_nice + cpu_system + cpu_irq + cpu_softirq + cpu_steal + cpu_guest + cpu_guestnice ))
+    cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
+    
+    ${initFlag} && {
+	cpu_ALL0="${cpu_ALL}"
+        cpu_LOAD0="${cpu_LOAD}"
+
+	( read -r -u $fd_sleep -t 0.01; ) {fd_sleep}<><(:)
+
+        read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice </proc/stat
+    
+        cpu_LOAD=$(( cpu_user + cpu_nice + cpu_system + cpu_irq + cpu_softirq + cpu_steal + cpu_guest + cpu_guestnice ))
+        cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
+    }
+
+    tALL=$(( cpu_ALL - cpu_ALL0 ))
+
+    pLOAD=$(( ( loadMaxVal * ( cpu_LOAD - cpu_LOAD0 ) ) / ( 1 + cpu_ALL - cpu_ALL0 ) ))
+
+    ${initFlag} || {
+
+        tLOAD=$(( cpu_LOAD - cpu_LOAD0 ))
+        
+        (( tALL0 > ( 10 * tALL ) )) && tALL0=$(( 10 * tALL ))
+
+        pLOAD=$(( ( loadMaxVal * tLOAD ) / ( 1 + tALL ) ))
+        pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
+
+    }
+
+    pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
+    printf '%s\n' "${pLOADA[@]}"
+    ${echoFlag} && printf 'Current System CPU Load = %s\n' "${pLOAD}" >&2
+)
+

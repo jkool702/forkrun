@@ -1,19 +1,24 @@
 # FORKRUN
 
-`forkrun` is an *extremely* fast pure-bash function that leverages bash coprocs to efficiently run several commands simultaniously in parallel (i.e., it's a "loop parallelizer"). 
+`forkrun` is an *extremely* fast pure-bash function that leverages bash coprocs to efficiently run several commands simultaneously in parallel (i.e., it's a "loop parallelizer"). 
 
 `forkrun` is used in much the same way that `xargs` or `parallel` are, but is faster (see the `hyperfine_benchmark` subdirectory for benchmarks) while still being full-featured and only requires having a fairly recent `bash` version (4.0+) to run<sup>1</sup>. `forkrun`:
-* offers more features than `xargsd` and is mildly faster than it's fastest invocation (`forkrun` without any flags is functionally equivilant to `xargs -P $*(nproc) -d $'\n'`)  
-* is considerably faster than `parallel` (over an order of magnitude faster in some cases) while still supporting many of the particularly useful "core" `parallel` features
-* can be easily and efficiently be adapted to parallelize complex tasks without penalty by using shell functions (unlike `xargs` and `parallel`, `forkrun` doesnt need to use `/bin/bash -c` every time the function is executed)
+* offers more features than `xargs` and is mildly faster than it's fastest invocation (`forkrun` without any flags is functionally equivalent to `xargs -P $*(nproc) -d $'\n'`),
+* is considerably faster than `parallel` (over an order of magnitude faster in some cases) while still supporting many of the particularly useful "core" `parallel` features,
+* can be easily and efficiently be adapted to parallelize complex tasks without penalty by using shell functions (unlike `xargs` and `parallel`, `forkrun` doesn't need to call a new instance of `/bin/bash -c` on every loop iteration when the shell function is run).
 
 <sup>1: bash 5.1+ is preffered and much better tested. A few basic filesystem operations (`rm`, `mkdir`) must also be available. `fallocate` and `inotifywait` are not required; but, if present, will be used to lower runtime resource usage. `bash-completion` is required to enable automatic completion (on `<TAB>` press) when typing the forkrun cmdline.</sup>
 
-**CURRENT VERSION**: forkrun v1.3.0
+**CURRENT VERSION**: forkrun v1.4.0
 
-**PREVIOUS VERION**: forkrun v1.2.0
+**PREVIOUS VERSION**: forkrun v1.3.0
 
 # CHANGELOG
+
+**forkrun v1.4**:  3 new features have been added:
+1. `forkrun` can now dynamically determine how many coprocs to spawn based on runtime conditions (specifically: CPU usage and whether or not coprocs are waiting in a read queue to read data from stdin). To use this functionality, pass the ;-j; flag a negative number (just passing `-j -` works too). See the help (run `forkrun --help` or `forkrun --help=all`) for additional info.
+2. `forkrun` can now read its input from a file descriptor other than stdin using the `-u` flag (which is standard in bash's `read` and `mapfile` commands). MINOR API CHANGE: the existing `-u` flag, which prevents escaping the commands given on `forkrun`'s commandline, has been changed to use `-U` or `--UNESCAPE` (i.e., it is now uppercase instead of lowercase).
+3. on x86_64 platforms, `forkrun` will use a custom bash loadable builtin to call `lseek`, greatly improving the efficiency of reading data from stdin as `forkrun` runs. `forkrun`'s "no-load" speed (i.e., stdin is all newlines and they are being passed to a `:` call) now exceeds 4 million lines per second on my system, highlighting how efficient `forkrun`'s parallelization framework is. Using `lseek` also removes `dd` from the "required dependency" list, even when using NULL-delimited input.
 
 **forkrun v1.3**: forkrun {-z|-0|--null} has been fixed and now works 100% reliably with NULL-delimited input! However, [only] when using NULL-delimited input `dd` is now a required dependency.
 
