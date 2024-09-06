@@ -11,7 +11,7 @@
 
 **CURRENT VERSION**: forkrun v1.4.0
 
-**PREVIOUS VERION**: forkrun v1.3.0
+**PREVIOUS VERSION**: forkrun v1.3.0
 
 # CHANGELOG
 
