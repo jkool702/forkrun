@@ -1,5 +1,6 @@
 # SETUP
-# NOTE: a tmpfs is already mounted at /mnt/ramdisk
+# NOTE: a tmpfs is already mounted at /mnt/ramdisk. Otherwise, run:
+#mount -t tmpfs tmpfs /mnt/ramdisk
 
 rsync -a --max-size=16M /usr /mnt/ramdisk
 find /mnt/ramdisk/usr -type f >/mnt/ramdisk/filelist
