@@ -1181,25 +1181,32 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 esac
 
                 # starting at $outCur, print all indices in sequential order that have been recorded as being run and then remove the tmp output file[s]
-                while true; do
-                    case "${outHave[${outCur}]}" in
-                        [01])
-                            [[ "${outHave[${outCur}]}" == 1 ]] && {
-                                cat "${tmpDir}"/.out/x${outCur} >&${fd_stdout}
-                                \rm  -f "${tmpDir}"/.out/x"${outCur}"
-                            }
-
-                            unset "outHave[${outCur}]"
-
-                            # advance outCur by 1
-                            ((outCur++))
-                            [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
-                        ;;
-                        *)
-                            break
-                        ;;
-                    esac
-                done
+                [[ ${outHave[${outCur}]} ]] && {
+                    outPrint=()
+                                
+                    while (( ${#outPrint[@]} < 128 )); do
+                        case "${outHave[${outCur}]}" in
+                            1)
+                                outPrint+=("${tmpDir}/.out/x${outCur}")
+                            ;;
+                            0)
+                                 
+                            ;;
+                            *)
+                                break
+                            ;;
+                        esac
+                        
+                        unset "outHave[${outCur}]"
+                
+                        # advance outCur by 1
+                        ((outCur++))
+                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
+                    done
+                
+                    cat "${outPrint[@]}"
+                    \rm -f "${outPrint[@]}"
+                }
 
                 # check for end condition
                 [[ -f "${tmpDir}"/.quit ]] && { continueFlag=false; break; }
