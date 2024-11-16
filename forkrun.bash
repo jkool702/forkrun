@@ -1207,8 +1207,10 @@ p_PID+=(\${p{<#>}_PID})""" )"
                     [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                 done
             
-                cat "${outPrint[@]}"
-                \rm -f "${outPrint[@]}"
+                [[ ${#outPrintr[@]} == 0 ]] || {
+                    cat "${outPrint[@]}"
+                    \rm -f "${outPrint[@]}"
+                }
                 
                 # check for end condition
                 [[ -f "${tmpDir}"/.quit ]] && { continueFlag=false; break; }
