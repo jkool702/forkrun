@@ -1207,7 +1207,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                     [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
                 done
             
-                [[ ${#outPrintr[@]} == 0 ]] || {
+                [[ ${#outPrint[@]} == 0 ]] || {
                     cat "${outPrint[@]}"
                     \rm -f "${outPrint[@]}"
                 }
