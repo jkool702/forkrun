@@ -29,7 +29,7 @@ forkrun() {
     # make all variables local
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nProcsMax nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
-    local -a A p_PID runCmd outHave pLOADA
+    local -a A p_PID runCmd outHave outPrint pLOADA
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -1163,51 +1163,53 @@ p_PID+=(\${p{<#>}_PID})""" )"
             while ${continueFlag}; do
 
                 # read order indices that are done running. 
-                read -r -u ${fd_nOrder0}
-                case "${REPLY}" in
-                    +([0-9]))
-                        # index has an output file
-                        outHave[${REPLY}]=1
-                    ;;
-                    x+([0-9]))
-                        # index was empty
-                        outHave[${REPLY#x}]=0
-                    ;;
-                    '')
-                        # end condition was met
-                        continueFlag=false
-                        break
-                    ;;
-                esac
+                while true; do
+                    read -r -u ${fd_nOrder0}
+                    case "${REPLY}" in
+                        +([0-9]))
+                            # index has an output file
+                            outHave[${REPLY}]=1
+                        ;;
+                        x+([0-9]))
+                            # index was empty
+                            outHave[${REPLY#x}]=0
+                        ;;
+                        '')
+                            # end condition was met
+                            continueFlag=false
+                            break
+                        ;;
+                    esac 
+                    [[ ${outHave[${outCur}]} ]] && break
+                done
 
                 # starting at $outCur, print all indices in sequential order that have been recorded as being run and then remove the tmp output file[s]
-                [[ ${outHave[${outCur}]} ]] && {
-                    outPrint=()
-                                
-                    while (( ${#outPrint[@]} < 128 )); do
-                        case "${outHave[${outCur}]}" in
-                            1)
-                                outPrint+=("${tmpDir}/.out/x${outCur}")
-                            ;;
-                            0)
-                                 
-                            ;;
-                            *)
-                                break
-                            ;;
-                        esac
-                        
-                        unset "outHave[${outCur}]"
                 
-                        # advance outCur by 1
-                        ((outCur++))
-                        [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
-                    done
+                outPrint=()
+                            
+                while (( ${#outPrint[@]} < 128 )); do
+                    case "${outHave[${outCur}]}" in
+                        1)
+                            outPrint+=("${tmpDir}/.out/x${outCur}")
+                        ;;
+                        0)
+                             
+                        ;;
+                        *)
+                            break
+                        ;;
+                    esac
+                    
+                    unset "outHave[${outCur}]"
+            
+                    # advance outCur by 1
+                    ((outCur++))
+                    [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
+                done
+            
+                cat "${outPrint[@]}"
+                \rm -f "${outPrint[@]}"
                 
-                    cat "${outPrint[@]}"
-                    \rm -f "${outPrint[@]}"
-                }
-
                 # check for end condition
                 [[ -f "${tmpDir}"/.quit ]] && { continueFlag=false; break; }
             done
@@ -1225,8 +1227,9 @@ p_PID+=(\${p{<#>}_PID})""" )"
             ${nQueueFlag} && printf 'final worker process count: %s    ( min read queue: %s )\n' "$(<"${tmpDir}"/.nWorkers)" "${nQueueMin}" 
         } >&${fd_stderr} 
 
+
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read0}<"${fPath}" {fd_read}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
