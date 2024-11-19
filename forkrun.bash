@@ -1159,57 +1159,52 @@ p_PID+=(\${p{<#>}_PID})""" )"
             # initialize real-time printing of ordered output as forkrun runs
             outCur=10
             continueFlag=true
+            outPrint=()
 
             while ${continueFlag}; do
 
                 # read order indices that are done running. 
-                while true; do
-                    read -r -u ${fd_nOrder0}
-                    case "${REPLY}" in
-                        +([0-9]))
-                            # index has an output file
-                            outHave[${REPLY}]=1
-                        ;;
-                        x+([0-9]))
-                            # index was empty
-                            outHave[${REPLY#x}]=0
-                        ;;
-                        '')
-                            # end condition was met
-                            continueFlag=false
-                            break
-                        ;;
-                    esac 
-                    [[ ${outHave[${outCur}]} ]] && break
-                done
+                read -r -u ${fd_nOrder0}
+                case "${REPLY}" in
+                    +([0-9]))
+                        # index has an output file
+                        outHave[${REPLY}]=1
+                    ;;
+                    x+([0-9]))
+                        # index was empty
+                        outHave[${REPLY#x}]=0
+                    ;;
+                    '')
+                        # end condition was met
+                        continueFlag=false
+                        break
+                    ;;
+                esac 
 
                 # starting at $outCur, print all indices in sequential order that have been recorded as being run and then remove the tmp output file[s]
                 
-                outPrint=()
-                            
-                while (( ${#outPrint[@]} < 128 )); do
-                    case "${outHave[${outCur}]}" in
-                        1)
-                            outPrint+=("${tmpDir}/.out/x${outCur}")
-                        ;;
-                        0)
-                             
-                        ;;
-                        *)
-                            break
-                        ;;
-                    esac
+                while [[ "${outHave[${outCur}]}" ]]; do
+
+                    [[ "${outHave[${outCur}]}" == 1 ]] && outPrint+=("${tmpDir}/.out/x${outCur}")
                     
                     unset "outHave[${outCur}]"
             
                     # advance outCur by 1
                     ((outCur++))
                     [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
+                
+                    [[ ${#outPrint[@]} == 128 ]] && {
+                        cat "${outPrint[@]}"
+                        \rm -f "${outPrint[@]}"
+                        outPrint=()
+                    }
+
                 done
-            
+
                 [[ ${#outPrint[@]} == 0 ]] || {
                     cat "${outPrint[@]}"
                     \rm -f "${outPrint[@]}"
+                    outPrint=()
                 }
                 
                 # check for end condition
