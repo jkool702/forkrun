@@ -8,7 +8,7 @@ shopt -s extglob
 renice --priority -20 --pid $$
 
 [[ "$USER" == 'root' ]] && {
-	for nn in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo 'performance' >"${nn}"; done#!/usr
+	for nn in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo 'performance' >"${nn}"; done
 }
 
 declare -F forkrun &>/dev/null || { 
