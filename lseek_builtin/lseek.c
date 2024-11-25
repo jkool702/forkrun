@@ -77,24 +77,22 @@ static int lseek_main(int argc, char **argv) {
         return 1;
     }
 
-    // get SEEK_TYPE and call lseek to move fd byte offset 
-    if (argc == 4 && strcmp(argv[3], "SEEK_SET") == 0) {
-        if (lseek(fd, offset, SEEK_SET) == (off_t) -1) {
-            fprintf(stderr, "\nERROR: %s\n", strerror(errno));
-            return 1;
-        }
-    } else if (argc == 4 && strcmp(argv[3], "SEEK_END") == 0) {
-        if (lseek(fd, offset, SEEK_END) == (off_t) -1) {
-            fprintf(stderr, "\nERROR: %s\n", strerror(errno));
-            return 1;
-        }
-    } else {
-        if (lseek(fd, offset, SEEK_CUR) == (off_t) -1) {
-            fprintf(stderr, "\nERROR: %s\n", strerror(errno));
-            return 1;
+    // get SEEK_TYPE 
+    int whence = SEEK_CUR; 
+    if (argc == 4) {
+        if (strcmp(argv[3], "SEEK_SET") == 0) {
+            whence = SEEK_SET;
+        } else if (strcmp(argv[3], "SEEK_END") == 0) {
+            whence = SEEK_END;
         }
     }
 
+    // call lseek to move fd byte offset 
+    if (lseek(fd, offset, whence) == (off_t) -1) {
+        fprintf(stderr, "\nERROR: %s\n", strerror(errno));
+        return 1;
+    }
+    
     return 0;
 }
 
