@@ -28,13 +28,17 @@ extern char **make_builtin_argv();
 static char *lseek_doc[] = {
     "",
     "----------------------------------------------",
-    "USAGE:    lseek <FD> <REL_OFFSET>",
+    "USAGE:    lseek <FD> <REL_OFFSET> [<SEEK_TYPE>]",
     "",
     "Move the file descriptor <FD> by <REL_OFFSET>",
     "bytes relative to its current byte offset.",
     "",
     "positive <REL_OFFSET> advances the <FD>",
     "negative <REL_OFFSET> rewinds the <FD>",
+    "",
+    "SEEK_TYPE is optional and can take the value of:",
+    "   'SEEK_SET'   'SEEK_CUR'    'SEEK_END'",
+    " If omitted or invalid, SEEK_CUR is used.",
     "----------------------------------------------",
     "",
     NULL
@@ -46,15 +50,15 @@ struct builtin lseek_struct = {
     lseek_builtin,        // Function to call
     BUILTIN_ENABLED,      // Default status
     lseek_doc,            // Documentation strings
-    "lseek <FD> <REL_OFFSET>",  // Usage string
+    "lseek <FD> <REL_OFFSET> [<SEEK_TYPE>]",  // Usage string
     0                     // Number of long options
 };
 
 // main function
 static int lseek_main(int argc, char **argv) {
-    // check for exactly 2 args passed to lseek
-    if (argc != 3) {
-        fprintf(stderr, "\nIncorrect number of arguments.\nUSAGE: lseek <FD> <REL_OFFSET>\n");
+    // check for exactly 2 or 3 args passed to lseek
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "\nIncorrect number of arguments.\nUSAGE: lseek <FD> <REL_OFFSET> [<SEEK_TYPE>]\n");
         return 1;
     }
 
@@ -65,7 +69,7 @@ static int lseek_main(int argc, char **argv) {
         return 1;
     }
 
-     // get + validate (relative) offset
+    // get + validate (relative) offset
     errno = 0;
     off_t offset = atoll(argv[2]);
     if (errno == ERANGE) {
@@ -73,12 +77,22 @@ static int lseek_main(int argc, char **argv) {
         return 1;
     }
 
+    // get SEEK_TYPE 
+    int whence = SEEK_CUR; 
+    if (argc == 4) {
+        if (strcmp(argv[3], "SEEK_SET") == 0) {
+            whence = SEEK_SET;
+        } else if (strcmp(argv[3], "SEEK_END") == 0) {
+            whence = SEEK_END;
+        }
+    }
+
     // call lseek to move fd byte offset 
-    if (lseek(fd, offset, SEEK_CUR) == (off_t) -1) {
+    if (lseek(fd, offset, whence) == (off_t) -1) {
         fprintf(stderr, "\nERROR: %s\n", strerror(errno));
         return 1;
     }
-
+    
     return 0;
 }
 
