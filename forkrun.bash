@@ -22,7 +22,7 @@ forkrun() {
 
 ############################ BEGIN FUNCTION ############################
 
-    trap - EXIT INT TERM HUP USR1 USR2
+    trap - EXIT INT TERM HUP USR1
 
     shopt -s extglob
 
@@ -30,6 +30,7 @@ forkrun() {
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nProcsMax nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
     local -a A p_PID runCmd outHave outPrint pLOADA
+    local -A pMap
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -149,6 +150,10 @@ forkrun() {
                 [[ "${1:0:1}" == '-' ]] && nOrderFlag=true || nOrderFlag=false
             ;;
 
+            [+-]?([+-])K?(EEP?(?(-)ORDER?(ING)?(?(-)INFO))))
+                [[ "${1:0:1}" == '-' ]] && exportOrderFlag=true || exportOrderFlag=false
+            ;;
+
             [+-]?([+-])@(0|z?(ero)|null))
                 [[ "${1:0:1}" == '-' ]] && nullDelimiterFlag=true || nullDelimiterFlag=false
             ;;
@@ -167,10 +172,6 @@ forkrun() {
 
             [+-]?([+-])@(D|[Dd]elete))
                 [[ "${1:0:1}" == '-' ]] && rmTmpDirFlag=true || rmTmpDirFlag=false
-            ;;
-
-            [+-]?([+-])n?(umber)?(-)?(line?(s)))
-                [[ "${1:0:1}" == '-' ]] && exportOrderFlag=true || exportOrderFlag=false
             ;;
 
             [+-]?([+-])@(N?(O)|[Nn][Oo]?(-)func))
@@ -1856,3 +1857,30 @@ _forkrun_get_load() (
     ${echoFlag} && printf 'Current System CPU Load = %s\n' "${pLOAD}" >&2
 )
 
+_forkrun_getVal() {
+    ## expands IEC and SI prefixed to get the numeric value they represent
+	#
+	# IEC prefixes (1024^N) are used by default are used to be consistent with other linux tools
+	# SI prefixes (1000^N) can be used by adding a '+' to the start of the number
+	#
+	# neither capatalization nor trailing -i's and -b's have any effect
+	#     1k =  1K =  1kb =  1KB =  1kib =  1KiB = 1024
+    #    +1k = +1K = +1kb = +1KB = +1kib = +1KiB = 1000
+
+    local +i nn;
+
+    (( ${#pMap[@]} > 0 )) || pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10)
+     
+    for nn in "${@,,}"; do	
+        nn="${nn%%[ib]*}";
+          
+        case "${nn:0:1}" in
+            '+')
+                echo "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
+            ;;
+            *)
+                echo "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn: -1}]:-0} ) ))"
+            ;;
+        esac
+    done
+}
