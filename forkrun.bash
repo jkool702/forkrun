@@ -1867,13 +1867,16 @@ _forkrun_getVal() {
 	#     1k =  1K =  1kb =  1KB =  1kib =  1KiB = 1024
     #    +1k = +1K = +1kb = +1KB = +1kib = +1KiB = 1000
 
-    local +i nn;
+    local +i nn
+    local -AI pMap
 
     (( ${#pMap[@]} > 0 )) || pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10)
      
     for nn in "${@,,}"; do	
-        nn="${nn%%[ib]*}";
-          
+        nn="${nn%b}";
+        [[ "${nn:0:1}${nn: -1}"  == '+i' ]] && nn="${nn:1}"
+        nn="${nn%i}";
+
         case "${nn:0:1}" in
             '+')
                 echo "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
