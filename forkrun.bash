@@ -1064,10 +1064,10 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 kkProcs=${nProcs}                
 
                 p_PID=()
-		pLOADA=()
+        pLOADA=()
 
                 nQueue=0
-		nQueueLastCount=0
+        nQueueLastCount=0
                 
                 (( "${nQueueMin}" <= 0 )) && nQueueMin=1
                 
@@ -1075,7 +1075,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
                 mapfile -t pLOADA < <(_forkrun_get_load -i)
                             
-		(( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
+        (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
 
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
                     nQueueLast=${nQueue}
@@ -1097,14 +1097,14 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
                     if (( ( ${nQueue} + ${nQueueLast} ) < ( 2 * ${nQueueMin} ) )); then
 
-			    if (( ${nQueueLastCount} < ( ${nQueueLastCountGoal} * ( 1 + ( kkProcs /  nCPU ) ) ) )); then
+                if (( ${nQueueLastCount} < ( ${nQueueLastCountGoal} * ( 1 + ( kkProcs /  nCPU ) ) ) )); then
                             ((nQueueLastCount++))
                         else
                             nQueueLastCount=0
 
                             mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA[@]}")
 
-		            (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
+                    (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
 
                             (( ${pLOADA} >= ${pLOAD_max} )) || {
 
@@ -1133,7 +1133,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                             }
                         fi
                     else
-			    nQueueLastCount=0
+                nQueueLastCount=0
                     fi
                     
                 done
@@ -1804,13 +1804,13 @@ _forkrun_get_load() (
                 }
             ;;
             [0-9]*)
-		    case "${argCount}" in
-			    0)  [[ ${1} == 0 ]] && pLOAD0=1 || pLOAD0="${1}"  ;;
-			    1)  cpu_ALL0="${1}"  ;;
-			    2)  cpu_LOAD0="${1}"  ;;
-			    3)  tALL0="${1}"  ;;
-		    esac
-		    ((argCount++))
+            case "${argCount}" in
+                0)  [[ ${1} == 0 ]] && pLOAD0=1 || pLOAD0="${1}"  ;;
+                1)  cpu_ALL0="${1}"  ;;
+                2)  cpu_LOAD0="${1}"  ;;
+                3)  tALL0="${1}"  ;;
+            esac
+            ((argCount++))
             ;;
         esac
         shift 1
@@ -1826,10 +1826,10 @@ _forkrun_get_load() (
     cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
     
     ${initFlag} && {
-	cpu_ALL0="${cpu_ALL}"
+    cpu_ALL0="${cpu_ALL}"
         cpu_LOAD0="${cpu_LOAD}"
 
-	( read -r -u $fd_sleep -t 0.01; ) {fd_sleep}<><(:)
+    ( read -r -u $fd_sleep -t 0.01; ) {fd_sleep}<><(:)
 
         read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice </proc/stat
     
@@ -1859,30 +1859,32 @@ _forkrun_get_load() (
 
 _forkrun_getVal() {
     ## expands IEC and SI prefixed to get the numeric value they represent
-	#
-	# IEC prefixes (1024^N) are used by default are used to be consistent with other linux tools
-	# SI prefixes (1000^N) can be used by adding a '+' to the start of the number
-	#
-	# neither capatalization nor trailing -i's and -b's have any effect
-	#     1k =  1K =  1kb =  1KB =  1kib =  1KiB = 1024
-    #    +1k = +1K = +1kb = +1KB = +1kib = +1KiB = 1000
+    #
+    # IEC prefixes (1024^N) are used by default are used to be consistent with other linux tools
+    # SI prefixes (1000^N) can be used by adding a '+' to the start of the number (requires single letter prefix)
+    #
+    # NOTES:
+    #    a trailing -i (Ki/KiB/Mi/MiB/Gi/GiB/...) will *always* be treated as a IEC Prefix
+    #    neither capatalization nor a trailing -b/-B have any effect. example:
+    #        1k =  1K =  1kb =  1KB =  1kib =  1KiB = +1kib = +1KiB =1024
+    #       +1k = +1K = +1kb = +1KB = 1000
 
     local +i nn
-    local -AI pMap
+    #local -AI pMap
 
     (( ${#pMap[@]} > 0 )) || pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10)
      
-    for nn in "${@,,}"; do	
+    for nn in "${@,,}"; do    
         nn="${nn%b}";
-        [[ "${nn:0:1}${nn: -1}"  == '+i' ]] && nn="${nn:1}"
+        [[ "${nn:0:1}${nn:'-1'}"  == '+i' ]] && nn="${nn//'+'/}"
         nn="${nn%i}";
 
         case "${nn:0:1}" in
             '+')
-                echo "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
+                echo "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn:'-1'}]:-0} ) ))"
             ;;
             *)
-                echo "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn: -1}]:-0} ) ))"
+                echo "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn:'-1'}]:-0} ) ))"
             ;;
         esac
     done
