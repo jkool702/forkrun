@@ -27,8 +27,8 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nProcsMax nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines nLines0 nLinesMax nQueueMin nOrder nProcs nProcsMax nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local -i PID0 nLinesCur nLinesNew nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
     local -a A p_PID runCmd outHave outPrint pLOADA
     local -A pMap
 
@@ -73,7 +73,7 @@ forkrun() {
                     continue
                 fi
                 if [[ "${nLines0}" == +([0-9])','+([0-9]) ]]; then
-                    nLinesMax="${nLines0##*,}"
+                    nLinesMax="$(_forkrun_getVal "${nLines0##*,}")"
                     nLines="${nLines0%%,*}"
                 else
                     nLines="${nLines0}"
@@ -307,22 +307,13 @@ forkrun() {
             nBytes="${nBytes,,}"
             nBytes="${nBytes//' '/}"
 
-            [[ "${nBytes}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]),+([0-9])?(.+([0-9])) ]] && {
+            [[ "${nBytes}" == +([0-9])?([kmgtpezyrq])?(i)?([b]),+([0-9])?(.+([0-9])) ]] && {
                 tTimeout="${nBytes##*,}"
                 [[ "${tTimeout}" == +([0-9]).*([0-9]) ]] && { tTimeout="${tTimeout%%.*}"; ((tTimeout++)); }
                 nBytes="${nBytes%,*}"
             }
 
-            nBytes="${nBytes%b}"
-            [[ "${nBytes}" == +([0-9])@([kmgtp])?(i) ]] && {
-                local -A nBytesParser=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5)
-
-                if [[ ${nBytes: -1:1} == 'i' ]]; then
-                    nBytes="$(( ${nBytes%[kmgtp]i} * ( 1024 ** ${nBytesParser[${nBytes: -2:1}]} ) ))"
-                else
-                    nBytes="$(( ${nBytes%[kmgtp]} * ( 1000 ** ${nBytesParser[${nBytes: -1:1}]} ) ))"
-                fi
-            }
+            nBytes="$(_forkrun_getVal "${nBytes}")"
 
             # make sure nBytes is only digits
             [[ "${nBytes//[0-9]/}" ]] && (( ${verboseLevel} >= 0 )) && { 
@@ -367,7 +358,7 @@ forkrun() {
         else
             # set batch size
             { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
-            { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
+            { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1 || nLines="$(_forkrun_getVal "${nLines}")"
         fi
 
         # set number of coproc workers and (if enabled) minimim worker read queue length
@@ -379,16 +370,17 @@ forkrun() {
         [[ "${nProcs}" == *','* ]] && {
             : "${nQueueFlag:=true}"
             nProcsMax="${nProcs#*,}"
-            nProcs="${nProcs%%,*}"
+            nProcs="$(_forkrun_getVal "${nProcs%%,*}")"
             [[ "${nProcsMax}" == *','* ]] && {
-                nQueueMin="${nProcsMax#*,}"
-                nProcsMax="${nProcsMax%%,*}"
+                nQueueMin="$(_forkrun_getVal "${nProcsMax#*,}")"
+                nProcsMax="$(_forkrun_getVal "${nProcsMax%%,*}")"
             }
         }
 
         : "${nQueueFlag:=false}" "${nQueueMin:=1}"
 
-        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}"
+        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}" nQueueMin="${nQueueMin}" nLines="${nLines}" nLinesMax="${nLinesMax}"
+        
         nCPU="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')";
         { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nQueueFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
 
@@ -1064,10 +1056,10 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 kkProcs=${nProcs}                
 
                 p_PID=()
-        pLOADA=()
+                pLOADA=()
 
                 nQueue=0
-        nQueueLastCount=0
+                nQueueLastCount=0
                 
                 (( "${nQueueMin}" <= 0 )) && nQueueMin=1
                 
@@ -1075,7 +1067,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
                 mapfile -t pLOADA < <(_forkrun_get_load -i)
                             
-        (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
+               (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
 
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
                     nQueueLast=${nQueue}
@@ -1097,14 +1089,14 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
                     if (( ( ${nQueue} + ${nQueueLast} ) < ( 2 * ${nQueueMin} ) )); then
 
-                if (( ${nQueueLastCount} < ( ${nQueueLastCountGoal} * ( 1 + ( kkProcs /  nCPU ) ) ) )); then
+                        if (( ${nQueueLastCount} < ( ${nQueueLastCountGoal} * ( 1 + ( kkProcs /  nCPU ) ) ) )); then
                             ((nQueueLastCount++))
                         else
                             nQueueLastCount=0
 
                             mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA[@]}")
 
-                    (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
+                            (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
 
                             (( ${pLOADA} >= ${pLOAD_max} )) || {
 
@@ -1858,33 +1850,28 @@ _forkrun_get_load() (
 )
 
 _forkrun_getVal() {
-    ## expands IEC and SI prefixed to get the numeric value they represent
+    ## Expands IEC and SI prefixes to get the numeric value they represent
     #
-    # IEC prefixes (1024^N) are used by default are used to be consistent with other linux tools
-    # SI prefixes (1000^N) can be used by adding a '+' to the start of the number (requires single letter prefix)
+    # IEC PREFIC (1024^N) is used if the prefix has a trailing '-i' (Ki/Mi/Gi). This is is the case without exception.
+    #  SI PREFIX (1000^N) is used if the prefix is a single letter (K/M/G/...), UNLESS the number is prefaced with a '+'.
     #
-    # NOTES:
-    #    a trailing -i (Ki/KiB/Mi/MiB/Gi/GiB/...) will *always* be treated as a IEC Prefix
-    #    neither capatalization nor a trailing -b/-B have any effect. example:
-    #        1k =  1K =  1kb =  1KB =  1kib =  1KiB = +1kib = +1KiB =1024
-    #       +1k = +1K = +1kb = +1KB = 1000
+    # NOTE: neither capatalization nor a trailing -b/-B have any effect. full word prefixes (e.g., '1 kilobyte') are not supported.
+    #
+    #  PARSING EXAMPLES:
+    #        +1k = +1K = +1kb = +1KB = 1kib = 1KiB = +1kib = +1KiB = 1024
+    #         1k =  1K =  1kb =  1KB = 1000
 
-    local +i nn
-    #local -AI pMap
+    local +i -l nn
 
-    (( ${#pMap[@]} > 0 )) || pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10)
+    (( ${#pMap[@]} == 20 )) || local -Ag pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10 [ki]=1 [mi]=2 [gi]=3 [ti]=4 [pi]=5 [ei]=6 [zi]=7 [yi]=8 [ri]=9 [qi]=10)
      
-    for nn in "${@,,}"; do    
-        nn="${nn%b}";
-        [[ "${nn:0:1}${nn:'-1'}"  == '+i' ]] && nn="${nn//'+'/}"
-        nn="${nn%i}";
-
-        case "${nn:0:1}" in
-            '+')
-                echo "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn:'-1'}]:-0} ) ))"
+    for nn in "${@%%[Bb]*}"; do    
+        case "${nn// /}" in
+            *'i'|'+'*)
+                printf '%s\n' "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn##*[0-9]}]:-0} ) ))"
             ;;
             *)
-                echo "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn:'-1'}]:-0} ) ))"
+                printf '%s\n' "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
             ;;
         esac
     done
