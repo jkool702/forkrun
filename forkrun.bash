@@ -27,10 +27,11 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLines0 nOrder nProcs nProcsMax nBytes tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLines nLinesCur nLinesNew nLinesMax nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueMin nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
+    local +i nLines nLines0 nBytes nProcs
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLinesMax nQueueMin nOrder nProcsMax tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local -i PID0 nLinesCur nLinesNew nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
     local -a A p_PID runCmd outHave outPrint pLOADA
-    local -A pMap
+    #local -Ax pMap
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -41,51 +42,51 @@ forkrun() {
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?(?([= ])?([+-])*([0-9])@([0-9,])*([0-9])?(,*([0-9]))))
-                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?([+-])*([0-9])@([0-9,])*([0-9])?(,*([0-9])) ]]; then
+            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?(?([= ])?([+-])*([0-9])*@([0-9,])**([0-9])*?(,*([0-9])*)))
+                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?([+-])*([0-9])*@([0-9,])**([0-9])*?(,*([0-9])*) ]]; then
                     nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?(+))}"
-                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?) ]] && [[ "${2}" == ?([+-])*([0-9])@([0-9,-])*([0-9])?(,*([0-9])) ]]; then
+                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?) ]] && [[ "${2}" == ?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
                     nProcs="${2#'+'}"
                     shift 1
                 fi
             ;;
 
-            -?(-)?(n)l?(ine?(s))?(?([= ])+([0-9])))
-                if [[ "${1}" == -?(-)?(n)l?(ine?(s))?([= ])+([0-9]) ]]; then
+            -?(-)?(n)l?(ine?(s))?(?([= ])+([0-9])*))
+                if [[ "${1}" == -?(-)?(n)l?(ine?(s))?([= ])+([0-9])* ]]; then
                     nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
                     nLinesAutoFlag=false
-                elif [[ "${1}" == -?(-)?(n)l?(ine?(s)) ]] && [[ "${2}" == +([0-9]) ]]; then
+                elif [[ "${1}" == -?(-)?(n)l?(ine?(s)) ]] && [[ "${2}" == +([0-9])* ]]; then
                     nLines="${2}"
                     nLinesAutoFlag=false
                     shift 1
                 fi
             ;;
 
-            -?(-)?(N)L?(INE?(S))?(?([= ])+([0-9])?(,+([0-9]))))
-                if [[ "${1}" == -?(-)?(N)L?(INE?(S))?([= ])+([0-9])?(,+([0-9])) ]]; then
+            -?(-)?(N)L?(INE?(S))?(?([= ])+([0-9])*?(,+([0-9])*)))
+                if [[ "${1}" == -?(-)?(N)L?(INE?(S))?([= ])+([0-9])*?(,+([0-9])*) ]]; then
                     nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
                     nLinesAutoFlag=true
-                elif [[ "${1}" == -?(-)?(N)L?(INE?(S)) ]] && [[ "${2}" == +([0-9])?(,+([0-9])) ]]; then
+                elif [[ "${1}" == -?(-)?(N)L?(INE?(S)) ]] && [[ "${2}" == +([0-9])*?(,+([0-9])*) ]]; then
                     nLines0="${2}"
                     nLinesAutoFlag=true
                     shift 1
                 else
                     continue
                 fi
-                if [[ "${nLines0}" == +([0-9])','+([0-9]) ]]; then
-                    nLinesMax="${nLines0##*,}"
+                if [[ "${nLines0}" == +([0-9])*','+([0-9])* ]]; then
+                    nLinesMax="$(_forkrun_getVal "${nLines0##*,}")"
                     nLines="${nLines0%%,*}"
                 else
                     nLines="${nLines0}"
                 fi
             ;;
 
-            -?(-)b?(yte?(s))?(?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])))
-                if [[ "${1}" == -?(-)b?(yte?(s))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb]) ]]; then
-                    nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb]))}"
+            -?(-)b?(yte?(s))?(?([= ])+([0-9])*))
+                if [[ "${1}" == -?(-)b?(yte?(s))?([= ])+([0-9])* ]]; then
+                    nBytes="${1##@(+([0-9])*)}"
                     readBytesFlag=true
                     readBytesExactFlag=false
-                elif [[ "${1}" == -?(-)b?(yte?(s)) ]] && [[ "${2}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]) ]]; then
+                elif [[ "${1}" == -?(-)b?(yte?(s)) ]] && [[ "${2}" == +([0-9])* ]]; then
                     nBytes="${2}"
                     readBytesFlag=true
                     readBytesExactFlag=false
@@ -93,12 +94,12 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)B?(YTE?(S))?(?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9])))))
-                if [[ "${1}" == -?(-)B?(YTE?(S))?([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))) ]]; then
-                    nBytes="${1##@(+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))))}"
+            -?(-)B?(YTE?(S))?(?([= ])+([0-9])*?(,+([0-9])*?(.+([0-9])*))))
+                if [[ "${1}" == -?(-)B?(YTE?(S))?([= ])+([0-9])*?(,+([0-9])*?(.+([0-9])*)) ]]; then
+                    nBytes="${1##@(+([0-9])*?(,+([0-9])*?(.+([0-9])*)))}"
                     readBytesFlag=true
                     readBytesExactFlag=true
-                elif [[ "${1}" == -?(-)B?(YTE?(S)) ]] && [[ "${2}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9]))) ]]; then
+                elif [[ "${1}" == -?(-)B?(YTE?(S)) ]] && [[ "${2}" == +([0-9])*?(,+([0-9])*?(.+([0-9])*)) ]]; then
                     nBytes="${2}"
                     readBytesFlag=true
                     readBytesExactFlag=true
@@ -282,7 +283,7 @@ forkrun() {
         fi
 
         # determine what forkrun is using lines on stdin for
-        if ${FORCE_allowCarriageReturnsFlag}; then
+        if ${FORCE_allowCarriageReturnsFlag:-false}; then
             # NOTE: allowing carriage returns in parFunC (or its initial args) is DANGEROUS. Dont do this unless you know what you are doing.
             # As such, `FORCE_allowCarriageReturnsFlag` can only be enabled (set to `true`) using the DEBUG_FORKRUN environment variable
             runCmd=("${@}") 
@@ -307,22 +308,13 @@ forkrun() {
             nBytes="${nBytes,,}"
             nBytes="${nBytes//' '/}"
 
-            [[ "${nBytes}" == +([0-9])?([KkMmGgTtPp])?(i)?([Bb]),+([0-9])?(.+([0-9])) ]] && {
+            [[ "${nBytes}" == +([0-9])?([kmgtpezyrq])?(i)?([b]),+([0-9])?(.+([0-9])) ]] && {
                 tTimeout="${nBytes##*,}"
                 [[ "${tTimeout}" == +([0-9]).*([0-9]) ]] && { tTimeout="${tTimeout%%.*}"; ((tTimeout++)); }
                 nBytes="${nBytes%,*}"
             }
 
-            nBytes="${nBytes%b}"
-            [[ "${nBytes}" == +([0-9])@([kmgtp])?(i) ]] && {
-                local -A nBytesParser=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5)
-
-                if [[ ${nBytes: -1:1} == 'i' ]]; then
-                    nBytes="$(( ${nBytes%[kmgtp]i} * ( 1024 ** ${nBytesParser[${nBytes: -2:1}]} ) ))"
-                else
-                    nBytes="$(( ${nBytes%[kmgtp]} * ( 1000 ** ${nBytesParser[${nBytes: -1:1}]} ) ))"
-                fi
-            }
+            nBytes="$(_forkrun_getVal "${nBytes}")"
 
             # make sure nBytes is only digits
             [[ "${nBytes//[0-9]/}" ]] && (( ${verboseLevel} >= 0 )) && { 
@@ -366,7 +358,7 @@ forkrun() {
 
         else
             # set batch size
-            { [[ ${nLines} ]]  && (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; } || : "${nLinesAutoFlag:=true}"
+            { [[ ${nLines} ]] && { nLines="$(_forkrun_getVal "${nLines}")"; (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; }; } || : "${nLinesAutoFlag:=true}"
             { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
         fi
 
@@ -379,16 +371,13 @@ forkrun() {
         [[ "${nProcs}" == *','* ]] && {
             : "${nQueueFlag:=true}"
             nProcsMax="${nProcs#*,}"
-            nProcs="${nProcs%%,*}"
-            [[ "${nProcsMax}" == *','* ]] && {
-                nQueueMin="${nProcsMax#*,}"
-                nProcsMax="${nProcsMax%%,*}"
-            }
+            [[ "${nProcsMax}" == *','* ]] && nQueueMin="$(_forkrun_getVal "${nProcsMax#*,}")"
+            nProcsMax="$(_forkrun_getVal "${nProcsMax%%,*}")"
         }
+        nProcs="$(_forkrun_getVal "${nProcs%%,*}")"
 
         : "${nQueueFlag:=false}" "${nQueueMin:=1}"
-
-        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}"
+     
         nCPU="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')";
         { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nQueueFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
 
@@ -404,6 +393,12 @@ forkrun() {
 
         # set defaults for control flags/parameters
         : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=1024}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" "${stdinRunFlag:=false}" 
+
+        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}" nQueueMin="${nQueueMin}" nLines="${nLines}" nLinesMax="${nLinesMax}"
+
+        # ensure sensible nLinesMax
+         ${nLinesAutoFlag} && {  (( nLinesMax < 2 * nLines )) && nLinesMax=$(( 2 * nLines )); } || { (( nLinesMax < nLines )) && nLinesMax=nLines; }
+
         doneIndicatorFlag=false
 
         # check for inotifywait
@@ -486,7 +481,7 @@ forkrun() {
             ${fallocateFlag} && echo 'using fallocate to shrink the tmpfile containing stdin as forkrun runs'
             ${lseekFlag} && echo 'using "lseek" loadable builtin to read data faster and more efficiently'
             ${nQueueFlag} && printf '(-j|-P) initial / max workers: %s / %s. workers will be dynamically spawned (up to a %s workers max) whenever read queue depth is less than %s\n' "${nProcs}" "${nProcsMax}" "${nProcsMax}" "${nQueueMin}" || printf '(-j|-P) using %s coproc workers\n' ${nProcs}
-            ${nLinesAutoFlag} && printf '(-L) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}"
+            ${nLinesAutoFlag} && printf '(-L) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}" || printf '(-l) using %s lines per function call (batch size) \n' "${nLines}"
             printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
             ${readBytesFlag} && printf '(-%s) data will be read in chunks of %s %s bytes using %s\n' "$(${readBytesExactFlag} && echo 'B' || echo 'b')" "$(${readBytesExactFlag} && echo 'exactly' || echo 'up to')" "${nBytes}" "${readBytesProg}"
             ${nOrderFlag} && echo '(-k) output will be ordered the same as if the inputs were run sequentially'
@@ -1064,10 +1059,10 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 kkProcs=${nProcs}                
 
                 p_PID=()
-		pLOADA=()
+                pLOADA=()
 
                 nQueue=0
-		nQueueLastCount=0
+                nQueueLastCount=0
                 
                 (( "${nQueueMin}" <= 0 )) && nQueueMin=1
                 
@@ -1075,7 +1070,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
                 mapfile -t pLOADA < <(_forkrun_get_load -i)
                             
-		(( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
+               (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
 
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
                     nQueueLast=${nQueue}
@@ -1097,14 +1092,14 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
                     if (( ( ${nQueue} + ${nQueueLast} ) < ( 2 * ${nQueueMin} ) )); then
 
-			    if (( ${nQueueLastCount} < ( ${nQueueLastCountGoal} * ( 1 + ( kkProcs /  nCPU ) ) ) )); then
+                        if (( ${nQueueLastCount} < ( ${nQueueLastCountGoal} * ( 1 + ( kkProcs /  nCPU ) ) ) )); then
                             ((nQueueLastCount++))
                         else
                             nQueueLastCount=0
 
                             mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA[@]}")
 
-		            (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
+                            (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
 
                             (( ${pLOADA} >= ${pLOAD_max} )) || {
 
@@ -1133,7 +1128,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
                             }
                         fi
                     else
-			    nQueueLastCount=0
+                nQueueLastCount=0
                     fi
                     
                 done
@@ -1249,7 +1244,7 @@ _forkrun_complete() {
             ;;
 
             # forkrun option with arg or for displaying help - 1 input
-            -?(-)@(@([jP]|?(n)[Pp]roc?(s)?)@([= ])+([0-9])|?(n)l?(ine?(s))@([= ])+([0-9])|?(N)L?(INE?(S))@([= ])+([0-9])?(,+([0-9]))|b?(yte?(s))@([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])|B?(YTE?(S))@([= ])+([0-9])?([KkMmGgTtPp])?(i)?([Bb])?(,+([0-9])?(.+([0-9])))|t?(mp?(?(-)dir))@([= ])*@([[:graph:]])*|d?(elim?(iter))@([= ])@([[:graph:]])*|help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|usage|[h?]))
+            -?(-)@(@([jP]|?(n)[Pp]roc?(s)?)@([= ])+([0-9])|?(n)l?(ine?(s))@([= ])+([0-9])|?(N)L?(INE?(S))@([= ])+([0-9])?(,+([0-9]))|b?(yte?(s))@([= ])+([0-9])*|B?(YTE?(S))@([= ])+([0-9])*?(,+([0-9])?(.+([0-9])))|t?(mp?(?(-)dir))@([= ])*@([[:graph:]])*|d?(elim?(iter))@([= ])@([[:graph:]])*|help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|usage|[h?]))
                 ((kk++))
             ;;
 
@@ -1297,7 +1292,7 @@ _forkrun_complete() {
 
         # generate array with possible completions
         mapfile -t compsA < <(printf '%s ' '' -{,-}{j,P,nprocs}{,=} $'\n' \
-echo -t{,=} --{tmp,tmpdir}{,=} --t{,=} -{tmp,tmpdir}{,=} $'\n' \
+-t{,=} --{tmp,tmpdir}{,=} --t{,=} -{tmp,tmpdir}{,=} $'\n' \
 -l{,=} --{,n}line{s,}{,=} --l{,=} -{,n}line{s,}{,=} $'\n' \
 -L{,=} --{,N}LINE{S,}{,=} --L{,=} -{,N}LINE{S,}{,=} $'\n' \
 -b{,=} --byte{s,}{,=} --b{,=} -byte{s,}{,=} $'\n' \
@@ -1307,9 +1302,9 @@ echo -t{,=} --{tmp,tmpdir}{,=} --t{,=} -{tmp,tmpdir}{,=} $'\n' \
 {-,+}i {--,++}insert {--,++}i {-,+}insert {-+,+-}i {-+,+-}insert $'\n' \
 {-,+}I {--,++}INSERT{,-ID,ID} {--,++}I {-,+}INSERT{,-ID,ID}{-+,+-}I {-+,+-}INSERT{,-ID,ID} $'\n' \
 {-,+}k {--,++}keep{,-order,order} {--,++}k {-,+}keep{,-order,order} {-+,+-}k {-+,+-}keep{,-order,order} $'\n' \
-{-,+}n {--,++}number{-,}line{,s} {--,++}n {-,+}number{-,}line{,s} {-+,+-}n {-+,+-}number{-,}line{,s} $'\n' \
+{-,+}K {--,++}KEEP{,ORDER,ORDERING,-ORDER,-ORDERING}{,INFO,-INFO} {--,++}K {-,+}KEEP{,ORDER,ORDERING,-ORDER,-ORDERING}{,INFO,-INFO} {-+,+-}K {-+,+-}KEEP{,ORDER,ORDERING,-ORDER,-ORDERING}{,INFO,-INFO} $'\n' \
 {-,+}{z,0} {--,++}{zero,null} {--,++}{z,0} {-,+}{zero,null} {-+,+-}{z,0} {-+,+-}{zero,null} $'\n' \
-{-,+}s {--,++}sub{,-}shell{-,}run {--,++}s {-,+}sub{,-}shell{-,}run {-+,+-}s {-+,+-}sub{,-}shell{-,}run $'\n' \
+{-,+}s {--,++}sub{,-}shell{-,}run {-v-,++}s {-,+}sub{,-}shell{-,}run {-+,+-}s {-+,+-}sub{,-}shell{-,}run $'\n' \
 {-,+}S {--,++}{S,s}tdin{,-run,run} {--,++}S {-,+}{S,s}tdin{,-run,run} {-+,+-}S {-+,+-}{S,s}tdin{,-run,run} $'\n' \
 {-,+}p {--,++}pipe{,-read,read} {--,++}p {-,+}pipe{,-read,read} {-+,+-}p {-+,+-}pipe{,-read,read} $'\n' \
 {-,+}D {--,++}{D,d}elete {--,++}D {-,+}{D,d}elete {-+,+-}D {-+,+-}{D,d}elete $'\n' \
@@ -1804,13 +1799,13 @@ _forkrun_get_load() (
                 }
             ;;
             [0-9]*)
-		    case "${argCount}" in
-			    0)  [[ ${1} == 0 ]] && pLOAD0=1 || pLOAD0="${1}"  ;;
-			    1)  cpu_ALL0="${1}"  ;;
-			    2)  cpu_LOAD0="${1}"  ;;
-			    3)  tALL0="${1}"  ;;
-		    esac
-		    ((argCount++))
+            case "${argCount}" in
+                0)  [[ ${1} == 0 ]] && pLOAD0=1 || pLOAD0="${1}"  ;;
+                1)  cpu_ALL0="${1}"  ;;
+                2)  cpu_LOAD0="${1}"  ;;
+                3)  tALL0="${1}"  ;;
+            esac
+            ((argCount++))
             ;;
         esac
         shift 1
@@ -1826,10 +1821,10 @@ _forkrun_get_load() (
     cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
     
     ${initFlag} && {
-	cpu_ALL0="${cpu_ALL}"
+    cpu_ALL0="${cpu_ALL}"
         cpu_LOAD0="${cpu_LOAD}"
 
-	( read -r -u $fd_sleep -t 0.01; ) {fd_sleep}<><(:)
+    ( read -r -u $fd_sleep -t 0.01; ) {fd_sleep}<><(:)
 
         read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice </proc/stat
     
@@ -1858,31 +1853,29 @@ _forkrun_get_load() (
 )
 
 _forkrun_getVal() {
-    ## expands IEC and SI prefixed to get the numeric value they represent
-	#
-	# IEC prefixes (1024^N) are used by default are used to be consistent with other linux tools
-	# SI prefixes (1000^N) can be used by adding a '+' to the start of the number
-	#
-	# neither capatalization nor trailing -i's and -b's have any effect
-	#     1k =  1K =  1kb =  1KB =  1kib =  1KiB = 1024
-    #    +1k = +1K = +1kb = +1KB = +1kib = +1KiB = 1000
+    ## Expands IEC and SI prefixes to get the numeric value they represent
+    #
+    # IEC PREFIC (1024^N) is used if the prefix has a trailing '-i' (Ki/Mi/Gi). This is is the case without exception.
+    #  SI PREFIX (1000^N) is used if the prefix is a single letter (K/M/G/...), UNLESS the number is prefaced with a '+'.
+    #
+    # NOTE: neither capatalization nor a trailing -b/-B have any effect. full word prefixes (e.g., '1 kilobyte') are not supported.
+    #
+    #  PARSING EXAMPLES:
+    #        +1k = +1K = +1kb = +1KB = 1kib = 1KiB = +1kib = +1KiB = 1024
+    #         1k =  1K =  1kb =  1KB = 1000
 
-    local +i nn
-    local -AI pMap
+    local +i -l nn
 
-    (( ${#pMap[@]} > 0 )) || pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10)
+    (( ${#pMap[@]} == 20 )) || local -Ag pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10 [ki]=1 [mi]=2 [gi]=3 [ti]=4 [pi]=5 [ei]=6 [zi]=7 [yi]=8 [ri]=9 [qi]=10)
      
-    for nn in "${@,,}"; do	
-        nn="${nn%b}";
-        [[ "${nn:0:1}${nn: -1}"  == '+i' ]] && nn="${nn:1}"
-        nn="${nn%i}";
-
-        case "${nn:0:1}" in
-            '+')
-                echo "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
+    for nn in "${@%%[Bb]*}"; do    
+        [[ ${nn} ]] || continue
+        case "${nn// /}" in
+            *'i'|'+'*)
+                printf '%s\n' "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn##*[0-9]}]:-0} ) ))"
             ;;
             *)
-                echo "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn: -1}]:-0} ) ))"
+                printf '%s\n' "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
             ;;
         esac
     done
