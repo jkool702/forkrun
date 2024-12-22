@@ -27,11 +27,10 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local +i nLines nLines0 nBytes nProcs
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nLinesMax nQueueMin nOrder nProcsMax tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nQueueMin
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i PID0 nLinesCur nLinesNew nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
     local -a A p_PID runCmd outHave outPrint pLOADA
-    #local -Ax pMap
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -1230,8 +1229,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 _forkrun_complete() {
     local -i kk jj
     local cmdFlag 
-    local -a compsA comps0 compsT
-    local -A comps
+    local -a compsA comps0 compsT comps
 
     cmdFlag=false
 
@@ -1318,20 +1316,15 @@ _forkrun_complete() {
 {--,-}help={a,all} $'\n' \
 --)
 
-        # generate possible complertions
-        mapfile -t comps0 < <( IFS=' '; compgen -W "${compsA[*]}" -- "${COMP_WORDS[${COMP_CWORD}]}"; )
-
-        # for each possible match, use 1 match from each type of option that forkrun supports. This prevents multiple aliases for a given option being suggested together.
-        for kk in "${!comps0[@]}"; do
-            for jj in "${!compsA[@]}"; do
-                if [[ "${compsA[$jj]}" == *" ${comps0[$kk]} "* ]]; then
-                    mapfile -t compsT < <( IFS=' '; compgen -W "${compsA[$jj]}" -- "${COMP_WORDS[${COMP_CWORD}]}"; )
-                    comps[${compsT[0]}]=''
-                fi
-            done
+        # for each possible option alias group, generate completions and use the 1st match. This prevents multiple aliases for a given option being suggested together.
+        for jj in "${!compsA[@]}"; do
+            if [[ "${compsA[$jj]}" == *\ "${COMP_WORDS[${COMP_CWORD}]}"* ]]; then
+                mapfile -t -n 1 compsT < <( IFS=' '; compgen -W "${compsA[$jj]}" -- "${COMP_WORDS[${COMP_CWORD}]}"; )
+                comps+=("${compsT[0]}")
+            fi
         done
 
-        COMPREPLY=("${!comps[@]}")
+        COMPREPLY=("${comps[@]}")
 
     fi
 }
