@@ -22,7 +22,7 @@ forkrun() {
 
 ############################ BEGIN FUNCTION ############################
 
-    trap - EXIT INT TERM HUP USR1 USR2
+    trap - EXIT INT TERM HUP USR1
 
     shopt -s extglob
 
@@ -30,7 +30,7 @@ forkrun() {
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nQueueMin
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr nLinesRead pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i PID0 nLinesCur nLinesNew nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0
-    local -a A p_PID runCmd outHave outPrint pLOADA
+    local -a A p_PID runCmd outHave outPrint pLOADA pLOADA0
     local -a -i timesA linesA
 
 
@@ -524,10 +524,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 export LC_ALL=C LANG=C IFS=
 
                 trap - EXIT
-                trap 'trap - TERM INT HUP USR1 USR2; kill -INT '"${PID0}"' ${BASHPID}' INT
-                trap 'trap - TERM INT HUP USR1 USR2; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                trap 'trap - TERM INT HUP USR1 USR2; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM INT HUP USR1 USR2' USR1
+                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+                trap 'trap - TERM INT HUP USR1' USR1
 
                 cat <&${fd_stdin} >&${fd_write}
                 : >"${tmpDir}"/.done
@@ -557,10 +557,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 export LC_ALL=C LANG=C IFS=
 
                 trap - EXIT
-                trap 'trap - TERM INT HUP USR1 USR2; kill -INT '"${PID0}"' ${BASHPID}' INT
-                trap 'trap - TERM INT HUP USR1 USR2; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                trap 'trap - TERM INT HUP USR1 USR2; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM INT HUP USR1 USR2' USR1
+                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+                trap 'trap - TERM INT HUP USR1' USR1
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
@@ -603,10 +603,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 export LC_ALL=C LANG=C IFS=
 
                 trap '[[ -f "'"${tmpDir}"'"/.run/pAuto ]] && \rm -f "'"${tmpDir}"'"/.run/pAuto' EXIT
-                trap 'trap - TERM INT HUP USR1 USR2; kill -INT '"${PID0}"' ${BASHPID}' INT
-                trap 'trap - TERM INT HUP USR1 USR2; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                trap 'trap - TERM INT HUP USR1 USR2; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM INT HUP USR1 USR2' USR1
+                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+                trap 'trap - TERM INT HUP USR1' USR1
 
                 ${fallocateFlag} && {
                     nWait=$(( 16 + ( ${nProcs} / 2 ) ))
@@ -622,18 +622,23 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         0)
                             nLinesAutoFlag=false
                             fallocateFlag=false
+                            nQueueFlag=false
                             break
                         ;;
                         x)
                             nLinesAutoFlag=false
                         ;;
                         q)
-                            nQueueFlag=0
+                            nQueueFlag=false
                         ;;
                     esac
 
-                    read -r fd_read_pos </proc/self/fdinfo/${fd_read}
-                    fd_read_pos=${fd_read_pos##*$'\t'}
+                    if ${fallocateFlag} || ${nLinesAutoFlag} || ${nQueueFlag}; then
+
+                        read -r fd_read_pos </proc/self/fdinfo/${fd_read}
+                        fd_read_pos=${fd_read_pos##*$'\t'}
+
+                    fi
 
                     if ${nLinesAutoFlag} || ${nQueueFlag}; then
 
@@ -684,6 +689,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     [[ -f "${tmpDir}"/.quit ]] && {
                         nLinesAutoFlag=false
                         fallocateFlag=false
+                        nQueueFlag=false
                     }
 
                 done
@@ -707,10 +713,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     export LC_ALL=C LANG=C IFS=
 
                     trap - EXIT
-                    trap 'trap - TERM INT HUP USR1 USR2; kill -INT '"${PID0}"' ${BASHPID}' INT
-                    trap 'trap - TERM INT HUP USR1 USR2; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                    trap 'trap - TERM INT HUP USR1 USR2; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                    trap 'trap - TERM INT HUP USR1 USR2' USR1
+                    trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
+                    trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                    trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+                    trap 'trap - TERM INT HUP USR1' USR1
                     inotifywait -q -m -e modify,close --format '' "${fPath}" >&${fd_inotify0} &
                     printf '%s\n' "${!}" >"${tmpDir}"/.run/pNotify
                 )
@@ -737,19 +743,18 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 export LC_ALL=C LANG=C IFS=
 
                 trap '[[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
-                trap 'trap - TERM INT HUP USR1 USR2; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
-                trap 'trap - TERM INT HUP USR1 USR2; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
-                trap 'trap - TERM INT HUP USR1 USR2; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
-                trap 'trap - TERM INT HUP USR1 USR2' USR1
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
+                trap 'trap - TERM INT HUP USR1' USR1
 
     
                 # get initial measurement for system cpu load calculation
-                read -r pLOAD0 _ </proc/loadavg; 
-                pLOAD0="${pLOAD0%% *}"
+                IFS=' '; read -r pLOAD0 _ </proc/loadavg; IFS=
                 pLOAD0="${pLOAD0//./}"; 
-                pLOAD0="${pLOAD0##*(0)}"
+                pLOAD0="${pLOAD0##+(0)}"
                 pLOAD0="$(( ( 100 * pLOAD0 ) / nCPU ))"; 
-                mapfile -t pLOADA < <(_forkrun_get_load -i); 
+                mapfile -t pLOADA0 < <(_forkrun_get_load -i); 
 
                 p_PID=()
 
@@ -761,7 +766,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 read -r -u ${fd_nQueue0}
 
                 # get "extra" load from coprocs forken from main thread and use it to estimate extra CPU load per coproc worker
-                mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA[@]}")
+                mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
                 pLOAD1=$(( ( pLOADA0 - pLOAD0 ) / ( kkProcs ) ))
                 #pLOAD1=$(( 10000 / nCPU ))
 
@@ -772,6 +777,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     IFS=' '
                     read -r -u ${fd_nQueue} runLines runTime
+                    [[ "${runLines}" == '0' ]] && [[ "${runTime}" == '0' ]] && break
                     read -r inLines inTime <"${tmpDir}"/.stdin_lines_time
                     IFS=
 
@@ -820,10 +826,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     for (( kk=0; kk<${pAdd}; kk++ )); do
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
-                        (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs. (read queue depth = %s)\n' "${kk}" "${pAdd}" "${kkProcs}" "${nQueue}" >&${fd_stderr}
-                        printf '%s\n' "${kkProcs}" >&${fd_nQueue0}
+                        (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs.\n' "${kk}" "${pAdd}" "${kkProcs}" >&${fd_stderr}
                         ((kkProcs++))
-                        kill -USR2 "${PID0}"
                     done
 
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
@@ -837,7 +841,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
               } 2>&${fd_stderr}
             } 2>/dev/null
 
-            exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
+            exitTrapStr+='echo "0 0" >&'"${fd_nQueue}"'; '$'\n'
             printf '%s\n' "${pQueue_PID}" > "${tmpDir}"/.run/pQueue
 
         }
@@ -875,10 +879,10 @@ trap ': >\"${tmpDir}\"/.quit;
 [[ -f \"${tmpDir}\"/.run/p{<#>} ]] && \\rm -f \"${tmpDir}\"/.run/p{<#>}; 
 printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT
 
-trap 'trap - TERM INT HUP USR1 USR2; kill -INT ${PID0} \${BASHPID}' INT
-trap 'trap - TERM INT HUP USR1 USR2; kill -TERM ${PID0} \${BASHPID}' TERM
-trap 'trap - TERM INT HUP USR1 USR2; kill -HUP ${PID0} \${BASHPID}' HUP
-trap 'trap - TERM INT HUP USR1 USR2' USR1
+trap 'trap - TERM INT HUP USR1; kill -INT ${PID0} \${BASHPID}' INT
+trap 'trap - TERM INT HUP USR1; kill -TERM ${PID0} \${BASHPID}' TERM
+trap 'trap - TERM INT HUP USR1; kill -HUP ${PID0} \${BASHPID}' HUP
+trap 'trap - TERM INT HUP USR1' USR1
 
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
@@ -1135,17 +1139,17 @@ p_PID+=(\${p{<#>}_PID})""" )"
         
         trap "${exitTrapStr}" EXIT
 
-        trap 'trap - TERM INT HUP USR1 USR2; 
+        trap 'trap - TERM INT HUP USR1; 
         returnVal=1; 
         kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
         kill -INT $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" INT
 
-        trap 'trap - TERM INT HUP USR1 USR2; 
+        trap 'trap - TERM INT HUP USR1; 
         returnVal=1; 
         kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
         kill -TERM $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" TERM
 
-        trap 'trap - TERM INT HUP USR1 USR2; 
+        trap 'trap - TERM INT HUP USR1; 
         returnVal=1; 
         kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
         kill -HUP $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" HUP
@@ -1166,12 +1170,10 @@ p_PID+=(\${p{<#>}_PID})""" )"
             [[ -f "${tmpDir}"/.quit ]] && break
             source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
         done
+
         echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    
         : >"${tmpDir}"/.spawned
-        ${nQueueFlag} && {
-            trap 'read -r -u '"${fd_nQueue0}"' PID_add; p_PID+=($(<"'"${tmpDir}"'"/.run/p'"${PID_add}"'))' USR2
-            printf '\n' >&${fd_nQueue0}
-        }
+        ${nQueueFlag} && printf '\n' >&${fd_nQueue0}
 
         (( ${verboseLevel} > 1 )) && printf '\n\n%s WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr}
 
@@ -1249,7 +1251,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         # print final nLines count
         (( ${verboseLevel} > 1 )) && {
             ${nLinesAutoFlag} && printf 'nLines (final) = %s    ( max = %s )\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}"
-            ${nQueueFlag} && printf 'final worker process count: %s    ( min read queue: %s )\n' "$(<"${tmpDir}"/.nWorkers)" "${nQueueMin}" 
+            ${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)"
         } >&${fd_stderr} 
 
 
