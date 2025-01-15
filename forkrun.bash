@@ -22,15 +22,17 @@ forkrun() {
 
 ############################ BEGIN FUNCTION ############################
 
-    trap - EXIT INT TERM HUP USR1
+    trap - EXIT INT TERM HUP USR1 USR2
 
     shopt -s extglob
 
     # make all variables local
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nQueueMin
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLinesCur nLinesNew nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr nLinesRead pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local -i PID0 nLinesCur nLinesNew nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0
     local -a A p_PID runCmd outHave outPrint pLOADA
+    local -a -i timesA linesA
+
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -504,6 +506,8 @@ forkrun() {
 
         # # # # # FORK "HELPER" PROCESSES # # # # #
 
+        tStart="${EPOCHREALTIME//./}"
+
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
@@ -520,10 +524,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 export LC_ALL=C LANG=C IFS=
 
                 trap - EXIT
-                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
-                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM INT HUP USR1' USR1
+                trap 'trap - TERM INT HUP USR1 USR2; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM INT HUP USR1 USR2; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - TERM INT HUP USR1 USR2; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+                trap 'trap - TERM INT HUP USR1 USR2' USR1
 
                 cat <&${fd_stdin} >&${fd_write}
                 : >"${tmpDir}"/.done
@@ -553,10 +557,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 export LC_ALL=C LANG=C IFS=
 
                 trap - EXIT
-                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
-                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM INT HUP USR1' USR1
+                trap 'trap - TERM INT HUP USR1 USR2; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM INT HUP USR1 USR2; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - TERM INT HUP USR1 USR2; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+                trap 'trap - TERM INT HUP USR1 USR2' USR1
 
                 # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
                 # start at 10 so that bash wont try to treat x0_ as an octal
@@ -584,7 +588,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
         fi
 
         # setup automatic dynamic nLines adjustment and/or fallocate pre-truncation of (already processed) stdin
-        if ${nLinesAutoFlag} || ${fallocateFlag}; then
+        if ${nLinesAutoFlag} || ${fallocateFlag} || ${nQueueFlag}; then
 
             printf '%s\n' ${nLines} >"${tmpDir}"/.nLines
 
@@ -599,20 +603,20 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 export LC_ALL=C LANG=C IFS=
 
                 trap '[[ -f "'"${tmpDir}"'"/.run/pAuto ]] && \rm -f "'"${tmpDir}"'"/.run/pAuto' EXIT
-                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
-                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM INT HUP USR1' USR1
+                trap 'trap - TERM INT HUP USR1 USR2; kill -INT '"${PID0}"' ${BASHPID}' INT
+                trap 'trap - TERM INT HUP USR1 USR2; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                trap 'trap - TERM INT HUP USR1 USR2; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+                trap 'trap - TERM INT HUP USR1 USR2' USR1
 
                 ${fallocateFlag} && {
                     nWait=$(( 16 + ( ${nProcs} / 2 ) ))
                     fd_read_pos_old=0
                 }
-                ${nLinesAutoFlag} && nRead=0
+                ${nLinesAutoFlag} && nLinesRead=0
 
-                while ${fallocateFlag} || ${nLinesAutoFlag}; do
+                while ${fallocateFlag} || ${nLinesAutoFlag} || ${nQueueFlag}; do
 
-                    read -u ${fd_nAuto} -t 0.1
+                    read -u ${fd_nAuto} -t 0.1 || continue
 
                     case ${REPLY} in
                         0)
@@ -620,23 +624,32 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                             fallocateFlag=false
                             break
                         ;;
-
-                        '')
+                        x)
                             nLinesAutoFlag=false
+                        ;;
+                        q)
+                            nQueueFlag=0
                         ;;
                     esac
 
                     read -r fd_read_pos </proc/self/fdinfo/${fd_read}
                     fd_read_pos=${fd_read_pos##*$'\t'}
 
-                    if ${nLinesAutoFlag}; then
+                    if ${nLinesAutoFlag} || ${nQueueFlag}; then
 
                         read fd_write_pos </proc/self/fdinfo/${fd_write}
                         fd_write_pos=${fd_write_pos##*$'\t'}
 
-                        nRead+=${REPLY}
+                        [[ "${REPLY}" == +([0-9]) ]] && nLinesRead=$(( nLinesRead + ${REPLY} ))
 
-                        nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
+                        nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) ))
+                    fi
+
+                    ${nQueueFlag} && printf '%s %s\n' "${nLinesEst}" "$(( ${EPOCHREALTIME//./} - tStart ))" >"${tmpDir}"/.stdin_lines_time
+
+                    if ${nLinesAutoFlag}; then
+
+                        nLinesNew=$(( 1 + ( ( nLinesEst - nLinesRead ) / ${nProcs} ) ))
 
                         (( ${nLinesNew} > ${nLinesCur} )) && {
 
@@ -645,7 +658,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                             printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines
 
                             # verbose output
-                            (( ${verboseLevel} > 2 )) && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&${fd_stderr}
+                            (( ${verboseLevel} > 2 )) && printf '\nCHANGING nLines from %s to %s!!!  --  ( nLinesRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nLinesRead} ${fd_write_pos} ${fd_read_pos} >&${fd_stderr}
 
                             nLinesCur=${nLinesNew}
                         }
@@ -694,10 +707,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     export LC_ALL=C LANG=C IFS=
 
                     trap - EXIT
-                    trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
-                    trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                    trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                    trap 'trap - TERM INT HUP USR1' USR1
+                    trap 'trap - TERM INT HUP USR1 USR2; kill -INT '"${PID0}"' ${BASHPID}' INT
+                    trap 'trap - TERM INT HUP USR1 USR2; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+                    trap 'trap - TERM INT HUP USR1 USR2; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+                    trap 'trap - TERM INT HUP USR1 USR2' USR1
                     inotifywait -q -m -e modify,close --format '' "${fPath}" >&${fd_inotify0} &
                     printf '%s\n' "${!}" >"${tmpDir}"/.run/pNotify
                 )
@@ -705,10 +718,128 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 pNotify_PID="$(<"${tmpDir}"/.run/pNotify)"
             } 2>/dev/null {fd_inotify0}>&${fd_inotify}
 
-
             exitTrapStr+=': > "'"${tmpDir}"'"/.stdin; '$'\n'
             ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
             exitTrapStr_kill+="${pNotify_PID} "
+        }
+
+        # setup dynamically spawning new worker coprocs
+        # dynamic spawning is decided using 3 criteria:
+        #    1) total worker coproc count must not exceed the maximum worker coproc count (by default 2 * nCPU)
+        #    2) coprocs will spawn until total system cpu load is at >=90% (for all cpu cores) OR until one of the other criteria is violated
+        #    3) coprocs will spawn until ( the average time it takes to get N lines on stdin ) >= ( ( the time it takes to process N lines ) / ( num worker coprocs ) OR until one of the other criteria is violated
+        ${nQueueFlag} && {
+            export -f _forkrun_get_load
+            { coproc pQueue {
+
+                # set traps and global vars
+
+                export LC_ALL=C LANG=C IFS=
+
+                trap '[[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
+                trap 'trap - TERM INT HUP USR1 USR2; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
+                trap 'trap - TERM INT HUP USR1 USR2; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
+                trap 'trap - TERM INT HUP USR1 USR2; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
+                trap 'trap - TERM INT HUP USR1 USR2' USR1
+
+    
+                # get initial measurement for system cpu load calculation
+                read -r pLOAD0 _ </proc/loadavg; 
+                pLOAD0="${pLOAD0%% *}"
+                pLOAD0="${pLOAD0//./}"; 
+                pLOAD0="${pLOAD0##*(0)}"
+                pLOAD0="$(( ( 100 * pLOAD0 ) / nCPU ))"; 
+                mapfile -t pLOADA < <(_forkrun_get_load -i); 
+
+                p_PID=()
+
+                : "${pLOAD_max:=9000}" "${nProcsMax:=$((2*${nCPU}))}" 
+
+                # wait for the coprocs spawned by the main thread to be spawned
+                # start dynamic spawning after nProcs workers already spawned
+                kkProcs=${nProcs}                
+                read -r -u ${fd_nQueue0}
+
+                # get "extra" load from coprocs forken from main thread and use it to estimate extra CPU load per coproc worker
+                mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA[@]}")
+                pLOAD1=$(( ( pLOADA0 - pLOAD0 ) / ( kkProcs ) ))
+                #pLOAD1=$(( 10000 / nCPU ))
+
+                (( ${verboseLevel} > 3 )) && printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1}" >&${fd_stderr}
+
+                # begin main loop
+                until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
+
+                    IFS=' '
+                    read -r -u ${fd_nQueue} runLines runTime
+                    read -r inLines inTime <"${tmpDir}"/.stdin_lines_time
+                    IFS=
+
+                    linesA[${runLines}]=$(( linesA[${runLines}] + runLines ))
+                    timesA[${runLines}]=$(( timesA[${runLines}] + runTime ))
+
+                    mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
+
+                    (( pLOADA > pLOAD_max )) && continue
+
+                    pAddMax=$(( nProcsMax - kkProcs ))
+
+                    pAdd0=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))
+
+                    (( pAdd < 1 )) && pAdd=0
+                    (( pAdd > pAddMax )) && pAdd=${pAddMax}
+
+                    #{ declare -p inTime inLines runTime runLines timesA linesA kkProcs pAdd pAdd1 pLOAD1 pLOADA; echo; } >&${fd_stderr}
+
+                    if (( ( inTime * kkProcs * linesA[${runLines}] ) < ( timesA[${runLines}] * inLines ) )); then
+
+                        pAdd1=$(( ( ( timesA[${runLines}] * inLines ) / ( inTime * linesA[${runLines}] ) ) - kkProcs ))
+
+                        (( pAdd1 < 1 )) && pAdd1=0
+                        (( pAdd1 > pAddMax )) && pAdd1=${pAddMax}
+
+                        if (( pAdd > 0 )) && (( pAdd0 > 0 )); then
+                            pAdd=$(( ( ( pAdd * pAdd ) + ( pAdd1 * pAdd1 ) ) / ( pAdd + pAdd0 ) ))
+                        elif (( pAdd < 0 )) && (( pAdd1 > 0 )); then
+                            pAdd=${pAdd1}
+                        fi
+
+                    fi
+
+                    (( pAdd < 1 )) && continue 
+
+                    pAdd=$(( ( ( ( 2 * nProcsMax ) - kkProcs ) * pAdd ) / ( 2 * nProcsMax ) ))
+                    (( ${pAdd} > ( 1 + ( ${nCPU} / 2 ) ) )) && pAdd=$(( 1 + ( ${nCPU} / 2 ) ))
+
+                    (( pAdd < 1 )) && pAdd=1
+                    (( pAdd > pAddMax )) && pAdd=${pAddMax}
+
+                    (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \n' "${pAdd}" >&${fd_stderr}
+
+                    mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+
+                    for (( kk=0; kk<${pAdd}; kk++ )); do
+                        source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
+                        (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs. (read queue depth = %s)\n' "${kk}" "${pAdd}" "${kkProcs}" "${nQueue}" >&${fd_stderr}
+                        printf '%s\n' "${kkProcs}" >&${fd_nQueue0}
+                        ((kkProcs++))
+                        kill -USR2 "${PID0}"
+                    done
+
+                    echo "${kkProcs}" >"${tmpDir}"/.nWorkers
+                    
+                done
+
+                ${nLinesAutoFlag} && printf 'q\n' >&${fd_nAuto}
+
+                [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
+
+              } 2>&${fd_stderr}
+            } 2>/dev/null
+
+            exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
+            printf '%s\n' "${pQueue_PID}" > "${tmpDir}"/.run/pQueue
+
         }
 
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
@@ -744,14 +875,13 @@ trap ': >\"${tmpDir}\"/.quit;
 [[ -f \"${tmpDir}\"/.run/p{<#>} ]] && \\rm -f \"${tmpDir}\"/.run/p{<#>}; 
 printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT
 
-trap 'trap - TERM INT HUP USR1; kill -INT ${PID0} \${BASHPID}' INT
-trap 'trap - TERM INT HUP USR1; kill -TERM ${PID0} \${BASHPID}' TERM
-trap 'trap - TERM INT HUP USR1; kill -HUP ${PID0} \${BASHPID}' HUP
-trap 'trap - TERM INT HUP USR1' USR1
+trap 'trap - TERM INT HUP USR1 USR2; kill -INT ${PID0} \${BASHPID}' INT
+trap 'trap - TERM INT HUP USR1 USR2; kill -TERM ${PID0} \${BASHPID}' TERM
+trap 'trap - TERM INT HUP USR1 USR2; kill -HUP ${PID0} \${BASHPID}' HUP
+trap 'trap - TERM INT HUP USR1 USR2' USR1
 
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
-${nQueueFlag}  && echo "printf '%s' '+' >&${fd_nQueue}"
 echo """
     read -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
@@ -899,7 +1029,6 @@ ${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } ||
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
 echo """
     printf '\\n' >&${fd_continue}"""
-${nQueueFlag} && echo "printf '%s' '-' >&${fd_nQueue}"
 echo """
     [[ \${#A[@]} == 0 ]] && {
         \${doneIndicatorFlag} || { 
@@ -910,7 +1039,7 @@ echo """
           }
         }
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
-${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
+${nLinesAutoFlag} && echo "printf 'x\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
 ${nQueueFlag} && echo "\printf '%s' '0' >&${fd_nQueue}"
 ${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' 2>/dev/null'
@@ -925,7 +1054,8 @@ echo """
         fi
         continue
     }"""
-${nLinesAutoFlag} && { printf '%s' """
+${nQueueFlag} && echo 'tStart0=${EPOCHREALTIME//./}'
+{ ${nLinesAutoFlag} || ${nQueueFlag}; } && { printf '%s' """
     \${nLinesAutoFlag} && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false
@@ -980,6 +1110,7 @@ ${noFuncFlag} && echo 'IFS='
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
 ${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
+${nQueueFlag} && echo "printf '%s %s\\n' \${#A[@]} \$(( \${EPOCHREALTIME//./} - tStart0 )) >&${fd_nQueue}"
 echo """
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
@@ -1004,17 +1135,17 @@ p_PID+=(\${p{<#>}_PID})""" )"
         
         trap "${exitTrapStr}" EXIT
 
-        trap 'trap - TERM INT HUP USR1; 
+        trap 'trap - TERM INT HUP USR1 USR2; 
         returnVal=1; 
         kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
         kill -INT $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" INT
 
-        trap 'trap - TERM INT HUP USR1; 
+        trap 'trap - TERM INT HUP USR1 USR2; 
         returnVal=1; 
         kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
         kill -TERM $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" TERM
 
-        trap 'trap - TERM INT HUP USR1; 
+        trap 'trap - TERM INT HUP USR1 USR2; 
         returnVal=1; 
         kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); 
         kill -HUP $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" HUP
@@ -1030,7 +1161,6 @@ p_PID+=(\${p{<#>}_PID})""" )"
         #     when that process writes a '\n' back to the pipe it releases the read lock
         printf '\n' >&${fd_continue};
 
-
         # source the coproc code for each coproc worker
         for (( kkProcs=0 ; kkProcs<${nProcs} ; kkProcs++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
@@ -1038,109 +1168,12 @@ p_PID+=(\${p{<#>}_PID})""" )"
         done
         echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    
         : >"${tmpDir}"/.spawned
+        ${nQueueFlag} && {
+            trap 'read -r -u '"${fd_nQueue0}"' PID_add; p_PID+=($(<"'"${tmpDir}"'"/.run/p'"${PID_add}"'))' USR2
+            printf '\n' >&${fd_nQueue0}
+        }
 
         (( ${verboseLevel} > 1 )) && printf '\n\n%s WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr}
-
-        # setup dynamically coproc to spawn new workers based on read queue length
-        ${nQueueFlag} && ! [[ -f "${tmpDir}"/.quit ]] && {
-            export -f _forkrun_get_load
-            { coproc pQueue {
-
-                export LC_ALL=C LANG=C IFS=
-
-                trap '[[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
-                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
-                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
-                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
-                trap 'trap - TERM INT HUP USR1' USR1
-
-                # start spawning after nProcs workers already forked
-                kkProcs=${nProcs}                
-
-                p_PID=()
-                pLOADA=()
-
-                nQueue=0
-                nQueueLastCount=0
-                
-                (( "${nQueueMin}" <= 0 )) && nQueueMin=1
-                
-                : "${pLOAD_max:=9500}" "${nProcsMax:=$((2*${nCPU}))}" "${nQueueLastCountGoal:=5}"
-
-                mapfile -t pLOADA < <(_forkrun_get_load -i)
-                            
-               (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
-
-                until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
-                    nQueueLast=${nQueue}
-
-                    # read from fd_queue pipe. 
-                    #      '+' --> increase queue depth by 1. 
-                    #      '-' --> decrease queue depth by 1.
-                    #      '0' --> quit
-                    read -r -u ${fd_nQueue} -N 1 
-        
-                    case "${REPLY}" in
-                        '+')  ((nQueue++))  ;;
-                        '-')  ((nQueue--))  ;;
-                        0)      break       ;;
-                        *)     continue     ;;
-                    esac
-
-                    # (( ${verboseLevel} > 3 )) && { printf '\nnQueue  = %s (nProcs = %s)\n' "${nQueue}" "${kkProcs}"; cat /proc/self/schedstat; } >&${fd_stderr}
-
-                    if (( ( ${nQueue} + ${nQueueLast} ) < ( 2 * ${nQueueMin} ) )); then
-
-                        if (( ${nQueueLastCount} < ( ${nQueueLastCountGoal} * ( 1 + ( kkProcs /  nCPU ) ) ) )); then
-                            ((nQueueLastCount++))
-                        else
-                            nQueueLastCount=0
-
-                            mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA[@]}")
-
-                            (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
-
-                            (( ${pLOADA} >= ${pLOAD_max} )) || {
-
-                                if (( ${nCPU} > ${kkProcs} )); then
-
-                                    pAdd=$(( 1 + ( ( ${nCPU} - ${kkProcs} ) * ( ${pLOAD_max} - ${pLOADA} ) ) / ( 1 + ${pLOADA} ) ))
-
-                                    (( ${verboseLevel} > 3 )) && printf '(pLOAD=%s  --  initial pAdd: %s ' "${pLOADA}" "${pAdd}" >&${fd_stderr}
-
-                                    (( ${pAdd} > ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) )) && pAdd=$(( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ))
-                                    (( ${pAdd} > ( 1 + ( ${nCPU} / 16 ) ) )) && pAdd=$(( 1 + ( ${nCPU} / 16 ) ))
-
-                                    (( ${pAdd} < 1 )) && pAdd=1
-                                else
-                                    pAdd=1
-                                fi
-
-                                (( ${verboseLevel} > 3 )) && printf 'final pAdd: %s \n' "${pAdd}" >&${fd_stderr}
-
-                                for (( kk=0; kk<${pAdd}; kk++ )); do
-                                    source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
-                                    (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs. (read queue depth = %s)\n' "${kk}" "${pAdd}" "${kkProcs}" "${nQueue}" >&${fd_stderr}
-                                    ((kkProcs++))
-                                done
-                                echo "${kkProcs}" >"${tmpDir}"/.nWorkers
-                            }
-                        fi
-                    else
-                nQueueLastCount=0
-                    fi
-                    
-                done
-
-                [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
-
-              } 2>&${fd_stderr}
-            } 2>/dev/null
-
-            exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
-            printf '%s\n' "${pQueue_PID}" > "${tmpDir}"/.run/pQueue
-
-        }
 
         (( ${verboseLevel} > 3 )) && { 
             printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}"
@@ -1221,7 +1254,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_nQueue0}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
