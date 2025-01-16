@@ -732,7 +732,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
             exitTrapStr_kill+="${pNotify_PID} "
         }
 
-# setup dynamically spawning new worker coprocs
+        # setup dynamically spawning new worker coprocs
         # dynamic spawning is decided using 3 criteria:
         #    1) total worker coproc count must not exceed the maximum worker coproc count (by default 2 * nCPU)
         #    2) coprocs will spawn until total system cpu load is at >=90% (for all cpu cores) OR until one of the other criteria is violated
@@ -742,9 +742,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
             { coproc pQueue {
 
                 # set traps and global vars
-
                 export LC_ALL=C LANG=C IFS=
-
                 trap 'printf '"'"'\n'"'"' >&'"${fd_nQueue0}"'; [[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
@@ -752,7 +750,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - TERM INT HUP USR1' USR1
 
     
-                # get initial measurement for system cpu load calculation
+                # get estimate of pre-forkrun baxkgrounfd system load (/proc/loadavg) and
+                # get initial measurement for system cpu load calculation (/proc/stat)
                 IFS=' .'
                 read -r pLOAD00 pLOAD01 _ </proc/loadavg
                 IFS=
@@ -760,7 +759,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                 mapfile -t pLOADA0 < <(_forkrun_get_load -i)
 
-                # wait for the helper coprocs spawned by the main thread to be spawned
+                # set some initial values
                 kkProcs=${nProcs}                
                 p_PID=()
                 : "${pLOAD_max:=9000}" "${nProcsMax:=$((2*${nCPU}))}" 
@@ -772,48 +771,63 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
                 pLOAD1=$(( ( pLOADA0 - pLOAD0 ) / ( kkProcs ) ))
                 #pLOAD1=$(( 10000 / nCPU ))
+
+                # record the average load at the current worker coproc count
                 pLOAD0=${pLOADA0}
                 kkProcs0=${kkProcs}
 
                 (( ${verboseLevel} > 3 )) && printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1}" >&${fd_stderr}
 
-                # start dynamic spawning after nProcs workers already spawned
+                # start dynamic spawning now that nProcs workers have already spawned
                 # begin main loop
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
 
+                    # wait for new info to get average run time per batch at current batch size arrives
                     IFS=' '
                     read -r -u ${fd_nQueue} runLines runTime
                     (( ${runLines} < 0 )) && (( ${runTime} < 0 )) && { IFS=; break; }
                     read -r inLines inTime <"${tmpDir}"/.stdin_lines_time
                     IFS=
 
+                    # update counts of lines run and run times for the current batch size
                     runLinesA[${runLines}]=$(( runLinesA[${runLines}] + runLines ))
                     runTimeA[${runLines}]=$(( runTimeA[${runLines}] + runTime ))
 
+                    # get average system load since the last time a new worker coproc was spawned
                     mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
 
+                    # abort if system load is above threshold
                     (( pLOADA > pLOAD_max )) && continue
 
+                    # figure out the max  numer of new workers to add on this loop
                     pAddMax=$(( nProcsMax - kkProcs ))
+                    (( pAddMax > ( 1 + ( nCPU / 4 ) ) )) && pAddMax=$(( 1 + ( nCPU / 4 ) ))
 
+                    # estimate out how many new workers it would take to increase systsem load up to threshold
                     #echo "pAdd=\$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))=\$(( ( $pLOAD_max - $pLOADA ) / $pLOAD1 ))=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))" >&${fd_stderr}
                     pAdd=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))
 
-
+                    # make sure estimate is between [0::pAddMax]
                     (( pAdd < 1 )) && pAdd=0
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
-                    (( pAddMax > ( 1 + ( nCPU / 4 ) ) )) && pAddMax=$(( 1 + ( nCPU / 4 ) ))
 
                     #{ declare -p inTime inLines runTime runLines runTimeA runLinesA kkProcs pAdd pAdd1 pLOAD1 pLOADA; echo; } >&${fd_stderr}
 
+                    # check if "time for N lines to arrive on stdin (t_in)" is less than "time to process N lines (t_run) / numWorkers (kkProcs)"
+                    # since only one worker can read data at a time, bhaving these be equal is ideal since
+                    # data is read as fast as it is comming in and workers arent sitting idle in a wait queue
                     if (( ( inTime * kkProcs * runLinesA[${runLines}] ) < ( runTimeA[${runLines}] * inLines ) )); then
 
+                        # estimate num workers to add to make t_in = t_run / kkProcs
                         #echo "pAdd1=\$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))=\$(( ( ( ${runTimeA[${runLines}]} * $inLines ) / ( $inTime * ${runLinesA[${runLines}]} ) ) - $kkProcs ))=$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))" >&${fd_stderr}
                         pAdd1=$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))
 
+                        # make sure estimate is between [0::pAddMax]
                         (( pAdd1 < 1 )) && pAdd1=0
                         (( pAdd1 > pAddMax )) && pAdd1=${pAddMax}
 
+                        # combine this estimate with the opne that maximizes system load
+                        # if only one of these is >0 keep that one, otherwise average with more weight on the smaller estimate
                         if (( pAdd > 0 )) && (( pAdd1 > 0 )); then
                             pAdd0=$(( ( ( pAdd * pAdd ) + ( pAdd1 * pAdd1 ) ) / ( pAdd + pAdd1 ) ))
                             if (( pAdd < pAdd1 )); then
@@ -826,43 +840,59 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         fi
                     fi
 
+                    # move on to next iteration if we arent adding new workers
                     (( pAdd < 1 )) && continue 
 
+                    # reduce the number of new workers to spawn a bit, since we cant unspawn them if we spawn too many
+                    # the closer the current worker count is to the max worker count limit, the more this is reduced
                     pAdd=$(( ( ( nProcsMax - kkProcs ) * pAdd ) / ( 4 * nProcsMax ) ))
-
                     (( pAdd < 1 )) && pAdd=1
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
 
+                    # update when system load is measured from since we are about to spawn new workers
                     mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
 
+                    # compare system load now to what it was just before the previous most recent group of new coprocs was spawned
                     if (( pLOADA0 > pLOAD0 )); then
 
+                        # system load increased (as expected). update "previous load + worker count variables"
                         (( kkProcs > kkProcs0 )) && {
                             pLOAD1=$(( ( pLOAD1 * ( kkProcs - kkProcs0 ) + ( pLOADA0 - pLOAD0 ) ) / ( 2 * ( kkProcs - kkProcs0 ) ) ))
                             pLOAD0=${pLOADA0}
                             kkProcs0=${kkProcs}
                         }
-                    elif (( kkProcs > kkProcs0 )); then
-                        pLOAD_max=$(( ( ( kkProcs * pLOAD_max ) + ( ( kkProcs-kkProcs0 ) * pLOADA0 ) ) / ( ( 2 * kkProcs ) - kkProcs0 ) ))
                     else
-                        pLOAD_max=$(( ( ( 3 * pLOAD_max ) + pLOADA0 ) / 4 ))
-                    fi
-                    #echo "pAdd (final) = $pAdd" >&${fd_stderr}
 
+                        # system load dropped with spawning new coprocs. This probably means our target maximum system load is too high.
+                        # about spawning new coprocs, lower system load target, and try again. 
+                        # How much load target increases depends on how many new coprocs were last spawned that resulted in lowered system load.
+                        if (( kkProcs > kkProcs0 )); then
+                            pLOAD_max=$(( ( ( kkProcs * pLOAD_max ) + ( ( kkProcs-kkProcs0 ) * pLOADA0 ) ) / ( ( 2 * kkProcs ) - kkProcs0 ) ))
+                        else
+                            pLOAD_max=$(( ( ( 3 * pLOAD_max ) + pLOADA0 ) / 4 ))
+                        fi
+                        continue
+                    fi
+                    
+                    #echo "pAdd (final) = $pAdd" >&${fd_stderr}
                     (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \n' "${pAdd}" >&${fd_stderr}
 
+                    # spawn the new coproc workers
                     for (( kk=0; kk<${pAdd}; kk++ )); do
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
                         (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs.\n' "${kk}" "${pAdd}" "${kkProcs}" >&${fd_stderr}
                         ((kkProcs++))
                     done
 
+                    # update public worker count info file
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
                     
                 done
 
+                # tell pAuto that the main nQueue loop is done
                 ${nLinesAutoFlag} && printf 'q\n' >&${fd_nAuto}
 
+                # wait for spawned coproc workers to finish
                 [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
 
               } 2>&${fd_stderr}
