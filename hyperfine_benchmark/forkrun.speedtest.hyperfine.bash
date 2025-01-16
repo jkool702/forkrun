@@ -95,7 +95,7 @@ C1[5]=' >/dev/null'
 
 mkdir -p "${hfdir0}"/file_lists
 
-nArgs=(1024 4096 16384 65536 262144 1048576)
+nArgs=('' 1024 4096 16384 65536 262144 1048576)
 cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3")
 find "${findDir}" -type f $(${nullFlag} && printf '%s' '-print0') >"${hfdir0}"/file_lists/f0
 if ${nullFlag}; then
@@ -105,7 +105,7 @@ else
 fi
 for (( kk=1; kk<=${#nArgs[@]}; kk++ )); do
 
-	shuf $(${nullFlag} && printf '%s' '-z') -n ${nArgs[$(($kk-1))]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f0
+	shuf $(${nullFlag} && printf '%s' '-z') -n ${nArgs[$kk]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f0
 
     (( nArgs >= nArgsMax )) && {
         nArgs=("${nArgs[@]:0:$((kk+1))}")
@@ -119,7 +119,7 @@ for jj in "${!C0[@]}"; do
 
     mkdir -p "${hfdir}"/results
 
-    for kk in "${!nArgs[@]}"; do [[ "$kk" == 0 ]] && continue 
+    for (( kk=1; kk<${#nArgs[@]}; kk++ )); do
         printf '\n-------------------------------- STARTING TESTING FOR %s VALUES --------------------------------\n\n' "${nArgs[$kk]}"; 
 
         for c in "${cksumAlgsA[@]}"; do 
