@@ -507,6 +507,7 @@ forkrun() {
         # # # # # FORK "HELPER" PROCESSES # # # # #
 
         tStart="${EPOCHREALTIME//./}"
+	${nQueueFlag} && mapfile -t pLOADA0 < <(_forkrun_get_load -i)
 
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
@@ -752,12 +753,18 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
     
                 # get estimate of pre-forkrun baxkgrounfd system load (/proc/loadavg) and
                 # get initial measurement for system cpu load calculation (/proc/stat)
-                IFS=' .'
-                read -r pLOAD00 pLOAD01 _ </proc/loadavg
-                IFS=
-                pLOAD0=$(( ( ( 10000 * pLOAD00 ) + ( 100 * ${pLOAD01##+([0])} ) ) / nCPU ))
+#                IFS=' .'
+#                read -r pLOAD00 pLOAD01 _ </proc/loadavg
+#                IFS=
+#                pLOAD0=$(( ( ( 10000 * pLOAD00 ) + ( 100 * ${pLOAD01##+([0])} ) ) / nCPU ))
+#                pLOAD0=0
 
-                mapfile -t pLOADA0 < <(_forkrun_get_load -i)
+                # wait for the helper coprocs spawned by the main thread to be spawned
+                read -r -u ${fd_nQueue0}
+
+		# get background load
+                mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+		pLOAD0="${pLOADA0}"
 
                 # set some initial values
                 kkProcs=${nProcs}                
@@ -845,7 +852,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # reduce the number of new workers to spawn a bit, since we cant unspawn them if we spawn too many
                     # the closer the current worker count is to the max worker count limit, the more this is reduced
-                    pAdd=$(( ( ( nProcsMax - kkProcs ) * pAdd ) / ( 4 * nProcsMax ) ))
+		    pAdd=$(( ( ( ( nProcsMax ) - kkProcs ) * pAdd ) / ( 4 * nProcsMax ) ))
                     (( pAdd < 1 )) && pAdd=1
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
 
@@ -855,23 +862,23 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # compare system load now to what it was just before the previous most recent group of new coprocs was spawned
                     if (( pLOADA0 > pLOAD0 )); then
 
-                        # system load increased (as expected). update "previous load + worker count variables"
+                        # system load increased (as expected). update "previous load" + "worker count" variables
                         (( kkProcs > kkProcs0 )) && {
-                            pLOAD1=$(( ( pLOAD1 * ( kkProcs - kkProcs0 ) + ( pLOADA0 - pLOAD0 ) ) / ( 2 * ( kkProcs - kkProcs0 ) ) ))
+                            pLOAD1=$(( 1 + ( 3 * pLOAD1 * ( kkProcs - kkProcs0 ) + ( pLOADA0 - pLOAD0 ) ) / ( 4 * ( kkProcs - kkProcs0 ) ) ))
                             pLOAD0=${pLOADA0}
                             kkProcs0=${kkProcs}
                         }
                     else
 
                         # system load dropped with spawning new coprocs. This probably means our target maximum system load is too high.
-                        # about spawning new coprocs, lower system load target, and try again. 
+                        # cut number of new coprocs to spawn to 1 and lower system load target
                         # How much load target increases depends on how many new coprocs were last spawned that resulted in lowered system load.
                         if (( kkProcs > kkProcs0 )); then
                             pLOAD_max=$(( ( ( kkProcs * pLOAD_max ) + ( ( kkProcs-kkProcs0 ) * pLOADA0 ) ) / ( ( 2 * kkProcs ) - kkProcs0 ) ))
                         else
                             pLOAD_max=$(( ( ( 3 * pLOAD_max ) + pLOADA0 ) / 4 ))
                         fi
-                        continue
+			pAdd=1
                     fi
                     
                     #echo "pAdd (final) = $pAdd" >&${fd_stderr}
@@ -1213,6 +1220,8 @@ p_PID+=(\${p{<#>}_PID})""" )"
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && { printf '\nSET TRAPS:\n\n'; trap -p; } >&${fd_stderr}
 
+        ${nQueueFlag} && printf '\n' >&${fd_nQueue0}
+
         # # # # # FORK COPROC "WORKERS" # # # # #
 
         # initialize read lock {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
@@ -1308,8 +1317,10 @@ p_PID+=(\${p{<#>}_PID})""" )"
         # print final nLines count
         (( ${verboseLevel} > 1 )) && {
             ${nLinesAutoFlag} && printf 'nLines (final) = %s    ( max = %s )\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}"
-            ${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)"
+            # ${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)"
         } >&${fd_stderr} 
+        
+	${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)" >&${fd_stderr}
 
 
     # open anonymous pipes + other misc file descriptors for the above code block
