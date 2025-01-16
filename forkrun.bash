@@ -507,7 +507,6 @@ forkrun() {
         # # # # # FORK "HELPER" PROCESSES # # # # #
 
         tStart="${EPOCHREALTIME//./}"
-	${nQueueFlag} && mapfile -t pLOADA0 < <(_forkrun_get_load -i)
 
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
@@ -759,12 +758,14 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 #                pLOAD0=$(( ( ( 10000 * pLOAD00 ) + ( 100 * ${pLOAD01##+([0])} ) ) / nCPU ))
 #                pLOAD0=0
 
+	        ${nQueueFlag} && mapfile -t pLOADA0 < <(_forkrun_get_load -i)
+
                 # wait for the helper coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nQueue0}
 
 		# get background load
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
-		pLOAD0="${pLOADA0}"
+		pLOAD0="(( pLOADA0 / 2 ))"
 
                 # set some initial values
                 kkProcs=${nProcs}                
@@ -857,16 +858,17 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
 
                     # update when system load is measured from since we are about to spawn new workers
-                    mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+                    #mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
 
                     # compare system load now to what it was just before the previous most recent group of new coprocs was spawned
-                    if (( pLOADA0 > pLOAD0 )); then
+                    if (( pLOADA > pLOAD0 )); then
 
                         # system load increased (as expected). update "previous load" + "worker count" variables
                         (( kkProcs > kkProcs0 )) && {
-                            pLOAD1=$(( 1 + ( 3 * pLOAD1 * ( kkProcs - kkProcs0 ) + ( pLOADA0 - pLOAD0 ) ) / ( 4 * ( kkProcs - kkProcs0 ) ) ))
-                            pLOAD0=${pLOADA0}
+                            pLOAD1=$(( 1 + ( pLOAD1 * ( kkProcs - kkProcs0 ) + ( pLOADA - pLOAD0 ) ) / ( ( kkProcs - kkProcs0 ) ) ))
+                            pLOAD0=${pLOADA}
                             kkProcs0=${kkProcs}
+			    pLOAD_max=$(( ( ( nProcsMax * pLOAD_max ) + ( pAdd * 9500 ) ) / ( nProcsMax + pAdd ) ))
                         }
                     else
 
@@ -876,9 +878,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         if (( kkProcs > kkProcs0 )); then
                             pLOAD_max=$(( ( ( kkProcs * pLOAD_max ) + ( ( kkProcs-kkProcs0 ) * pLOADA0 ) ) / ( ( 2 * kkProcs ) - kkProcs0 ) ))
                         else
-                            pLOAD_max=$(( ( ( 3 * pLOAD_max ) + pLOADA0 ) / 4 ))
+                            pLOAD_max=$(( (  pLOAD_max + pLOADA0 ) / 2 ))
                         fi
-			pAdd=1
+			#pAdd=1
+			continue
                     fi
                     
                     #echo "pAdd (final) = $pAdd" >&${fd_stderr}
