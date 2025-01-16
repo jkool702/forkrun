@@ -1896,6 +1896,8 @@ _forkrun_get_load() (
         shift 1
     done
 
+    : "${tAlll0:=0)"
+
 #    if [[ ${pLOAD0} == 0 ]] || [[ ${cpu_ALL0} == 0 ]] || [[ ${cpu_LOAD0} == 0 ]] || [[ ${tALL0} == 0 ]] || [[ -z ${pLOAD0} ]] || [[ -z ${cpu_ALL0} ]] || [[ -z ${cpu_LOAD0} ]] || [[ -z ${tALL0} ]]; then
 #        initFlag=true
 #    fi
@@ -1906,36 +1908,29 @@ _forkrun_get_load() (
     cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
     
     ${initFlag} && {
-    cpu_ALL0="${cpu_ALL}"
-        cpu_LOAD0="${cpu_LOAD}"
-
-    ( read -r -u $fd_sleep -t 0.01; ) {fd_sleep}<><(:)
-
-        read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice </proc/stat
-    
-        cpu_LOAD=$(( cpu_user + cpu_nice + cpu_system + cpu_irq + cpu_softirq + cpu_steal + cpu_guest + cpu_guestnice ))
-        cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
+        pLOADA=(-1 "${cpu_ALL}" "${cpu_LOAD}" 0)
+        printf '%s\n' "${pLOADA[@]}"   
+        return 0
     }
 
     tALL=$(( cpu_ALL - cpu_ALL0 ))
 
     pLOAD=$(( ( loadMaxVal * ( cpu_LOAD - cpu_LOAD0 ) ) / ( 1 + cpu_ALL - cpu_ALL0 ) ))
 
-    ${initFlag} || {
-
-        tLOAD=$(( cpu_LOAD - cpu_LOAD0 ))
+    tLOAD=$(( cpu_LOAD - cpu_LOAD0 ))
         
-        (( tALL0 > ( 10 * tALL ) )) && tALL0=$(( 10 * tALL ))
+    (( tALL0 > ( 10 * tALL ) )) && tALL0=$(( 10 * tALL ))
 
-        pLOAD=$(( ( loadMaxVal * tLOAD ) / ( 1 + tALL ) ))
-        pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
+    pLOAD=$(( ( loadMaxVal * tLOAD ) / ( 1 + tALL ) ))
+    pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
 
-    }
 
     pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
     printf '%s\n' "${pLOADA[@]}"
     ${echoFlag} && printf 'Current System CPU Load = %s\n' "${pLOAD}" >&2
 )
+
+export -fp _forkrun_getVal &>/dev/null && export -nf _forkrun_getVal
 
 _forkrun_getVal() {
     ## Expands IEC and SI prefixes to get the numeric value they represent
