@@ -765,7 +765,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
 		# get background load
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
-		pLOAD0="(( pLOADA0 / 2 ))"
+		pLOAD0="(( pLOADA0 / 4 ))"
 
                 # set some initial values
                 kkProcs=${nProcs}                
@@ -853,7 +853,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # reduce the number of new workers to spawn a bit, since we cant unspawn them if we spawn too many
                     # the closer the current worker count is to the max worker count limit, the more this is reduced
-		    pAdd=$(( ( ( ( nProcsMax ) - kkProcs ) * pAdd ) / ( 4 * nProcsMax ) ))
+		    pAdd=$(( ( ( ( 4 * nProcsMax ) - ( 3 * kkProcs ) ) * pAdd ) / ( 16 * nProcsMax ) ))
                     (( pAdd < 1 )) && pAdd=1
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
 
@@ -868,7 +868,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                             pLOAD1=$(( 1 + ( pLOAD1 * ( kkProcs - kkProcs0 ) + ( pLOADA - pLOAD0 ) ) / ( ( kkProcs - kkProcs0 ) ) ))
                             pLOAD0=${pLOADA}
                             kkProcs0=${kkProcs}
-			    pLOAD_max=$(( ( ( nProcsMax * pLOAD_max ) + ( pAdd * 9500 ) ) / ( nProcsMax + pAdd ) ))
+			    (( pLOAD_max < 9000 )) && pLOAD_max=$(( ( ( 3 * nProcsMax * pLOAD_max ) + ( pAdd * 9000 ) ) / ( ( 3 * nProcsMax ) + pAdd ) ))
                         }
                     else
 

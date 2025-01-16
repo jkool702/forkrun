@@ -98,12 +98,18 @@ C1[5]=' >/dev/null'
 
 mkdir -p "${hfdir0}"/file_lists
 
-nArgs=('' 1024 4096 16384 65536 262144 1048576)
+find "${findDir}" -type f $(${nullFlag} && printf '%s' '-print0') >"${hfdir0}"/file_lists/f0
+
+nArgsMax="$(tr '\0' '\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
+nArgs=('' 1024 )
+until (( ( 4 * nArgs[-1] ) >= nArgsMax )); do
+	nArgs+=($((4 * nArgs[-1])))
+done
+nArgs+=(${nArgsMax})
+
 cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3")
 
-nArgs[-1]="$(tr '\0' '\n' <../hyperfine/file_lists/f0 | wc -l)"
 
-find "${findDir}" -type f $(${nullFlag} && printf '%s' '-print0') >"${hfdir0}"/file_lists/f0
 #if ${nullFlag}; then
 #    nArgsMax="$(tr $'\x00' $'\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
 #else
