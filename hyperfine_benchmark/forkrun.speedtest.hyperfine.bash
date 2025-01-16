@@ -98,18 +98,18 @@ mkdir -p "${hfdir0}"/file_lists
 nArgs=('' 1024 4096 16384 65536 262144 1048576)
 cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3")
 find "${findDir}" -type f $(${nullFlag} && printf '%s' '-print0') >"${hfdir0}"/file_lists/f0
-if ${nullFlag}; then
-    nArgsMax="$(tr $'\x00' $'\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
-else
-    nArgsMax="$(wc -l <"${hfdir0}"/file_lists/f0)"
-fi
+#if ${nullFlag}; then
+#    nArgsMax="$(tr $'\x00' $'\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
+#else
+#    nArgsMax="$(wc -l <"${hfdir0}"/file_lists/f0)"
+#fi
 for (( kk=1; kk<=${#nArgs[@]}; kk++ )); do
 
 	shuf $(${nullFlag} && printf '%s' '-z') -n ${nArgs[$kk]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f0
 
-    (( nArgs[$kk] >= nArgsMax )) && {
-        nArgs=("${nArgs[@]:0:$((kk+1))}")
-        break
+#    (( nArgs[$kk] >= nArgsMax )) && {
+#        nArgs=("${nArgs[@]:0:$((kk+1))}")
+#        break
     }
 done
 
@@ -207,9 +207,9 @@ for jj in "${!C0[@]}"; do
     {
     printf '\n\n||-----------------------------------------------------------------------------------------------------------------------------------------------------------||\n||------------------------------------------------------------------- RUN_TIME_IN_SECONDS -------------------------------------------------------------------||\n||-----------------------------------------------------------------------------------------------------------------------------------------------------------||\n'  
 
-    for kk in "${!nArgs[@]}"; do [[ "$kk" == 0 ]] && continue
+    for (( kk=1; kk<=${#nArgs[@]}; kk++ )); do
 
-        printf '\n\n\n%.157s|| \n\n' "$(printf '||----------------------------------------------------------------- NUM_CHECKSUMS=%s -------------------------------------------------------------------------' $(wc -l <"${hfdir0}/file_lists/f${kk}"))"
+        printf '\n\n\n%.157s|| \n\n' "$(printf '||----------------------------------------------------------------- NUM_CHECKSUMS=%s -------------------------------------------------------------------------' ${nArgs[$kk]})"
         printf0 8:'(algorithm)' 
         if ${testParallelFlag}; then
 		printf0 12:'(forkrun -j -)' 12:'(forkrun)' 12:'(xargs)' 12:'(parallel)' 44:'(relative performance vs xargs)' 44:'(relative performance vs parallel)'
