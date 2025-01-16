@@ -1896,7 +1896,7 @@ _forkrun_get_load() (
         shift 1
     done
 
-    : "${tAlll0:=0)"
+    : "${tALL0:=0}"
 
 #    if [[ ${pLOAD0} == 0 ]] || [[ ${cpu_ALL0} == 0 ]] || [[ ${cpu_LOAD0} == 0 ]] || [[ ${tALL0} == 0 ]] || [[ -z ${pLOAD0} ]] || [[ -z ${cpu_ALL0} ]] || [[ -z ${cpu_LOAD0} ]] || [[ -z ${tALL0} ]]; then
 #        initFlag=true
