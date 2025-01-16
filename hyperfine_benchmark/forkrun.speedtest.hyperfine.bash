@@ -41,6 +41,7 @@ findDirDefault='/usr'
 
 findDir='/mnt/ramdisk/usr'
 ramdiskTransferFlag=false
+nullFlag=true
 
 [[ -n "$1" ]] && [[ -d "$1" ]] && findDir="$1"
 : ${findDir:="${findDirDefault}"} ${ramdiskTransferFlag:=true}
@@ -70,6 +71,8 @@ else
 
 fi
 "${testParallelFlag:=true}"
+testParallelFlag=false
+
 declare -a C0 C1
 
 C0[0]=''
@@ -94,27 +97,38 @@ mkdir -p "${hfdir0}"/file_lists
 
 nArgs=(1024 4096 16384 65536 262144 1048576)
 cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3")
-find "${findDir}" -type f >"${hfdir0}"/file_lists/f6
-for kk in {1..5}; do
-	shuf -n ${nArgs[$(($kk-1))]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f6
+find "${findDir}" -type f $(${nullFlag} && printf '%s' '-print0') >"${hfdir0}"/file_lists/f0
+if ${nullFlag}; then
+    nArgsMax="$(tr $'\x00' $'\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
+else
+    nArgsMax="$(wc -l <"${hfdir0}"/file_lists/f0)"
+fi
+for (( kk=1; kk<=${#nArgs[@]}; kk++ )); do
+
+	shuf $(${nullFlag} && printf '%s' '-z') -n ${nArgs[$(($kk-1))]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f0
+
+    (( nArgs >= nArgsMax )) && {
+        nArgs=("${nArgs[@]:0:$((kk+1))}")
+        break
+    }
 done
 
-for jj in ${!C0[@]}; do
+for jj in "${!C0[@]}"; do
         
     hfdir="${hfdir0}/C${jj}"
 
     mkdir -p "${hfdir}"/results
 
-    for kk in {1..6}; do 
-        printf '\n-------------------------------- %s values --------------------------------\n\n' $(wc -l <"${hfdir0}"/file_lists/f${kk}); 
+    for kk in "${!nArgs[@]}"; do [[ "$kk" == 0 ]] && continue 
+        printf '\n-------------------------------- STARTING TESTING FOR %s VALUES --------------------------------\n\n' "${nArgs[$kk]}"; 
 
         for c in "${cksumAlgsA[@]}"; do 
-            printf '\n---------------- %s ----------------\n\n' "$c"; 
+            printf '\n---------------- %s (%s) ----------------\n\n' "$c" "${nArgs[$kk]}"; 
 
             if ${testParallelFlag}; then
-               hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -j - --','forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --','parallel -m --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
+		       hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -j - '"$(${nullFlag} && printf '%s' '-z ')"'--','forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --','parallel -m --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
             else
-               hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -j - --','forkrun --','xargs -P '"$(nproc)"' -d $'"'"'\n'"'"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
+               hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -j - '"$(${nullFlag} && printf '%s' '-z ')"'--','forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
             fi
 
         done
@@ -130,8 +144,8 @@ for jj in ${!C0[@]}; do
 	    printf '%0.12s    \t' '(forkrun)' '(xargs)' "$(${testParallelFlag} && echo '(parallel)')"; 
         done; 
         printf '\n\n'; 
-        for kk in {1..6}; do
-            printf '%s\t' $(wc -l <"${hfdir0}"/file_lists/f$kk)
+        for kk in "${!nArgs[@]}"; do [[ "$kk" == 0 ]] && continue
+            printf '%s\t' "${nArgs[$kk]}"
             for c in "${cksumAlgsA[@]}"; do
                 printf '%0.12s\t' $(grep -F "$t" < "${hfdir}"/results/forkrun."${c// /_}".f${kk}.hyperfine.results | sed -E s/'^.*\:'//)
             done
@@ -166,7 +180,7 @@ for jj in ${!C0[@]}; do
 
         padStr="$(source /proc/self/fd/0 <<<"printf '%.0s ' {1..${padMax}}")"
 
-        for kk in ${!val[@]}; do
+        for kk in "${!val[@]}"; do
             val[$kk]+="${padStr:0:${pad[$kk]}}"
         done
 
@@ -193,7 +207,7 @@ for jj in ${!C0[@]}; do
     {
     printf '\n\n||-----------------------------------------------------------------------------------------------------------------------------------------------------------||\n||------------------------------------------------------------------- RUN_TIME_IN_SECONDS -------------------------------------------------------------------||\n||-----------------------------------------------------------------------------------------------------------------------------------------------------------||\n'  
 
-    for kk in {1..6}; do
+    for kk in "${!nArgs[@]}"; do [[ "$kk" == 0 ]] && continue
 
         printf '\n\n\n%.157s|| \n\n' "$(printf '||----------------------------------------------------------------- NUM_CHECKSUMS=%s -------------------------------------------------------------------------' $(wc -l <"${hfdir0}/file_lists/f${kk}"))"
         printf0 8:'(algorithm)' 
