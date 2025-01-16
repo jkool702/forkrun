@@ -12,10 +12,13 @@ renice --priority -20 --pid $$
 }
 
 declare -F forkrun &>/dev/null || { 
-    [[ -f ./forkrun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash
+    #[[ -f ./forkrun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash
+    [[ -f ./forkrun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_nQueue/forkrun.bash
     . ./forkrun.bash
 }
 #export -f forkrun
+
+: <<EOC
 source /proc/self/fd/0 <<EOI
 _forkrun_export() {
 shopt -s extglob
@@ -35,7 +38,7 @@ EeEOoOFfF
 EOI
 
 export -f _forkrun_export
-
+EOC
 
 findDirDefault='/usr'
 
@@ -97,6 +100,9 @@ mkdir -p "${hfdir0}"/file_lists
 
 nArgs=('' 1024 4096 16384 65536 262144 1048576)
 cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3")
+
+nArgs[-1]="$(tr '\0' '\n' <../hyperfine/file_lists/f0 | wc -l)"
+
 find "${findDir}" -type f $(${nullFlag} && printf '%s' '-print0') >"${hfdir0}"/file_lists/f0
 #if ${nullFlag}; then
 #    nArgsMax="$(tr $'\x00' $'\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
