@@ -107,7 +107,7 @@ for (( kk=1; kk<=${#nArgs[@]}; kk++ )); do
 
 	shuf $(${nullFlag} && printf '%s' '-z') -n ${nArgs[$kk]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f0
 
-    (( nArgs >= nArgsMax )) && {
+    (( nArgs[$kk] >= nArgsMax )) && {
         nArgs=("${nArgs[@]:0:$((kk+1))}")
         break
     }
