@@ -734,9 +734,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
         # setup dynamically spawning new worker coprocs
         # dynamic spawning is decided using 3 criteria:
-        #    1) total worker coproc count must not exceed the maximum worker coproc count (by default 2 * nCPU)
-        #    2) coprocs will spawn until total system cpu load is at >=90% (for all cpu cores) OR until one of the other criteria is violated
-        #    3) coprocs will spawn until ( the average time it takes to get N lines on stdin ) >= ( ( the time it takes to process N lines ) / ( num worker coprocs ) OR until one of the other criteria is violated
+        #    1) total worker coproc count must not exceed the maximum worker coproc count (by default 2 * nCPU).
+        #    2) coprocs will spawn until total system cpu load is at >=90% (for all cpu cores) OR until one of the other criteria is violated. If spawning new coproc(s) lowers system load, the target (90%) will be reduced.
+        #    3) coprocs will spawn until ( the average time it takes to get N lines on stdin ) >= ( ( the time it takes to process N lines ) / ( num worker coprocs ) OR until one of the other criteria is violated.
         ${nQueueFlag} && {
             export -f _forkrun_get_load
             { coproc pQueue {
