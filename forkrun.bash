@@ -28,9 +28,11 @@ forkrun() {
 
     # make all variables local
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nQueueMin
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
-    local -i PID0 nLinesCur nLinesNew nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd
-    local -a A p_PID runCmd outHave outPrint pLOADA
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr nLinesRead pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
+    local -i PID0 nLinesCur nLinesNew nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0
+    local -a A p_PID runCmd outHave outPrint pLOADA pLOADA0
+    local -a -i runTimeA runLinesA
+
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -504,6 +506,8 @@ forkrun() {
 
         # # # # # FORK "HELPER" PROCESSES # # # # #
 
+        tStart="${EPOCHREALTIME//./}"
+
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
 : >"'"${tmpDir}"'"/.quit;
@@ -538,6 +542,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
             exitTrapStr_kill+="${pWrite_PID} "
 
         }
+
+                
+
 
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
@@ -584,7 +591,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
         fi
 
         # setup automatic dynamic nLines adjustment and/or fallocate pre-truncation of (already processed) stdin
-        if ${nLinesAutoFlag} || ${fallocateFlag}; then
+        if ${nLinesAutoFlag} || ${fallocateFlag} || ${nQueueFlag}; then
 
             printf '%s\n' ${nLines} >"${tmpDir}"/.nLines
 
@@ -608,35 +615,49 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     nWait=$(( 16 + ( ${nProcs} / 2 ) ))
                     fd_read_pos_old=0
                 }
-                ${nLinesAutoFlag} && nRead=0
+                ${nLinesAutoFlag} && nLinesRead=0
 
-                while ${fallocateFlag} || ${nLinesAutoFlag}; do
+                while ${fallocateFlag} || ${nLinesAutoFlag} || ${nQueueFlag}; do
 
-                    read -u ${fd_nAuto} -t 0.1
+                    read -u ${fd_nAuto} -t 0.1 || continue
 
                     case ${REPLY} in
                         0)
                             nLinesAutoFlag=false
                             fallocateFlag=false
+                            nQueueFlag=false
                             break
                         ;;
-
-                        '')
+                        x)
                             nLinesAutoFlag=false
+                        ;;
+                        q)
+                            nQueueFlag=false
                         ;;
                     esac
 
-                    read -r fd_read_pos </proc/self/fdinfo/${fd_read}
-                    fd_read_pos=${fd_read_pos##*$'\t'}
+                    if ${fallocateFlag} || ${nLinesAutoFlag} || ${nQueueFlag}; then
 
-                    if ${nLinesAutoFlag}; then
+                        read -r fd_read_pos </proc/self/fdinfo/${fd_read}
+                        fd_read_pos=${fd_read_pos##*$'\t'}
+
+                    fi
+
+                    if ${nLinesAutoFlag} || ${nQueueFlag}; then
 
                         read fd_write_pos </proc/self/fdinfo/${fd_write}
                         fd_write_pos=${fd_write_pos##*$'\t'}
 
-                        nRead+=${REPLY}
+                        [[ "${REPLY}" == +([0-9]) ]] && nLinesRead=$(( nLinesRead + ${REPLY} ))
 
-                        nLinesNew=$(( 1 + ( ${nLinesCur} + ( ( 1 + ${nRead} ) * ( ${fd_write_pos} - ${fd_read_pos} ) ) / ( ${nProcs} * ( 1 + ${fd_read_pos} ) ) ) ))
+                        nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) ))
+                    fi
+
+                    ${nQueueFlag} && printf '%s %s\n' "${nLinesEst}" "$(( ${EPOCHREALTIME//./} - tStart ))" >"${tmpDir}"/.stdin_lines_time
+
+                    if ${nLinesAutoFlag}; then
+
+                        nLinesNew=$(( 1 + ( ( nLinesEst - nLinesRead ) / ${nProcs} ) ))
 
                         (( ${nLinesNew} > ${nLinesCur} )) && {
 
@@ -645,7 +666,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                             printf '%s\n' ${nLinesNew} >"${tmpDir}"/.nLines
 
                             # verbose output
-                            (( ${verboseLevel} > 2 )) && printf '\nCHANGING nLines from %s to %s!!!  --  ( nRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nRead} ${fd_write_pos} ${fd_read_pos} >&${fd_stderr}
+                            (( ${verboseLevel} > 2 )) && printf '\nCHANGING nLines from %s to %s!!!  --  ( nLinesRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nLinesRead} ${fd_write_pos} ${fd_read_pos} >&${fd_stderr}
 
                             nLinesCur=${nLinesNew}
                         }
@@ -671,6 +692,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     [[ -f "${tmpDir}"/.quit ]] && {
                         nLinesAutoFlag=false
                         fallocateFlag=false
+                        nQueueFlag=false
                     }
 
                 done
@@ -705,12 +727,191 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 pNotify_PID="$(<"${tmpDir}"/.run/pNotify)"
             } 2>/dev/null {fd_inotify0}>&${fd_inotify}
 
-
             exitTrapStr+=': > "'"${tmpDir}"'"/.stdin; '$'\n'
             ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
             exitTrapStr_kill+="${pNotify_PID} "
         }
 
+        # setup dynamically spawning new worker coprocs
+        # dynamic spawning is decided using 3 criteria:
+        #    1) total worker coproc count must not exceed the maximum worker coproc count (by default 2 * nCPU).
+        #    2) coprocs will spawn until total system cpu load is at >=90% (for all cpu cores) OR until one of the other criteria is violated. If spawning new coproc(s) lowers system load, the target (90%) will be reduced.
+        #    3) coprocs will spawn until ( the average time it takes to get N lines on stdin ) >= ( ( the time it takes to process N lines ) / ( num worker coprocs ) OR until one of the other criteria is violated.
+        ${nQueueFlag} && {
+            export -f _forkrun_get_load
+            { coproc pQueue {
+
+                # set traps and global vars
+                export LC_ALL=C LANG=C IFS=
+                trap 'printf '"'"'\n'"'"' >&'"${fd_nQueue0}"'; [[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
+                trap 'trap - TERM INT HUP USR1' USR1
+
+    
+                # get estimate of pre-forkrun baxkgrounfd system load (/proc/loadavg) and
+                # get initial measurement for system cpu load calculation (/proc/stat)
+#                IFS=' .'
+#                read -r pLOAD00 pLOAD01 _ </proc/loadavg
+#                IFS=
+#                pLOAD0=$(( ( ( 10000 * pLOAD00 ) + ( 100 * ${pLOAD01##+([0])} ) ) / nCPU ))
+#                pLOAD0=0
+
+	        ${nQueueFlag} && mapfile -t pLOADA0 < <(_forkrun_get_load -i)
+
+                # wait for the helper coprocs spawned by the main thread to be spawned
+                read -r -u ${fd_nQueue0}
+
+		# get background load
+                mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+		pLOAD0="(( pLOADA0 / 4 ))"
+
+                # set some initial values
+                kkProcs=${nProcs}                
+                p_PID=()
+                : "${pLOAD_max:=9000}" "${nProcsMax:=$((2*${nCPU}))}" 
+                
+                # wait for the worker coprocs spawned by the main thread to be spawned
+                read -r -u ${fd_nQueue0}
+
+                # get "extra" load from coprocs forken from main thread and use it to estimate extra CPU load per coproc worker
+                mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+                pLOAD1=$(( ( pLOADA0 - pLOAD0 ) / ( kkProcs ) ))
+                #pLOAD1=$(( 10000 / nCPU ))
+
+                # record the average load at the current worker coproc count
+                pLOAD0=${pLOADA0}
+                kkProcs0=${kkProcs}
+
+                (( ${verboseLevel} > 3 )) && printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1}" >&${fd_stderr}
+
+                # start dynamic spawning now that nProcs workers have already spawned
+                # begin main loop
+                until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
+
+                    # wait for new info to get average run time per batch at current batch size arrives
+                    IFS=' '
+                    read -r -u ${fd_nQueue} runLines runTime
+                    (( ${runLines} < 0 )) && (( ${runTime} < 0 )) && { IFS=; break; }
+                    read -r inLines inTime <"${tmpDir}"/.stdin_lines_time
+                    IFS=
+
+                    # update counts of lines run and run times for the current batch size
+                    runLinesA[${runLines}]=$(( runLinesA[${runLines}] + runLines ))
+                    runTimeA[${runLines}]=$(( runTimeA[${runLines}] + runTime ))
+
+                    # get average system load since the last time a new worker coproc was spawned
+                    mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
+
+                    # abort if system load is above threshold
+                    (( pLOADA > pLOAD_max )) && continue
+
+                    # figure out the max  numer of new workers to add on this loop
+                    pAddMax=$(( nProcsMax - kkProcs ))
+                    (( pAddMax > ( 1 + ( nCPU / 4 ) ) )) && pAddMax=$(( 1 + ( nCPU / 4 ) ))
+
+                    # estimate out how many new workers it would take to increase systsem load up to threshold
+                    #echo "pAdd=\$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))=\$(( ( $pLOAD_max - $pLOADA ) / $pLOAD1 ))=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))" >&${fd_stderr}
+                    pAdd=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))
+
+                    # make sure estimate is between [0::pAddMax]
+                    (( pAdd < 1 )) && pAdd=0
+                    (( pAdd > pAddMax )) && pAdd=${pAddMax}
+
+                    #{ declare -p inTime inLines runTime runLines runTimeA runLinesA kkProcs pAdd pAdd1 pLOAD1 pLOADA; echo; } >&${fd_stderr}
+
+                    # check if "time for N lines to arrive on stdin (t_in)" is less than "time to process N lines (t_run) / numWorkers (kkProcs)"
+                    # since only one worker can read data at a time, bhaving these be equal is ideal since
+                    # data is read as fast as it is comming in and workers arent sitting idle in a wait queue
+                    if (( ( inTime * kkProcs * runLinesA[${runLines}] ) < ( runTimeA[${runLines}] * inLines ) )); then
+
+                        # estimate num workers to add to make t_in = t_run / kkProcs
+                        #echo "pAdd1=\$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))=\$(( ( ( ${runTimeA[${runLines}]} * $inLines ) / ( $inTime * ${runLinesA[${runLines}]} ) ) - $kkProcs ))=$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))" >&${fd_stderr}
+                        pAdd1=$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))
+
+                        # make sure estimate is between [0::pAddMax]
+                        (( pAdd1 < 1 )) && pAdd1=0
+                        (( pAdd1 > pAddMax )) && pAdd1=${pAddMax}
+
+                        # combine this estimate with the opne that maximizes system load
+                        # if only one of these is >0 keep that one, otherwise average with more weight on the smaller estimate
+                        if (( pAdd > 0 )) && (( pAdd1 > 0 )); then
+                            pAdd0=$(( ( ( pAdd * pAdd ) + ( pAdd1 * pAdd1 ) ) / ( pAdd + pAdd1 ) ))
+                            if (( pAdd < pAdd1 )); then
+                                pAdd=$(( ( ( 3 * pAdd ) + pAdd0 ) / 4 ))
+                            elif (( pAdd1 < pAdd )); then
+                                pAdd=$(( ( ( 3 * pAdd1 ) + pAdd0 ) / 4 ))
+                            fi
+                        elif (( pAdd < 0 )) && (( pAdd1 > 0 )); then
+                            pAdd=${pAdd1}
+                        fi
+                    fi
+
+                    # move on to next iteration if we arent adding new workers
+                    (( pAdd < 1 )) && continue 
+
+                    # reduce the number of new workers to spawn a bit, since we cant unspawn them if we spawn too many
+                    # the closer the current worker count is to the max worker count limit, the more this is reduced
+		    pAdd=$(( ( ( ( 4 * nProcsMax ) - ( 3 * kkProcs ) ) * pAdd ) / ( 16 * nProcsMax ) ))
+                    (( pAdd < 1 )) && pAdd=1
+                    (( pAdd > pAddMax )) && pAdd=${pAddMax}
+
+                    # update when system load is measured from since we are about to spawn new workers
+                    #mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+
+                    # compare system load now to what it was just before the previous most recent group of new coprocs was spawned
+                    if (( pLOADA > pLOAD0 )); then
+
+                        # system load increased (as expected). update "previous load" + "worker count" variables
+                        (( kkProcs > kkProcs0 )) && {
+                            pLOAD1=$(( 1 + ( pLOAD1 * ( kkProcs - kkProcs0 ) + ( pLOADA - pLOAD0 ) ) / ( ( kkProcs - kkProcs0 ) ) ))
+                            pLOAD0=${pLOADA}
+                            kkProcs0=${kkProcs}
+			    (( pLOAD_max < 9000 )) && pLOAD_max=$(( ( ( 3 * nProcsMax * pLOAD_max ) + ( pAdd * 9000 ) ) / ( ( 3 * nProcsMax ) + pAdd ) ))
+                        }
+                    else
+
+                        # system load dropped with spawning new coprocs. This probably means our target maximum system load is too high.
+                        # cut number of new coprocs to spawn to 1 and lower system load target
+                        # How much load target increases depends on how many new coprocs were last spawned that resulted in lowered system load.
+                        if (( kkProcs > kkProcs0 )); then
+                            pLOAD_max=$(( ( ( kkProcs * pLOAD_max ) + ( ( kkProcs-kkProcs0 ) * pLOADA0 ) ) / ( ( 2 * kkProcs ) - kkProcs0 ) ))
+                        else
+                            pLOAD_max=$(( (  pLOAD_max + pLOADA0 ) / 2 ))
+                        fi
+			#pAdd=1
+			continue
+                    fi
+                    
+                    #echo "pAdd (final) = $pAdd" >&${fd_stderr}
+                    (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \n' "${pAdd}" >&${fd_stderr}
+
+                    # spawn the new coproc workers
+                    for (( kk=0; kk<${pAdd}; kk++ )); do
+                        source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
+                        (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs.\n' "${kk}" "${pAdd}" "${kkProcs}" >&${fd_stderr}
+                        ((kkProcs++))
+                    done
+
+                    # update public worker count info file
+                    echo "${kkProcs}" >"${tmpDir}"/.nWorkers
+                    
+                done
+
+                # tell pAuto that the main nQueue loop is done
+                ${nLinesAutoFlag} && printf 'q\n' >&${fd_nAuto}
+
+                # wait for spawned coproc workers to finish
+                [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
+
+              } 2>&${fd_stderr}
+            } 2>/dev/null
+
+            exitTrapStr+='echo "-1 -1" >&'"${fd_nQueue}"'; '$'\n'
+            printf '%s\n' "${pQueue_PID}" > "${tmpDir}"/.run/pQueue
+
+        }
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
         # Due to how the coproc code is dynamically generated and sourced, it cannot directly contain comments. A very brief overview of their function is below.
@@ -751,7 +952,6 @@ trap 'trap - TERM INT HUP USR1' USR1
 
 while true; do"""
 ${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
-${nQueueFlag}  && echo "printf '%s' '+' >&${fd_nQueue}"
 echo """
     read -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
@@ -899,7 +1099,6 @@ ${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } ||
 ${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
 echo """
     printf '\\n' >&${fd_continue}"""
-${nQueueFlag} && echo "printf '%s' '-' >&${fd_nQueue}"
 echo """
     [[ \${#A[@]} == 0 ]] && {
         \${doneIndicatorFlag} || { 
@@ -910,7 +1109,7 @@ echo """
           }
         }
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
-${nLinesAutoFlag} && echo "printf '\\n' >&\${fd_nAuto0}"
+${nLinesAutoFlag} && echo "printf 'x\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
 ${nQueueFlag} && echo "\printf '%s' '0' >&${fd_nQueue}"
 ${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' 2>/dev/null'
@@ -925,7 +1124,8 @@ echo """
         fi
         continue
     }"""
-${nLinesAutoFlag} && { printf '%s' """
+${nQueueFlag} && echo 'tStart0=${EPOCHREALTIME//./}'
+{ ${nLinesAutoFlag} || ${nQueueFlag}; } && { printf '%s' """
     \${nLinesAutoFlag} && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false
@@ -980,6 +1180,7 @@ ${noFuncFlag} && echo 'IFS='
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
 ${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
+${nQueueFlag} && echo "printf '%s %s\\n' \${#A[@]} \$(( \${EPOCHREALTIME//./} - tStart0 )) >&${fd_nQueue}"
 echo """
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
@@ -1022,6 +1223,8 @@ p_PID+=(\${p{<#>}_PID})""" )"
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && { printf '\nSET TRAPS:\n\n'; trap -p; } >&${fd_stderr}
 
+        ${nQueueFlag} && printf '\n' >&${fd_nQueue0}
+
         # # # # # FORK COPROC "WORKERS" # # # # #
 
         # initialize read lock {fd_continue} will act as an exclusive read lock (so lines from stdin are read atomically):
@@ -1030,117 +1233,17 @@ p_PID+=(\${p{<#>}_PID})""" )"
         #     when that process writes a '\n' back to the pipe it releases the read lock
         printf '\n' >&${fd_continue};
 
-
         # source the coproc code for each coproc worker
         for (( kkProcs=0 ; kkProcs<${nProcs} ; kkProcs++ )); do
             [[ -f "${tmpDir}"/.quit ]] && break
             source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
         done
+
         echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    
         : >"${tmpDir}"/.spawned
+        ${nQueueFlag} && printf '\n' >&${fd_nQueue0}
 
         (( ${verboseLevel} > 1 )) && printf '\n\n%s WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr}
-
-        # setup dynamically coproc to spawn new workers based on read queue length
-        ${nQueueFlag} && ! [[ -f "${tmpDir}"/.quit ]] && {
-            export -f _forkrun_get_load
-            { coproc pQueue {
-
-                export LC_ALL=C LANG=C IFS=
-
-                trap '[[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
-                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
-                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
-                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
-                trap 'trap - TERM INT HUP USR1' USR1
-
-                # start spawning after nProcs workers already forked
-                kkProcs=${nProcs}                
-
-                p_PID=()
-                pLOADA=()
-
-                nQueue=0
-                nQueueLastCount=0
-                
-                (( "${nQueueMin}" <= 0 )) && nQueueMin=1
-                
-                : "${pLOAD_max:=9500}" "${nProcsMax:=$((2*${nCPU}))}" "${nQueueLastCountGoal:=5}"
-
-                mapfile -t pLOADA < <(_forkrun_get_load -i)
-                            
-               (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
-
-                until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
-                    nQueueLast=${nQueue}
-
-                    # read from fd_queue pipe. 
-                    #      '+' --> increase queue depth by 1. 
-                    #      '-' --> decrease queue depth by 1.
-                    #      '0' --> quit
-                    read -r -u ${fd_nQueue} -N 1 
-        
-                    case "${REPLY}" in
-                        '+')  ((nQueue++))  ;;
-                        '-')  ((nQueue--))  ;;
-                        0)      break       ;;
-                        *)     continue     ;;
-                    esac
-
-                    # (( ${verboseLevel} > 3 )) && { printf '\nnQueue  = %s (nProcs = %s)\n' "${nQueue}" "${kkProcs}"; cat /proc/self/schedstat; } >&${fd_stderr}
-
-                    if (( ( ${nQueue} + ${nQueueLast} ) < ( 2 * ${nQueueMin} ) )); then
-
-                        if (( ${nQueueLastCount} < ( ${nQueueLastCountGoal} * ( 1 + ( kkProcs /  nCPU ) ) ) )); then
-                            ((nQueueLastCount++))
-                        else
-                            nQueueLastCount=0
-
-                            mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA[@]}")
-
-                            (( ${verboseLevel} > 2 )) && printf 'pLOADA = ( %s %s %s %s )\n' "${pLOADA[@]}" >&${fd_stderr}
-
-                            (( ${pLOADA} >= ${pLOAD_max} )) || {
-
-                                if (( ${nCPU} > ${kkProcs} )); then
-
-                                    pAdd=$(( 1 + ( ( ${nCPU} - ${kkProcs} ) * ( ${pLOAD_max} - ${pLOADA} ) ) / ( 1 + ${pLOADA} ) ))
-
-                                    (( ${verboseLevel} > 3 )) && printf '(pLOAD=%s  --  initial pAdd: %s ' "${pLOADA}" "${pAdd}" >&${fd_stderr}
-
-                                    (( ${pAdd} > ( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ) )) && pAdd=$(( ( ${nProcsMax} - ${kkProcs} ) - ( ( ${nProcsMax} - ${kkProcs} ) / ( 1 + ( 3 * ${nQueueMin} ) - ( 2 * ${nQueue} ) - ${nQueueLast} ) ) ))
-                                    (( ${pAdd} > ( 1 + ( ${nCPU} / 16 ) ) )) && pAdd=$(( 1 + ( ${nCPU} / 16 ) ))
-
-                                    (( ${pAdd} < 1 )) && pAdd=1
-                                else
-                                    pAdd=1
-                                fi
-
-                                (( ${verboseLevel} > 3 )) && printf 'final pAdd: %s \n' "${pAdd}" >&${fd_stderr}
-
-                                for (( kk=0; kk<${pAdd}; kk++ )); do
-                                    source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
-                                    (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs. (read queue depth = %s)\n' "${kk}" "${pAdd}" "${kkProcs}" "${nQueue}" >&${fd_stderr}
-                                    ((kkProcs++))
-                                done
-                                echo "${kkProcs}" >"${tmpDir}"/.nWorkers
-                            }
-                        fi
-                    else
-                nQueueLastCount=0
-                    fi
-                    
-                done
-
-                [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
-
-              } 2>&${fd_stderr}
-            } 2>/dev/null
-
-            exitTrapStr+='echo "0" >&'"${fd_nQueue}"'; '$'\n'
-            printf '%s\n' "${pQueue_PID}" > "${tmpDir}"/.run/pQueue
-
-        }
 
         (( ${verboseLevel} > 3 )) && { 
             printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}"
@@ -1212,16 +1315,19 @@ p_PID+=(\${p{<#>}_PID})""" )"
         #p_PID=($(_forkrun_rmdups "${p_PID[@]}" $(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null)))
         p_PID+=($(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null))
         wait "${p_PID[@]}" "${pQueue_PID}" &>/dev/null; 
+        ${nQueueFlag} && read -r -u ${fd_nQueue0}
 
         # print final nLines count
         (( ${verboseLevel} > 1 )) && {
             ${nLinesAutoFlag} && printf 'nLines (final) = %s    ( max = %s )\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}"
-            ${nQueueFlag} && printf 'final worker process count: %s    ( min read queue: %s )\n' "$(<"${tmpDir}"/.nWorkers)" "${nQueueMin}" 
+            # ${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)"
         } >&${fd_stderr} 
+        
+	${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)" >&${fd_stderr}
 
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_nQueue0}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
@@ -1804,6 +1910,8 @@ _forkrun_get_load() (
         shift 1
     done
 
+    : "${tALL0:=0}"
+
 #    if [[ ${pLOAD0} == 0 ]] || [[ ${cpu_ALL0} == 0 ]] || [[ ${cpu_LOAD0} == 0 ]] || [[ ${tALL0} == 0 ]] || [[ -z ${pLOAD0} ]] || [[ -z ${cpu_ALL0} ]] || [[ -z ${cpu_LOAD0} ]] || [[ -z ${tALL0} ]]; then
 #        initFlag=true
 #    fi
@@ -1814,36 +1922,29 @@ _forkrun_get_load() (
     cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
     
     ${initFlag} && {
-    cpu_ALL0="${cpu_ALL}"
-        cpu_LOAD0="${cpu_LOAD}"
-
-    ( read -r -u $fd_sleep -t 0.01; ) {fd_sleep}<><(:)
-
-        read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice </proc/stat
-    
-        cpu_LOAD=$(( cpu_user + cpu_nice + cpu_system + cpu_irq + cpu_softirq + cpu_steal + cpu_guest + cpu_guestnice ))
-        cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
+        pLOADA=(-1 "${cpu_ALL}" "${cpu_LOAD}" 0)
+        printf '%s\n' "${pLOADA[@]}"   
+        return 0
     }
 
     tALL=$(( cpu_ALL - cpu_ALL0 ))
 
     pLOAD=$(( ( loadMaxVal * ( cpu_LOAD - cpu_LOAD0 ) ) / ( 1 + cpu_ALL - cpu_ALL0 ) ))
 
-    ${initFlag} || {
-
-        tLOAD=$(( cpu_LOAD - cpu_LOAD0 ))
+    tLOAD=$(( cpu_LOAD - cpu_LOAD0 ))
         
-        (( tALL0 > ( 10 * tALL ) )) && tALL0=$(( 10 * tALL ))
+    (( tALL0 > ( 10 * tALL ) )) && tALL0=$(( 10 * tALL ))
 
-        pLOAD=$(( ( loadMaxVal * tLOAD ) / ( 1 + tALL ) ))
-        pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
+    pLOAD=$(( ( loadMaxVal * tLOAD ) / ( 1 + tALL ) ))
+    pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
 
-    }
 
     pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
     printf '%s\n' "${pLOADA[@]}"
     ${echoFlag} && printf 'Current System CPU Load = %s\n' "${pLOAD}" >&2
 )
+
+export -fp _forkrun_getVal &>/dev/null && export -nf _forkrun_getVal
 
 _forkrun_getVal() {
     ## Expands IEC and SI prefixes to get the numeric value they represent
