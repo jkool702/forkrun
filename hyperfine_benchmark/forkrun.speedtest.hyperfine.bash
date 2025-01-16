@@ -12,10 +12,13 @@ renice --priority -20 --pid $$
 }
 
 declare -F forkrun &>/dev/null || { 
-    [[ -f ./forkrun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash
+    #[[ -f ./forkrun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash
+    [[ -f ./forkrun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_nQueue/forkrun.bash
     . ./forkrun.bash
 }
 #export -f forkrun
+
+: <<EOC
 source /proc/self/fd/0 <<EOI
 _forkrun_export() {
 shopt -s extglob
@@ -35,7 +38,7 @@ EeEOoOFfF
 EOI
 
 export -f _forkrun_export
-
+EOC
 
 findDirDefault='/usr'
 
@@ -95,22 +98,31 @@ C1[5]=' >/dev/null'
 
 mkdir -p "${hfdir0}"/file_lists
 
-nArgs=('' 1024 4096 16384 65536 262144 1048576)
-cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3")
 find "${findDir}" -type f $(${nullFlag} && printf '%s' '-print0') >"${hfdir0}"/file_lists/f0
+
+nArgsMax="$(tr '\0' '\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
+nArgs=('' 1024 )
+until (( ( 4 * nArgs[-1] ) >= nArgsMax )); do
+	nArgs+=($((4 * nArgs[-1])))
+done
+nArgs+=(${nArgsMax})
+
+cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3")
+
+
 #if ${nullFlag}; then
 #    nArgsMax="$(tr $'\x00' $'\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
 #else
 #    nArgsMax="$(wc -l <"${hfdir0}"/file_lists/f0)"
 #fi
-for (( kk=1; kk<=${#nArgs[@]}; kk++ )); do
+for (( kk=1; kk<${#nArgs[@]}; kk++ )); do
 
 	shuf $(${nullFlag} && printf '%s' '-z') -n ${nArgs[$kk]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f0
 
 #    (( nArgs[$kk] >= nArgsMax )) && {
 #        nArgs=("${nArgs[@]:0:$((kk+1))}")
 #        break
-    }
+#    }
 done
 
 for jj in "${!C0[@]}"; do
@@ -207,7 +219,7 @@ for jj in "${!C0[@]}"; do
     {
     printf '\n\n||-----------------------------------------------------------------------------------------------------------------------------------------------------------||\n||------------------------------------------------------------------- RUN_TIME_IN_SECONDS -------------------------------------------------------------------||\n||-----------------------------------------------------------------------------------------------------------------------------------------------------------||\n'  
 
-    for (( kk=1; kk<=${#nArgs[@]}; kk++ )); do
+    for (( kk=1; kk<${#nArgs[@]}; kk++ )); do
 
         printf '\n\n\n%.157s|| \n\n' "$(printf '||----------------------------------------------------------------- NUM_CHECKSUMS=%s -------------------------------------------------------------------------' ${nArgs[$kk]})"
         printf0 8:'(algorithm)' 
