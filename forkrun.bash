@@ -31,7 +31,7 @@ forkrun() {
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr nLinesRead pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID fd_read_pos fd_read_pos_old fd_write_pos DEBUG_FORKRUN
     local -i PID0 nLinesCur nLinesNew nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0
     local -a A p_PID runCmd outHave outPrint pLOADA pLOADA0
-    local -a -i timesA linesA
+    local -a -i runTimeA runLinesA
 
 
     # # # # # PARSE OPTIONS # # # # #
@@ -543,6 +543,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
         }
 
+                
+
+
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
 
@@ -729,7 +732,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
             exitTrapStr_kill+="${pNotify_PID} "
         }
 
-        # setup dynamically spawning new worker coprocs
+# setup dynamically spawning new worker coprocs
         # dynamic spawning is decided using 3 criteria:
         #    1) total worker coproc count must not exceed the maximum worker coproc count (by default 2 * nCPU)
         #    2) coprocs will spawn until total system cpu load is at >=90% (for all cpu cores) OR until one of the other criteria is violated
@@ -742,7 +745,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                 export LC_ALL=C LANG=C IFS=
 
-                trap '[[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
+                trap 'printf '"'"'\n'"'"' >&'"${fd_nQueue0}"'; [[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
@@ -750,39 +753,42 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
     
                 # get initial measurement for system cpu load calculation
-                IFS=' '; read -r pLOAD0 _ </proc/loadavg; IFS=
-                pLOAD0="${pLOAD0//./}"; 
-                pLOAD0="${pLOAD0##+(0)}"
-                pLOAD0="$(( ( 100 * pLOAD0 ) / nCPU ))"; 
-                mapfile -t pLOADA0 < <(_forkrun_get_load -i); 
+                IFS=' .'
+                read -r pLOAD00 pLOAD01 _ </proc/loadavg
+                IFS=
+                pLOAD0=$(( ( ( 10000 * pLOAD00 ) + ( 100 * ${pLOAD01##+([0])} ) ) / nCPU ))
 
-                p_PID=()
+                mapfile -t pLOADA0 < <(_forkrun_get_load -i)
 
-                : "${pLOAD_max:=9000}" "${nProcsMax:=$((2*${nCPU}))}" 
-
-                # wait for the coprocs spawned by the main thread to be spawned
-                # start dynamic spawning after nProcs workers already spawned
+                # wait for the helper coprocs spawned by the main thread to be spawned
                 kkProcs=${nProcs}                
+                p_PID=()
+                : "${pLOAD_max:=9000}" "${nProcsMax:=$((2*${nCPU}))}" 
+                
+                # wait for the worker coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nQueue0}
 
                 # get "extra" load from coprocs forken from main thread and use it to estimate extra CPU load per coproc worker
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
                 pLOAD1=$(( ( pLOADA0 - pLOAD0 ) / ( kkProcs ) ))
                 #pLOAD1=$(( 10000 / nCPU ))
+                pLOAD0=${pLOADA0}
+                kkProcs0=${kkProcs}
 
                 (( ${verboseLevel} > 3 )) && printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1}" >&${fd_stderr}
 
+                # start dynamic spawning after nProcs workers already spawned
                 # begin main loop
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
 
                     IFS=' '
                     read -r -u ${fd_nQueue} runLines runTime
-                    [[ "${runLines}" == '0' ]] && [[ "${runTime}" == '0' ]] && break
+                    (( ${runLines} < 0 )) && (( ${runTime} < 0 )) && { IFS=; break; }
                     read -r inLines inTime <"${tmpDir}"/.stdin_lines_time
                     IFS=
 
-                    linesA[${runLines}]=$(( linesA[${runLines}] + runLines ))
-                    timesA[${runLines}]=$(( timesA[${runLines}] + runTime ))
+                    runLinesA[${runLines}]=$(( runLinesA[${runLines}] + runLines ))
+                    runTimeA[${runLines}]=$(( runTimeA[${runLines}] + runTime ))
 
                     mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
 
@@ -790,39 +796,60 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     pAddMax=$(( nProcsMax - kkProcs ))
 
-                    pAdd0=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))
+                    #echo "pAdd=\$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))=\$(( ( $pLOAD_max - $pLOADA ) / $pLOAD1 ))=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))" >&${fd_stderr}
+                    pAdd=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))
+
 
                     (( pAdd < 1 )) && pAdd=0
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
+                    (( pAddMax > ( 1 + ( nCPU / 4 ) ) )) && pAddMax=$(( 1 + ( nCPU / 4 ) ))
 
-                    #{ declare -p inTime inLines runTime runLines timesA linesA kkProcs pAdd pAdd1 pLOAD1 pLOADA; echo; } >&${fd_stderr}
+                    #{ declare -p inTime inLines runTime runLines runTimeA runLinesA kkProcs pAdd pAdd1 pLOAD1 pLOADA; echo; } >&${fd_stderr}
 
-                    if (( ( inTime * kkProcs * linesA[${runLines}] ) < ( timesA[${runLines}] * inLines ) )); then
+                    if (( ( inTime * kkProcs * runLinesA[${runLines}] ) < ( runTimeA[${runLines}] * inLines ) )); then
 
-                        pAdd1=$(( ( ( timesA[${runLines}] * inLines ) / ( inTime * linesA[${runLines}] ) ) - kkProcs ))
+                        #echo "pAdd1=\$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))=\$(( ( ( ${runTimeA[${runLines}]} * $inLines ) / ( $inTime * ${runLinesA[${runLines}]} ) ) - $kkProcs ))=$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))" >&${fd_stderr}
+                        pAdd1=$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))
 
                         (( pAdd1 < 1 )) && pAdd1=0
                         (( pAdd1 > pAddMax )) && pAdd1=${pAddMax}
 
-                        if (( pAdd > 0 )) && (( pAdd0 > 0 )); then
-                            pAdd=$(( ( ( pAdd * pAdd ) + ( pAdd1 * pAdd1 ) ) / ( pAdd + pAdd0 ) ))
+                        if (( pAdd > 0 )) && (( pAdd1 > 0 )); then
+                            pAdd0=$(( ( ( pAdd * pAdd ) + ( pAdd1 * pAdd1 ) ) / ( pAdd + pAdd1 ) ))
+                            if (( pAdd < pAdd1 )); then
+                                pAdd=$(( ( ( 3 * pAdd ) + pAdd0 ) / 4 ))
+                            elif (( pAdd1 < pAdd )); then
+                                pAdd=$(( ( ( 3 * pAdd1 ) + pAdd0 ) / 4 ))
+                            fi
                         elif (( pAdd < 0 )) && (( pAdd1 > 0 )); then
                             pAdd=${pAdd1}
                         fi
-
                     fi
 
                     (( pAdd < 1 )) && continue 
 
-                    pAdd=$(( ( ( ( 2 * nProcsMax ) - kkProcs ) * pAdd ) / ( 2 * nProcsMax ) ))
-                    (( ${pAdd} > ( 1 + ( ${nCPU} / 2 ) ) )) && pAdd=$(( 1 + ( ${nCPU} / 2 ) ))
+                    pAdd=$(( ( ( nProcsMax - kkProcs ) * pAdd ) / ( 4 * nProcsMax ) ))
 
                     (( pAdd < 1 )) && pAdd=1
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
 
-                    (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \n' "${pAdd}" >&${fd_stderr}
-
                     mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+
+                    if (( pLOADA0 > pLOAD0 )); then
+
+                        (( kkProcs > kkProcs0 )) && {
+                            pLOAD1=$(( ( pLOAD1 * ( kkProcs - kkProcs0 ) + ( pLOADA0 - pLOAD0 ) ) / ( 2 * ( kkProcs - kkProcs0 ) ) ))
+                            pLOAD0=${pLOADA0}
+                            kkProcs0=${kkProcs}
+                        }
+                    elif (( kkProcs > kkProcs0 )); then
+                        pLOAD_max=$(( ( ( kkProcs * pLOAD_max ) + ( ( kkProcs-kkProcs0 ) * pLOADA0 ) ) / ( ( 2 * kkProcs ) - kkProcs0 ) ))
+                    else
+                        pLOAD_max=$(( ( ( 3 * pLOAD_max ) + pLOADA0 ) / 4 ))
+                    fi
+                    #echo "pAdd (final) = $pAdd" >&${fd_stderr}
+
+                    (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \n' "${pAdd}" >&${fd_stderr}
 
                     for (( kk=0; kk<${pAdd}; kk++ )); do
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
@@ -841,11 +868,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
               } 2>&${fd_stderr}
             } 2>/dev/null
 
-            exitTrapStr+='echo "0 0" >&'"${fd_nQueue}"'; '$'\n'
+            exitTrapStr+='echo "-1 -1" >&'"${fd_nQueue}"'; '$'\n'
             printf '%s\n' "${pQueue_PID}" > "${tmpDir}"/.run/pQueue
 
         }
-
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
 
         # Due to how the coproc code is dynamically generated and sourced, it cannot directly contain comments. A very brief overview of their function is below.
@@ -1247,6 +1273,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         #p_PID=($(_forkrun_rmdups "${p_PID[@]}" $(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null)))
         p_PID+=($(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null))
         wait "${p_PID[@]}" "${pQueue_PID}" &>/dev/null; 
+        ${nQueueFlag} && read -r -u ${fd_nQueue0}
 
         # print final nLines count
         (( ${verboseLevel} > 1 )) && {
