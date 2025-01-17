@@ -2,18 +2,26 @@
 
 `forkrun` is an *extremely* fast pure-bash function that leverages bash coprocs to efficiently run several commands simultaneously in parallel (i.e., it's a "loop parallelizer"). 
 
-`forkrun` is used in much the same way that `xargs` or `parallel` are, but is faster (see the `hyperfine_benchmark` subdirectory for benchmarks) while still being full-featured and only requires having a fairly recent `bash` version (4.0+) to run<sup>1</sup>. `forkrun`:
-* offers more features than `xargs` and is mildly faster than it's fastest invocation (`forkrun` without any flags is functionally equivalent to `xargs -P $*(nproc) -d $'\n'`),
-* is considerably faster than `parallel` (over an order of magnitude faster in some cases) while still supporting many of the particularly useful "core" `parallel` features,
+`forkrun`'s usage and syntax are very similar to `xargs` and `parallel`.  However, <sup>1</sup>. `forkrun`:
+
+* offers more features than `xargs` and is approximately equal in speed to the fastest `xargs` invocation<sup>2</sup>. (`forkrun` without any flags is functionally equivalent to `xargs -P $*(nproc) -d $'\n'`),
+* is considerably faster than `parallel` (over an order of magnitude faster in some cases) <sup>2</sup>, while still supporting many of the particularly useful "core" `parallel` features,
 * can be easily and efficiently be adapted to parallelize complex tasks without penalty by using shell functions (unlike `xargs` and `parallel`, `forkrun` doesn't need to call a new instance of `/bin/bash -c` on every loop iteration when the shell function is run).
 
 <sup>1: bash 5.1+ is preffered and much better tested. A few basic filesystem operations (`rm`, `mkdir`) must also be available. `fallocate` and `inotifywait` are not required; but, if present, will be used to lower runtime resource usage. `bash-completion` is required to enable automatic completion (on `<TAB>` press) when typing the forkrun cmdline.</sup>
 
-**CURRENT VERSION**: forkrun v1.4.0
+<sup>2: see the `hyperfine_benchmark` subdirectory for benchmarks</sup>
 
-**PREVIOUS VERSION**: forkrun v1.3.0
+**CURRENT VERSION**: forkrun v1.5.0
+
+**PREVIOUS VERSION**: forkrun v1.4.0
 
 # CHANGELOG
+
+**forkrun v1.5**: major changes include
+
+1. the logic by which coprocs are dynamically spawned has been completely rewritten.
+2.All numeric commandline arguments now accept standard prefixes (k=1000, ki=1024, M=1000000, etc.)
 
 **forkrun v1.4**:  3 new features have been added:
 1. `forkrun` can now dynamically determine how many coprocs to spawn based on runtime conditions (specifically: CPU usage and whether or not coprocs are waiting in a read queue to read data from stdin). To use this functionality, pass the ;-j; flag a negative number (just passing `-j -` works too). See the help (run `forkrun --help` or `forkrun --help=all`) for additional info.
