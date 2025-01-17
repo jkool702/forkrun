@@ -758,14 +758,14 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 #                pLOAD0=$(( ( ( 10000 * pLOAD00 ) + ( 100 * ${pLOAD01##+([0])} ) ) / nCPU ))
 #                pLOAD0=0
 
-	        ${nQueueFlag} && mapfile -t pLOADA0 < <(_forkrun_get_load -i)
+                ${nQueueFlag} && mapfile -t pLOADA0 < <(_forkrun_get_load -i)
 
                 # wait for the helper coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nQueue0}
 
-		# get background load
+                # get background load
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
-		pLOAD0="(( pLOADA0 / 4 ))"
+                pLOAD0="(( pLOADA0 / 4 ))"
 
                 # set some initial values
                 kkProcs=${nProcs}                
@@ -785,6 +785,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 kkProcs0=${kkProcs}
 
                 (( ${verboseLevel} > 3 )) && printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1}" >&${fd_stderr}
+
+                pAddCount0=4
+                pAddCount=${pAddCount0}
 
                 # start dynamic spawning now that nProcs workers have already spawned
                 # begin main loop
@@ -809,7 +812,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # figure out the max  numer of new workers to add on this loop
                     pAddMax=$(( nProcsMax - kkProcs ))
-                    (( pAddMax > ( 1 + ( nCPU / 4 ) ) )) && pAddMax=$(( 1 + ( nCPU / 4 ) ))
+                    (( pAddMax > ( 1 + ( nCPU / 2 ) ) )) && pAddMax=$(( 1 + ( nCPU / 2 ) ))
 
                     # estimate out how many new workers it would take to increase systsem load up to threshold
                     #echo "pAdd=\$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))=\$(( ( $pLOAD_max - $pLOADA ) / $pLOAD1 ))=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))" >&${fd_stderr}
@@ -853,7 +856,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # reduce the number of new workers to spawn a bit, since we cant unspawn them if we spawn too many
                     # the closer the current worker count is to the max worker count limit, the more this is reduced
-		    pAdd=$(( ( ( ( 4 * nProcsMax ) - ( 3 * kkProcs ) ) * pAdd ) / ( 16 * nProcsMax ) ))
+                    pAdd=$(( ( ( ( 4 * nProcsMax ) - ( 3 * kkProcs ) ) * pAdd ) / ( 8 * nProcsMax ) ))
                     (( pAdd < 1 )) && pAdd=1
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
 
@@ -868,7 +871,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                             pLOAD1=$(( 1 + ( pLOAD1 * ( kkProcs - kkProcs0 ) + ( pLOADA - pLOAD0 ) ) / ( ( kkProcs - kkProcs0 ) ) ))
                             pLOAD0=${pLOADA}
                             kkProcs0=${kkProcs}
-			    (( pLOAD_max < 9000 )) && pLOAD_max=$(( ( ( 3 * nProcsMax * pLOAD_max ) + ( pAdd * 9000 ) ) / ( ( 3 * nProcsMax ) + pAdd ) ))
+                            (( pLOAD_max < 9000 )) && pLOAD_max=$(( ( ( 3 * nProcsMax * pLOAD_max ) + ( pAdd * 9000 ) ) / ( ( 3 * nProcsMax ) + pAdd ) ))
                         }
                     else
 
@@ -880,12 +883,32 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         else
                             pLOAD_max=$(( (  pLOAD_max + pLOADA0 ) / 2 ))
                         fi
-			#pAdd=1
-			continue
+                       pAdd=$(( pAdd / ( 1 + kkProcs - kkProcs0 ) )) 
+                       continue
                     fi
                     
                     #echo "pAdd (final) = $pAdd" >&${fd_stderr}
                     (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \n' "${pAdd}" >&${fd_stderr}
+
+                    case ${pAddCount} in
+                        ${pAddCount0})
+                            pAddMin="${pAdd}"
+                            pAddSum="${pAdd}"
+                            ((pAddCount--))
+                            continue
+                        ;;
+                        0) 
+                            pAddCount="${pAddCount0}"
+                            (( pAdd < pAddMin )) || pAdd="${pAddMin}"
+                            pAdd=$(( ( pAdd + ( pAddSum / pAddCount0 ) ) / 2 ))
+                        ;;
+                        *)
+                            (( pAdd < pAddMin )) && pAddMin="${pAdd}"
+                            pAddSum=$(( pAddSum + pAdd ))
+                            ((pAddCount--))
+                            continue
+                        ;;
+                    esac
 
                     # spawn the new coproc workers
                     for (( kk=0; kk<${pAdd}; kk++ )); do
@@ -1323,7 +1346,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
             # ${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)"
         } >&${fd_stderr} 
         
-	${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)" >&${fd_stderr}
+    ${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)" >&${fd_stderr}
 
 
     # open anonymous pipes + other misc file descriptors for the above code block
