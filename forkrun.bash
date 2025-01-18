@@ -743,7 +743,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                 # set traps and global vars
                 export LC_ALL=C LANG=C IFS=
-                trap 'printf '"'"'\n'"'"' >&'"${fd_nQueue0}"'; [[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
+                trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto0}"'; [[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
@@ -921,9 +921,6 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
                     
                 done
-
-                # tell pAuto that the main nQueue loop is done
-                ${nLinesAutoFlag} && printf 'q\n' >&${fd_nAuto}
 
                 # wait for spawned coproc workers to finish
                 [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
@@ -1810,9 +1807,19 @@ EOF
 _forkrun_lseek_setup() {
     ## sets up a "lseek" bash builtin for x86_64 machines
     local lseekPreFlag=false
+    local lseekArch
 
-    type uname &>/dev/null && { [[ $(uname -m) == 'x86_64' ]] || return 1; }
-    [[ -f /proc/sys/kernel/arch ]] && { [[ "$(</proc/sys/kernel/arch)" == 'x86_64' ]] || return 1; }
+    if type uname &>/dev/null; then
+        lseekArch="$(uname -m)"
+
+    elif [ -f /proc/sys/kernel/arch ]] ; then
+        lseekArch="$(</proc/sys/kernel/arch)"
+
+    else
+        return 1
+    fi
+
+    { [[ "${lseekArch}" == 'x86_64' ]] || [[  "${lseekArch}" == 'aarch64' ]] || [[  "${lseekArch}" == 'riscv64' ]] || return 1; }
 
     enable lseek 2>/dev/null || {
         [[ -f /usr/local/lib/bash/lseek ]] && lseekPreFlag=true 
@@ -1821,13 +1828,13 @@ _forkrun_lseek_setup() {
                 mkdir -p /usr/local/lib/bash
                 ${lseekPreFlag} && \mv /usr/local/lib/bash/lseek /usr/local/lib/bash/lseek.old
                 [[ "${BASH_LOADABLES_PATH}" == */usr/local/lib/bash* ]] || export BASH_LOADABLES_PATH=/usr/local/lib/bash:${BASH_LOADABLES_PATH}
-                curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/lseek'
+                curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/bin/lseek.'"${lseekArch}"
             ;;
             *)
                 mkdir -p /dev/shm/.forkrun.lseek
                 ${lseekPreFlag} && \mv /dev/shm/.forkrun.lseek/lseek /dev/shm/.forkrun.lseek/lseek.old
                 [[ "${BASH_LOADABLES_PATH}" == */dev/shm/.forkrun.lseek* ]] || export BASH_LOADABLES_PATH=/dev/shm/.forkrun.lseek:${BASH_LOADABLES_PATH}
-                curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/lseek'
+                curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/bin/lseek.'"${lseekArch}"
             ;;
         esac
 
