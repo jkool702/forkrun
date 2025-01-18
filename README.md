@@ -18,10 +18,10 @@
 
 # CHANGELOG
 
-**forkrun v1.5**: major changes include
-
+**forkrun v1.5**: major changes include:
 1. the logic by which coprocs are dynamically spawned has been completely rewritten.
-2.All numeric commandline arguments now accept standard prefixes (k=1000, ki=1024, M=1000000, etc.)
+2. all numeric commandline arguments now accept standard prefixes (k=1000, ki=1024, M=1000000, etc.)
+3. the lseek loadable builtin now can be used on aarch64 and riscv64 architectures
 
 **forkrun v1.4**:  3 new features have been added:
 1. `forkrun` can now dynamically determine how many coprocs to spawn based on runtime conditions (specifically: CPU usage and whether or not coprocs are waiting in a read queue to read data from stdin). To use this functionality, pass the ;-j; flag a negative number (just passing `-j -` works too). See the help (run `forkrun --help` or `forkrun --help=all`) for additional info.
