@@ -380,6 +380,7 @@ forkrun() {
         : "${nQueueFlag:=false}" "${nQueueMin:=1}"
      
         nCPU="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')";
+        (( nCPU < 1 )) && nCPU=1
         { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nQueueFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
 
         ${nQueueFlag} && { 
@@ -615,7 +616,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     nWait=$(( 16 + ( ${nProcs} / 2 ) ))
                     fd_read_pos_old=0
                 }
-                ${nLinesAutoFlag} && nLinesRead=0
+                nLinesRead=0
 
                 while ${fallocateFlag} || ${nLinesAutoFlag} || ${nQueueFlag}; do
 
@@ -634,28 +635,23 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         q)
                             nQueueFlag=false
                         ;;
+                        *)
+                            { ${nLinesAutoFlag} || ${nQueueFlag}; } && nLinesRead=$(( nLinesRead + ${REPLY} ))
+                        ;;
                     esac
 
-                    if ${fallocateFlag} || ${nLinesAutoFlag} || ${nQueueFlag}; then
+                    IFS=$'\t'
+                    read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}
+                    read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
+                    IFS=
 
-                        read -r fd_read_pos </proc/self/fdinfo/${fd_read}
-                        fd_read_pos=${fd_read_pos##*$'\t'}
-
-                    fi
-
-                    if ${nLinesAutoFlag} || ${nQueueFlag}; then
-
-                        read fd_write_pos </proc/self/fdinfo/${fd_write}
-                        fd_write_pos=${fd_write_pos##*$'\t'}
-
-                        [[ "${REPLY}" == +([0-9]) ]] && nLinesRead=$(( nLinesRead + ${REPLY} ))
-
-                        nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) ))
-                    fi
+                    { ${nLinesAutoFlag} || ${nQueueFlag}; } && nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) ))
 
                     ${nQueueFlag} && printf '%s %s\n' "${nLinesEst}" "$(( ${EPOCHREALTIME//./} - tStart ))" >"${tmpDir}"/.stdin_lines_time
 
                     if ${nLinesAutoFlag}; then
+
+                        ${nQueueFlag} && [[ -f "${tmpDir}"/.nWorkers ]] && nProcs="$(<"${tmpDir}"/.nWorkers)"
 
                         nLinesNew=$(( 1 + ( ( nLinesEst - nLinesRead ) / ${nProcs} ) ))
 
@@ -700,7 +696,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
               } 2>&${fd_stderr}
             } 2>/dev/null
 
-            exitTrapStr+='( printf '"'"'0\n'"'"' >&${fd_nAuto0}; ) {fd_nAuto0}>&'"${fd_nAuto}"'; '$'\n'
+            exitTrapStr+='printf '"'"'0\n'"'"' >&'"${fd_nAuto}"'; '$'\n'
             printf '%s\n' "${pAuto_PID}" > "${tmpDir}"/.run/pAuto
 
         fi
@@ -743,7 +739,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                 # set traps and global vars
                 export LC_ALL=C LANG=C IFS=
-                trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto0}"'; [[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
+                trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto}"'; printf '"'"'\n'"'"' >&'"${fd_nQueue0}"'; [[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
@@ -758,14 +754,14 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 #                pLOAD0=$(( ( ( 10000 * pLOAD00 ) + ( 100 * ${pLOAD01##+([0])} ) ) / nCPU ))
 #                pLOAD0=0
 
-                ${nQueueFlag} && mapfile -t pLOADA0 < <(_forkrun_get_load -i)
+                mapfile -t pLOADA0 < <(_forkrun_get_load -i)
 
                 # wait for the helper coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nQueue0}
 
                 # get background load
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
-                pLOAD0="(( pLOADA0 / 4 ))"
+                pLOAD0="(( pLOADA0 / 2 ))"
 
                 # set some initial values
                 kkProcs=${nProcs}                
@@ -812,7 +808,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # figure out the max  numer of new workers to add on this loop
                     pAddMax=$(( nProcsMax - kkProcs ))
-                    (( pAddMax > ( 1 + ( nCPU / 2 ) ) )) && pAddMax=$(( 1 + ( nCPU / 2 ) ))
+		    (( pAddMax > ( 1 + ( 2 * nCPU ) ) / 3 )) && pAddMax=$(( ( 1 + ( 2 * nCPU ) ) / 3 ))
 
                     # estimate out how many new workers it would take to increase systsem load up to threshold
                     #echo "pAdd=\$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))=\$(( ( $pLOAD_max - $pLOADA ) / $pLOAD1 ))=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))" >&${fd_stderr}
@@ -856,7 +852,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # reduce the number of new workers to spawn a bit, since we cant unspawn them if we spawn too many
                     # the closer the current worker count is to the max worker count limit, the more this is reduced
-                    pAdd=$(( ( ( ( 4 * nProcsMax ) - ( 3 * kkProcs ) ) * pAdd ) / ( 8 * nProcsMax ) ))
+		    pAdd=$(( ( ( ( 4 * nProcsMax ) - ( 3 * kkProcs ) ) * pAdd ) / ( ( 8 * nProcsMax ) + ( 3 * kkProcs ) ) ))
                     (( pAdd < 1 )) && pAdd=1
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
 
@@ -971,7 +967,7 @@ trap 'trap - TERM INT HUP USR1; kill -HUP ${PID0} \${BASHPID}' HUP
 trap 'trap - TERM INT HUP USR1' USR1
 
 while true; do"""
-${nLinesAutoFlag} && echo "\${nLinesAutoFlag} && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
+{ ${nLinesAutoFlag} || ${nQueueFlag}; } && echo "{ \${nLinesAutoFlag} || \${nQueueFlag}; } && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
 echo """
     read -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
@@ -1131,8 +1127,9 @@ echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf 'x\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
-${nQueueFlag} && echo "\printf '%s' '0' >&${fd_nQueue}"
-${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' 2>/dev/null'
+${nQueueFlag} && echo """\printf '%s' '0' >&${fd_nQueue}
+printf 'q\\n' >&\${fd_nAuto0}"""
+${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' &>/dev/null'
 echo """
             : >\"${tmpDir}\"/.quit
             printf '%.0s\\n' \"${tmpDir}\"/.run/p* >&${fd_continue}
@@ -1146,7 +1143,7 @@ echo """
     }"""
 ${nQueueFlag} && echo 'tStart0=${EPOCHREALTIME//./}'
 { ${nLinesAutoFlag} || ${nQueueFlag}; } && { printf '%s' """
-    \${nLinesAutoFlag} && {
+    { \${nLinesAutoFlag} || \${nQueueFlag}; } && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false
     }"""
@@ -1333,7 +1330,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         # wait for coprocs to finish
         (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
         #p_PID=($(_forkrun_rmdups "${p_PID[@]}" $(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null)))
-        p_PID+=($(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null))
+        #p_PID+=($(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null))
         wait "${p_PID[@]}" "${pQueue_PID}" &>/dev/null; 
         ${nQueueFlag} && read -r -u ${fd_nQueue0}
 
@@ -1812,7 +1809,7 @@ _forkrun_lseek_setup() {
     if type uname &>/dev/null; then
         lseekArch="$(uname -m)"
 
-    elif [ -f /proc/sys/kernel/arch ]] ; then
+    elif [[ -f /proc/sys/kernel/arch ]] ; then
         lseekArch="$(</proc/sys/kernel/arch)"
 
     else
@@ -1967,7 +1964,6 @@ _forkrun_get_load() (
 
     pLOAD=$(( ( loadMaxVal * tLOAD ) / ( 1 + tALL ) ))
     pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
-
 
     pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
     printf '%s\n' "${pLOADA[@]}"
