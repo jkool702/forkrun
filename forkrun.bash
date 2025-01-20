@@ -42,18 +42,18 @@ forkrun() {
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?(?([= ])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*)))
-                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
-                    nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= ])?(+))}"
+            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?(?([= $'\t'$'\n'])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*)))
+                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= $'\t'$'\n'])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
+                    nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= $'\t'$'\n'])?(+))}"
                 elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?) ]] && [[ "${2}" == ?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
                     nProcs="${2#'+'}"
                     shift 1
                 fi
             ;;
 
-            -?(-)?(n)l?(ine?(s))?(?([= ])+([0-9])*))
-                if [[ "${1}" == -?(-)?(n)l?(ine?(s))?([= ])+([0-9])* ]]; then
-                    nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= ]))}"
+            -?(-)?(n)l?(ine?(s))?(?([= $'\t'$'\n'])+([0-9])*))
+                if [[ "${1}" == -?(-)?(n)l?(ine?(s))?([= $'\t'$'\n'])+([0-9])* ]]; then
+                    nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= $'\t'$'\n']))}"
                     nLinesAutoFlag=false
                 elif [[ "${1}" == -?(-)?(n)l?(ine?(s)) ]] && [[ "${2}" == +([0-9])* ]]; then
                     nLines="${2}"
@@ -62,9 +62,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)?(N)L?(INE?(S))?(?([= ])+([0-9])*?(,+([0-9])*)))
-                if [[ "${1}" == -?(-)?(N)L?(INE?(S))?([= ])+([0-9])*?(,+([0-9])*) ]]; then
-                    nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([= ]))}"
+            -?(-)?(N)L?(INE?(S))?(?([= $'\t'$'\n'])+([0-9])*?(,+([0-9])*)))
+                if [[ "${1}" == -?(-)?(N)L?(INE?(S))?([= $'\t'$'\n'])+([0-9])*?(,+([0-9])*) ]]; then
+                    nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([= $'\t'$'\n']))}"
                     nLinesAutoFlag=true
                 elif [[ "${1}" == -?(-)?(N)L?(INE?(S)) ]] && [[ "${2}" == +([0-9])*?(,+([0-9])*) ]]; then
                     nLines0="${2}"
@@ -81,9 +81,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?(?([= ])+([0-9])))
-                if [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([= ])+([0-9]) ]]; then
-                    nLinesReadLimit="${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([= ]))}"
+            -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?(?([= $'\t'$'\n'])+([0-9])))
+                if [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([= $'\t'$'\n'])+([0-9]) ]]; then
+                    nLinesReadLimit="${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([= $'\t'$'\n']))}"
                     nLinesReadLimitFlag=true
                 elif [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max)) ]] && [[ "${2}" == +([0-9]) ]]; then
                     nLinesReadLimit="${2}"
@@ -92,8 +92,8 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)b?(yte?(s))?(?([= ])+([0-9])*))
-                if [[ "${1}" == -?(-)b?(yte?(s))?([= ])+([0-9])* ]]; then
+            -?(-)b?(yte?(s))?(?([= $'\t'$'\n'])+([0-9])*))
+                if [[ "${1}" == -?(-)b?(yte?(s))?([= $'\t'$'\n'])+([0-9])* ]]; then
                     nBytes="${1##@(+([0-9])*)}"
                     readBytesFlag=true
                     readBytesExactFlag=false
@@ -105,8 +105,8 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)B?(YTE?(S))?(?([= ])+([0-9])*?(,+([0-9])*?(.+([0-9])*))))
-                if [[ "${1}" == -?(-)B?(YTE?(S))?([= ])+([0-9])*?(,+([0-9])*?(.+([0-9])*)) ]]; then
+            -?(-)B?(YTE?(S))?(?([= $'\t'$'\n'])+([0-9])*?(,+([0-9])*?(.+([0-9])*))))
+                if [[ "${1}" == -?(-)B?(YTE?(S))?([= $'\t'$'\n'])+([0-9])*?(,+([0-9])*?(.+([0-9])*)) ]]; then
                     nBytes="${1##@(+([0-9])*?(,+([0-9])*?(.+([0-9])*)))}"
                     readBytesFlag=true
                     readBytesExactFlag=true
@@ -118,9 +118,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)t?(mp?(?(-)dir))?(?([= ])*@([[:graph:]])*))
-                if [[ "${1}" == -?(-)t?(mp?(?(-)dir))?([= ])*@([[:graph:]])* ]]; then
-                    tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= ]))}"
+            -?(-)t?(mp?(?(-)dir))?(?([= $'\t'$'\n'])*@([[:graph:]])*))
+                if [[ "${1}" == -?(-)t?(mp?(?(-)dir))?([= $'\t'$'\n'])*@([[:graph:]])* ]]; then
+                    tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= $'\t'$'\n']))}"
                     mkdir -p "${tmpDirRoot}"
                 elif [[ "${1}" == -?(-)t?(mp?(?(-)dir)) ]] && [[ "${2}" == *@([[:graph:]])* ]]; then
                     tmpDirRoot="${2}"
@@ -129,9 +129,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)d?(elim?(iter))?(?([= ])@([[:graph:]])*))
-                if [[ "${1}" == -?(-)d?(elim?(iter))?([= ])@([[:graph:]])* ]]; then
-                    delimiterVal="${1##@(-?(-)d?(elim?(iter))?([= ]))}"
+            -?(-)d?(elim?(iter))?(?([= $'\t'$'\n'])@([[:graph:]])*))
+                if [[ "${1}" == -?(-)d?(elim?(iter))?([= $'\t'$'\n'])@([[:graph:]])* ]]; then
+                    delimiterVal="${1##@(-?(-)d?(elim?(iter))?([= $'\t'$'\n']))}"
                     (( ${#delimiterVal} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
                     (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
                 elif [[ "${1}" == -?(-)d?(elim?(iter)) ]] && [[ "${2}" == @([[:graph:]])* ]]; then
@@ -141,9 +141,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)@(u|fd|file?(-)descriptor)?(?([= ])+([0-9])))
-                if [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor)?([= ])+([0-9]) ]]; then
-                    fd_stdin0="${1##@(-?(-)@(u|fd|file?(-)descriptor)?([= ]))}"
+            -?(-)@(u|fd|file?(-)descriptor)?(?([= $'\t'$'\n'])+([0-9])))
+                if [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor)?([= $'\t'$'\n'])+([0-9]) ]]; then
+                    fd_stdin0="${1##@(-?(-)@(u|fd|file?(-)descriptor)?([= $'\t'$'\n']))}"
                 elif [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor) ]] && [[ "${2}" == +([0-9]) ]]; then
                     fd_stdin0="${2}"
                     shift 1
@@ -285,7 +285,7 @@ forkrun() {
         shopt -s nullglob
 
         # dynamically set defaults for a few flags
-        : "${noFuncFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}"
+        : "${noFuncFlag:=false}""${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}" "${nLinesReadLimitFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" 
 
         if enable lseek &>/dev/null; then
             : "${lseekFlag:=true}"
@@ -311,6 +311,7 @@ forkrun() {
         if ${readBytesFlag}; then
             # turn off nLinesAuto
             nLinesAutoFlag=false
+            nLinesReadLimitFlag=false
 
             # turn on passing data via stdin (to prevent mangling NULL's in binary data) by default when byte splitting
             : "${stdinRunFlag:=true}"
@@ -483,6 +484,7 @@ forkrun() {
         nLinesCur=${nLines}
 
         mkdir -p "${tmpDir}"/.run
+        ${nLinesReadLimitFlag} && echo '0' >"${tmpDir}"/.nLinesRead
 
         # if keeping tmpDir print its location to stderr
         ${rmTmpDirFlag} || (( ${verboseLevel} <= 0 )) || printf '\ntmpDir path: %s\n\n' "${tmpDir}" >&${fd_stderr}
@@ -553,9 +555,6 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
             exitTrapStr_kill+="${pWrite_PID} "
 
         }
-
-                
-
 
         # setup (ordered) output. This uses the same naming scheme as `split -d` to ensure a simple `cat /path/*` always orders things correctly.
         if ${nOrderFlag}; then
@@ -646,7 +645,13 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                             nQueueFlag=false
                         ;;
                         *)
-                            { ${nLinesAutoFlag} || ${nQueueFlag}; } && nLinesRead=$(( nLinesRead + ${REPLY} ))
+                            if ${nLinesAutoFlag} || ${nQueueFlag}; then
+                                if ${nLinesReadLimitFlag}; then
+                                    read -r nLinesRead <"${tmpDir}"/.nLinesRead
+                                else
+                                    nLinesRead=$(( nLinesRead + ${REPLY} ))
+                                fi
+                            fi
                         ;;
                     esac
 
@@ -818,7 +823,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # figure out the max  numer of new workers to add on this loop
                     pAddMax=$(( nProcsMax - kkProcs ))
-            (( pAddMax > ( 1 + ( 2 * nCPU ) ) / 3 )) && pAddMax=$(( ( 1 + ( 2 * nCPU ) ) / 3 ))
+                    (( pAddMax > ( 1 + ( 2 * nCPU ) ) / 3 )) && pAddMax=$(( ( 1 + ( 2 * nCPU ) ) / 3 ))
 
                     # estimate out how many new workers it would take to increase systsem load up to threshold
                     #echo "pAdd=\$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))=\$(( ( $pLOAD_max - $pLOADA ) / $pLOAD1 ))=$(( ( pLOAD_max - pLOADA ) / pLOAD1 ))" >&${fd_stderr}
@@ -862,7 +867,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # reduce the number of new workers to spawn a bit, since we cant unspawn them if we spawn too many
                     # the closer the current worker count is to the max worker count limit, the more this is reduced
-            pAdd=$(( ( ( ( 4 * nProcsMax ) - ( 3 * kkProcs ) ) * pAdd ) / ( ( 8 * nProcsMax ) + ( 3 * kkProcs ) ) ))
+                    pAdd=$(( ( ( ( 4 * nProcsMax ) - ( 3 * kkProcs ) ) * pAdd ) / ( ( 8 * nProcsMax ) + ( 3 * kkProcs ) ) ))
                     (( pAdd < 1 )) && pAdd=1
                     (( pAdd > pAddMax )) && pAdd=${pAddMax}
 
@@ -897,7 +902,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \n' "${pAdd}" >&${fd_stderr}
 
                     case ${pAddCount} in
-                        ${pAddCount0})
+                        "${pAddCount0}")
                             pAddMin="${pAdd}"
                             pAddSum="${pAdd}"
                             ((pAddCount--))
@@ -1060,6 +1065,9 @@ if ${readBytesFlag}; then
         ;;
     esac
 else
+    ${nLinesReadLimitFlag} && printf '%s' """read -r nLinesRead <\"${tmpDir}\"/.nLinesRead
+    (( ( nLinesReadLimit - nLinesRead ) < nLinesCur )) && nLinesCur=\$(( nLinesReadLimit - nLinesRead ))
+    (( nLinesCur == 0 )) && A=() || """
     printf '%s ' "mapfile"
     ${lseekFlag} && printf '%s ' '-t'
     printf '%s ' '-n' "\${nLinesCur}" '-u'
@@ -1122,7 +1130,15 @@ else
     }
 fi
 ${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || ${readBytesFlag} || echo "}"
-${nOrderFlag} && echo "read -u ${fd_nOrder} nOrder"
+${nOrderFlag} && echo "read -r -u ${fd_nOrder} nOrder"
+${nLinesReadLimitFlag} && echo """
+nLinesRead+=\${#A[@]}
+echo \${nLinesRead} >\"${tmpDir}\"/.nLinesRead
+(( nLinesRead == nLinesReadLimit )) && {
+    : >\"${tmpDir}\"/.quit
+    echo '0' >\"${tmpDir}\"/.nLines
+}
+"""
 echo """
     printf '\\n' >&${fd_continue}"""
 echo """
@@ -1427,6 +1443,7 @@ _forkrun_complete() {
         mapfile -t compsA < <(printf '%s ' '' -{,-}{j,P,nprocs}{,=} $'\n' \
 -t{,=} --{tmp,tmpdir}{,=} --t{,=} -{tmp,tmpdir}{,=} $'\n' \
 -l{,=} --{,n}line{s,}{,=} --l{,=} -{,n}line{s,}{,=} $'\n' \
+-n{,=} --n{,line}{s,}{,-}{,lim,limit}{,-}{,max}{,=}  --n{,line}{s,}{,-}{,max}{,-}{,lim,limit}{,=} --n{,=} -n{,line}{s,}{,-}{,lim,limit}{,-}{,max}{,=}  -n{,line}{s,}{,-}{,max}{,-}{,lim,limit}{,=} $'\n' \
 -L{,=} --{,N}LINE{S,}{,=} --L{,=} -{,N}LINE{S,}{,=} $'\n' \
 -b{,=} --byte{s,}{,=} --b{,=} -byte{s,}{,=} $'\n' \
 -B{,=} --BYTE{S,}{,=} --B{,=} -BYTE{S,}{,=} $'\n' \
