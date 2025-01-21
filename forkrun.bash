@@ -35,7 +35,7 @@ forkrun() {
 
     # # # # # PARSE OPTIONS # # # # #
 
-    : "${verboseLevel:=0}" "${returnVal:=0}" "${fd_stdin0:=0}"
+    : "${verboseLevel:=0}" "${returnVal:=0}" "${fd_stdin0:=0}" "${nLinesReadLimitFlag:=false}" 
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
@@ -253,6 +253,17 @@ forkrun() {
     mkdir -p "${tmpDir}"/.run
     : >"${fPath}"
 
+    # if we were passed the -n flag and we have `head` then use it
+    if ${nLinesReadLimitFlag} && type -a head &>/dev/null; then
+        { 
+          {
+            head -n ${nLinesReadLimit} <&${fd_head0} >&${fd_stdin0}
+          } &
+        } {fd_stdin0}<><(:) {fd_head0}<&0
+        trap 'exec {'"${fd_head0}"'}>&-; exec {'"${fd_stdin0}"'}>&-; trap - EXIT' EXIT
+        nLinesReadLimitFlag=false
+    fi
+
     # # # # # BEGIN MAIN SUBSHELL # # # # #
 
     # several file descriptors are opened for use by things running in this subshell. See closing`)` near the end of this function.
@@ -285,7 +296,7 @@ forkrun() {
         shopt -s nullglob
 
         # dynamically set defaults for a few flags
-        : "${noFuncFlag:=false}""${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}" "${nLinesReadLimitFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" 
+        : "${noFuncFlag:=false}""${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" 
 
         if enable lseek &>/dev/null; then
             : "${lseekFlag:=true}"
