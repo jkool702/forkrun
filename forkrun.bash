@@ -260,7 +260,7 @@ forkrun() {
             head -n ${nLinesReadLimit} <&${fd_head0} >&${fd_stdin0}
           } &
         } {fd_stdin0}<><(:) {fd_head0}<&0
-        trap 'exec {'"${fd_head0}"'}>&-; exec {'"${fd_stdin0}"'}>&-; trap - EXIT' EXIT
+        trap 'exec {fd_head0}>&-; exec {fd_stdin0}>&-; trap - EXIT' EXIT
         nLinesReadLimitFlag=false
     fi
 
