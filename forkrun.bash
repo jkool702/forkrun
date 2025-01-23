@@ -28,8 +28,8 @@ forkrun() {
 
     # make all variables local
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nQueueMin 
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 writeFileProgStr readBytesProg nullDelimiterProg ddQuietStr pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID  DEBUG_FORKRUN
-    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime pAddCount pAddMin pAddSum pAddMax
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID  DEBUG_FORKRUN
+    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime pAddCount pAddMin pAddSum pAddMax
     local -a A p_PID runCmd outHave outPrint pLOADA pLOADA0
     local -a -i runTimeA runLinesA
 
@@ -533,15 +533,15 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
         } || {
             ${nLinesReadLimitFlag} && type -a head &>/dev/null && { 
                 if ${nullDelimiterFlag}; then
-                    writeFileProgStr=2
+                    writeFileProgType=2
                     nLinesReadLimitFlag=false
                 elif [[ "${delimiterVal}" == '$'"'"'\n'"'" ]]; then
-                    writeFileProgStr=3
+                    writeFileProgType=3
                     nLinesReadLimitFlag=false
                 fi
             }
             
-            : "${writeFileProgStr:=1}"
+            : "${writeFileProgType:=1}"
         
             # spawn a coproc to write stdin to a tmpfile
             # After we are done reading all of stdin indicate this by touching .done
@@ -555,7 +555,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
                 trap 'trap - TERM INT HUP USR1' USR1
 
-                case ${writeFileProgStr} in
+                case ${writeFileProgType} in
                     1) cat <&${fd_stdin} >&${fd_write} ;;
                     2) head -z -n ${nLinesReadLimit} <&${fd_stdin} >&${fd_write} ;;
                     3) head -n ${nLinesReadLimit} <&${fd_stdin} >&${fd_write} ;;
