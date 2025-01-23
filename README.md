@@ -6,7 +6,7 @@
 
 * offers more features than `xargs` and is approximately equal in speed to the fastest `xargs` invocation<sup>2</sup>. (`forkrun` without any flags is functionally equivalent to `xargs -P $*(nproc) -d $'\n'`),
 * is considerably faster than `parallel` (over an order of magnitude faster in some cases) <sup>2</sup>, while still supporting many of the particularly useful "core" `parallel` features,
-* can be easily and efficiently be adapted to parallelize complex tasks without penalty by using shell functions (unlike `xargs` and `parallel`, `forkrun` doesn't need to call a new instance of `/bin/bash -c` on every loop iteration when the shell function is run).
+* can be easily and efficiently adapted to parallelize complex tasks without penalty by using shell functions (unlike `xargs` and `parallel`, `forkrun` doesn't need to call a new instance of `/bin/bash -c` on every loop iteration when the shell function is run).
 
 <sup>1: bash 5.1+ is preffered and much better tested. A few basic filesystem operations (`rm`, `mkdir`) must also be available. `fallocate` and `inotifywait` are not required; but, if present, will be used to lower runtime resource usage. `bash-completion` is required to enable automatic completion (on `<TAB>` press) when typing the forkrun cmdline.</sup>
 
