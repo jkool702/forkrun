@@ -37,8 +37,8 @@ static char *lseek_doc[] = {
     "negative <REL_OFFSET> rewinds the <FD>",
     "",
     "SEEK_TYPE is optional and can take the value of:",
-    "   'SEEK_SET'   'SEEK_CUR'    'SEEK_END'",
-    " If omitted or invalid, SEEK_CUR is used.",
+    "     'SEEK_SET'   'SEEK_CUR'    'SEEK_END'",
+    "  If omitted, SEEK_CUR is used.",
     "----------------------------------------------",
     "",
     NULL
@@ -56,7 +56,6 @@ struct builtin lseek_struct = {
 
 // main function
 static int lseek_main(int argc, char **argv) {
-    int whence = SEEK_CUR
     
     // check for exactly 2 or 3 args passed to lseek
     if (argc != 3 && argc != 4) {
@@ -86,9 +85,7 @@ static int lseek_main(int argc, char **argv) {
             whence = SEEK_SET;
         } else if (strcmp(argv[3], "SEEK_END") == 0) {
             whence = SEEK_END;
-        } else if (strcmp(argv[3], "SEEK_CUR") == 0) {
-            whence = SEEK_CUR;
-        } else {
+        } else if (strcmp(argv[3], "SEEK_CUR") != 0) {
             fprintf(stderr, "Error: Invalid SEEK_TYPE. Must be SEEK_SET, SEEK_CUR, or SEEK_END\n");
             return 1;
         }
