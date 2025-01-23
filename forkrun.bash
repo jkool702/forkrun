@@ -533,15 +533,15 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
         } || {
             ${nLinesReadLimitFlag} && type -a head &>/dev/null && { 
                 if ${nullDelimiterFlag}; then
-                    writeFileProgStr="head -z -n ${nLinesReadLimit}"
+                    writeFileProgStr=2
                     nLinesReadLimitFlag=false
                 elif [[ "${delimiterVal}" == '$'"'"'\n'"'" ]]; then
-                    writeFileProgStr="head -n ${nLinesReadLimit}"
+                    writeFileProgStr=3
                     nLinesReadLimitFlag=false
                 fi
             }
             
-            : "${writeFileProgStr:=cat}"
+            : "${writeFileProgStr:=1}"
         
             # spawn a coproc to write stdin to a tmpfile
             # After we are done reading all of stdin indicate this by touching .done
@@ -555,7 +555,11 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
                 trap 'trap - TERM INT HUP USR1' USR1
 
-                ${writeFileProgStr} <&${fd_stdin} >&${fd_write}
+                case ${writeFileProgStr} in
+                    1) cat <&${fd_stdin} >&${fd_write} ;;
+                    2) head -z -n ${nLinesReadLimit} <&${fd_stdin} >&${fd_write} ;;
+                    3) head -n ${nLinesReadLimit} <&${fd_stdin} >&${fd_write} ;;
+                esac
                     
                 : >"${tmpDir}"/.done
                 (( ${verboseLevel} > 1 )) && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
