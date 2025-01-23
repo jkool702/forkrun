@@ -81,12 +81,12 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?(?([[:space:]])+([0-9])))
-                if [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([[:space:]])+([0-9]) ]]; then
-                    nLinesReadLimit="${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([[:space:]]))}"
+            -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?(?([[:space:]])+([0-9])*))
+                if [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([[:space:]])+([0-9])* ]]; then
+                    nLinesReadLimit="$(_forkrun_getVal "${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([[:space:]]))}")"
                     nLinesReadLimitFlag=true
-                elif [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max)) ]] && [[ "${2}" == +([0-9]) ]]; then
-                    nLinesReadLimit="${2}"
+                elif [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max)) ]] && [[ "${2}" == +([0-9])* ]]; then
+                    nLinesReadLimit="$(_forkrun_getVal "${2}")"
                     nLinesReadLimitFlag=true
                     shift 1
                 fi
