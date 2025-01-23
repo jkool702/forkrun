@@ -19,7 +19,7 @@
 # CHANGELOG
 
 **forkrun v1.5**: major changes include:
-1. the logic by which coprocs are dynamically spawned has been completely rewritten.
+1. the logic by which coprocs are dynamically spawned has been completely rewritten to improve performance and reliability when handling varying workloads.
 2. all numeric commandline arguments now accept standard prefixes (k=1000, ki=1024, M=1000000, etc.)
 3. the lseek loadable builtin has been recompiled and now can be used on x86_64 and aarch64 and riscv64 architectures
 4. **BREAKING CHANGE**: the `-n` flag (which previously added ordering infornmation to the output and implied `-k`) has been renamed to `-K`. The `-n` flag now implements a new feature - limiting the otal number of lines that `forkrun` will process. `... | forkrun -n <#> ...` is basically equivilant to `... | head -n <#> | forkrun ...` (except that, unlike `head`, `forkrun -n <#> -d _` allows for this functionality with delimiters other than NULLs and newlines).
