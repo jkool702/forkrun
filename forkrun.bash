@@ -29,31 +29,31 @@ forkrun() {
     # make all variables local
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nQueueMin 
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID  DEBUG_FORKRUN
-    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime pAddCount pAddMin pAddSum pAddMax
+    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime pAddCount pAddMin pAddSum pAddMax
     local -a A p_PID runCmd outHave outPrint pLOADA pLOADA0
     local -a -i runTimeA runLinesA
 
     # # # # # PARSE OPTIONS # # # # #
 
-    : "${verboseLevel:=0}" "${returnVal:=0}" "${fd_stdin0:=0}"
+    : "${verboseLevel:=0}" "${returnVal:=0}" "${fd_stdin0:=0}" "${nLinesReadLimitFlag:=false}" 
 
     # check inputs and set defaults if needed
     [[ $# == 0 ]] && optParseFlag=false || optParseFlag=true
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)@([jP]|?(n)[Pp]roc?(s)?)?(?([= $'\t'$'\n'])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*)))
-                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= $'\t'$'\n'])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
-                    nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s)?)?([= $'\t'$'\n'])?(+))}"
-                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)?) ]] && [[ "${2}" == ?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
+            -?(-)@([jP]|?(n)[Pp]roc?(s))?(?([[:space:]])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*)))
+                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s))?([[:space:]])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
+                    nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s))?([[:space:]])?(+))}"
+                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)) ]] && [[ "${2}" == ?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
                     nProcs="${2#'+'}"
                     shift 1
                 fi
             ;;
 
-            -?(-)?(n)l?(ine?(s))?(?([= $'\t'$'\n'])+([0-9])*))
-                if [[ "${1}" == -?(-)?(n)l?(ine?(s))?([= $'\t'$'\n'])+([0-9])* ]]; then
-                    nLines="${1##@(-?(-)?(n)l?(ine?(s))?([= $'\t'$'\n']))}"
+            -?(-)?(n)l?(ine?(s))?(?([[:space:]])+([0-9])*))
+                if [[ "${1}" == -?(-)?(n)l?(ine?(s))?([[:space:]])+([0-9])* ]]; then
+                    nLines="${1##@(-?(-)?(n)l?(ine?(s))?([[:space:]]))}"
                     nLinesAutoFlag=false
                 elif [[ "${1}" == -?(-)?(n)l?(ine?(s)) ]] && [[ "${2}" == +([0-9])* ]]; then
                     nLines="${2}"
@@ -62,9 +62,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)?(N)L?(INE?(S))?(?([= $'\t'$'\n'])+([0-9])*?(,+([0-9])*)))
-                if [[ "${1}" == -?(-)?(N)L?(INE?(S))?([= $'\t'$'\n'])+([0-9])*?(,+([0-9])*) ]]; then
-                    nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([= $'\t'$'\n']))}"
+            -?(-)?(N)L?(INE?(S))?(?([[:space:]])+([0-9])*?(,+([0-9])*)))
+                if [[ "${1}" == -?(-)?(N)L?(INE?(S))?([[:space:]])+([0-9])*?(,+([0-9])*) ]]; then
+                    nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([[:space:]]))}"
                     nLinesAutoFlag=true
                 elif [[ "${1}" == -?(-)?(N)L?(INE?(S)) ]] && [[ "${2}" == +([0-9])*?(,+([0-9])*) ]]; then
                     nLines0="${2}"
@@ -81,9 +81,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?(?([= $'\t'$'\n'])+([0-9])))
-                if [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([= $'\t'$'\n'])+([0-9]) ]]; then
-                    nLinesReadLimit="${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([= $'\t'$'\n']))}"
+            -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?(?([[:space:]])+([0-9])))
+                if [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([[:space:]])+([0-9]) ]]; then
+                    nLinesReadLimit="${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([[:space:]]))}"
                     nLinesReadLimitFlag=true
                 elif [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max)) ]] && [[ "${2}" == +([0-9]) ]]; then
                     nLinesReadLimit="${2}"
@@ -92,8 +92,8 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)b?(yte?(s))?(?([= $'\t'$'\n'])+([0-9])*))
-                if [[ "${1}" == -?(-)b?(yte?(s))?([= $'\t'$'\n'])+([0-9])* ]]; then
+            -?(-)b?(yte?(s))?(?([[:space:]])+([0-9])*))
+                if [[ "${1}" == -?(-)b?(yte?(s))?([[:space:]])+([0-9])* ]]; then
                     nBytes="${1##@(+([0-9])*)}"
                     readBytesFlag=true
                     readBytesExactFlag=false
@@ -105,8 +105,8 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)B?(YTE?(S))?(?([= $'\t'$'\n'])+([0-9])*?(,+([0-9])*?(.+([0-9])*))))
-                if [[ "${1}" == -?(-)B?(YTE?(S))?([= $'\t'$'\n'])+([0-9])*?(,+([0-9])*?(.+([0-9])*)) ]]; then
+            -?(-)B?(YTE?(S))?(?([[:space:]])+([0-9])*?(,+([0-9])*?(.+([0-9])*))))
+                if [[ "${1}" == -?(-)B?(YTE?(S))?([[:space:]])+([0-9])*?(,+([0-9])*?(.+([0-9])*)) ]]; then
                     nBytes="${1##@(+([0-9])*?(,+([0-9])*?(.+([0-9])*)))}"
                     readBytesFlag=true
                     readBytesExactFlag=true
@@ -118,32 +118,32 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)t?(mp?(?(-)dir))?(?([= $'\t'$'\n'])*@([[:graph:]])*))
-                if [[ "${1}" == -?(-)t?(mp?(?(-)dir))?([= $'\t'$'\n'])*@([[:graph:]])* ]]; then
-                    tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([= $'\t'$'\n']))}"
+            -?(-)t?(mp?(?(-)dir))?(?([[:space:]])*@([[:graph:][:space:])*))
+                if [[ "${1}" == -?(-)t?(mp?(?(-)dir))?([[:space:]])*@([[:graph:][:space:]])* ]]; then
+                    tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([[:space:]]))}"
                     mkdir -p "${tmpDirRoot}"
-                elif [[ "${1}" == -?(-)t?(mp?(?(-)dir)) ]] && [[ "${2}" == *@([[:graph:]])* ]]; then
+                elif [[ "${1}" == -?(-)t?(mp?(?(-)dir)) ]] && [[ "${2}" == *@([[:graph:][:space:]])* ]]; then
                     tmpDirRoot="${2}"
                     mkdir -p "${tmpDirRoot}"
                     shift 1
                 fi
             ;;
 
-            -?(-)d?(elim?(iter))?(?([= $'\t'$'\n'])@([[:graph:]])*))
-                if [[ "${1}" == -?(-)d?(elim?(iter))?([= $'\t'$'\n'])@([[:graph:]])* ]]; then
-                    delimiterVal="${1##@(-?(-)d?(elim?(iter))?([= $'\t'$'\n']))}"
+            -?(-)d?(elim?(iter))?(?([[:space:]])@([[:graph:][:space:]])*))
+                if [[ "${1}" == -?(-)d?(elim?(iter))?([[:space:]])@([[:graph:][:space:]])* ]]; then
+                    delimiterVal="${1##@(-?(-)d?(elim?(iter))?([[:space:]]))}"
                     (( ${#delimiterVal} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
                     (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
-                elif [[ "${1}" == -?(-)d?(elim?(iter)) ]] && [[ "${2}" == @([[:graph:]])* ]]; then
+                elif [[ "${1}" == -?(-)d?(elim?(iter)) ]] && [[ "${2}" == @([[:graph:][:space:]])* ]]; then
                     (( ${#2} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
                     (( ${#2} == 0 )) && nullDelimiterFlag=true || delimiterVal="${2:0:1}"
                     shift 1
                 fi
             ;;
 
-            -?(-)@(u|fd|file?(-)descriptor)?(?([= $'\t'$'\n'])+([0-9])))
-                if [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor)?([= $'\t'$'\n'])+([0-9]) ]]; then
-                    fd_stdin0="${1##@(-?(-)@(u|fd|file?(-)descriptor)?([= $'\t'$'\n']))}"
+            -?(-)@(u|fd|file?(-)descriptor)?(?([[:space:]])+([0-9])))
+                if [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor)?([[:space:]])+([0-9]) ]]; then
+                    fd_stdin0="${1##@(-?(-)@(u|fd|file?(-)descriptor)?([[:space:]]))}"
                 elif [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor) ]] && [[ "${2}" == +([0-9]) ]]; then
                     fd_stdin0="${2}"
                     shift 1
@@ -216,7 +216,7 @@ forkrun() {
                 optParseFlag=false
             ;;
 
-            @([-+])?([-+])*@([[:graph:]])*)
+            @([-+])?([-+])*@([[:graph:][:space:]])*)
                 printf '\nERROR: FLAG "%s" NOT RECOGNIZED. ABORTING.\n\nNOTE: If this flag was intended for the code being parallelized: then:\n1. ensure all flags for forkrun come first\n2. pass '"'"'--'"'"' to denote where forkrun flag parsing should stop.\n\nUSAGE INFO:' "$1" >&2
 
                 _forkrun_displayHelp --usage
@@ -285,7 +285,7 @@ forkrun() {
         shopt -s nullglob
 
         # dynamically set defaults for a few flags
-        : "${noFuncFlag:=false}""${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}" "${nLinesReadLimitFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" 
+        : "${noFuncFlag:=false}" "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" 
 
         if enable lseek &>/dev/null; then
             : "${lseekFlag:=true}"
@@ -527,10 +527,22 @@ forkrun() {
 : >"'"${tmpDir}"'"/.quit;
 kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
 
-       ${pipeReadFlag} && {
+        ${pipeReadFlag} && {
             # '.done'  file makes no sense when reading from a pipe
             : >"${tmpDir}"/.done
         } || {
+            ${nLinesReadLimitFlag} && type -a head &>/dev/null && { 
+                if ${nullDelimiterFlag}; then
+                    writeFileProgType=2
+                    nLinesReadLimitFlag=false
+                elif [[ "${delimiterVal}" == '$'"'"'\n'"'" ]]; then
+                    writeFileProgType=3
+                    nLinesReadLimitFlag=false
+                fi
+            }
+            
+            : "${writeFileProgType:=1}"
+        
             # spawn a coproc to write stdin to a tmpfile
             # After we are done reading all of stdin indicate this by touching .done
             { coproc pWrite {
@@ -543,7 +555,12 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
                 trap 'trap - TERM INT HUP USR1' USR1
 
-                cat <&${fd_stdin} >&${fd_write}
+                case ${writeFileProgType} in
+                    1) cat <&${fd_stdin} >&${fd_write} ;;
+                    2) head -z -n ${nLinesReadLimit} <&${fd_stdin} >&${fd_write} ;;
+                    3) head -n ${nLinesReadLimit} <&${fd_stdin} >&${fd_write} ;;
+                esac
+                    
                 : >"${tmpDir}"/.done
                 (( ${verboseLevel} > 1 )) && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
                 ${inotifyFlag} && {
@@ -1394,7 +1411,7 @@ _forkrun_complete() {
             ;;
 
             # forkrun option with arg or for displaying help - 1 input
-            -?(-)@(@([jP]|?(n)[Pp]roc?(s)?)@([= ])+([0-9])|?(n)l?(ine?(s))@([= ])+([0-9])|?(N)L?(INE?(S))@([= ])+([0-9])?(,+([0-9]))|b?(yte?(s))@([= ])+([0-9])*|B?(YTE?(S))@([= ])+([0-9])*?(,+([0-9])?(.+([0-9])))|t?(mp?(?(-)dir))@([= ])*@([[:graph:]])*|d?(elim?(iter))@([= ])@([[:graph:]])*|help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|usage|[h?]))
+            -?(-)@(@([jP]|?(n)[Pp]roc?(s)?)@([= ])+([0-9])|?(n)l?(ine?(s))@([= ])+([0-9])|?(N)L?(INE?(S))@([= ])+([0-9])?(,+([0-9]))|b?(yte?(s))@([= ])+([0-9])*|B?(YTE?(S))@([= ])+([0-9])*?(,+([0-9])?(.+([0-9])))|t?(mp?(?(-)dir))@([= ])*@([[:graph:][:space:]])*|d?(elim?(iter))@([= ])@([[:graph:][:space:]])*|help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|usage|[h?]))
                 ((kk++))
             ;;
 
