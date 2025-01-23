@@ -21,12 +21,14 @@
 **forkrun v1.5**: major changes include:
 1. the logic by which coprocs are dynamically spawned has been completely rewritten.
 2. all numeric commandline arguments now accept standard prefixes (k=1000, ki=1024, M=1000000, etc.)
-3. the lseek loadable builtin now can be used on aarch64 and riscv64 architectures
+3. the lseek loadable builtin has been recompiled and now can be used on x86_64 and aarch64 and riscv64 architectures
+4. **BREAKING CHANGE**: the `-n` flag (which previously added ordering infornmation to the output and implied `-k`) has been renamed to `-K`. The `-n` flag now implements a new feature - limiting the otal number of lines that `forkrun` will process. `... | forkrun -n <#> ...` is basically equivilant to `... | head -n <#> | forkrun ...` (except that, unlike `head`, `forkrun -n <#> -d _` allows for this functionality with delimiters other than NULLs and newlines).
+5. Various minor optimizations and bug fixes. Notably, parsing the options that specify a custom delimiter or tmp dir now work properly if whitespace characters are present (meaning things like `-s $'\t'` now work
 
 **forkrun v1.4**:  3 new features have been added:
 1. `forkrun` can now dynamically determine how many coprocs to spawn based on runtime conditions (specifically: CPU usage and whether or not coprocs are waiting in a read queue to read data from stdin). To use this functionality, pass the ;-j; flag a negative number (just passing `-j -` works too). See the help (run `forkrun --help` or `forkrun --help=all`) for additional info.
 2. `forkrun` can now read its input from a file descriptor other than stdin using the `-u` flag (which is standard in bash's `read` and `mapfile` commands). MINOR API CHANGE: the existing `-u` flag, which prevents escaping the commands given on `forkrun`'s commandline, has been changed to use `-U` or `--UNESCAPE` (i.e., it is now uppercase instead of lowercase).
-3. on x86_64 platforms, `forkrun` will use a custom bash loadable builtin to call `lseek`, greatly improving the efficiency of reading data from stdin as `forkrun` runs. `forkrun`'s "no-load" speed (i.e., stdin is all newlines and they are being passed to a `:` call) now exceeds 4 million lines per second on my system, highlighting how efficient `forkrun`'s parallelization framework is. Using `lseek` also removes `dd` from the "required dependency" list, even when using NULL-delimited input.
+3. on x86_64 platforms, `forkrun` will use a custom bash loadable builtin to call `lseek`, greatly improving the efficiency of reading data from stdin as `forkrun` runs. `forkrun`'s "no-load" speed (i.e., stdin is all newlines and they are being passed to a `:` call) now exceeds 4 million lines per second on my system, highlighting how efficient `forkrun`'s parallelization framework is. Using `lseek` also removes `dd` from the "required dependency" list when using NULL-delimited input.
 
 **forkrun v1.3**: forkrun {-z|-0|--null} has been fixed and now works 100% reliably with NULL-delimited input! However, [only] when using NULL-delimited input `dd` is now a required dependency.
 
