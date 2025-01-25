@@ -42,18 +42,18 @@ forkrun() {
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)@([jP]|?(n)[Pp]roc?(s))?(?([[:space:]])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*)))
-                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s))?([[:space:]])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
-                    nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s))?([[:space:]])?(+))}"
+            -?(-)@([jP]|?(n)[Pp]roc?(s))?(*([[:space:]])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*)))
+                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s))*([[:space:]])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
+                    nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s))*([[:space:]])?(+))}"
                 elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)) ]] && [[ "${2}" == ?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
                     nProcs="${2#'+'}"
                     shift 1
                 fi
             ;;
 
-            -?(-)?(n)l?(ine?(s))?(?([[:space:]])+([0-9])*))
-                if [[ "${1}" == -?(-)?(n)l?(ine?(s))?([[:space:]])+([0-9])* ]]; then
-                    nLines="${1##@(-?(-)?(n)l?(ine?(s))?([[:space:]]))}"
+            -?(-)?(n)l?(ine?(s))?(*([[:space:]])+([0-9])*))
+                if [[ "${1}" == -?(-)?(n)l?(ine?(s))*([[:space:]])+([0-9])* ]]; then
+                    nLines="${1##@(-?(-)?(n)l?(ine?(s))*([[:space:]]))}"
                     nLinesAutoFlag=false
                 elif [[ "${1}" == -?(-)?(n)l?(ine?(s)) ]] && [[ "${2}" == +([0-9])* ]]; then
                     nLines="${2}"
@@ -62,9 +62,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)?(N)L?(INE?(S))?(?([[:space:]])+([0-9])*?(,+([0-9])*)))
-                if [[ "${1}" == -?(-)?(N)L?(INE?(S))?([[:space:]])+([0-9])*?(,+([0-9])*) ]]; then
-                    nLines0="${1##@(-?(-)?(N)L?(INE?(S))?([[:space:]]))}"
+            -?(-)?(N)L?(INE?(S))?(*([[:space:]])+([0-9])*?(,+([0-9])*)))
+                if [[ "${1}" == -?(-)?(N)L?(INE?(S))*([[:space:]])+([0-9])*?(,+([0-9])*) ]]; then
+                    nLines0="${1##@(-?(-)?(N)L?(INE?(S))*([[:space:]]))}"
                     nLinesAutoFlag=true
                 elif [[ "${1}" == -?(-)?(N)L?(INE?(S)) ]] && [[ "${2}" == +([0-9])*?(,+([0-9])*) ]]; then
                     nLines0="${2}"
@@ -81,9 +81,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?(?([[:space:]])+([0-9])*))
-                if [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([[:space:]])+([0-9])* ]]; then
-                    nLinesReadLimit="$(_forkrun_getVal "${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?([[:space:]]))}")"
+            -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?(*([[:space:]])+([0-9])*))
+                if [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))*([[:space:]])+([0-9])* ]]; then
+                    nLinesReadLimit="$(_forkrun_getVal "${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))*([[:space:]]))}")"
                     nLinesReadLimitFlag=true
                 elif [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max)) ]] && [[ "${2}" == +([0-9])* ]]; then
                     nLinesReadLimit="$(_forkrun_getVal "${2}")"
@@ -92,8 +92,8 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)b?(yte?(s))?(?([[:space:]])+([0-9])*))
-                if [[ "${1}" == -?(-)b?(yte?(s))?([[:space:]])+([0-9])* ]]; then
+            -?(-)b?(yte?(s))?(*([[:space:]])+([0-9])*))
+                if [[ "${1}" == -?(-)b?(yte?(s))*([[:space:]])+([0-9])* ]]; then
                     nBytes="${1##@(+([0-9])*)}"
                     readBytesFlag=true
                     readBytesExactFlag=false
@@ -105,8 +105,8 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)B?(YTE?(S))?(?([[:space:]])+([0-9])*?(,+([0-9])*?(.+([0-9])*))))
-                if [[ "${1}" == -?(-)B?(YTE?(S))?([[:space:]])+([0-9])*?(,+([0-9])*?(.+([0-9])*)) ]]; then
+            -?(-)B?(YTE?(S))?(*([[:space:]])+([0-9])*?(,+([0-9])*?(.+([0-9])*))))
+                if [[ "${1}" == -?(-)B?(YTE?(S))*([[:space:]])+([0-9])*?(,+([0-9])*?(.+([0-9])*)) ]]; then
                     nBytes="${1##@(+([0-9])*?(,+([0-9])*?(.+([0-9])*)))}"
                     readBytesFlag=true
                     readBytesExactFlag=true
@@ -118,20 +118,20 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)t?(mp?(?(-)dir))?(?([[:space:]])*@([[:graph:][:space:])*))
-                if [[ "${1}" == -?(-)t?(mp?(?(-)dir))?([[:space:]])*@([[:graph:][:space:]])* ]]; then
-                    tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))?([[:space:]]))}"
+            -?(-)t?(mp?(?(-)dir))?(*([[:space:]])+([[:graph:][:space:]])))
+                if [[ "${1}" == -?(-)t?(mp?(?(-)dir))*([[:space:]])+([[:graph:][:space:]]) ]]; then
+                    tmpDirRoot="${1##@(-?(-)t?(mp?(?(-)dir))*([[:space:]]))}"
                     mkdir -p "${tmpDirRoot}"
-                elif [[ "${1}" == -?(-)t?(mp?(?(-)dir)) ]] && [[ "${2}" == *@([[:graph:][:space:]])* ]]; then
+                elif [[ "${1}" == -?(-)t?(mp?(?(-)dir)) ]] && [[ "${2}" == +([[:graph:][:space:]]) ]]; then
                     tmpDirRoot="${2}"
                     mkdir -p "${tmpDirRoot}"
                     shift 1
                 fi
             ;;
 
-            -?(-)d?(elim?(iter))?(?([[:space:]])@([[:graph:][:space:]])*))
-                if [[ "${1}" == -?(-)d?(elim?(iter))?([[:space:]])@([[:graph:][:space:]])* ]]; then
-                    delimiterVal="${1##@(-?(-)d?(elim?(iter))?([[:space:]]))}"
+            -?(-)d?(elim?(iter))?(*([[:space:]])@([[:graph:][:space:]])*))
+                if [[ "${1}" == -?(-)d?(elim?(iter))*([[:space:]])@([[:graph:][:space:]])* ]]; then
+                    delimiterVal="${1##@(-?(-)d?(elim?(iter))*([[:space:]]))}"
                     (( ${#delimiterVal} > 1 )) && printf '\nWARNING: the delimiter must be a single character, and a multi-character string was given. Only using the 1st character.\n\n' >&2
                     (( ${#delimiterVal} == 0 )) && nullDelimiterFlag=true || delimiterVal="${delimiterVal:0:1}"
                 elif [[ "${1}" == -?(-)d?(elim?(iter)) ]] && [[ "${2}" == @([[:graph:][:space:]])* ]]; then
@@ -141,9 +141,9 @@ forkrun() {
                 fi
             ;;
 
-            -?(-)@(u|fd|file?(-)descriptor)?(?([[:space:]])+([0-9])))
-                if [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor)?([[:space:]])+([0-9]) ]]; then
-                    fd_stdin0="${1##@(-?(-)@(u|fd|file?(-)descriptor)?([[:space:]]))}"
+            -?(-)@(u|fd|file?(-)descriptor)?(*([[:space:]])+([0-9])))
+                if [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor)*([[:space:]])+([0-9]) ]]; then
+                    fd_stdin0="${1##@(-?(-)@(u|fd|file?(-)descriptor)*([[:space:]]))}"
                 elif [[ "${1}" ==  -?(-)@(u|fd|file?(-)descriptor) ]] && [[ "${2}" == +([0-9]) ]]; then
                     fd_stdin0="${2}"
                     shift 1
@@ -216,7 +216,7 @@ forkrun() {
                 optParseFlag=false
             ;;
 
-            @([-+])?([-+])*@([[:graph:][:space:]])*)
+            @([-+])?([-+])+([[:graph:][:space:]]))
                 printf '\nERROR: FLAG "%s" NOT RECOGNIZED. ABORTING.\n\nNOTE: If this flag was intended for the code being parallelized: then:\n1. ensure all flags for forkrun come first\n2. pass '"'"'--'"'"' to denote where forkrun flag parsing should stop.\n\nUSAGE INFO:' "$1" >&2
 
                 _forkrun_displayHelp --usage
@@ -1411,7 +1411,7 @@ _forkrun_complete() {
             ;;
 
             # forkrun option with arg or for displaying help - 1 input
-            -?(-)@(@([jP]|?(n)[Pp]roc?(s)?)@([= ])+([0-9])|?(n)l?(ine?(s))@([= ])+([0-9])|?(N)L?(INE?(S))@([= ])+([0-9])?(,+([0-9]))|b?(yte?(s))@([= ])+([0-9])*|B?(YTE?(S))@([= ])+([0-9])*?(,+([0-9])?(.+([0-9])))|t?(mp?(?(-)dir))@([= ])*@([[:graph:][:space:]])*|d?(elim?(iter))@([= ])@([[:graph:][:space:]])*|help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|usage|[h?]))
+            -?(-)@(@([jP]|?(n)[Pp]roc?(s)?)@([= ])+([0-9])|?(n)l?(ine?(s))@([= ])+([0-9])|?(N)L?(INE?(S))@([= ])+([0-9])?(,+([0-9]))|b?(yte?(s))@([= ])+([0-9])*|B?(YTE?(S))@([= ])+([0-9])*?(,+([0-9])?(.+([0-9])))|t?(mp?(?(-)dir))@([= ])+([[:graph:][:space:]])|d?(elim?(iter))@([= ])@([[:graph:][:space:]])*|help?(=@(a?(ll)|f?(lag?(s))|s?(hort)))|usage|[h?]))
                 ((kk++))
             ;;
 
