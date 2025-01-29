@@ -23,7 +23,7 @@
 2. all numeric commandline arguments now accept standard prefixes (k=1000, ki=1024, M=1000000, etc.)
 3. the lseek loadable builtin has been recompiled and now can be used on x86_64 and aarch64 and riscv64 architectures
 4. **BREAKING CHANGE**: the `-n` flag (which previously added ordering information to the output and implied `-k`) has been renamed to `-K`. The `-n` flag now implements a new feature - limiting the total number of lines that `forkrun` will process. `... | forkrun -n <#> ...` is basically equivilant to `... | head -n <#> | forkrun ...` (except that, unlike `head`, `forkrun -n <#> -d _` allows for this functionality with delimiters other than NULLs and newlines).
-5. Various minor optimizations and bug fixes. Notably, parsing the options that specify a custom delimiter or tmp dir now work properly if whitespace characters are present (meaning things like `-s $'\t'` now work
+5. Various minor optimizations and bug fixes. Notably, parsing the options that specify a custom delimiter or tmp dir now works properly if whitespace characters are present (meaning things like `-s $'\t'` now work
 
 **forkrun v1.4**:  3 new features have been added:
 1. `forkrun` can now dynamically determine how many coprocs to spawn based on runtime conditions (specifically: CPU usage and whether or not coprocs are waiting in a read queue to read data from stdin). To use this functionality, pass the ;-j; flag a negative number (just passing `-j -` works too). See the help (run `forkrun --help` or `forkrun --help=all`) for additional info.
