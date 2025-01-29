@@ -66,3 +66,6 @@ for nn in "${A[@]}"; do
     sleep 1
 done
 
+# ./flamegraph.pl --title="forkrun flamechart" --subtitle='combined hash algs | dynamic coproc count' --flamechart --minwidth 1 --height 20 --width 4200  out.folded  >forkrun_flamechart.svg
+
+
