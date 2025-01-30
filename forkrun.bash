@@ -27,9 +27,9 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nQueueMin 
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nQueueFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pQueue pWrite_PID pNotify_PID pOrder_PID pAuto_PID pQueue_PID  DEBUG_FORKRUN
-    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nQueue nQueueLast nQueueLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime pAddCount pAddMin pAddSum pAddMax
+    local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nSpawnMin 
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pNotify_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
+    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime pAddCount pAddMin pAddSum pAddMax
     local -a A p_PID runCmd outHave outPrint pLOADA pLOADA0
     local -a -i runTimeA runLinesA
 
@@ -374,32 +374,32 @@ forkrun() {
             { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
         fi
 
-        # set number of coproc workers and (if enabled) minimim worker read queue length
+        # set number of coproc workers and (if enabled) minimim worker read q length
         [[ "${nProcs}" == '-'* ]] && {
-            : "${nQueueFlag:=true}"
+            : "${nSpawnFlag:=true}"
             nProcs="${nProcs#'-'}"
         }
 
         [[ "${nProcs}" == *','* ]] && {
-            : "${nQueueFlag:=true}"
+            : "${nSpawnFlag:=true}"
             nProcsMax="${nProcs#*,}"
-            [[ "${nProcsMax}" == *','* ]] && nQueueMin="$(_forkrun_getVal "${nProcsMax#*,}")"
+            [[ "${nProcsMax}" == *','* ]] && nSpawnMin="$(_forkrun_getVal "${nProcsMax#*,}")"
             nProcsMax="$(_forkrun_getVal "${nProcsMax%%,*}")"
         }
         nProcs="$(_forkrun_getVal "${nProcs%%,*}")"
 
-        : "${nQueueFlag:=false}" "${nQueueMin:=1}"
+        : "${nSpawnFlag:=false}" "${nSpawnMin:=1}"
      
         nCPU="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')";
         (( nCPU < 1 )) && nCPU=1
-        { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nQueueFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
+        { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nSpawnFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
 
-        ${nQueueFlag} && { 
+        ${nSpawnFlag} && { 
             [[ ${nProcsMax//0/} ]] || nProcsMax=$(( ${nCPU} * 2 ));
-            [[ ${nQueueMin//0/} ]] || nQueueMin=1
+            [[ ${nSpawnMin//0/} ]] || nSpawnMin=1
         }
 
-        { ${nQueueFlag} && (( ${nQueueMin:-0} > 0 )) && { [[ ${nProcsMax:-0} == '0' ]] || (( ${nProcs} < ${nProcsMax} )); }; } || : "${nQueueFlag:=false}"
+        { ${nSpawnFlag} && (( ${nSpawnMin:-0} > 0 )) && { [[ ${nProcsMax:-0} == '0' ]] || (( ${nProcs} < ${nProcsMax} )); }; } || : "${nSpawnFlag:=false}"
 
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
@@ -407,7 +407,7 @@ forkrun() {
         # set defaults for control flags/parameters
         : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=1024}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" "${stdinRunFlag:=false}" 
 
-        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}" nQueueMin="${nQueueMin}" nLines="${nLines}" nLinesMax="${nLinesMax}"
+        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}" nSpawnMin="${nSpawnMin}" nLines="${nLines}" nLinesMax="${nLinesMax}"
 
         # ensure sensible nLinesMax
          ${nLinesAutoFlag} && {  (( nLinesMax < 2 * nLines )) && nLinesMax=$(( 2 * nLines )); } || { (( nLinesMax < nLines )) && nLinesMax=nLines; }
@@ -494,7 +494,7 @@ forkrun() {
             ${inotifyFlag} && echo 'using inotify to efficiently wait for slow inputs on stdin'
             ${fallocateFlag} && echo 'using fallocate to shrink the tmpfile containing stdin as forkrun runs'
             ${lseekFlag} && echo 'using "lseek" loadable builtin to read data faster and more efficiently'
-            ${nQueueFlag} && printf '(-j|-P) initial / max workers: %s / %s. workers will be dynamically spawned (up to a %s workers max) whenever read queue depth is less than %s\n' "${nProcs}" "${nProcsMax}" "${nProcsMax}" "${nQueueMin}" || printf '(-j|-P) using %s coproc workers\n' ${nProcs}
+            ${nSpawnFlag} && printf '(-j|-P) initial / max workers: %s / %s. workers will be dynamically spawned (up to a %s workers max) whenever read q depth is less than %s\n' "${nProcs}" "${nProcsMax}" "${nProcsMax}" "${nSpawnMin}" || printf '(-j|-P) using %s coproc workers\n' ${nProcs}
             ${nLinesAutoFlag} && printf '(-L) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}" || printf '(-l) using %s lines per function call (batch size) \n' "${nLines}"
             printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
             ${nLinesReadLimitFlag} && printf '(-n) forkrun will return after reading %s lines (or until it reads an EOF from stdin, whichever comes first)\n' "${nLinesReadLimit}"
@@ -619,7 +619,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
         fi
 
         # setup automatic dynamic nLines adjustment and/or fallocate pre-truncation of (already processed) stdin
-        if ${nLinesAutoFlag} || ${fallocateFlag} || ${nQueueFlag}; then
+        if ${nLinesAutoFlag} || ${fallocateFlag} || ${nSpawnFlag}; then
 
             printf '%s\n' ${nLines} >"${tmpDir}"/.nLines
 
@@ -645,7 +645,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 }
                 nLinesRead=0
 
-                while ${fallocateFlag} || ${nLinesAutoFlag} || ${nQueueFlag}; do
+                while ${fallocateFlag} || ${nLinesAutoFlag} || ${nSpawnFlag}; do
 
                     read -u ${fd_nAuto} -t 0.1 || continue
 
@@ -653,17 +653,17 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         0)
                             nLinesAutoFlag=false
                             fallocateFlag=false
-                            nQueueFlag=false
+                            nSpawnFlag=false
                             break
                         ;;
                         x)
                             nLinesAutoFlag=false
                         ;;
                         q)
-                            nQueueFlag=false
+                            nSpawnFlag=false
                         ;;
                         *)
-                            if ${nLinesAutoFlag} || ${nQueueFlag}; then
+                            if ${nLinesAutoFlag} || ${nSpawnFlag}; then
                                 if ${nLinesReadLimitFlag}; then
                                     read -r nLinesRead <"${tmpDir}"/.nLinesRead
                                 else
@@ -678,13 +678,13 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
                     IFS=
 
-                    { ${nLinesAutoFlag} || ${nQueueFlag}; } && nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) ))
+                    { ${nLinesAutoFlag} || ${nSpawnFlag}; } && nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) ))
 
-                    ${nQueueFlag} && printf '%s %s\n' "${nLinesEst}" "$(( ${EPOCHREALTIME//./} - tStart ))" >"${tmpDir}"/.stdin_lines_time
+                    ${nSpawnFlag} && printf '%s %s\n' "${nLinesEst}" "$(( ${EPOCHREALTIME//./} - tStart ))" >"${tmpDir}"/.stdin_lines_time
 
                     if ${nLinesAutoFlag}; then
 
-                        ${nQueueFlag} && [[ -f "${tmpDir}"/.nWorkers ]] && nProcs="$(<"${tmpDir}"/.nWorkers)"
+                        ${nSpawnFlag} && [[ -f "${tmpDir}"/.nWorkers ]] && nProcs="$(<"${tmpDir}"/.nWorkers)"
 
                         nLinesNew=$(( 1 + ( ( nLinesEst - nLinesRead ) / ${nProcs} ) ))
 
@@ -721,7 +721,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     [[ -f "${tmpDir}"/.quit ]] && {
                         nLinesAutoFlag=false
                         fallocateFlag=false
-                        nQueueFlag=false
+                        nSpawnFlag=false
                     }
 
                 done
@@ -766,13 +766,13 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
         #    1) total worker coproc count must not exceed the maximum worker coproc count (by default 2 * nCPU).
         #    2) coprocs will spawn until total system cpu load is at >=90% (for all cpu cores) OR until one of the other criteria is violated. If spawning new coproc(s) lowers system load, the target (90%) will be reduced.
         #    3) coprocs will spawn until ( the average time it takes to get N lines on stdin ) >= ( ( the time it takes to process N lines ) / ( num worker coprocs ) OR until one of the other criteria is violated.
-        ${nQueueFlag} && {
+        ${nSpawnFlag} && {
             export -f _forkrun_get_load
-            { coproc pQueue {
+            { coproc pSpawn {
 
                 # set traps and global vars
                 export LC_ALL=C LANG=C IFS=
-                trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto}"'; printf '"'"'\n'"'"' >&'"${fd_nQueue0}"'; [[ -f "'"${tmpDir}"'"/.run/pQueue ]] && \rm -f "'"${tmpDir}"'"/.run/pQueue' EXIT
+                trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto}"'; printf '"'"'\n'"'"' >&'"${fd_nSpawn0}"'; [[ -f "'"${tmpDir}"'"/.run/pSpawn ]] && \rm -f "'"${tmpDir}"'"/.run/pSpawn' EXIT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
@@ -790,7 +790,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 mapfile -t pLOADA0 < <(_forkrun_get_load -i)
 
                 # wait for the helper coprocs spawned by the main thread to be spawned
-                read -r -u ${fd_nQueue0}
+                read -r -u ${fd_nSpawn0}
 
                 # get background load
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
@@ -802,7 +802,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 : "${pLOAD_max:=9000}" "${nProcsMax:=$((2*${nCPU}))}" 
                 
                 # wait for the worker coprocs spawned by the main thread to be spawned
-                read -r -u ${fd_nQueue0}
+                read -r -u ${fd_nSpawn0}
 
                 # get "extra" load from coprocs forken from main thread and use it to estimate extra CPU load per coproc worker
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
@@ -824,7 +824,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # wait for new info to get average run time per batch at current batch size arrives
                     IFS=' '
-                    read -r -u ${fd_nQueue} runLines runTime
+                    read -r -u ${fd_nSpawn} runLines runTime
                     (( ${runLines} < 0 )) && (( ${runTime} < 0 )) && { IFS=; break; }
                     read -r inLines inTime <"${tmpDir}"/.stdin_lines_time
                     IFS=
@@ -855,7 +855,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # check if "time for N lines to arrive on stdin (t_in)" is less than "time to process N lines (t_run) / numWorkers (kkProcs)"
                     # since only one worker can read data at a time, bhaving these be equal is ideal since
-                    # data is read as fast as it is comming in and workers arent sitting idle in a wait queue
+                    # data is read as fast as it is comming in and workers arent sitting idle in a wait q
                     if (( ( inTime * kkProcs * runLinesA[${runLines}] ) < ( runTimeA[${runLines}] * inLines ) )); then
 
                         # estimate num workers to add to make t_in = t_run / kkProcs
@@ -957,8 +957,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
               } 2>&${fd_stderr}
             } 2>/dev/null
 
-            exitTrapStr+='echo "-1 -1" >&'"${fd_nQueue}"'; '$'\n'
-            printf '%s\n' "${pQueue_PID}" > "${tmpDir}"/.run/pQueue
+            exitTrapStr+='echo "-1 -1" >&'"${fd_nSpawn}"'; '$'\n'
+            printf '%s\n' "${pSpawn_PID}" > "${tmpDir}"/.run/pSpawn
 
         }
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
@@ -1000,7 +1000,7 @@ trap 'trap - TERM INT HUP USR1; kill -HUP ${PID0} \${BASHPID}' HUP
 trap 'trap - TERM INT HUP USR1' USR1
 
 while true; do"""
-{ ${nLinesAutoFlag} || ${nQueueFlag}; } && echo "{ \${nLinesAutoFlag} || \${nQueueFlag}; } && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
+{ ${nLinesAutoFlag} || ${nSpawnFlag}; } && echo "{ \${nLinesAutoFlag} || \${nSpawnFlag}; } && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
 echo """
     read -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
@@ -1173,7 +1173,7 @@ echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf 'x\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
-${nQueueFlag} && echo """\printf '%s' '0' >&${fd_nQueue}
+${nSpawnFlag} && echo """\printf '%s' '0' >&${fd_nSpawn}
 printf 'q\\n' >&\${fd_nAuto0}"""
 ${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' &>/dev/null'
 echo """
@@ -1187,9 +1187,9 @@ echo """
         fi
         continue
     }"""
-${nQueueFlag} && echo 'tStart0=${EPOCHREALTIME//./}'
-{ ${nLinesAutoFlag} || ${nQueueFlag}; } && { printf '%s' """
-    { \${nLinesAutoFlag} || \${nQueueFlag}; } && {
+${nSpawnFlag} && echo 'tStart0=${EPOCHREALTIME//./}'
+{ ${nLinesAutoFlag} || ${nSpawnFlag}; } && { printf '%s' """
+    { \${nLinesAutoFlag} || \${nSpawnFlag}; } && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false
     }"""
@@ -1243,7 +1243,7 @@ ${noFuncFlag} && echo 'IFS='
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
 ${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
-${nQueueFlag} && echo "printf '%s %s\\n' \${#A[@]} \$(( \${EPOCHREALTIME//./} - tStart0 )) >&${fd_nQueue}"
+${nSpawnFlag} && echo "printf '%s %s\\n' \${#A[@]} \$(( \${EPOCHREALTIME//./} - tStart0 )) >&${fd_nSpawn}"
 echo """
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
@@ -1286,7 +1286,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && { printf '\nSET TRAPS:\n\n'; trap -p; } >&${fd_stderr}
 
-        ${nQueueFlag} && printf '\n' >&${fd_nQueue0}
+        ${nSpawnFlag} && printf '\n' >&${fd_nSpawn0}
 
         # # # # # FORK COPROC "WORKERS" # # # # #
 
@@ -1304,13 +1304,13 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
         echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    
         : >"${tmpDir}"/.spawned
-        ${nQueueFlag} && printf '\n' >&${fd_nQueue0}
+        ${nSpawnFlag} && printf '\n' >&${fd_nSpawn0}
 
         (( ${verboseLevel} > 1 )) && printf '\n\n%s WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr}
 
         (( ${verboseLevel} > 3 )) && { 
             printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}"
-            declare -p fd_continue fd_inotify fd_nAuto fd_nOrder fd_nOrder0 fd_nQueue fd_read fd_write fd_stdin fd_stdout fd_stderr 
+            declare -p fd_continue fd_inotify fd_nAuto fd_nOrder fd_nOrder0 fd_nSpawn fd_read fd_write fd_stdin fd_stdout fd_stderr 
         } >&${fd_stderr}
 
         # # # # # WAIT FOR THEM TO FINISH # # # # #
@@ -1377,20 +1377,20 @@ p_PID+=(\${p{<#>}_PID})""" )"
         (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
         #p_PID=($(_forkrun_rmdups "${p_PID[@]}" $(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null)))
         #p_PID+=($(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null))
-        wait "${p_PID[@]}" "${pQueue_PID}" &>/dev/null; 
-        ${nQueueFlag} && read -r -u ${fd_nQueue0}
+        wait "${p_PID[@]}" "${pSpawn_PID}" &>/dev/null; 
+        ${nSpawnFlag} && read -r -u ${fd_nSpawn0}
 
         # print final nLines count
         (( ${verboseLevel} > 1 )) && {
             ${nLinesAutoFlag} && printf 'nLines (final) = %s    ( max = %s )\n'  "$(<"${tmpDir}"/.nLines)" "${nLinesMax}"
-            # ${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)"
+            # ${nSpawnFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)"
         } >&${fd_stderr} 
         
-    ${nQueueFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)" >&${fd_stderr}
+    ${nSpawnFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)" >&${fd_stderr}
 
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nQueue}<><(:) {fd_nQueue0}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nSpawn}<><(:) {fd_nSpawn0}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
@@ -1652,8 +1652,8 @@ GENERAL NOTES:
 FLAGS WITH ARGUMENTS
 --------------------
 
-    (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc). If the number is negative (begins with a '-') then the numbner of coprocs used will be determined dynamically based on read wait queue length (see "alt syntax" below).
-    (-j|-P) -[<#1>[,<#2>[,<#3>]]]: alternate syntax to enable dynamically determining coproc count. <#1> is the initial number of coprocs spawned (default: num CPUs / 2). <#2> is the maximum number of coprocs to be spawned (default: num CPUs * 2). <#3> is the minimum read wait queue depth - if fewer than this many processes are waiting in line to read data another will be spawned (default: 1). All values (except for the '-' / negative sign) are optional, and may be omitted (leaving just a '-') to just set max coproc count or min wait queue depth.
+    (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc). If the number is negative (begins with a '-') then the numbner of coprocs used will be determined dynamically based on runtime conditions (see "alt syntax" below).
+    (-j|-P) -[<#1>[,<#2>[,<#3>]]]: alternate syntax to enable dynamically determining coproc count. <#1> is the initial number of coprocs spawned (default: num CPUs / 2). <#2> is the maximum number of coprocs to be spawned (default: num CPUs * 2). <#3> is the minimum read wait q depth - if fewer than this many processes are waiting in line to read data another will be spawned (default: 1). All values (except for the '-' / negative sign) are optional, and may be omitted (leaving just a '-') to just set max coproc count or min wait q depth.
     -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
     -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,1024'
     -n <#>      : limit forkrun to processing (at most) the first <#> lines passed on stdin.
@@ -1706,18 +1706,18 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 
 ----------------------------------------------------------
 
--j | -P | --nprocs  <#> : sets the number of worker coprocs to use. If set to a negative number then the coproc count is adjusted dynamically based on read wait queue depth (see alt syntax below).
+-j | -P | --nprocs  <#> : sets the number of worker coprocs to use. If set to a negative number then the coproc count is adjusted dynamically based on read wait q depth (see alt syntax below).
    ---->  default  : number of logical CPU cores ($(nproc))
 
 -j | -P | --nprocs -[<#1>[,<#2>[,<#3>]]]: (alt syntax - dynamic coproc count). 
         <#1> is the initial number of coprocs spawned (--> default: num CPUs / 2). 
         <#2> is the maximum number of coprocs to be spawned (--> default: num CPUs * 2). 
-        <#3> is the minimum read wait queue depth - if fewer than this many processes are waiting in line to read data another will be spawned (--> default: 1). 
-    All values (except the '-' / negative sign) are optional, and may be omitted (leaving just a '-') to just set max coproc count or min wait queue depth.
+        <#3> is the minimum read wait q depth - if fewer than this many processes are waiting in line to read data another will be spawned (--> default: 1). 
+    All values (except the '-' / negative sign) are optional, and may be omitted (leaving just a '-') to just set max coproc count or min wait q depth.
     EXAMPLES: `-j -` or `-j -,` or `-j -,,`: sets defaults for all 3 parameters
-              `-j -10,,2`: sets initial coproc count to 10, max coproc count to default (2 * nCPU) and min wait queue depth to 2
+              `-j -10,,2`: sets initial coproc count to 10, max coproc count to default (2 * nCPU) and min wait q depth to 2
 
-NOTE: Don't set max number of coprocs too high. On larger problems, it will likely hit this maximum. Setting it too high can lead to excessive resource consumption and potential performance degradation. This limit is based on the idea that only one coproc can read data at a time, spawning more until there's always at least one waiting. However, forkrun (especially with lseek) reads data very quickly (typically 100's of microseconds per operation), making it challenging to build a significant read wait queue.
+NOTE: Don't set max number of coprocs too high. On larger problems, it will likely hit this maximum. Setting it too high can lead to excessive resource consumption and potential performance degradation. This limit is based on the idea that only one coproc can read data at a time, spawning more until there's always at least one waiting. However, forkrun (especially with lseek) reads data very quickly (typically 100's of microseconds per operation), making it challenging to build a significant read wait q.
 
 ----------------------------------------------------------
 
