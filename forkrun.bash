@@ -29,7 +29,7 @@ forkrun() {
     # make all variables local
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nSpawnMin 
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 pLOAD1 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pNotify_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
-    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs verboseLevel pLOAD_max pAdd tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime pAddCount pAddMin pAddSum pAddMax
+    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs clk_tck verboseLevel pLOAD_max pAdd tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime pAddCount pAddMin pAddSum pAddMax
     local -a A p_PID runCmd outHave outPrint pLOADA pLOADA0
     local -a -i runTimeA runLinesA
 
@@ -778,6 +778,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
                 trap 'trap - TERM INT HUP USR1' USR1
 
+                clk_tck=$( read -r _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ut1 _ </proc/self/stat; read -r ut0 _ </proc/uptime; echo $(( ut1 / ${ut0%.*} )); )
     
                 # get estimate of pre-forkrun baxkgrounfd system load (/proc/loadavg) and
                 # get initial measurement for system cpu load calculation (/proc/stat)
@@ -818,6 +819,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 pAddCount0=4
                 pAddCount=${pAddCount0}
 
+                mapfile -t p_PID < <(cat "${tmpDir}"/.run/p[0-9]*)
+
                 # start dynamic spawning now that nProcs workers have already spawned
                 # begin main loop
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
@@ -835,6 +838,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # get average system load since the last time a new worker coproc was spawned
                     mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
+                    pLOADA_new=$(( (  10000000000 / clk_tck) * ( $( ( IFS=','; source /proc/self/fd/0 2>/dev/null <<<"cat /proc/{${p_PID[*]}}/stat" ) | while read -r _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done) 0 ) / ( kkProcs * ( ${EPOCHREALTIME//./} - tStart ) ) )); }
+                    printf 'old time: %s    new time: %s\n' $pLOADA $pLOADA_new >&${fd_stderr}
 
                     # abort if system load is above threshold
                     (( pLOADA > pLOAD_max )) && continue
