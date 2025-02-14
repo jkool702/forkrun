@@ -842,7 +842,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # get average system load since the last time a new worker coproc was spawned
                     mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
-                    mapfile -t pLOADA_new < <(_forkrun_get_load_PID "${pLOADA0_new[@]}" -- "${p_PID0[@]}" "${p_PID[@]}")
+                    mapfile -t pLOADA_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${p_PID0[@]}" "${p_PID[@]}")
                     # pLOADA_new=$(( (  10000 / clk_tck) * ( $( ( IFS=','; source /proc/self/fd/0 2>/dev/null <<<"cat /proc/{${p_PID[*]}}/stat" ) | { IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done; }) 0 ) / ( kkProcs * ( ${EPOCHREALTIME//./} - tStart ) ) ));
                     printf 'old time: %s    new time: %s\n' $pLOADA $pLOADA_new >&${fd_stderr}
 
@@ -2030,7 +2030,7 @@ _forkrun_get_load() (
         
     (( tALL0 > ( 2 * tALL ) )) && tALL0=$(( 2 * tALL ))
 
-    pLOAD=$(( ( loadMaxVal * tLOAD ) / ( 1 + tALL ) ))
+    pLOAD=$(( ( loadMaxVal * ( 1 + tLOAD ) ) / ( 1 + tALL ) ))
     (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
 
     pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
@@ -2100,15 +2100,15 @@ _forkrun_get_load_pid() (
                 pidA=("$@")
                 break
                ;;
-            [0-9]*)
-            case "${argCount}" in
-                0)  [[ ${1} == 0 ]] && pLOAD0=1 || pLOAD0="${1}"  ;;
-                1)  cpu_ALL0="${1}"  ;;
-                2)  cpu_LOAD0="${1}"  ;;
-                3)  tALL0="${1}"  ;;
-                *)  pidA+=("${1}")  ;;
-            esac
-            ((argCount++))
+            *)
+                case "${argCount}" in
+                    0)  [[ ${1} == 0 ]] && pLOAD0=1 || pLOAD0="${1}"  ;;
+                    1)  cpu_ALL0="${1}"  ;;
+                    2)  cpu_LOAD0="${1}"  ;;
+                    3)  tALL0="${1}"  ;;
+                    *)  pidA+=("${1}")  ;;
+                esac
+                ((argCount++))
             ;;
         esac
         shift 1
@@ -2118,15 +2118,16 @@ _forkrun_get_load_pid() (
     
     [[ "${tmpDir}" ]] || local tmpDir='/tmp' 
 
+    [[ ${#pidA[@]} == 0 ]] && pidA=($$)
+
     cat $(printf '/proc/%s/stat ' "${pidA[@]}") 2>/dev/null >"${tmpDir}"/.proc_pid_stat
-    read -r  _ cpu_IDLE </proc/uptime
+    read -r _ cpu_IDLE </proc/uptime
     
     cpu_LOAD=$(( $( IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r -u $fd_stat _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done {fd_stat}<"${tmpDir}"/.proc_pid_stat ) 0 ));
 
-    rm "${tmpDir}"/.proc_pid_stat
+    \rm -f "${tmpDir}"/.proc_pid_stat
 
     cpu_ALL=$(( cpu_LOAD + ${cpu_IDLE//./} ))
-    tALL=$(( cpu_ALL - cpu_ALL0 ))
 
     ${initFlag} && {
         pLOADA=(-1 "${cpu_ALL}" "${cpu_LOAD}" 0)
@@ -2142,7 +2143,7 @@ _forkrun_get_load_pid() (
         
     (( tALL0 > ( 2 * tALL ) )) && tALL0=$(( 2 * tALL ))
 
-    pLOAD=$(( ( loadMaxVal * tLOAD ) / ( 1 + tALL ) ))
+    pLOAD=$(( ( loadMaxVal * ( 1 + tLOAD ) ) / ( 1 + tALL ) ))
     (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
 
     pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
