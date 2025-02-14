@@ -789,12 +789,14 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 #                pLOAD0=0
 
                 mapfile -t pLOADA0 < <(_forkrun_get_load -i)
+                mapfile -t pLOADA0 < <(_forkrun_get_load -i ${PID0})
 
                 # wait for the helper coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nSpawn0}
 
                 # get background load
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+                mapfile -t pLOADA0 < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" "${PID0}")
                 pLOAD0="(( pLOADA0 / 2 ))"
 
                 # set some initial values
@@ -820,7 +822,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 pAddCount=${pAddCount0}
 
                 mapfile -t p_PID0 < <(cat "${tmpDir}"/.run/p[0-9]*)
-                p_PID=()
+                mapfile -t pLOADA0_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" "${pLOADA0[@]}" -- "${p_PID0[@]}")
+
 
                 # start dynamic spawning now that nProcs workers have already spawned
                 # begin main loop
@@ -839,7 +842,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # get average system load since the last time a new worker coproc was spawned
                     mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
-                    mapfile -t pLOADA_new < <(_forkrun_get_load_PID "${pLOADA0[@]}" "${p_PID0[@]}" ${p_PID[@]}")
+                    mapfile -t pLOADA_new < <(_forkrun_get_load_PID "${pLOADA0_new[@]}" -- "${p_PID0[@]}" "${p_PID[@]}")
                     # pLOADA_new=$(( (  10000 / clk_tck) * ( $( ( IFS=','; source /proc/self/fd/0 2>/dev/null <<<"cat /proc/{${p_PID[*]}}/stat" ) | { IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done; }) 0 ) / ( kkProcs * ( ${EPOCHREALTIME//./} - tStart ) ) ));
                     printf 'old time: %s    new time: %s\n' $pLOADA $pLOADA_new >&${fd_stderr}
 
@@ -898,6 +901,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # update when system load is measured from since we are about to spawn new workers
                     #mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+                    #mapfile -t pLOADA0_new < <(_forkrun_get_load "${pLOADA0_new[@]}" -- "${p_PIOD[@]}" "${p_PID0[@]}")
 
                     # compare system load now to what it was just before the previous most recent group of new coprocs was spawned
                     if (( pLOADA > pLOAD0 )); then
