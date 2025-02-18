@@ -773,9 +773,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 # set traps and global vars
                 export LC_ALL=C LANG=C IFS=
                 trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto}"'; printf '"'"'\n'"'"' >&'"${fd_nSpawn0}"'; [[ -f "'"${tmpDir}"'"/.run/pSpawn ]] && \rm -f "'"${tmpDir}"'"/.run/pSpawn' EXIT
-                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}"' INT
-                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}"' TERM
-                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}"' HUP
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' INT
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' TERM
+                trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' HUP
                 trap 'trap - TERM INT HUP USR1' USR1
 
                 clk_tck=$( IFS=' '; read -r _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ut1 _ </proc/self/stat; read -r ut0 _ </proc/uptime; echo $(( ut1 / ${ut0%.*} )); )
@@ -908,7 +908,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # update when system load is measured from since we are about to spawn new workers
                     #mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
-                    #mapfile -t pLOADA0_new < <(_forkrun_get_load "${pLOADA0_new[@]}" -- "${p_PIOD[@]}" "${p_PID0[@]}")
+                    #mapfile -t pLOADA0_new < <(_forkrun_get_load "${pLOADA0_new[@]}" -- "${p_PID[@]}" "${p_PID0[@]}")
 
                     # compare system load now to what it was just before the previous most recent group of new coprocs was spawned
                     if (( pLOADA > pLOAD0 )); then
