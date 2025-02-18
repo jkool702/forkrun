@@ -1980,10 +1980,10 @@ _forkrun_get_load() (
     echoFlag=false
     argCount=0
 
-    pLOAD0="${pLOADA[0]}"
-    cpu_ALL0="${pLOADA[1]}"
-    cpu_LOAD0="${pLOADA[2]}"
-    tALL0="${pLOADA[3]}"
+    #pLOAD0="${pLOADA[0]}"
+    #cpu_ALL0="${pLOADA[1]}"
+    #cpu_LOAD0="${pLOADA[2]}"
+    #tALL0="${pLOADA[3]}"
 
 
     while (( ${#} > 0 )); do
@@ -2082,10 +2082,10 @@ _forkrun_get_load_pid() (
     echoFlag=false
     argCount=0
 
-    pLOAD0="${pLOADA_new[0]}"
-    cpu_ALL0="${pLOADA_new[1]}"
-    cpu_LOAD0="${pLOADA_new[2]}"
-    tALL0="${pLOADA_new[3]}"
+    #pLOAD0="${pLOADA_new[0]}"
+    #cpu_ALL0="${pLOADA_new[1]}"
+    #cpu_LOAD0="${pLOADA_new[2]}"
+    #tALL0="${pLOADA_new[3]}"
 
 
     while (( ${#} > 0 )); do
