@@ -789,14 +789,14 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 #                pLOAD0=0
 
                 mapfile -t pLOADA0 < <(_forkrun_get_load -i)
-                mapfile -t pLOADA0 < <(_forkrun_get_load -i ${PID0})
+                mapfile -t pLOADA0 < <(_forkrun_get_load_pid -i -- ${PID0})
 
                 # wait for the helper coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nSpawn0}
 
                 # get background load
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
-                mapfile -t pLOADA0 < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" "${PID0}")
+                mapfile -t pLOADA0 < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${PID0}")
                 pLOAD0="(( pLOADA0 / 2 ))"
 
                 # set some initial values
@@ -822,8 +822,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 pAddCount=${pAddCount0}
 
                 mapfile -t p_PID0 < <(cat "${tmpDir}"/.run/p[0-9]*)
-                mapfile -t pLOADA0_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" "${pLOADA0[@]}" -- "${p_PID0[@]}")
-
+                mapfile -t pLOADA0_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${p_PID0[@]}")
+                
+                pAddFlag=false
 
                 # start dynamic spawning now that nProcs workers have already spawned
                 # begin main loop
@@ -845,6 +846,12 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     mapfile -t pLOADA_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${p_PID0[@]}" "${p_PID[@]}")
                     # pLOADA_new=$(( (  10000 / clk_tck) * ( $( ( IFS=','; source /proc/self/fd/0 2>/dev/null <<<"cat /proc/{${p_PID[*]}}/stat" ) | { IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done; }) 0 ) / ( kkProcs * ( ${EPOCHREALTIME//./} - tStart ) ) ));
                     printf 'old time: %s    new time: %s\n' $pLOADA $pLOADA_new >&${fd_stderr}
+
+                    ${pAddFlag} && {
+                        pLOADA0=("{pLOADA[@]}")
+                        pLOADA0_new=("{pLOADA_new[@]}")
+                        pAddFlag=false
+                    }
 
                     # abort if system load is above threshold
                     (( pLOADA > pLOAD_max )) && continue
@@ -949,6 +956,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                             continue
                         ;;
                     esac
+
+                    (( ${pAdd} > 0 )) && pAddFlag=true
 
                     # spawn the new coproc workers
                     for (( kk=0; kk<${pAdd}; kk++ )); do
@@ -2065,18 +2074,18 @@ _forkrun_get_load_pid() (
     unset IFS
 
     local -i loadMaxVal tLOAD tALL0 tALL cpu_ALL cpu_ALL0 cpu_LOAD cpu_LOAD0 pLOAD pLOAD0 argCount
-    local initFlag echoFlag cpu_IDLE
-    local -a pidA
+    local initFlag echoFlag 
+    local -a pidA cpu_ALLA
     
     loadMaxVal=10000
     initFlag=false
     echoFlag=false
     argCount=0
 
-    pLOAD0="${pLOADA[0]}"
-    cpu_ALL0="${pLOADA[1]}"
-    cpu_LOAD0="${pLOADA[2]}"
-    tALL0="${pLOADA[3]}"
+    pLOAD0="${pLOADA_new[0]}"
+    cpu_ALL0="${pLOADA_new[1]}"
+    cpu_LOAD0="${pLOADA_new[2]}"
+    tALL0="${pLOADA_new[3]}"
 
 
     while (( ${#} > 0 )); do
@@ -2114,21 +2123,23 @@ _forkrun_get_load_pid() (
         shift 1
     done
 
-    : "${tALL0:=0}" "${nCPU:=$(nproc)}"
+    : "${tALL0:=0}" 
     
     [[ "${tmpDir}" ]] || local tmpDir='/tmp' 
 
     [[ ${#pidA[@]} == 0 ]] && pidA=($$)
 
     cat $(printf '/proc/%s/stat ' "${pidA[@]}") 2>/dev/null >"${tmpDir}"/.proc_pid_stat
-    read -r _ cpu_IDLE </proc/uptime
+    read -r -a _ cpu_ALLA </proc/stat
     
     cpu_LOAD=$(( $( IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r -u $fd_stat _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done {fd_stat}<"${tmpDir}"/.proc_pid_stat ) 0 ));
 
     \rm -f "${tmpDir}"/.proc_pid_stat
 
-    cpu_ALL=$(( cpu_LOAD + ${cpu_IDLE//./} ))
-
+    IFS='+'
+    cpu_ALL=$(( cpu_ALLA[*]:1} ))
+    unset IFS
+    
     ${initFlag} && {
         pLOADA=(-1 "${cpu_ALL}" "${cpu_LOAD}" 0)
         printf '%s\n' "${pLOADA[@]}"   
