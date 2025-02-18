@@ -2129,8 +2129,9 @@ _forkrun_get_load_pid() (
 
     [[ ${#pidA[@]} == 0 ]] && pidA=($$)
 
-    cat $(printf '/proc/%s/stat ' "${pidA[@]}") 2>/dev/null >"${tmpDir}"/.proc_pid_stat
+    cat $(printf '/proc/%s/stat ' "${pidA[@]}") </dev/null 2>/dev/null >"${tmpDir}"/.proc_pid_stat
     read -r -a _ cpu_ALLA </proc/stat
+    [[ ! -s "${tmpDir}"/.proc_pid_stat ]] && { \rm -f "${tmpDir}"/.proc_pid_stat; return 1; }
     
     cpu_LOAD=$(( $( IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r -u $fd_stat _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done {fd_stat}<"${tmpDir}"/.proc_pid_stat ) 0 ));
 
