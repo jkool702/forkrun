@@ -789,14 +789,14 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 #                pLOAD0=0
 
                 mapfile -t pLOADA0 < <(_forkrun_get_load -i)
-                mapfile -t pLOADA0 < <(_forkrun_get_load_pid -i -- ${PID0})
+                mapfile -t pLOADA0_new < <(_forkrun_get_load_pid -i -- ${PID0})
 
                 # wait for the helper coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nSpawn0}
 
                 # get background load
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
-                mapfile -t pLOADA0 < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${PID0}")
+                mapfile -t pLOADA0_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${PID0}")
                 pLOAD0="(( pLOADA0 / 2 ))"
 
                 # set some initial values
@@ -848,8 +848,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     printf 'old time: %s    new time: %s\n' $pLOADA $pLOADA_new >&${fd_stderr}
 
                     ${pAddFlag} && {
-                        pLOADA0=("{pLOADA[@]}")
-                        pLOADA0_new=("{pLOADA_new[@]}")
+                        pLOADA0=("${pLOADA[@]}")
+                        pLOADA0_new=("${pLOADA_new[@]}")
                         pAddFlag=false
                     }
 
@@ -930,8 +930,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         else
                             pLOAD_max=$(( (  pLOAD_max + pLOADA0 ) / 2 ))
                         fi
-                       pAdd=$(( pAdd / ( 1 + kkProcs - kkProcs0 ) )) 
-                       continue
+                        pAdd=$(( pAdd / ( 1 + kkProcs - kkProcs0 ) )) 
+		        printf 'pLOAD_max is now %s / 10000\n' "${pLOAD_max}"  >&${fd_stderr}
+                        #continue
                     fi
                     
                     #echo "pAdd (final) = $pAdd" >&${fd_stderr}
@@ -957,7 +958,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         ;;
                     esac
 
-                    (( ${pAdd} > 0 )) && pAddFlag=true
+                    (( ${pAdd} > 0 )) && pAddFlag=true || continue
 
                     # spawn the new coproc workers
                     for (( kk=0; kk<${pAdd}; kk++ )); do
@@ -965,6 +966,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         (( ${verboseLevel} > 2 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs.\n' "${kk}" "${pAdd}" "${kkProcs}" >&${fd_stderr}
                         ((kkProcs++))
                     done
+                    
+		    printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
 
                     # update public worker count info file
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
@@ -1980,10 +1983,10 @@ _forkrun_get_load() (
     echoFlag=false
     argCount=0
 
-    #pLOAD0="${pLOADA[0]}"
-    #cpu_ALL0="${pLOADA[1]}"
-    #cpu_LOAD0="${pLOADA[2]}"
-    #tALL0="${pLOADA[3]}"
+    pLOAD0="${pLOADA0[0]}"
+    cpu_ALL0="${pLOADA0[1]}"
+    cpu_LOAD0="${pLOADA0[2]}"
+    tALL0="${pLOADA0[3]}"
 
 
     while (( ${#} > 0 )); do
@@ -2033,14 +2036,14 @@ _forkrun_get_load() (
 
     tALL=$(( cpu_ALL - cpu_ALL0 ))
 
-    pLOAD=$(( ( loadMaxVal * ( cpu_LOAD - cpu_LOAD0 ) ) / ( 1 + cpu_ALL - cpu_ALL0 ) ))
+#    pLOAD=$(( ( loadMaxVal * ( cpu_LOAD - cpu_LOAD0 ) ) / ( 1 + cpu_ALL - cpu_ALL0 ) ))
 
     tLOAD=$(( cpu_LOAD - cpu_LOAD0 ))
         
-    (( tALL0 > ( 2 * tALL ) )) && tALL0=$(( 2 * tALL ))
+    (( tALL0 > ( tALL << 1 ) )) && tALL0=$((  tALL << 1 ))
 
     pLOAD=$(( ( loadMaxVal * ( 1 + tLOAD ) ) / ( 1 + tALL ) ))
-    (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
+    (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + ( tALL << 1 ) + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + ( ( tALL + tALL0 ) << 1 ) ) ))
 
     pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
     printf '%s\n' "${pLOADA[@]}"
@@ -2082,10 +2085,10 @@ _forkrun_get_load_pid() (
     echoFlag=false
     argCount=0
 
-    #pLOAD0="${pLOADA_new[0]}"
-    #cpu_ALL0="${pLOADA_new[1]}"
-    #cpu_LOAD0="${pLOADA_new[2]}"
-    #tALL0="${pLOADA_new[3]}"
+    pLOAD0="${pLOADA0_new[0]}"
+    cpu_ALL0="${pLOADA0_new[1]}"
+    cpu_LOAD0="${pLOADA0_new[2]}"
+    tALL0="${pLOADA0_new[3]}"
 
 
     while (( ${#} > 0 )); do
@@ -2142,8 +2145,8 @@ _forkrun_get_load_pid() (
     unset IFS
     
     ${initFlag} && {
-        pLOADA=(-1 "${cpu_ALL}" "${cpu_LOAD}" 0)
-        printf '%s\n' "${pLOADA[@]}"   
+        pLOADA_new=(-1 "${cpu_ALL}" "${cpu_LOAD}" 0)
+        printf '%s\n' "${pLOADA_new[@]}"   
         return 0
     }
 
@@ -2155,11 +2158,11 @@ _forkrun_get_load_pid() (
         
     (( tALL0 > ( 2 * tALL ) )) && tALL0=$(( 2 * tALL ))
 
-    pLOAD=$(( ( loadMaxVal * ( 1 + tLOAD ) ) / ( 1 + tALL ) ))
+    pLOAD=$(( ( loadMaxVal * clk_tck * ( 1 + tLOAD ) ) / ( 1 + tALL ) ))
     (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + tALL + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + tALL + ( 2 * tALL0 ) ) ))
 
-    pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
-    printf '%s\n' "${pLOADA[@]}"
+    pLOADA_new=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
+    printf '%s\n' "${pLOADA_new[@]}"
     ${echoFlag} && printf 'Current System CPU Load = %s / %s\n' "${pLOAD}" "${loadMaxVal}" >&2
 )
 
