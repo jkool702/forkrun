@@ -779,6 +779,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - TERM INT HUP USR1' USR1
 
                 clk_tck=$( IFS=' '; read -r _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ut1 _ </proc/self/stat; read -r ut0 _ </proc/uptime; echo $(( ut1 / ${ut0%.*} )); )
+                type grep &>/dev/null & haveGrepFlag=true || haveGrepFlag=false
     
                 # get estimate of pre-forkrun baxkgrounfd system load (/proc/loadavg) and
                 # get initial measurement for system cpu load calculation (/proc/stat)
@@ -931,7 +932,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                             pLOAD_max=$(( (  pLOAD_max + pLOADA0 ) / 2 ))
                         fi
                         pAdd=$(( pAdd / ( 1 + kkProcs - kkProcs0 ) )) 
-		        printf 'pLOAD_max is now %s / 10000\n' "${pLOAD_max}"  >&${fd_stderr}
+                        printf 'pLOAD_max is now %s / 10000\n' "${pLOAD_max}"  >&${fd_stderr}
                         #continue
                     fi
                     
@@ -967,7 +968,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         ((kkProcs++))
                     done
                     
-		    printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
+                    printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
 
                     # update public worker count info file
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
@@ -2133,12 +2134,15 @@ _forkrun_get_load_pid() (
     [[ ${#pidA[@]} == 0 ]] && pidA=($$)
 
     # ALT IMPLEMENTATION (IF WE HAVE GREP)
-    # IFS='|'
-    # printf -v grep_str '(%s) ' "${pidA[*]}"
-    # unset IFS
-    # cat /proc/[0-9]*/stat 2>/dev/null | grep -E "$grep_str" >"${tmpDir}"/.proc_pid_stat
-
-    cat $(printf '/proc/%s/stat ' "${pidA[@]}") </dev/null 2>/dev/null >"${tmpDir}"/.proc_pid_stat
+    if ${haveGrepFlag}; then
+        IFS='|'
+        printf -v grep_str '(%s) ' "${pidA[*]}"
+        unset IFS
+        cat /proc/[0-9]*/stat 2>/dev/null | grep -E "$grep_str" >"${tmpDir}"/.proc_pid_stat
+    else
+        cat $(printf '/proc/%s/stat ' "${pidA[@]}") </dev/null 2>/dev/null >"${tmpDir}"/.proc_pid_stat
+    fi
+    
     read -r -a cpu_ALLA </proc/stat
     [[ ! -s "${tmpDir}"/.proc_pid_stat ]] && { \rm -f "${tmpDir}"/.proc_pid_stat; return 1; }
     
