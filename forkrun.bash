@@ -2077,7 +2077,7 @@ _forkrun_get_load_pid() (
     unset IFS
 
     local -i loadMaxVal tLOAD tALL0 tALL cpu_ALL cpu_ALL0 cpu_LOAD cpu_LOAD0 pLOAD pLOAD0 argCount
-    local initFlag echoFlag 
+    local initFlag echoFlag grep_str
     local -a pidA cpu_ALLA
     
     loadMaxVal=10000
@@ -2131,6 +2131,12 @@ _forkrun_get_load_pid() (
     [[ "${tmpDir}" ]] || local tmpDir='/tmp' 
 
     [[ ${#pidA[@]} == 0 ]] && pidA=($$)
+
+    # ALT IMPLEMENTATION (IF WE HAVE GREP)
+    # IFS='|'
+    # printf -v grep_str '(%s) ' "${pidA[*]}"
+    # unset IFS
+    # cat /proc/[0-9]*/stat 2>/dev/null | grep -E "$grep_str" >"${tmpDir}"/.proc_pid_stat
 
     cat $(printf '/proc/%s/stat ' "${pidA[@]}") </dev/null 2>/dev/null >"${tmpDir}"/.proc_pid_stat
     read -r -a cpu_ALLA </proc/stat
