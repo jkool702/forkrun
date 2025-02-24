@@ -2044,7 +2044,7 @@ _forkrun_get_load() (
     (( tALL0 > ( tALL << 1 ) )) && tALL0=$((  tALL << 1 ))
 
     pLOAD=$(( ( loadMaxVal * ( 1 + tLOAD ) ) / ( 1 + tALL ) ))
-    (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + ( tALL << 1 ) + tALL0 ) * pLOAD ) + ( tALL0 * pLOAD0 ) ) / ( 1 + ( ( tALL + tALL0 ) << 1 ) ) ))
+    (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + ( tALL << 2 ) + tALL0 ) * pLOAD ) + ( 3 * tALL0 * pLOAD0 ) ) / ( 1 + ( ( tALL + tALL0 ) << 2 ) ) ))
 
     pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
     printf '%s\n' "${pLOADA[@]}"
