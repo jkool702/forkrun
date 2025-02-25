@@ -24,8 +24,7 @@ done
 kkProcs=$N
 kkProcs0=0
 pAddFlag=true
-linesCur0=$(( lines_read_from_tmpfile + estimated_unread_lines_in_tmpfile ))
-tLast=${EPOCHREALTIME//./}
+read -r inLines inTime <"${tmpDir}"/.stdin_lines_time
 declare -a lineRate_run lines_runA times_runA
 lineRate_run[0]=0
 
@@ -34,12 +33,12 @@ lineRate_run[0]=0
 until end_condition; do
 
     # update cpu utilization 
-    _forkrun_get_load
+    mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
 
     # if we increased kkProcs on the previous iteration then reset stats
     if ${pAddFlag}; then        
         # reset average per-worker cpu usage for kkProcs workers (pLOAD1) 
-        pLOAD1=$(( ( pLOADA - pLOAD_bg ) / kkProcs))
+        pLOAD1[$kkProcs]=$(( ( pLOADA - pLOAD_bg ) / kkProcs))
         
         # update previous /proc/stats reference point
         pLOADA0=("${pLOADA[@]}")
@@ -47,19 +46,10 @@ until end_condition; do
         pAddFlag=false
     else
         # update average per-worker cpu usage  with kkProcs workers (pLOAD1)
-        pLOAD1=$(( ( ( kkProcs * pLOAD1 ) + ( pLOADA - pLOAD_bg ) ) / ( 2 * kkProcs ) ))
+        pLOAD1[$kkProcs]=$(( ( ( kkProcs * ${pLOAD1[$kkProcs]} ) + ( pLOADA - pLOAD_bg ) ) / ( 2 * kkProcs ) ))
 
     fi
         
-    # update estimates of lineRate_stdin (how fast lines are arriving on stdin) 
-    # use average of long-term and short-term estimates of stdin line arrival rates
-    # note: line counts/estimates are handled by another helper coproc
-    linesCur=$(( lines_read_from_tmpfile + estimated_unread_lines_in_tmpfile ))
-    tCur=${EPOCHREALTIME//./}
-    lineRate_stdin=$(( ( ( linesCur / ( tCur - tStart ) ) + ( ( linesCur - linesCur0 ) / ( tCur - tlast ) ) ) / 2 ))    
-    linesCur0=$linesCur
-    tLast=$tCur
-    
     # update lineRate_run (how fast we are processing lines at current kkProcs)
     # worker coprocs send data with # lines run and time taken to run those lines to anon pipe fd_runtimes
     read -r -u $fd_runtimes runLines runTime
@@ -71,15 +61,24 @@ until end_condition; do
     done
     lineRate_run[$kkProcs]=$(( ( kkProcs * runLinesA[$kkProcs] ) / runTimeA[$kkProcs] ))
     
-    # dynamically adjust pLOAD_target
-    pLOADA=$((kkProcs * pLOAD1))
+
+    # update estimates of lineRate_stdin (how fast lines are arriving on stdin) 
+    # use average of long-term and short-term estimates of stdin line arrival rates
+    # note: line counts/estimates are handled by another helper coproc
+    inLines0=$inLines
+    inTime0=$inTime
+    read -r inLines inTime <"${tmpDir}"/.stdin_lines_time
+    lineRate_stdin=$(( ( ( inLines / inTime ) + ( ( inLines - inLines0 ) / ( inTime - inTime0 ) ) ) / 2 ))    
+
+        # dynamically adjust pLOAD_target
+    pLOADA=$(( kkProcs * ${pLOAD1[$kkProcs]} ))
     if (( pLOADA > pLOAD_max )); then
         # sysload too high - dont spawn
         continue
     elif (( pLOADA0 > pLOADA )); then
         # adding more workers decreases system load. lower pLOAD_target
         pLOAD_target=$pLOADA
-    elif (( pLOADA > pLOAD_target ))
+    elif (( pLOADA > pLOAD_target )); then
         # sysload between current and max targets. increase pLOAD_target a bit
         pLOAD_target=$(( ( pLOADA + pLOAD_target + pLOAD_max ) / 3 ))
     fi
@@ -90,7 +89,7 @@ until end_condition; do
     { (( lineRate_run[$kkProcs] >= lineRate_stdin )) || (( lineRate_run[$kkProcs] < lineRate_run[$kkProcs0] )); } && continue   
     
     # estimate how many additional workers are needed (at current cpu usage per worker) to hit pLOAD_target    
-    nAdd_sysLoad=$(( ( pLOAD_target - pLOADA ) / pLOAD1 ))
+    nAdd_sysLoad=$(( ( pLOAD_target - pLOADA ) / ${pLOAD1[$kkProcs]} ))
     
     # estimate how many additional workers are needed (at current lineRate_run increase rate) to hit lineRate_stdin    
     nAdd_lineRate=$(( ( 1 - ( lineRate_stdin / lineRate_run ) ) * kkProcs ))
