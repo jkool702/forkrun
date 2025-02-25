@@ -3,17 +3,17 @@
 
 tStart=${EPOCHREALTIME//./}
 nCPU=$(nproc)
-sysLoadTarget=90
-sysLoadTargetMax=90
-sysLoadLast=0
+pLOAD_target=900000
+pLOAD_max=900000
+pLOADA0=0
 
 # record initial /proc/stats in stats0
 
 # fork "helper coprocs"
 
 # record /proc/stats again in stats1. 
-# pass difference to a function "get_cpu stats1 stats0" to get background cpu usage (cpu_bg) and replace stats0=stats1
-cpu_bg=$(get_cpu stats1 stats0)
+# pass difference to a function "get_cpu stats1 stats0" to get background cpu usage (pLOAD_bg) and replace stats0=stats1
+pLOAD_bg=$(get_cpu stats1 stats0)
 
 # fork N initial "worker coprocs"
 for (( kk=0; kk<N; kk++ )); do
@@ -23,7 +23,7 @@ done
 # initialize some values
 kkProcs=$N
 kkProcs0=0
-kkProcsUpdateFlag=true
+pAddFlag=true
 linesCur0=$(( lines_read_from_tmpfile + estimated_unread_lines_in_tmpfile ))
 tLast=${EPOCHREALTIME//./}
 declare -a lineRate_run lines_runA times_runA
@@ -34,18 +34,21 @@ lineRate_run[0]=0
 until end_condition; do
 
     # update cpu utilization 
-    # record /proc/stats again in stats1. 
+    _forkrun_get_load
+
     # if we increased kkProcs on the previous iteration then reset stats
-    if ${kkProcsUpdateFlag}; then
-        # replace stats0=stats1 
+    if ${pAddFlag}; then        
+        # reset average per-worker cpu usage for kkProcs workers (pLOAD1) 
+        pLOAD1=$(( ( pLOADA - pLOAD_bg ) / kkProcs))
         
-        # reset average per-worker cpu usage (cpu_worker) with kkProcs workers 
-        cpu_worker=$(( ( $(get_cpu stats1 stats0) - cpu_bg ) / kkProcs))
+        # update previous /proc/stats reference point
+        pLOADA0=("${pLOADA[@]}")
     
-        kkProcsUpdateFlag=false
+        pAddFlag=false
     else
-        # update average per-worker cpu usage (cpu_worker) with kkProcs workers 
-        cpu_worker=$(( ( cpu_worker + ( ( $(get_cpu stats1 stats0) - cpu_bg ) / kkProcs) ) ) / 2 ))
+        # update average per-worker cpu usage  with kkProcs workers (pLOAD1)
+        pLOAD1=$(( ( ( kkProcs * pLOAD1 ) + ( pLOADA - pLOAD_bg ) ) / ( 2 * kkProcs ) ))
+
     fi
         
     # update estimates of lineRate_stdin (how fast lines are arriving on stdin) 
@@ -59,26 +62,26 @@ until end_condition; do
     
     # update lineRate_run (how fast we are processing lines at current kkProcs)
     # worker coprocs send data with # lines run and time taken to run those lines to anon pipe fd_runtimes
-    read -r -u $fd_runtimes run_lines run_time
-    run_timeA[$kkProcs]+=$run_time
-    run_linesA[$kkProcs]+=$run_lines
-    while read -r -u $fd_runtimes -t 0.001 run_lines run_time; do
-        run_timeA[$kkProcs]+=$run_time
-        run_linesA[$kkProcs]+=$run_lines
+    read -r -u $fd_runtimes runLines runTime
+    runTimeA[$kkProcs]+=$runTime
+    runLinesA[$kkProcs]+=$runLines
+    while read -r -u $fd_runtimes -t 0.001 runLines runTime; do
+        runTimeA[$kkProcs]+=$runTime
+        runLinesA[$kkProcs]+=$runLines
     done
-    lineRate_run[$kkProcs]=$(( ( kkProcs * run_linesA[$kkProcs] ) / run_timeA[$kkProcs] ))
+    lineRate_run[$kkProcs]=$(( ( kkProcs * runLinesA[$kkProcs] ) / runTimeA[$kkProcs] ))
     
-    # dynamically adjust sysLoadTarget
-    sysLoadCur=$((kkProcs * cpu_worker))
-    if (( sysLoadCur > sysLoadTargetMax )); then
+    # dynamically adjust pLOAD_target
+    pLOADA=$((kkProcs * pLOAD1))
+    if (( pLOADA > pLOAD_max )); then
         # sysload too high - dont spawn
         continue
-    elif (( sysLoadLast > sysLoadCur )); then
-        # adding more workers decreases system load. lower sysLoadTarget
-        sysLoadTarget=$sysLoadCur
-    elif (( sysLoadCur > sysLoadTarget ))
-        # sysload between current and max targets. increase sysLoadTarget a bit
-        sysLoadTarget=$(( ( sysLoadCur + sysLoadTarget + sysLoadTargetMax ) / 3 ))
+    elif (( pLOADA0 > pLOADA )); then
+        # adding more workers decreases system load. lower pLOAD_target
+        pLOAD_target=$pLOADA
+    elif (( pLOADA > pLOAD_target ))
+        # sysload between current and max targets. increase pLOAD_target a bit
+        pLOAD_target=$(( ( pLOADA + pLOAD_target + pLOAD_max ) / 3 ))
     fi
     
     # compare data processing rate to data input rate. Dont spawn more workers if either:
@@ -86,8 +89,8 @@ until end_condition; do
     # 2. we are processing lines more slowly than we were before the most recent spawning of additional workers
     { (( lineRate_run[$kkProcs] >= lineRate_stdin )) || (( lineRate_run[$kkProcs] < lineRate_run[$kkProcs0] )); } && continue   
     
-    # estimate how many additional workers are needed (at current cpu usage per worker) to hit sysLoadTarget    
-    nAdd_sysLoad=$(( ( sysLoadTarget - sysLoadCur ) / cpu_worker ))
+    # estimate how many additional workers are needed (at current cpu usage per worker) to hit pLOAD_target    
+    nAdd_sysLoad=$(( ( pLOAD_target - pLOADA ) / pLOAD1 ))
     
     # estimate how many additional workers are needed (at current lineRate_run increase rate) to hit lineRate_stdin    
     nAdd_lineRate=$(( ( 1 - ( lineRate_stdin / lineRate_run ) ) * kkProcs ))
@@ -112,6 +115,6 @@ until end_condition; do
     kkProcs0=${kkProcs}
     kkProcs+=${nAdd}
     
-    kkProcsUpdateFlag=true
+    pAddFlag=true
     
 done
