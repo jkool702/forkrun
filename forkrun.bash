@@ -778,54 +778,43 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' HUP
                 trap 'trap - TERM INT HUP USR1' USR1
 
-                clk_tck=$( IFS=' '; read -r _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ ut1 _ </proc/self/stat; read -r ut0 _ </proc/uptime; echo $(( ut1 / ${ut0%.*} )); )
-                type grep &>/dev/null & haveGrepFlag=true || haveGrepFlag=false
-    
-                # get estimate of pre-forkrun baxkgrounfd system load (/proc/loadavg) and
-                # get initial measurement for system cpu load calculation (/proc/stat)
-#                IFS=' .'
-#                read -r pLOAD00 pLOAD01 _ </proc/loadavg
-#                IFS=
-#                pLOAD0=$(( ( ( 10000 * pLOAD00 ) + ( 100 * ${pLOAD01##+([0])} ) ) / nCPU ))
-#                pLOAD0=0
-
+                # initialize cpu load calcukation
                 mapfile -t pLOADA0 < <(_forkrun_get_load -i)
-                mapfile -t pLOADA0_new < <(_forkrun_get_load_pid -i -- ${PID0})
+                #mapfile -t pLOADA0_new < <(_forkrun_get_load_pid -i -- ${PID0})
 
                 # wait for the helper coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nSpawn0}
 
-                # get background load
+                # get background load from non-woirkerr coprocs
                 mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
-                mapfile -t pLOADA0_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${PID0}")
-                pLOAD0="(( pLOADA0 / 2 ))"
+                #mapfile -t pLOADA0_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${PID0}")
+                pLOAD_bg="(( pLOADA0 / 2 ))"
 
-                # set some initial values
+                # set some initial values whgile we wait
+                : "${pLOAD_max:=900000}" "${pLOAD_target:=900000}" "${nProcsMax:=$((2*${nCPU}))}" 
                 kkProcs=${nProcs}                
-                p_PID=()
-                : "${pLOAD_max:=9000}" "${nProcsMax:=$((2*${nCPU}))}" 
+                kkProcs0=0
+                pAddFlag=true
+                linesCur0=
+                lineRate_run[0]=0
+                
                 
                 # wait for the worker coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nSpawn0}
 
                 # get "extra" load from coprocs forken from main thread and use it to estimate extra CPU load per coproc worker
-                mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
-                pLOAD1=$(( ( pLOADA0 - pLOAD0 ) / ( kkProcs ) ))
+                mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
+                pLOAD1=$(( ( pLOADA - pLOAD_bg ) / kkProcs ))
                 #pLOAD1=$(( 10000 / nCPU ))
 
                 # record the average load at the current worker coproc count
-                pLOAD0=${pLOADA0}
-                kkProcs0=${kkProcs}
+                #mapfile -t pLOADA0_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${p_PID0[@]}")
 
                 (( ${verboseLevel} > 3 )) && printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1}" >&${fd_stderr}
 
-                pAddCount0=4
-                pAddCount=${pAddCount0}
-
+                # get pid's for worker coprocs spawned in main thread
                 mapfile -t p_PID0 < <(cat "${tmpDir}"/.run/p[0-9]*)
-                mapfile -t pLOADA0_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${p_PID0[@]}")
                 
-                pAddFlag=false
 
                 # start dynamic spawning now that nProcs workers have already spawned
                 # begin main loop
@@ -844,7 +833,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # get average system load since the last time a new worker coproc was spawned
                     mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
-                    mapfile -t pLOADA_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${p_PID0[@]}" "${p_PID[@]}")
+                    #mapfile -t pLOADA_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${p_PID0[@]}" "${p_PID[@]}")
                     # pLOADA_new=$(( (  10000 / clk_tck) * ( $( ( IFS=','; source /proc/self/fd/0 2>/dev/null <<<"cat /proc/{${p_PID[*]}}/stat" ) | { IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done; }) 0 ) / ( kkProcs * ( ${EPOCHREALTIME//./} - tStart ) ) ));
                     printf 'old time: %s    new time: %s\n' $pLOADA $pLOADA_new >&${fd_stderr}
 
@@ -1965,7 +1954,7 @@ _forkrun_get_load() (
     #    '-m'|'--max'|'--max-load' maxloadNum:  positive integer (maxLoadNum) that replaces 10000 as the number that repesents 100% load. 
     #
     # OUTPUTS:          pLOAD  cpu_ALL  cpu_LOAD  tALL
-    #     --> pLOAD:    represents the current average load level estimate between all logical CPU cores ( scaled between 0 - 10000, or (if set) between 0 - $maxLoadNum )  
+    #     --> pLOAD:    represents the current average load level estimate between all logical CPU cores ( scaled between 0 - 1000000, or (if set) between 0 - $maxLoadNum )  
     #     --> cpu_ALL:  total sum of ALL components from /proc/stats when the last pLOAD was computed
     #     --> cpu_LOAD: total sum of the components that represent CPU load (everything except idle time and IOwait time) when the last pLOAD was computed
     #     --> tALL:     total time difference used in the last call to _forkrun_get_load  (i.e., $(( CPU_ALL - CPU_ALL0 )) from previous run) 
@@ -1979,7 +1968,7 @@ _forkrun_get_load() (
     local -i loadMaxVal cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice tLOAD tALL tALL0 cpu_ALL cpu_ALL0 cpu_LOAD cpu_LOAD0 pLOAD pLOAD0 argCount
     local initFlag echoFlag
     
-    loadMaxVal=10000
+    loadMaxVal=1000000
     initFlag=false
     echoFlag=false
     argCount=0
