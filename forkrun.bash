@@ -803,7 +803,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                 # get "extra" load from coprocs forken from main thread and use it to estimate extra CPU load per coproc worker
                 mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
-                pLOAD1[$kkProcs]=$(( ( pLOADA - pLOAD_bg ) / kkProcs ))
+                pLOAD1[$kkProcs]=$(( ( pLOADA - pLOAD_bg + ( kkProcs >> 1 ) ) / kkProcs ))
                 #pLOAD1=$(( 10000 / nCPU ))
                 
                 read -r inLines inTime <"${tmpDir}"/.stdin_lines_time
@@ -816,7 +816,6 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 # get pid's for worker coprocs spawned in main thread
                 mapfile -t p_PID0 < <(cat "${tmpDir}"/.run/p[0-9]*)
                 
-
                 # start dynamic spawning now that nProcs workers have already spawned
                 # begin main loop
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
@@ -855,12 +854,13 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     if ${pAddFlag}; then 
 
                         # start a new "load-per-coproc-worker" estimate
-                        pLOAD1[$kkProcs]=$(( ( ( kkProcs0 * ${pLOAD1[$kkProcs0]} ) + ( pLOADA - pLOAD_bg ) ) / ( kkProcs + kkProcs0 ) ))
+                        pLOAD1[$kkProcs]=$(( ( ( kkProcs0 * ${pLOAD1[$kkProcs0]} ) + ( pLOADA - pLOAD_bg ) + ( ( kkProcs + kkProcs0 ) >> 1 
+) ) / ( kkProcs + kkProcs0 ) ))
 
                         pAddFlag=false
                     else
                         # update "load-per-coproc-worker" estimate smoothly
-                        pLOAD1[$kkProcs]=$(( ( ( ( kkProcs * ${pLOAD1[$kkProcs]} ) + ( pLOADA - pLOAD_bg ) ) / kkProcs ) >> 1 ))
+                        pLOAD1[$kkProcs]=$(( ( kkProcs * ( 1 + ${pLOAD1[$kkProcs]} ) + ( pLOADA - pLOAD_bg ) ) / ( kkProcs << 1 )  ))
                     fi
   
                     # figure out the max  numer of new workers to add on this loop
@@ -875,12 +875,12 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         # system load dropped with spawning new coprocs. This probably means our target maximum system load is too high.  decrease pLOAD_target.
                         # decrease more as coprocs were last spawned that resulted in lowered system load increases
                         # decrease more when we are closer to nProcsMax
-                        pLOAD_target=$(( ( ( pAddMax ) * pLOAD_target + ( ( 1 + ( kkProcs - kkProcs0 ) * ( kkProcs >> 1 ) ) * pLOADA0 ) ) / ( 1 + pAddMax + ( ( kkProcs - kkProcs0 ) * ( kkProcs >> 1 ) ) ) ))
+                        pLOAD_target=$(( ( ( pAddMax ) * ( ( pLOAD_target << 1 ) + 1 ) + ( ( 1 + ( kkProcs - kkProcs0 ) * ( kkProcs >> 1 ) ) * ( ( pLOADA0 << 1 ) + 1 ) ) ) / ( 2 + ( pAddMax << 1 )+ ( ( kkProcs - kkProcs0 ) * kkProcs ) ) ))
                     elif (( pLOADA > pLOAD_target )) && (( pLOAD_target < pLOAD_max )); then
                         # sysload between current and max targets. increase pLOAD_target. How much load target increases depends on:
                         # increase more when kProcs is lower
                         # increase more when we are further away from nProcsMax 
-                        pLOAD_target=$(( ( ( pAddMax * pLOAD_max ) + ( kkProcs * ( pLOAD_target + pLOADA ) ) ) / ( pAddMax + ( kkProcs << 1 ) ) ))
+                        pLOAD_target=$(( ( ( pAddMax * ( ( pLOAD_max >> 1 ) + 1 ) ) + ( kkProcs * ( ( pLOAD_target + pLOADA ) << 1 + 1 ) ) ) / ( ( pAddMax << 1 ) + kkProcs ) ))
                     fi
 
                     
@@ -902,12 +902,12 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # { (( lineRate_run[$kkProcs] >= lineRate_stdin )) || (( lineRate_run[$kkProcs] < lineRate_run[$kkProcs0] )); } && continue   
 
                     # estimate how many additional workers are needed (at current cpu usage per worker) to hit pLOAD_target    
-                    pAdd_sysLoad=$(( ( pLOAD_target - pLOADA ) / ${pLOAD1[${kkProcs}]} ))
+                    pAdd_sysLoad=$(( ( ( ( pLOAD_target - pLOADA ) << 1 ) + ${pLOAD1[${kkProcs}]} ) / ( ${pLOAD1[${kkProcs}]} << 1 ) ))
     
                     # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
-                    pAdd_lineRate=$(( ( ( ${runTimeA[${kkProcs}]} * ( ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) ) / inTimeDelta ) >> 1 ) ) / ( ${runLinesA[${kkProcs}]} * inTime ) ) - kkProcs ))
+                    pAdd_lineRate=$(( ( ( ( ${runTimeA[${kkProcs}]} * ( ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + ( inTimeDelta >> 1 ) ) / inTimeDelta ) >> 1 ) ) + ( ${runLinesA[${kkProcs}]} * ( inTime >> 1 ) ) ) / ( ${runLinesA[${kkProcs}]} * inTime ) ) - kkProcs ))
                            
-                    # take the harmonic average to put more weight on the smaller of the two pAdd values
+                    # take the harmonic average to put more weight on the smaller of the two pAdd values 
                     if (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 )); then
                         pAdd=0
                     else
@@ -917,7 +917,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # compare how much our lineRate increased to how much our worker count increased
                     # ideally, increasing kkProcs by X% will increase lineRate_run by X%
                     # if lineRate_run icreases less than this then e are starting to hit other bottlenecjks and should slow down new coproc spawning
-                    pAdd=$(( ( ( ( pAdd * kkProcs0 * ${runTimeA[${kkProcs0}]} ) / ${runLinesA[${kkProcs0}]} ) * ${runLinesA[${kkProcs}]} ) / ( kkProcs * ${runTimeA[${kkProcs}]} ) ))
+                    pAdd=$(( ( ( ( ( ( pAdd * kkProcs0 * ${runTimeA[${kkProcs0}]} ) + (  ${runLinesA[${kkProcs0}]} >> 1 ) ) / ${runLinesA[${kkProcs0}]} ) * ${runLinesA[${kkProcs}]} ) + ( ( kkProcs * ${runTimeA[${kkProcs}]} ) >> 1 ) ) / ( kkProcs * ${runTimeA[${kkProcs}]} ) ))
                     
                     # make sure estimate is between [0::pAddMax]. abort if pAdd is 0 (or is somehow negative).
                     (( pAdd < 1 )) && pAdd=0
