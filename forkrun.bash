@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # shellcheck disable=SC2004,SC2015,SC2016,SC2028,SC2162 source=/dev/null
 
 shopt -s extglob
@@ -917,8 +917,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # compare how much our lineRate increased to how much our worker count increased
                     # ideally, increasing kkProcs by X% will increase lineRate_run by X%
                     # if lineRate_run icreases less than this then e are starting to hit other bottlenecjks and should slow down new coproc spawning
-                    # FIX ME
-                    pAdd=$(( pAdd * ( lineRate_run[$kkProcs] - lineRate_run[$kkProcs0] ) / ( 1 + ( kkProcs - kkProcs0 ) / kkProcs0 ) ))
+                    pAdd=$(( ( ( ( pAdd * kkProcs0 * $runTimeA[${kkProcs0}]} ) / ${runLinesA[${kkProcs0}]} ) * ${runLinesA[${kkProcs]} ) / ( kkProcs * ${runTimeA[${kkProcs}]} ) ))
                     
                     # make sure estimate is between [0::pAddMax]. abort if pAdd is 0 (or is somehow negative).
                     (( pAdd < 1 )) && pAdd=0
