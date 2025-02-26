@@ -811,7 +811,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 # record the average load at the current worker coproc count
                 #mapfile -t pLOADA0_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${p_PID0[@]}")
 
-                (( ${verboseLevel} > 3 )) && printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1}" >&${fd_stderr}
+                (( ${verboseLevel} > 3 )) && printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1[$kkProcs]}" >&${fd_stderr}
 
                 # get pid's for worker coprocs spawned in main thread
                 mapfile -t p_PID0 < <(cat "${tmpDir}"/.run/p[0-9]*)
