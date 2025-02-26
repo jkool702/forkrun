@@ -917,7 +917,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # compare how much our lineRate increased to how much our worker count increased
                     # ideally, increasing kkProcs by X% will increase lineRate_run by X%
                     # if lineRate_run icreases less than this then e are starting to hit other bottlenecjks and should slow down new coproc spawning
-                    pAdd=$(( ( ( ( pAdd * kkProcs0 * $runTimeA[${kkProcs0}]} ) / ${runLinesA[${kkProcs0}]} ) * ${runLinesA[${kkProcs}]} ) / ( kkProcs * ${runTimeA[${kkProcs}]} ) ))
+                    pAdd=$(( ( ( ( pAdd * kkProcs0 * ${runTimeA[${kkProcs0}]} ) / ${runLinesA[${kkProcs0}]} ) * ${runLinesA[${kkProcs}]} ) / ( kkProcs * ${runTimeA[${kkProcs}]} ) ))
                     
                     # make sure estimate is between [0::pAddMax]. abort if pAdd is 0 (or is somehow negative).
                     (( pAdd < 1 )) && pAdd=0
