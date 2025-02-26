@@ -890,7 +890,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # FIX ME
                     inLinesDelta=$(( inLines - inLines0 ))
                     inTimeDelta=$(( inTime - inTime0 ))
-                    { (( ( kkProcs  * ${runLinesA[${kkProcs}]} * inTimeDelta )  >= ( ( ( ${runTimesA[${kkProcs}]} * inLines * inTimeDelta ) / inTime + ( ${runTimesA[${kkProcs}]} * inLinesDelta ) ) >> 1 ) )) || (( ( kkProcs * ${runLinesA[${kkProcs}]} * ${runTimesA[${kkProcs0}]} ) < ( kkProcs0 * ${runLinesA[${kkProcs0}]} * ${runTimesA[${kkProcs}]} ) )); } && continue   
+                    { (( ( kkProcs  * ${runLinesA[${kkProcs}]} * inTimeDelta )  >= ( ( ( ${runTimeA[${kkProcs}]} * inLines * inTimeDelta ) / inTime + ( ${runTimeA[${kkProcs}]} * inLinesDelta ) ) >> 1 ) )) || (( ( kkProcs * ${runLinesA[${kkProcs}]} * ${runTimeA[${kkProcs0}]} ) < ( kkProcs0 * ${runLinesA[${kkProcs0}]} * ${runTimeA[${kkProcs}]} ) )); } && continue   
 
                     # The above checks if "time for N lines to arrive on stdin (t_in)" is less than "time to process N lines (t_run) / numWorkers (kkProcs)"
                     # since only one worker can read data at a time, having these be equal is ideal 
@@ -909,9 +909,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                            
                     # take the harmonic average to put more weight on the smaller of the two pAdd values
                     if (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 )); then
-                        pAdd = 0
+                        pAdd=0
                     else
-                        pAdd=$(( ( 2 * pAdd_sysLoad * pAdd_lineRate ) / ( pAdd_sysLoad + pAdd_lineRate ) ))
+                        pAdd=$(( ( ( pAdd_sysLoad * pAdd_lineRate ) << 1 ) / ( pAdd_sysLoad + pAdd_lineRate ) ))
                     fi
                     
                     # compare how much our lineRate increased to how much our worker count increased
