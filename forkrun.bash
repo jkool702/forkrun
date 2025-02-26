@@ -821,17 +821,20 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 # begin main loop
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
 
+                    # update reference point for /proc/stat-based cpu load if we just spawned worker coprocs
+                    ${pAddFlag} && pLOADA0=("${pLOADA[@]}")
+
                     # wait for new info to get average run time per batch at current worker count arrives
                     # update counts of lines run and run times for the current kkProcs
                     IFS=' '
                     # get 1 data point using a blocking read
-                    read -r -u ${fd_nSpawn} runLines runTime runProcs
-                    runLinesA[${runProcs}]+=runLines
-                    runTimeA[${runProcs}]+=runTime 
+                    read -r -u ${fd_nSpawn} runLines runTime
+                    runLinesA[${kkProcs}]+=runLines
+                    runTimeA[${kkProcs}]+=runTime 
                     # get any other available data points using non-blocking reads
-                    { (( ${runLines} >= 0 )) || (( ${runTime} >= 0 )); } && while read -r -u ${fd_nSpawn} -t 0.0001 runLines runTime runProcs; do
-                        runLinesA[${runProcs}]+=runLines
-                        runTimeA[${runProcs}]+=runTime 
+                    { (( ${runLines} >= 0 )) || (( ${runTime} >= 0 )); } && while read -r -u ${fd_nSpawn} -t 0.0001 runLines runTime; do
+                        runLinesA[${kkProcs}]+=runLines
+                        runTimeA[${kkProcs}]+=runTime 
                     done                    
                     (( ${runLines} >= 0 )) || (( ${runTime} >= 0 )) || {
                         IFS=
@@ -849,18 +852,15 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     #pLOADA_new=$(( (  10000 / clk_tck) * ( $( ( IFS=','; source /proc/self/fd/0 2>/dev/null <<<"cat /proc/{${p_PID[*]}}/stat" ) | { IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done; }) 0 ) / ( kkProcs * ( ${EPOCHREALTIME//./} - tStart ) ) ));
                     #(( ${verboseLevel} > 2 )) && printf 'old time: %s    new time: %s\n' $pLOADA $pLOADA_new >&${fd_stderr}
 
-                    if ${pAddFlag}; then
-                        # update reference point for /proc/stat-based cpu load 
-                        pLOADA0=("${pLOADA[@]}")
-                        #pLOADA0_new=("${pLOADA_new[@]}")
+                    if ${pAddFlag}; then 
 
                         # start a new "load-per-coproc-worker" estimate
-                        pLOAD1[$kkProcs]=$(( ( pLOADA - pLOAD_bg ) / kkProcs ))
+                        pLOAD1[$kkProcs]=$(( ( ( kkProcs0 * ${pLOAD1[$kkProcs0]} ) + ( pLOADA - pLOAD_bg ) ) / ( kkProcs + kkProcs0 ) ))
 
                         pAddFlag=false
                     else
                         # update "load-per-coproc-worker" estimate smoothly
-                        pLOAD1[$kkProcs]=$(( ( ( kkProcs * ${pLOAD1[$kkProcs]} ) + ( pLOADA - pLOAD_bg ) ) / ( 2 * kkProcs ) ))
+                        pLOAD1[$kkProcs]=$(( ( ( ( kkProcs * ${pLOAD1[$kkProcs]} ) + ( pLOADA - pLOAD_bg ) ) / kkProcs ) >> 1 ))
                     fi
   
                     # figure out the max  numer of new workers to add on this loop
@@ -876,11 +876,11 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         # decrease more as coprocs were last spawned that resulted in lowered system load increases
                         # decrease more when we are closer to nProcsMax
                         pLOAD_target=$(( ( ( pAddMax ) * pLOAD_target + ( ( 1 + ( kkProcs - kkProcs0 ) * ( kkProcs >> 1 ) ) * pLOADA0 ) ) / ( 1 + pAddMax + ( ( kkProcs - kkProcs0 ) * ( kkProcs >> 1 ) ) ) ))
-                    elif (( pLOADA > pLOAD_target )); then
+                    elif (( pLOADA > pLOAD_target )) && (( pLOAD_target < pLOAD_max )); then
                         # sysload between current and max targets. increase pLOAD_target. How much load target increases depends on:
                         # increase more when kProcs is lower
                         # increase more when we are further away from nProcsMax 
-                       (( pLOAD_target < pLOAD_max )) && pLOAD_target=$(( ( ( pAddMax * pLOAD_max ) + ( kkProcs * ( pLOAD_target + pLOADA ) ) ) / ( pAddMax + ( kkProcs << 1 ) ) ))
+                        pLOAD_target=$(( ( ( pAddMax * pLOAD_max ) + ( kkProcs * ( pLOAD_target + pLOADA ) ) ) / ( pAddMax + ( kkProcs << 1 ) ) ))
                     fi
 
                     
@@ -888,22 +888,24 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # 1. we are already processing lines faster than they are arriving on stdin, or
                     # 2. we are processing lines more slowly than we were before the most recent spawning of additional workers
                     # FIX ME
-                    { (( lineRate_run[$kkProcs] >= lineRate_stdin )) || (( lineRate_run[$kkProcs] < lineRate_run[$kkProcs0] )); } && continue   
+                    inLinesDelta=$(( inLines - inLines0 ))
+                    inTimeDelta=$(( inTime - inTime0 ))
+                    { (( ( ( kkProcs * ${runLinesA[${kkProcs}]} * inTimeDelta ) << 1 ) >= ( ( ${runTimesA[$kkProcs]} * inLines * inTimeDelta ) / inTime + ( ${runTimesA[$kkProcs]} * inLinesDelta ) ) )) || (( ( kkProcs * ${runLinesA[${kkProcs}]} * ${runTimesA[${kkProcs0}]} ) < ( kkProcs0 * ${runLinesA[${kkProcs0}]} * ${runTimesA[${kkProcs}]} ) )); } && continue   
 
-                    # check if "time for N lines to arrive on stdin (t_in)" is less than "time to process N lines (t_run) / numWorkers (kkProcs)"
-                    # since only one worker can read data at a time, bhaving these be equal is ideal since
-                    # data is read as fast as it is comming in and workers arent sitting idle in a wait q
-                    #if (( ( inTime * kkProcs * runLinesA[${kkProcs}] ) < ( runTimeA[${kkProcs}] * inLines ) )); then
-                    
+                    # The above checks if "time for N lines to arrive on stdin (t_in)" is less than "time to process N lines (t_run) / numWorkers (kkProcs)"
+                    # since only one worker can read data at a time, having these be equal is ideal 
+                    # otherwise data is being processed faster than it is comming in and workers are sitting idle in a wait queue
+                    # the check would be equivilant to the following in a language that supported floting points / decimals:
+                    #
+                    # lineRate_run[$kkProcs]=$(( ( kkProcs * runLinesA[$kkProcs] ) / runTimeA[$kkProcs] ))
+                    # lineRate_stdin=$(( ( ( inLines / inTime ) + ( ( inLines - inLines0 ) / ( inTime - inTime0 ) ) ) / 2 ))    
+                    # { (( lineRate_run[$kkProcs] >= lineRate_stdin )) || (( lineRate_run[$kkProcs] < lineRate_run[$kkProcs0] )); } && continue   
+
                     # estimate how many additional workers are needed (at current cpu usage per worker) to hit pLOAD_target    
                     pAdd_sysLoad=$(( ( pLOAD_target - pLOADA ) / ${pLOAD1[$kkProcs]} ))
     
-                    # estimate how many additional workers are needed (at current lineRate_run increase rate) to hit lineRate_stdin  
-                    # FIX ME
-                    pAdd_lineRate=$(( ( 1 - ( lineRate_stdin / lineRate_run ) ) * kkProcs ))
-
-                    # estimate num workers to add to make t_in = t_run / kkProcs
-                    #pAdd1=$(( ( ( runTimeA[${runLines}] * inLines ) / ( inTime * runLinesA[${runLines}] ) ) - kkProcs ))
+                    # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
+                    pAdd_lineRate=$(( ( ( runTimeA[${kkProcs]} * ( ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) ) / inTimeDelta ) >> 1 ) ) / ( runLinesA[${kkProcs}]} * inTime ) ) - kkProcs ))
                            
                     # take the harmonic average to put more weight on the smaller of the two pAdd values
                     if (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 )); then
