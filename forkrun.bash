@@ -890,7 +890,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # FIX ME
                     inLinesDelta=$(( inLines - inLines0 ))
                     inTimeDelta=$(( inTime - inTime0 ))
-                    { (( ( ( kkProcs * ${runLinesA[${kkProcs}]} * inTimeDelta ) << 1 ) >= ( ( ${runTimesA[$kkProcs]} * inLines * inTimeDelta ) / inTime + ( ${runTimesA[$kkProcs]} * inLinesDelta ) ) )) || (( ( kkProcs * ${runLinesA[${kkProcs}]} * ${runTimesA[${kkProcs0}]} ) < ( kkProcs0 * ${runLinesA[${kkProcs0}]} * ${runTimesA[${kkProcs}]} ) )); } && continue   
+                    if (( ( kkProcs  * ${runLinesA[${kkProcs}]} * inTimeDelta )  >= ( ( ( ${runTimesA[${kkProcs}]} * inLines * inTimeDelta ) / inTime + ( ${runTimesA[${kkProcs}]} * inLinesDelta ) ) >> 1 ) )) || (( ( kkProcs * ${runLinesA[${kkProcs}]} * ${runTimesA[${kkProcs0}]} ) < ( kkProcs0 * ${runLinesA[${kkProcs0}]} * ${runTimesA[${kkProcs}]} ) )); } && continue   
 
                     # The above checks if "time for N lines to arrive on stdin (t_in)" is less than "time to process N lines (t_run) / numWorkers (kkProcs)"
                     # since only one worker can read data at a time, having these be equal is ideal 
@@ -902,10 +902,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # { (( lineRate_run[$kkProcs] >= lineRate_stdin )) || (( lineRate_run[$kkProcs] < lineRate_run[$kkProcs0] )); } && continue   
 
                     # estimate how many additional workers are needed (at current cpu usage per worker) to hit pLOAD_target    
-                    pAdd_sysLoad=$(( ( pLOAD_target - pLOADA ) / ${pLOAD1[$kkProcs]} ))
+                    pAdd_sysLoad=$(( ( pLOAD_target - pLOADA ) / ${pLOAD1[${kkProcs}]} ))
     
                     # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
-                    pAdd_lineRate=$(( ( ( runTimeA[${kkProcs]} * ( ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) ) / inTimeDelta ) >> 1 ) ) / ( runLinesA[${kkProcs}]} * inTime ) ) - kkProcs ))
+                    pAdd_lineRate=$(( ( ( ${runTimeA[${kkProcs}]} * ( ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) ) / inTimeDelta ) >> 1 ) ) / ( ${runLinesA[${kkProcs}]} * inTime ) ) - kkProcs ))
                            
                     # take the harmonic average to put more weight on the smaller of the two pAdd values
                     if (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 )); then
@@ -917,7 +917,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # compare how much our lineRate increased to how much our worker count increased
                     # ideally, increasing kkProcs by X% will increase lineRate_run by X%
                     # if lineRate_run icreases less than this then e are starting to hit other bottlenecjks and should slow down new coproc spawning
-                    pAdd=$(( ( ( ( pAdd * kkProcs0 * $runTimeA[${kkProcs0}]} ) / ${runLinesA[${kkProcs0}]} ) * ${runLinesA[${kkProcs]} ) / ( kkProcs * ${runTimeA[${kkProcs}]} ) ))
+                    pAdd=$(( ( ( ( pAdd * kkProcs0 * $runTimeA[${kkProcs0}]} ) / ${runLinesA[${kkProcs0}]} ) * ${runLinesA[${kkProcs}]} ) / ( kkProcs * ${runTimeA[${kkProcs}]} ) ))
                     
                     # make sure estimate is between [0::pAddMax]. abort if pAdd is 0 (or is somehow negative).
                     (( pAdd < 1 )) && pAdd=0
