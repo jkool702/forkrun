@@ -29,7 +29,7 @@ forkrun() {
     # make all variables local
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nSpawnMin 
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pNotify_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
-    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs clk_tck verboseLevel pLOAD_max pAdd tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime pAddCount pAddMin pAddSum pAddMax
+    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel pLOAD_max pLOAD_target pAd pAdd_sysLoad pAdd_lineRated tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime inLines0 inTime0 inLinesDelta inTimeDelta pAddCount pAddMin pAddSum pAddMax runLines runTime
     local -a A p_PID p_PID0 runCmd outHave outPrint pLOADA pLOADA0 
     local -a -i runTimeA runLinesA pLOAD1
 
@@ -829,12 +829,12 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     IFS=' '
                     # get 1 data point using a blocking read
                     read -r -u ${fd_nSpawn} runLines runTime
-                    runLinesA[${kkProcs}]+=runLines
-                    runTimeA[${kkProcs}]+=runTime 
+                    (( runLinesA[${kkProcs}] += runLines ))
+                    (( runTimeA[${kkProcs}] += runTime  ))
                     # get any other available data points using non-blocking reads
                     { (( ${runLines} >= 0 )) || (( ${runTime} >= 0 )); } && while read -r -u ${fd_nSpawn} -t 0.0001 runLines runTime; do
-                        runLinesA[${kkProcs}]+=runLines
-                        runTimeA[${kkProcs}]+=runTime 
+                        (( runLinesA[${kkProcs}] += runLines ))
+                        (( runTimeA[${kkProcs}] += runTime ))
                     done                    
                     (( ${runLines} >= 0 )) || (( ${runTime} >= 0 )) || {
                         IFS=
