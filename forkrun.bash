@@ -890,7 +890,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # FIX ME
                     inLinesDelta=$(( inLines - inLines0 ))
                     inTimeDelta=$(( inTime - inTime0 ))
-                    if (( ( kkProcs  * ${runLinesA[${kkProcs}]} * inTimeDelta )  >= ( ( ( ${runTimesA[${kkProcs}]} * inLines * inTimeDelta ) / inTime + ( ${runTimesA[${kkProcs}]} * inLinesDelta ) ) >> 1 ) )) || (( ( kkProcs * ${runLinesA[${kkProcs}]} * ${runTimesA[${kkProcs0}]} ) < ( kkProcs0 * ${runLinesA[${kkProcs0}]} * ${runTimesA[${kkProcs}]} ) )); } && continue   
+                    { (( ( kkProcs  * ${runLinesA[${kkProcs}]} * inTimeDelta )  >= ( ( ( ${runTimesA[${kkProcs}]} * inLines * inTimeDelta ) / inTime + ( ${runTimesA[${kkProcs}]} * inLinesDelta ) ) >> 1 ) )) || (( ( kkProcs * ${runLinesA[${kkProcs}]} * ${runTimesA[${kkProcs0}]} ) < ( kkProcs0 * ${runLinesA[${kkProcs0}]} * ${runTimesA[${kkProcs}]} ) )); } && continue   
 
                     # The above checks if "time for N lines to arrive on stdin (t_in)" is less than "time to process N lines (t_run) / numWorkers (kkProcs)"
                     # since only one worker can read data at a time, having these be equal is ideal 
