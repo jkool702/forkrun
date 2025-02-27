@@ -926,7 +926,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # take the harmonic average to put more weight on the smaller of the two pAdd values 
                     if (( pAdd_sysLoad == 0 )) && (( pAdd_lineRate == 0 )); then
                         continue
-                    elif 
+                    elif (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 ))
                         pAdd=$(( ( ( ( ( 1 + pAdd_sysLoad ) * ( 1 + pAdd_lineRate ) ) << 2 ) + ( ( pAdd_sysLoad + pAdd_lineRate ) * ( pAdd_sysLoad + pAdd_lineRate ) ) ) / ( ( pAdd_sysLoad + pAdd_lineRate ) << 3 ) ))
                     else
                         pAdd=$(( ( ( pAdd_sysLoad * pAdd_lineRate ) << 1 ) / ( pAdd_sysLoad + pAdd_lineRate ) ))
