@@ -867,9 +867,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # update "load-per-coproc-worker" estimate smoothly
                     pLOAD1[$kkProcs]=$(( ( 1 + kkProcs + ( ( pLOAD1[$kkProcs] + pLOADA - pLOAD_bg ) << 1 ) ) / ( ( kkProcs + 1 ) << 1 ) ))
-                    printf 'pLOAD1[%s] is now %s (1 core = %s)\n' "$kkProcs" "${pLOAD1[$kkProcs]}" "$((1000000/nCPU))" >&${fd_stderr}
+                    (( ${verboseLevel} > 3 )) && printf 'pLOAD1[%s] is now %s / 1000000\n' "$kkProcs" "${pLOAD1[$kkProcs]}" "$(( ${pLOAD1[$kkProcs]} * nCPU ))" >&${fd_stderr}
                     
-                    # figure out the max  numer of new workers to add on this loop
+                    # figure out the max number of new workers to add on this loop
                     pAddMax=$(( nProcsMax - kkProcs ))
                     (( pAddMax > ( nCPU >> 1 ) )) && pAddMax=$(( nCPU >> 1 ))
                     
