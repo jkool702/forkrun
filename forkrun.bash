@@ -867,7 +867,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                     # update "load-per-coproc-worker" estimate smoothly
                     pLOAD1[$kkProcs]=$(( ( 1 + kkProcs + ( ( pLOAD1[$kkProcs] + pLOADA - pLOAD_bg ) << 1 ) ) / ( ( kkProcs + 1 ) << 1 ) ))
-  
+                    printf 'pAdd: %s \npLOAD1[%s] is now %s\n' "$kkProcs" "${pLOAD1[$kkProcs]}" >&${fd_stderr}
+                    
                     # figure out the max  numer of new workers to add on this loop
                     pAddMax=$(( nProcsMax - kkProcs ))
                     (( pAddMax > ( nCPU >> 1 ) )) && pAddMax=$(( nCPU >> 1 ))
@@ -880,7 +881,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         # system load dropped with spawning new coprocs. This probably means our target maximum system load is too high.  decrease pLOAD_target.
                         # decrease more as coprocs were last spawned that resulted in lowered system load increases
                         # decrease more when we are closer to nProcsMax
-                        pLOAD_target=$(( ( ( pAddMax * pLOAD_target ) + ( ( pAddMax + kkProcs * ( kkProcs-kkProcs0 ) ) * pLOADA0 ) ) / ( ( pAddMax << 1 ) + kkProcs * ( kkProcs-kkProcs0 ) ) ))
+                        pLOAD_target=$(( ( ( pAddMax * pLOAD_target ) + ( ( pAddMax + kkProcs ) * pLOADA ) ) / ( ( pAddMax << 1 ) + kkProcs ) ))
 
                     elif (( pLOAD_target < pLOAD_max )); then
                         # sysload between current and max targets. increase pLOAD_target. How much load target increases depends on:
@@ -889,7 +890,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         pLOAD_target=$(( ( ( ( pAddMax * pLOAD_max ) + (  nProcsMax * ( 1 + pLOAD_target + pLOADA - ( pLOAD_bg << 1 ) ) ) ) / ( ( nProcsMax << 1 ) + pAddMax ) )  + pLOAD_bg ))
                     fi
                     (( pLOAD_target > pLOAD_max )) && pLOAD_target="${pLOAD_max}"
-                    (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \npLOAD_target is now %s / 10000\n' "${pAdd}" "${pLOAD_target}" >&${fd_stderr}
+                    (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \npLOAD_target is now %s / %s\n' "${pAdd}" "${pLOAD_target}" "${pLOAD_max}" >&${fd_stderr}
 
                     
                     # compare data processing rate to data input rate. Dont spawn more workers if either:
@@ -923,8 +924,10 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
 
                     # take the harmonic average to put more weight on the smaller of the two pAdd values 
-                    if (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 )); then
+                    if (( pAdd_sysLoad == 0 )) && (( pAdd_lineRate == 0 )); then
                         continue
+                    elif 
+                        pAdd=$(( ( ( ( ( 1 + pAdd_sysLoad ) * ( 1 + pAdd_lineRate ) ) << 2 ) + ( ( pAdd_sysLoad + pAdd_lineRate ) * ( pAdd_sysLoad + pAdd_lineRate ) ) ) / ( ( pAdd_sysLoad + pAdd_lineRate ) << 3 ) ))
                     else
                         pAdd=$(( ( ( pAdd_sysLoad * pAdd_lineRate ) << 1 ) / ( pAdd_sysLoad + pAdd_lineRate ) ))
                     fi
