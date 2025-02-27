@@ -798,13 +798,15 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 pAddFlag=true
                 runLinesA[0]=1
                 runTimeA[0]=1
+
+                # fetch coproc source code from tmpdir
+                coprocSrcCode="$(<"${tmpDir}"/.coprocSrcCode)"
                 
                 # wait for the worker coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nSpawn0}
 
                 # get "extra" load from coprocs forken from main thread and use it to estimate extra CPU load per coproc worker
-                mapfile -t pLOADA < <(_forkrun_get_load "${pLOADA0[@]}")
-                pLOAD1[$kkProcs]=$(( ( pLOADA - pLOAD_bg + ( kkProcs >> 1 ) ) / kkProcs ))
+
                 pLOAD1[0]=0
                 
                 IFS=' '
@@ -824,7 +826,11 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 until [[ -f "${tmpDir}"/.quit ]] || (( ${kkProcs} >= ${nProcsMax} )); do
 
                     # update reference point for /proc/stat-based cpu load if we just spawned worker coprocs
-                    ${pAddFlag} && pLOADA0=("${pLOADA[@]}")
+                    ${pAddFlag} && {
+                        mapfile -t pLOADA0 < <(_forkrun_get_load "${pLOADA0[@]}")
+                        pLOAD1[$kkProcs]=$(( ( ( ( pLOADA0 - pLOAD_bg ) << 1 ) + kkProcs ) / ( kkProcs << 1 ) ))
+                        pAddFlag=false
+                    }
 
                     # wait for new info to get average run time per batch at current worker count arrives
                     # update counts of lines run and run times for the current kkProcs
@@ -859,16 +865,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     #pLOADA_new=$(( (  10000 / clk_tck) * ( $( ( IFS=','; source /proc/self/fd/0 2>/dev/null <<<"cat /proc/{${p_PID[*]}}/stat" ) | { IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done; }) 0 ) / ( kkProcs * ( ${EPOCHREALTIME//./} - tStart ) ) ));
                     #(( ${verboseLevel} > 2 )) && printf 'old time: %s    new time: %s\n' $pLOADA $pLOADA_new >&${fd_stderr}
 
-                    if ${pAddFlag}; then 
-
-                        # start a new "load-per-coproc-worker" estimate
-                        pLOAD1[$kkProcs]=$(( ( ( kkProcs0 * ${pLOAD1[$kkProcs0]} ) + ( pLOADA - pLOAD_bg ) + ( ( kkProcs + kkProcs0 ) >> 1 ) ) / ( kkProcs + kkProcs0 ) ))
-
-                        pAddFlag=false
-                    else
-                        # update "load-per-coproc-worker" estimate smoothly
-                        pLOAD1[$kkProcs]=$(( ( kkProcs * ( 1 + ${pLOAD1[$kkProcs]:-${pLOAD1[$kkProcs0]}} ) + ( pLOADA - pLOAD_bg ) ) / ( kkProcs << 1 )  ))
-                    fi
+                    # update "load-per-coproc-worker" estimate smoothly
+                    pLOAD1[$kkProcs]=$(( ( 1 + kkProcs + ( ( pLOAD1[$kkProcs] + pLOADA - pLOAD_bg ) << 1 ) ) / ( ( kkProcs + 1 ) << 1 ) ))
   
                     # figure out the max  numer of new workers to add on this loop
                     pAddMax=$(( nProcsMax - kkProcs ))
@@ -882,13 +880,15 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         # system load dropped with spawning new coprocs. This probably means our target maximum system load is too high.  decrease pLOAD_target.
                         # decrease more as coprocs were last spawned that resulted in lowered system load increases
                         # decrease more when we are closer to nProcsMax
-                        pLOAD_target=$(( ( ( pAddMax ) * ( ( pLOAD_target << 1 ) + 1 ) + ( ( 1 + ( kkProcs - kkProcs0 ) * ( kkProcs >> 1 ) ) * ( ( pLOADA0 << 1 ) + 1 ) ) ) / ( 2 + ( pAddMax << 1 )+ ( ( kkProcs - kkProcs0 ) * kkProcs ) ) ))
-                    elif (( pLOADA > pLOAD_target )) && (( pLOAD_target < pLOAD_max )); then
+                        pLOAD_target=$(( ( ( pAddMax * pLOAD_target ) + ( ( pAddMax + kkProcs * ( kkProcs-kkProcs0 ) ) * pLOADA0 ) ) / ( ( pAddMax << 1 ) + kkProcs * ( kkProcs-kkProcs0 ) ) ))
+
+                    elif (( pLOAD_target < pLOAD_max )); then
                         # sysload between current and max targets. increase pLOAD_target. How much load target increases depends on:
                         # increase more when kProcs is lower
                         # increase more when we are further away from nProcsMax 
-                        pLOAD_target=$(( ( ( pAddMax * ( ( pLOAD_max >> 1 ) + 1 ) ) + ( kkProcs * ( ( pLOAD_target + pLOADA ) << 1 + 1 ) ) ) / ( ( pAddMax << 1 ) + kkProcs ) ))
+                        pLOAD_target=$(( ( ( ( pAddMax * pLOAD_max ) + (  nProcsMax * ( 1 + pLOAD_target + pLOADA - ( pLOAD_bg << 1 ) ) ) ) / ( ( nProcsMax << 1 ) + pAddMax ) )  + pLOAD_bg ))
                     fi
+                    (( pLOAD_target > pLOAD_max )) && pLOAD_target="${pLOAD_max}"
                     (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \npLOAD_target is now %s / 10000\n' "${pAdd}" "${pLOAD_target}" >&${fd_stderr}
 
                     
@@ -1291,7 +1291,10 @@ p_PID+=(\${p{<#>}_PID})""" )"
         (( ${verboseLevel} > 1 )) && printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr}
         (( ${verboseLevel} > 3 )) && { printf '\nSET TRAPS:\n\n'; trap -p; } >&${fd_stderr}
 
-        ${nSpawnFlag} && printf '\n' >&${fd_nSpawn0}
+        ${nSpawnFlag} && {
+            printf '%s\n' "${coprocSrcCode}" >"${tmpDir}"/.coprocSrcCode
+            printf '\n' >&${fd_nSpawn0}
+        }
 
         # # # # # FORK COPROC "WORKERS" # # # # #
 
