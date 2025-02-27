@@ -42,12 +42,14 @@ EOC
 
 findDirDefault='/usr'
 
-findDir='/mnt/ramdisk/usr'
-ramdiskTransferFlag=false
-nullFlag=true
-
 [[ -n "$1" ]] && [[ -d "$1" ]] && findDir="$1"
-: ${findDir:="${findDirDefault}"} ${ramdiskTransferFlag:=true}
+
+[[ -d /mnt/ramdisk/usr ]] && [[ -z "${findDir}" ]] && {
+    findDir='/mnt/ramdisk/usr'
+    ramdiskTransferFlag=false
+}
+
+: "${findDir:="${findDirDefault}"}" "${ramdiskTransferFlag:=true}" "${nullFlag:=true}"
 
 findDir="$(realpath "${findDir}")"
 findDir="${findDir%/}"
