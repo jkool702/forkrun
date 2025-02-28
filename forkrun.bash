@@ -27,7 +27,7 @@ forkrun() {
     shopt -s extglob
 
     # make all variables local
-    local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax nSpawnMin 
+    local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax  
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag inotifyFlag lseekFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pNotify_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
     local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel pLOAD_max pLOAD_target pAd pAdd_sysLoad pAdd_lineRated tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime inLines0 inTime0 inLines1 inTime1 inLinesDelta inTimeDelta pAddCount pAddMin pAddSum pAddMax runLines runTime
     local -a A p_PID p_PID0 runCmd outHave outPrint pLOADA pLOADA0 
@@ -42,10 +42,10 @@ forkrun() {
     while ${optParseFlag} && (( $# > 0  )) && [[ "$1" == [-+]* ]]; do
         case "${1}" in
 
-            -?(-)@([jP]|?(n)[Pp]roc?(s))?(*([[:space:]])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*)))
-                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s))*([[:space:]])?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
+            -?(-)@([jP]|?(n)[Pp]roc?(s))?(*([[:space:]])?([+-])*([0-9])*@([0-9,-])*?(,*([0-9])*)))
+                if [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s))*([[:space:]])?([+-])*([0-9])*@([0-9,-])*?(,*([0-9])*) ]]; then
                     nProcs="${1##@(-?(-)@([jP]|?(n)[Pp]roc?(s))*([[:space:]])?(+))}"
-                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)) ]] && [[ "${2}" == ?([+-])*([0-9])*@([0-9,-])**([0-9])*?(,*([0-9])*) ]]; then
+                elif [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)) ]] && [[ "${2}" == ?([+-])*([0-9])*@([0-9,-])*?(,*([0-9])*) ]]; then
                     nProcs="${2#'+'}"
                     shift 1
                 fi
@@ -382,24 +382,21 @@ forkrun() {
 
         [[ "${nProcs}" == *','* ]] && {
             : "${nSpawnFlag:=true}"
-            nProcsMax="${nProcs#*,}"
-            [[ "${nProcsMax}" == *','* ]] && nSpawnMin="$(_forkrun_getVal "${nProcsMax#*,}")"
-            nProcsMax="$(_forkrun_getVal "${nProcsMax%%,*}")"
+            nProcsMax="$(_forkrun_getVal "${nProcs#*,}")"
         }
         nProcs="$(_forkrun_getVal "${nProcs%%,*}")"
 
-        : "${nSpawnFlag:=false}" "${nSpawnMin:=1}"
-     
+        : "${nSpawnFlag:=false}"
+        
         nCPU="$({ type -a nproc &>/dev/null && nproc; } || { type -a grep &>/dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA  </proc/cpuinfo && tmpA=("${tmpA[@]//processor*/$'\034'}") && tmpA=("${tmpA[@]//!($'\034')/}") && tmpA=("${tmpA[@]//$'\034'/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')";
         (( nCPU < 1 )) && nCPU=1
         { [[ ${nProcs} ]] && (( ${nProcs:-0} > 0 )); } || { ${nSpawnFlag} && nProcs=$(( ${nCPU} / 2  )) || nProcs=${nCPU}; }
 
         ${nSpawnFlag} && { 
             [[ ${nProcsMax//0/} ]] || nProcsMax=$(( ${nCPU} * 2 ));
-            [[ ${nSpawnMin//0/} ]] || nSpawnMin=1
         }
 
-        { ${nSpawnFlag} && (( ${nSpawnMin:-0} > 0 )) && { [[ ${nProcsMax:-0} == '0' ]] || (( ${nProcs} < ${nProcsMax} )); }; } || : "${nSpawnFlag:=false}"
+        { ${nSpawnFlag} && (( ${nProcs} < ${nProcsMax} )) || : "${nSpawnFlag:=false}"
 
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
@@ -407,7 +404,7 @@ forkrun() {
         # set defaults for control flags/parameters
         : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=1024}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" "${stdinRunFlag:=false}" 
 
-        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}" nSpawnMin="${nSpawnMin}" nLines="${nLines}" nLinesMax="${nLinesMax}"
+        local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}" nLines="${nLines}" nLinesMax="${nLinesMax}"
 
         # ensure sensible nLinesMax
          ${nLinesAutoFlag} && {  (( nLinesMax < 2 * nLines )) && nLinesMax=$(( 2 * nLines )); } || { (( nLinesMax < nLines )) && nLinesMax=nLines; }
@@ -494,7 +491,7 @@ forkrun() {
             ${inotifyFlag} && echo 'using inotify to efficiently wait for slow inputs on stdin'
             ${fallocateFlag} && echo 'using fallocate to shrink the tmpfile containing stdin as forkrun runs'
             ${lseekFlag} && echo 'using "lseek" loadable builtin to read data faster and more efficiently'
-            ${nSpawnFlag} && printf '(-j|-P) initial / max workers: %s / %s. workers will be dynamically spawned (up to a %s workers max) whenever read q depth is less than %s\n' "${nProcs}" "${nProcsMax}" "${nProcsMax}" "${nSpawnMin}" || printf '(-j|-P) using %s coproc workers\n' ${nProcs}
+            ${nSpawnFlag} && printf '(-j|-P) initial / max workers: %s / %s. workers will be dynamically spawned (up to a maximum of %s workers)\n' "${nProcs}" "${nProcsMax}" "${nProcsMax}" || printf '(-j|-P) using %s coproc workers\n' ${nProcs}
             ${nLinesAutoFlag} && printf '(-L) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}" || printf '(-l) using %s lines per function call (batch size) \n' "${nLines}"
             printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}"
             ${nLinesReadLimitFlag} && printf '(-n) forkrun will return after reading %s lines (or until it reads an EOF from stdin, whichever comes first)\n' "${nLinesReadLimit}"
@@ -1594,7 +1591,7 @@ cat<<'EOF' >&2
 
 USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
 
-# LIST OF FLAGS: [-j|-P [-]<#>[,<#>,<#>]] [-t <path>] ( [-l <#>] | [-L <#[,#]>]] ) ( [-b <#>] | [-B <#>[,<#>]] ) [-d <char>] [-u <fd>] [-i] [-I] [-k] [-K] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
+# LIST OF FLAGS: [-j|-P [-]<#>[,<#>]] [-t <path>] ( [-l <#>] | [-L <#[,#]>]] ) ( [-b <#>] | [-B <#>[,<#>]] ) [-d <char>] [-u <fd>] [-i] [-I] [-k] [-K] [-z|-0] [-s] [-S] [-p] [-D] [-N] [-u] [-v] [-h|-?]
 
 EOF
 
@@ -1664,7 +1661,7 @@ FLAGS WITH ARGUMENTS
 --------------------
 
     (-j|-p) <#> : num worker coprocs. set number of worker coprocs. Default is $(nproc). If the number is negative (begins with a '-') then the numbner of coprocs used will be determined dynamically based on runtime conditions (see "alt syntax" below).
-    (-j|-P) -[<#1>[,<#2>[,<#3>]]]: alternate syntax to enable dynamically determining coproc count. <#1> is the initial number of coprocs spawned (default: num CPUs / 2). <#2> is the maximum number of coprocs to be spawned (default: num CPUs * 2). <#3> is the minimum read wait q depth - if fewer than this many processes are waiting in line to read data another will be spawned (default: 1). All values (except for the '-' / negative sign) are optional, and may be omitted (leaving just a '-') to just set max coproc count or min wait q depth.
+    (-j|-P) -[<#1>[,<#2>]]: alternate syntax to enable dynamically determining coproc count. <#1> is the initial number of coprocs spawned (default: num CPUs / 2). <#2> is the maximum number of coprocs to be spawned (default: num CPUs * 2). All values (except for the '-' / negative sign) are optional, and may be omitted (leaving just a '-') to just set max coproc count.
     -l <#>      : num lines per function call (batch size). set static number of lines to pass to the function on each function call. Disables automatic dynamic batch size adjustment. if -l=1 then the "read from a pipe" mode (-p) flag is automatically activated (unless flag `+p` is also given). Default is to use the automatic batch size adjustment.
     -L <#[,#]>  : set initial (<#>) or initial+maximum (<#,#>) lines per batch while keeping the automatic batch size adjustment enabled. Default is '1,1024'
     -n <#>      : limit forkrun to processing (at most) the first <#> lines passed on stdin.
@@ -1720,13 +1717,12 @@ SYNTAX NOTE: Arguments for flags may be passed with a (breaking or non-breaking)
 -j | -P | --nprocs  <#> : sets the number of worker coprocs to use. If set to a negative number then the coproc count is adjusted dynamically based on read wait q depth (see alt syntax below).
    ---->  default  : number of logical CPU cores ($(nproc))
 
--j | -P | --nprocs -[<#1>[,<#2>[,<#3>]]]: (alt syntax - dynamic coproc count). 
+-j | -P | --nprocs -[<#1>[,<#2>]]: (alt syntax - dynamic coproc count). 
         <#1> is the initial number of coprocs spawned (--> default: num CPUs / 2). 
         <#2> is the maximum number of coprocs to be spawned (--> default: num CPUs * 2). 
-        <#3> is the minimum read wait q depth - if fewer than this many processes are waiting in line to read data another will be spawned (--> default: 1). 
     All values (except the '-' / negative sign) are optional, and may be omitted (leaving just a '-') to just set max coproc count or min wait q depth.
-    EXAMPLES: `-j -` or `-j -,` or `-j -,,`: sets defaults for all 3 parameters
-              `-j -10,,2`: sets initial coproc count to 10, max coproc count to default (2 * nCPU) and min wait q depth to 2
+    EXAMPLES: `-j -` or `-j -,`: sets defaults for both parameters
+              `-j -10,`: sets initial coproc count to 10, max coproc count to default (2 * nCPU) 
 
 NOTE: Don't set max number of coprocs too high. On larger problems, it will likely hit this maximum. Setting it too high can lead to excessive resource consumption and potential performance degradation. This limit is based on the idea that only one coproc can read data at a time, spawning more until there's always at least one waiting. However, forkrun (especially with lseek) reads data very quickly (typically 100's of microseconds per operation), making it challenging to build a significant read wait q.
 
