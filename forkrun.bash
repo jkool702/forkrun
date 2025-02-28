@@ -795,9 +795,6 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 pAddFlag=true
                 runLinesA[0]=1
                 runTimeA[0]=1
-
-                runLinesA[$kkProcs]=1
-                runTimeA[$kkProcs]=1
                 
                 # fetch coproc source code from tmpdir
                 coprocSrcCode="$(<"${tmpDir}"/.coprocSrcCode)"
@@ -842,7 +839,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     runTime=(${A[@]##*,})
                     IFS='+'
                     runLinesA[${kkProcs}]=$(( runLinesA[${kkProcs}] + "${runLines[*]##*(0)}" ))
-                    runTimeA[${kkProcs}]= $(( runTimeA[${kkProcs}] + "${runTime[*]##*(0)}" ))
+                    runTimeA[${kkProcs}]=$(( runTimeA[${kkProcs}] + "${runTime[*]##*(0)}" ))
                     IFS=' '
 
                     # update count of lines / time for lines arriving on stdin
@@ -947,8 +944,6 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         (( ${verboseLevel} > 3 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs.\n' "${kk}" "${pAdd}" "${kkProcs}" >&${fd_stderr}
                         ((kkProcs++))
                     done
-                    runLinesA[${kkProcs}]=1
-                    runTimeA[${kkProcs}]=1
                     
                     (( ${verboseLevel} > 2 )) &&printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
 
