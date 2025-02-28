@@ -396,7 +396,7 @@ forkrun() {
             [[ ${nProcsMax//0/} ]] || nProcsMax=$(( ${nCPU} * 2 ));
         }
 
-        { ${nSpawnFlag} && (( ${nProcs} < ${nProcsMax} )) || : "${nSpawnFlag:=false}"
+        { ${nSpawnFlag} && (( ${nProcs} < ${nProcsMax} )); } || : "${nSpawnFlag:=false}"
 
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
         ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
