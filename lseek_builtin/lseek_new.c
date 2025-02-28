@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <limits.h>
 
 #include "command.h"
 #include "builtins.h"
@@ -29,23 +30,25 @@ extern char **make_builtin_argv();
 // Metadata about the builtin
 static char *lseek_doc[] = {
     "",
-    "----------------------------------------------",
-    "USAGE:    lseek [-v <VAR> | -q] <FD> <REL_OFFSET> [<SEEK_TYPE>]",
+    "--------------------------------------------------------------",
+    "USAGE:    lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]",
     "",
-    "Move the file descriptor <FD> by <REL_OFFSET>",
-    "bytes relative to its current byte offset.",
+    "Move the file descriptor <FD> by <OFFSET> bytes.",
     "",
-    "positive <REL_OFFSET> advances the <FD>",
-    "negative <REL_OFFSET> rewinds the <FD>",
+    "By default, <OFFSET> is relative to <FD>'s current byte offset:",
+    "  positive <OFFSET> advances the <FD>",
+    "  negative <OFFSET> rewinds the <FD>",
     "",
-    "SEEK_TYPE is optional and can take the value of:",
+    "<SEEK_TYPE> is optional and can take the value of:",
     "     'SEEK_SET'   'SEEK_CUR'    'SEEK_END'",
-    "  If omitted, SEEK_CUR is used.",
+    "  If omitted, SEEK_CUR is used by default.",
     "",
-    "If -v <VAR> are the first 2 args, the final byte offset",
-    "for the file descriptor will be saved in variable <VAR>.",
-    "If omitted, it will be printed to stdout unless the 1st arg is -q.",
-    "----------------------------------------------",
+    "<VAR> is optional. If present, the new byte offset of",
+    "  file descriptor <FD> will be saved in variable <VAR>",
+    "",
+    "NOTE: to use 'SEEK_SET' or 'SEEK_CUR' or 'SEEK_END' as <VAR>,",
+    "  <SEEK_TYPE> *must* explicitly be passed on the lseek cmdline",
+    "--------------------------------------------------------------",
     "",
     NULL
 };
@@ -56,83 +59,79 @@ struct builtin lseek_struct = {
     lseek_builtin,        // Function to call
     BUILTIN_ENABLED,      // Default status
     lseek_doc,            // Documentation strings
-    "lseek [-v <VAR> | -q] <FD> <REL_OFFSET> [<SEEK_TYPE>]",  // Usage string
+    "lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]",  // Usage string
     0                     // Number of long options
 };
 
 // main function
 static int lseek_main(int argc, char **argv) {
-    optind = 1; // Reset getopt() state
-    int opt;
-    char *varname = NULL;
-    int fd_index = 1;  // Default index for FD argument
-    int quiet = 0;     // Suppress output flag
-
-    // Parse optional flags
-    while ((opt = getopt(argc, argv, "v:q")) != -1) {
-        switch (opt) {
-            case 'v':
-                varname = optarg;
-                fd_index += 2;  // Shift FD index to account for -v <varname>
-                break;
-            case 'q':
-                quiet = 1;  // Enable quiet mode
-                fd_index += 1;  // Shift FD index to account for -q
-                break;			
-            default:
-                fprintf(stderr, "Usage: lseek [-v varname | -q] <FD> <REL_OFFSET> [<SEEK_TYPE>]\n");
-                return 1;
-        }
-    }
-
-    // Ensure enough arguments remain
-    if (argc - fd_index < 2 || argc - fd_index > 3) {
-        fprintf(stderr, "Usage: lseek [-v varname | -q] <FD> <REL_OFFSET> [<SEEK_TYPE>]\n");
+    // check for 3, 4, or 5 arguments
+    if (argc < 3 || argc > 5) {
+        fprintf(stderr, "\nIncorrect number of arguments.\nUSAGE: lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]\n");
         return 1;
     }
 
     // Get + validate file descriptor
-    int fd = atoi(argv[fd_index]);
-    if (fd == 0 && strcmp(argv[fd_index], "0") != 0) {
-        fprintf(stderr, "ERROR: Invalid file descriptor.\n");
+    int fd = atoi(argv[1]);
+    if (fd == 0 && strcmp(argv[1], "0") != 0) {
+        fprintf(stderr, "\nERROR: Invalid file descriptor.\n");
         return 1;
     }
 
     // Get + validate offset
     errno = 0;
-    off_t offset = atoll(argv[fd_index + 1]);
-    if (errno == ERANGE) {
-        fprintf(stderr, "ERROR: Offset out of range.\n");
+    off_t offset = atoll(argv[2]);
+    if (offset == LLONG_MAX || offset == LLONG_MIN) {  // Better range check
+        fprintf(stderr, "\nERROR: Offset out of range.\n");
         return 1;
     }
 
-    // Get SEEK_TYPE
+    // Default SEEK_TYPE is SEEK_CUR
     int whence = SEEK_CUR;
-    if (argc - fd_index == 3) {
-        if (strcmp(argv[fd_index + 2], "SEEK_SET") == 0) {
+    char *varname = NULL;
+
+    // Handle SEEK_TYPE and optional VAR
+    if (argc > 3) {
+        // If argv[3] is a valid SEEK_TYPE, set it
+        if (strcmp(argv[3], "SEEK_SET") == 0) {
             whence = SEEK_SET;
-        } else if (strcmp(argv[fd_index + 2], "SEEK_END") == 0) {
+        } else if (strcmp(argv[3], "SEEK_END") == 0) {
             whence = SEEK_END;
-        } else if (strcmp(argv[fd_index + 2], "SEEK_CUR") != 0) {
-            fprintf(stderr, "ERROR: Invalid SEEK_TYPE. Must be SEEK_SET, SEEK_CUR, or SEEK_END\n");
+        }
+        // If argv[3] is SEEK_CUR or empty, do nothing (default is SEEK_CUR)
+        else if (strcmp(argv[3], "SEEK_CUR") == 0 || argv[3][0] == '\0') {
+            // No action needed
+        }
+        // If 4 args and argv[3] is not a valid SEEK_TYPE, assume it's a variable name
+        else if (argc == 4) {
+            varname = argv[3];
+        }
+        // If 5 args but argv[3] is invalid, print an error
+        else {
+            fprintf(stderr, "Error: Invalid SEEK_TYPE. Must be SEEK_SET, SEEK_CUR, SEEK_END, or empty ('').\n");
             return 1;
+        }
+
+        // If there are 5 arguments, the last one is always the variable name
+        if (argc == 5) {
+            varname = argv[4];
         }
     }
 
-    // Call lseek to move fd byte offset
+    // Call lseek to move fd byte offset 
     off_t new_offset = lseek(fd, offset, whence);
     if (new_offset == (off_t)-1) {
         fprintf(stderr, "ERROR: %s\n", strerror(errno));
         return 1;
     }
 
-    // If -v flag was used, save new offset in the shell variable
+    // If <VAR> was provided, then store new byte offset in shell variable "varname"
     if (varname) {
         char offset_str[32];
         snprintf(offset_str, sizeof(offset_str), "%lld", (long long)new_offset);
         bind_variable(varname, offset_str, 0);
-    } else if (!quiet) {
-        // Otherwise, print to stdout unless -q was specified
+    } else {
+        // Otherwise, print to stdout
         printf("%lld\n", (long long)new_offset);
         fflush(stdout);
     }
