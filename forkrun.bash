@@ -835,12 +835,12 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # get 1 data point using a blocking read
                     read -r -u ${fd_nSpawn} -t 0.1 -a A
                     (( ${#A[@]} == 0 )) && continue
-                    IFS='+'
                     runLines=(${A[@]%%,*})
                     runTime=(${A[@]##*,})
-                    IFS=' '
+                    IFS='+'
                     runLinesA[${kkProcs}]=$(( runLinesA[${kkProcs}] + "${runLines[*]##*(0)}" ))
                     runTimeA[${kkProcs}]= $(( runTimeA[${kkProcs}] + "${runTime[*]##*(0)}" ))
+                    IFS=' '
 
                     # update count of lines / time for lines arriving on stdin
                     read -r inLines1 inTime1 <"${tmpDir}"/.stdin_lines_time
