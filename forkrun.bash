@@ -833,20 +833,16 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     # update counts of lines run and run times for the current kkProcs
                     IFS=' '
                     # get 1 data point using a blocking read
-                    read -r -u ${fd_nSpawn} runLines runTime
+                    read -r -u ${fd_nSpawn} -t 0.1 -a A
+                    (( ${#A[@]} == 0 )) && continue
+                    IFS='+'
+                    runLines=$(("${A[*]%%,*}"))
+                    runTime=$(("${A[*]##*,}"))
+                    IFS=' '
                     (( runLinesA[${kkProcs}] += runLines ))
                     (( runTimeA[${kkProcs}] += runTime  ))
-                    # get any other available data points using non-blocking reads
-                    { (( ${runLines} >= 0 )) || (( ${runTime} >= 0 )); } && while read -r -u ${fd_nSpawn} -t 0.0001 runLines runTime; do
-                        (( runLinesA[${kkProcs}] += runLines ))
-                        (( runTimeA[${kkProcs}] += runTime ))
-                    done                    
-                    (( ${runLines} >= 0 )) || (( ${runTime} >= 0 )) || {
-                        IFS=
-                        break
-                    }
-                    # update count of lines / time for lines arriving on stdin
 
+                    # update count of lines / time for lines arriving on stdin
                     read -r inLines1 inTime1 <"${tmpDir}"/.stdin_lines_time
                     IFS=
                     (( inLines1 > inLines )) && (( inTime1 > inTime )) && {
@@ -964,6 +960,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
             exitTrapStr+='echo "-1 -1" >&'"${fd_nSpawn}"'; '$'\n'
             printf '%s\n' "${pSpawn_PID}" > "${tmpDir}"/.run/pSpawn
+            exitTrapStr_kill+="${pSpawn_PID} "
 
         }
         # # # # # DYNAMICALLY GENERATE COPROC SOURCE CODE # # # # #
@@ -1248,7 +1245,7 @@ ${noFuncFlag} && echo 'IFS='
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
 ${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
-${nSpawnFlag} && echo "printf '%s %s\\n' \${#A[@]} \$(( \${EPOCHREALTIME//./} - tStart0 )) >&${fd_nSpawn}"
+${nSpawnFlag} && echo "printf '%s,%s ' \${#A[@]} \$(( \${EPOCHREALTIME//./} - tStart0 )) >&${fd_nSpawn}"
 echo """
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
