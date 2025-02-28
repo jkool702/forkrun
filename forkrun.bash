@@ -944,6 +944,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         (( ${verboseLevel} > 3 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs.\n' "${kk}" "${pAdd}" "${kkProcs}" >&${fd_stderr}
                         ((kkProcs++))
                     done
+                    runTimeA[${kkProcs}]=0
+                    runLinesA[${kkProcs}]=0
                     
                     (( ${verboseLevel} > 2 )) &&printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
 
