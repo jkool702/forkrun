@@ -88,8 +88,9 @@ static int lseek_main(int argc, char **argv) {
 
     // Default SEEK_TYPE is SEEK_CUR
     int whence = SEEK_CUR;
+    int quiet = 0;
     char *varname = NULL;
-
+    
     // Handle SEEK_TYPE and optional VAR
     if (argc > 3) {
         // If argv[3] is a valid SEEK_TYPE, set it
@@ -98,9 +99,9 @@ static int lseek_main(int argc, char **argv) {
         } else if (strcmp(argv[3], "SEEK_END") == 0) {
             whence = SEEK_END;
         }
-        // If argv[3] is SEEK_CUR or empty, do nothing (default is SEEK_CUR)
+        // If argv[3] is SEEK_CUR or empty, default to SEEK_CUR
         else if (strcmp(argv[3], "SEEK_CUR") == 0 || argv[3][0] == '\0') {
-            // No action needed
+            // No action needed, SEEK_CUR is already set
         }
         // If 4 args and argv[3] is not a valid SEEK_TYPE, assume it's a variable name
         else if (argc == 4) {
@@ -111,13 +112,17 @@ static int lseek_main(int argc, char **argv) {
             fprintf(stderr, "Error: Invalid SEEK_TYPE. Must be SEEK_SET, SEEK_CUR, SEEK_END, or empty ('').\n");
             return 1;
         }
-
-        // If there are 5 arguments, the last one is always the variable name
+    
+        // If there are 5 arguments, argv[4] is the variable name or quiet mode
         if (argc == 5) {
-            varname = argv[4];
+            if (argv[4][0] == '\0') {
+                quiet = 1;  // Enable quiet mode
+            } else {
+                varname = argv[4];
+            }
         }
     }
-
+    
     // Call lseek to move fd byte offset 
     off_t new_offset = lseek(fd, offset, whence);
     if (new_offset == (off_t)-1) {
@@ -130,7 +135,7 @@ static int lseek_main(int argc, char **argv) {
         char offset_str[32];
         snprintf(offset_str, sizeof(offset_str), "%lld", (long long)new_offset);
         bind_variable(varname, offset_str, 0);
-    } else {
+    } else if (!quiet) {
         // Otherwise, print to stdout
         printf("%lld\n", (long long)new_offset);
         fflush(stdout);
