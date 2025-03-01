@@ -1918,48 +1918,86 @@ EOF
 
 _forkrun_lseek_setup() {
     ## sets up a "lseek" bash builtin for x86_64 machines
-    local lseekPreFlag=false
-    local lseekArch
+    local lseekArch cksumAlg cksumVal cksumAll lseekPre lseekGetFlag lseekCurlFailedFlag forkrunRepo
+    
+    lseekGetFlag=false 
+    lseekCurlFailedFlag=false
+    #forkrunRepo='main'
+    forkrunRepo='forkrun_testing_nSpawn_3'
+
+    type curl &>/dev/null || {
+        enable lseek 2>/dev/null
+        return
+    }
 
     if type uname &>/dev/null; then
         lseekArch="$(uname -m)"
-
     elif [[ -f /proc/sys/kernel/arch ]] ; then
         lseekArch="$(</proc/sys/kernel/arch)"
-
     else
         return 1
     fi
 
     { [[ "${lseekArch}" == 'x86_64' ]] || [[  "${lseekArch}" == 'aarch64' ]] || [[  "${lseekArch}" == 'riscv64' ]] || return 1; }
 
-    enable lseek 2>/dev/null || {
-        [[ -f /usr/local/lib/bash/lseek ]] && lseekPreFlag=true 
+    if [[ -f /usr/local/lib/bash/lseek ]]; then
+        lseekPre='/usr/local/lib/bash/lseek'
+    elif  [[ $USER == 'root' && [[ -f /dev/shm/.forkrun.lseek/lseek ]]; then 
+        lseekPre='/dev/shm/.forkrun.lseek/lseek'
+    fi
+
+    [[ ${lseekPre} ]] && {
+        for cksumAlg in sha256sum sha512sum b2sum sha1sum md5sum cksum sum; do
+            type $cksumAlg &>/dev/null || { cksumAlg=''; continue; }
+        done
+        [[ ${cksumAlg} ]] && {
+            cksumVal="$($cksumAlg "$lseekPre")"
+            cksumVal="${cksumVal%%lseek*}"
+            cksumAll="$(curl "https://github.com/jkool702/forkrun/raw/refs/heads/${forkrunRepo}/lseek_builtin/bin/lseek.checksums" 2>/dev/null)"
+            [[ "${cksumAll}" == *"${cksumVal}"* ]] || lseekGetFlag=true
+        }
+    }
+
+    if [[ ${lseekPre} ]] && ! ${lseekGetFlag}; then
+        enable lseek 2>/dev/null || lseekGetFlag=true
+    else
+        lseekGetFlag=true
+    fi
+    
+    if ${lseekGetFlag}; then
         case "${USER}" in
             root)
                 mkdir -p /usr/local/lib/bash
-                ${lseekPreFlag} && \mv /usr/local/lib/bash/lseek /usr/local/lib/bash/lseek.old
+                ${lseekPre} && \mv -f /usr/local/lib/bash/lseek /usr/local/lib/bash/lseek.old
                 [[ "${BASH_LOADABLES_PATH}" == */usr/local/lib/bash* ]] || export BASH_LOADABLES_PATH=/usr/local/lib/bash:${BASH_LOADABLES_PATH}
-                #curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/bin/lseek.'"${lseekArch}"
-                curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/forkrun_testing/lseek_builtin/bin/lseek.'"${lseekArch}"
+                curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/lseek_builtin/bin/lseek.'"${lseekArch}" || lseekCurlFailedFlag=true
 
             ;;
             *)
                 mkdir -p /dev/shm/.forkrun.lseek
-                ${lseekPreFlag} && \mv /dev/shm/.forkrun.lseek/lseek /dev/shm/.forkrun.lseek/lseek.old
+                [[ -f /dev/shm/.forkrun.lseek/lseek ]] && lseekPre=true 
+                ${lseekPre} && \mv -f /dev/shm/.forkrun.lseek/lseek /dev/shm/.forkrun.lseek/lseek.old
                 [[ "${BASH_LOADABLES_PATH}" == */dev/shm/.forkrun.lseek* ]] || export BASH_LOADABLES_PATH=/dev/shm/.forkrun.lseek:${BASH_LOADABLES_PATH}
-                #curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/main/lseek_builtin/bin/lseek.'"${lseekArch}"
-                curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/forkrun_testing/lseek_builtin/bin/lseek.'"${lseekArch}"
+                curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/lseek_builtin/bin/lseek.'"${lseekArch}" || lseekCurlFailedFlag=true
             ;;
         esac
 
+        [[ ${lseekPre} ]] && {
+            if ${lseekCurlFailedFlag}; then
+                \mv "${lseekPre}".old "${lseekPre}"
+            else
+                enable -d lseek 2>/dev/null
+            fi
+        }
         enable lseek &>/dev/null || return 1
-    }
-
+    else
+        enable lseek &>/dev/null || return 1
+    fi
+    
     echo 'abc' >/dev/shm/.forkrun.lseek.test
     {
         read -r -u $fd -N 1
-        lseek $fd -1
+        lseek $fd -1 >/dev/null
         read -r -u $fd -N 1
         exec {fd}>&-
     } {fd}</dev/shm/.forkrun.lseek.test
@@ -1971,14 +2009,11 @@ _forkrun_lseek_setup() {
         ;;
         *)
             enable -d lseek
-            printf '\nWARNING: lseek functionality has not been enabled due to an unknown runtime error.\nIf you are on x86_64 and are using bash 4.0 or later, please file a github issue in the forkrun repo describing this error.\n' >&2
-            if [[ "${USER}" == 'root' ]]; then
-                \rm -f /usr/local/lib/bash/lseek
-                ${lseekPreFlag} && \mv /usr/local/lib/bash/lseek.old /usr/local/lib/bash/lseek
-            else
-                \rm -f /dev/shm/.forkrun.lseek/lseek
-                ${lseekPreFlag} && \mv /dev/shm/.forkrun.lseek/lseek.old /dev/shm/.forkrun.lseek/lseek
-            fi
+            printf '\nWARNING: lseek functionality has not been enabled due to an unknown runtime error.\nIf you are on x86_64 or aarch64 and are using bash 4.0 or later, please file a github issue in the forkrun repo describing this error.\n' >&2
+            [[ ${lseekPre} ]] && ! ${lseekCurlFailedFlag} && {
+                \rm -f "${lseekPre}"
+                \mv "${lseekPre}".old "${lseekPre}"
+            }
             return 1
         ;;
     esac
