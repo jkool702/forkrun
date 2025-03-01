@@ -768,6 +768,66 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
             echo '1 1' >"${tmpDir}"/.stdin_lines_time
             { coproc pSpawn {
 
+            
+_forkrun_get_load() {
+    ## computes a "smoothed average system CPU load" using info gathered from /proc/stat
+    # 100% load on all CPU's gives pLOAD=1000000 (1 million)
+  
+    # FLAGS:  
+    #    '-i'|'--init':  initialize/reset load calculation. 
+    # 
+    #
+    # pLOADA0 (input) / pLOADA (output):     ( pLOAD  cpu_ALL  cpu_LOAD  tALL )
+    #     --> pLOAD:    represents the current average load level estimate between all logical CPU cores ( scaled between 0 - 1000000, or (if set) between 0 - $maxLoadNum )  
+    #     --> cpu_ALL:  total sum of ALL components from /proc/stats when the last pLOAD was computed
+    #     --> cpu_LOAD: total sum of the components that represent CPU load (everything except idle time and IOwait time) when the last pLOAD was computed
+    #     --> tALL:     total time difference used in the last call to _forkrun_get_load  (i.e., $(( CPU_ALL - CPU_ALL0 )) from previous run) 
+ 
+
+    unset IFS
+
+    local -i cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice tLOAD tALL tALL0 cpu_ALL cpu_ALL0 cpu_LOAD cpu_LOAD0 pLOAD pLOAD0 argCount
+    local -i -I loadMaxVal 
+    local initFlag echoFlag
+        
+    case "${1}" in
+        -i|--init)
+            initFlag=true
+        ;;
+        *)
+            initFlag=false
+            pLOAD0="${pLOADA0[0]}"
+            cpu_ALL0="${pLOADA0[1]}"
+            cpu_LOAD0="${pLOADA0[2]}"
+            tALL0="${pLOADA0[3]}"
+        ;;
+    esac
+
+    : "${loadMaxVal:=1000000}" "${tALL0:=0}"
+
+    read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice </proc/stat
+    
+    cpu_LOAD=$(( cpu_user + cpu_nice + cpu_system + cpu_irq + cpu_softirq + cpu_steal + cpu_guest + cpu_guestnice ))
+    cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
+    
+    ${initFlag} && {
+        pLOADA=(0 "${cpu_ALL}" "${cpu_LOAD}" 0)
+        return 0
+    }
+
+    tALL=$(( cpu_ALL - cpu_ALL0 ))
+
+    tLOAD=$(( cpu_LOAD - cpu_LOAD0 ))
+        
+    (( tALL0 > ( tALL << 2 ) )) && tALL0=$((  tALL << 2 ))
+
+    pLOAD=$(( ( loadMaxVal * ( 1 + tLOAD ) ) / ( 1 + tALL ) ))
+    (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + ( tALL << 2 ) + tALL0 ) * pLOAD ) + ( 3 * tALL0 * pLOAD0 ) ) / ( 1 + ( ( tALL + tALL0 ) << 2 ) ) ))
+
+    pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
+
+}
+
                 # set traps and global vars
                 export LC_ALL=C LANG=C IFS=
                 trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto}"'; printf '"'"'\n'"'"' >&'"${fd_nSpawn0}"'; [[ -f "'"${tmpDir}"'"/.run/pSpawn ]] && \rm -f "'"${tmpDir}"'"/.run/pSpawn' EXIT
@@ -1930,6 +1990,39 @@ _forkrun_lseek_setup() {
 _forkrun_lseek_setup
 
 
+export -fp _forkrun_getVal &>/dev/null && export -nf _forkrun_getVal
+
+_forkrun_getVal() {
+    ## Expands IEC and SI prefixes to get the numeric value they represent
+    #
+    # IEC PREFIC (1024^N) is used if the prefix has a trailing '-i' (Ki/Mi/Gi). This is is the case without exception.
+    #  SI PREFIX (1000^N) is used if the prefix is a single letter (K/M/G/...), UNLESS the number is prefaced with a '+'.
+    #
+    # NOTE: neither capatalization nor a trailing -b/-B have any effect. full word prefixes (e.g., '1 kilobyte') are not supported.
+    #
+    #  PARSING EXAMPLES:
+    #        +1k = +1K = +1kb = +1KB = 1kib = 1KiB = +1kib = +1KiB = 1024
+    #         1k =  1K =  1kb =  1KB = 1000
+
+    local +i -l nn
+
+    (( ${#pMap[@]} == 20 )) || local -Ag pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10 [ki]=1 [mi]=2 [gi]=3 [ti]=4 [pi]=5 [ei]=6 [zi]=7 [yi]=8 [ri]=9 [qi]=10)
+     
+    for nn in "${@%%[Bb]*}"; do    
+        [[ ${nn} ]] || continue
+        case "${nn// /}" in
+            *'i'|'+'*)
+                printf '%s\n' "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn##*[0-9]}]:-0} ) ))"
+            ;;
+            *)
+                printf '%s\n' "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
+            ;;
+        esac
+    done
+}
+
+
+: << EEOOFF
 export -fp _forkrun_get_load &>/dev/null && export -nf _forkrun_get_load
 
 _forkrun_get_load() (
@@ -2165,34 +2258,4 @@ _forkrun_get_load_pid() (
     printf '%s\n' "${pLOADA_new[@]}"
     ${echoFlag} && printf 'Current System CPU Load = %s / %s\n' "${pLOAD}" "${loadMaxVal}" >&2
 )
-
-export -fp _forkrun_getVal &>/dev/null && export -nf _forkrun_getVal
-
-_forkrun_getVal() {
-    ## Expands IEC and SI prefixes to get the numeric value they represent
-    #
-    # IEC PREFIC (1024^N) is used if the prefix has a trailing '-i' (Ki/Mi/Gi). This is is the case without exception.
-    #  SI PREFIX (1000^N) is used if the prefix is a single letter (K/M/G/...), UNLESS the number is prefaced with a '+'.
-    #
-    # NOTE: neither capatalization nor a trailing -b/-B have any effect. full word prefixes (e.g., '1 kilobyte') are not supported.
-    #
-    #  PARSING EXAMPLES:
-    #        +1k = +1K = +1kb = +1KB = 1kib = 1KiB = +1kib = +1KiB = 1024
-    #         1k =  1K =  1kb =  1KB = 1000
-
-    local +i -l nn
-
-    (( ${#pMap[@]} == 20 )) || local -Ag pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10 [ki]=1 [mi]=2 [gi]=3 [ti]=4 [pi]=5 [ei]=6 [zi]=7 [yi]=8 [ri]=9 [qi]=10)
-     
-    for nn in "${@%%[Bb]*}"; do    
-        [[ ${nn} ]] || continue
-        case "${nn// /}" in
-            *'i'|'+'*)
-                printf '%s\n' "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn##*[0-9]}]:-0} ) ))"
-            ;;
-            *)
-                printf '%s\n' "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
-            ;;
-        esac
-    done
-}
+EEOOFF
