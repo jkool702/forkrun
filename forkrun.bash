@@ -1245,7 +1245,7 @@ echo """
           [[ -f \"${tmpDir}\"/.done ]] && {"""
 if ${lseekPosFlag}; then
     echo """
-                lseek ${fd_read} 0 SEEK_CUR fd_read_pos"""
+                lseek ${fd_read} 0 SEEK_CUR fd_read_pos
                 lseek ${fd_write} 0 SEEK_CUR fd_write_pos"""
 else
     echo """
