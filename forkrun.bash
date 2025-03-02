@@ -1971,7 +1971,7 @@ _forkrun_lseek_setup() {
 
     if [[ -f /usr/local/lib/bash/lseek ]]; then
         lseekPre='/usr/local/lib/bash/lseek'
-    elif  [[ $USER == 'root' && [[ -f /dev/shm/.forkrun.lseek/lseek ]]; then 
+    elif  [[ $USER == 'root' ]] && [[ -f /dev/shm/.forkrun.lseek/lseek ]]; then 
         lseekPre='/dev/shm/.forkrun.lseek/lseek'
     fi
 
