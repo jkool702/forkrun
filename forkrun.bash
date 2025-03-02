@@ -1172,7 +1172,7 @@ else
                     echo "[[ \"\${REPLY}\" == ${delimiterVal} ]] || {"
                 fi
         elif ${nullDelimiterFlag}; then
-            if $[lseekPosFlag}; then
+            if ${lseekPosFlag}; then
                 echo """
                 lseek ${fd_read} 0 SEEK_CUR fd_read_pos"""
             else
@@ -1184,7 +1184,7 @@ else
                 { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( fd_read_pos - 1 )) | read -t 1 -r -d ''; } || {"""
               ;;
               'bash')
-                if $[lseekPosFlag}; then
+                if ${lseekPosFlag}; then
                     echo """
                 lseek ${fd_read0} 0 SEEK_CUR fd_read_pos0"""
                 else
@@ -1243,7 +1243,7 @@ echo """
     [[ \${#A[@]} == 0 ]] && {
         \${doneIndicatorFlag} || { 
           [[ -f \"${tmpDir}\"/.done ]] && {"""
-if $[lseekPosFlag}; then
+if ${lseekPosFlag}; then
     echo """
                 lseek ${fd_read} 0 SEEK_CUR fd_read_pos"""
                 lseek ${fd_write} 0 SEEK_CUR fd_write_pos"""
