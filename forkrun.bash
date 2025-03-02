@@ -293,6 +293,10 @@ forkrun() {
             : "${lseekFlag:=false}"
         fi
 
+        ${lseekFlag} && {
+            [[ "$(lseek $fd_read 0 )" == 0 ]] && : "${lseekOffsetFlag:=true}" || : "${lseekOffsetFlag:=false}"
+        }
+
         # determine what forkrun is using lines on stdin for
         if ${FORCE_allowCarriageReturnsFlag:-false}; then
             # NOTE: allowing carriage returns in parFunC (or its initial args) is DANGEROUS. Dont do this unless you know what you are doing.
@@ -670,10 +674,15 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         ;;
                     esac
 
-                    IFS=$'\t'
-                    read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}
-                    read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
-                    IFS=
+                    if ${lseekOffsetFlag}; then
+                        lseek $fd_read 0 SEEK_CUR fd_read_pos
+                        lseek $fd_write 0 SEEK_CUR fd_write_pos
+                    else
+                        IFS=$'\t'
+                        read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}
+                        read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
+                        IFS=
+                    fi
 
                     { ${nLinesAutoFlag} || ${nSpawnFlag}; } && nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) ))
 
@@ -1163,14 +1172,26 @@ else
                     echo "[[ \"\${REPLY}\" == ${delimiterVal} ]] || {"
                 fi
         elif ${nullDelimiterFlag}; then
-            echo """
+            if $[lseekOffsetFlag}; then
+                echo """
+                lseek ${fd_read} 0 SEEK_CUR fd_read_pos"""
+            else
+                echo """
                 IFS=\$'\\t'; read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}; IFS="""
+            fi
             case "${nullDelimiterProg}" in
               'dd') echo """
                 { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( fd_read_pos - 1 )) | read -t 1 -r -d ''; } || {"""
               ;;
-              'bash') echo """
-                IFS=\$'\\t'; read -r _ fd_read_pos0 </proc/self/fdinfo/${fd_read0}; IFS=
+              'bash')
+                if $[lseekOffsetFlag}; then
+                    echo """
+                lseek ${fd_read0} 0 SEEK_CUR fd_read_pos0"""
+                else
+                    echo """
+                IFS=\$'\\t'; read -r _ fd_read_pos0 </proc/self/fdinfo/${fd_read0}; IFS="""
+                fi
+            echo """
                 nBytes=\$(( fd_read_pos - fd_read_pos0 - \${#A[@]} ))"""
                 if ${ddAvailableFlag}; then 
                   echo """
@@ -1221,11 +1242,19 @@ echo """
 echo """
     [[ \${#A[@]} == 0 ]] && {
         \${doneIndicatorFlag} || { 
-          [[ -f \"${tmpDir}\"/.done ]] && {
+          [[ -f \"${tmpDir}\"/.done ]] && {"""
+if $[lseekOffsetFlag}; then
+    echo """
+                lseek ${fd_read} 0 SEEK_CUR fd_read_pos"""
+                lseek ${fd_write} 0 SEEK_CUR fd_write_pos"""
+else
+    echo """
             IFS=\$'\\t'; 
             read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}
             read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
-            IFS=
+            IFS="""
+fi
+echo """
             [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && doneIndicatorFlag=true
           }
         }
