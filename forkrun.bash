@@ -23,6 +23,11 @@ forkrun() {
 ############################ BEGIN FUNCTION ############################
 
     trap - EXIT INT TERM HUP USR1
+    if [[ -f /usr/local/lib/bash/lseek ]]; then
+        lseekPre='/usr/local/lib/bash/lseek'
+    elif  [[ $USER == 'root' ]] && [[ -f /dev/shm/.forkrun.lseek/lseek ]]; then 
+        lseekPre='/dev/shm/.forkrun.lseek/lseek'
+    fi
 
     shopt -s extglob
 
@@ -1969,20 +1974,20 @@ _forkrun_lseek_setup() {
 
     { [[ "${lseekArch}" == 'x86_64' ]] || [[  "${lseekArch}" == 'aarch64' ]] || [[  "${lseekArch}" == 'riscv64' ]] || return 1; }
 
-    if [[ -f /usr/local/lib/bash/lseek ]]; then
-        lseekPre='/usr/local/lib/bash/lseek'
-    elif  [[ $USER == 'root' ]] && [[ -f /dev/shm/.forkrun.lseek/lseek ]]; then 
+    if  ! [[ $USER == 'root' ]] && [[ -f /dev/shm/.forkrun.lseek/lseek ]]; then 
         lseekPre='/dev/shm/.forkrun.lseek/lseek'
+    elif [[ -f /usr/local/lib/bash/lseek ]]; then
+        lseekPre='/usr/local/lib/bash/lseek'
     fi
 
     [[ ${lseekPre} ]] && {
         for cksumAlg in sha256sum sha512sum b2sum sha1sum md5sum cksum sum; do
-            type $cksumAlg &>/dev/null || { cksumAlg=''; continue; }
+            type $cksumAlg &>/dev/null && break || cksumAlg=''
         done
         [[ ${cksumAlg} ]] && {
             cksumVal="$($cksumAlg "$lseekPre")"
-            cksumVal="${cksumVal%%lseek*}"
-            cksumAll="$(curl "https://github.com/jkool702/forkrun/raw/refs/heads/${forkrunRepo}/lseek_builtin/bin/lseek.checksums" 2>/dev/null)"
+            cksumVal="${cksumVal%% *}"
+            cksumAll="$(curl 'https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/'"${forkrunRepo}"'/lseek_builtin/bin/lseek.checksums' 2>/dev/null)"
             [[ "${cksumAll}" == *"${cksumVal}"* ]] || lseekGetFlag=true
         }
     }
@@ -1994,18 +1999,16 @@ _forkrun_lseek_setup() {
     fi
     
     if ${lseekGetFlag}; then
+        ${lseekPre} && \mv -f "${lseekPre}" "${lseekPre}".old 
         case "${USER}" in
             root)
                 mkdir -p /usr/local/lib/bash
-                ${lseekPre} && \mv -f /usr/local/lib/bash/lseek /usr/local/lib/bash/lseek.old
                 [[ "${BASH_LOADABLES_PATH}" == */usr/local/lib/bash* ]] || export BASH_LOADABLES_PATH=/usr/local/lib/bash:${BASH_LOADABLES_PATH}
                 curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/lseek_builtin/bin/lseek.'"${lseekArch}" || lseekCurlFailedFlag=true
 
             ;;
             *)
                 mkdir -p /dev/shm/.forkrun.lseek
-                [[ -f /dev/shm/.forkrun.lseek/lseek ]] && lseekPre=true 
-                ${lseekPre} && \mv -f /dev/shm/.forkrun.lseek/lseek /dev/shm/.forkrun.lseek/lseek.old
                 [[ "${BASH_LOADABLES_PATH}" == */dev/shm/.forkrun.lseek* ]] || export BASH_LOADABLES_PATH=/dev/shm/.forkrun.lseek:${BASH_LOADABLES_PATH}
                 curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/lseek_builtin/bin/lseek.'"${lseekArch}" || lseekCurlFailedFlag=true
             ;;
