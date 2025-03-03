@@ -9,7 +9,7 @@
 #include "builtins.h"
 #include "shell.h"
 
-#define PROC_STAT_FIELDS 44  // Number of fields in /proc/pid/stat
+#define PROC_STAT_FIELDS 44
 #define MAX_STAT_LEN 1024
 
 static long parse_stat_field(const char *stat, int field) {
@@ -17,7 +17,6 @@ static long parse_stat_field(const char *stat, int field) {
     int current_field = 1;
     int in_comm = 0;
     
-    // Skip past the comm field which may contain spaces
     if(*p == '(') {
         in_comm = 1;
         p++;
@@ -27,17 +26,20 @@ static long parse_stat_field(const char *stat, int field) {
         if(!in_comm) {
             if(*p == ' ') current_field++;
         } else {
-            if(*p == ')') in_comm = 0;
+            if(*p == ')') {
+                in_comm = 0;
+                current_field++;  // Account for end of comm field
+            }
         }
         p++;
-        while(*p == ' ') p++; // Skip spaces between fields
+        while(*p == ' ') p++;
     }
     
     return strtol(p, NULL, 10);
 }
 
 int get_cpu_usage_builtin(WORD_LIST *list) {
-    long total = 0;
+    unsigned long long total = 0;
     WORD_LIST *l;
 
     for(l = list; l; l = l->next) {
@@ -61,18 +63,18 @@ int get_cpu_usage_builtin(WORD_LIST *list) {
             long stime = parse_stat_field(stat_buf, 15);
             long cutime = parse_stat_field(stat_buf, 16);
             long cstime = parse_stat_field(stat_buf, 17);
-            total += utime + stime + cutime + cstime;
+            total += (unsigned long long)utime + stime + cutime + cstime;
         }
     }
 
-    printf("%ld\n", total);
+    printf("%llu\n", total);
     return EXECUTION_SUCCESS;
 }
 
 struct builtin get_cpu_usage_struct = {
-    "get_cpu_usage",
+    (char *)"get_cpu_usage",
     get_cpu_usage_builtin,
     BUILTIN_ENABLED,
-    "Calculate total CPU ticks for given PIDs",
-    "get_cpu_usage pid1 [pid2 ... pidN]"
+    (char *)"Calculate total CPU ticks for given PIDs",
+    (char *)"get_cpu_usage pid1 [pid2 ... pidN]"
 };

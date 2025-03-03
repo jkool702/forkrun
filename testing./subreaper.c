@@ -1,4 +1,3 @@
-* subreaper.c - Enable child subreaper */
 #include <sys/prctl.h>
 #include "config.h"
 #include "builtins.h"
@@ -13,9 +12,9 @@ int subreaper_builtin(WORD_LIST *list) {
 }
 
 struct builtin subreaper_struct = {
-    "subreaper",
+    (char *)"subreaper",  // Explicit cast for name
     subreaper_builtin,
     BUILTIN_ENABLED,
-    "Set process as child subreaper",
+    (char *)"Set process as child subreaper",  // Cast for short_doc
     NULL
 };

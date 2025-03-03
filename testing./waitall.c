@@ -1,4 +1,3 @@
-/* waitall.c - Wait for all children */
 #include <sys/wait.h>
 #include "config.h"
 #include "builtins.h"
@@ -12,9 +11,9 @@ int waitall_builtin(WORD_LIST *list) {
 }
 
 struct builtin waitall_struct = {
-    "waitall",
+    (char *)"waitall",
     waitall_builtin,
     BUILTIN_ENABLED,
-    "Reap all zombie children",
+    (char *)"Reap all zombie children",
     NULL
 };
