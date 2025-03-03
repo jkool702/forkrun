@@ -908,9 +908,11 @@ _forkrun_get_load() {
                     (( ${#A[@]} == 0 )) && continue
                     runLines=(${A[@]%%,*})
                     runTime=(${A[@]##*,})
+                    runLines=(${runLines[@]##*(0)})
+                    runTime=(${runTime[@]##*(0)})
                     IFS='+'
-                    runLinesA[${kkProcs}]=$(( runLinesA[${kkProcs}] + "${runLines[*]##*(0)}" ))
-                    runTimeA[${kkProcs}]=$(( runTimeA[${kkProcs}] + "${runTime[*]##*(0)}" ))
+                    runLinesA[${kkProcs}]=$(( runLinesA[${kkProcs}] + "${runLines[*]}" ))
+                    runTimeA[${kkProcs}]=$(( runTimeA[${kkProcs}] + "${runTime[*]}" ))
                     IFS=' '
 
                     # update count of lines / time for lines arriving on stdin
