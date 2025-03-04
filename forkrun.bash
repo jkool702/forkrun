@@ -23,11 +23,6 @@ forkrun() {
 ############################ BEGIN FUNCTION ############################
 
     trap - EXIT INT TERM HUP USR1
-    if [[ -f /usr/local/lib/bash/lseek ]]; then
-        lseekPre='/usr/local/lib/bash/lseek'
-    elif  [[ $USER == 'root' ]] && [[ -f /dev/shm/.forkrun.lseek/lseek ]]; then 
-        lseekPre='/dev/shm/.forkrun.lseek/lseek'
-    fi
 
     shopt -s extglob
 
@@ -79,7 +74,7 @@ forkrun() {
                     continue
                 fi
                 if [[ "${nLines0}" == +([0-9])*','+([0-9])* ]]; then
-                    nLinesMax="$(_forkrun_getVal "${nLines0##*,}")"
+                    _forkrun_getVal nLinesMax "${nLines0##*,}"
                     nLines="${nLines0%%,*}"
                 else
                     nLines="${nLines0}"
@@ -88,10 +83,10 @@ forkrun() {
 
             -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))?(*([[:space:]])+([0-9])*))
                 if [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))*([[:space:]])+([0-9])* ]]; then
-                    nLinesReadLimit="$(_forkrun_getVal "${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))*([[:space:]]))}")"
+                    _forkrun_getVal nLinesReadLimit "${1##@(-?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max))*([[:space:]]))}"
                     nLinesReadLimitFlag=true
                 elif [[ "${1}" == -?(-)n?(line?(s)+(?(-)lim?(it)|?(-)max)) ]] && [[ "${2}" == +([0-9])* ]]; then
-                    nLinesReadLimit="$(_forkrun_getVal "${2}")"
+                    _forkrun_getVal nLinesReadLimit "${2}"
                     nLinesReadLimitFlag=true
                     shift 1
                 fi
@@ -335,7 +330,7 @@ forkrun() {
                 nBytes="${nBytes%,*}"
             }
 
-            nBytes="$(_forkrun_getVal "${nBytes}")"
+            _forkrun_getVal nBytes "${nBytes}"
 
             # make sure nBytes is only digits
             [[ "${nBytes//[0-9]/}" ]] && (( ${verboseLevel} >= 0 )) && { 
@@ -379,7 +374,7 @@ forkrun() {
 
         else
             # set batch size
-            { [[ ${nLines} ]] && { nLines="$(_forkrun_getVal "${nLines}")"; (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; }; } || : "${nLinesAutoFlag:=true}"
+            { [[ ${nLines} ]] && { _forkrun_getVal nLines "${nLines}"; (( ${nLines} > 0 )) && : "${nLinesAutoFlag:=false}"; }; } || : "${nLinesAutoFlag:=true}"
             { [[ -z ${nLines} ]] || [[ ${nLines} == 0 ]]; } && nLines=1
         fi
 
@@ -391,9 +386,9 @@ forkrun() {
 
         [[ "${nProcs}" == *','* ]] && {
             : "${nSpawnFlag:=true}"
-            nProcsMax="$(_forkrun_getVal "${nProcs#*,}")"
+            _forkrun_getVal nProcsMax "${nProcs#*,}"
         }
-        nProcs="$(_forkrun_getVal "${nProcs%%,*}")"
+        _forkrun_getVal nProcs "${nProcs%%,*}"
 
         : "${nSpawnFlag:=false}"
         
@@ -2071,6 +2066,11 @@ _forkrun_getVal() {
     #         1k =  1K =  1kb =  1KB = 1000
 
     local +i -l nn
+    local vOut
+
+    local -n vOut="$1"
+    shift 1
+    local -g vOut
 
     (( ${#pMap[@]} == 20 )) || local -Ag pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10 [ki]=1 [mi]=2 [gi]=3 [ti]=4 [pi]=5 [ei]=6 [zi]=7 [yi]=8 [ri]=9 [qi]=10)
      
@@ -2078,13 +2078,14 @@ _forkrun_getVal() {
         [[ ${nn} ]] || continue
         case "${nn// /}" in
             *'i'|'+'*)
-                printf '%s\n' "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn##*[0-9]}]:-0} ) ))"
+                printf -v vOut '%s\n' "$(( ${nn//[^0-9]/} << ( 10 * ${pMap[${nn##*[0-9]}]:-0} ) ))"
             ;;
             *)
-                printf '%s\n' "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
+                printf -v vOut '%s\n' "$(( ${nn//[^0-9]/} * ( 1000 ** ${pMap[${nn: -1}]:-0} ) ))"
             ;;
         esac
     done
+    local +n vOut
 }
 
 # export -fp _forkrun_get_load &>/dev/null && export -nf _forkrun_get_load
