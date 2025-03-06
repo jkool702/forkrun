@@ -28,10 +28,10 @@ forkrun() {
 
     # make all variables local
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax  
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag inotifyFlag lseekFlag lseekPosFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pNotify_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
-    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel pLOAD_max pLOAD_target pAd pAdd_sysLoad pAdd_lineRated tStart tStart0 fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime inLines0 inTime0 inLines1 inTime1 inLinesDelta inTimeDelta pAddCount pAddMin pAddSum pAddMax 
-    local -a A p_PID p_PID0 runCmd outHave outPrint pLOADA pLOADA0 runLines runTime
-    local -a -i runTimeA runLinesA pLOAD1
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 tStart0 tStart1 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag inotifyFlag lseekFlag lseekPosFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pNotify_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
+    local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel pLOAD_max pLOAD_target pAd pAdd_sysLoad pAdd_lineRated tStart fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime inLines0 inTime0 inLines1 nTime1 inLinesDelta inTimeDelta pAddCount pAddMin pAddSum pAddMax 
+    local -a A p_PID p_PID0 runCmd outHave outPrint pLOADA pLOADA0 runLines runTime waitTime
+    local -a -i runLinesA runTimeA waitTimeA pLOAD1
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -862,6 +862,7 @@ _forkrun_get_load() {
                 pAddFlag=true
                 runLinesA[0]=1
                 runTimeA[0]=1
+                waitTimeA[0]=1
                 
                 # fetch coproc source code from tmpdir
                 coprocSrcCode="$(<"${tmpDir}"/.coprocSrcCode)"
@@ -902,12 +903,16 @@ _forkrun_get_load() {
                     read -r -u ${fd_nSpawn} -t 0.1 -a A
                     (( ${#A[@]} == 0 )) && continue
                     runLines=(${A[@]%%,*})
-                    runTime=(${A[@]##*,})
+                    runTime=(${A[@]#*,})
+                    waitTime=(${runTime[@]#*,})
+                    runTime=(${runTime[@]%,*})
                     runLines=(${runLines[@]##*(0)})
                     runTime=(${runTime[@]##*(0)})
+                    waitTime=(${waitTime[@]##*(0)})
                     IFS='+'
                     runLinesA[${kkProcs}]=$(( runLinesA[${kkProcs}] + "${runLines[*]}" ))
-		    runTimeA[${kkProcs}]=$(( runTimeA[${kkProcs}] + ( ( "${runTime[*]}" ) / kkProcs ) ))
+                    runTimeA[${kkProcs}]=$(( runTimeA[${kkProcs}] + ( ( "${runTime[*]}" ) / kkProcs ) ))
+                    waitTimeA[${kkProcs}]=$(( waitTimeA[${kkProcs}] + ( ( "${waitTime[*]}" ) / kkProcs ) ))
                     IFS=' '
 
                     # update count of lines / time for lines arriving on stdin
@@ -997,7 +1002,7 @@ _forkrun_get_load() {
                     # ideally, increasing kkProcs by X% will increase lineRate_run by X%
                     # if lineRate_run increases less than this then e are starting to hit other bottlenecks and should slow down new coproc spawning
                     # requires that coprocs have been spawned (by pSpawn) at least once already
-                    (( kkProcs0 > 0 )) && pAdd=$(( ( pAdd * ( ( 1 + nProcsMax - kkProcs ) * ( ( kkProcs0 * ${runTimeA[${kkProcs0}]} * ${runLinesA[${kkProcs}]} ) / kkProcs ) ) / nProcsMax ) / ( ${runLinesA[${kkProcs0}]} * ${runTimeA[${kkProcs}]} ) ))
+                    (( kkProcs0 > 0 )) && pAdd=$(( ( ( pAdd * ( ( 1 + nProcsMax - kkProcs ) * ( ( kkProcs0 * runTimeA[${kkProcs0}] * runLinesA[${kkProcs}] ) / kkProcs ) ) / nProcsMax ) * ( runTimeA[${kkProcs}] - waitTimeA[${kkProcs}] ) ) / ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] * waitTimeA[${kkProcs}] ) ))
                     
                     # make sure estimate is between [0::pAddMax]. continue to next loop iteration if pAdd is 0 (or is somehow negative).
                     (( pAdd < 1 )) && continue
@@ -1070,9 +1075,10 @@ trap 'trap - TERM INT HUP USR1; kill -HUP ${PID0} \${BASHPID}' HUP
 trap 'trap - TERM INT HUP USR1' USR1
 
 while true; do"""
+${nSpawnFlag} && echo 'tStart0=${EPOCHREALTIME}'
 { ${nLinesAutoFlag} || ${nSpawnFlag}; } && echo "{ \${nLinesAutoFlag} || \${nSpawnFlag}; } && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
 echo """
-    read -u ${fd_continue}
+    read -r -u ${fd_continue}
     [[ -f \"${tmpDir}\"/.quit ]] && {
         printf '\n' >&${fd_continue}
         break
@@ -1153,6 +1159,7 @@ if ${readBytesFlag}; then
         ;;
     esac
 else
+    ${nSpawnFlag} && echo 'tStart1=${EPOCHREALTIME}'
     ${nLinesReadLimitFlag} && printf '%s' """read -r nLinesRead <\"${tmpDir}\"/.nLinesRead
     (( ( nLinesReadLimit - nLinesRead ) < nLinesCur )) && nLinesCur=\$(( nLinesReadLimit - nLinesRead ))
     (( nLinesCur == 0 )) && A=() || """
@@ -1174,26 +1181,15 @@ else
                     echo "[[ \"\${REPLY}\" == ${delimiterVal} ]] || {"
                 fi
         elif ${nullDelimiterFlag}; then
-            if ${lseekPosFlag}; then
-                echo """
-                lseek ${fd_read} 0 SEEK_CUR fd_read_pos"""
-            else
                 echo """
                 IFS=\$'\\t'; read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}; IFS="""
-            fi
             case "${nullDelimiterProg}" in
               'dd') echo """
                 { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( fd_read_pos - 1 )) | read -t 1 -r -d ''; } || {"""
               ;;
               'bash')
-                if ${lseekPosFlag}; then
                     echo """
-                lseek ${fd_read0} 0 SEEK_CUR fd_read_pos0"""
-                else
-                    echo """
-                IFS=\$'\\t'; read -r _ fd_read_pos0 </proc/self/fdinfo/${fd_read0}; IFS="""
-                fi
-            echo """
+                IFS=\$'\\t'; read -r _ fd_read_pos0 </proc/self/fdinfo/${fd_read0}; IFS=
                 nBytes=\$(( fd_read_pos - fd_read_pos0 - \${#A[@]} ))"""
                 if ${ddAvailableFlag}; then 
                   echo """
@@ -1277,7 +1273,6 @@ echo """
         fi
         continue
     }"""
-${nSpawnFlag} && echo 'tStart0=${EPOCHREALTIME//./}'
 { ${nLinesAutoFlag} || ${nSpawnFlag}; } && { printf '%s' """
     { \${nLinesAutoFlag} || \${nSpawnFlag}; } && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
@@ -1333,7 +1328,7 @@ ${noFuncFlag} && echo 'IFS='
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
 ${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
-${nSpawnFlag} && echo "printf '%s,%s ' \${#A[@]} \$(( \${EPOCHREALTIME//./} - tStart0 )) >&${fd_nSpawn}"
+${nSpawnFlag} && echo "printf '%s,%s,%s ' \${#A[@]} \$(( \${EPOCHREALTIME//./} - \${tStart0//./} )) \$(( \${tStart1//./} - \${tStart0//./} )) >&${fd_nSpawn}"
 echo """
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
