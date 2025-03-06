@@ -109,7 +109,8 @@ static int childusage_main(int argc, char **argv) {
 /* Wrapper: Convert WORD_LIST to argc/argv, call childusage_main, free argv */
 int childusage_builtin(WORD_LIST *list) {
     int argc;
-    char **argv = make_builtin_argv(list, &argc);
+    char **argv;
+    argv = make_builtin_argv(list, &argc);
     int ret = childusage_main(argc, argv);
     xfree(argv);
     return ret;

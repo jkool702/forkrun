@@ -907,7 +907,7 @@ _forkrun_get_load() {
                     runTime=(${runTime[@]##*(0)})
                     IFS='+'
                     runLinesA[${kkProcs}]=$(( runLinesA[${kkProcs}] + "${runLines[*]}" ))
-                    runTimeA[${kkProcs}]=$(( runTimeA[${kkProcs}] + "${runTime[*]}" ))
+		    runTimeA[${kkProcs}]=$(( runTimeA[${kkProcs}] + ( ( "${runTime[*]}" ) / kkProcs ) ))
                     IFS=' '
 
                     # update count of lines / time for lines arriving on stdin
@@ -1013,7 +1013,7 @@ _forkrun_get_load() {
                         ((kkProcs++))
                     done
                     
-                    (( ${verboseLevel} > 2 )) &&printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
+                    (( ${verboseLevel} > 2 )) && printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
 
                     # update public worker count info file
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
@@ -1984,7 +1984,7 @@ _forkrun_lseek_setup() {
         [[ ${cksumAlg} ]] && {
             cksumVal="$($cksumAlg "$lseekPre")"
             cksumVal="${cksumVal%% *}"
-            cksumAll="$(curl 'https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/'"${forkrunRepo}"'/lseek_builtin/bin/lseek.checksums' 2>/dev/null)"
+            cksumAll="$(curl 'https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/'"${forkrunRepo}"'/loadables/CHECKSUMS' 2>/dev/null)"
             [[ "${cksumAll}" == *"${cksumVal}"* ]] || lseekGetFlag=true
         }
     }
@@ -2001,13 +2001,13 @@ _forkrun_lseek_setup() {
             root)
                 mkdir -p /usr/local/lib/bash
                 [[ "${BASH_LOADABLES_PATH}" == */usr/local/lib/bash* ]] || export BASH_LOADABLES_PATH=/usr/local/lib/bash:${BASH_LOADABLES_PATH}
-                curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/lseek_builtin/bin/lseek.'"${lseekArch}" || lseekCurlFailedFlag=true
+                curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/loadables/bin/'"${lseekArch}"'/lseek' || lseekCurlFailedFlag=true
 
             ;;
             *)
                 mkdir -p /dev/shm/.forkrun.lseek
                 [[ "${BASH_LOADABLES_PATH}" == */dev/shm/.forkrun.lseek* ]] || export BASH_LOADABLES_PATH=/dev/shm/.forkrun.lseek:${BASH_LOADABLES_PATH}
-                curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/lseek_builtin/bin/lseek.'"${lseekArch}" || lseekCurlFailedFlag=true
+                curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/loadables/bin/'"${lseekArch}"'/lseek' || lseekCurlFailedFlag=true
             ;;
         esac
 
