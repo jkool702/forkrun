@@ -1002,7 +1002,7 @@ _forkrun_get_load() {
                     # ideally, increasing kkProcs by X% will increase lineRate_run by X%
                     # if lineRate_run increases less than this then e are starting to hit other bottlenecks and should slow down new coproc spawning
                     # requires that coprocs have been spawned (by pSpawn) at least once already
-                    (( kkProcs0 > 0 )) && pAdd=$(( ( ( pAdd * ( ( 1 + nProcsMax - kkProcs ) * ( ( kkProcs0 * runTimeA[${kkProcs0}] * runLinesA[${kkProcs}] ) / kkProcs ) ) / nProcsMax ) * ( runTimeA[${kkProcs}] - waitTimeA[${kkProcs}] ) ) / ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] * waitTimeA[${kkProcs}] ) ))
+                    (( kkProcs0 > 0 )) && pAdd=$(( ( ( pAdd * ( ( 1 + nProcsMax - kkProcs ) * ( ( kkProcs0 * runTimeA[${kkProcs0}] * runLinesA[${kkProcs}] ) / kkProcs ) ) / nProcsMax ) * ( ( runTimeA[${kkProcs}] << 1 ) - waitTimeA[${kkProcs}] ) ) / ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] * ( runTimeA[${kkProcs}] + ( waitTimeA[${kkProcs}] << 2 ) ) ) ))
                     
                     # make sure estimate is between [0::pAddMax]. continue to next loop iteration if pAdd is 0 (or is somehow negative).
                     (( pAdd < 1 )) && continue
