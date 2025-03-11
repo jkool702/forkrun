@@ -1,0 +1,1522 @@
+The following time profile is seperated by process ID (pid). 
+For each pid, the time for each line has been combined into a single time.
+For example:     <#>:  T sec <<--- (Nx) { cmd }     indicates that: 
+For the PID / [sub]shell nesting listed at the top of this group, at line number <#>, cmd was run N times, which had a combined run time of T seconds
+
+TOTAL COMBINED RUN TIME: 182.606671 SECONDS
+
+
+
+
+:  0.000180 sec          <<--- (1x) {  }
+TOTAL TIME FOR PID 444012 {1.3}: 9.482626 sec
+1:  0.000066 sec         <<--- (1x) { [[ -n ${tmpDirRoot} ]] }
+1:  0.000067 sec         <<--- (1x) { nOrderFlag=true }
+1:  0.000068 sec         <<--- (1x) { fPath="${tmpDir}"/.stdin }
+1:  0.000068 sec         <<--- (1x) { tmpDirRoot='/dev/shm' }
+1:  0.000069 sec         <<--- (1x) { [[ -n ${TMPDIR} ]] }
+1:  0.000069 sec         <<--- (1x) { unset tmpVar }
+1:  0.000070 sec         <<--- (1x) { [[ -d '/dev/shm' ]] }
+1:  0.000071 sec         <<--- (1x) { nProcs="${2#'+'}" }
+1:  0.000072 sec         <<--- (1x) { [[ "${2}" == ?([+-])*([0-9])*@([0-9,-])*?(,*([0-9])*) ]] }
+1:  0.000074 sec         <<--- (1x) { [[ $# == 0 ]] }
+1:  0.000074 sec         <<--- (1x) { [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s)) ]] }
+1:  0.000076 sec         <<--- (1x) { verboseLevel=$(( ${verboseLevel} + ${#tmpVar} )) }
+1:  0.000077 sec         <<--- (1x) { [ -t "${fd_stdin0}" ] }
+1:  0.000078 sec         <<--- (1x) { [[ "${1}" == -?(-)@([jP]|?(n)[Pp]roc?(s))*([[:space:]])?([+-])*([0-9])*@([0-9,-])*?(,*([0-9])*) ]] }
+1:  0.000078 sec         <<--- (1x) { tmpVar="${1##+([+-])}" }
+1:  0.000079 sec         <<--- (1x) { optParseFlag=true }
+1:  0.000083 sec         <<--- (1x) { shopt -s extglob }
+1:  0.000083 sec         <<--- (1x) { trap - EXIT INT TERM HUP USR1 }
+1:  0.000087 sec         <<--- (1x) { local -a -i runLinesA runTimeA spawnTimeA numReadA numEmptyReadA pLOAD1 }
+1:  0.000087 sec         <<--- (1x) { local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax }
+1:  0.000090 sec         <<--- (1x) { local -a A p_PID p_PID0 runCmd outHave outPrint pLOADA pLOADA0 runLines runTime }
+1:  0.000093 sec         <<--- (1x) { : "${verboseLevel:=0}" "${returnVal:=0}" "${fd_stdin0:=0}" "${nLinesReadLimitFlag:=false}" }
+1:  0.000141 sec         <<--- (2x) { [[ "${1:0:1}" == '-' ]] }
+1:  0.000155 sec         <<--- (1x) { local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel pLOAD_max pLOAD_target pAd pAdd_sysLoad pAdd_lineRated tStart fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime inLines0 inTime0 inLines1 nTime1 inLinesDelta inTimeDelta pAddCount pAddMin pAddSum pAddMax }
+1:  0.000176 sec         <<--- (1x) { local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 tStart0 tStart1 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag inotifyFlag lseekFlag lseekPosFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pNotify_PID pOrder_PID pAuto_PID pSpawn_PID DEBUG_FORKRUN }
+1:  0.000227 sec         <<--- (3x) { [[ ${#} == 0 ]] }
+1:  0.000280 sec         <<--- (4x) { shift 1 }
+1:  0.000286 sec         <<--- (4x) { (( $# > 0  )) }
+1:  0.000302 sec         <<--- (4x) { [[ "$1" == [-+]* ]] }
+1:  0.000331 sec         <<--- (4x) { ${optParseFlag} }
+1:  0.000366 sec         <<--- (4x) { case "${1}" in  }
+1:  0.001577 sec         <<--- (1x) { mkdir -p "${tmpDir}"/.run }
+1:  0.004011 sec         <<--- (1x) { tmpDir="$(mktemp -p "${tmpDirRoot}" -d .forkrun.XXXXXX)" }
+5:  0.000101 sec         <<--- (1x) { forkrun -vvvv -j - -k xxhsum -H3 }
+31:  0.000668 sec        <<--- (1x) { cat }
+32:  9.472146 sec        <<--- (2x) { forkrun -vvvv -j - -k xxhsum -H3 }
+
+
+TOTAL TIME FOR PID 444067 {1.4}: 0.000789 sec
+1:  0.000789 sec         <<--- (1x) { tmpDir="$(mktemp -p "${tmpDirRoot}" -d .forkrun.XXXXXX)" }
+
+
+TOTAL TIME FOR PID 444073 {1.4}: 1.705828 sec
+1:  0.000061 sec         <<--- (1x) { continueFlag=false }
+1:  0.000062 sec         <<--- (1x) { [[ -n ${nn} ]] }
+1:  0.000062 sec         <<--- (1x) { [[ -z ${delimiterVal} ]] }
+1:  0.000063 sec         <<--- (1x) { delimiterVal='$'"'"'\n'"'" }
+1:  0.000063 sec         <<--- (1x) { [[ -n ${nProcsMax//0/} ]] }
+1:  0.000063 sec         <<--- (1x) { noFuncFlag=false }
+1:  0.000063 sec         <<--- (1x) { outStr='>"'"${tmpDir}"'"/.out/x${nOrder}' }
+1:  0.000063 sec         <<--- (1x) { shift 1 }
+1:  0.000064 sec         <<--- (1x) { : "${nSpawnFlag:=true}" }
+1:  0.000064 sec         <<--- (1x) { (( ${#pMap[@]} == 20 )) }
+1:  0.000064 sec         <<--- (1x) { local -g vOut }
+1:  0.000065 sec         <<--- (1x) { continue }
+1:  0.000066 sec         <<--- (1x) { ${fallocateFlag} }
+1:  0.000066 sec         <<--- (1x) { [[ "${nProcs}" == '-'* ]] }
+1:  0.000066 sec         <<--- (1x) { continueFlag=true }
+1:  0.000066 sec         <<--- (1x) { local +i -l nn }
+1:  0.000066 sec         <<--- (1x) { [[ -n ${nProcs} ]] }
+1:  0.000066 sec         <<--- (1x) { outCur=10 }
+1:  0.000066 sec         <<--- (1x) { [[ -z ${nLines} ]] }
+1:  0.000067 sec         <<--- (1x) { (( ${nProcs} < ${nProcsMax} )) }
+1:  0.000067 sec         <<--- (1x) { nLinesCur=${nLines} }
+1:  0.000067 sec         <<--- (1x) { nProcs="${nProcs#'-'}" }
+1:  0.000068 sec         <<--- (1x) { [[ "${nProcs}" == *','* ]] }
+1:  0.000068 sec         <<--- (1x) { : "${nSpawnFlag:=false}" }
+1:  0.000068 sec         <<--- (1x) { echo 'using fallocate to shrink the tmpfile containing stdin as forkrun runs' }
+1:  0.000068 sec         <<--- (1x) { LANG=C }
+1:  0.000068 sec         <<--- (1x) { local -n vOut="$1" }
+1:  0.000068 sec         <<--- (1x) { local vOut }
+1:  0.000068 sec         <<--- (1x) { [[ -n ${nLines} ]] }
+1:  0.000068 sec         <<--- (1x) { nLines=1 }
+1:  0.000068 sec         <<--- (1x) { (( nLinesMax < nLines )) }
+1:  0.000069 sec         <<--- (1x) { ${FORCE_allowCarriageReturnsFlag:-false} }
+1:  0.000069 sec         <<--- (1x) { : "${lseekFlag:=true}" }
+1:  0.000069 sec         <<--- (1x) { : "${lseekPosFlag:=true}" }
+1:  0.000069 sec         <<--- (1x) { ${subshellRunFlag} }
+1:  0.000069 sec         <<--- (1x) { echo "(-v) Verbosity Level: ${verboseLevel}" }
+1:  0.000069 sec         <<--- (1x) { exitTrapStr+='printf '"'"'0\n'"'"' >&'"${fd_nAuto}"'; ''$'\n'' }
+1:  0.000069 sec         <<--- (1x) { IFS= }
+1:  0.000069 sec         <<--- (1x) { printf '(-t) forkrun tmpdir will be under %s\n' "${tmpDirRoot}" }
+1:  0.000070 sec         <<--- (1x) { nProcs=$(( 1 + ( ${nCPU} / 4 )  )) }
+1:  0.000071 sec         <<--- (1x) { echo 'using inotify to efficiently wait for slow inputs on stdin' }
+1:  0.000071 sec         <<--- (1x) { (( nCPU < 1 )) }
+1:  0.000072 sec         <<--- (1x) { ${stdinRunFlag} }
+1:  0.000072 sec         <<--- (1x) { [[ -n ${DEBUG_FORKRUN} ]] }
+1:  0.000072 sec         <<--- (1x) { (( nLinesMax < 2 * nLines )) }
+1:  0.000073 sec         <<--- (1x) { : "${fallocateFlag:=true}" }
+1:  0.000073 sec         <<--- (1x) { : "${nLinesAutoFlag:=true}" }
+1:  0.000073 sec         <<--- (1x) { echo '(-k) output will be ordered the same as if the inputs were run sequentially' }
+1:  0.000073 sec         <<--- (1x) { nProcsMax=$(( ${nCPU} * 2 )) }
+1:  0.000073 sec         <<--- (1x) { printf '(-L) automatically adjusting batch size (lines per function call). initial = %s line(s). maximum = %s line(s).\n' "${nLines}" "${nLinesMax}" }
+1:  0.000073 sec         <<--- (1x) { printf 'tmpdir: %s\n' "${tmpDir}" }
+1:  0.000074 sec         <<--- (1x) { exitTrapStr+='echo "-1 -1" >&'"${fd_nSpawn}"'; ''$'\n'' }
+1:  0.000074 sec         <<--- (1x) { PID0="${BASHPID}" }
+1:  0.000075 sec         <<--- (1x) { exitTrapStr_kill+="${pWrite_PID} " }
+1:  0.000076 sec         <<--- (1x) { shopt -s nullglob }
+1:  0.000077 sec         <<--- (1x) { : "${inotifyFlag:=true}" }
+1:  0.000077 sec         <<--- (1x) { doneIndicatorFlag=false }
+1:  0.000077 sec         <<--- (1x) { echo 'using "lseek" loadable builtin to read data faster and more efficiently' }
+1:  0.000077 sec         <<--- (1x) { trap 'trap - TERM INT HUP USR1; $'\n'        returnVal=1; $'\n'        kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); $'\n'        kill -INT $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" INT }
+1:  0.000078 sec         <<--- (1x) { exitTrapStr=': >"'"${tmpDir}"'"/.done;$'\n': >"'"${tmpDir}"'"/.quit;$'\n'kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; ''$'\n'' }
+1:  0.000078 sec         <<--- (1x) { exitTrapStr_kill+="${pSpawn_PID} " }
+1:  0.000078 sec         <<--- (1x) { printf '\n------------------------------------------\n\n' }
+1:  0.000079 sec         <<--- (1x) { break }
+1:  0.000079 sec         <<--- (1x) { printf '\nSET TRAPS:\n\n' }
+'/}") }00079 sec         <<--- (1x) { runCmd=("${@//'
+1:  0.000079 sec         <<--- (1x) { tStart="${EPOCHREALTIME//./}" }
+1:  0.000080 sec         <<--- (1x) { exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; ''$'\n'' }
+1:  0.000080 sec         <<--- (1x) { exitTrapStr_kill+="${pOrder_PID} " }
+1:  0.000080 sec         <<--- (1x) { printf '\n' >&${fd_nSpawn0} }
+1:  0.000081 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+1:  0.000081 sec         <<--- (1x) { printf '(-j|-P) initial / max workers: %s / %s. workers will be dynamically spawned (up to a maximum of %s workers)\n' "${nProcs}" "${nProcsMax}" "${nProcsMax}" }
+1:  0.000082 sec         <<--- (1x) { exitTrapStr+=': > "'"${tmpDir}"'"/.stdin; ''$'\n'' }
+1:  0.000082 sec         <<--- (1x) { local -i nProcs="${nProcs}" nProcsMax="${nProcsMax}" nLines="${nLines}" nLinesMax="${nLinesMax}" }
+1:  0.000083 sec         <<--- (1x) { enable lseek &> /dev/null }
+1:  0.000084 sec         <<--- (1x) { trap 'trap - TERM INT HUP USR1; $'\n'        returnVal=1; $'\n'        kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); $'\n'        kill -HUP $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" HUP }
+1:  0.000085 sec         <<--- (1x) { printf '\n' >&${fd_continue} }
+1:  0.000085 sec         <<--- (1x) { printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr} }
+1:  0.000086 sec         <<--- (1x) { exitTrapStr_kill+="${pNotify_PID} " }
+1:  0.000091 sec         <<--- (1x) { (( ${verboseLevel} > 0 )) }
+1:  0.000091 sec         <<--- (1x) { printf '%s\n' "${pSpawn_PID}" > "${tmpDir}"/.run/pSpawn }
+1:  0.000093 sec         <<--- (1x) { : "${noFuncFlag:=false}" "${readBytesFlag:=false}" "${readBytesExactFlag:=false}" "${nullDelimiterFlag:=false}" "${FORCE_allowCarriageReturnsFlag:=false}" }
+1:  0.000094 sec         <<--- (1x) { trap 'trap - TERM INT HUP USR1; $'\n'        returnVal=1; $'\n'        kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null); $'\n'        kill -TERM $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) '"${PID0}" TERM }
+1:  0.000098 sec         <<--- (1x) { LC_ALL=C }
+1:  0.000098 sec         <<--- (1x) { pNotify_PID="$(< "${tmpDir}"/.run/pNotify)" }
+1:  0.000103 sec         <<--- (1x) { : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=1024}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" "${stdinRunFlag:=false}" }
+1:  0.000103 sec         <<--- (1x) { printf '\n\nALL HELPER COPROCS FORKED\n\n' >&${fd_stderr} }
+1:  0.000104 sec         <<--- (1x) { outCur="${outCur}00" }
+1:  0.000105 sec         <<--- (1x) { printf '%s\n' "${pAuto_PID}" > "${tmpDir}"/.run/pAuto }
+1:  0.000110 sec         <<--- (1x) { declare -p fd_continue fd_inotify fd_nAuto fd_nOrder fd_nOrder0 fd_nSpawn fd_read fd_write fd_stdin fd_stdout fd_stderr }
+1:  0.000110 sec         <<--- (1x) { trap "${exitTrapStr}" EXIT }
+1:  0.000112 sec         <<--- (1x) { source /proc/self/fd/0 >&${fd_inotify0} }
+1:  0.000121 sec         <<--- (1x) { echo '0' > "${tmpDir}"/.lastReadPos }
+1:  0.000128 sec         <<--- (1x) { exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; ''$'\n'' }
+1:  0.000130 sec         <<--- (2x) { ${nullDelimiterFlag} }
+1:  0.000131 sec         <<--- (2x) { (( ${#runCmd[@]} > 0 )) }
+1:  0.000132 sec         <<--- (1x) { local -Ag pMap=([k]=1 [m]=2 [g]=3 [t]=4 [p]=5 [e]=6 [z]=7 [y]=8 [r]=9 [q]=10 [ki]=1 [mi]=2 [gi]=3 [ti]=4 [pi]=5 [ei]=6 [zi]=7 [yi]=8 [ri]=9 [qi]=10) }
+1:  0.000132 sec         <<--- (2x) { ${substituteStringIDFlag} }
+1:  0.000132 sec         <<--- (2x) { ${unescapeFlag} }
+1:  0.000134 sec         <<--- (1x) { exitTrapStr+='trap - INT TERM HUP USR1; $'\n'        return ${returnVal:-0}' }
+1:  0.000134 sec         <<--- (1x) { hash "${runCmd[0]}" &> /dev/null }
+1:  0.000135 sec         <<--- (2x) { ${substituteStringFlag} }
+1:  0.000136 sec         <<--- (2x) { ${exportOrderFlag} }
+1:  0.000137 sec         <<--- (1x) { type -a fallocate &> /dev/null }
+1:  0.000140 sec         <<--- (1x) { exitTrapStr+='cat </dev/null "'"${tmpDir}"'"/.out/x* >&'"${fd_stdout}"'; ''$'\n'' }
+1:  0.000144 sec         <<--- (1x) { printf '%s\n' "${coprocSrcCode}" > "${tmpDir}"/.coprocSrcCode }
+1:  0.000147 sec         <<--- (1x) { type -a inotifywait &> /dev/null }
+1:  0.000150 sec         <<--- (1x) { exitTrapStr+='kill $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null;$'\n'        kill -9 '"${exitTrapStr_kill}"' 2>/dev/null; $'\n'        kill -9 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; ''$'\n'' }
+1:  0.000163 sec         <<--- (2x) { ${inotifyFlag} }
+1:  0.000164 sec         <<--- (2x) { (( ${verboseLevel} > 3 )) }
+1:  0.000188 sec         <<--- (1x) { trap -p }
+1:  0.000198 sec         <<--- (1x) { printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}" }
+1:  0.000205 sec         <<--- (3x) { ${noFuncFlag} }
+1:  0.000208 sec         <<--- (3x) { ${lseekFlag} }
+1:  0.000210 sec         <<--- (3x) { ${readBytesFlag} }
+1:  0.000211 sec         <<--- (3x) { ${nLinesReadLimitFlag} }
+1:  0.000217 sec         <<--- (1x) { read -r -u ${fd_nSpawn0} }
+1:  0.000261 sec         <<--- (3x) { ${rmTmpDirFlag} }
+1:  0.000287 sec         <<--- (1x) { printf 'nLines (final) = %s    ( max = %s )\n' "$(< "${tmpDir}"/.nLines)" "${nLinesMax}" }
+1:  0.000336 sec         <<--- (5x) { ${pipeReadFlag} }
+1:  0.000354 sec         <<--- (3x) { (( ${verboseLevel} > 1 )) }
+1:  0.000403 sec         <<--- (5x) { ${nOrderFlag} }
+1:  0.000455 sec         <<--- (5x) { ${nLinesAutoFlag} }
+1:  0.000514 sec         <<--- (1x) { : "${writeFileProgType:=1}" }
+1:  0.000579 sec         <<--- (1x) { printf '%s\n' {10..89} >&${fd_nOrder} }
+1:  0.000587 sec         <<--- (1x) { printf '%s\n' ${nLines} > "${tmpDir}"/.nLines }
+1:  0.000643 sec         <<--- (1x) { echo '1 1' > "${tmpDir}"/.stdin_lines_time }
+1:  0.000857 sec         <<--- (9x) { ${nSpawnFlag} }
+1:  0.001434 sec         <<--- (1x) { mkdir -p "${tmpDir}"/.out }
+1:  0.001713 sec         <<--- (1x) { mkdir -p "${tmpDir}"/.run }
+1:  0.002214 sec         <<--- (1x) { [[ "$(lseek $fd_read 0)" == 0 ]] }
+1:  0.002571 sec         <<--- (1x) { printf '\n\n------------------- FLAGS INFO -------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")" }
+1:  0.002954 sec         <<--- (1x) { mapfile -t runCmd < <(printf '%q\n' "${runCmd[@]}") }
+1:  0.003878 sec         <<--- (1x) { : > "${fPath}" }
+1:  0.007286 sec         <<--- (1x) { printf '(%s) delimiter: %s\n' "$([[ "${delimiterVal}" == '$'"'"'\n'"'" ]] && echo '--' || echo '-d')" "${delimiterVal}" }
+1:  0.007773 sec         <<--- (1x) { nCPU="$({ type -a nproc &> /dev/null && nproc; } || { type -a grep &> /dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA < /proc/cpuinfo && tmpA=("${tmpA[@]//processor*/''}") && tmpA=("${tmpA[@]//!('')/}") && tmpA=("${tmpA[@]//''/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')" }
+1:  0.014490 sec         <<--- (2x) { _forkrun_getVal nProcs "${nProcs%%,*}" }
+1:  0.026959 sec         <<--- (354x) { outPrint=() }
+1:  0.027139 sec         <<--- (362x) { [[ ${#outPrint[@]} == 128 ]] }
+1:  0.027389 sec         <<--- (362x) { ((outCur++)) }
+1:  0.027492 sec         <<--- (362x) { [[ "${outCur}" == +(9)+(0) ]] }
+1:  0.027990 sec         <<--- (362x) { [[ ${#outPrint[@]} == 0 ]] }
+1:  0.028137 sec         <<--- (362x) { ${continueFlag} }
+1:  0.028876 sec         <<--- (362x) { [[ "${outHave[${outCur}]}" == 1 ]] }
+1:  0.028912 sec         <<--- (362x) { outPrint+=("${tmpDir}/.out/x${outCur}") }
+1:  0.028917 sec         <<--- (362x) { [[ -f "${tmpDir}"/.quit ]] }
+1:  0.029117 sec         <<--- (362x) { unset "outHave[${outCur}]" }
+1:  0.029589 sec         <<--- (362x) { outHave[${REPLY}]=1 }
+1:  0.045887 sec         <<--- (1x) { wait "${p_PID[@]}" "${pSpawn_PID}" &> /dev/null }
+1:  0.054609 sec         <<--- (14x) { printf 'final worker process count: %s\n' "$(< "${tmpDir}"/.nWorkers)" >&${fd_stderr} }
+1:  0.062122 sec         <<--- (724x) { [[ -n "${outHave[${outCur}]}" ]] }
+1:  0.094540 sec         <<--- (362x) { read -r -u ${fd_nOrder0} }
+1:  0.115380 sec         <<--- (1x) { coprocSrcCode="$(echo """$'\n'local p{<#>} p{<#>}_PID$'\n'$'\n'{ coproc p{<#>} {$'\n'export LC_ALL=C LANG=C IFS=$'\n'$'\n'echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}$'\n'$'\n'trap ': >\"${tmpDir}\"/.quit; $'\n'[[ -f \"${tmpDir}\"/.run/p{<#>} ]] && \\rm -f \"${tmpDir}\"/.run/p{<#>}; $'\n'printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT$'\n'$'\n'trap 'trap - TERM INT HUP USR1; kill -INT ${PID0} \${BASHPID}' INT$'\n'trap 'trap - TERM INT HUP USR1; kill -TERM ${PID0} \${BASHPID}' TERM$'\n'trap 'trap - TERM INT HUP USR1; kill -HUP ${PID0} \${BASHPID}' HUP$'\n'trap 'trap - TERM INT HUP USR1' USR1$'\n'$'\n'while true; do"""$'\n'{ ${nLinesAutoFlag} || ${nSpawnFlag}; } && echo "{ \${nLinesAutoFlag} || \${nSpawnFlag}; } && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"$'\n'echo """$'\n'    read -r -u ${fd_continue} _$'\n'    [[ -f \"${tmpDir}\"/.quit ]] && {$'\n'        printf '\n' >&${fd_continue}$'\n'        break$'\n'    }$'\n'    [[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true"""$'\n'if ${readBytesFlag}; then$'\n'    case "${readBytesProg}" in $'\n'        'dd')$'\n'            printf 'dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>} 2>"%s"/.stdin.tmp-status.{<#>} ' "${nBytes}" "${tmpDir}" "${tmpDir}"$'\n'${pipeReadFlag} && printf 'iflag=fullblock <&%s\n' "${fd_stdin}" || printf '<&%s\n' "${fd_read}"$'\n'printf '[[ "$(<"%s"/.stdin.tmp-status.{<#>})" == *$'"'"'\\n'"'"'"0 bytes"* ]] && A=() || A[0]=1\n' "${tmpDir}"$'\n'        ;;$'\n'        'head')$'\n'            printf 'head -c %s ' "${nBytes}"$'\n'${pipeReadFlag} && printf '<&%s ' "${fd_stdin}" || printf '<&%s ' "${fd_read}"$'\n'printf '>"%s"/.stdin.tmp.{<#>}\n' "${tmpDir}"$'\n'printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] 2>/dev/null && A[0]=1 || A=()\n' "${tmpDir}"$'\n'        ;;$'\n'        'bash')$'\n'            if ${stdinRunFlag}; then$'\n'                [[ -n ${tTimeout} ]] && echo "SECONDS=0"$'\n'printf 'if read -r -d '"''"' -n %s -u %s' "${nBytes}" "${fd_read}"$'\n'[[ -n ${tTimeout} ]] && printf ' -t %s' "${tTimeout}"$'\n'echo """; then$'\n'                [[ \${REPLY} ]] && A=(\"\${REPLY}\") || A=('')$'\n'                trailingNullFlag=true"""$'\n'${readBytesExactFlag} && echo 'nBytesRead=1'$'\n'echo """$'\n'            else$'\n'                [[ \${REPLY} ]] && A=(\"\${REPLY}\") || A=()$'\n'                trailingNullFlag=false"""$'\n'${readBytesExactFlag} && echo 'nBytesRead=0'$'\n'echo 'fi'$'\n'if ${readBytesExactFlag}; then$'\n'                    echo """$'\n'            nBytesRead+=\${#REPLY}$'\n'            [[ \${nBytesRead} == 0 ]] || (( \${nBytesRead} >= ${nBytes} )) || {"""$'\n'[[ -n ${tTimeout} ]] && echo "while (( \${SECONDS} < ${tTimeout} )); do" || echo "while true; do"$'\n'echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true"$'\n'printf "if read -r -d '' -n \$(( ${nBytes} - \${nBytesRead} )) -u ${fd_read}"$'\n'[[ -n ${tTimeout} ]] && printf ' -t %s' "${tTimeout}"$'\n'echo """; then$'\n'                    ((nBytesRead++))$'\n'                    nBytesRead+=\${#REPLY}$'\n'                    [[ \${REPLY} ]] && A+=(\"\${REPLY}\") || A+=('')$'\n'                    (( \${nBytesRead} >= ${nBytes} )) && { trailingNullFlag=true; break; }$'\n'                else$'\n'                    trailingNullFlag=false$'\n'                    [[ \${REPLY} ]] && A+=(\"\${REPLY}\")$'\n'                    { (( \${nBytesRead} >= ${nBytes} )) || ${doneIndicatorFlag}; } && { trailingNullFlag=false; break; }$'\n'                    break$'\n'                fi$'\n'            done$'\n'        }""";$'\n'                fi$'\n'echo """$'\n'        {$'\n'            if \${trailingNullFlag}; then$'\n'                printf '%s\0' \"\${A[@]}\" $'\n'            else$'\n'                printf '%s' \"\${A[0]}\" $'\n'                printf '\0%s' \"\${A[@]:1}\"$'\n'            fi $'\n'        } >\"${tmpDir}\"/.stdin.tmp.{<#>}""";$'\n'            else$'\n'                printf 'read -r -N %s -u ' "${nBytes}"$'\n'if ${readBytesExactFlag}; then$'\n'                    printf '%s ' "${fd_stdin}"$'\n'[[ -n ${tTimeout} ]] && printf '-t %s ' "${tTimeout} ";$'\n'                else$'\n'                    printf '%s ' ${fd_read};$'\n'                fi$'\n'echo '-a A';$'\n'            fi$'\n'        ;;$'\n'    esac;$'\n'else$'\n'    ${nLinesReadLimitFlag} && printf '%s' """read -r nLinesRead <\"${tmpDir}\"/.nLinesRead$'\n'    (( ( nLinesReadLimit - nLinesRead ) < nLinesCur )) && nLinesCur=\$(( nLinesReadLimit - nLinesRead ))$'\n'    (( nLinesCur == 0 )) && A=() || """$'\n'printf '%s ' "mapfile"$'\n'${lseekFlag} && printf '%s ' '-t'$'\n'printf '%s ' '-n' "\${nLinesCur}" '-u'$'\n'${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}$'\n'{ ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'$'\n'echo "${delimiterReadStr} A"$'\n'${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || { echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"$'\n'if ${lseekFlag}; then$'\n'        echo """$'\n'                lseek ${fd_read} -1$'\n'                read -r -u ${fd_read} -N 1"""$'\n'if ${nullDelimiterFlag}; then$'\n'            echo "[[ \${#REPLY} == 0 ]] || {";$'\n'        else$'\n'            echo "[[ \"\${REPLY}\" == ${delimiterVal} ]] || {";$'\n'        fi;$'\n'    else$'\n'        if ${nullDelimiterFlag}; then$'\n'            echo """$'\n'                IFS=\$'\\t'; read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}; IFS="""$'\n'case "${nullDelimiterProg}" in $'\n'                'dd')$'\n'                    echo """$'\n'                { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( fd_read_pos - 1 )) | read -t 1 -r -d ''; } || {"""$'\n'                ;;$'\n'                'bash')$'\n'                    echo """$'\n'                IFS=\$'\\t'; read -r _ fd_read_pos0 </proc/self/fdinfo/${fd_read0}; IFS=$'\n'                nBytes=\$(( fd_read_pos - fd_read_pos0 - \${#A[@]} ))"""$'\n'if ${ddAvailableFlag}; then$'\n'                        echo """$'\n'                    {$'\n'                        if (( \${nBytes}  > 65535 )); then$'\n'                            { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( fd_read_pos - 1 )) | read -t 1 -r -d ''; } $'\n'                        else$'\n'                            read -r -u ${fd_read0} -N \${nBytes} _$'\n'                            read -r -u ${fd_read0} -d ''$'\n'                            [[ \${#REPLY} == 0 ]]$'\n'                        fi$'\n'                    } || {""";$'\n'                    else$'\n'                        echo """$'\n'                    read -r -u ${fd_read0} -N \${nBytes} _$'\n'                    read -r -u ${fd_read0} -d ''$'\n'                    [[ \${#REPLY} == 0 ]] || {""";$'\n'                    fi$'\n'                ;;$'\n'            esac;$'\n'        else$'\n'            echo "[[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {";$'\n'        fi;$'\n'    fi$'\n'(( ${verboseLevel} > 2 )) && echo """$'\n'                echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"""$'\n'echo """$'\n'                until read -r -u ${fd_read} ${delimiterReadStr}; do $'\n'                    A[-1]+=\"\${REPLY}\"; $'\n'                done"""$'\n'printf '%s' "A[-1]+=\"\${REPLY}\""$'\n'${lseekFlag} && printf '\n' || printf '%s\n' "${delimiterVal}"$'\n'(( ${verboseLevel} > 2 )) && echo "echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}"$'\n'echo "}"; };$'\n'fi$'\n'${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || ${readBytesFlag} || echo "}"$'\n'${nOrderFlag} && echo "read -r -u ${fd_nOrder} nOrder"$'\n'${nLinesReadLimitFlag} && echo """$'\n'nLinesRead+=\${#A[@]}$'\n'echo \${nLinesRead} >\"${tmpDir}\"/.nLinesRead$'\n'(( nLinesRead == nLinesReadLimit )) && {$'\n'    : >\"${tmpDir}\"/.quit$'\n'    echo '0' >\"${tmpDir}\"/.nLines$'\n'}$'\n'"""$'\n'echo """$'\n'    printf '\\n' >&${fd_continue}"""$'\n'echo """$'\n'    [[ \${#A[@]} == 0 ]] && {$'\n'        \${doneIndicatorFlag} || { $'\n'          [[ -f \"${tmpDir}\"/.done ]] && {"""$'\n'if ${lseekPosFlag}; then$'\n'    echo """$'\n'                lseek ${fd_read} 0 SEEK_CUR fd_read_pos$'\n'                lseek ${fd_write} 0 SEEK_CUR fd_write_pos""";$'\n'else$'\n'    echo """$'\n'            IFS=\$'\\t'; $'\n'            read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}$'\n'            read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}$'\n'            IFS=""";$'\n'fi$'\n'echo """$'\n'            [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && doneIndicatorFlag=true$'\n'          }$'\n'        }$'\n'        if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""$'\n'${nLinesAutoFlag} && echo "printf 'x\\n' >&\${fd_nAuto0}"$'\n'${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"$'\n'${nSpawnFlag} && echo """\printf '%s' '0' >&${fd_nSpawn}$'\n'printf 'q\\n' >&\${fd_nAuto0}"""$'\n'${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' &>/dev/null'$'\n'echo """$'\n'            : >\"${tmpDir}\"/.quit$'\n'            printf '%.0s\\n' \"${tmpDir}\"/.run/p* >&${fd_continue}$'\n'            break"""$'\n'{ ${inotifyFlag} || ${nOrderFlag}; } && echo "else"$'\n'${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"$'\n'${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify}"$'\n'echo """$'\n'        fi$'\n'        continue$'\n'    }"""$'\n'{ ${nLinesAutoFlag} || ${nSpawnFlag}; } && { printf '%s' """$'\n'    { \${nLinesAutoFlag} || \${nSpawnFlag}; } && {$'\n'        printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}$'\n'        (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false$'\n'    }"""$'\n'${fallocateFlag} && printf '%s' ' || ' || echo; }$'\n'${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"$'\n'${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || ${lseekFlag} || { echo """$'\n'        { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {"""$'\n'(( ${verboseLevel} > 2 )) && echo "echo \"FIXING SPLIT READ\" >&${fd_stderr}"$'\n'echo """$'\n'            A[-1]=\"\${A[-1]%${delimiterVal}}\"$'\n'            IFS=$'\n'            mapfile ${delimiterReadStr} A <<<\"\${A[*]}\"$'\n'        }"""; }$'\n'${subshellRunFlag} && echo '(' || echo '{'$'\n'{ ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'$'\n'${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""$'\n'${noFuncFlag} && echo 'IFS=$'"'"'\n'"'"$'\n'printf '%s ' "${runCmd[@]}"$'\n'if ${readBytesFlag} && ! { [[ ${readBytesProg} == 'bash' ]] && ! ${stdinRunFlag}; }; then$'\n'    if ${stdinRunFlag} || ${noFuncFlag}; then$'\n'        printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp.{<#>}';$'\n'    else$'\n'        printf '"$(<"%s"/%s)"' "${tmpDir}" '.stdin.tmp.{<#>}';$'\n'    fi;$'\n'else$'\n'    if ${stdinRunFlag}; then$'\n'        printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\"";$'\n'    else$'\n'        if ${noFuncFlag}; then$'\n'            printf "<<<\"\${A[*]%s}\"" "${delimiterRemoveStr}";$'\n'        else$'\n'            if ! ${substituteStringFlag}; then$'\n'                printf '%s' "\"\${A[@]${delimiterRemoveStr}}\"";$'\n'            fi;$'\n'        fi;$'\n'    fi;$'\n'fi$'\n'(( ${verboseLevel} > 2 )) && echo """ || {$'\n'        {$'\n'            printf '\\n\\n----------------------------------------------\\n\\n'$'\n'            echo 'ERROR DURING \"${runCmd[*]}\" CALL'$'\n'            declare -p A nLinesCur nLinesAutoFlag$'\n'            echo 'fd_read:'$'\n'            cat /proc/self/fdinfo/${fd_read}$'\n'            echo 'fd_write:'$'\n'            cat /proc/self/fdinfo/${fd_write}$'\n'            echo$'\n'        } >&${fd_stderr}$'\n'    }"""$'\n'${readBytesFlag} && { [[ -n ${readBytesProg//bash/} ]] || ${stdinRunFlag}; } && printf '\n\\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}\n'$'\n'${noFuncFlag} && echo 'IFS='$'\n'${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'$'\n'echo "${outStr}"$'\n'${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"$'\n'${nSpawnFlag} && echo "printf '%s,%s ' \${#A[@]} \${EPOCHREALTIME//./} >&${fd_nSpawn}"$'\n'echo """$'\n'done$'\n'} 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}$'\n'} 2>/dev/null$'\n'p_PID+=(\${p{<#>}_PID})""")" }
+1:  0.439834 sec         <<--- (353x) { \rm -f "${outPrint[@]}" }
+1:  0.482479 sec         <<--- (353x) { cat "${outPrint[@]}" }
+5:  0.000067 sec         <<--- (1x) { _forkrun_getVal nProcs "${nProcs%%,*}" }
+5:  0.013080 sec         <<--- (1x) { printf '%.0s\n' {0..8} }
+26:  0.000069 sec        <<--- (1x) { for nn in "${@%%[Bb]*}" }
+669:  0.026820 sec       <<--- (362x) { case "${REPLY}" in  }
+
+
+TOTAL TIME FOR PID 444074 {1.5}: 0.001246 sec
+1:  0.001246 sec         <<--- (1x) { : > "${fPath}" }
+
+
+TOTAL TIME FOR PID 444075 {1.5}: 0.001677 sec
+1:  0.001677 sec         <<--- (1x) { : > "${fPath}" }
+
+
+TOTAL TIME FOR PID 444077 {1.5}: 0.002086 sec
+1:  0.002086 sec         <<--- (1x) { : > "${fPath}" }
+
+
+TOTAL TIME FOR PID 444079 {1.5}: 0.002433 sec
+1:  0.002433 sec         <<--- (1x) { : > "${fPath}" }
+
+
+TOTAL TIME FOR PID 444081 {1.5}: 0.002849 sec
+1:  0.002849 sec         <<--- (1x) { : > "${fPath}" }
+
+
+TOTAL TIME FOR PID 444083 {1.5}: 0.003537 sec
+1:  0.003537 sec         <<--- (1x) { : > "${fPath}" }
+
+
+TOTAL TIME FOR PID 444085 {1.5}: 0.004177 sec
+1:  0.004177 sec         <<--- (1x) { : > "${fPath}" }
+
+
+TOTAL TIME FOR PID 444100 {1.5}: 0.000559 sec
+1:  0.000559 sec         <<--- (1x) { [[ "$(lseek $fd_read 0)" == 0 ]] }
+
+
+TOTAL TIME FOR PID 444134 {1.5}: 0.000921 sec
+1:  0.000194 sec         <<--- (1x) { type -a nproc &> /dev/null }
+1:  0.000727 sec         <<--- (1x) { nCPU="$({ type -a nproc &> /dev/null && nproc; } || { type -a grep &> /dev/null && grep -cE '^processor.*: ' /proc/cpuinfo; } || { mapfile -t tmpA < /proc/cpuinfo && tmpA=("${tmpA[@]//processor*/''}") && tmpA=("${tmpA[@]//!('')/}") && tmpA=("${tmpA[@]//''/1}") && tmpA="${tmpA[*]}" && tmpA="${tmpA// /}" && echo ${#tmpA}; } || printf '8')" }
+
+
+TOTAL TIME FOR PID 444170 {1.5}: 0.000720 sec
+1:  0.000720 sec         <<--- (1x) { mapfile -t runCmd < <(printf '%q\n' "${runCmd[@]}") }
+
+
+TOTAL TIME FOR PID 444181 {1.5}: 0.000617 sec
+1:  0.000617 sec         <<--- (1x) { printf '\n\n------------------- FLAGS INFO -------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")" }
+
+
+TOTAL TIME FOR PID 444205 {1.5}: 0.001580 sec
+1:  0.000221 sec         <<--- (1x) { [[ "${delimiterVal}" == '$'"'"'\n'"'" ]] }
+1:  0.001359 sec         <<--- (1x) { printf '(%s) delimiter: %s\n' "$([[ "${delimiterVal}" == '$'"'"'\n'"'" ]] && echo '--' || echo '-d')" "${delimiterVal}" }
+
+
+TOTAL TIME FOR PID 444220 {1.5}: 0.030242 sec
+1:  0.000797 sec         <<--- (1x) { : "${writeFileProgType:=1}" }
+555:  0.000159 sec       <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+557:  0.000068 sec       <<--- (1x) { trap - EXIT }
+558:  0.000076 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT }
+559:  0.000082 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM }
+560:  0.000063 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP }
+561:  0.000069 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+563:  0.000067 sec       <<--- (1x) { case ${writeFileProgType} in  }
+564:  0.026521 sec       <<--- (1x) { cat <&${fd_stdin} >&${fd_write} }
+569:  0.000110 sec       <<--- (1x) { : > "${tmpDir}"/.done }
+570:  0.000093 sec       <<--- (1x) { (( ${verboseLevel} > 1 )) }
+570:  0.000121 sec       <<--- (1x) { printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr} }
+571:  0.000069 sec       <<--- (1x) { ${inotifyFlag} }
+572:  0.000066 sec       <<--- (1x) { ((kk=0 )) }
+572:  0.000602 sec       <<--- (9x) { ((kk++ )) }
+572:  0.000617 sec       <<--- (9x) { ((kk<=nProcs )) }
+573:  0.000662 sec       <<--- (9x) { : >&${fd_write} }
+
+
+TOTAL TIME FOR PID 444233 {1.5}: 0.001168 sec
+1:  0.000695 sec         <<--- (1x) { printf '%s\n' {10..89} >&${fd_nOrder} }
+593:  0.000100 sec       <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+595:  0.000083 sec       <<--- (1x) { trap - EXIT }
+596:  0.000075 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT }
+597:  0.000077 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM }
+598:  0.000072 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP }
+599:  0.000066 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+
+
+TOTAL TIME FOR PID 444243 {1.5}: 0.809035 sec
+1:  0.000649 sec         <<--- (1x) { printf '%s\n' ${nLines} > "${tmpDir}"/.nLines }
+5:  0.000080 sec         <<--- (1x) { ${nSpawnFlag} }
+639:  0.000088 sec       <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+641:  0.000085 sec       <<--- (1x) { trap '[[ -f "'"${tmpDir}"'"/.run/pAuto ]] && \rm -f "'"${tmpDir}"'"/.run/pAuto' EXIT }
+642:  0.000075 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT }
+643:  0.000078 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM }
+644:  0.000075 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP }
+645:  0.000074 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+647:  0.000071 sec       <<--- (1x) { ${fallocateFlag} }
+648:  0.000069 sec       <<--- (1x) { nWait=$(( 16 + ( ${nProcs} / 2 ) )) }
+649:  0.000071 sec       <<--- (1x) { fd_read_pos_old=0 }
+651:  0.000069 sec       <<--- (1x) { nLinesRead=0 }
+653:  0.000075 sec       <<--- (1x) { ${nLinesAutoFlag} }
+653:  0.000090 sec       <<--- (1x) { ${nSpawnFlag} }
+653:  0.028123 sec       <<--- (329x) { ${fallocateFlag} }
+655:  0.000226 sec       <<--- (2x) { continue }
+655:  0.262269 sec       <<--- (328x) { read -u ${fd_nAuto} -t 0.1 }
+657:  0.026323 sec       <<--- (326x) { case ${REPLY} in  }
+671:  0.025656 sec       <<--- (326x) { ${nLinesAutoFlag} }
+671:  0.026372 sec       <<--- (325x) { ${nSpawnFlag} }
+672:  0.025793 sec       <<--- (326x) { ${nLinesReadLimitFlag} }
+675:  0.028178 sec       <<--- (326x) { nLinesRead=$(( nLinesRead + ${REPLY} )) }
+681:  0.025552 sec       <<--- (326x) { ${lseekPosFlag} }
+682:  0.027052 sec       <<--- (326x) { lseek $fd_read 0 SEEK_CUR fd_read_pos }
+683:  0.027673 sec       <<--- (326x) { lseek $fd_write 0 SEEK_CUR fd_write_pos }
+691:  0.025146 sec       <<--- (326x) { ${nLinesAutoFlag} }
+691:  0.025306 sec       <<--- (325x) { ${nSpawnFlag} }
+691:  0.028461 sec       <<--- (326x) { nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) )) }
+693:  0.025406 sec       <<--- (326x) { ${nSpawnFlag} }
+693:  0.036854 sec       <<--- (326x) { printf '%s %s\n' "${nLinesEst}" "$(( ${EPOCHREALTIME//./} - tStart ))" > "${tmpDir}"/.stdin_lines_time }
+695:  0.026057 sec       <<--- (326x) { ${nLinesAutoFlag} }
+697:  0.000067 sec       <<--- (1x) { ${nSpawnFlag} }
+697:  0.000070 sec       <<--- (1x) { [[ -f "${tmpDir}"/.nWorkers ]] }
+699:  0.000072 sec       <<--- (1x) { nLinesNew=$(( 1 + ( ( nLinesEst - nLinesRead ) / ${nProcs} ) )) }
+701:  0.000071 sec       <<--- (1x) { (( ${nLinesNew} > ${nLinesCur} )) }
+703:  0.000066 sec       <<--- (1x) { nLinesNew=${nLinesMax} }
+703:  0.000068 sec       <<--- (1x) { (( ${nLinesNew} >= ${nLinesMax} )) }
+703:  0.000074 sec       <<--- (1x) { nLinesAutoFlag=false }
+705:  0.000082 sec       <<--- (1x) { printf '%s\n' ${nLinesNew} > "${tmpDir}"/.nLines }
+708:  0.000084 sec       <<--- (1x) { (( ${verboseLevel} > 2 )) }
+708:  0.000118 sec       <<--- (1x) { printf '\nCHANGING nLines from %s to %s!!!  --  ( nLinesRead = %s ; write pos = %s ; read pos = %s )\n' ${nLinesCur} ${nLinesNew} ${nLinesRead} ${fd_write_pos} ${fd_read_pos} >&${fd_stderr} }
+710:  0.000092 sec       <<--- (1x) { nLinesCur=${nLinesNew} }
+714:  0.025304 sec       <<--- (326x) { ${fallocateFlag} }
+715:  0.025980 sec       <<--- (326x) { case ${nWait} in  }
+717:  0.001180 sec       <<--- (15x) { fd_read_pos=$(( 4096 * ( ${fd_read_pos} / 4096 ) )) }
+718:  0.001185 sec       <<--- (15x) { (( ${fd_read_pos} > ${fd_read_pos_old} )) }
+719:  0.023415 sec       <<--- (15x) { fallocate -p -o ${fd_read_pos_old} -l $(( ${fd_read_pos} - ${fd_read_pos_old} )) "${fPath}" }
+720:  0.001069 sec       <<--- (15x) { (( ${verboseLevel} > 2 )) }
+720:  0.001439 sec       <<--- (15x) { echo "Truncating $(( ${fd_read_pos} - ${fd_read_pos_old} )) bytes off the start of the tmp file storing stdin" >&${fd_stderr} }
+721:  0.001168 sec       <<--- (15x) { fd_read_pos_old=${fd_read_pos} }
+723:  0.001284 sec       <<--- (15x) { nWait=$(( 16 + ( ${nProcs} / 2 ) )) }
+726:  0.025805 sec       <<--- (311x) { ((nWait--)) }
+731:  0.027964 sec       <<--- (326x) { [[ -f "${tmpDir}"/.quit ]] }
+732:  0.000102 sec       <<--- (1x) { nLinesAutoFlag=false }
+733:  0.000089 sec       <<--- (1x) { fallocateFlag=false }
+734:  0.000091 sec       <<--- (1x) { nSpawnFlag=false }
+
+
+TOTAL TIME FOR PID 444258 {1.5}: 0.001735 sec
+1:  0.000091 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+1:  0.000099 sec         <<--- (1x) { trap - EXIT }
+1:  0.000105 sec         <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+1:  0.000106 sec         <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM }
+1:  0.000111 sec         <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT }
+1:  0.000112 sec         <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP }
+1:  0.000474 sec         <<--- (1x) { inotifywait -q -m -e modify,close --format '' "${fPath}" >&${fd_inotify0} }
+5:  0.000637 sec         <<--- (1x) { printf '%.0s\n' {0..8} }
+
+
+TOTAL TIME FOR PID 444285 {1.5}: 6.069922 sec
+1:  0.000787 sec         <<--- (1x) { echo '1 1' > "${tmpDir}"/.stdin_lines_time }
+5:  0.000204 sec         <<--- (3x) { wait "${p_PID[@]}" }
+6:  0.000680 sec         <<--- (1x) { local p0 p0_PID }
+6:  0.000685 sec         <<--- (1x) { local p3 p3_PID }
+6:  0.000701 sec         <<--- (1x) { local p1 p1_PID }
+6:  0.000722 sec         <<--- (1x) { local p7 p7_PID }
+6:  0.000729 sec         <<--- (1x) { local p4 p4_PID }
+6:  0.000730 sec         <<--- (1x) { local p2 p2_PID }
+6:  0.000764 sec         <<--- (1x) { local p10 p10_PID }
+6:  0.000783 sec         <<--- (1x) { local p9 p9_PID }
+6:  0.000823 sec         <<--- (1x) { local p18 p18_PID }
+6:  0.000832 sec         <<--- (1x) { local p16 p16_PID }
+6:  0.000840 sec         <<--- (1x) { local p19 p19_PID }
+6:  0.000853 sec         <<--- (1x) { local p17 p17_PID }
+6:  0.000862 sec         <<--- (1x) { local p20 p20_PID }
+6:  0.000884 sec         <<--- (1x) { local p6 p6_PID }
+6:  0.000901 sec         <<--- (1x) { local p21 p21_PID }
+6:  0.000985 sec         <<--- (1x) { local p12 p12_PID }
+6:  0.001006 sec         <<--- (1x) { local p13 p13_PID }
+6:  0.001009 sec         <<--- (1x) { local p11 p11_PID }
+6:  0.001021 sec         <<--- (1x) { local p14 p14_PID }
+6:  0.001022 sec         <<--- (1x) { local p5 p5_PID }
+6:  0.001086 sec         <<--- (1x) { local p8 p8_PID }
+6:  0.001195 sec         <<--- (1x) { local p15 p15_PID }
+104:  0.000076 sec       <<--- (1x) { p_PID+=(${p7_PID}) }
+104:  0.000081 sec       <<--- (1x) { p_PID+=(${p13_PID}) }
+104:  0.000084 sec       <<--- (1x) { p_PID+=(${p17_PID}) }
+104:  0.000084 sec       <<--- (1x) { p_PID+=(${p3_PID}) }
+104:  0.000085 sec       <<--- (1x) { p_PID+=(${p9_PID}) }
+104:  0.000086 sec       <<--- (1x) { p_PID+=(${p21_PID}) }
+104:  0.000086 sec       <<--- (1x) { p_PID+=(${p2_PID}) }
+104:  0.000087 sec       <<--- (1x) { p_PID+=(${p16_PID}) }
+104:  0.000087 sec       <<--- (1x) { p_PID+=(${p1_PID}) }
+104:  0.000088 sec       <<--- (1x) { p_PID+=(${p10_PID}) }
+104:  0.000088 sec       <<--- (1x) { p_PID+=(${p5_PID}) }
+104:  0.000089 sec       <<--- (1x) { p_PID+=(${p4_PID}) }
+104:  0.000092 sec       <<--- (1x) { p_PID+=(${p18_PID}) }
+104:  0.000099 sec       <<--- (1x) { p_PID+=(${p0_PID}) }
+104:  0.000103 sec       <<--- (1x) { p_PID+=(${p20_PID}) }
+104:  0.000104 sec       <<--- (1x) { p_PID+=(${p6_PID}) }
+104:  0.000115 sec       <<--- (1x) { p_PID+=(${p14_PID}) }
+104:  0.000120 sec       <<--- (1x) { p_PID+=(${p19_PID}) }
+104:  0.000127 sec       <<--- (1x) { p_PID+=(${p11_PID}) }
+104:  0.000132 sec       <<--- (1x) { p_PID+=(${p12_PID}) }
+104:  0.000137 sec       <<--- (1x) { p_PID+=(${p8_PID}) }
+104:  0.000146 sec       <<--- (1x) { p_PID+=(${p15_PID}) }
+783:  0.000389 sec       <<--- (3x) { _forkrun_get_load -i }
+783:  0.003302 sec       <<--- (41x) { _forkrun_get_load }
+799:  0.004359 sec       <<--- (44x) { local -i cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice tLOAD tALL tALL0 cpu_ALL cpu_ALL0 cpu_LOAD cpu_LOAD0 pLOAD pLOAD0 }
+800:  0.003467 sec       <<--- (44x) { local -i -I loadMaxVal }
+801:  0.003450 sec       <<--- (44x) { local initFlag }
+803:  0.003537 sec       <<--- (44x) { case "${1}" in  }
+805:  0.000205 sec       <<--- (3x) { initFlag=true }
+808:  0.003092 sec       <<--- (41x) { initFlag=false }
+809:  0.003368 sec       <<--- (41x) { pLOAD0="${pLOADA0[0]}" }
+810:  0.003213 sec       <<--- (41x) { cpu_ALL0="${pLOADA0[1]}" }
+811:  0.003268 sec       <<--- (41x) { cpu_LOAD0="${pLOADA0[2]}" }
+812:  0.003407 sec       <<--- (41x) { tALL0="${pLOADA0[3]}" }
+816:  0.003619 sec       <<--- (44x) { : "${loadMaxVal:=1000000}" }
+818:  0.003451 sec       <<--- (44x) { IFS=' ' }
+819:  0.009121 sec       <<--- (44x) { read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice < /proc/stat }
+820:  0.003299 sec       <<--- (44x) { IFS= }
+822:  0.003757 sec       <<--- (44x) { cpu_LOAD=$(( cpu_user + cpu_nice + cpu_system + cpu_irq + cpu_softirq + cpu_steal + cpu_guest + cpu_guestnice )) }
+823:  0.003516 sec       <<--- (44x) { cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait )) }
+825:  0.000216 sec       <<--- (3x) { [[ "${pLOADA0[*]}" == *([0 ]) ]] }
+825:  0.003360 sec       <<--- (44x) { ${initFlag} }
+826:  0.000066 sec       <<--- (1x) { pLOADA0=(0 "${cpu_ALL}" "${cpu_LOAD}" 0) }
+830:  0.003422 sec       <<--- (43x) { tALL=$(( cpu_ALL - cpu_ALL0 )) }
+832:  0.003363 sec       <<--- (43x) { tLOAD=$(( cpu_LOAD - cpu_LOAD0 )) }
+834:  0.003127 sec       <<--- (41x) { tALL0=$((  tALL << 2 )) }
+834:  0.003308 sec       <<--- (43x) { (( tALL0 > ( tALL << 2 ) )) }
+836:  0.003422 sec       <<--- (43x) { pLOAD=$(( ( loadMaxVal * ( 1 + tLOAD ) ) / ( 1 + tALL ) )) }
+837:  0.003104 sec       <<--- (43x) { (( pLOAD0 > 0 )) }
+837:  0.003305 sec       <<--- (41x) { pLOAD=$(( ( ( ( 1 + ( tALL << 2 ) + tALL0 ) * pLOAD ) + ( 3 * tALL0 * pLOAD0 ) ) / ( 1 + ( ( tALL + tALL0 ) << 2 ) ) )) }
+839:  0.003813 sec       <<--- (43x) { pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}") }
+840:  0.000151 sec       <<--- (2x) { ${initFlag} }
+845:  0.000102 sec       <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+846:  0.000105 sec       <<--- (1x) { trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto}"'; printf '"'"'\n'"'"' >&'"${fd_nSpawn0}"'; [[ -f "'"${tmpDir}"'"/.run/pSpawn ]] && \rm -f "'"${tmpDir}"'"/.run/pSpawn' EXIT }
+847:  0.000089 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' INT }
+848:  0.000088 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' TERM }
+849:  0.000085 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' HUP }
+850:  0.000077 sec       <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+853:  0.000078 sec       <<--- (1x) { pLOADA0=(0 0 0 0) }
+854:  0.020185 sec       <<--- (2x) { _forkrun_get_load -i }
+857:  0.000071 sec       <<--- (1x) { : "${pLOAD_max:=900000}" "${pLOAD_target:=900000}" "${nProcsMax:=$((2*${nCPU}))}" }
+858:  0.000068 sec       <<--- (1x) { kkProcs0=0 }
+859:  0.000061 sec       <<--- (1x) { pAddFlag=true }
+860:  0.000070 sec       <<--- (1x) { runLinesA[0]=1 }
+861:  0.000065 sec       <<--- (1x) { pLOAD1[0]=0 }
+862:  0.000066 sec       <<--- (1x) { inLines=0 }
+863:  0.000068 sec       <<--- (1x) { inTime=0 }
+866:  0.108271 sec       <<--- (1x) { read -r -u ${fd_nSpawn0} }
+869:  0.030031 sec       <<--- (2x) { _forkrun_get_load -i }
+870:  0.000072 sec       <<--- (1x) { pLOAD_bg="$(( pLOADA0 / 2 ))" }
+873:  0.000145 sec       <<--- (1x) { coprocSrcCode="$(< "${tmpDir}"/.coprocSrcCode)" }
+876:  0.000093 sec       <<--- (1x) { spawnTimeA[0]=${EPOCHREALTIME//./} }
+877:  0.000068 sec       <<--- (1x) { ((kkProcs=0 )) }
+877:  0.000558 sec       <<--- (8x) { ((kkProcs++ )) }
+877:  0.000670 sec       <<--- (9x) { ((kkProcs<8 )) }
+878:  0.000571 sec       <<--- (8x) { [[ -f "${tmpDir}"/.quit ]] }
+879:  0.001534 sec       <<--- (8x) { source /proc/self/fd/0 <<< "${coprocSrcCode//'{<#>}'/"${kkProcs}"}" }
+881:  0.000079 sec       <<--- (1x) { spawnTimeA[$kkProcs]="${EPOCHREALTIME//./}" }
+882:  0.000091 sec       <<--- (1x) { echo "${kkProcs}" > "${tmpDir}"/.nWorkers }
+883:  0.000080 sec       <<--- (1x) { : > "${tmpDir}"/.spawned }
+884:  0.000107 sec       <<--- (1x) { (( ${verboseLevel} > 1 )) }
+884:  0.000135 sec       <<--- (1x) { printf '\n\n%s WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr} }
+889:  0.003603 sec       <<--- (42x) { [[ -f "${tmpDir}"/.quit ]] }
+889:  0.003848 sec       <<--- (41x) { (( ${kkProcs} >= ${nProcsMax} )) }
+892:  0.003274 sec       <<--- (41x) { ${pAddFlag} }
+893:  0.030392 sec       <<--- (2x) { _forkrun_get_load -i }
+894:  0.000070 sec       <<--- (1x) { pLOAD1[$kkProcs]=$(( ( ( ( pLOADA0 - pLOAD_bg ) << 1 ) + kkProcs ) / ( kkProcs << 1 ) )) }
+895:  0.000065 sec       <<--- (1x) { pAddFlag=false }
+896:  0.000066 sec       <<--- (1x) { (( ${verboseLevel} > 3 )) }
+896:  0.000143 sec       <<--- (1x) { printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1[$kkProcs]}" >&${fd_stderr} }
+901:  0.003113 sec       <<--- (41x) { IFS=' ' }
+903:  4.107858 sec       <<--- (41x) { read -r -u ${fd_nSpawn} -t 0.1 -a A }
+904:  0.003064 sec       <<--- (41x) { (( ${#A[@]} == 0 )) }
+905:  0.004317 sec       <<--- (41x) { runLines=(${A[@]%%,*}) }
+906:  0.005959 sec       <<--- (41x) { runTime=(${A[@]##*,}) }
+908:  0.004304 sec       <<--- (41x) { runLines=(${runLines[@]##+(0)}) }
+909:  0.005300 sec       <<--- (41x) { runTime=(${runTime[@]##+(0)}) }
+911:  0.003554 sec       <<--- (41x) { (( numEmptyReadA[$kkProcs]+=$(( ${#A[@]} - ${#runLines[@]} )) )) }
+912:  0.003651 sec       <<--- (41x) { (( numReadA[$kkProcs]+=${#A[@]} )) }
+914:  0.003138 sec       <<--- (41x) { IFS='+' }
+915:  0.003910 sec       <<--- (41x) { runLinesA[${kkProcs}]=$(( "${runLines[*]}" + runLinesA[${kkProcs}] )) }
+916:  0.004238 sec       <<--- (41x) { runTimeA[${kkProcs}]=$(( "${runTime[*]}" - spawnTimeA[${kkProcs}] )) }
+917:  0.003854 sec       <<--- (41x) { runTimeA[${kkProcs}]=${runTimeA[${kkProcs}]##+(0)} }
+918:  0.003193 sec       <<--- (41x) { IFS=' ' }
+921:  0.004293 sec       <<--- (41x) { read -r inLines1 inTime1 < "${tmpDir}"/.stdin_lines_time }
+922:  0.003270 sec       <<--- (41x) { IFS= }
+923:  0.001226 sec       <<--- (16x) { (( inTime1 > inTime )) }
+923:  0.003310 sec       <<--- (41x) { (( inLines1 > inLines )) }
+924:  0.001175 sec       <<--- (16x) { inLines0=${inLines} }
+925:  0.001158 sec       <<--- (16x) { inTime0=${inTime} }
+926:  0.001180 sec       <<--- (16x) { inLines=${inLines1} }
+927:  0.001258 sec       <<--- (16x) { inTime=${inTime1} }
+931:  1.459441 sec       <<--- (82x) { _forkrun_get_load }
+937:  0.003956 sec       <<--- (41x) { pLOAD1[$kkProcs]=$(( ( ( ( 1 + kkProcs) * ( pLOAD1[$kkProcs] ) ) + ( 3 * ( pLOADA - pLOAD_bg ) ) ) / ( ( kkProcs << 2 ) + 1 ) )) }
+938:  0.003148 sec       <<--- (41x) { (( ${verboseLevel} > 3 )) }
+938:  0.004067 sec       <<--- (41x) { printf 'pLOAD1[%s] is now %s / 1000000\n' "$kkProcs" "${pLOAD1[$kkProcs]}" >&${fd_stderr} }
+941:  0.003199 sec       <<--- (41x) { pAddMax=$(( nProcsMax - kkProcs )) }
+942:  0.003086 sec       <<--- (41x) { (( pAddMax > ( nCPU >> 1 ) )) }
+942:  0.003254 sec       <<--- (41x) { pAddMax=$(( nCPU >> 1 )) }
+945:  0.002991 sec       <<--- (41x) { (( pLOADA > pLOAD_max )) }
+948:  0.003087 sec       <<--- (41x) { (( pLOADA < pLOADA0 )) }
+954:  0.003190 sec       <<--- (41x) { (( pLOAD_target < pLOAD_max )) }
+960:  0.003198 sec       <<--- (41x) { (( pLOAD_target > pLOAD_max )) }
+961:  0.003408 sec       <<--- (41x) { (( ${verboseLevel} > 3 )) }
+961:  0.004313 sec       <<--- (41x) { printf 'pAdd: %s \npLOAD_target is now %s / %s\n' "${pAdd}" "${pLOAD_target}" "${pLOAD_max}" >&${fd_stderr} }
+968:  0.003317 sec       <<--- (41x) { inLinesDelta=$(( inLines - inLines0 )) }
+969:  0.003503 sec       <<--- (41x) { inTimeDelta=$(( inTime - inTime0 )) }
+971:  0.003658 sec       <<--- (41x) { (( ( numEmptyReadA[$kkProcs] << 3 ) > ( 1 + numReadA[$kkProcs] ) )) }
+983:  0.003830 sec       <<--- (41x) { pAdd_sysLoad=$(( ( pLOAD_target - pLOADA ) / ${pLOAD1[${kkProcs}]} )) }
+985:  0.003168 sec       <<--- (41x) { (( pAdd_sysLoad > pAddMax )) }
+985:  0.003191 sec       <<--- (41x) { pAdd_sysLoad=${pAddMax} }
+986:  0.003204 sec       <<--- (41x) { (( pAdd_sysLoad < 0 )) }
+988:  0.003431 sec       <<--- (41x) { (( ( numEmptyReadA[$kkProcs] << 3 ) > ( 1 + numReadA[$kkProcs] ) )) }
+1007:  0.003081 sec      <<--- (41x) { pAdd="${pAdd_sysLoad}" }
+1016:  0.003160 sec      <<--- (41x) { (( kkProcs0 > 0 )) }
+1016:  0.004368 sec      <<--- (40x) { pAdd=$(( (  pAdd * ( ( ( 1 + nProcsMax - kkProcs ) * ( ( kkProcs0 * runTimeA[${kkProcs0}] * runLinesA[${kkProcs}] ) / kkProcs ) ) / nProcsMax ) ) / ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] ) )) }
+1019:  0.003077 sec      <<--- (41x) { (( pAdd < 1 )) }
+1019:  0.003369 sec      <<--- (40x) { continue }
+1020:  0.000067 sec      <<--- (1x) { (( pAdd > pAddMax )) }
+1022:  0.000076 sec      <<--- (1x) { (( ${verboseLevel} > 2 )) }
+1022:  0.000083 sec      <<--- (1x) { printf '\nSPAWNING %s NEW WORKER COPROCS\n' "${pAdd}" >&${fd_stderr} }
+1025:  0.000092 sec      <<--- (1x) { kkProcs0=${kkProcs} }
+1026:  0.000111 sec      <<--- (1x) { ((kk=0)) }
+1026:  0.001012 sec      <<--- (14x) { ((kk++ )) }
+1026:  0.001187 sec      <<--- (15x) { ((kk<14)) }
+1027:  0.003093 sec      <<--- (14x) { source /proc/self/fd/0 <<< "${coprocSrcCode//'{<#>}'/"${kkProcs}"}" }
+1028:  0.001043 sec      <<--- (14x) { (( ${verboseLevel} > 3 )) }
+1028:  0.001557 sec      <<--- (14x) { printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs.\n' "${kk}" "${pAdd}" "${kkProcs}" >&${fd_stderr} }
+1029:  0.001050 sec      <<--- (14x) { ((kkProcs++)) }
+1031:  0.000079 sec      <<--- (1x) { spawnTimeA[$kkProcs]="${EPOCHREALTIME//./}" }
+1033:  0.000067 sec      <<--- (1x) { (( ${verboseLevel} > 2 )) }
+1033:  0.000107 sec      <<--- (1x) { printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr} }
+1036:  0.000082 sec      <<--- (1x) { echo "${kkProcs}" > "${tmpDir}"/.nWorkers }
+1038:  0.000067 sec      <<--- (1x) { IFS=',' }
+1039:  0.001693 sec      <<--- (22x) { true }
+1040:  0.002284 sec      <<--- (22x) { read -r -u ${fd_nSpawn} -d ' ' runLines runTime }
+1041:  0.001824 sec      <<--- (22x) { runLines=(${runLines##+(0)}) }
+1042:  0.001888 sec      <<--- (22x) { runTime=(${runTime##+(0)}) }
+1043:  0.001882 sec      <<--- (22x) { (( ${runTime} < spawnTimeA[$kkProcs] )) }
+1044:  0.001771 sec      <<--- (21x) { ((numReadA[$kkProcs0]++)) }
+1045:  0.001627 sec      <<--- (21x) { [[ -n ${runLines} ]] }
+1045:  0.001854 sec      <<--- (21x) { (( runLinesA[$kkProcs0]+=${runLines} )) }
+1047:  0.001742 sec      <<--- (21x) { runTimeA[${kkProcs0}]=$(( runTime - spawnTimeA[${kkProcs0}] )) }
+1048:  0.001735 sec      <<--- (21x) { runTimeA[${kkProcs0}]=${runTimeA[${kkProcs0}]##+(0)} }
+1050:  0.000070 sec      <<--- (1x) { ((numReadA[$kkProcs]++)) }
+1051:  0.000086 sec      <<--- (1x) { [[ -n ${runLines} ]] }
+1051:  0.000095 sec      <<--- (1x) { (( runLinesA[$kkProcs]+=${runLines} )) }
+1053:  0.000073 sec      <<--- (1x) { runTimeA[${kkProcs}]=$(( runTime - spawnTimeA[${kkProcs}] )) }
+1054:  0.000072 sec      <<--- (1x) { runTimeA[${kkProcs}]=${runTimeA[${kkProcs}]##+(0)} }
+1056:  0.000096 sec      <<--- (1x) { break }
+1062:  0.000064 sec      <<--- (1x) { [[ ${#p_PID[@]} == 0 ]] }
+1062:  0.000254 sec      <<--- (1x) { wait "${p_PID[@]}" }
+
+
+TOTAL TIME FOR PID 444302 {1.5}: 0.008420 sec
+1:  0.000061 sec         <<--- (1x) { ${lseekPosFlag} }
+1:  0.000061 sec         <<--- (1x) { ${substituteStringFlag} }
+1:  0.000065 sec         <<--- (1x) { echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {" }
+1:  0.000065 sec         <<--- (1x) { echo "[[ \"\${REPLY}\" == ${delimiterVal} ]] || {" }
+1:  0.000065 sec         <<--- (1x) { printf '%s ' '-t' }
+1:  0.000066 sec         <<--- (1x) { printf '\n' }
+1:  0.000066 sec         <<--- (1x) { printf '\n%s ' '}' }
+1:  0.000067 sec         <<--- (1x) { echo "${delimiterReadStr} A" }
+1:  0.000067 sec         <<--- (1x) { printf '%s' "A[-1]+=\"\${REPLY}\"" }
+1:  0.000067 sec         <<--- (1x) { printf '%s ' '-n' "\${nLinesCur}" '-u' }
+1:  0.000068 sec         <<--- (1x) { ${stdinRunFlag} }
+1:  0.000068 sec         <<--- (1x) { echo "echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}" }
+1:  0.000069 sec         <<--- (1x) { echo "else" }
+1:  0.000069 sec         <<--- (1x) { echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify}" }
+1:  0.000069 sec         <<--- (1x) { echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}" }
+1:  0.000070 sec         <<--- (1x) { echo "${outStr}" }
+1:  0.000070 sec         <<--- (1x) { printf '%s ' "mapfile" }
+1:  0.000071 sec         <<--- (1x) { ${substituteStringIDFlag} }
+1:  0.000071 sec         <<--- (1x) { echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}" }
+1:  0.000072 sec         <<--- (1x) { echo ": >\"${tmpDir}\"/.out/.quit{<#>}" }
+1:  0.000072 sec         <<--- (1x) { printf '%s' ' || ' }
+1:  0.000072 sec         <<--- (1x) { printf '%s ' ${fd_read} }
+1:  0.000072 sec         <<--- (1x) { printf '%s' """$'\n'    { \${nLinesAutoFlag} || \${nSpawnFlag}; } && {$'\n'        printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}$'\n'        (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false$'\n'    }""" }
+1:  0.000073 sec         <<--- (1x) { echo """$'\n'                until read -r -u ${fd_read} ${delimiterReadStr}; do $'\n'                    A[-1]+=\"\${REPLY}\"; $'\n'                done""" }
+1:  0.000073 sec         <<--- (1x) { echo """\printf '%s' '0' >&${fd_nSpawn}$'\n'printf 'q\\n' >&\${fd_nAuto0}""" }
+1:  0.000074 sec         <<--- (1x) { echo """$'\n'                lseek ${fd_read} -1$'\n'                read -r -u ${fd_read} -N 1""" }
+1:  0.000074 sec         <<--- (1x) { echo 'kill -9 '"${pNotify_PID}"' &>/dev/null' }
+1:  0.000074 sec         <<--- (1x) { echo "printf '%s,%s ' \${#A[@]} \${EPOCHREALTIME//./} >&${fd_nSpawn}" }
+1:  0.000074 sec         <<--- (1x) { echo "printf 'x\\n' >&\${fd_nAuto0}" }
+1:  0.000075 sec         <<--- (1x) { echo '{' }
+1:  0.000075 sec         <<--- (1x) { echo """$'\n'            : >\"${tmpDir}\"/.quit$'\n'            printf '%.0s\\n' \"${tmpDir}\"/.run/p* >&${fd_continue}$'\n'            break""" }
+1:  0.000075 sec         <<--- (1x) { echo """$'\n'                echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}""" }
+1:  0.000075 sec         <<--- (1x) { echo """$'\n'    printf '\\n' >&${fd_continue}""" }
+1:  0.000078 sec         <<--- (1x) { echo """$'\n'            [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && doneIndicatorFlag=true$'\n'          }$'\n'        }$'\n'        if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then""" }
+1:  0.000078 sec         <<--- (1x) { echo "read -r -u ${fd_nOrder} nOrder" }
+1:  0.000082 sec         <<--- (1x) { echo """$'\n'    [[ \${#A[@]} == 0 ]] && {$'\n'        \${doneIndicatorFlag} || { $'\n'          [[ -f \"${tmpDir}\"/.done ]] && {""" }
+1:  0.000082 sec         <<--- (1x) { echo """$'\n'        fi$'\n'        continue$'\n'    }""" }
+1:  0.000083 sec         <<--- (1x) { echo """$'\n'                lseek ${fd_read} 0 SEEK_CUR fd_read_pos$'\n'                lseek ${fd_write} 0 SEEK_CUR fd_write_pos""" }
+1:  0.000086 sec         <<--- (1x) { echo "printf '\\n' >&\${fd_nAuto0}" }
+1:  0.000089 sec         <<--- (1x) { printf '%s' "\"\${A[@]${delimiterRemoveStr}}\"" }
+1:  0.000093 sec         <<--- (1x) { printf '%s ' "${runCmd[@]}" }
+1:  0.000094 sec         <<--- (1x) { echo """ || {$'\n'        {$'\n'            printf '\\n\\n----------------------------------------------\\n\\n'$'\n'            echo 'ERROR DURING \"${runCmd[*]}\" CALL'$'\n'            declare -p A nLinesCur nLinesAutoFlag$'\n'            echo 'fd_read:'$'\n'            cat /proc/self/fdinfo/${fd_read}$'\n'            echo 'fd_write:'$'\n'            cat /proc/self/fdinfo/${fd_write}$'\n'            echo$'\n'        } >&${fd_stderr}$'\n'    }""" }
+1:  0.000099 sec         <<--- (1x) { echo "{ \${nLinesAutoFlag} || \${nSpawnFlag}; } && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}" }
+1:  0.000121 sec         <<--- (2x) { ${subshellRunFlag} }
+1:  0.000123 sec         <<--- (2x) { ${fallocateFlag} }
+1:  0.000125 sec         <<--- (2x) { ${nSpawnFlag} }
+1:  0.000129 sec         <<--- (2x) { ${exportOrderFlag} }
+1:  0.000138 sec         <<--- (2x) { ${nLinesReadLimitFlag} }
+1:  0.000186 sec         <<--- (3x) { ${inotifyFlag} }
+1:  0.000188 sec         <<--- (3x) { ${nLinesAutoFlag} }
+1:  0.000193 sec         <<--- (3x) { ${noFuncFlag} }
+1:  0.000197 sec         <<--- (3x) { (( ${verboseLevel} > 2 )) }
+1:  0.000207 sec         <<--- (2x) { echo "}" }
+1:  0.000215 sec         <<--- (1x) { echo """$'\n'local p{<#>} p{<#>}_PID$'\n'$'\n'{ coproc p{<#>} {$'\n'export LC_ALL=C LANG=C IFS=$'\n'$'\n'echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}$'\n'$'\n'trap ': >\"${tmpDir}\"/.quit; $'\n'[[ -f \"${tmpDir}\"/.run/p{<#>} ]] && \\rm -f \"${tmpDir}\"/.run/p{<#>}; $'\n'printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT$'\n'$'\n'trap 'trap - TERM INT HUP USR1; kill -INT ${PID0} \${BASHPID}' INT$'\n'trap 'trap - TERM INT HUP USR1; kill -TERM ${PID0} \${BASHPID}' TERM$'\n'trap 'trap - TERM INT HUP USR1; kill -HUP ${PID0} \${BASHPID}' HUP$'\n'trap 'trap - TERM INT HUP USR1' USR1$'\n'$'\n'while true; do""" }
+1:  0.000267 sec         <<--- (1x) { echo """$'\n'    read -r -u ${fd_continue} _$'\n'    [[ -f \"${tmpDir}\"/.quit ]] && {$'\n'        printf '\n' >&${fd_continue}$'\n'        break$'\n'    }$'\n'    [[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true""" }
+1:  0.000273 sec         <<--- (4x) { ${lseekFlag} }
+1:  0.000308 sec         <<--- (5x) { ${nOrderFlag} }
+1:  0.000327 sec         <<--- (5x) { ${nullDelimiterFlag} }
+1:  0.000332 sec         <<--- (5x) { ${pipeReadFlag} }
+1:  0.000343 sec         <<--- (5x) { ${readBytesFlag} }
+1:  0.001579 sec         <<--- (1x) { coprocSrcCode="$(echo """$'\n'local p{<#>} p{<#>}_PID$'\n'$'\n'{ coproc p{<#>} {$'\n'export LC_ALL=C LANG=C IFS=$'\n'$'\n'echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}$'\n'$'\n'trap ': >\"${tmpDir}\"/.quit; $'\n'[[ -f \"${tmpDir}\"/.run/p{<#>} ]] && \\rm -f \"${tmpDir}\"/.run/p{<#>}; $'\n'printf '\"'\"'\n'\"'\"' >&${fd_continue}' EXIT$'\n'$'\n'trap 'trap - TERM INT HUP USR1; kill -INT ${PID0} \${BASHPID}' INT$'\n'trap 'trap - TERM INT HUP USR1; kill -TERM ${PID0} \${BASHPID}' TERM$'\n'trap 'trap - TERM INT HUP USR1; kill -HUP ${PID0} \${BASHPID}' HUP$'\n'trap 'trap - TERM INT HUP USR1' USR1$'\n'$'\n'while true; do"""$'\n'{ ${nLinesAutoFlag} || ${nSpawnFlag}; } && echo "{ \${nLinesAutoFlag} || \${nSpawnFlag}; } && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"$'\n'echo """$'\n'    read -r -u ${fd_continue} _$'\n'    [[ -f \"${tmpDir}\"/.quit ]] && {$'\n'        printf '\n' >&${fd_continue}$'\n'        break$'\n'    }$'\n'    [[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true"""$'\n'if ${readBytesFlag}; then$'\n'    case "${readBytesProg}" in $'\n'        'dd')$'\n'            printf 'dd bs=32768 count=%sB of="%s"/.stdin.tmp.{<#>} 2>"%s"/.stdin.tmp-status.{<#>} ' "${nBytes}" "${tmpDir}" "${tmpDir}"$'\n'${pipeReadFlag} && printf 'iflag=fullblock <&%s\n' "${fd_stdin}" || printf '<&%s\n' "${fd_read}"$'\n'printf '[[ "$(<"%s"/.stdin.tmp-status.{<#>})" == *$'"'"'\\n'"'"'"0 bytes"* ]] && A=() || A[0]=1\n' "${tmpDir}"$'\n'        ;;$'\n'        'head')$'\n'            printf 'head -c %s ' "${nBytes}"$'\n'${pipeReadFlag} && printf '<&%s ' "${fd_stdin}" || printf '<&%s ' "${fd_read}"$'\n'printf '>"%s"/.stdin.tmp.{<#>}\n' "${tmpDir}"$'\n'printf '[[ $(<"%s"/.stdin.tmp.{<#>}) ]] 2>/dev/null && A[0]=1 || A=()\n' "${tmpDir}"$'\n'        ;;$'\n'        'bash')$'\n'            if ${stdinRunFlag}; then$'\n'                [[ -n ${tTimeout} ]] && echo "SECONDS=0"$'\n'printf 'if read -r -d '"''"' -n %s -u %s' "${nBytes}" "${fd_read}"$'\n'[[ -n ${tTimeout} ]] && printf ' -t %s' "${tTimeout}"$'\n'echo """; then$'\n'                [[ \${REPLY} ]] && A=(\"\${REPLY}\") || A=('')$'\n'                trailingNullFlag=true"""$'\n'${readBytesExactFlag} && echo 'nBytesRead=1'$'\n'echo """$'\n'            else$'\n'                [[ \${REPLY} ]] && A=(\"\${REPLY}\") || A=()$'\n'                trailingNullFlag=false"""$'\n'${readBytesExactFlag} && echo 'nBytesRead=0'$'\n'echo 'fi'$'\n'if ${readBytesExactFlag}; then$'\n'                    echo """$'\n'            nBytesRead+=\${#REPLY}$'\n'            [[ \${nBytesRead} == 0 ]] || (( \${nBytesRead} >= ${nBytes} )) || {"""$'\n'[[ -n ${tTimeout} ]] && echo "while (( \${SECONDS} < ${tTimeout} )); do" || echo "while true; do"$'\n'echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true"$'\n'printf "if read -r -d '' -n \$(( ${nBytes} - \${nBytesRead} )) -u ${fd_read}"$'\n'[[ -n ${tTimeout} ]] && printf ' -t %s' "${tTimeout}"$'\n'echo """; then$'\n'                    ((nBytesRead++))$'\n'                    nBytesRead+=\${#REPLY}$'\n'                    [[ \${REPLY} ]] && A+=(\"\${REPLY}\") || A+=('')$'\n'                    (( \${nBytesRead} >= ${nBytes} )) && { trailingNullFlag=true; break; }$'\n'                else$'\n'                    trailingNullFlag=false$'\n'                    [[ \${REPLY} ]] && A+=(\"\${REPLY}\")$'\n'                    { (( \${nBytesRead} >= ${nBytes} )) || ${doneIndicatorFlag}; } && { trailingNullFlag=false; break; }$'\n'                    break$'\n'                fi$'\n'            done$'\n'        }""";$'\n'                fi$'\n'echo """$'\n'        {$'\n'            if \${trailingNullFlag}; then$'\n'                printf '%s\0' \"\${A[@]}\" $'\n'            else$'\n'                printf '%s' \"\${A[0]}\" $'\n'                printf '\0%s' \"\${A[@]:1}\"$'\n'            fi $'\n'        } >\"${tmpDir}\"/.stdin.tmp.{<#>}""";$'\n'            else$'\n'                printf 'read -r -N %s -u ' "${nBytes}"$'\n'if ${readBytesExactFlag}; then$'\n'                    printf '%s ' "${fd_stdin}"$'\n'[[ -n ${tTimeout} ]] && printf '-t %s ' "${tTimeout} ";$'\n'                else$'\n'                    printf '%s ' ${fd_read};$'\n'                fi$'\n'echo '-a A';$'\n'            fi$'\n'        ;;$'\n'    esac;$'\n'else$'\n'    ${nLinesReadLimitFlag} && printf '%s' """read -r nLinesRead <\"${tmpDir}\"/.nLinesRead$'\n'    (( ( nLinesReadLimit - nLinesRead ) < nLinesCur )) && nLinesCur=\$(( nLinesReadLimit - nLinesRead ))$'\n'    (( nLinesCur == 0 )) && A=() || """$'\n'printf '%s ' "mapfile"$'\n'${lseekFlag} && printf '%s ' '-t'$'\n'printf '%s ' '-n' "\${nLinesCur}" '-u'$'\n'${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}$'\n'{ ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'$'\n'echo "${delimiterReadStr} A"$'\n'${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || { echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"$'\n'if ${lseekFlag}; then$'\n'        echo """$'\n'                lseek ${fd_read} -1$'\n'                read -r -u ${fd_read} -N 1"""$'\n'if ${nullDelimiterFlag}; then$'\n'            echo "[[ \${#REPLY} == 0 ]] || {";$'\n'        else$'\n'            echo "[[ \"\${REPLY}\" == ${delimiterVal} ]] || {";$'\n'        fi;$'\n'    else$'\n'        if ${nullDelimiterFlag}; then$'\n'            echo """$'\n'                IFS=\$'\\t'; read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}; IFS="""$'\n'case "${nullDelimiterProg}" in $'\n'                'dd')$'\n'                    echo """$'\n'                { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( fd_read_pos - 1 )) | read -t 1 -r -d ''; } || {"""$'\n'                ;;$'\n'                'bash')$'\n'                    echo """$'\n'                IFS=\$'\\t'; read -r _ fd_read_pos0 </proc/self/fdinfo/${fd_read0}; IFS=$'\n'                nBytes=\$(( fd_read_pos - fd_read_pos0 - \${#A[@]} ))"""$'\n'if ${ddAvailableFlag}; then$'\n'                        echo """$'\n'                    {$'\n'                        if (( \${nBytes}  > 65535 )); then$'\n'                            { dd if=\"${fPath}\" bs=1 count=1 ${ddQuietStr} skip=\$(( fd_read_pos - 1 )) | read -t 1 -r -d ''; } $'\n'                        else$'\n'                            read -r -u ${fd_read0} -N \${nBytes} _$'\n'                            read -r -u ${fd_read0} -d ''$'\n'                            [[ \${#REPLY} == 0 ]]$'\n'                        fi$'\n'                    } || {""";$'\n'                    else$'\n'                        echo """$'\n'                    read -r -u ${fd_read0} -N \${nBytes} _$'\n'                    read -r -u ${fd_read0} -d ''$'\n'                    [[ \${#REPLY} == 0 ]] || {""";$'\n'                    fi$'\n'                ;;$'\n'            esac;$'\n'        else$'\n'            echo "[[ \"\${A[-1]: -1}\" == ${delimiterVal} ]] || {";$'\n'        fi;$'\n'    fi$'\n'(( ${verboseLevel} > 2 )) && echo """$'\n'                echo \"Partial read at: \${A[-1]}\" >&${fd_stderr}"""$'\n'echo """$'\n'                until read -r -u ${fd_read} ${delimiterReadStr}; do $'\n'                    A[-1]+=\"\${REPLY}\"; $'\n'                done"""$'\n'printf '%s' "A[-1]+=\"\${REPLY}\""$'\n'${lseekFlag} && printf '\n' || printf '%s\n' "${delimiterVal}"$'\n'(( ${verboseLevel} > 2 )) && echo "echo \"Partial read fixed to: \${A[-1]}\" >&${fd_stderr}"$'\n'echo "}"; };$'\n'fi$'\n'${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || ${readBytesFlag} || echo "}"$'\n'${nOrderFlag} && echo "read -r -u ${fd_nOrder} nOrder"$'\n'${nLinesReadLimitFlag} && echo """$'\n'nLinesRead+=\${#A[@]}$'\n'echo \${nLinesRead} >\"${tmpDir}\"/.nLinesRead$'\n'(( nLinesRead == nLinesReadLimit )) && {$'\n'    : >\"${tmpDir}\"/.quit$'\n'    echo '0' >\"${tmpDir}\"/.nLines$'\n'}$'\n'"""$'\n'echo """$'\n'    printf '\\n' >&${fd_continue}"""$'\n'echo """$'\n'    [[ \${#A[@]} == 0 ]] && {$'\n'        \${doneIndicatorFlag} || { $'\n'          [[ -f \"${tmpDir}\"/.done ]] && {"""$'\n'if ${lseekPosFlag}; then$'\n'    echo """$'\n'                lseek ${fd_read} 0 SEEK_CUR fd_read_pos$'\n'                lseek ${fd_write} 0 SEEK_CUR fd_write_pos""";$'\n'else$'\n'    echo """$'\n'            IFS=\$'\\t'; $'\n'            read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}$'\n'            read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}$'\n'            IFS=""";$'\n'fi$'\n'echo """$'\n'            [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && doneIndicatorFlag=true$'\n'          }$'\n'        }$'\n'        if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""$'\n'${nLinesAutoFlag} && echo "printf 'x\\n' >&\${fd_nAuto0}"$'\n'${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"$'\n'${nSpawnFlag} && echo """\printf '%s' '0' >&${fd_nSpawn}$'\n'printf 'q\\n' >&\${fd_nAuto0}"""$'\n'${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' &>/dev/null'$'\n'echo """$'\n'            : >\"${tmpDir}\"/.quit$'\n'            printf '%.0s\\n' \"${tmpDir}\"/.run/p* >&${fd_continue}$'\n'            break"""$'\n'{ ${inotifyFlag} || ${nOrderFlag}; } && echo "else"$'\n'${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"$'\n'${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify}"$'\n'echo """$'\n'        fi$'\n'        continue$'\n'    }"""$'\n'{ ${nLinesAutoFlag} || ${nSpawnFlag}; } && { printf '%s' """$'\n'    { \${nLinesAutoFlag} || \${nSpawnFlag}; } && {$'\n'        printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}$'\n'        (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false$'\n'    }"""$'\n'${fallocateFlag} && printf '%s' ' || ' || echo; }$'\n'${fallocateFlag} && echo "printf '\\n' >&\${fd_nAuto0}"$'\n'${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || ${lseekFlag} || { echo """$'\n'        { [[ \"\${A[*]##*${delimiterVal}}\" ]] || [[ -z \${A[0]} ]]; } && {"""$'\n'(( ${verboseLevel} > 2 )) && echo "echo \"FIXING SPLIT READ\" >&${fd_stderr}"$'\n'echo """$'\n'            A[-1]=\"\${A[-1]%${delimiterVal}}\"$'\n'            IFS=$'\n'            mapfile ${delimiterReadStr} A <<<\"\${A[*]}\"$'\n'        }"""; }$'\n'${subshellRunFlag} && echo '(' || echo '{'$'\n'{ ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'$'\n'${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""$'\n'${noFuncFlag} && echo 'IFS=$'"'"'\n'"'"$'\n'printf '%s ' "${runCmd[@]}"$'\n'if ${readBytesFlag} && ! { [[ ${readBytesProg} == 'bash' ]] && ! ${stdinRunFlag}; }; then$'\n'    if ${stdinRunFlag} || ${noFuncFlag}; then$'\n'        printf '<"%s"/%s' "${tmpDir}" '.stdin.tmp.{<#>}';$'\n'    else$'\n'        printf '"$(<"%s"/%s)"' "${tmpDir}" '.stdin.tmp.{<#>}';$'\n'    fi;$'\n'else$'\n'    if ${stdinRunFlag}; then$'\n'        printf '<<<%s' "\"\${A[@]${delimiterRemoveStr}}\"";$'\n'    else$'\n'        if ${noFuncFlag}; then$'\n'            printf "<<<\"\${A[*]%s}\"" "${delimiterRemoveStr}";$'\n'        else$'\n'            if ! ${substituteStringFlag}; then$'\n'                printf '%s' "\"\${A[@]${delimiterRemoveStr}}\"";$'\n'            fi;$'\n'        fi;$'\n'    fi;$'\n'fi$'\n'(( ${verboseLevel} > 2 )) && echo """ || {$'\n'        {$'\n'            printf '\\n\\n----------------------------------------------\\n\\n'$'\n'            echo 'ERROR DURING \"${runCmd[*]}\" CALL'$'\n'            declare -p A nLinesCur nLinesAutoFlag$'\n'            echo 'fd_read:'$'\n'            cat /proc/self/fdinfo/${fd_read}$'\n'            echo 'fd_write:'$'\n'            cat /proc/self/fdinfo/${fd_write}$'\n'            echo$'\n'        } >&${fd_stderr}$'\n'    }"""$'\n'${readBytesFlag} && { [[ -n ${readBytesProg//bash/} ]] || ${stdinRunFlag}; } && printf '\n\\rm -f "'"${tmpDir}"'"/.stdin.tmp.{<#>}\n'$'\n'${noFuncFlag} && echo 'IFS='$'\n'${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'$'\n'echo "${outStr}"$'\n'${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"$'\n'${nSpawnFlag} && echo "printf '%s,%s ' \${#A[@]} \${EPOCHREALTIME//./} >&${fd_nSpawn}"$'\n'echo """$'\n'done$'\n'} 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}$'\n'} 2>/dev/null$'\n'p_PID+=(\${p{<#>}_PID})""")" }
+
+
+TOTAL TIME FOR PID 444511 {1.6}: 7.601418 sec
+5:  0.000133 sec         <<--- (1x) { break }
+6:  0.000691 sec         <<--- (1x) { local p0 p0_PID }
+6:  0.001791 sec         <<--- (2x) { break }
+9:  0.000085 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000091 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p0 }
+15:  0.000084 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p0 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p0; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000062 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003575 sec        <<--- (35x) { true }
+23:  0.002823 sec        <<--- (32x) { ${nSpawnFlag} }
+23:  0.002838 sec        <<--- (35x) { ${nLinesAutoFlag} }
+23:  0.003121 sec        <<--- (35x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.003237 sec        <<--- (35x) { nLinesCur=${REPLY} }
+23:  0.003599 sec        <<--- (35x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.936228 sec        <<--- (35x) { read -r -u 11 _ }
+26:  0.003369 sec        <<--- (35x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000114 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000143 sec        <<--- (1x) { break }
+30:  0.003057 sec        <<--- (34x) { doneIndicatorFlag=true }
+30:  0.003067 sec        <<--- (34x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.028630 sec        <<--- (34x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.003073 sec        <<--- (34x) { ${doneIndicatorFlag} }
+32:  0.003144 sec        <<--- (34x) { [[ ${#A[@]} == 0 ]] }
+47:  0.003348 sec        <<--- (34x) { read -r -u 14 nOrder }
+49:  0.003283 sec        <<--- (34x) { printf '\n' 1>&11 }
+51:  0.003153 sec        <<--- (34x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002897 sec        <<--- (31x) { ${nSpawnFlag} }
+79:  0.002984 sec        <<--- (34x) { ${nLinesAutoFlag} }
+80:  0.003278 sec        <<--- (34x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.003108 sec        <<--- (34x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003842 sec        <<--- (32x) { nLinesAutoFlag=false }
+84:  0.565724 sec        <<--- (34x) { xxhsum -H3 "${A[@]}" }
+98:  0.003170 sec        <<--- (34x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003477 sec        <<--- (34x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 444527 {1.6}: 7.625398 sec
+5:  0.000124 sec         <<--- (1x) { break }
+6:  0.000714 sec         <<--- (1x) { local p1 p1_PID }
+6:  0.001922 sec         <<--- (2x) { break }
+9:  0.000084 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000088 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p1 }
+15:  0.000083 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p1 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p1; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000069 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000065 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000064 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000068 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003466 sec        <<--- (35x) { true }
+23:  0.002759 sec        <<--- (35x) { ${nLinesAutoFlag} }
+23:  0.002765 sec        <<--- (32x) { ${nSpawnFlag} }
+23:  0.003017 sec        <<--- (35x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.003044 sec        <<--- (35x) { nLinesCur=${REPLY} }
+23:  0.003566 sec        <<--- (35x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  7.048345 sec        <<--- (35x) { read -r -u 11 _ }
+26:  0.003308 sec        <<--- (35x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000123 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000166 sec        <<--- (1x) { break }
+30:  0.002808 sec        <<--- (34x) { doneIndicatorFlag=true }
+30:  0.002997 sec        <<--- (34x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.026268 sec        <<--- (34x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002986 sec        <<--- (34x) { ${doneIndicatorFlag} }
+32:  0.002994 sec        <<--- (34x) { [[ ${#A[@]} == 0 ]] }
+47:  0.003252 sec        <<--- (34x) { read -r -u 14 nOrder }
+49:  0.002950 sec        <<--- (34x) { printf '\n' 1>&11 }
+51:  0.002942 sec        <<--- (34x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002792 sec        <<--- (34x) { ${nLinesAutoFlag} }
+79:  0.002793 sec        <<--- (31x) { ${nSpawnFlag} }
+80:  0.003358 sec        <<--- (34x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002876 sec        <<--- (34x) { (( ${nLinesCur} < 1024 )) }
+81:  0.004332 sec        <<--- (32x) { nLinesAutoFlag=false }
+84:  0.481645 sec        <<--- (34x) { xxhsum -H3 "${A[@]}" }
+98:  0.003161 sec        <<--- (34x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003404 sec        <<--- (34x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 444549 {1.6}: 7.586440 sec
+5:  0.000159 sec         <<--- (1x) { break }
+6:  0.000736 sec         <<--- (1x) { local p2 p2_PID }
+6:  0.002247 sec         <<--- (2x) { break }
+9:  0.000085 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000087 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p2 }
+15:  0.000085 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p2 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p2; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000064 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000065 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000065 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003422 sec        <<--- (34x) { true }
+23:  0.002828 sec        <<--- (34x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002987 sec        <<--- (34x) { ${nLinesAutoFlag} }
+23:  0.003014 sec        <<--- (32x) { ${nSpawnFlag} }
+23:  0.003201 sec        <<--- (34x) { nLinesCur=${REPLY} }
+23:  0.003604 sec        <<--- (34x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.970203 sec        <<--- (34x) { read -r -u 11 _ }
+26:  0.003401 sec        <<--- (34x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000129 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000170 sec        <<--- (1x) { break }
+30:  0.003092 sec        <<--- (33x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.003115 sec        <<--- (33x) { doneIndicatorFlag=true }
+31:  0.029460 sec        <<--- (33x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.003038 sec        <<--- (33x) { [[ ${#A[@]} == 0 ]] }
+32:  0.003048 sec        <<--- (33x) { ${doneIndicatorFlag} }
+47:  0.003375 sec        <<--- (33x) { read -r -u 14 nOrder }
+49:  0.003104 sec        <<--- (33x) { printf '\n' 1>&11 }
+51:  0.002861 sec        <<--- (33x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002980 sec        <<--- (31x) { ${nSpawnFlag} }
+79:  0.003015 sec        <<--- (33x) { ${nLinesAutoFlag} }
+80:  0.003361 sec        <<--- (33x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002931 sec        <<--- (33x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003971 sec        <<--- (32x) { nLinesAutoFlag=false }
+84:  0.515385 sec        <<--- (33x) { xxhsum -H3 "${A[@]}" }
+98:  0.003369 sec        <<--- (33x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003716 sec        <<--- (33x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 444575 {1.6}: 7.602601 sec
+5:  0.000143 sec         <<--- (1x) { break }
+6:  0.000705 sec         <<--- (1x) { local p3 p3_PID }
+6:  0.001963 sec         <<--- (2x) { break }
+9:  0.000085 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000083 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p3 }
+15:  0.000091 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p3 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p3; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000102 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000101 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000068 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003539 sec        <<--- (34x) { true }
+23:  0.002726 sec        <<--- (34x) { ${nLinesAutoFlag} }
+23:  0.002819 sec        <<--- (32x) { ${nSpawnFlag} }
+23:  0.002910 sec        <<--- (34x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.003226 sec        <<--- (34x) { nLinesCur=${REPLY} }
+23:  0.003747 sec        <<--- (34x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  7.009582 sec        <<--- (34x) { read -r -u 11 _ }
+26:  0.003247 sec        <<--- (34x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000143 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000171 sec        <<--- (1x) { break }
+30:  0.003022 sec        <<--- (33x) { doneIndicatorFlag=true }
+30:  0.003159 sec        <<--- (33x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.029191 sec        <<--- (33x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002965 sec        <<--- (33x) { [[ ${#A[@]} == 0 ]] }
+32:  0.003086 sec        <<--- (33x) { ${doneIndicatorFlag} }
+47:  0.003187 sec        <<--- (33x) { read -r -u 14 nOrder }
+49:  0.003077 sec        <<--- (33x) { printf '\n' 1>&11 }
+51:  0.003160 sec        <<--- (33x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002880 sec        <<--- (33x) { ${nLinesAutoFlag} }
+79:  0.002953 sec        <<--- (31x) { ${nSpawnFlag} }
+80:  0.003293 sec        <<--- (33x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002845 sec        <<--- (33x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003702 sec        <<--- (32x) { nLinesAutoFlag=false }
+84:  0.493562 sec        <<--- (33x) { xxhsum -H3 "${A[@]}" }
+98:  0.003592 sec        <<--- (33x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003409 sec        <<--- (33x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 444609 {1.6}: 7.632409 sec
+5:  0.000088 sec         <<--- (1x) { break }
+6:  0.000738 sec         <<--- (1x) { local p4 p4_PID }
+6:  0.001305 sec         <<--- (2x) { break }
+9:  0.000089 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000085 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p4 }
+15:  0.000090 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p4 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p4; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003202 sec        <<--- (33x) { true }
+23:  0.002597 sec        <<--- (31x) { ${nSpawnFlag} }
+23:  0.002638 sec        <<--- (33x) { ${nLinesAutoFlag} }
+23:  0.002815 sec        <<--- (33x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.003009 sec        <<--- (33x) { nLinesCur=${REPLY} }
+23:  0.003449 sec        <<--- (33x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.989892 sec        <<--- (33x) { read -r -u 11 _ }
+26:  0.003155 sec        <<--- (33x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+30:  0.002848 sec        <<--- (33x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002877 sec        <<--- (33x) { doneIndicatorFlag=true }
+31:  0.026142 sec        <<--- (33x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002824 sec        <<--- (32x) { ${doneIndicatorFlag} }
+32:  0.003042 sec        <<--- (33x) { [[ ${#A[@]} == 0 ]] }
+47:  0.003114 sec        <<--- (33x) { read -r -u 14 nOrder }
+49:  0.003074 sec        <<--- (33x) { printf '\n' 1>&11 }
+51:  0.002809 sec        <<--- (33x) { [[ ${#A[@]} == 0 ]] }
+52:  0.000113 sec        <<--- (1x) { ${doneIndicatorFlag} }
+61:  0.000109 sec        <<--- (1x) { ${doneIndicatorFlag} }
+62:  0.000116 sec        <<--- (1x) { printf 'x\n' >&${fd_nAuto0} }
+63:  0.000115 sec        <<--- (1x) { : > "/dev/shm/.forkrun.RYYIOP"/.out/.quit4 }
+64:  0.000122 sec        <<--- (1x) { \printf '%s' '0' 1>&16 }
+65:  0.000080 sec        <<--- (1x) { printf 'q\n' >&${fd_nAuto0} }
+66:  0.000090 sec        <<--- (1x) { kill -9 444273 &> /dev/null }
+68:  0.000076 sec        <<--- (1x) { : > "/dev/shm/.forkrun.RYYIOP"/.quit }
+69:  0.000448 sec        <<--- (1x) { printf '%.0s\n' "/dev/shm/.forkrun.RYYIOP"/.run/p* 1>&11 }
+70:  0.000091 sec        <<--- (1x) { break }
+79:  0.002653 sec        <<--- (30x) { ${nSpawnFlag} }
+79:  0.002733 sec        <<--- (32x) { ${nLinesAutoFlag} }
+80:  0.003145 sec        <<--- (32x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002774 sec        <<--- (32x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003962 sec        <<--- (31x) { nLinesAutoFlag=false }
+84:  0.549455 sec        <<--- (32x) { xxhsum -H3 "${A[@]}" }
+98:  0.002941 sec        <<--- (32x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003238 sec        <<--- (32x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 444659 {1.6}: 7.613445 sec
+5:  0.000139 sec         <<--- (1x) { break }
+6:  0.000964 sec         <<--- (1x) { local p5 p5_PID }
+6:  0.001964 sec         <<--- (2x) { break }
+9:  0.000089 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000103 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p5 }
+15:  0.000089 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p5 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p5; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000064 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000069 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000068 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003307 sec        <<--- (33x) { true }
+23:  0.002717 sec        <<--- (33x) { ${nLinesAutoFlag} }
+23:  0.002817 sec        <<--- (31x) { ${nSpawnFlag} }
+23:  0.002875 sec        <<--- (33x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002902 sec        <<--- (33x) { nLinesCur=${REPLY} }
+23:  0.003305 sec        <<--- (33x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.980418 sec        <<--- (33x) { read -r -u 11 _ }
+26:  0.003183 sec        <<--- (33x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000126 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000170 sec        <<--- (1x) { break }
+30:  0.003023 sec        <<--- (32x) { doneIndicatorFlag=true }
+30:  0.003042 sec        <<--- (32x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.028392 sec        <<--- (32x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002913 sec        <<--- (32x) { ${doneIndicatorFlag} }
+32:  0.002986 sec        <<--- (32x) { [[ ${#A[@]} == 0 ]] }
+47:  0.003325 sec        <<--- (32x) { read -r -u 14 nOrder }
+49:  0.002919 sec        <<--- (32x) { printf '\n' 1>&11 }
+51:  0.002966 sec        <<--- (32x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002667 sec        <<--- (30x) { ${nSpawnFlag} }
+79:  0.002701 sec        <<--- (32x) { ${nLinesAutoFlag} }
+80:  0.003287 sec        <<--- (32x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002932 sec        <<--- (32x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003904 sec        <<--- (31x) { nLinesAutoFlag=false }
+84:  0.536558 sec        <<--- (32x) { xxhsum -H3 "${A[@]}" }
+98:  0.003104 sec        <<--- (32x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003290 sec        <<--- (32x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 444710 {1.6}: 7.619814 sec
+5:  0.000176 sec         <<--- (1x) { break }
+6:  0.000829 sec         <<--- (1x) { local p6 p6_PID }
+6:  0.001980 sec         <<--- (2x) { break }
+9:  0.000081 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000087 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p6 }
+15:  0.000085 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p6 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p6; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000101 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000100 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000104 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000105 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003076 sec        <<--- (33x) { true }
+23:  0.002661 sec        <<--- (33x) { ${nLinesAutoFlag} }
+23:  0.002685 sec        <<--- (33x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002735 sec        <<--- (32x) { ${nSpawnFlag} }
+23:  0.002849 sec        <<--- (33x) { nLinesCur=${REPLY} }
+23:  0.003174 sec        <<--- (33x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  7.068039 sec        <<--- (33x) { read -r -u 11 _ }
+26:  0.003296 sec        <<--- (33x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000132 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000172 sec        <<--- (1x) { break }
+30:  0.002795 sec        <<--- (32x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002799 sec        <<--- (32x) { doneIndicatorFlag=true }
+31:  0.027352 sec        <<--- (32x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002895 sec        <<--- (32x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002948 sec        <<--- (32x) { ${doneIndicatorFlag} }
+47:  0.002951 sec        <<--- (32x) { read -r -u 14 nOrder }
+49:  0.003176 sec        <<--- (32x) { printf '\n' 1>&11 }
+51:  0.003002 sec        <<--- (32x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002781 sec        <<--- (31x) { ${nSpawnFlag} }
+79:  0.002983 sec        <<--- (32x) { ${nLinesAutoFlag} }
+80:  0.003286 sec        <<--- (32x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002718 sec        <<--- (32x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003722 sec        <<--- (32x) { nLinesAutoFlag=false }
+84:  0.457698 sec        <<--- (32x) { xxhsum -H3 "${A[@]}" }
+98:  0.002943 sec        <<--- (32x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003298 sec        <<--- (32x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 444762 {1.6}: 7.603041 sec
+5:  0.000134 sec         <<--- (1x) { break }
+6:  0.000745 sec         <<--- (1x) { local p7 p7_PID }
+6:  0.001681 sec         <<--- (2x) { break }
+9:  0.000086 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000089 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p7 }
+15:  0.000101 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p7 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p7; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000065 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000068 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000084 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000072 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003321 sec        <<--- (33x) { true }
+23:  0.002565 sec        <<--- (33x) { ${nLinesAutoFlag} }
+23:  0.002906 sec        <<--- (33x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002946 sec        <<--- (32x) { ${nSpawnFlag} }
+23:  0.003010 sec        <<--- (33x) { nLinesCur=${REPLY} }
+23:  0.003494 sec        <<--- (33x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.990899 sec        <<--- (33x) { read -r -u 11 _ }
+26:  0.003350 sec        <<--- (33x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000127 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000163 sec        <<--- (1x) { break }
+30:  0.003022 sec        <<--- (32x) { doneIndicatorFlag=true }
+30:  0.003147 sec        <<--- (32x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.027669 sec        <<--- (32x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002941 sec        <<--- (32x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002963 sec        <<--- (32x) { ${doneIndicatorFlag} }
+47:  0.003274 sec        <<--- (32x) { read -r -u 14 nOrder }
+49:  0.002931 sec        <<--- (32x) { printf '\n' 1>&11 }
+51:  0.003066 sec        <<--- (32x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002856 sec        <<--- (32x) { ${nLinesAutoFlag} }
+79:  0.002937 sec        <<--- (31x) { ${nSpawnFlag} }
+80:  0.003184 sec        <<--- (32x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002760 sec        <<--- (32x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003913 sec        <<--- (32x) { nLinesAutoFlag=false }
+84:  0.516208 sec        <<--- (32x) { xxhsum -H3 "${A[@]}" }
+98:  0.003002 sec        <<--- (32x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003262 sec        <<--- (32x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 445812 {1.6}: 7.452780 sec
+5:  0.000141 sec         <<--- (1x) { break }
+6:  0.001018 sec         <<--- (1x) { local p8 p8_PID }
+6:  0.001494 sec         <<--- (2x) { break }
+9:  0.000085 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000098 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p8 }
+15:  0.000111 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p8 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p8; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000095 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000069 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000065 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.002906 sec        <<--- (30x) { true }
+23:  0.002493 sec        <<--- (29x) { ${nSpawnFlag} }
+23:  0.002558 sec        <<--- (30x) { ${nLinesAutoFlag} }
+23:  0.002656 sec        <<--- (30x) { nLinesCur=${REPLY} }
+23:  0.002708 sec        <<--- (30x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.003069 sec        <<--- (30x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.931672 sec        <<--- (30x) { read -r -u 11 _ }
+26:  0.002734 sec        <<--- (30x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+30:  0.002533 sec        <<--- (30x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002564 sec        <<--- (30x) { doneIndicatorFlag=true }
+31:  0.023585 sec        <<--- (30x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002627 sec        <<--- (29x) { ${doneIndicatorFlag} }
+32:  0.002754 sec        <<--- (30x) { [[ ${#A[@]} == 0 ]] }
+47:  0.002987 sec        <<--- (30x) { read -r -u 14 nOrder }
+49:  0.002705 sec        <<--- (30x) { printf '\n' 1>&11 }
+51:  0.002698 sec        <<--- (30x) { [[ ${#A[@]} == 0 ]] }
+52:  0.000075 sec        <<--- (1x) { ${doneIndicatorFlag} }
+61:  0.000081 sec        <<--- (1x) { ${doneIndicatorFlag} }
+62:  0.000122 sec        <<--- (1x) { printf 'x\n' >&${fd_nAuto0} }
+63:  0.000131 sec        <<--- (1x) { : > "/dev/shm/.forkrun.RYYIOP"/.out/.quit8 }
+64:  0.000114 sec        <<--- (1x) { \printf '%s' '0' 1>&16 }
+65:  0.000123 sec        <<--- (1x) { printf 'q\n' >&${fd_nAuto0} }
+66:  0.000124 sec        <<--- (1x) { kill -9 444273 &> /dev/null }
+68:  0.000108 sec        <<--- (1x) { : > "/dev/shm/.forkrun.RYYIOP"/.quit }
+69:  0.000699 sec        <<--- (1x) { printf '%.0s\n' "/dev/shm/.forkrun.RYYIOP"/.run/p* 1>&11 }
+70:  0.000163 sec        <<--- (1x) { break }
+79:  0.002519 sec        <<--- (29x) { ${nLinesAutoFlag} }
+79:  0.002526 sec        <<--- (28x) { ${nSpawnFlag} }
+80:  0.002683 sec        <<--- (29x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002512 sec        <<--- (29x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003499 sec        <<--- (29x) { nLinesAutoFlag=false }
+84:  0.434941 sec        <<--- (29x) { xxhsum -H3 "${A[@]}" }
+98:  0.002837 sec        <<--- (29x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003032 sec        <<--- (29x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 445872 {1.6}: 7.432514 sec
+5:  0.000127 sec         <<--- (1x) { break }
+6:  0.000805 sec         <<--- (1x) { local p9 p9_PID }
+6:  0.001973 sec         <<--- (2x) { break }
+9:  0.000149 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000144 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p9 }
+15:  0.000112 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p9 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p9; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000068 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000071 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000062 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000065 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003111 sec        <<--- (30x) { true }
+23:  0.002543 sec        <<--- (30x) { ${nLinesAutoFlag} }
+23:  0.002700 sec        <<--- (29x) { ${nSpawnFlag} }
+23:  0.002761 sec        <<--- (30x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002776 sec        <<--- (30x) { nLinesCur=${REPLY} }
+23:  0.003317 sec        <<--- (30x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.760159 sec        <<--- (30x) { read -r -u 11 _ }
+26:  0.002868 sec        <<--- (30x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000123 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000153 sec        <<--- (1x) { break }
+30:  0.002672 sec        <<--- (29x) { doneIndicatorFlag=true }
+30:  0.002734 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.025086 sec        <<--- (29x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002590 sec        <<--- (29x) { ${doneIndicatorFlag} }
+32:  0.002671 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+47:  0.002916 sec        <<--- (29x) { read -r -u 14 nOrder }
+49:  0.002821 sec        <<--- (29x) { printf '\n' 1>&11 }
+51:  0.002853 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002462 sec        <<--- (29x) { ${nLinesAutoFlag} }
+79:  0.002634 sec        <<--- (28x) { ${nSpawnFlag} }
+80:  0.002976 sec        <<--- (29x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002539 sec        <<--- (29x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003396 sec        <<--- (29x) { nLinesAutoFlag=false }
+84:  0.583918 sec        <<--- (29x) { xxhsum -H3 "${A[@]}" }
+98:  0.002953 sec        <<--- (29x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003206 sec        <<--- (29x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 445933 {1.6}: 7.472974 sec
+5:  0.000093 sec         <<--- (1x) { break }
+6:  0.000781 sec         <<--- (1x) { local p10 p10_PID }
+6:  0.001351 sec         <<--- (2x) { break }
+9:  0.000079 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000096 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p10 }
+15:  0.000094 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p10 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p10; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000089 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000064 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000064 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.002955 sec        <<--- (30x) { true }
+23:  0.002362 sec        <<--- (30x) { ${nLinesAutoFlag} }
+23:  0.002522 sec        <<--- (29x) { ${nSpawnFlag} }
+23:  0.002546 sec        <<--- (30x) { nLinesCur=${REPLY} }
+23:  0.002657 sec        <<--- (30x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.003095 sec        <<--- (30x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.746528 sec        <<--- (30x) { read -r -u 11 _ }
+26:  0.002670 sec        <<--- (30x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000081 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000101 sec        <<--- (1x) { break }
+30:  0.002481 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002538 sec        <<--- (29x) { doneIndicatorFlag=true }
+31:  0.022925 sec        <<--- (29x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002511 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002559 sec        <<--- (29x) { ${doneIndicatorFlag} }
+47:  0.003031 sec        <<--- (29x) { read -r -u 14 nOrder }
+49:  0.002880 sec        <<--- (29x) { printf '\n' 1>&11 }
+51:  0.002815 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002544 sec        <<--- (29x) { ${nLinesAutoFlag} }
+79:  0.002595 sec        <<--- (28x) { ${nSpawnFlag} }
+80:  0.003013 sec        <<--- (29x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002638 sec        <<--- (29x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003555 sec        <<--- (29x) { nLinesAutoFlag=false }
+84:  0.642660 sec        <<--- (29x) { xxhsum -H3 "${A[@]}" }
+98:  0.002980 sec        <<--- (29x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.002955 sec        <<--- (29x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 445997 {1.6}: 7.417176 sec
+5:  0.000153 sec         <<--- (1x) { break }
+6:  0.000945 sec         <<--- (1x) { local p11 p11_PID }
+6:  0.002938 sec         <<--- (2x) { break }
+9:  0.000137 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000148 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p11 }
+15:  0.000105 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p11 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p11; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000069 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000087 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000090 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.002966 sec        <<--- (30x) { true }
+23:  0.002441 sec        <<--- (30x) { ${nLinesAutoFlag} }
+23:  0.002499 sec        <<--- (29x) { ${nSpawnFlag} }
+23:  0.002692 sec        <<--- (30x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002845 sec        <<--- (30x) { nLinesCur=${REPLY} }
+23:  0.003455 sec        <<--- (30x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.875315 sec        <<--- (30x) { read -r -u 11 _ }
+26:  0.002698 sec        <<--- (30x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000118 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000139 sec        <<--- (1x) { break }
+30:  0.002603 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002658 sec        <<--- (29x) { doneIndicatorFlag=true }
+31:  0.023941 sec        <<--- (29x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002626 sec        <<--- (29x) { ${doneIndicatorFlag} }
+32:  0.002666 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+47:  0.002822 sec        <<--- (29x) { read -r -u 14 nOrder }
+49:  0.002602 sec        <<--- (29x) { printf '\n' 1>&11 }
+51:  0.002732 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002448 sec        <<--- (29x) { ${nLinesAutoFlag} }
+79:  0.002473 sec        <<--- (28x) { ${nSpawnFlag} }
+80:  0.002787 sec        <<--- (29x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002418 sec        <<--- (29x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003349 sec        <<--- (29x) { nLinesAutoFlag=false }
+84:  0.455297 sec        <<--- (29x) { xxhsum -H3 "${A[@]}" }
+98:  0.002708 sec        <<--- (29x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003139 sec        <<--- (29x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446060 {1.6}: 7.412427 sec
+5:  0.000136 sec         <<--- (1x) { break }
+6:  0.000983 sec         <<--- (1x) { local p12 p12_PID }
+6:  0.001978 sec         <<--- (2x) { break }
+9:  0.000115 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000098 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p12 }
+15:  0.000087 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p12 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p12; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000065 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000095 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000096 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003026 sec        <<--- (30x) { true }
+23:  0.002537 sec        <<--- (30x) { ${nLinesAutoFlag} }
+23:  0.002596 sec        <<--- (30x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002627 sec        <<--- (29x) { ${nSpawnFlag} }
+23:  0.002633 sec        <<--- (30x) { nLinesCur=${REPLY} }
+23:  0.003265 sec        <<--- (30x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.899641 sec        <<--- (30x) { read -r -u 11 _ }
+26:  0.002839 sec        <<--- (30x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000123 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000162 sec        <<--- (1x) { break }
+30:  0.002524 sec        <<--- (29x) { doneIndicatorFlag=true }
+30:  0.002542 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.021851 sec        <<--- (29x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002445 sec        <<--- (29x) { ${doneIndicatorFlag} }
+32:  0.002457 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+47:  0.002809 sec        <<--- (29x) { read -r -u 14 nOrder }
+49:  0.002703 sec        <<--- (29x) { printf '\n' 1>&11 }
+51:  0.002583 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002491 sec        <<--- (29x) { ${nLinesAutoFlag} }
+79:  0.002601 sec        <<--- (28x) { ${nSpawnFlag} }
+80:  0.002853 sec        <<--- (29x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002498 sec        <<--- (29x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003195 sec        <<--- (29x) { nLinesAutoFlag=false }
+84:  0.429730 sec        <<--- (29x) { xxhsum -H3 "${A[@]}" }
+98:  0.002728 sec        <<--- (29x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003249 sec        <<--- (29x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446124 {1.6}: 7.408281 sec
+5:  0.000106 sec         <<--- (1x) { break }
+6:  0.000946 sec         <<--- (1x) { local p13 p13_PID }
+6:  0.001434 sec         <<--- (2x) { break }
+9:  0.000138 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000093 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p13 }
+15:  0.000124 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p13 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p13; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000090 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000098 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000083 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.002988 sec        <<--- (30x) { true }
+23:  0.002462 sec        <<--- (29x) { ${nSpawnFlag} }
+23:  0.002518 sec        <<--- (30x) { ${nLinesAutoFlag} }
+23:  0.002580 sec        <<--- (30x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002757 sec        <<--- (30x) { nLinesCur=${REPLY} }
+23:  0.003100 sec        <<--- (30x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.856217 sec        <<--- (30x) { read -r -u 11 _ }
+26:  0.002984 sec        <<--- (30x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000118 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000130 sec        <<--- (1x) { break }
+30:  0.002533 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002665 sec        <<--- (29x) { doneIndicatorFlag=true }
+31:  0.023630 sec        <<--- (29x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002492 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002680 sec        <<--- (29x) { ${doneIndicatorFlag} }
+47:  0.002831 sec        <<--- (29x) { read -r -u 14 nOrder }
+49:  0.002821 sec        <<--- (29x) { printf '\n' 1>&11 }
+51:  0.002865 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002478 sec        <<--- (29x) { ${nLinesAutoFlag} }
+79:  0.002577 sec        <<--- (28x) { ${nSpawnFlag} }
+80:  0.002990 sec        <<--- (29x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002687 sec        <<--- (29x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003509 sec        <<--- (29x) { nLinesAutoFlag=false }
+84:  0.466757 sec        <<--- (29x) { xxhsum -H3 "${A[@]}" }
+98:  0.002884 sec        <<--- (29x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.002849 sec        <<--- (29x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446189 {1.6}: 7.408632 sec
+5:  0.000144 sec         <<--- (1x) { break }
+6:  0.000963 sec         <<--- (1x) { local p14 p14_PID }
+6:  0.001960 sec         <<--- (2x) { break }
+9:  0.000138 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000120 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p14 }
+15:  0.000088 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p14 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p14; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000064 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000100 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000108 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000092 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003053 sec        <<--- (29x) { true }
+23:  0.002302 sec        <<--- (29x) { ${nLinesAutoFlag} }
+23:  0.002364 sec        <<--- (28x) { ${nSpawnFlag} }
+23:  0.002610 sec        <<--- (29x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002657 sec        <<--- (29x) { nLinesCur=${REPLY} }
+23:  0.003257 sec        <<--- (29x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.846012 sec        <<--- (29x) { read -r -u 11 _ }
+26:  0.002775 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000120 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000175 sec        <<--- (1x) { break }
+30:  0.002474 sec        <<--- (28x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002593 sec        <<--- (28x) { doneIndicatorFlag=true }
+31:  0.024647 sec        <<--- (28x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002561 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002650 sec        <<--- (28x) { ${doneIndicatorFlag} }
+47:  0.002878 sec        <<--- (28x) { read -r -u 14 nOrder }
+49:  0.002760 sec        <<--- (28x) { printf '\n' 1>&11 }
+51:  0.002605 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002513 sec        <<--- (27x) { ${nSpawnFlag} }
+79:  0.002522 sec        <<--- (28x) { ${nLinesAutoFlag} }
+80:  0.002909 sec        <<--- (28x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002483 sec        <<--- (28x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003241 sec        <<--- (28x) { nLinesAutoFlag=false }
+84:  0.477029 sec        <<--- (28x) { xxhsum -H3 "${A[@]}" }
+98:  0.002734 sec        <<--- (28x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.002931 sec        <<--- (28x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446259 {1.6}: 7.406210 sec
+5:  0.000151 sec         <<--- (1x) { break }
+6:  0.001126 sec         <<--- (1x) { local p15 p15_PID }
+6:  0.002203 sec         <<--- (2x) { break }
+9:  0.000135 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000102 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p15 }
+15:  0.000088 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p15 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p15; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000071 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000062 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.002669 sec        <<--- (29x) { true }
+23:  0.002322 sec        <<--- (29x) { ${nLinesAutoFlag} }
+23:  0.002358 sec        <<--- (29x) { nLinesCur=${REPLY} }
+23:  0.002364 sec        <<--- (28x) { ${nSpawnFlag} }
+23:  0.002488 sec        <<--- (29x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002933 sec        <<--- (29x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.904016 sec        <<--- (29x) { read -r -u 11 _ }
+26:  0.002465 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+30:  0.002365 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002383 sec        <<--- (29x) { doneIndicatorFlag=true }
+31:  0.022435 sec        <<--- (29x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002374 sec        <<--- (28x) { ${doneIndicatorFlag} }
+32:  0.002399 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+47:  0.002847 sec        <<--- (29x) { read -r -u 14 nOrder }
+49:  0.002713 sec        <<--- (29x) { printf '\n' 1>&11 }
+51:  0.002756 sec        <<--- (29x) { [[ ${#A[@]} == 0 ]] }
+52:  0.000118 sec        <<--- (1x) { ${doneIndicatorFlag} }
+61:  0.000084 sec        <<--- (1x) { ${doneIndicatorFlag} }
+62:  0.000079 sec        <<--- (1x) { printf 'x\n' >&${fd_nAuto0} }
+63:  0.000106 sec        <<--- (1x) { : > "/dev/shm/.forkrun.RYYIOP"/.out/.quit15 }
+64:  0.000088 sec        <<--- (1x) { \printf '%s' '0' 1>&16 }
+65:  0.000097 sec        <<--- (1x) { printf 'q\n' >&${fd_nAuto0} }
+66:  0.000095 sec        <<--- (1x) { kill -9 444273 &> /dev/null }
+68:  0.000098 sec        <<--- (1x) { : > "/dev/shm/.forkrun.RYYIOP"/.quit }
+69:  0.000473 sec        <<--- (1x) { printf '%.0s\n' "/dev/shm/.forkrun.RYYIOP"/.run/p* 1>&11 }
+70:  0.000188 sec        <<--- (1x) { break }
+79:  0.002291 sec        <<--- (28x) { ${nLinesAutoFlag} }
+79:  0.002476 sec        <<--- (27x) { ${nSpawnFlag} }
+80:  0.002842 sec        <<--- (28x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002498 sec        <<--- (28x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003455 sec        <<--- (28x) { nLinesAutoFlag=false }
+84:  0.420007 sec        <<--- (28x) { xxhsum -H3 "${A[@]}" }
+98:  0.002525 sec        <<--- (28x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.002732 sec        <<--- (28x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446323 {1.6}: 7.393244 sec
+5:  0.000151 sec         <<--- (1x) { break }
+6:  0.000852 sec         <<--- (1x) { local p16 p16_PID }
+6:  0.002206 sec         <<--- (2x) { break }
+9:  0.000091 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000113 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p16 }
+15:  0.000135 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p16 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p16; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000098 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000098 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000099 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003040 sec        <<--- (29x) { true }
+23:  0.002415 sec        <<--- (29x) { ${nLinesAutoFlag} }
+23:  0.002493 sec        <<--- (28x) { ${nSpawnFlag} }
+23:  0.002609 sec        <<--- (29x) { nLinesCur=${REPLY} }
+23:  0.002611 sec        <<--- (29x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.003141 sec        <<--- (29x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.827617 sec        <<--- (29x) { read -r -u 11 _ }
+26:  0.002757 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000153 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000186 sec        <<--- (1x) { break }
+30:  0.002475 sec        <<--- (28x) { doneIndicatorFlag=true }
+30:  0.002500 sec        <<--- (28x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.024345 sec        <<--- (28x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002471 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002577 sec        <<--- (28x) { ${doneIndicatorFlag} }
+47:  0.002912 sec        <<--- (28x) { read -r -u 14 nOrder }
+49:  0.002799 sec        <<--- (28x) { printf '\n' 1>&11 }
+51:  0.002616 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002418 sec        <<--- (27x) { ${nSpawnFlag} }
+79:  0.002424 sec        <<--- (28x) { ${nLinesAutoFlag} }
+80:  0.002798 sec        <<--- (28x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002399 sec        <<--- (28x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003306 sec        <<--- (28x) { nLinesAutoFlag=false }
+84:  0.480474 sec        <<--- (28x) { xxhsum -H3 "${A[@]}" }
+98:  0.002760 sec        <<--- (28x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003038 sec        <<--- (28x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446386 {1.6}: 7.386490 sec
+5:  0.000150 sec         <<--- (1x) { break }
+6:  0.000868 sec         <<--- (1x) { local p17 p17_PID }
+6:  0.001873 sec         <<--- (2x) { break }
+9:  0.000134 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000133 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p17 }
+15:  0.000087 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p17 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p17; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000069 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000065 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000064 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.002766 sec        <<--- (29x) { true }
+23:  0.002373 sec        <<--- (29x) { ${nLinesAutoFlag} }
+23:  0.002440 sec        <<--- (28x) { ${nSpawnFlag} }
+23:  0.002607 sec        <<--- (29x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002669 sec        <<--- (29x) { nLinesCur=${REPLY} }
+23:  0.003059 sec        <<--- (29x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.876369 sec        <<--- (29x) { read -r -u 11 _ }
+26:  0.002743 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000125 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000162 sec        <<--- (1x) { break }
+30:  0.002444 sec        <<--- (28x) { doneIndicatorFlag=true }
+30:  0.002504 sec        <<--- (28x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.022598 sec        <<--- (28x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002353 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002485 sec        <<--- (28x) { ${doneIndicatorFlag} }
+47:  0.002832 sec        <<--- (28x) { read -r -u 14 nOrder }
+49:  0.002620 sec        <<--- (28x) { printf '\n' 1>&11 }
+51:  0.002744 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002450 sec        <<--- (28x) { ${nLinesAutoFlag} }
+79:  0.002521 sec        <<--- (27x) { ${nSpawnFlag} }
+80:  0.002955 sec        <<--- (28x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002517 sec        <<--- (28x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003322 sec        <<--- (28x) { nLinesAutoFlag=false }
+84:  0.427796 sec        <<--- (28x) { xxhsum -H3 "${A[@]}" }
+98:  0.002635 sec        <<--- (28x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.002892 sec        <<--- (28x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446442 {1.6}: 7.355380 sec
+5:  0.000135 sec         <<--- (1x) { break }
+6:  0.000832 sec         <<--- (1x) { local p18 p18_PID }
+6:  0.001761 sec         <<--- (2x) { break }
+9:  0.000087 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000093 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p18 }
+15:  0.000132 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p18 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p18; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000090 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000115 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000099 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000098 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.002856 sec        <<--- (29x) { true }
+23:  0.002459 sec        <<--- (28x) { ${nSpawnFlag} }
+23:  0.002481 sec        <<--- (29x) { ${nLinesAutoFlag} }
+23:  0.002538 sec        <<--- (29x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002642 sec        <<--- (29x) { nLinesCur=${REPLY} }
+23:  0.003017 sec        <<--- (29x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.788818 sec        <<--- (29x) { read -r -u 11 _ }
+26:  0.002877 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000083 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000165 sec        <<--- (1x) { break }
+30:  0.002558 sec        <<--- (28x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002589 sec        <<--- (28x) { doneIndicatorFlag=true }
+31:  0.024511 sec        <<--- (28x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002408 sec        <<--- (28x) { ${doneIndicatorFlag} }
+32:  0.002477 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+47:  0.002713 sec        <<--- (28x) { read -r -u 14 nOrder }
+49:  0.002665 sec        <<--- (28x) { printf '\n' 1>&11 }
+51:  0.002796 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002453 sec        <<--- (28x) { ${nLinesAutoFlag} }
+79:  0.002611 sec        <<--- (27x) { ${nSpawnFlag} }
+80:  0.002979 sec        <<--- (28x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002381 sec        <<--- (28x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003524 sec        <<--- (28x) { nLinesAutoFlag=false }
+84:  0.481641 sec        <<--- (28x) { xxhsum -H3 "${A[@]}" }
+98:  0.002804 sec        <<--- (28x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.002892 sec        <<--- (28x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446507 {1.6}: 7.338201 sec
+5:  0.000098 sec         <<--- (1x) { break }
+6:  0.000860 sec         <<--- (1x) { local p19 p19_PID }
+6:  0.001980 sec         <<--- (2x) { break }
+9:  0.000086 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000151 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p19 }
+15:  0.000123 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p19 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p19; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000104 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000102 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.002909 sec        <<--- (29x) { true }
+23:  0.002458 sec        <<--- (29x) { ${nLinesAutoFlag} }
+23:  0.002598 sec        <<--- (28x) { ${nSpawnFlag} }
+23:  0.002759 sec        <<--- (29x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002761 sec        <<--- (29x) { nLinesCur=${REPLY} }
+23:  0.003327 sec        <<--- (29x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.603134 sec        <<--- (29x) { read -r -u 11 _ }
+26:  0.002804 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000122 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000165 sec        <<--- (1x) { break }
+30:  0.002590 sec        <<--- (28x) { doneIndicatorFlag=true }
+30:  0.002736 sec        <<--- (28x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.024629 sec        <<--- (28x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002452 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002548 sec        <<--- (28x) { ${doneIndicatorFlag} }
+47:  0.002726 sec        <<--- (28x) { read -r -u 14 nOrder }
+49:  0.002755 sec        <<--- (28x) { printf '\n' 1>&11 }
+51:  0.002805 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002403 sec        <<--- (28x) { ${nLinesAutoFlag} }
+79:  0.002587 sec        <<--- (27x) { ${nSpawnFlag} }
+80:  0.002775 sec        <<--- (28x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002714 sec        <<--- (28x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003345 sec        <<--- (28x) { nLinesAutoFlag=false }
+84:  0.648662 sec        <<--- (28x) { xxhsum -H3 "${A[@]}" }
+98:  0.002829 sec        <<--- (28x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.002971 sec        <<--- (28x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446570 {1.6}: 7.337057 sec
+5:  0.000160 sec         <<--- (1x) { break }
+6:  0.000872 sec         <<--- (1x) { local p20 p20_PID }
+6:  0.001927 sec         <<--- (2x) { break }
+9:  0.000085 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000101 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p20 }
+15:  0.000131 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p20 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p20; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000071 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000066 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000078 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000069 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.003146 sec        <<--- (29x) { true }
+23:  0.002517 sec        <<--- (29x) { ${nLinesAutoFlag} }
+23:  0.002632 sec        <<--- (28x) { ${nSpawnFlag} }
+23:  0.002718 sec        <<--- (29x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002894 sec        <<--- (29x) { nLinesCur=${REPLY} }
+23:  0.003305 sec        <<--- (29x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.812969 sec        <<--- (29x) { read -r -u 11 _ }
+26:  0.002658 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000126 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000151 sec        <<--- (1x) { break }
+30:  0.002521 sec        <<--- (28x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+30:  0.002707 sec        <<--- (28x) { doneIndicatorFlag=true }
+31:  0.024101 sec        <<--- (28x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002665 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002792 sec        <<--- (28x) { ${doneIndicatorFlag} }
+47:  0.002790 sec        <<--- (28x) { read -r -u 14 nOrder }
+49:  0.002854 sec        <<--- (28x) { printf '\n' 1>&11 }
+51:  0.002607 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002439 sec        <<--- (28x) { ${nLinesAutoFlag} }
+79:  0.002518 sec        <<--- (27x) { ${nSpawnFlag} }
+80:  0.002797 sec        <<--- (28x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002463 sec        <<--- (28x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003374 sec        <<--- (28x) { nLinesAutoFlag=false }
+84:  0.437917 sec        <<--- (28x) { xxhsum -H3 "${A[@]}" }
+98:  0.002867 sec        <<--- (28x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.002969 sec        <<--- (28x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 446633 {1.6}: 7.366286 sec
+5:  0.000090 sec         <<--- (1x) { break }
+6:  0.000872 sec         <<--- (1x) { local p21 p21_PID }
+6:  0.001342 sec         <<--- (2x) { break }
+9:  0.000088 sec         <<--- (1x) { export LC_ALL=C LANG=C IFS= }
+11:  0.000097 sec        <<--- (1x) { echo "${BASH_PID}" > "/dev/shm/.forkrun.RYYIOP"/.run/p21 }
+15:  0.000117 sec        <<--- (1x) { trap ': >"/dev/shm/.forkrun.RYYIOP"/.quit; $'\n'[[ -f "/dev/shm/.forkrun.RYYIOP"/.run/p21 ]] && \rm -f "/dev/shm/.forkrun.RYYIOP"/.run/p21; $'\n'printf '"'"'\n'"'"' >&11' EXIT }
+17:  0.000068 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -INT 444073 ${BASHPID}' INT }
+18:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -TERM 444073 ${BASHPID}' TERM }
+19:  0.000068 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1; kill -HUP 444073 ${BASHPID}' HUP }
+20:  0.000067 sec        <<--- (1x) { trap 'trap - TERM INT HUP USR1' USR1 }
+22:  0.002958 sec        <<--- (29x) { true }
+23:  0.002449 sec        <<--- (29x) { ${nLinesAutoFlag} }
+23:  0.002569 sec        <<--- (29x) { [[ ${REPLY} == +([0-9]) ]] }
+23:  0.002684 sec        <<--- (29x) { nLinesCur=${REPLY} }
+23:  0.002730 sec        <<--- (28x) { ${nSpawnFlag} }
+23:  0.003186 sec        <<--- (29x) { read -r < "/dev/shm/.forkrun.RYYIOP"/.nLines }
+25:  6.665139 sec        <<--- (29x) { read -r -u 11 _ }
+26:  0.002724 sec        <<--- (29x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.quit ]] }
+27:  0.000085 sec        <<--- (1x) { printf '\n' 1>&11 }
+28:  0.000103 sec        <<--- (1x) { break }
+30:  0.002617 sec        <<--- (28x) { doneIndicatorFlag=true }
+30:  0.002657 sec        <<--- (28x) { [[ -f "/dev/shm/.forkrun.RYYIOP"/.done ]] }
+31:  0.027821 sec        <<--- (28x) { mapfile -t -n ${nLinesCur} -u 18 A }
+32:  0.002468 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+32:  0.002661 sec        <<--- (28x) { ${doneIndicatorFlag} }
+47:  0.002829 sec        <<--- (28x) { read -r -u 14 nOrder }
+49:  0.002739 sec        <<--- (28x) { printf '\n' 1>&11 }
+51:  0.002790 sec        <<--- (28x) { [[ ${#A[@]} == 0 ]] }
+79:  0.002600 sec        <<--- (28x) { ${nLinesAutoFlag} }
+79:  0.002645 sec        <<--- (27x) { ${nSpawnFlag} }
+80:  0.002889 sec        <<--- (28x) { printf '%s\n' ${#A[@]} >&${fd_nAuto0} }
+81:  0.002583 sec        <<--- (28x) { (( ${nLinesCur} < 1024 )) }
+81:  0.003411 sec        <<--- (28x) { nLinesAutoFlag=false }
+84:  0.612071 sec        <<--- (28x) { xxhsum -H3 "${A[@]}" }
+98:  0.002836 sec        <<--- (28x) { printf '%s\n' "${nOrder}" 1>&15 }
+99:  0.003166 sec        <<--- (28x) { printf '%s,%s ' ${#A[@]} ${EPOCHREALTIME//./} 1>&16 }
+
+
+TOTAL TIME FOR PID 478451 {1.5}: 0.000598 sec
+1:  0.000598 sec         <<--- (1x) { printf 'final worker process count: %s\n' "$(< "${tmpDir}"/.nWorkers)" >&${fd_stderr} }
+
+
+TOTAL TIME FOR PID 478461 {1.5}: 0.000740 sec
+1:  0.000740 sec         <<--- (1x) { printf 'final worker process count: %s\n' "$(< "${tmpDir}"/.nWorkers)" >&${fd_stderr} }
+
+
+TOTAL TIME FOR PID 478466 {1.5}: 0.000948 sec
+1:  0.000948 sec         <<--- (1x) { printf 'final worker process count: %s\n' "$(< "${tmpDir}"/.nWorkers)" >&${fd_stderr} }
+
+
