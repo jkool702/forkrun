@@ -895,9 +895,11 @@ _forkrun_get_load() {
                     # wait for new info to get average run time per batch at current worker count arrives
                     # update counts of lines run and run times for the current kkProcs
                     IFS=' '
-                    # get 1 data point using a blocking read
-                    read -r -u ${fd_nSpawn} -t 0.1 -a A
+                    # get data for 55 ms
+                    read -r -u ${fd_nSpawn} -t 0.055 -a A
                     (( ${#A[@]} == 0 )) && continue
+
+                    # split sdata into lines and times
                     runLines=(${A[@]%%,*})
                     runTime=(${A[@]##*,})
                     
@@ -909,7 +911,7 @@ _forkrun_get_load() {
 
                     IFS='+'
                     runLinesA[${kkProcs}]=$(( "${runLines[*]}" + runLinesA[${kkProcs}] ))
-                    runTimeA[${kkProcs}]=$(( "${runTime[*]}" - spawnTimeA[${kkProcs}] ))
+                    runTimeA[${kkProcs}]=$(( "${runTime[-1]}" - spawnTimeA[${kkProcs}] ))
                     runTimeA[${kkProcs}]=${runTimeA[${kkProcs}]##+(0)}
                     IFS=' '
 
