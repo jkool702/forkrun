@@ -1002,20 +1002,17 @@ _forkrun_get_load() {
                     pAdd_lineRate=$(( ( kkProcs * ( ( ${runTimeA[${kkProcs}]} * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) ) - kkProcs ))
                            
                     
-                        (( pAdd_lineRate > pAdd_sysLoad )) && pAdd_lineRate=${pAdd_sysLoad}
-                        (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
+                    (( pAdd_lineRate > pAdd_sysLoad )) && pAdd_lineRate=${pAdd_sysLoad}
+                    (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
 
-                        # take the harmonic average to put more weight on the smaller of the two pAdd values 
-                        if (( pAdd_sysLoad == 0 )) && (( pAdd_lineRate == 0 )); then
-                            continue
-                        elif (( pAdd_sysLoad == 0 )); then
-                            pAdd=$(( ( ( ( 1 + pAdd_lineRate ) << 2 ) + ( ( pAdd_lineRate ) * ( pAdd_lineRate ) ) ) / ( ( pAdd_lineRate ) << 3 ) ))
-                        else
-                            pAdd=$(( ( ( pAdd_sysLoad * pAdd_lineRate ) << 1 ) / ( pAdd_sysLoad + pAdd_lineRate ) ))
-                        fi
+                    # take the harmonic average to put more weight on the smaller of the two pAdd values 
+                    if (( pAdd_sysLoad == 0 )) && (( pAdd_lineRate == 0 )); then
+                        continue
+                    elif (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 )); then
+                        pAdd=$(( ( ( ( ( 1 + pAdd_sysLoad ) * ( 1 + pAdd_lineRate ) ) << 2 ) + ( ( pAdd_sysLoad + pAdd_lineRate ) * ( pAdd_sysLoad + pAdd_lineRate ) ) ) / ( ( pAdd_sysLoad + pAdd_lineRate ) << 3 ) ))
+                    else
+                        pAdd=$(( ( ( pAdd_sysLoad * pAdd_lineRate ) << 1 ) / ( pAdd_sysLoad + pAdd_lineRate ) ))
                     fi
-
-               
                     
                     # compare how much our lineRate increased to how much our worker count increased
                     # ideally, increasing kkProcs by X% will increase lineRate_run by X%
