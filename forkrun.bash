@@ -907,7 +907,6 @@ _forkrun_get_load() {
                     runTime=(${A[@]##*,})
                     
                     runLines=(${runLines[@]##+(0)})
-                    runTime=(${runTime[@]##+(0)})
 
                     # figure out the number of lines that werent read because we hit EOF before nLines lines were read
                     noReadLinesA0=(${A[@]##${nLines},*})
@@ -919,7 +918,8 @@ _forkrun_get_load() {
                     if (( ${#runTime[@]} > 0 )); then
                         runTimeA[${kkProcs}]="$(( runTime[-1] - spawnTimeA[${kkProcs}] ))"
                         runTimeA[${kkProcs}]="${runTimeA[${kkProcs}]##+(0)}"
-                    elif [[ -z ${runTimeA[${kkProcs}]} ]] || (( ${runTimeA[${kkProcs}]} < 1 )); then
+                    fi
+                    if [[ -z ${runTimeA[${kkProcs}]} ]] || (( ${runTimeA[${kkProcs}]} < 1 )); then
                         runTimeA[${kkProcs}]=1
                     fi
                     IFS=' '
@@ -999,12 +999,9 @@ _forkrun_get_load() {
 
 
                     # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
-                    pAdd_lineRate=$(( ( kkProcs * ( ( ${runTimeA[${kkProcs}]} * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( ${runLinesA[${kkProcs}]} * inTime ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) ) - kkProcs ))
+                    pAdd_lineRate=$(( ( kkProcs * ( ( ${runTimeA[${kkProcs}]} * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) ) - kkProcs ))
                            
-                    if (( pAdd_sysLoad > pAdd_lineRate )); then
-                        pAdd="${pAdd_sysLoad}"
-
-                    else
+                    
                         (( pAdd_lineRate > pAdd_sysLoad )) && pAdd_lineRate=${pAdd_sysLoad}
                         (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
 
@@ -1025,7 +1022,7 @@ _forkrun_get_load() {
                     # if lineRate_run increases less than this then e are starting to hit other bottlenecks and should slow down new coproc spawning
                     # requires that coprocs have been spawned (by pSpawn) at least once already
                     #(( kkProcs0 > 0 )) && pAdd=$(( ( pAdd * runTimeA[${kkProcs}] ) / ( waitTimeA[${kkProcs}] + ( runTimeA[${kkProcs}] >> 4 ) ) ))
-                    (( kkProcs0 > 0 )) && pAdd=$(( (  pAdd * ( ( ( 1 + nProcsMax - kkProcs ) * ( ( kkProcs0 * runTimeA[${kkProcs0}] * runLinesA[${kkProcs}] ) / kkProcs ) ) / nProcsMax ) ) / ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] ) ))
+                    (( kkProcs0 > 0 )) && pAdd=$(( ( (  pAdd * ( 1 + nProcsMax - kkProcs ) * ( ( ( kkProcs0 * runTimeA[${kkProcs0}] * runLinesA[${kkProcs}] ) + ( ( kkProcs * nCPU ) >> 1 ) ) / ( kkProcs * nCPU ) ) ) + ( ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] ) >>  1 ) ) / ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] ) ))
 
                     # reduce if we arent getting full reads more than 1/8 of the time
                     (( ( noReadLinesA[$kkProcs] << 3 ) > runLinesA[$kkProcs] )) && pAdd=$(( ( pAdd * ( runLinesA[$kkProcs] - noReadLinesA[$kkProcs] ) ) / runLinesA[$kkProcs] ))
@@ -1052,22 +1049,21 @@ _forkrun_get_load() {
 
                    
                     runTime0=
+                    kkProcs01=$(( $kkProcs0 + 1 ))
                     while true; do
                         IFS=','
                         read -r -u ${fd_nSpawn} -d ' ' runLines runTime
                         IFS=
-                        runLines=(${runLines##+(0)})
-                        runTime=(${runTime##+(0)})
-                        if (( ${runTime} < spawnTimeA[$kkProcs] )); then
+                        if (( ${runTime} < spawnTimeA[${kkProcs01}] )); then
                             (( runLinesA[$kkProcs0]+=${runLines} ))
                             (( runLines < nLines )) && noReadLinesA[$kkProcs0]=$(( noReadLinesA[$kkProcs0] + nLines - runLines ))
 
                             runTime0=${runTime}
-                        else
-                            ((numReadA[$kkProcs]++))
-                            [[ ${runLines} ]] && (( runLinesA[$kkProcs]=${runLines} )) || { ((noReadLinesA[$kkProcs]++)); runLinesA[$kkProcs]=1; }
-
-                            (( runTime > spawnTimeA[${kkProcs}] )) && runTimeA[${kkProcs}]=$(( runTime - spawnTimeA[${kkProcs}] )) || runTimeA[${kkProcs}]=$(( ${EPOCHREALTIME//./} - spawnTimeA[${kkProcs}] ))
+                            
+                        elif (( ${runTime} >= spawnTimeA[${kkProcs}] )); then
+                            (( runLinesA[$kkProcs]=${runLines} ))
+                            (( runLines < nLines )) && noReadLinesA[$kkProcs]=$(( nLines - runLines )) || noReadLinesA[$kkProcs]=0
+                            runTimeA[${kkProcs}]=$(( runTime - spawnTimeA[${kkProcs}] )) || runTimeA[${kkProcs}]=$(( ${EPOCHREALTIME//./} - spawnTimeA[${kkProcs}] ))
                             runTimeA[${kkProcs}]=${runTimeA[${kkProcs}]##+(0)}
 
                             [[ ${runTime0} ]] && {
