@@ -31,7 +31,8 @@ forkrun() {
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 tStart0 tStart1 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag inotifyFlag lseekFlag lseekPosFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pNotify_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
     local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel pLOAD_max pLOAD_target pAd pAdd_sysLoad pAdd_lineRated tStart fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime inLines0 inTime0 inLines1 nTime1 inLinesDelta inTimeDelta pAddCount pAddMin pAddSum pAddMax 
     local -a A p_PID p_PID0 runCmd outHave outPrint pLOADA pLOADA0 runLines runTime 
-    local -a -i runLinesA runTimeA spawnTimeA noReadLinesA noReadLinesA0 pLOAD1
+    local -a -i runLinesA runTimeA spawnTimeA pLOAD1
+    #noReadLinesA noReadLinesA0 
 
     # # # # # PARSE OPTIONS # # # # #
 
@@ -909,11 +910,11 @@ _forkrun_get_load() {
                     runLines=(${runLines[@]##+(0)})
 
                     # figure out the number of lines that werent read because we hit EOF before nLines lines were read
-                    noReadLinesA0=(${A[@]##${nLines},*})
-                    noReadLinesA0=(${noReadLinesA0[@]%%,*})
+                    #noReadLinesA0=(${A[@]##${nLines},*})
+                    #noReadLinesA0=(${noReadLinesA0[@]%%,*})
 
                     IFS='+'
-                    (( ${#noReadLinesA0[@]} > 0 )) && noReadLinesA[$kkProcs]="$(( noReadLinesA[$kkProcs] + ( nLines * ${#noReadLinesA0[@]} ) - ( ${noReadLinesA0[*]} ) ))"
+                    #(( ${#noReadLinesA0[@]} > 0 )) && noReadLinesA[$kkProcs]="$(( noReadLinesA[$kkProcs] + ( nLines * ${#noReadLinesA0[@]} ) - ( ${noReadLinesA0[*]} ) ))"
                     runLinesA[${kkProcs}]="$(( ${runLines[*]} + runLinesA[${kkProcs}] ))"
                     if (( ${#runTime[@]} > 0 )); then
                         runTimeA[${kkProcs}]="$(( runTime[-1] - spawnTimeA[${kkProcs}] ))"
@@ -1022,7 +1023,7 @@ _forkrun_get_load() {
                     (( kkProcs0 > 0 )) && pAdd=$(( ( (  pAdd * ( 1 + nProcsMax - kkProcs ) * ( ( ( kkProcs0 * runTimeA[${kkProcs0}] * runLinesA[${kkProcs}] ) + ( ( kkProcs * nCPU ) >> 1 ) ) / ( kkProcs * nCPU ) ) ) + ( ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] ) >>  1 ) ) / ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] ) ))
 
                     # reduce if we arent getting full reads more than 1/8 of the time
-                    (( ( noReadLinesA[$kkProcs] << 3 ) > runLinesA[$kkProcs] )) && pAdd=$(( ( pAdd * ( runLinesA[$kkProcs] - noReadLinesA[$kkProcs] ) ) / runLinesA[$kkProcs] ))
+                    #(( ( noReadLinesA[$kkProcs] << 3 ) > runLinesA[$kkProcs] )) && pAdd=$(( ( pAdd * ( runLinesA[$kkProcs] - noReadLinesA[$kkProcs] ) ) / runLinesA[$kkProcs] ))
                     
                     # make sure estimate is between [0::pAddMax]. continue to next loop iteration if pAdd is 0 (or is somehow negative).
                     (( pAdd < 1 )) && continue
@@ -1053,13 +1054,13 @@ _forkrun_get_load() {
                         IFS=
                         if (( ${runTime} < spawnTimeA[${kkProcs01}] )); then
                             (( runLinesA[$kkProcs0]+=${runLines} ))
-                            (( runLines < nLines )) && noReadLinesA[$kkProcs0]=$(( noReadLinesA[$kkProcs0] + nLines - runLines ))
+                            #(( runLines < nLines )) && noReadLinesA[$kkProcs0]=$(( noReadLinesA[$kkProcs0] + nLines - runLines ))
 
                             runTime0=${runTime}
                             
                         elif (( ${runTime} >= spawnTimeA[${kkProcs}] )); then
                             (( runLinesA[$kkProcs]=${runLines} ))
-                            (( runLines < nLines )) && noReadLinesA[$kkProcs]=$(( nLines - runLines )) || noReadLinesA[$kkProcs]=0
+                            #(( runLines < nLines )) && noReadLinesA[$kkProcs]=$(( nLines - runLines )) || noReadLinesA[$kkProcs]=0
                             runTimeA[${kkProcs}]=$(( runTime - spawnTimeA[${kkProcs}] )) || runTimeA[${kkProcs}]=$(( ${EPOCHREALTIME//./} - spawnTimeA[${kkProcs}] ))
                             runTimeA[${kkProcs}]=${runTimeA[${kkProcs}]##+(0)}
 
