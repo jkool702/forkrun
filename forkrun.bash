@@ -859,6 +859,7 @@ _forkrun_get_load() {
                 pLOAD1[0]=0
                 inLines=0
                 inTime=0
+                emptyReadFlag=false
 
                 # wait for the helper coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nSpawn0}
@@ -875,7 +876,7 @@ _forkrun_get_load() {
                 for (( kkProcs=0 ; kkProcs<${nProcs} ; kkProcs++ )); do
                     [[ -f "${tmpDir}"/.quit ]] && break
                     source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
-                    spawnTimeA[$kkProcs]="${EPOCHREALTIME//./}" 
+                    spawnTimeA[$((kkProcs+1))]="${EPOCHREALTIME//./}" 
                 done
                 echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    
                 : >"${tmpDir}"/.spawned
@@ -901,13 +902,15 @@ _forkrun_get_load() {
                     read -r -u ${fd_nSpawn} -t 0.05 -a A
                     (( ${#A[@]} == 0 )) && continue
 
-                    (( nLines >= nLinesMax )) || read -r nLines <"${tmpDir}/.nLines"
+                    #(( nLines >= nLinesMax )) || read -r nLines <"${tmpDir}/.nLines"
 
                     # split sdata into lines and times
                     runLines=(${A[@]%%,*})
                     runTime=(${A[@]##*,})
                     
                     runLines=(${runLines[@]##+(0)})
+
+                    (( ${#runLines[@]} < ${#A[@]} )) && emptyReadFlag=true || emptyReadFlag=false
 
                     # figure out the number of lines that werent read because we hit EOF before nLines lines were read
                     #noReadLinesA0=(${A[@]##${nLines},*})
@@ -998,21 +1001,28 @@ _forkrun_get_load() {
                     (( pAdd_sysLoad > pAddMax )) && pAdd_sysLoad=${pAddMax}
                     (( pAdd_sysLoad < 0 )) && pAdd_sysLoad=0
 
-
-                    # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
-                    pAdd_lineRate=$(( ( kkProcs * ( ( ${runTimeA[${kkProcs}]} * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) ) - kkProcs ))
+                    if ${emptyReadFlag}; then
+                    
+                        # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
+                        pAdd_lineRate=$(( ( ( ( ${runTimeA[${kkProcs}]} * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) ) - kkProcs ))
                            
                     
-                    (( pAdd_lineRate > pAdd_sysLoad )) && pAdd_lineRate=${pAdd_sysLoad}
-                    (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
+                        (( pAdd_lineRate > pAdd_sysLoad )) && pAdd_lineRate=${pAdd_sysLoad}
+                        (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
 
-                    # take the harmonic average to put more weight on the smaller of the two pAdd values 
-                    if (( pAdd_sysLoad == 0 )) && (( pAdd_lineRate == 0 )); then
-                        continue
-                    elif (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 )); then
-                        pAdd=$(( ( ( ( ( 1 + pAdd_sysLoad ) * ( 1 + pAdd_lineRate ) ) << 2 ) + ( ( pAdd_sysLoad + pAdd_lineRate ) * ( pAdd_sysLoad + pAdd_lineRate ) ) ) / ( ( pAdd_sysLoad + pAdd_lineRate ) << 3 ) ))
+                        # take the harmonic average to put more weight on the smaller of the two pAdd values 
+                        if (( pAdd_sysLoad == 0 )) && (( pAdd_lineRate == 0 )); then
+                            continue
+                        elif (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 )); then
+                            pAdd=$(( ( ( ( ( 1 + pAdd_sysLoad ) * ( 1 + pAdd_lineRate ) ) << 2 ) + ( ( pAdd_sysLoad + pAdd_lineRate ) * ( pAdd_sysLoad + pAdd_lineRate ) ) ) / ( ( pAdd_sysLoad + pAdd_lineRate ) << 3 ) ))
+                        else
+                            pAdd=$(( ( ( pAdd_sysLoad * pAdd_lineRate ) << 1 ) / ( pAdd_sysLoad + pAdd_lineRate ) ))
+                        fi
+
                     else
-                        pAdd=$(( ( ( pAdd_sysLoad * pAdd_lineRate ) << 1 ) / ( pAdd_sysLoad + pAdd_lineRate ) ))
+
+                        pAdd="${pAdd_sysLoad}"
+
                     fi
                     
                     # compare how much our lineRate increased to how much our worker count increased
@@ -1037,7 +1047,7 @@ _forkrun_get_load() {
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
                         (( ${verboseLevel} > 3 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs.\n' "${kk}" "${pAdd}" "${kkProcs}" >&${fd_stderr}
                         ((kkProcs++))
-                        spawnTimeA[$kkProcs]="${EPOCHREALTIME//./}"
+                        spawnTimeA[${kkProcs}]="${EPOCHREALTIME//./}"
                     done
                     
                     (( ${verboseLevel} > 2 )) && printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
@@ -1047,7 +1057,8 @@ _forkrun_get_load() {
 
                    
                     runTime0=
-                    kkProcs01=$(( $kkProcs0 + 1 ))
+                    kkProcs01="${kkProcs0}"
+                    ((kkProcs01++))
                     while true; do
                         IFS=','
                         read -r -u ${fd_nSpawn} -d ' ' runLines runTime
