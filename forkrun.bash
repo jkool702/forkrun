@@ -1232,7 +1232,7 @@ else
         echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
         if ${lseekFlag}; then
             echo """
-                lseek ${fd_read} -1
+                lseek ${fd_read} -1 SEEK_CUR ''
                 read -r -u ${fd_read} -N 1"""
                 if ${nullDelimiterFlag}; then
                     echo "[[ \${#REPLY} == 0 ]] || {"
