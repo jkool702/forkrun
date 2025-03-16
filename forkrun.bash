@@ -675,15 +675,15 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         ;;
                     esac
 
-                    if ${lseekPosFlag}; then
-                        lseek $fd_read 0 SEEK_CUR fd_read_pos
-                        lseek $fd_write 0 SEEK_CUR fd_write_pos
-                    else
+                    #if ${lseekPosFlag}; then
+                    #    lseek $fd_read 0 SEEK_CUR fd_read_pos
+                    #    lseek $fd_write 0 SEEK_CUR fd_write_pos
+                    #else
                         IFS=$'\t'
                         read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}
                         read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
                         IFS=
-                    fi
+                    #fi
 
                     { ${nLinesAutoFlag} || ${nSpawnFlag}; } && nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) ))
 
@@ -1299,19 +1299,11 @@ echo """
 echo """
     [[ \${#A[@]} == 0 ]] && {
         \${doneIndicatorFlag} || { 
-          [[ -f \"${tmpDir}\"/.done ]] && {"""
-if ${lseekPosFlag}; then
-    echo """
-                lseek ${fd_read} 0 SEEK_CUR fd_read_pos
-                lseek ${fd_write} 0 SEEK_CUR fd_write_pos"""
-else
-    echo """
+          [[ -f \"${tmpDir}\"/.done ]] && {
             IFS=\$'\\t'; 
             read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}
             read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
-            IFS="""
-fi
-echo """
+            IFS=
             [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && doneIndicatorFlag=true
           }
         }
