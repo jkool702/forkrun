@@ -1992,80 +1992,86 @@ EOF
 
 }
 
-_forkrun_lseek_setup() {
-    ## sets up a "lseek" bash builtin for x86_64 machines
-    local lseekArch cksumAlg cksumVal cksumAll lseekPre lseekGetFlag lseekCurlFailedFlag forkrunRepo
+_forkrun_loadable_setup() {
+    ## sets up a "loadable" bash builtin for x86_64 machines
+    local loadableArch cksumAlg cksumVal cksumAll loadablePre loadableDir loadableGetFlag loadableCurlFailedFlag forkrunRepo
     
-    lseekGetFlag=false 
-    lseekCurlFailedFlag=false
+    loadableGetFlag=false 
+    loadableCurlFailedFlag=false
     #forkrunRepo='main'
-    forkrunRepo='forkrun_testing_nSpawn_3'
+    forkrunRepo='forkrun_testing_nSpawn_5'
 
     type curl &>/dev/null || {
-        enable lseek 2>/dev/null
+        if [[ -f "${BASH_LOADABLES_PATH%%:*}"/forkrun.so ]]; then
+            enable -f "${BASH_LOADABLES_PATH%%:*}"/forkrun.so lseek 2>/dev/null
+            enable -f "${BASH_LOADABLES_PATH%%:*}"/forkrun.so childusage 2>/dev/null
+        else
+            enable lseek 2>/dev/null
+            enable childusage 2>/dev/null
+        fi
         return
     }
 
     if type uname &>/dev/null; then
-        lseekArch="$(uname -m)"
+        loadableArch="$(uname -m)"
     elif [[ -f /proc/sys/kernel/arch ]] ; then
-        lseekArch="$(</proc/sys/kernel/arch)"
+        loadableArch="$(</proc/sys/kernel/arch)"
     else
         return 1
     fi
 
-    { [[ "${lseekArch}" == 'x86_64' ]] || [[  "${lseekArch}" == 'aarch64' ]] || [[  "${lseekArch}" == 'riscv64' ]] || return 1; }
+    { [[ "${loadableArch}" == 'x86_64' ]] || [[  "${loadableArch}" == 'aarch64' ]] || [[  "${loadableArch}" == 'riscv64' ]] || return 1; }
 
-    if  ! [[ $USER == 'root' ]] && [[ -f /dev/shm/.forkrun.lseek/lseek ]]; then 
-        lseekPre='/dev/shm/.forkrun.lseek/lseek'
-    elif [[ -f /usr/local/lib/bash/lseek ]]; then
-        lseekPre='/usr/local/lib/bash/lseek'
+    if  ! [[ $USER == 'root' ]] && [[ -f /dev/shm/.forkrun.loadable/forkrun.so ]]; then 
+        loadablePre='/dev/shm/.forkrun.loadable/forkrun.so'
+    elif [[ -f /usr/local/lib/bash/forkrun.so ]]; then
+        loadablePre='/usr/local/lib/bash/forkrun.so'
     fi
 
-    [[ ${lseekPre} ]] && {
+    [[ ${loadablePre} ]] && {
         for cksumAlg in sha256sum sha512sum b2sum sha1sum md5sum cksum sum; do
             type $cksumAlg &>/dev/null && break || cksumAlg=''
         done
         [[ ${cksumAlg} ]] && {
-            cksumVal="$($cksumAlg "$lseekPre")"
+            cksumVal="$($cksumAlg "$loadablePre")"
             cksumVal="${cksumVal%% *}"
             cksumAll="$(curl 'https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/'"${forkrunRepo}"'/loadables/CHECKSUMS' 2>/dev/null)"
-            [[ "${cksumAll}" == *"${cksumVal}"* ]] || lseekGetFlag=true
+            [[ "${cksumAll}" == *"${cksumVal}"* ]] || loadableGetFlag=true
         }
     }
 
-    if [[ ${lseekPre} ]] && ! ${lseekGetFlag}; then
-        enable lseek 2>/dev/null || lseekGetFlag=true
+    if [[ ${loadablePre} ]] && ! ${loadableGetFlag}; then
+        enable -f "${loadablePre}" lseek 2>/dev/null || loadableGetFlag=true
+        enable -f "${loadablePre}" childusage 2>/dev/null || loadableGetFlag=true
     else
-        lseekGetFlag=true
+        loadableGetFlag=true
     fi
     
-    if ${lseekGetFlag}; then
-        ${lseekPre} && \mv -f "${lseekPre}" "${lseekPre}".old 
+    if ${loadableGetFlag}; then
+        ${loadablePre} && \mv -f "${loadablePre}" "${loadablePre}".old 
         case "${USER}" in
-            root)
-                mkdir -p /usr/local/lib/bash
-                [[ "${BASH_LOADABLES_PATH}" == */usr/local/lib/bash* ]] || export BASH_LOADABLES_PATH=/usr/local/lib/bash:${BASH_LOADABLES_PATH}
-                curl -o /usr/local/lib/bash/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/loadables/bin/'"${lseekArch}"'/lseek' || lseekCurlFailedFlag=true
-
-            ;;
-            *)
-                mkdir -p /dev/shm/.forkrun.lseek
-                [[ "${BASH_LOADABLES_PATH}" == */dev/shm/.forkrun.lseek* ]] || export BASH_LOADABLES_PATH=/dev/shm/.forkrun.lseek:${BASH_LOADABLES_PATH}
-                curl -o /dev/shm/.forkrun.lseek/lseek 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/loadables/bin/'"${lseekArch}"'/lseek' || lseekCurlFailedFlag=true
-            ;;
+            root)  loadableDir='/usr/local/lib/bash'  ;;
+            *)  loadableDir='/dev/shm/.forkrun.loadable'  ;;
         esac
+        
+        mkdir -p "${loadableDir}"
+        [[ "${BASH_LOADABLES_PATH}" == *"${loadableDir}"* ]] || export BASH_LOADABLES_PATH="${loadableDir}:${BASH_LOADABLES_PATH}"
+        curl -o "${loadableDir}"/forkrun.so 'https://raw.githubusercontent.com/jkool702/forkrun/'"${forkrunRepo}"'/loadables/bin/'"${loadableArch}"'/forkrun.so' || loadableCurlFailedFlag=true
 
-        [[ ${lseekPre} ]] && {
-            if ${lseekCurlFailedFlag}; then
-                \mv "${lseekPre}".old "${lseekPre}"
+        [[ ${loadablePre} ]] && {
+            if ${loadableCurlFailedFlag}; then
+                \mv "${loadablePre}".old "${loadablePre}"
             else
                 enable -d lseek 2>/dev/null
+                enable -d childusage 2>/dev/null
             fi
         }
-        enable lseek &>/dev/null || return 1
+        
+        enable -f "${loadableDir}"/forkrun.so lseek 2>/dev/null || return 1
+        enable -f "${loadableDir}"/forkrun.so childusage 2>/dev/null || return 1
     else
-        enable lseek &>/dev/null || return 1
+        enable -f "${loadableDir}"/forkrun.so lseek 2>/dev/null || return 1
+        enable -f "${loadableDir}"/forkrun.so childusage 2>/dev/null || return 1
     fi
     
     echo 'abc' >/dev/shm/.forkrun.lseek.test
@@ -2084,16 +2090,16 @@ _forkrun_lseek_setup() {
         *)
             enable -d lseek
             printf '\nWARNING: lseek functionality has not been enabled due to an unknown runtime error.\nIf you are on x86_64 or aarch64 and are using bash 4.0 or later, please file a github issue in the forkrun repo describing this error.\n' >&2
-            [[ ${lseekPre} ]] && ! ${lseekCurlFailedFlag} && {
-                \rm -f "${lseekPre}"
-                \mv "${lseekPre}".old "${lseekPre}"
+            [[ ${loadablePre} ]] && ! ${loadableCurlFailedFlag} && {
+                \rm -f "${loadablePre}"
+                \mv "${loadablePre}".old "${loadablePre}"
             }
             return 1
         ;;
     esac
 }
 
-_forkrun_lseek_setup
+_forkrun_loadable_setup
 
 
 export -fp _forkrun_getVal &>/dev/null && export -nf _forkrun_getVal
