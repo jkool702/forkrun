@@ -761,7 +761,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 )
 
                 pNotify_PID="$(<"${tmpDir}"/.run/pNotify)"
-            } 2>/dev/null {fd_inotify0}>&${fd_inotify}
+            } 2>/dev/null {fd_inotify0}<>&${fd_inotify}
 
             exitTrapStr+=': > "'"${tmpDir}"'"/.stdin; '$'\n'
             ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
