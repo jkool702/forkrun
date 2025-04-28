@@ -132,8 +132,7 @@ static int evfd_init_builtin(WORD_LIST *list) {
 struct builtin evfd_init_struct = {"evfd_init", evfd_init_builtin, BUILTIN_ENABLED, NULL, "evfd_init", 0};
 
 // evfd_wait
-
-int evfd_wait_builtin(WORD_LIST *list) {
+static int evfd_wait_builtin(WORD_LIST *list) {
     int argc;
     char **argv = make_builtin_argv(list, &argc);
 
@@ -144,6 +143,21 @@ int evfd_wait_builtin(WORD_LIST *list) {
         read_fd = atoi(argv[1]);
         if (argv[2][0] != '\0') sig_fd = atoi(argv[2]);
         if (argc == 4) status_fd = atoi(argv[3]);
+    }
+
+    // Determine tmpdir for .done/.quit
+    const char *tmpdir = getenv("FORKRUN_TMPDIR");
+    if (!tmpdir) tmpdir = "/tmp";
+    char donepath[PATH_MAX], quitpath[PATH_MAX];
+    snprintf(donepath, sizeof(donepath), "%s/.done", tmpdir);
+    snprintf(quitpath, sizeof(quitpath), "%s/.quit", tmpdir);
+
+    // 1) If .quit exists, immediately signal done
+    if (access(quitpath, F_OK) == 0) {
+        bind_variable("doneIndicatorFlag", "true", 0);
+        if (status_fd >= 0) dprintf(status_fd, "0\n");
+        xfree(argv);
+        return EXECUTION_SUCCESS;
     }
 
     struct pollfd pfds[2];
@@ -159,27 +173,30 @@ int evfd_wait_builtin(WORD_LIST *list) {
     pfds[nfds].events = POLLIN;
     nfds++;
 
-    int ret = poll(pfds, nfds, 256); // wait forever
+    // Wait for either data/hangup on read_fd or event on evfd
+    int ret = poll(pfds, nfds, -1);
     if (ret < 0) {
         builtin_error("evfd_wait: poll failed: %s", strerror(errno));
         xfree(argv);
         return EXECUTION_FAILURE;
     }
 
+    // 2) Handle read_fd events
     if (read_fd >= 0) {
         if (pfds[0].revents & POLLIN) {
-            // read_fd has data ready
+            // Data ready
             if (status_fd >= 0) dprintf(status_fd, "0\n");
             xfree(argv);
             return EXECUTION_SUCCESS;
         }
         if (pfds[0].revents & POLLHUP) {
-            // read_fd hit EOF — check .done marker
-            const char *tmpdir = getenv("FORKRUN_TMPDIR");
-            if (!tmpdir) tmpdir = "/tmp";
-            char donepath[PATH_MAX];
-            snprintf(donepath, sizeof(donepath), "%s/.done", tmpdir);
+            // EOF on read_fd — check for .done
             if (access(donepath, F_OK) == 0) {
+                // Create .quit to signal global shutdown
+                int fdq = open(quitpath, O_CREAT | O_CLOEXEC, 0666);
+                if (fdq >= 0) close(fdq);
+                // Set doneIndicatorFlag for bash logic
+                bind_variable("doneIndicatorFlag", "true", 0);
                 if (status_fd >= 0) dprintf(status_fd, "0\n");
                 xfree(argv);
                 return EXECUTION_SUCCESS;
@@ -187,8 +204,8 @@ int evfd_wait_builtin(WORD_LIST *list) {
         }
     }
 
-    // Otherwise, eventfd woke us up
-    if (pfds[nfds - 1].revents & POLLIN) {
+    // 3) Handle eventfd signal
+    if (pfds[nfds-1].revents & POLLIN) {
         uint64_t cnt;
         if (read(sig_fd, &cnt, sizeof(cnt)) != sizeof(cnt)) {
             builtin_error("evfd_wait: eventfd read failed: %s", strerror(errno));
@@ -201,6 +218,8 @@ int evfd_wait_builtin(WORD_LIST *list) {
     xfree(argv);
     return EXECUTION_SUCCESS;
 }
+
+struct builtin evfd_wait_struct = {"evfd_wait", evfd_wait_built
 
 struct builtin evfd_wait_struct = {"evfd_wait", evfd_wait_builtin, BUILTIN_ENABLED, NULL, "evfd_wait", 0};
 
