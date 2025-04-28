@@ -2107,6 +2107,8 @@ _forkrun_loadable_setup() {
 
 #_forkrun_loadable_setup
 
+enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_splice lseek cpuusage childusage
+
 
 export -fp _forkrun_getVal &>/dev/null && export -nf _forkrun_getVal
 
