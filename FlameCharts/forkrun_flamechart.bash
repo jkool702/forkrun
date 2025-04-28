@@ -45,12 +45,22 @@ sha256sum
 sha512sum
 sha224sum
 sha384sum
+sha512sum
 md5sum 
 sum -s
 sum -r
 cksum
 b2sum
-cksum -a sm3'
+cksum -a sm3
+xxhsum
+xxhsum -H3'
+
+export A
+
+  perf record -b -g -F max /bin/bash -O extglob -c 'for nn in "${A[@]}"; do forkrun '"$nn"' </mnt/ramdisk/filelist >/dev/null; done'
+    perf script > out.perf
+    /mnt/ramdisk/FlameGraph/stackcollapse-perf.pl --all out.perf > out.folded
+    ./FlameGraph/flamegraph.pl --title="forkrun flamechart -- ALL" --flamechart --hash --width 4096 --height 24 out.folded  >forkrun_combined_new.svg
 
 
 for nn in "${A[@]}"; do
