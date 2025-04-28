@@ -279,6 +279,8 @@ forkrun() {
         LANG=C
         IFS=
 
+        enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_splice lseek cpuusage childusage
+
         export LC_ALL=C LANG=C IFS=
         FORKRUN_TMPDIR="$tmpDir"
         export FORKRUN_TMPDIR="$tmpDir"
@@ -1229,7 +1231,7 @@ else
     (( nLinesCur == 0 )) && A=() || """
     echo """ {
     echo \"worker {<#>} calling evfd_wait\" >&${fd_stdout}
-    evfd_wait ${fd_read} || : >\"${tmpDir}\"/.quit"""
+    evfd_wait ${fd_read}"""
     printf '%s ' "mapfile"
     ${lseekFlag} && printf '%s ' '-t'
     printf '%s ' '-n' "\${nLinesCur}" '-u'
@@ -2106,6 +2108,7 @@ _forkrun_loadable_setup() {
 }
 
 #_forkrun_loadable_setup
+enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_splice lseek cpuusage childusage
 
 enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_splice lseek cpuusage childusage
 

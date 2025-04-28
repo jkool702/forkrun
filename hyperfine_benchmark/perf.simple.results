@@ -1,0 +1,63 @@
+###### FORKRUN #####
+
+        240,292.14 msec task-clock                       #   20.275 CPUs utilized             
+            31,460      context-switches                 #  130.924 /sec                      
+             7,193      cpu-migrations                   #   29.934 /sec                      
+         3,421,649      page-faults                      #   14.240 K/sec                     
+ 1,499,175,714,049      instructions                     #    1.50  insn per cycle              (38.47%)
+ 1,001,606,576,694      cycles                           #    4.168 GHz                         (46.18%)
+   <not supported>      stalled-cycles-frontend                                               
+   <not supported>      stalled-cycles-backend                                                
+    77,631,890,411      branches                         #  323.073 M/sec                       (46.19%)
+       675,119,416      branch-misses                    #    0.87% of all branches             (46.18%)
+   175,922,543,813      L1-dcache-loads                  #  732.119 M/sec                       (46.16%)
+     7,828,966,257      L1-dcache-load-misses            #    4.45% of all L1-dcache accesses   (46.17%)
+       952,395,336      LLC-loads                        #    3.963 M/sec                       (30.76%)
+       756,720,475      LLC-load-misses                  #   79.45% of all LL-cache accesses    (30.75%)
+   <not supported>      L1-icache-loads                                                       
+     7,639,506,658      L1-icache-load-misses                                                   (30.76%)
+   176,341,580,186      dTLB-loads                       #  733.863 M/sec                       (30.75%)
+        74,483,419      dTLB-load-misses                 #    0.04% of all dTLB cache accesses  (30.75%)
+       112,343,796      iTLB-loads                       #  467.530 K/sec                       (30.76%)
+        61,823,419      iTLB-load-misses                 #   55.03% of all iTLB cache accesses  (30.77%)
+   <not supported>      L1-dcache-prefetches                                                  
+   <not supported>      L1-dcache-prefetch-misses                                             
+
+      11.851422365 seconds time elapsed
+
+     190.271948000 seconds user
+      47.692649000 seconds sys
+
+
+
+
+##### XARGS #####
+
+        210,382.77 msec task-clock                       #   16.475 CPUs utilized             
+            10,134      context-switches                 #   48.169 /sec                      
+               460      cpu-migrations                   #    2.186 /sec                      
+           708,987      page-faults                      #    3.370 K/sec                     
+ 1,400,262,341,313      instructions                     #    1.59  insn per cycle              (38.45%)
+   879,718,210,113      cycles                           #    4.182 GHz                         (46.14%)
+   <not supported>      stalled-cycles-frontend                                               
+   <not supported>      stalled-cycles-backend                                                
+    55,275,484,798      branches                         #  262.738 M/sec                       (46.16%)
+       444,757,885      branch-misses                    #    0.80% of all branches             (46.18%)
+   153,232,183,035      L1-dcache-loads                  #  728.349 M/sec                       (46.19%)
+     6,467,559,133      L1-dcache-load-misses            #    4.22% of all L1-dcache accesses   (46.19%)
+       765,084,938      LLC-loads                        #    3.637 M/sec                       (30.80%)
+       693,078,724      LLC-load-misses                  #   90.59% of all LL-cache accesses    (30.78%)
+   <not supported>      L1-icache-loads                                                       
+     6,872,920,545      L1-icache-load-misses                                                   (30.75%)
+   153,111,638,090      dTLB-loads                       #  727.777 M/sec                       (30.73%)
+        52,924,251      dTLB-load-misses                 #    0.03% of all dTLB cache accesses  (30.73%)
+        89,101,837      iTLB-loads                       #  423.523 K/sec                       (30.74%)
+        52,950,978      iTLB-load-misses                 #   59.43% of all iTLB cache accesses  (30.76%)
+   <not supported>      L1-dcache-prefetches                                                  
+   <not supported>      L1-dcache-prefetch-misses                                             
+
+      12.769695358 seconds time elapsed
+
+     169.168523000 seconds user
+      39.332418000 seconds sys
+

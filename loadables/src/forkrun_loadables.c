@@ -159,7 +159,7 @@ int evfd_wait_builtin(WORD_LIST *list) {
     pfds[nfds].events = POLLIN;
     nfds++;
 
-    int ret = poll(pfds, nfds, -1); // wait forever
+    int ret = poll(pfds, nfds, 256); // wait forever
     if (ret < 0) {
         builtin_error("evfd_wait: poll failed: %s", strerror(errno));
         xfree(argv);
@@ -182,7 +182,7 @@ int evfd_wait_builtin(WORD_LIST *list) {
             if (access(donepath, F_OK) == 0) {
                 if (status_fd >= 0) dprintf(status_fd, "0\n");
                 xfree(argv);
-                return EXECUTION_FAILURE;
+                return EXECUTION_SUCCESS;
             }
         }
     }

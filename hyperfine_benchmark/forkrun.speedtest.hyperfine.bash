@@ -13,7 +13,7 @@ renice --priority -20 --pid $$
 
 declare -F forkrun &>/dev/null || { 
     #[[ -f ./forkrun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/forkrun/main/forkrun.bash
-    [[ -f ./forkrun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_nQueue/forkrun.bash
+    [[ -f ./forkrun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_nSpawn_5/forkrun.bash
     . ./forkrun.bash
 }
 #export -f forkrun
@@ -76,27 +76,27 @@ else
 
 fi
 "${testParallelFlag:=true}"
-testParallelFlag=false
+#testParallelFlag=false
 
 declare -a C0 C1
 
 C0[0]=''
 C1[0]=' <"'"${hfdir0}"'"/file_lists/f${kk}'
 
-C0[1]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
-C1[1]=''
+#C0[1]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
+#C1[1]=''
 
-C0[2]=''
-C1[2]=' <"'"${hfdir0}"'"/file_lists/f${kk} | wc -l'
+#C0[2]=''
+#C1[2]=' <"'"${hfdir0}"'"/file_lists/f${kk} | wc -l'
 
-C0[3]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
-C1[3]=' | wc -l'
+#C0[3]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
+#C1[3]=' | wc -l'
 
-C0[4]=''
-C1[4]=' <"'"${hfdir0}"'"/file_lists/f${kk} >/dev/null'
+#C0[4]=''
+#C1[4]=' <"'"${hfdir0}"'"/file_lists/f${kk} >/dev/null'
 
-C0[5]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
-C1[5]=' >/dev/null'
+#C0[5]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
+#C1[5]=' >/dev/null'
 
 mkdir -p "${hfdir0}"/file_lists
 
@@ -140,9 +140,9 @@ for jj in "${!C0[@]}"; do
             printf '\n---------------- %s (%s) ----------------\n\n' "$c" "${nArgs[$kk]}"; 
 
             if ${testParallelFlag}; then
-		       hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -j - '"$(${nullFlag} && printf '%s' '-z ')"'--','forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --','parallel -m --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
+		       hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -k '"$(${nullFlag} && printf '%s' '-z ')"'--','forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --','parallel -m '"$(${nullFlag} && printf '%s' '--null ')"'--' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
             else
-               hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -j - '"$(${nullFlag} && printf '%s' '-z ')"'--','forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
+               hyperfine -w 1 -i --shell=bash --parameter-list cmd 'forkrun -k '"$(${nullFlag} && printf '%s' '-z ')"'--','forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --' --export-json ""${hfdir}"/results/forkrun.${c// /_}.f${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
             fi
 
         done
@@ -226,9 +226,9 @@ for jj in "${!C0[@]}"; do
         printf '\n\n\n%.157s|| \n\n' "$(printf '||----------------------------------------------------------------- NUM_CHECKSUMS=%s -------------------------------------------------------------------------' ${nArgs[$kk]})"
         printf0 8:'(algorithm)' 
         if ${testParallelFlag}; then
-		printf0 12:'(forkrun -j -)' 12:'(forkrun)' 12:'(xargs)' 12:'(parallel)' 44:'(relative performance vs xargs)' 44:'(relative performance vs parallel)'
+		printf0 12:'(forkrun -k)' 12:'(forkrun)' 12:'(xargs)' 12:'(parallel)' 44:'(relative performance vs xargs)' 44:'(relative performance vs parallel)'
         else
-            printf0 12:'(forkrun -j -)' 12:'(forkrun)' 12:'(xargs)' 44:'(relative performance vs xargs)'
+            printf0 12:'(forkrun -k)' 12:'(forkrun)' 12:'(xargs)' 44:'(relative performance vs xargs)'
         fi
         printf '\n%s\t' '------------'
         if ${testParallelFlag}; then
