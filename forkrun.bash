@@ -28,7 +28,7 @@ forkrun() {
 
     # make all variables local
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax  
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 tStart0 tStart1 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag inotifyFlag lseekFlag lseekPosFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_inotify fd_inotify0 fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pNotify_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 tStart0 tStart1 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag lseekFlag lseekPosFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
     local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel pLOAD_max pLOAD_target pAd pAdd_sysLoad pAdd_lineRated tStart fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime inLines0 inTime0 inLines1 nTime1 inLinesDelta inTimeDelta pAddCount pAddMin pAddSum pAddMax 
     local -a A p_PID p_PID0 runCmd outHave outPrint pLOADA pLOADA0 runLines runTime 
     local -a -i runLinesA runTimeA spawnTimeA pLOAD1
@@ -280,6 +280,8 @@ forkrun() {
         IFS=
 
         export LC_ALL=C LANG=C IFS=
+        FORKRUN_TMPDIR="$tmpDir"
+        export FORKRUN_TMPDIR="$tmpDir"
         #umask 177
         PID0="${BASHPID}"
 
@@ -366,7 +368,7 @@ forkrun() {
             # read from pipe for -B if using dd/head. also dont need inotifywait
             if ${readBytesExactFlag} && ! { [[ ${readBytesProg} == 'bash' ]] && ${stdinRunFlag}; }; then  
                 pipeReadFlag=true
-                inotifyFlag=false
+#                inotifyFlag=false
             else
                 pipeReadFlag=false
             fi
@@ -416,8 +418,8 @@ forkrun() {
 
         doneIndicatorFlag=false
 
-        # check for inotifywait
-        type -a inotifywait &>/dev/null && ! ${pipeReadFlag} && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
+#        # check for inotifywait
+#        type -a inotifywait &>/dev/null && ! ${pipeReadFlag} && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
 
         # check for fallocate
         type -a fallocate &>/dev/null && ! ${pipeReadFlag} && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
@@ -493,7 +495,7 @@ forkrun() {
 
         (( ${verboseLevel} > 0 )) && {
             printf '\n\n------------------- FLAGS INFO -------------------\n\nCOMMAND TO PARALLELIZE: %s\n' "$(printf '%s ' "${runCmd[@]}")"
-            ${inotifyFlag} && echo 'using inotify to efficiently wait for slow inputs on stdin'
+#            ${inotifyFlag} && echo 'using inotify to efficiently wait for slow inputs on stdin'
             ${fallocateFlag} && echo 'using fallocate to shrink the tmpfile containing stdin as forkrun runs'
             ${lseekFlag} && echo 'using "lseek" loadable builtin to read data faster and more efficiently'
             ${nSpawnFlag} && printf '(-j|-P) initial / max workers: %s / %s. workers will be dynamically spawned (up to a maximum of %s workers)\n' "${nProcs}" "${nProcsMax}" "${nProcsMax}" || printf '(-j|-P) using %s coproc workers\n' ${nProcs}
@@ -523,6 +525,8 @@ forkrun() {
         # # # # # FORK "HELPER" PROCESSES # # # # #
 
         tStart="${EPOCHREALTIME//./}"
+
+        evfd_init
 
         # start building exit trap string
         exitTrapStr=': >"'"${tmpDir}"'"/.done;
@@ -558,18 +562,19 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - TERM INT HUP USR1' USR1
 
                 case ${writeFileProgType} in
-                    1) cat <&${fd_stdin} >&${fd_write} ;;
-                    2) head -z -n ${nLinesReadLimit} <&${fd_stdin} >&${fd_write} ;;
-                    3) head -n ${nLinesReadLimit} <&${fd_stdin} >&${fd_write} ;;
+                    1) cat <&${fd_stdin} | evfd_splice ${fd_write} ;;
+                    2) head -z -n ${nLinesReadLimit} <&${fd_stdin} | evfd_splice ${fd_write} ;;
+                    3) head -n ${nLinesReadLimit} <&${fd_stdin} | evfd_splice ${fd_write} ;;
                 esac
                     
                 : >"${tmpDir}"/.done
+                evfd_signal
                 (( ${verboseLevel} > 1 )) && printf '\nINFO: pWrite has finished - all of stdin has been saved to the tmpfile at %s\n' "${fPath}" >&${fd_stderr}
-                ${inotifyFlag} && {
-                    for (( kk=0 ; kk<=nProcs ; kk++ )); do
-                        : >&${fd_write}
-                    done
-                }
+#                ${inotifyFlag} && {
+#                    for (( kk=0 ; kk<=nProcs ; kk++ )); do
+#                        : >&${fd_write}
+#                    done
+#                }
               }
             }
             exitTrapStr_kill+="${pWrite_PID} "
@@ -741,32 +746,32 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
         fi
 
-        # setup+fork inotifywait (if available)
-        ${inotifyFlag} && {
-            {
-                # initially add 1 newline for each coproc to fd_inotify
-                { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
-
-                # run inotifywait
-                (
-                    export LC_ALL=C LANG=C IFS=
-
-                    trap - EXIT
-                    trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
-                    trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                    trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                    trap 'trap - TERM INT HUP USR1' USR1
-                    inotifywait -q -m -e modify,close --format '' "${fPath}" >&${fd_inotify0} &
-                    printf '%s\n' "${!}" >"${tmpDir}"/.run/pNotify
-                )
-
-                pNotify_PID="$(<"${tmpDir}"/.run/pNotify)"
-            } 2>/dev/null {fd_inotify0}<>&${fd_inotify}
-
-            exitTrapStr+=': > "'"${tmpDir}"'"/.stdin; '$'\n'
-            ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
-            exitTrapStr_kill+="${pNotify_PID} "
-        }
+#        # setup+fork inotifywait (if available)
+#        ${inotifyFlag} && {
+#            {
+#                # initially add 1 newline for each coproc to fd_inotify
+#                { source /proc/self/fd/0 >&${fd_inotify0}; }<<<"printf '%.0s\n' {0..${nProcs}}"
+#
+#                # run inotifywait
+#                (
+#                    export LC_ALL=C LANG=C IFS=
+#
+#                    trap - EXIT
+#                    trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
+#                    trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+#                    trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+#                    trap 'trap - TERM INT HUP USR1' USR1
+#                    inotifywait -q -m -e modify,close --format '' "${fPath}" >&${fd_inotify0} &
+#                    printf '%s\n' "${!}" >"${tmpDir}"/.run/pNotify
+#                )
+#
+#                pNotify_PID="$(<"${tmpDir}"/.run/pNotify)"
+#            } 2>/dev/null {fd_inotify0}<>&${fd_inotify}
+#
+#            exitTrapStr+=': > "'"${tmpDir}"'"/.stdin; '$'\n'
+#            ${nOrderFlag} && exitTrapStr+=': >"'"${tmpDir}"'"/.out/.quit; '$'\n'
+#            exitTrapStr_kill+="${pNotify_PID} "
+#        }
 
         # setup dynamically spawning new worker coprocs
         # dynamic spawning is decided using 3 criteria:
@@ -839,7 +844,7 @@ _forkrun_get_load() {
 }
 
                 # set traps and global vars
-                export LC_ALL=C LANG=C IFS=
+                export LC_ALL=C LANG=C IFS= 
                 trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto}"'; printf '"'"'\n'"'"' >&'"${fd_nSpawn0}"'; [[ -f "'"${tmpDir}"'"/.run/pSpawn ]] && \rm -f "'"${tmpDir}"'"/.run/pSpawn' EXIT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' INT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' TERM
@@ -1122,7 +1127,7 @@ _forkrun_get_load() {
 local p{<#>} p{<#>}_PID
 
 { coproc p{<#>} {
-export LC_ALL=C LANG=C IFS=
+export LC_ALL=C LANG=C IFS= FORKRUN_TMPDIR=\"${tmpDir}\"
 
 echo \"\${BASH_PID}\" >\"${tmpDir}\"/.run/p{<#>}
 
@@ -1222,12 +1227,16 @@ else
     ${nLinesReadLimitFlag} && printf '%s' """read -r nLinesRead <\"${tmpDir}\"/.nLinesRead
     (( ( nLinesReadLimit - nLinesRead ) < nLinesCur )) && nLinesCur=\$(( nLinesReadLimit - nLinesRead ))
     (( nLinesCur == 0 )) && A=() || """
+    echo """ {
+    echo \"worker {<#>} calling evfd_wait\" >&${fd_stdout}
+    evfd_wait ${fd_read} || : >\"${tmpDir}\"/.quit"""
     printf '%s ' "mapfile"
     ${lseekFlag} && printf '%s ' '-t'
     printf '%s ' '-n' "\${nLinesCur}" '-u'
     ${pipeReadFlag} && printf '%s ' ${fd_stdin} || printf '%s ' ${fd_read}
     { ${pipeReadFlag} || ${nullDelimiterFlag}; } && printf '%s ' '-t'
-    echo "${delimiterReadStr} A"
+    echo """${delimiterReadStr} A
+    }"""
     ${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || {
         echo "[[ \${#A[@]} == 0 ]] || \${doneIndicatorFlag} || {"
         if ${lseekFlag}; then
@@ -1301,8 +1310,8 @@ echo """
         \${doneIndicatorFlag} || { 
           [[ -f \"${tmpDir}\"/.done ]] && {
             IFS=\$'\\t'; 
-            read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}
-            read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
+            lseek $fd_read 0 SEEK_CUR fd_read_pos 
+            lseek $fd_write 0 SEEK_CUR fd_write_pos 
             IFS=
             [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && doneIndicatorFlag=true
           }
@@ -1310,18 +1319,15 @@ echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf 'x\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
-${nSpawnFlag} && echo """\printf '%s' '0' >&${fd_nSpawn}
-printf 'q\\n' >&\${fd_nAuto0}"""
-${inotifyFlag} && echo 'kill -9 '"${pNotify_PID}"' &>/dev/null'
+${nSpawnFlag} && echo """printf '%s' '0' >&${fd_nSpawn}
+            printf 'q\\n' >&\${fd_nAuto0}"""
 echo """
             : >\"${tmpDir}\"/.quit
             printf '%.0s\\n' \"${tmpDir}\"/.run/p* >&${fd_continue}
             break"""
-{ ${inotifyFlag} || ${nOrderFlag}; } && echo "else"
-${nOrderFlag} && echo "printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"
-${inotifyFlag} && echo "[[ -f \"${tmpDir}\"/.done ]] && doneIndicatorFlag=true || read -u ${fd_inotify}"
-echo """
-        fi
+${nOrderFlag} && echo """else
+            printf 'x%s\n' \"\${nOrder}\" >&\${fd_nOrder0}"""
+echo """fi
         continue
     }"""
 { ${nLinesAutoFlag} || ${nSpawnFlag}; } && { printf '%s' """
@@ -1397,7 +1403,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
         kill -9 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$'\n'
         
     
-        # if removiung tmpdir delete it in trap
+        # if removing tmpdir delete it in trap
         ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
         exitTrapStr+='trap - INT TERM HUP USR1; 
         return ${returnVal:-0}'
@@ -1448,7 +1454,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
         (( ${verboseLevel} > 3 )) && { 
             printf '\n\nDYNAMICALLY GENERATED COPROC CODE:\n\n%s\n\n' "${coprocSrcCode}"
-            declare -p fd_continue fd_inotify fd_nAuto fd_nOrder fd_nOrder0 fd_nSpawn fd_read fd_write fd_stdin fd_stdout fd_stderr 
+            declare -p fd_continue fd_nAuto fd_nOrder fd_nOrder0 fd_nSpawn fd_read fd_write fd_stdin fd_stdout fd_stderr 
         } >&${fd_stderr}
 
         # # # # # WAIT FOR THEM TO FINISH # # # # #
@@ -1528,7 +1534,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
 
     # open anonymous pipes + other misc file descriptors for the above code block
-    ) {fd_continue}<><(:) {fd_inotify}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nSpawn}<><(:) {fd_nSpawn0}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
+    ) {fd_continue}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nSpawn}<><(:) {fd_nSpawn0}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
 
 }
 
@@ -2099,7 +2105,7 @@ _forkrun_loadable_setup() {
     esac
 }
 
-_forkrun_loadable_setup
+#_forkrun_loadable_setup
 
 
 export -fp _forkrun_getVal &>/dev/null && export -nf _forkrun_getVal
