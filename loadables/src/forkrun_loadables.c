@@ -1,6 +1,4 @@
-#ifdef HAVE_CONFIG_H
-# include <config.h>
-#endif
+// forkrun_loadables.c
 
 // Enable GNU extensions for splice
 #ifndef _GNU_SOURCE
@@ -24,9 +22,10 @@
 #include <ctype.h>
 #include <sys/sendfile.h>
 #include <poll.h>
+#include <limits.h>
 
 #ifdef HAVE_CONFIG_H
-# include <config.h>
+#include <config.h>
 #endif
 
 // Bash internal headers
@@ -37,9 +36,22 @@
 #include "xmalloc.h"
 #include "variables.h"
 
-// Helper for builtins
+// Helpers for builtins
 extern int add_builtin(struct builtin *bp, int keep);
 extern char **make_builtin_argv();
+
+// define function prototypes
+static int fr_builtin(WORD_LIST *list);
+static int lseek_main(int argc, char **argv);
+static int evfd_init_main(int argc, char **argv);
+static int evfd_wait_main(int argc, char **argv);
+static int evfd_signal_main(int argc, char **argv);
+static int evfd_splice_main(int argc, char **argv);
+static int evfd_close_main(int argc, char **argv);
+static int childusage_main(int argc, char **argv);
+static int cpuusage_main(int argc, char **argv);
+static char *get_persistent_dir(void);
+
 
 /* -------------------------------------------------- */
 /* lseek builtin                                     */
@@ -51,24 +63,20 @@ static char *lseek_doc[] = {
     NULL
 };
 
-static int lseek_builtin(WORD_LIST *list) {
-    int argc; char **argv = make_builtin_argv(list, &argc);
+static int lseek_main(int argc, char **argv) {
     if (argc < 3 || argc > 5) {
         builtin_error("lseek: incorrect number of arguments");
-        xfree(argv);
         return EXECUTION_FAILURE;
     }
     int fd = atoi(argv[1]);
     if (fd < 0) {
         builtin_error("lseek: invalid file descriptor '%s'", argv[1]);
-        xfree(argv);
-        return EXECUTION_FAILURE;
+       return EXECUTION_FAILURE;
     }
     errno = 0;
     off_t offset = atoll(argv[2]);
     if (errno == ERANGE) {
         builtin_error("lseek: offset out of range '%s'", argv[2]);
-        xfree(argv);
         return EXECUTION_FAILURE;
     }
     int whence = SEEK_CUR;
@@ -88,7 +96,6 @@ static int lseek_builtin(WORD_LIST *list) {
     off_t new_offset = lseek(fd, offset, whence);
     if (new_offset == (off_t)-1) {
         builtin_error("lseek: %s", strerror(errno));
-        xfree(argv);
         return EXECUTION_FAILURE;
     }
     if (varname) {
@@ -98,13 +105,12 @@ static int lseek_builtin(WORD_LIST *list) {
     } else if (!quiet) {
         printf("%lld\n", (long long)new_offset);
     }
-    xfree(argv);
     return EXECUTION_SUCCESS;
 }
 
 struct builtin lseek_struct = {
     "lseek",
-    lseek_builtin,
+    fr_builtin,
     BUILTIN_ENABLED,
     lseek_doc,
     "lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]",
@@ -117,7 +123,7 @@ struct builtin lseek_struct = {
 static int evfd = -1;
 
 // evfd_init
-static int evfd_init_builtin(WORD_LIST *list) {
+static int evfd_init_main(int argc, char **argv) {
     if (evfd >= 0) close(evfd);
     evfd = eventfd(0, EFD_CLOEXEC);
     if (evfd < 0) {
@@ -129,12 +135,10 @@ static int evfd_init_builtin(WORD_LIST *list) {
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_init_struct = {"evfd_init", evfd_init_builtin, BUILTIN_ENABLED, NULL, "evfd_init", 0};
+struct builtin evfd_init_struct = {"evfd_init",fr_builtin, BUILTIN_ENABLED, NULL, "evfd_init", 0};
 
 // evfd_wait
-static int evfd_wait_builtin(WORD_LIST *list) {
-    int argc;
-    char **argv = make_builtin_argv(list, &argc);
+static int evfd_wait_main(int argc, char **argv) {
 
     int read_fd = -1, sig_fd = evfd, status_fd = -1;
     if (argc == 2) {
@@ -156,7 +160,6 @@ static int evfd_wait_builtin(WORD_LIST *list) {
     if (access(quitpath, F_OK) == 0) {
         bind_variable("doneIndicatorFlag", "true", 0);
         if (status_fd >= 0) dprintf(status_fd, "0\n");
-        xfree(argv);
         return EXECUTION_SUCCESS;
     }
 
@@ -177,7 +180,6 @@ static int evfd_wait_builtin(WORD_LIST *list) {
     int ret = poll(pfds, nfds, -1);
     if (ret < 0) {
         builtin_error("evfd_wait: poll failed: %s", strerror(errno));
-        xfree(argv);
         return EXECUTION_FAILURE;
     }
 
@@ -186,7 +188,6 @@ static int evfd_wait_builtin(WORD_LIST *list) {
         if (pfds[0].revents & POLLIN) {
             // Data ready
             if (status_fd >= 0) dprintf(status_fd, "0\n");
-            xfree(argv);
             return EXECUTION_SUCCESS;
         }
         if (pfds[0].revents & POLLHUP) {
@@ -198,7 +199,6 @@ static int evfd_wait_builtin(WORD_LIST *list) {
                 // Set doneIndicatorFlag for bash logic
                 bind_variable("doneIndicatorFlag", "true", 0);
                 if (status_fd >= 0) dprintf(status_fd, "0\n");
-                xfree(argv);
                 return EXECUTION_SUCCESS;
             }
         }
@@ -209,23 +209,18 @@ static int evfd_wait_builtin(WORD_LIST *list) {
         uint64_t cnt;
         if (read(sig_fd, &cnt, sizeof(cnt)) != sizeof(cnt)) {
             builtin_error("evfd_wait: eventfd read failed: %s", strerror(errno));
-            xfree(argv);
             return EXECUTION_FAILURE;
         }
         if (status_fd >= 0) dprintf(status_fd, "1\n");
     }
 
-    xfree(argv);
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_wait_struct = {"evfd_wait", evfd_wait_built
-
-struct builtin evfd_wait_struct = {"evfd_wait", evfd_wait_builtin, BUILTIN_ENABLED, NULL, "evfd_wait", 0};
+struct builtin evfd_wait_struct = {"evfd_wait", fr_builtin, BUILTIN_ENABLED, NULL, "evfd_wait", 0};
 
 // evfd_signal
-static int evfd_signal_builtin(WORD_LIST *list) {
-    int argc; char **argv = make_builtin_argv(list, &argc);
+static int evfd_signal_main(int argc, char **argv) {
     int fd = (argc > 1 ? atoi(argv[1]) : evfd);
     uint64_t one = 1;
     int flags = fcntl(fd, F_GETFL);
@@ -234,16 +229,14 @@ static int evfd_signal_builtin(WORD_LIST *list) {
         builtin_error("evfd_signal: %s", strerror(errno));
     }
     fcntl(fd, F_SETFL, flags);
-    xfree(argv);
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_signal_struct = {"evfd_signal", evfd_signal_builtin, BUILTIN_ENABLED, NULL, "evfd_signal", 0};
+struct builtin evfd_signal_struct = {"evfd_signal", fr_builtin, BUILTIN_ENABLED, NULL, "evfd_signal", 0};
 
 // evfd_splice
-static int evfd_splice_builtin(WORD_LIST *list) {
-    int argc; char **argv = make_builtin_argv(list, &argc);
-    if (argc != 2) { builtin_usage(); xfree(argv); return EXECUTION_FAILURE; }
+static int evfd_splice_main(int argc, char **argv) {
+    if (argc != 2) { builtin_error("evfd_splice: wrong args"); return EXECUTION_FAILURE; }
     int outfd = atoi(argv[1]);
     const size_t CHUNK = 64 * 1024;
     uint64_t one = 1;
@@ -256,24 +249,24 @@ static int evfd_splice_builtin(WORD_LIST *list) {
         write(evfd, &one, sizeof(one));
         fcntl(evfd, F_SETFL, flags);
     }
-    xfree(argv);
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_splice_struct = {"evfd_splice", evfd_splice_builtin, BUILTIN_ENABLED, NULL, "evfd_splice", 0};
+struct builtin evfd_splice_struct = {"evfd_splice", fr_builtin, BUILTIN_ENABLED, NULL, "evfd_splice", 0};
 
 // evfd_close
-static int evfd_close_builtin(WORD_LIST *list) {
+static int evfd_close_main(int argc, char **argv) {
     if (evfd >= 0) close(evfd);
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_close_struct = {"evfd_close", evfd_close_builtin, BUILTIN_ENABLED, NULL, "evfd_close", 0};
+struct builtin evfd_close_struct = {"evfd_close", fr_builtin, BUILTIN_ENABLED, NULL, "evfd_close", 0};
 
 /* -------------------------------------------------- */
 /* childusage builtin                                */
 /* -------------------------------------------------- */
 static char *childusage_doc[] = {"USAGE: childusage [ -q | --quiet ]", NULL};
+
 static char *get_persistent_dir(void) {
     const char *tmp = getenv("tmpDir"); if (!tmp) tmp = "/tmp";
     size_t len = strlen(tmp) + strlen("/.cpuusage") + 1;
@@ -281,6 +274,7 @@ static char *get_persistent_dir(void) {
     snprintf(p, len, "%s/.cpuusage", tmp);
     return p;
 }
+
 static int childusage_main(int argc, char **argv) {
     int quiet = 0;
     if (argc == 2 && (strcmp(argv[1], "-q")==0 || strcmp(argv[1], "--quiet")==0)) quiet = 1;
@@ -300,19 +294,16 @@ static int childusage_main(int argc, char **argv) {
     if (!quiet) printf("%llu\n", ticks);
     return EXECUTION_SUCCESS;
 }
-static int childusage_builtin(WORD_LIST *list) {
-    int argc; char **argv = make_builtin_argv(list, &argc);
-    int ret = childusage_main(argc, argv);
-    xfree(argv);
-    return ret;
-}
-struct builtin childusage_struct = {"childusage", childusage_builtin, BUILTIN_ENABLED, childusage_doc, "childusage [ -q ]", 0};
+
+struct builtin childusage_struct = {"childusage", fr_builtin, BUILTIN_ENABLED, childusage_doc, "childusage [ -q ]", 0};
 
 /* -------------------------------------------------- */
 /* cpuusage helpers and builtin                      */
 /* -------------------------------------------------- */
 typedef struct { pid_t pid, ppid; unsigned long utime, stime, cutime, cstime; } proc_info;
+
 static int is_number(const char *s) { for (; *s; ++s) if (!isdigit((unsigned char)*s)) return 0; return 1; }
+
 static int read_proc_stat(pid_t pid, proc_info *info) {
     char file[64]; snprintf(file, sizeof(file), "/proc/%d/stat", pid);
     FILE *f = fopen(file, "r"); if (!f) return -1;
@@ -330,6 +321,7 @@ static int read_proc_stat(pid_t pid, proc_info *info) {
     info->pid = pid;
     return 0;
 }
+
 static proc_info *get_all_processes(size_t *num) {
     DIR *d=opendir("/proc"); if (!d) return NULL;
     size_t cap=256, cnt=0; proc_info *arr = xmalloc(cap*sizeof(proc_info)); struct dirent *e;
@@ -345,7 +337,9 @@ static proc_info *get_all_processes(size_t *num) {
     *num=cnt;
     return arr;
 }
+
 static int pid_in_list(pid_t pid,pid_t *lst,size_t n) { for (size_t i=0;i<n;++i) if (lst[i]==pid) return 1; return 0; }
+
 static unsigned long long compute_live_cpu_time(pid_t*w,size_t wn,proc_info*a,size_t an) {
     pid_t *grp=xmalloc(wn*sizeof(pid_t)); size_t gc=wn; memcpy(grp,w,wn*sizeof(pid_t)); int added;
     do { added=0; for(size_t i=0;i<an;++i) if(!pid_in_list(a[i].pid,grp,gc)&&pid_in_list(a[i].ppid,grp,gc)){
@@ -358,19 +352,68 @@ static unsigned long long compute_live_cpu_time(pid_t*w,size_t wn,proc_info*a,si
     }
     xfree(grp); return tot;
 }
+
 static unsigned long long read_finished_time_for_pid(pid_t pid,const char*pdir){ char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/cpu.%d",pdir,pid); FILE*f=fopen(path,"r"); if(!f)return 0; unsigned long long v=0; fscanf(f,"%llu",&v); fclose(f); return v; }
+
 static unsigned long long read_all_cpu_time(void){ FILE*f=fopen("/proc/stat","r"); if(!f) return 0; char ln[512]; unsigned long long sum=0; if(fgets(ln,sizeof(ln),f)&&strncmp(ln,"cpu ",4)==0){ char*tok=strtok(ln+4," "); while(tok){ sum+=strtoull(tok,NULL,10); tok=strtok(NULL," "); }} fclose(f);return sum; }
 
-static int cpuusage_main(int argc,char**argv);
-static int cpuusage_builtin(WORD_LIST*list);
 static char *cpuusage_doc[] = {"USAGE: cpuusage <pid>...", NULL};
-struct builtin cpuusage_struct={"cpuusage",cpuusage_builtin,BUILTIN_ENABLED,cpuusage_doc,"cpuusage <pid>...",0};
+
 static int cpuusage_main(int argc,char **argv){ if(argc<2){ builtin_error("cpuusage: missing PIDs"); return EXECUTION_FAILURE;} size_t wn=argc-1; pid_t*w=xmalloc(wn*sizeof(pid_t)); for(size_t i=0;i<wn;++i) w[i]=atoi(argv[i+1]); size_t ap; proc_info*a=get_all_processes(&ap); if(!a){ builtin_error("cpuusage: /proc fail"); xfree(w); return EXECUTION_FAILURE;} unsigned long long live=compute_live_cpu_time(w,wn,a,ap); xfree(a); char*pdir=get_persistent_dir(); unsigned long long pers=0; for(size_t i=0;i<wn;++i) pers+=read_finished_time_for_pid(w[i],pdir); xfree(pdir); xfree(w); unsigned long long total=live+pers, all=read_all_cpu_time(); printf("%llu %llu\n",total,all); return EXECUTION_SUCCESS;} 
-static int cpuusage_builtin(WORD_LIST*list){ int argc; char**argv=make_builtin_argv(list,&argc); int r=cpuusage_main(argc,argv); xfree(argv); return r;} 
+
+struct builtin cpuusage_struct={"cpuusage",fr_builtin,BUILTIN_ENABLED,cpuusage_doc,"cpuusage <pid>...",0};
 
 /* -------------------------------------------------- */
-/* Register all builtins                              */
+/* Register all builtins  (under fr)                  */
 /* -------------------------------------------------- */
+
+static int fr_builtin(WORD_LIST *list) {
+    int argc;
+    char **argv = make_builtin_argv(list, &argc);
+    if (argc < 2) {
+        builtin_error("fr: missing subcommand");
+        xfree(argv);
+        return EXECUTION_FAILURE;
+    }
+
+    char *sub = argv[1];
+    // Shift off "fr"
+    argv++;  argc--;
+
+    int ret;
+    if (strcmp(sub, "lseek") == 0) {
+        ret = lseek_main(argc, argv);
+    }
+    else if (strcmp(sub, "evfd_wait") == 0) {
+        ret = evfd_wait_main(argc, argv);
+    }
+    else if (strcmp(sub, "evfd_init") == 0) {
+        ret = evfd_init_main(argc, argv);
+    }
+    else if (strcmp(sub, "evfd_signal") == 0) {
+        ret = evfd_signal_main(argc, argv);
+    }
+    else if (strcmp(sub, "evfd_splice") == 0) {
+        ret = evfd_splice_main(argc, argv);
+    }
+	else if (strcmp(sub, "evfd_close") == 0) {
+        ret = evfd_close_main(argc, argv);
+    }
+    else if (strcmp(sub, "cpuusage") == 0) {
+        ret = cpuusage_main(argc, argv);
+    }
+    else if (strcmp(sub, "childusage") == 0) {
+        ret = childusage_main(argc, argv);
+    }
+	else {
+        builtin_error("fr: unknown subcommand '%s'", sub);
+        ret = EXECUTION_FAILURE;
+    }
+
+    xfree(argv - 1);  // free the original pointer
+    return ret;
+}
+
 int setup_builtin_forkrun_loadables(void) {
     add_builtin(&lseek_struct,      1);
     add_builtin(&evfd_init_struct,  1);
@@ -382,4 +425,3 @@ int setup_builtin_forkrun_loadables(void) {
     add_builtin(&cpuusage_struct,   1);
     return 0;
 }
-
