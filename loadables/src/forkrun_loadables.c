@@ -370,15 +370,8 @@ struct builtin cpuusage_struct={"cpuusage",fr_builtin,BUILTIN_ENABLED,cpuusage_d
 static int fr_builtin(WORD_LIST *list) {
     int argc;
     char **argv = make_builtin_argv(list, &argc);
-    if (argc < 2) {
-        builtin_error("fr: missing subcommand");
-        xfree(argv);
-        return EXECUTION_FAILURE;
-    }
 
-    char *sub = argv[1];
-    // Shift off "fr"
-    argv++;  argc--;
+    char *sub = argv[0];
 
     int ret;
     if (strcmp(sub, "lseek") == 0) {
@@ -396,7 +389,7 @@ static int fr_builtin(WORD_LIST *list) {
     else if (strcmp(sub, "evfd_splice") == 0) {
         ret = evfd_splice_main(argc, argv);
     }
-	else if (strcmp(sub, "evfd_close") == 0) {
+    else if (strcmp(sub, "evfd_close") == 0) {
         ret = evfd_close_main(argc, argv);
     }
     else if (strcmp(sub, "cpuusage") == 0) {
@@ -410,7 +403,7 @@ static int fr_builtin(WORD_LIST *list) {
         ret = EXECUTION_FAILURE;
     }
 
-    xfree(argv - 1);  // free the original pointer
+    xfree(argv);  // free the original pointer
     return ret;
 }
 
