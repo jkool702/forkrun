@@ -157,7 +157,7 @@ static int evfd_wait_main(int argc, char **argv) {
     snprintf(quitpath, sizeof(quitpath), "%s/.quit", tmpdir);
 
     // 1) If .quit exists, immediately signal done
-    if (access(quitpath, F_OK) == 0) {
+    if ( access(quitpath, F_OK) == 0 || access(donepath, F_OK) == 0 ) {
         bind_variable("doneIndicatorFlag", "true", 0);
         if (status_fd >= 0) dprintf(status_fd, "0\n");
         return EXECUTION_SUCCESS;
@@ -189,18 +189,6 @@ static int evfd_wait_main(int argc, char **argv) {
             // Data ready
             if (status_fd >= 0) dprintf(status_fd, "0\n");
             return EXECUTION_SUCCESS;
-        }
-        if (pfds[0].revents & POLLHUP) {
-            // EOF on read_fd — check for .done
-            if (access(donepath, F_OK) == 0) {
-                // Create .quit to signal global shutdown
-                int fdq = open(quitpath, O_CREAT | O_CLOEXEC, 0666);
-                if (fdq >= 0) close(fdq);
-                // Set doneIndicatorFlag for bash logic
-                bind_variable("doneIndicatorFlag", "true", 0);
-                if (status_fd >= 0) dprintf(status_fd, "0\n");
-                return EXECUTION_SUCCESS;
-            }
         }
     }
 
