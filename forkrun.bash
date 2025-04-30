@@ -1230,7 +1230,6 @@ else
     (( ( nLinesReadLimit - nLinesRead ) < nLinesCur )) && nLinesCur=\$(( nLinesReadLimit - nLinesRead ))
     (( nLinesCur == 0 )) && A=() || """
     echo """ {
-    echo \"worker {<#>} calling evfd_wait\" >&${fd_stdout}
     evfd_wait ${fd_read}"""
     printf '%s ' "mapfile"
     ${lseekFlag} && printf '%s ' '-t'
