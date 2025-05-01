@@ -81,6 +81,7 @@ _trap_exit () {
 }
 
 trap '_trap_exit' INT TERM HUP EXIT
+trap 'echo "${BASH_COMMAND}"' ERR
 
 {
 
@@ -102,19 +103,18 @@ trap '_trap_exit' INT TERM HUP EXIT
 
                 [[ "${runArgs}" == '-k'* ]] && kInd=1 || kInd=0
                 [[ "${runArgs}" == *'-n '[0-9]* ]] && nInd=1 || nInd=0
+   ${verboseFlag} && cat >&2 <<<$'\n'\{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(forkrun\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur\ 2\>/dev/null\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(cat\ "${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur\ "${nFix[$nInd]}"\ "${kFix[$kInd]}"\)\ \&\&\ \{\ \(\(nPass\+\+\)\)\;\ printf\ \'%s\'\ \"PASS\"\;\ \}\ \|\|\ \{\ \(\(nFail\+\+\)\)\;\ printf\ \'%s\'\ \"FAIL\"\;' eval [[ 0 == 1 ]]; '\}\;\ printf\ "'"\:\ %s\\n"'"\ \"\ forkrun\ -z\ "${runArgs}"\ \"\;\ \}\;
+           source /proc/self/fd/0 <<<\{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(forkrun\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur\ 2\>/dev/null\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(cat\ "${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur\ "${nFix[$nInd]}"\ "${kFix[$kInd]}"\)\ \&\&\ \{\ \(\(nPass\+\+\)\)\;\ printf\ \'%s\'\ \"PASS\"\;\ \}\ \|\|\ \{\ \(\(nFail\+\+\)\)\;\ printf\ \'%s\'\ \"FAIL\"\;' eval [[ 0 == 1 ]]; '\}\;\ printf\ "'"\:\ %s\\n"'"\ \"\ forkrun\ -z\ "${runArgs}"\ \"\;\ \}\;$'\n'
 
-   ${verboseFlag} && cat >&2 <<<$'\n'\{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(forkrun\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur\ 2\>/dev/null\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(cat\ "${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur\ "${nFix[$nInd]}"\ "${kFix[$kInd]}"\)\ \&\&\ \{\ \(\(nPass\+\+\)\)\;\ printf\ \'%s\'\ \"PASS\"\;\ \}\ \|\|\ \{\ \(\(nFail\+\+\)\)\;\ printf\ \'%s\'\ \"FAIL\"\;\ \}\;\ printf\ "'"\:\ %s\\n"'"\ \"\ forkrun\ -z\ "${runArgs}"\ \"\;\ \}\;
-           source /proc/self/fd/0 <<<\{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(forkrun\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur\ 2\>/dev/null\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(cat\ "${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur\ "${nFix[$nInd]}"\ "${kFix[$kInd]}"\)\ \&\&\ \{\ \(\(nPass\+\+\)\)\;\ printf\ \'%s\'\ \"PASS\"\;\ \}\ \|\|\ \{\ \(\(nFail\+\+\)\)\;\ printf\ \'%s\'\ \"FAIL\"\;\ \}\;\ printf\ "'"\:\ %s\\n"'"\ \"\ forkrun\ -z\ "${runArgs}"\ \"\;\ \}\;$'\n'
-
-   ${verboseFlag} && cat >&2 <<<$'\n'\{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(forkrun\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur0\ 2\>/dev/null\ -z\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(tr\ "'"\\0"'"\ "'"\\n"'"\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur0\ "${nFix[$nInd]}"\ "${kFix[$kInd]}"\)\ \&\&\ \{\ \(\(nPass\+\+\)\)\;\ printf\ \'%s\'\ \"PASS\"\;\ \}\ \|\|\ \{\ \(\(nFail\+\+\)\)\;\ printf\ \'%s\'\ \"FAIL\"\;\ \}\;\ printf\ "'"\:\ %s\\n"'"\ \"\ forkrun\ -z\ "${runArgs}"\ \"\;\ \}\;
-          source /proc/self/fd/0  <<<\{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(forkrun\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur0\ 2\>/dev/null\ -z\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(tr\ "'"\\0"'"\ "'"\\n"'"\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur0\ "${nFix[$nInd]}"\ "${kFix[$kInd]}"\)\ \&\&\ \{\ \(\(nPass\+\+\)\)\;\ printf\ \'%s\'\ \"PASS\"\;\ \}\ \|\|\ \{\ \(\(nFail\+\+\)\)\;\ printf\ \'%s\'\ \"FAIL\"\;\ \}\;\ printf\ "'"\:\ %s\\n"'"\ \"\ forkrun\ -z\ "${runArgs}"\ \"\;\ \}\;$'\n'
+   ${verboseFlag} && cat >&2 <<<$'\n'\{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(forkrun\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur0\ 2\>/dev/null\ -z\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(tr\ "'"\\0"'"\ "'"\\n"'"\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur0\ "${nFix[$nInd]}"\ "${kFix[$kInd]}"\)\ \&\&\ \{\ \(\(nPass\+\+\)\)\;\ printf\ \'%s\'\ \"PASS\"\;\ \}\ \|\|\ \{\ \(\(nFail\+\+\)\)\;\ printf\ \'%s\'\ \"FAIL\"\;' eval [[ 0 == 1 ]]; '\}\;\ printf\ "'"\:\ %s\\n"'"\ \"\ forkrun\ -z\ "${runArgs}"\ \"\;\ \}\;
+          source /proc/self/fd/0  <<<\{\ diff\ 2\>/dev/null\ -q\ -B\ -E\ -Z\ -d\ -a\ -b\ -w\ \<\(forkrun\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur0\ 2\>/dev/null\ -z\ "${runArgs}"\ "${fFix[$fInd]}"\ "${kFix[$kInd]}"\ \)\ \<\(tr\ "'"\\0"'"\ "'"\\n"'"\ \<"${ramdiskMnt}"/forkrun_unit-tests_data/filelistCur0\ "${nFix[$nInd]}"\ "${kFix[$kInd]}"\)\ \&\&\ \{\ \(\(nPass\+\+\)\)\;\ printf\ \'%s\'\ \"PASS\"\;\ \}\ \|\|\ \{\ \(\(nFail\+\+\)\)\;\ printf\ \'%s\'\ \"FAIL\"\;' eval [[ 0 == 1 ]]; '\}\;\ printf\ "'"\:\ %s\\n"'"\ \"\ forkrun\ -z\ "${runArgs}"\ \"\;\ \}\;$'\n'
 
             done
             printf 'nPass=%s   nFail=%s\n' $nPass $nFail >&2
         done
     done
 
-    trap - INT TERM HUP EXIT
+    trap - INT TERM HUP EXIT ERR
     printf '%s %s\n' "${nPass}" "${nFail}" >&${fd_stats}; 
 
 } | tee >(grep -E '^FAIL' >>"${ramdiskMnt}/forkrun_unit-tests_data/fail.log")

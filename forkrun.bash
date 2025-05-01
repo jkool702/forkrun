@@ -31,7 +31,7 @@ forkrun() {
     local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 tStart0 tStart1 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag lseekFlag lseekPosFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
     local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel pLOAD_max pLOAD_target pAd pAdd_sysLoad pAdd_lineRated tStart fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime inLines0 inTime0 inLines1 nTime1 inLinesDelta inTimeDelta pAddCount pAddMin pAddSum pAddMax 
     local -a A p_PID p_PID0 runCmd outHave outPrint pLOADA pLOADA0 runLines runTime 
-    local -a -i runLinesA runTimeA spawnTimeA pLOAD1
+    local -a -i runLinesA runTimeA runWaitA runAllA spawnTimeA pLOAD1
     #noReadLinesA noReadLinesA0 
 
     # # # # # PARSE OPTIONS # # # # #
@@ -489,7 +489,7 @@ forkrun() {
 
         nLinesCur=${nLines}
 
-        mkdir -p "${tmpDir}"/.run
+        mkdir -p "${tmpDir}"/.{run,wait}
         ${nLinesReadLimitFlag} && echo '0' >"${tmpDir}"/.nLinesRead
 
         # if keeping tmpDir print its location to stderr
@@ -700,7 +700,13 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                         ${nSpawnFlag} && [[ -f "${tmpDir}"/.nWorkers ]] && nProcs="$(<"${tmpDir}"/.nWorkers)"
 
-                        nLinesNew=$(( 1 + ( ( nLinesEst - nLinesRead ) / ${nProcs} ) ))
+                        [[ -d "${tmpDir}"/.wait ]] && { 
+                            mapfile -t nProcsA < <(: | cat "${tmpDir}"/.wait 2>/dev/null)
+                            nProcsA=( ${nProcsA//0/} )
+                            (( ${#nProcsA[@]} > 0 )) && (( nProcs = ( ( nProcs + ${#nProcsA[@]} ) / 2 ) ))
+                        }
+
+                        nLinesNew=$(( 1 + ( ( nLinesEst - nLinesRead ) / ( 1 + ${nProcs} ) ) ))
 
                         (( ${nLinesNew} > ${nLinesCur} )) && {
 
@@ -784,66 +790,6 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
             echo '1 1' >"${tmpDir}"/.stdin_lines_time
             { coproc pSpawn {
 
-_forkrun_get_load() {
-    ## computes a "smoothed average system CPU load" using info gathered from /proc/stat
-    # 100% load on all CPU's gives pLOAD=1000000 (1 million)
-  
-    # FLAGS:  
-    #    '-i'|'--init':  initialize/reset load calculation. 
-    # 
-    #
-    # pLOADA0 (input) / pLOADA (output):     ( pLOAD  cpu_ALL  cpu_LOAD  tALL )
-    #     --> pLOAD:    represents the current average load level estimate between all logical CPU cores ( scaled between 0 - 1000000, or (if set) between 0 - $maxLoadNum )  
-    #     --> cpu_ALL:  total sum of ALL components from /proc/stats when the last pLOAD was computed
-    #     --> cpu_LOAD: total sum of the components that represent CPU load (everything except idle time and IOwait time) when the last pLOAD was computed
-    #     --> tALL:     total time difference used in the last call to _forkrun_get_load  (i.e., $(( CPU_ALL - CPU_ALL0 )) from previous run) 
- 
-
-
-    local -i cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice tLOAD tALL tALL0 cpu_ALL cpu_ALL0 cpu_LOAD cpu_LOAD0 pLOAD pLOAD0 
-    local -i -I loadMaxVal 
-    local initFlag 
-        
-    case "${1}" in
-        -i|--init)
-            initFlag=true
-        ;;
-        *)
-            initFlag=false
-            pLOAD0="${pLOADA0[0]}"
-            cpu_ALL0="${pLOADA0[1]}"
-            cpu_LOAD0="${pLOADA0[2]}"
-            tALL0="${pLOADA0[3]}"
-        ;;
-    esac
-
-    : "${loadMaxVal:=1000000}"
-
-    IFS=' '
-    read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice </proc/stat
-    IFS=
-    
-    cpu_LOAD=$(( cpu_user + cpu_nice + cpu_system + cpu_irq + cpu_softirq + cpu_steal + cpu_guest + cpu_guestnice ))
-    cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
-    
-    ${initFlag} && [[ "${pLOADA0[*]}" == *([0 ]) ]] && {
-        pLOADA0=(0 "${cpu_ALL}" "${cpu_LOAD}" 0)
-        return 0
-    }
-
-    tALL=$(( cpu_ALL - cpu_ALL0 ))
-
-    tLOAD=$(( cpu_LOAD - cpu_LOAD0 ))
-        
-    (( tALL0 > ( tALL << 2 ) )) && tALL0=$((  tALL << 2 ))
-
-    pLOAD=$(( ( loadMaxVal * ( 1 + tLOAD ) ) / ( 1 + tALL ) ))
-    (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + ( tALL << 2 ) + tALL0 ) * pLOAD ) + ( 3 * tALL0 * pLOAD0 ) ) / ( 1 + ( ( tALL + tALL0 ) << 2 ) ) ))
-
-    pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
-    ${initFlag} && pLOADA0=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
-
-}
 
                 # set traps and global vars
                 export LC_ALL=C LANG=C IFS= 
@@ -853,17 +799,11 @@ _forkrun_get_load() {
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' HUP
                 trap 'trap - TERM INT HUP USR1' USR1
 
-                # initialize cpu load calculation
-                pLOADA0=(0 0 0 0)
-                _forkrun_get_load -i
 
                 # set some initial values while we wait
-                : "${pLOAD_max:=900000}" "${pLOAD_target:=900000}" "${nProcsMax:=$((2*${nCPU}))}" 
+                : "${nProcsMax:=$((2*${nCPU}))}" 
                 kkProcs0=0
                 pAddFlag=true
-                runLinesA[0]=1
-                runTimeA[0]=1
-                pLOAD1[0]=0
                 inLines=0
                 inTime=0
                 emptyReadFlag=false
@@ -871,10 +811,6 @@ _forkrun_get_load() {
                 # wait for the helper coprocs spawned by the main thread to be spawned
                 read -r -u ${fd_nSpawn0}
 
-                # get background load from non-worker coprocs
-                _forkrun_get_load -i
-                pLOAD_bg="$(( pLOADA0 / 2 ))"
-                
                 # fetch coproc source code from tmpdir
                 coprocSrcCode="$(<"${tmpDir}"/.coprocSrcCode)"
                 
@@ -884,10 +820,13 @@ _forkrun_get_load() {
                     [[ -f "${tmpDir}"/.quit ]] && break
                     source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
                     spawnTimeA[$((kkProcs+1))]="${EPOCHREALTIME//./}" 
+                    echo "${kkProcs}" >"${tmpDir}"/.nWorkers
                 done
-                echo "${kkProcs}" >"${tmpDir}"/.nWorkers                    
+
+                kkProcsRun="$kkProcs"
+                                  
                 : >"${tmpDir}"/.spawned
-                (( ${verboseLevel} > 1 )) && printf '\n\n%s WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr}
+                (( ${verboseLevel} > 1 )) && printf '\n\n%s INITIAL WORKER COPROCS FORKED\n\n' "${nProcs}" >&${fd_stderr}
                 
                 
                 # start dynamic spawning now that nProcs workers have already spawned
@@ -896,7 +835,7 @@ _forkrun_get_load() {
 
                     # update reference point for /proc/stat-based cpu load if we just spawned worker coprocs
                     ${pAddFlag} && {
-                        _forkrun_get_load -i
+                        _forkrun_getLoad -i
                         pLOAD1[$kkProcs]=$(( ( ( ( pLOADA0 - pLOAD_bg ) << 1 ) + kkProcs ) / ( kkProcs << 1 ) ))
                         pAddFlag=false
                         (( ${verboseLevel} > 3 )) && printf 'pLOADA = ( %s %s %s %s )\nAverage load per worker coproc: %s\n' "${pLOADA[@]}" "${pLOAD1[$kkProcs]}" >&${fd_stderr}
@@ -904,36 +843,25 @@ _forkrun_get_load() {
 
                     # wait for new info to get average run time per batch at current worker count arrives
                     # update counts of lines run and run times for the current kkProcs
-                    IFS=' '
-                    # get data for 50 ms
-                    read -r -u ${fd_nSpawn} -t 0.05 -a A
-                    (( ${#A[@]} == 0 )) && continue
-
-                    #(( nLines >= nLinesMax )) || read -r nLines <"${tmpDir}/.nLines"
-
-                    # split sdata into lines and times
-                    runLines=(${A[@]%%,*})
-                    runTime=(${A[@]##*,})
                     
-                    runLines=(${runLines[@]##+(0)})
+                    # get data in 10 ms increments until we get some
+                    A=()
+                    while (( ${#A[@]} == 0 )); do
+                        IFS=$'\n' read -r -u ${fd_nSpawn} -t 0.01 -d '' -a A
+                    done
 
-                    (( ${#runLines[@]} < ${#A[@]} )) && emptyReadFlag=true || emptyReadFlag=false
+                    for kk in "${!A[@]}"; do
+                        case "${A[$kk]}" in
+                            l[0-9]*)  (( runLinesA[$kkProcsRun] += ${A[$kk]#l} ))  ;;
+                            t[0-9]*)  (( runTimesA[$kkProcsRun] += ${A[$kk]#t} ))  ;;
+                            k[0-9]*)  kkProcsRun0=$kkProcsRun; (( kkProcsRun += ${A[$kk]#k}))  ;;
+                            0)  ((runAllA[$kkProcsRun]++))  ;;
+                            1)  ((runAllA[$kkProcsRun]++)); ((runWaitA[$kkProcsRun]++))  ;;
+                            q)  break  ;;
+                        esac
+                    done
 
-                    # figure out the number of lines that werent read because we hit EOF before nLines lines were read
-                    #noReadLinesA0=(${A[@]##${nLines},*})
-                    #noReadLinesA0=(${noReadLinesA0[@]%%,*})
-
-                    IFS='+'
-                    #(( ${#noReadLinesA0[@]} > 0 )) && noReadLinesA[$kkProcs]="$(( noReadLinesA[$kkProcs] + ( nLines * ${#noReadLinesA0[@]} ) - ( ${noReadLinesA0[*]} ) ))"
-                    runLinesA[${kkProcs}]="$(( ${runLines[*]} + runLinesA[${kkProcs}] ))"
-                    if (( ${#runTime[@]} > 0 )); then
-                        runTimeA[${kkProcs}]="$(( runTime[-1] - spawnTimeA[${kkProcs}] ))"
-                        runTimeA[${kkProcs}]="${runTimeA[${kkProcs}]##+(0)}"
-                    fi
-                    if [[ -z ${runTimeA[${kkProcs}]} ]] || (( ${runTimeA[${kkProcs}]} < 1 )); then
-                        runTimeA[${kkProcs}]=1
-                    fi
-                    IFS=' '
+                    
 
                     [[ -f "${tmpDir}"/.done ]] || {
                         # update count of lines / time for lines arriving on stdin
@@ -948,99 +876,32 @@ _forkrun_get_load() {
                     }
 
                     IFS=
-
-                    # get average system load since the last time a new worker coproc was spawned
-                    _forkrun_get_load
-                    #mapfile -t pLOADA_new < <(_forkrun_get_load_pid "${pLOADA0_new[@]}" -- "${p_PID0[@]}" "${p_PID[@]}")
-                    #pLOADA_new=$(( (  10000 / clk_tck) * ( $( ( IFS=','; source /proc/self/fd/0 2>/dev/null <<<"cat /proc/{${p_PID[*]}}/stat" ) | { IFS=' '; declare -i u0=0 s0=0 u1=0 s1=0; while read -r _ _ _ _ _ _ _ _ _ _ _ _ _ u0 s0 u1 s1 _ ; do printf '%s + %s + %s + %s + ' $u0 $s0 $u1 $s1; done; }) 0 ) / ( kkProcs * ( ${EPOCHREALTIME//./} - tStart ) ) ));
-                    #(( ${verboseLevel} > 2 )) && printf 'old time: %s    new time: %s\n' $pLOADA $pLOADA_new >&${fd_stderr}
-
-                    # update "load-per-coproc-worker" estimate smoothly
-                    pLOAD1[$kkProcs]=$(( ( ( ( 1 + kkProcs) * ( pLOAD1[$kkProcs] ) ) + ( 3 * ( pLOADA - pLOAD_bg ) ) ) / ( ( kkProcs << 2 ) + 1 ) ))
-                    (( ${verboseLevel} > 3 )) && printf 'pLOAD1[%s] is now %s / 1000000\n' "$kkProcs" "${pLOAD1[$kkProcs]}"  >&${fd_stderr}
-                    
+      
                     # figure out the max number of new workers to add on this loop
                     pAddMax=$(( nProcsMax - kkProcs ))
                     (( pAddMax > ( nCPU >> 1 ) )) && pAddMax=$(( nCPU >> 1 ))
-                    (( pAddMax > ( kkProcs << 1 ) )) && pAddMax=$(( kkProcs << 1 ))
-                    
-                    # dynamically adjust pLOAD_target and abort if system load is above threshold
-                    if (( pLOADA > pLOAD_max )) || (( ( runLinesA[$kkProcs0] * runTimeA[$kkProcs] ) > ( runLinesA[$kkProcs] * runTimeA[$kkProcs0] ) )); then
-                        # sysload too high and/or line processing rate is decreasing (versus the rate before most recent coproc spawning) - dont spawn
-                        continue
-                    elif (( pLOADA < pLOADA0 )); then
-                        # system load dropped with spawning new coprocs. This probably means our target maximum system load is too high.  decrease pLOAD_target.
-                        # decrease more as coprocs were last spawned that resulted in lowered system load increases
-                        # decrease more when we are closer to nProcsMax
-                        pLOAD_target=$(( ( ( pAddMax * pLOAD_target ) + ( ( pAddMax + kkProcs ) * pLOADA ) ) / ( ( pAddMax << 1 ) + kkProcs ) ))
-
-                    elif (( pLOAD_target < pLOAD_max )); then
-                        # sysload between current and max targets. increase pLOAD_target. How much load target increases depends on:
-                        # increase more when kProcs is lower
-                        # increase more when we are further away from nProcsMax 
-                        pLOAD_target=$(( ( ( ( pAddMax * pLOAD_max ) + (  nProcsMax * ( 1 + pLOAD_target + pLOADA - ( pLOAD_bg << 1 ) ) ) ) / ( ( nProcsMax << 1 ) + pAddMax ) )  + pLOAD_bg ))
-                    fi
-                    (( pLOAD_target > pLOAD_max )) && pLOAD_target="${pLOAD_max}"
-                    (( ${verboseLevel} > 3 )) && printf 'pAdd: %s \npLOAD_target is now %s / %s\n' "${pAdd}" "${pLOAD_target}" "${pLOAD_max}" >&${fd_stderr}
-
+                    (( pAddMax > ( kkProcsRun << 1 ) )) && pAddMax=$(( kkProcsRun << 1 ))
                     
                     # compare data processing rate to data input rate. Dont spawn more workers if either:
                     # 1. we are already processing lines faster than they are arriving on stdin, or
                     # 2. we are processing lines more slowly than we were before the most recent spawning of additional workers
-                    # FIX ME
+
                     inLinesDelta=$(( inLines - inLines0 ))
                     inTimeDelta=$(( inTime - inTime0 ))
-                    #declare -p inTime inTime0 inTimeDelta inLines inLines0 inLinesDelta >&${fd_stderr}
-                    #{ (( ( noReadLinesA[$kkProcs] << 3 ) > ( 1 + numReadA[$kkProcs] ) )) || (( ( kkProcs * ${runLinesA[${kkProcs}]} * inTimeDelta )  >= ( ( ( ${runTimeA[${kkProcs}]} * inLines * inTimeDelta ) / inTime + ( ${runTimeA[${kkProcs}]} * inLinesDelta ) ) >> 1 ) )) || (( ( kkProcs * ${runLinesA[${kkProcs}]} * ${runTimeA[${kkProcs0}]} ) < ( kkProcs0 * ${runLinesA[${kkProcs0}]} * ${runTimeA[${kkProcs}]} ) )); } && (( kkProcs0 > 0 )) && continue   
+                      
+                    # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
+                    pAdd_lineRate=$(( ( ( ( ${runTimeA[${kkProcsRun}]} * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) ) - kkProcsRun ))
+                       
+                    (( pAdd_lineRate > pAddMax )) && pAddMax=${pAddMax}
+                    (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
 
-                    # The above checks if "time for N lines to arrive on stdin (t_in)" is less than "time to process N lines (t_run) / numWorkers (kkProcs)"
-                    # since only one worker can read data at a time, having these be equal is ideal 
-                    # otherwise data is being processed faster than it is comming in and workers are sitting idle in a wait queue
-                    # the check would be equivilant to the following in a language that supported floting points / decimals:
-                    #
-                    # lineRate_run[$kkProcs]=$(( ( kkProcs * runLinesA[$kkProcs] ) / runTimeA[$kkProcs] ))
-                    # lineRate_stdin=$(( ( ( inLines / inTime ) + ( ( inLines - inLines0 ) / ( inTime - inTime0 ) ) ) / 2 ))    
-                    # { (( lineRate_run[$kkProcs] >= lineRate_stdin )) || (( lineRate_run[$kkProcs] < lineRate_run[$kkProcs0] )); } && continue   
-
-                    # estimate how many additional workers are needed (at current cpu usage per worker) to hit pLOAD_target    
-                    pAdd_sysLoad=$(( ( pLOAD_target - pLOADA ) / ${pLOAD1[${kkProcs}]} ))
-
-                    (( pAdd_sysLoad > pAddMax )) && pAdd_sysLoad=${pAddMax}
-                    (( pAdd_sysLoad < 0 )) && pAdd_sysLoad=0
-
-                    if ${emptyReadFlag}; then
-                    
-                        # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
-                        pAdd_lineRate=$(( ( ( ( ${runTimeA[${kkProcs}]} * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcs}]} * inTime ) ) ) - kkProcs ))
-                           
-                    
-                        (( pAdd_lineRate > pAdd_sysLoad )) && pAdd_lineRate=${pAdd_sysLoad}
-                        (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
-
-                        # take the harmonic average to put more weight on the smaller of the two pAdd values 
-                        if (( pAdd_sysLoad == 0 )) && (( pAdd_lineRate == 0 )); then
-                            continue
-                        elif (( pAdd_sysLoad == 0 )) || (( pAdd_lineRate == 0 )); then
-                            pAdd=$(( ( ( ( ( 1 + pAdd_sysLoad ) * ( 1 + pAdd_lineRate ) ) << 2 ) + ( ( pAdd_sysLoad + pAdd_lineRate ) * ( pAdd_sysLoad + pAdd_lineRate ) ) ) / ( ( pAdd_sysLoad + pAdd_lineRate ) << 3 ) ))
-                        else
-                            pAdd=$(( ( ( pAdd_sysLoad * pAdd_lineRate ) << 1 ) / ( pAdd_sysLoad + pAdd_lineRate ) ))
-                        fi
-
-                    else
-
-                        pAdd="${pAdd_sysLoad}"
-
-                    fi
+                    (( pAdd = ( 1 + ( ( ( ( pAdd_lineRate << 1 ) + pAddMax ) >> 1 ) * ( 1 + runWaitA[${kkProcsRun}] ) / ( 1 + runWAllA[${kkProcsRun}] ) ) ) ))
                     
                     # compare how much our lineRate increased to how much our worker count increased
                     # ideally, increasing kkProcs by X% will increase lineRate_run by X%
                     # if lineRate_run increases less than this then e are starting to hit other bottlenecks and should slow down new coproc spawning
                     # requires that coprocs have been spawned (by pSpawn) at least once already
-                    #(( kkProcs0 > 0 )) && pAdd=$(( ( pAdd * runTimeA[${kkProcs}] ) / ( waitTimeA[${kkProcs}] + ( runTimeA[${kkProcs}] >> 4 ) ) ))
-                    (( kkProcs0 > 0 )) && pAdd=$(( ( (  pAdd * ( 1 + nProcsMax - kkProcs ) * ( ( ( kkProcs0 * runTimeA[${kkProcs0}] * runLinesA[${kkProcs}] ) + ( ( kkProcs * nCPU ) >> 1 ) ) / ( kkProcs * nCPU ) ) ) + ( ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] ) >>  1 ) ) / ( runLinesA[${kkProcs0}] * runTimeA[${kkProcs}] ) ))
-
-                    # reduce if we arent getting full reads more than 1/8 of the time
-                    #(( ( noReadLinesA[$kkProcs] << 3 ) > runLinesA[$kkProcs] )) && pAdd=$(( ( pAdd * ( runLinesA[$kkProcs] - noReadLinesA[$kkProcs] ) ) / runLinesA[$kkProcs] ))
+                    (( kkProcs0 > 0 )) && pAdd=$(( ( (  pAdd * ( 1 + nProcsMax - kkProcsRun ) * ( ( ( kkProcs0 * runTimeA[${kkProcsRun0}] * runLinesA[${kkProcsRun}] ) + ( ( kkProcsRun * nCPU ) >> 1 ) ) / ( kkProcsRun * nCPU ) ) ) + ( ( runLinesA[${kkProcsRun0}] * runTimeA[${kkProcsRun}] ) >>  1 ) ) / ( runLinesA[${kkProcsRun0}] * runTimeA[${kkProcsRun}] ) ))
                     
                     # make sure estimate is between [0::pAddMax]. continue to next loop iteration if pAdd is 0 (or is somehow negative).
                     (( pAdd < 1 )) && continue
@@ -1054,14 +915,13 @@ _forkrun_get_load() {
                         source /proc/self/fd/0 <<<"${coprocSrcCode//'{<#>}'/"${kkProcs}"}"
                         (( ${verboseLevel} > 3 )) && printf '\nSPAWNING A NEW WORKER COPROC (%s/%s). There are now %s coprocs.\n' "${kk}" "${pAdd}" "${kkProcs}" >&${fd_stderr}
                         ((kkProcs++))
-                        spawnTimeA[${kkProcs}]="${EPOCHREALTIME//./}"
                     done
-                    
-                    (( ${verboseLevel} > 2 )) && printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
-
+                     printf 'k%s\n' ${pAdd} >&${fd_nSpawn}
+    
                     # update public worker count info file
                     echo "${kkProcs}" >"${tmpDir}"/.nWorkers
-
+                   
+                    (( ${verboseLevel} > 2 )) && printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
                    
                     runTime0=
                     kkProcs01="${kkProcs0}"
@@ -1145,6 +1005,7 @@ trap 'trap - TERM INT HUP USR1' USR1
 while true; do"""
 { ${nLinesAutoFlag} || ${nSpawnFlag}; } && echo "{ \${nLinesAutoFlag} || \${nSpawnFlag}; } && read -r <\"${tmpDir}\"/.nLines && [[ \${REPLY} == +([0-9]) ]] && nLinesCur=\${REPLY}"
 echo """
+    echo 1 >\"${tmpDir}\"/.wait/p{<#>}
     read -r -u ${fd_continue} _
     [[ -f \"${tmpDir}\"/.quit ]] && {
         printf '\n' >&${fd_continue}
@@ -1230,7 +1091,7 @@ else
     (( ( nLinesReadLimit - nLinesRead ) < nLinesCur )) && nLinesCur=\$(( nLinesReadLimit - nLinesRead ))
     (( nLinesCur == 0 )) && A=() || """
     echo """ {
-    evfd_wait ${fd_read}"""
+    evfd_wait ${fd_read} '' ${fd_nSpawn}"""
     printf '%s ' "mapfile"
     ${lseekFlag} && printf '%s ' '-t'
     printf '%s ' '-n' "\${nLinesCur}" '-u'
@@ -1306,7 +1167,9 @@ echo \${nLinesRead} >\"${tmpDir}\"/.nLinesRead
 """
 echo """
     printf '\\n' >&${fd_continue}
+    echo 0 >\"${tmpDir}\"/.wait/p{<#>}
     [[ \${#A[@]} == 0 ]] && {
+        echo \"empty read (worker {<#>})\" >&${fd_stderr}
         \${doneIndicatorFlag} || { 
           [[ -f \"${tmpDir}\"/.done ]] && {
             IFS=\$'\\t';"""
@@ -1329,7 +1192,7 @@ echo """
         if \${doneIndicatorFlag} || [[ -f \"${tmpDir}\"/.quit ]]; then"""
 ${nLinesAutoFlag} && echo "printf 'x\\n' >&\${fd_nAuto0}"
 ${nOrderFlag} && echo ": >\"${tmpDir}\"/.out/.quit{<#>}"
-${nSpawnFlag} && echo """printf '%s' '0' >&${fd_nSpawn}
+${nSpawnFlag} && echo """printf 'q\\n' >&${fd_nSpawn}
             printf 'q\\n' >&\${fd_nAuto0}"""
 echo """
             : >\"${tmpDir}\"/.quit
@@ -1340,7 +1203,8 @@ ${nOrderFlag} && echo """else
 echo """fi
         continue
     }"""
-{ ${nLinesAutoFlag} || ${nSpawnFlag}; } && { printf '%s' """
+{ ${nLinesAutoFlag} || ${nSpawnFlag}; } && { 
+    printf '%s' """
     { \${nLinesAutoFlag} || \${nSpawnFlag}; } && {
         printf '%s\\n' \${#A[@]} >&\${fd_nAuto0}
         (( \${nLinesCur} < ${nLinesMax} )) || nLinesAutoFlag=false
@@ -1394,8 +1258,8 @@ ${readBytesFlag} && { [[ ${readBytesProg//bash/} ]] || ${stdinRunFlag}; } && pri
 ${noFuncFlag} && echo 'IFS='
 ${subshellRunFlag} && printf '\n%s ' ')' || printf '\n%s ' '}'
 echo "${outStr}"
-${nOrderFlag} && echo "printf '%s\n' \"\${nOrder}\" >&${fd_nOrder0}"
-${nSpawnFlag} && echo "printf '%s,%s ' \${#A[@]} \${EPOCHREALTIME//./} >&${fd_nSpawn}"
+${nOrderFlag} && echo "printf '%s\\n' \"\${nOrder}\" >&${fd_nOrder0}"
+${nSpawnFlag} && echo "printf 'l%s\\nt%s\\n' \${#A[@]} \${EPOCHREALTIME//./} >&${fd_nSpawn}"
 echo """
 done
 } 2>&${fd_stderr} {fd_nAuto0}>&${fd_nAuto}
@@ -2158,14 +2022,76 @@ _forkrun_getVal() {
     local +n vOut
 }
 
-# export -fp _forkrun_get_load &>/dev/null && export -nf _forkrun_get_load
+_forkrun_getLoad() {
+    ## computes a "smoothed average system CPU load" using info gathered from /proc/stat
+    # 100% load on all CPU's gives pLOAD=1000000 (1 million)
+  
+    # FLAGS:  
+    #    '-i'|'--init':  initialize/reset load calculation. 
+    # 
+    #
+    # pLOADA0 (input) / pLOADA (output):     ( pLOAD  cpu_ALL  cpu_LOAD  tALL )
+    #     --> pLOAD:    represents the current average load level estimate between all logical CPU cores ( scaled between 0 - 1000000, or (if set) between 0 - $maxLoadNum )  
+    #     --> cpu_ALL:  total sum of ALL components from /proc/stats when the last pLOAD was computed
+    #     --> cpu_LOAD: total sum of the components that represent CPU load (everything except idle time and IOwait time) when the last pLOAD was computed
+    #     --> tALL:     total time difference used in the last call to _forkrun_getLoad  (i.e., $(( CPU_ALL - CPU_ALL0 )) from previous run) 
+ 
+
+
+    local -i cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice tLOAD tALL tALL0 cpu_ALL cpu_ALL0 cpu_LOAD cpu_LOAD0 pLOAD pLOAD0 
+    local -i -I loadMaxVal 
+    local initFlag 
+        
+    case "${1}" in
+        -i|--init)
+            initFlag=true
+        ;;
+        *)
+            initFlag=false
+            pLOAD0="${pLOADA0[0]}"
+            cpu_ALL0="${pLOADA0[1]}"
+            cpu_LOAD0="${pLOADA0[2]}"
+            tALL0="${pLOADA0[3]}"
+        ;;
+    esac
+
+    : "${loadMaxVal:=1000000}"
+
+    IFS=' '
+    read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_IOwait cpu_irq cpu_softirq cpu_steal cpu_guest cpu_guestnice </proc/stat
+    IFS=
+    
+    cpu_LOAD=$(( cpu_user + cpu_nice + cpu_system + cpu_irq + cpu_softirq + cpu_steal + cpu_guest + cpu_guestnice ))
+    cpu_ALL=$(( cpu_LOAD + cpu_idle + cpu_IOwait ))
+    
+    ${initFlag} && [[ "${pLOADA0[*]}" == *([0 ]) ]] && {
+        pLOADA0=(0 "${cpu_ALL}" "${cpu_LOAD}" 0)
+        return 0
+    }
+
+    tALL=$(( cpu_ALL - cpu_ALL0 ))
+
+    tLOAD=$(( cpu_LOAD - cpu_LOAD0 ))
+        
+    (( tALL0 > ( tALL << 2 ) )) && tALL0=$((  tALL << 2 ))
+
+    pLOAD=$(( ( loadMaxVal * ( 1 + tLOAD ) ) / ( 1 + tALL ) ))
+    (( pLOAD0 > 0 )) && pLOAD=$(( ( ( ( 1 + ( tALL << 2 ) + tALL0 ) * pLOAD ) + ( 3 * tALL0 * pLOAD0 ) ) / ( 1 + ( ( tALL + tALL0 ) << 2 ) ) ))
+
+    pLOADA=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
+    ${initFlag} && pLOADA0=("${pLOAD}" "${cpu_ALL}" "${cpu_LOAD}" "${tALL}")
+
+}
+
+
+# export -fp _forkrun_getLoad &>/dev/null && export -nf _forkrun_getLoad
 # 
-# _forkrun_get_load() (
+# _forkrun_getLoad() (
 #     ## computes a "smoothed average system CPU load" using info gathered from /proc/stat
 #     #
 #     # USAGE:  
-#     #     mapfile -t -n 4 pLOADA  < <(_forkrun_get_load [-i|--init] [-e|--echo] [-m|--max|--max-load maxLoadNum] )
-#     #     mapfile -t -n 4 pLOADA  < <(_forkrun_get_load [-e|--echo] [-m|--max|--max-load maxLoadNum] "${pLOADA[@]}")
+#     #     mapfile -t -n 4 pLOADA  < <(_forkrun_getLoad [-i|--init] [-e|--echo] [-m|--max|--max-load maxLoadNum] )
+#     #     mapfile -t -n 4 pLOADA  < <(_forkrun_getLoad [-e|--echo] [-m|--max|--max-load maxLoadNum] "${pLOADA[@]}")
 #     #
 #     # FLAGS:  
 #     #    '-i'|'--init':  initialize/reset load calculation. 
@@ -2176,10 +2102,10 @@ _forkrun_getVal() {
 #     #     --> pLOAD:    represents the current average load level estimate between all logical CPU cores ( scaled between 0 - 1000000, or (if set) between 0 - $maxLoadNum )  
 #     #     --> cpu_ALL:  total sum of ALL components from /proc/stats when the last pLOAD was computed
 #     #     --> cpu_LOAD: total sum of the components that represent CPU load (everything except idle time and IOwait time) when the last pLOAD was computed
-#     #     --> tALL:     total time difference used in the last call to _forkrun_get_load  (i.e., $(( CPU_ALL - CPU_ALL0 )) from previous run) 
+#     #     --> tALL:     total time difference used in the last call to _forkrun_getLoad  (i.e., $(( CPU_ALL - CPU_ALL0 )) from previous run) 
 #     #
 #     # INPUTS:           pLOADA=( $pLOAD  $cpu_ALL  $cpu_LOAD  $tALL )
-#     #     --> Input the 3 values that were output last time _forkrun_get_load was called. 
+#     #     --> Input the 3 values that were output last time _forkrun_getLoad was called. 
 #     #     --> Not required if using -i flag. If any of these 3 values are not given then `-i` flag is implied
 # 
 #     unset IFS
@@ -2259,15 +2185,15 @@ _forkrun_getVal() {
 #     ${echoFlag} && printf 'Current System CPU Load = %s / %s\n' "${pLOAD}" "${loadMaxVal}" >&2
 # )
 # 
-# export -fp _forkrun_get_load_pid &>/dev/null && export -nf _forkrun_get_load_pid
+# export -fp _forkrun_getLoad_pid &>/dev/null && export -nf _forkrun_getLoad_pid
 # 
 # 
-# _forkrun_get_load_pid() (
+# _forkrun_getLoad_pid() (
 #     ## computes a "smoothed average CPU load" for a specific group of PIDs using info gathered from /proc/<pid>/stat
 #     #
 #     # USAGE:  
-#     #     mapfile -t pLOADA  < <(_forkrun_get_load [-i|--init] [-e|--echo] [-m|--max|--max-load maxLoadNum] [--] "${pidA[@]}")
-#     #     mapfile -t pLOADA  < <(_forkrun_get_load [-e|--echo] [-m|--max|--max-load maxLoadNum] "${pLOADA[@]}" [--] "${pidA[@]}")
+#     #     mapfile -t pLOADA  < <(_forkrun_getLoad [-i|--init] [-e|--echo] [-m|--max|--max-load maxLoadNum] [--] "${pidA[@]}")
+#     #     mapfile -t pLOADA  < <(_forkrun_getLoad [-e|--echo] [-m|--max|--max-load maxLoadNum] "${pLOADA[@]}" [--] "${pidA[@]}")
 #     #
 #     # FLAGS:  
 #     #    '-i'|'--init':  initialize/reset load calculation. 
@@ -2278,10 +2204,10 @@ _forkrun_getVal() {
 #     #     --> pLOAD:    represents the current average load level estimate between all logical CPU cores ( scaled between 0 - 10000, or (if set) between 0 - $maxLoadNum )  
 #     #     --> cpu_ALL:  total sum of ALL components from /proc/stats when the last pLOAD was computed
 #     #     --> cpu_LOAD: total sum of the components that represent CPU load (everything except idle time and IOwait time) when the last pLOAD was computed
-#     #     --> tALL:     total time difference used in the last call to _forkrun_get_load  (i.e., $(( CPU_ALL - CPU_ALL0 )) from previous run) 
+#     #     --> tALL:     total time difference used in the last call to _forkrun_getLoad  (i.e., $(( CPU_ALL - CPU_ALL0 )) from previous run) 
 #     #
 #     # INPUTS:           pLOADA=( $pLOAD  $cpu_ALL  $cpu_LOAD  $tALL )
-#     #     --> Input the 3 values that were output last time _forkrun_get_load was called. 
+#     #     --> Input the 3 values that were output last time _forkrun_getLoad was called. 
 #     #     --> Not required if using -i flag. If any of these 3 values are not given then `-i` flag is implied
 # 
 #     unset IFS
