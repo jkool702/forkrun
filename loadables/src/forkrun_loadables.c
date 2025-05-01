@@ -142,7 +142,7 @@ static char * evfd_init_doc[] = {
 
 static int evfd_init_main(int argc, char ** argv) {
     if (evfd >= 0) close(evfd);
-    evfd = eventfd(0, EFD_CLOEXEC);
+    evfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (evfd < 0) {
         builtin_error("evfd_init: %s", strerror(errno));
         return EXECUTION_FAILURE;
@@ -252,12 +252,11 @@ static char * evfd_signal_doc[] = {
 static int evfd_signal_main(int argc, char ** argv) {
     int fd = (argc > 1 ? atoi(argv[1]) : evfd);
     uint64_t one = 1;
-    int flags = fcntl(fd, F_GETFL);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    if (write(fd, & one, sizeof(one)) != sizeof(one) && errno != EAGAIN) {
+
+    if (write(fd, &one, sizeof(one)) != sizeof(one) && errno != EAGAIN) {
         builtin_error("evfd_signal: %s", strerror(errno));
     }
-    fcntl(fd, F_SETFL, flags);
+
     return EXECUTION_SUCCESS;
 }
 
@@ -280,7 +279,8 @@ static char * evfd_splice_doc[] = {
     NULL
 };
 
-static int evfd_splice_main(int argc, char ** argv) {
+static int evfd_splice_main(int argc, char **argv)
+{
     if (argc != 2) {
         builtin_error("evfd_splice: wrong args");
         return EXECUTION_FAILURE;
@@ -288,15 +288,30 @@ static int evfd_splice_main(int argc, char ** argv) {
     int outfd = atoi(argv[1]);
     const size_t CHUNK = 128 * 1024;
     uint64_t one = 1;
+
     while (1) {
-        ssize_t n = splice(STDIN_FILENO, NULL, outfd, NULL, CHUNK, SPLICE_F_MOVE | SPLICE_F_MORE);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) break;
-        int flags = fcntl(evfd, F_GETFL);
-        fcntl(evfd, F_SETFL, flags | O_NONBLOCK);
-        write(evfd, & one, sizeof(one));
-        fcntl(evfd, F_SETFL, flags);
+        ssize_t n = splice(
+            STDIN_FILENO, NULL,
+            outfd,       NULL,
+            CHUNK,
+            SPLICE_F_MOVE | SPLICE_F_MORE
+        );
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            builtin_error("evfd_splice: splice failed: %s", strerror(errno));
+            return EXECUTION_FAILURE;
+        }
+        if (n == 0)  // EOF
+            break;
+
+        // Simply write the eventfd; it won't block thanks to EFD_NONBLOCK.
+        if (write(evfd, &one, sizeof(one)) != sizeof(one) && errno != EAGAIN) {
+            builtin_error("evfd_splice: eventfd write: %s", strerror(errno));
+            return EXECUTION_FAILURE;
+        }
     }
+
     return EXECUTION_SUCCESS;
 }
 
