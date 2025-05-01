@@ -37,33 +37,43 @@
 #include "variables.h"
 
 // Helpers for builtins
-extern int add_builtin(struct builtin *bp, int keep);
-extern char **make_builtin_argv();
+extern int add_builtin(struct builtin * bp, int keep);
+extern char ** make_builtin_argv();
 
 // define function prototypes
-static int fr_builtin(WORD_LIST *list);
-static int lseek_main(int argc, char **argv);
-static int evfd_init_main(int argc, char **argv);
-static int evfd_wait_main(int argc, char **argv);
-static int evfd_signal_main(int argc, char **argv);
-static int evfd_splice_main(int argc, char **argv);
-static int evfd_close_main(int argc, char **argv);
-static int childusage_main(int argc, char **argv);
-static int cpuusage_main(int argc, char **argv);
-static char *get_persistent_dir(void);
-
+static int fr_builtin(WORD_LIST * list);
+static int lseek_main(int argc, char ** argv);
+static int evfd_init_main(int argc, char ** argv);
+static int evfd_wait_main(int argc, char ** argv);
+static int evfd_signal_main(int argc, char ** argv);
+static int evfd_splice_main(int argc, char ** argv);
+static int evfd_close_main(int argc, char ** argv);
+static int childusage_main(int argc, char ** argv);
+static int cpuusage_main(int argc, char ** argv);
+static char * get_persistent_dir(void);
 
 /* -------------------------------------------------- */
 /* lseek builtin                                     */
+/* -------------------------------------------------- */
+/* -------------------------------------------------- */
+/* Usage documentation for all forkrun loadables      */
 /* -------------------------------------------------- */
 
 static char *lseek_doc[] = {
     "",
     "USAGE: lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]",
+    "",
+    "Move the given file descriptor <FD> by <OFFSET> bytes.",
+    "",
+    "- SEEK_TYPE (optional): SEEK_SET, SEEK_CUR (default), SEEK_END",
+    "- VAR (optional): If given, store new file offset in variable VAR.",
+    "- If VAR is empty (''), enable quiet mode (no output).",
+    "",
+    "Returns new offset or stores it.",
     NULL
 };
 
-static int lseek_main(int argc, char **argv) {
+static int lseek_main(int argc, char ** argv) {
     if (argc < 3 || argc > 5) {
         builtin_error("lseek: incorrect number of arguments");
         return EXECUTION_FAILURE;
@@ -71,7 +81,7 @@ static int lseek_main(int argc, char **argv) {
     int fd = atoi(argv[1]);
     if (fd < 0) {
         builtin_error("lseek: invalid file descriptor '%s'", argv[1]);
-       return EXECUTION_FAILURE;
+        return EXECUTION_FAILURE;
     }
     errno = 0;
     off_t offset = atoll(argv[2]);
@@ -81,7 +91,7 @@ static int lseek_main(int argc, char **argv) {
     }
     int whence = SEEK_CUR;
     int quiet = 0;
-    char *varname = NULL;
+    char * varname = NULL;
     if (argc > 3) {
         if (strcmp(argv[3], "SEEK_SET") == 0) whence = SEEK_SET;
         else if (strcmp(argv[3], "SEEK_END") == 0) whence = SEEK_END;
@@ -94,16 +104,16 @@ static int lseek_main(int argc, char **argv) {
         }
     }
     off_t new_offset = lseek(fd, offset, whence);
-    if (new_offset == (off_t)-1) {
+    if (new_offset == (off_t) - 1) {
         builtin_error("lseek: %s", strerror(errno));
         return EXECUTION_FAILURE;
     }
     if (varname) {
         char buf_off[32];
-        snprintf(buf_off, sizeof(buf_off), "%lld", (long long)new_offset);
+        snprintf(buf_off, sizeof(buf_off), "%lld", (long long) new_offset);
         bind_variable(varname, buf_off, 0);
     } else if (!quiet) {
-        printf("%lld\n", (long long)new_offset);
+        printf("%lld\n", (long long) new_offset);
     }
     return EXECUTION_SUCCESS;
 }
@@ -123,22 +133,52 @@ struct builtin lseek_struct = {
 static int evfd = -1;
 
 // evfd_init
-static int evfd_init_main(int argc, char **argv) {
+
+static char *evfd_init_doc[] = {
+    "",
+    "USAGE: evfd_init",
+    "",
+    "Create a new eventfd, store FD number in $EVFD_FD.",
+    "Must be called once before using evfd_wait / evfd_signal.",
+    NULL
+};
+
+static int evfd_init_main(int argc, char ** argv) {
     if (evfd >= 0) close(evfd);
     evfd = eventfd(0, EFD_CLOEXEC);
     if (evfd < 0) {
         builtin_error("evfd_init: %s", strerror(errno));
         return EXECUTION_FAILURE;
     }
-    char buf[16]; snprintf(buf, sizeof(buf), "%d", evfd);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", evfd);
     bind_variable("EVFD_FD", buf, 0);
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_init_struct = {"evfd_init",fr_builtin, BUILTIN_ENABLED, NULL, "evfd_init", 0};
+struct builtin evfd_init_struct = {
+    "evfd_init",
+    fr_builtin,
+    BUILTIN_ENABLED,
+    evfd_init_doc,
+    "evfd_init",
+    0
+};
 
 // evfd_wait
-static int evfd_wait_main(int argc, char **argv) {
+static char *evfd_wait_doc[] = {
+    "",
+    "USAGE: evfd_wait [<read_fd>] [<signal_fd>] [<notify_fd>]",
+    "",
+    "Wait until data is available to read or an eventfd is signaled.",
+    "",
+    "- read_fd: Optional FD to check for unread data.",
+    "- signal_fd: Optional eventfd FD (defaults to EVFD_FD).",
+    "- notify_fd: Optional FD to write '0' (no wait) or '1' (waited).",
+    NULL
+};
+
+static int evfd_wait_main(int argc, char ** argv) {
 
     int read_fd = -1, sig_fd = evfd, status_fd = -1;
     if (argc == 2) {
@@ -150,14 +190,14 @@ static int evfd_wait_main(int argc, char **argv) {
     }
 
     // Determine tmpdir for .done/.quit
-    const char *tmpdir = getenv("FORKRUN_TMPDIR");
+    const char * tmpdir = getenv("FORKRUN_TMPDIR");
     if (!tmpdir) tmpdir = "/tmp";
     char donepath[PATH_MAX], quitpath[PATH_MAX];
     snprintf(donepath, sizeof(donepath), "%s/.done", tmpdir);
     snprintf(quitpath, sizeof(quitpath), "%s/.quit", tmpdir);
 
     // 1) If .quit exists, immediately signal done
-    if ( access(quitpath, F_OK) == 0 || access(donepath, F_OK) == 0 ) {
+    if (access(quitpath, F_OK) == 0 || access(donepath, F_OK) == 0) {
         bind_variable("doneIndicatorFlag", "true", 0);
         if (status_fd >= 0) dprintf(status_fd, "0\n");
         return EXECUTION_SUCCESS;
@@ -193,9 +233,9 @@ static int evfd_wait_main(int argc, char **argv) {
     }
 
     // 3) Handle eventfd signal
-    if (pfds[nfds-1].revents & POLLIN) {
+    if (pfds[nfds - 1].revents & POLLIN) {
         uint64_t cnt;
-        if (read(sig_fd, &cnt, sizeof(cnt)) != sizeof(cnt)) {
+        if (read(sig_fd, & cnt, sizeof(cnt)) != sizeof(cnt)) {
             builtin_error("evfd_wait: eventfd read failed: %s", strerror(errno));
             return EXECUTION_FAILURE;
         }
@@ -205,28 +245,63 @@ static int evfd_wait_main(int argc, char **argv) {
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_wait_struct = {"evfd_wait", fr_builtin, BUILTIN_ENABLED, NULL, "evfd_wait", 0};
+struct builtin evfd_wait_struct = {
+    "evfd_wait",
+    fr_builtin,
+    BUILTIN_ENABLED,
+    evfd_wait_doc,
+    "evfd_wait [<read_fd>] [<signal_fd>] [<notify_fd>]",
+    0
+};
 
 // evfd_signal
-static int evfd_signal_main(int argc, char **argv) {
+static char *evfd_signal_doc[] = {
+    "",
+    "USAGE: evfd_signal [<signal_fd>]",
+    "",
+    "Signal an eventfd to wake waiters.",
+    "Defaults to $EVFD_FD if no FD given.",
+    NULL
+};
+
+static int evfd_signal_main(int argc, char ** argv) {
     int fd = (argc > 1 ? atoi(argv[1]) : evfd);
     uint64_t one = 1;
     int flags = fcntl(fd, F_GETFL);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    if (write(fd, &one, sizeof(one)) != sizeof(one) && errno != EAGAIN) {
+    if (write(fd, & one, sizeof(one)) != sizeof(one) && errno != EAGAIN) {
         builtin_error("evfd_signal: %s", strerror(errno));
     }
     fcntl(fd, F_SETFL, flags);
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_signal_struct = {"evfd_signal", fr_builtin, BUILTIN_ENABLED, NULL, "evfd_signal", 0};
+struct builtin evfd_signal_struct = {
+    "evfd_signal",
+    fr_builtin,
+    BUILTIN_ENABLED,
+    evfd_signal_doc,
+    "evfd_signal [<signal_fd>]",
+    0
+};
 
 // evfd_splice
-static int evfd_splice_main(int argc, char **argv) {
-    if (argc != 2) { builtin_error("evfd_splice: wrong args"); return EXECUTION_FAILURE; }
+static char *evfd_splice_doc[] = {
+    "",
+    "USAGE: evfd_splice <output_fd>",
+    "",
+    "Continuously splice from stdin to output_fd in chunks.",
+    "After each chunk, signal eventfd to wake readers.",
+    NULL
+};
+
+static int evfd_splice_main(int argc, char ** argv) {
+    if (argc != 2) {
+        builtin_error("evfd_splice: wrong args");
+        return EXECUTION_FAILURE;
+    }
     int outfd = atoi(argv[1]);
-    const size_t CHUNK = 64 * 1024;
+    const size_t CHUNK = 128 * 1024;
     uint64_t one = 1;
     while (1) {
         ssize_t n = splice(STDIN_FILENO, NULL, outfd, NULL, CHUNK, SPLICE_F_MOVE | SPLICE_F_MORE);
@@ -234,175 +309,337 @@ static int evfd_splice_main(int argc, char **argv) {
         if (n <= 0) break;
         int flags = fcntl(evfd, F_GETFL);
         fcntl(evfd, F_SETFL, flags | O_NONBLOCK);
-        write(evfd, &one, sizeof(one));
+        write(evfd, & one, sizeof(one));
         fcntl(evfd, F_SETFL, flags);
     }
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_splice_struct = {"evfd_splice", fr_builtin, BUILTIN_ENABLED, NULL, "evfd_splice", 0};
+struct builtin evfd_splice_struct = {
+    "evfd_splice",
+    fr_builtin,
+    BUILTIN_ENABLED,
+    evfd_splice_doc,
+    "evfd_splice <output_fd>",
+    0
+};
 
 // evfd_close
-static int evfd_close_main(int argc, char **argv) {
+static char *evfd_close_doc[] = {
+    "",
+    "USAGE: evfd_close",
+    "",
+    "Close and clean up the eventfd, unset $EVFD_FD.",
+    NULL
+};
+
+static int evfd_close_main(int argc, char ** argv) {
     if (evfd >= 0) close(evfd);
     return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_close_struct = {"evfd_close", fr_builtin, BUILTIN_ENABLED, NULL, "evfd_close", 0};
+struct builtin evfd_close_struct = {
+    "evfd_close",
+    fr_builtin,
+    BUILTIN_ENABLED,
+    evfd_close_doc,
+    "evfd_close",
+    0
+};
 
 /* -------------------------------------------------- */
 /* childusage builtin                                */
 /* -------------------------------------------------- */
-static char *childusage_doc[] = {"USAGE: childusage [ -q | --quiet ]", NULL};
+static char *childusage_doc[] = {
+    "",
+    "USAGE: childusage [ -q | --quiet ]",
+    "",
+    "Record finished children's CPU time to ${tmpDir}/.cpuusage/cpu.<PID>.",
+    "If '-q' or '--quiet' is given, suppress output.",
+    NULL
+};
 
-static char *get_persistent_dir(void) {
-    const char *tmp = getenv("tmpDir"); if (!tmp) tmp = "/tmp";
+static char * get_persistent_dir(void) {
+    const char * tmp = getenv("tmpDir");
+    if (!tmp) tmp = "/tmp";
     size_t len = strlen(tmp) + strlen("/.cpuusage") + 1;
-    char *p = xmalloc(len);
+    char * p = xmalloc(len);
     snprintf(p, len, "%s/.cpuusage", tmp);
     return p;
 }
 
-static int childusage_main(int argc, char **argv) {
+static int childusage_main(int argc, char ** argv) {
     int quiet = 0;
-    if (argc == 2 && (strcmp(argv[1], "-q")==0 || strcmp(argv[1], "--quiet")==0)) quiet = 1;
-    else if (argc > 2) { builtin_error("Usage: childusage [ -q ]"); return EXECUTION_FAILURE; }
-    pid_t pid = getpid(); struct rusage ru;
-    if (getrusage(RUSAGE_CHILDREN, &ru)!=0) { builtin_error("getrusage: %s", strerror(errno)); return EXECUTION_FAILURE; }
+    if (argc == 2 && (strcmp(argv[1], "-q") == 0 || strcmp(argv[1], "--quiet") == 0)) quiet = 1;
+    else if (argc > 2) {
+        builtin_error("Usage: childusage [ -q ]");
+        return EXECUTION_FAILURE;
+    }
+    pid_t pid = getpid();
+    struct rusage ru;
+    if (getrusage(RUSAGE_CHILDREN, & ru) != 0) {
+        builtin_error("getrusage: %s", strerror(errno));
+        return EXECUTION_FAILURE;
+    }
     long tps = sysconf(_SC_CLK_TCK);
-    if (tps<=0) { builtin_error("sysconf(_SC_CLK_TCK) failed"); return EXECUTION_FAILURE; }
-    unsigned long long ticks = (unsigned long long)ru.ru_utime.tv_sec*tps + ru.ru_utime.tv_usec*tps/1000000;
-    ticks += (unsigned long long)ru.ru_stime.tv_sec*tps + ru.ru_stime.tv_usec*tps/1000000;
-    char *pdir = get_persistent_dir();
-    if (mkdir(pdir, 0777)!=0 && errno!=EEXIST) { builtin_error("mkdir %s: %s", pdir, strerror(errno)); xfree(pdir); return EXECUTION_FAILURE; }
-    char path[PATH_MAX]; snprintf(path, sizeof(path), "%s/cpu.%d", pdir, pid);
+    if (tps <= 0) {
+        builtin_error("sysconf(_SC_CLK_TCK) failed");
+        return EXECUTION_FAILURE;
+    }
+    unsigned long long ticks = (unsigned long long) ru.ru_utime.tv_sec * tps + ru.ru_utime.tv_usec * tps / 1000000;
+    ticks += (unsigned long long) ru.ru_stime.tv_sec * tps + ru.ru_stime.tv_usec * tps / 1000000;
+    char * pdir = get_persistent_dir();
+    if (mkdir(pdir, 0777) != 0 && errno != EEXIST) {
+        builtin_error("mkdir %s: %s", pdir, strerror(errno));
+        xfree(pdir);
+        return EXECUTION_FAILURE;
+    }
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/cpu.%d", pdir, pid);
     xfree(pdir);
-    FILE *f = fopen(path, "w"); if (!f) { builtin_error("fopen %s: %s", path, strerror(errno)); return EXECUTION_FAILURE; }
-    fprintf(f, "%llu\n", ticks); fclose(f);
+    FILE * f = fopen(path, "w");
+    if (!f) {
+        builtin_error("fopen %s: %s", path, strerror(errno));
+        return EXECUTION_FAILURE;
+    }
+    fprintf(f, "%llu\n", ticks);
+    fclose(f);
     if (!quiet) printf("%llu\n", ticks);
     return EXECUTION_SUCCESS;
 }
 
-struct builtin childusage_struct = {"childusage", fr_builtin, BUILTIN_ENABLED, childusage_doc, "childusage [ -q ]", 0};
+struct builtin childusage_struct = {
+    "childusage",
+    fr_builtin,
+    BUILTIN_ENABLED,
+    childusage_doc,
+    "childusage [ -q | --quiet ]",
+    0
+};
 
 /* -------------------------------------------------- */
 /* cpuusage helpers and builtin                      */
 /* -------------------------------------------------- */
-typedef struct { pid_t pid, ppid; unsigned long utime, stime, cutime, cstime; } proc_info;
+static char *cpuusage_doc[] = {
+    "",
+    "USAGE: cpuusage <worker_pid> [worker_pid ...]",
+    "",
+    "Compute total CPU time for workers and their descendants.",
+    "Adds finished CPU time (from .cpuusage files) + live /proc times.",
+    "Outputs: <TOTAL_CPU_TIME> <SYSTEM_CPU_TIME>",
+    NULL
+};
 
-static int is_number(const char *s) { for (; *s; ++s) if (!isdigit((unsigned char)*s)) return 0; return 1; }
+typedef struct {
+    pid_t pid, ppid;
+    unsigned long utime, stime, cutime, cstime;
+}
+proc_info;
 
-static int read_proc_stat(pid_t pid, proc_info *info) {
-    char file[64]; snprintf(file, sizeof(file), "/proc/%d/stat", pid);
-    FILE *f = fopen(file, "r"); if (!f) return -1;
-    char buf[1024]; if (!fgets(buf, sizeof(buf), f)) { fclose(f); return -1; }
+static int is_number(const char * s) {
+    for (;* s; ++s)
+        if (!isdigit((unsigned char) * s)) return 0;
+    return 1;
+}
+
+static int read_proc_stat(pid_t pid, proc_info * info) {
+    char file[64];
+    snprintf(file, sizeof(file), "/proc/%d/stat", pid);
+    FILE * f = fopen(file, "r");
+    if (!f) return -1;
+    char buf[1024];
+    if (!fgets(buf, sizeof(buf), f)) {
+        fclose(f);
+        return -1;
+    }
     fclose(f);
-    char *paren = strrchr(buf, ')'); if (!paren) return -1;
-    char *p = paren+1, *tok; int fld=0;
-    tok = strtok(p, " "); while (tok && fld<2) { tok=strtok(NULL," "); fld++; }
-    if (!tok) return -1; info->ppid=atoi(tok);
-    for (int i=0;i<9;++i) tok=strtok(NULL," "); if (!tok) return -1;
-    info->utime=strtoul(strtok(NULL," "),NULL,10);
-    info->stime=strtoul(strtok(NULL," "),NULL,10);
-    info->cutime=strtoul(strtok(NULL," "),NULL,10);
-    info->cstime=strtoul(strtok(NULL," "),NULL,10);
-    info->pid = pid;
+    char * paren = strrchr(buf, ')');
+    if (!paren) return -1;
+    char * p = paren + 1, * tok;
+    int fld = 0;
+    tok = strtok(p, " ");
+    while (tok && fld < 2) {
+        tok = strtok(NULL, " ");
+        fld++;
+    }
+    if (!tok) return -1;
+    info -> ppid = atoi(tok);
+    for (int i = 0; i < 9; ++i) tok = strtok(NULL, " ");
+    if (!tok) return -1;
+    info -> utime = strtoul(strtok(NULL, " "), NULL, 10);
+    info -> stime = strtoul(strtok(NULL, " "), NULL, 10);
+    info -> cutime = strtoul(strtok(NULL, " "), NULL, 10);
+    info -> cstime = strtoul(strtok(NULL, " "), NULL, 10);
+    info -> pid = pid;
     return 0;
 }
 
-static proc_info *get_all_processes(size_t *num) {
-    DIR *d=opendir("/proc"); if (!d) return NULL;
-    size_t cap=256, cnt=0; proc_info *arr = xmalloc(cap*sizeof(proc_info)); struct dirent *e;
-    while ((e=readdir(d))) {
-        if (!is_number(e->d_name)) continue;
-        pid_t pid=atoi(e->d_name); proc_info inf;
-        if (read_proc_stat(pid,&inf)==0) {
-            if (cnt==cap) arr=xrealloc(arr,(cap*=2)*sizeof(proc_info));
-            arr[cnt++]=inf;
+static proc_info * get_all_processes(size_t * num) {
+    DIR * d = opendir("/proc");
+    if (!d) return NULL;
+    size_t cap = 256, cnt = 0;
+    proc_info * arr = xmalloc(cap * sizeof(proc_info));
+    struct dirent * e;
+    while ((e = readdir(d))) {
+        if (!is_number(e -> d_name)) continue;
+        pid_t pid = atoi(e -> d_name);
+        proc_info inf;
+        if (read_proc_stat(pid, & inf) == 0) {
+            if (cnt == cap) arr = xrealloc(arr, (cap *= 2) * sizeof(proc_info));
+            arr[cnt++] = inf;
         }
     }
     closedir(d);
-    *num=cnt;
+    * num = cnt;
     return arr;
 }
 
-static int pid_in_list(pid_t pid,pid_t *lst,size_t n) { for (size_t i=0;i<n;++i) if (lst[i]==pid) return 1; return 0; }
-
-static unsigned long long compute_live_cpu_time(pid_t*w,size_t wn,proc_info*a,size_t an) {
-    pid_t *grp=xmalloc(wn*sizeof(pid_t)); size_t gc=wn; memcpy(grp,w,wn*sizeof(pid_t)); int added;
-    do { added=0; for(size_t i=0;i<an;++i) if(!pid_in_list(a[i].pid,grp,gc)&&pid_in_list(a[i].ppid,grp,gc)){
-            grp=xrealloc(grp,(gc+1)*sizeof(pid_t)); grp[gc++]=a[i].pid; added=1; }}
-    while(added);
-    unsigned long long tot=0; for(size_t i=0;i<gc;++i) for(size_t j=0;j<an;++j) if(a[j].pid==grp[i]){
-        if(pid_in_list(a[j].pid,w,wn)) tot+=a[j].utime+a[j].stime;
-        else tot+=a[j].utime+a[j].stime+a[j].cutime+a[j].cstime;
-        break;
-    }
-    xfree(grp); return tot;
+static int pid_in_list(pid_t pid, pid_t * lst, size_t n) {
+    for (size_t i = 0; i < n; ++i)
+        if (lst[i] == pid) return 1;
+    return 0;
 }
 
-static unsigned long long read_finished_time_for_pid(pid_t pid,const char*pdir){ char path[PATH_MAX]; snprintf(path,sizeof(path),"%s/cpu.%d",pdir,pid); FILE*f=fopen(path,"r"); if(!f)return 0; unsigned long long v=0; fscanf(f,"%llu",&v); fclose(f); return v; }
+static unsigned long long compute_live_cpu_time(pid_t * w, size_t wn, proc_info * a, size_t an) {
+    pid_t * grp = xmalloc(wn * sizeof(pid_t));
+    size_t gc = wn;
+    memcpy(grp, w, wn * sizeof(pid_t));
+    int added;
+    do {
+        added = 0;
+        for (size_t i = 0; i < an; ++i)
+            if (!pid_in_list(a[i].pid, grp, gc) && pid_in_list(a[i].ppid, grp, gc)) {
+                grp = xrealloc(grp, (gc + 1) * sizeof(pid_t));
+                grp[gc++] = a[i].pid;
+                added = 1;
+            }
+    }
+    while (added);
+    unsigned long long tot = 0;
+    for (size_t i = 0; i < gc; ++i)
+        for (size_t j = 0; j < an; ++j)
+            if (a[j].pid == grp[i]) {
+                if (pid_in_list(a[j].pid, w, wn)) tot += a[j].utime + a[j].stime;
+                else tot += a[j].utime + a[j].stime + a[j].cutime + a[j].cstime;
+                break;
+            }
+    xfree(grp);
+    return tot;
+}
 
-static unsigned long long read_all_cpu_time(void){ FILE*f=fopen("/proc/stat","r"); if(!f) return 0; char ln[512]; unsigned long long sum=0; if(fgets(ln,sizeof(ln),f)&&strncmp(ln,"cpu ",4)==0){ char*tok=strtok(ln+4," "); while(tok){ sum+=strtoull(tok,NULL,10); tok=strtok(NULL," "); }} fclose(f);return sum; }
+static unsigned long long read_finished_time_for_pid(pid_t pid,
+    const char * pdir) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/cpu.%d", pdir, pid);
+    FILE * f = fopen(path, "r");
+    if (!f) return 0;
+    unsigned long long v = 0;
+    fscanf(f, "%llu", & v);
+    fclose(f);
+    return v;
+}
 
-static char *cpuusage_doc[] = {"USAGE: cpuusage <pid>...", NULL};
+static unsigned long long read_all_cpu_time(void) {
+    FILE * f = fopen("/proc/stat", "r");
+    if (!f) return 0;
+    char ln[512];
+    unsigned long long sum = 0;
+    if (fgets(ln, sizeof(ln), f) && strncmp(ln, "cpu ", 4) == 0) {
+        char * tok = strtok(ln + 4, " ");
+        while (tok) {
+            sum += strtoull(tok, NULL, 10);
+            tok = strtok(NULL, " ");
+        }
+    }
+    fclose(f);
+    return sum;
+}
 
-static int cpuusage_main(int argc,char **argv){ if(argc<2){ builtin_error("cpuusage: missing PIDs"); return EXECUTION_FAILURE;} size_t wn=argc-1; pid_t*w=xmalloc(wn*sizeof(pid_t)); for(size_t i=0;i<wn;++i) w[i]=atoi(argv[i+1]); size_t ap; proc_info*a=get_all_processes(&ap); if(!a){ builtin_error("cpuusage: /proc fail"); xfree(w); return EXECUTION_FAILURE;} unsigned long long live=compute_live_cpu_time(w,wn,a,ap); xfree(a); char*pdir=get_persistent_dir(); unsigned long long pers=0; for(size_t i=0;i<wn;++i) pers+=read_finished_time_for_pid(w[i],pdir); xfree(pdir); xfree(w); unsigned long long total=live+pers, all=read_all_cpu_time(); printf("%llu %llu\n",total,all); return EXECUTION_SUCCESS;} 
+static char * cpuusage_doc[] = {
+    "USAGE: cpuusage <pid>...",
+    NULL
+};
 
-struct builtin cpuusage_struct={"cpuusage",fr_builtin,BUILTIN_ENABLED,cpuusage_doc,"cpuusage <pid>...",0};
+static int cpuusage_main(int argc, char ** argv) {
+    if (argc < 2) {
+        builtin_error("cpuusage: missing PIDs");
+        return EXECUTION_FAILURE;
+    }
+    size_t wn = argc - 1;
+    pid_t * w = xmalloc(wn * sizeof(pid_t));
+    for (size_t i = 0; i < wn; ++i) w[i] = atoi(argv[i + 1]);
+    size_t ap;
+    proc_info * a = get_all_processes( & ap);
+    if (!a) {
+        builtin_error("cpuusage: /proc fail");
+        xfree(w);
+        return EXECUTION_FAILURE;
+    }
+    unsigned long long live = compute_live_cpu_time(w, wn, a, ap);
+    xfree(a);
+    char * pdir = get_persistent_dir();
+    unsigned long long pers = 0;
+    for (size_t i = 0; i < wn; ++i) pers += read_finished_time_for_pid(w[i], pdir);
+    xfree(pdir);
+    xfree(w);
+    unsigned long long total = live + pers, all = read_all_cpu_time();
+    printf("%llu %llu\n", total, all);
+    return EXECUTION_SUCCESS;
+}
+
+struct builtin cpuusage_struct = {
+    "cpuusage",
+    fr_builtin,
+    BUILTIN_ENABLED,
+    cpuusage_doc,
+    "cpuusage <worker_pid> [<worker_pid> [<...>]]",
+    0
+};
 
 /* -------------------------------------------------- */
 /* Register all builtins  (under fr)                  */
 /* -------------------------------------------------- */
 
-static int fr_builtin(WORD_LIST *list) {
+static int fr_builtin(WORD_LIST * list) {
     int argc;
-    char **argv = make_builtin_argv(list, &argc);
+    char ** argv = make_builtin_argv(list, & argc);
 
-    char *sub = argv[0];
+    char * sub = argv[0];
 
     int ret;
     if (strcmp(sub, "lseek") == 0) {
         ret = lseek_main(argc, argv);
-    }
-    else if (strcmp(sub, "evfd_wait") == 0) {
+    } else if (strcmp(sub, "evfd_wait") == 0) {
         ret = evfd_wait_main(argc, argv);
-    }
-    else if (strcmp(sub, "evfd_init") == 0) {
+    } else if (strcmp(sub, "evfd_init") == 0) {
         ret = evfd_init_main(argc, argv);
-    }
-    else if (strcmp(sub, "evfd_signal") == 0) {
+    } else if (strcmp(sub, "evfd_signal") == 0) {
         ret = evfd_signal_main(argc, argv);
-    }
-    else if (strcmp(sub, "evfd_splice") == 0) {
+    } else if (strcmp(sub, "evfd_splice") == 0) {
         ret = evfd_splice_main(argc, argv);
-    }
-    else if (strcmp(sub, "evfd_close") == 0) {
+    } else if (strcmp(sub, "evfd_close") == 0) {
         ret = evfd_close_main(argc, argv);
-    }
-    else if (strcmp(sub, "cpuusage") == 0) {
+    } else if (strcmp(sub, "cpuusage") == 0) {
         ret = cpuusage_main(argc, argv);
-    }
-    else if (strcmp(sub, "childusage") == 0) {
+    } else if (strcmp(sub, "childusage") == 0) {
         ret = childusage_main(argc, argv);
-    }
-	else {
+    } else {
         builtin_error("fr: unknown subcommand '%s'", sub);
         ret = EXECUTION_FAILURE;
     }
 
-    xfree(argv);  // free the original pointer
+    xfree(argv); 
     return ret;
 }
 
 int setup_builtin_forkrun_loadables(void) {
-    add_builtin(&lseek_struct,      1);
-    add_builtin(&evfd_init_struct,  1);
-    add_builtin(&evfd_wait_struct,  1);
-    add_builtin(&evfd_signal_struct,1);
-    add_builtin(&evfd_splice_struct,1);
-    add_builtin(&evfd_close_struct, 1);
-    add_builtin(&childusage_struct, 1);
-    add_builtin(&cpuusage_struct,   1);
+    add_builtin( & lseek_struct, 1);
+    add_builtin( & evfd_init_struct, 1);
+    add_builtin( & evfd_wait_struct, 1);
+    add_builtin( & evfd_signal_struct, 1);
+    add_builtin( & evfd_splice_struct, 1);
+    add_builtin( & evfd_close_struct, 1);
+    add_builtin( & childusage_struct, 1);
+    add_builtin( & cpuusage_struct, 1);
     return 0;
 }
