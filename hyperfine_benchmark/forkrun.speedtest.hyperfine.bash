@@ -76,7 +76,7 @@ else
 
 fi
 "${testParallelFlag:=true}"
-#testParallelFlag=false
+testParallelFlag=false
 
 declare -a C0 C1
 

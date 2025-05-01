@@ -1305,15 +1305,24 @@ echo \${nLinesRead} >\"${tmpDir}\"/.nLinesRead
 }
 """
 echo """
-    printf '\\n' >&${fd_continue}"""
-echo """
+    printf '\\n' >&${fd_continue}
     [[ \${#A[@]} == 0 ]] && {
         \${doneIndicatorFlag} || { 
           [[ -f \"${tmpDir}\"/.done ]] && {
-            IFS=\$'\\t'; 
+            IFS=\$'\\t';"""
+            if ${lseekFlag}; then 
+                echo """
             lseek $fd_read 0 SEEK_CUR fd_read_pos 
-            lseek $fd_write 0 SEEK_CUR fd_write_pos 
+            lseek $fd_write 0 SEEK_CUR fd_write_pos"""
+            else
+                echo """
+            IFS=\$'\\t'; 
+            read -r _ fd_read_pos </proc/self/fdinfo/${fd_read};
+            read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}; 
             IFS=
+                """
+            fi
+            echo """
             [[ \"\${fd_read_pos}\" == \"\${fd_write_pos}\" ]] && doneIndicatorFlag=true
           }
         }

@@ -555,11 +555,6 @@ static unsigned long long read_all_cpu_time(void) {
     return sum;
 }
 
-static char * cpuusage_doc[] = {
-    "USAGE: cpuusage <pid>...",
-    NULL
-};
-
 static int cpuusage_main(int argc, char ** argv) {
     if (argc < 2) {
         builtin_error("cpuusage: missing PIDs");
