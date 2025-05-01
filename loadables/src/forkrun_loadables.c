@@ -55,11 +55,8 @@ static char * get_persistent_dir(void);
 /* -------------------------------------------------- */
 /* lseek builtin                                     */
 /* -------------------------------------------------- */
-/* -------------------------------------------------- */
-/* Usage documentation for all forkrun loadables      */
-/* -------------------------------------------------- */
 
-static char *lseek_doc[] = {
+static char * lseek_doc[] = {
     "",
     "USAGE: lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]",
     "",
@@ -134,7 +131,7 @@ static int evfd = -1;
 
 // evfd_init
 
-static char *evfd_init_doc[] = {
+static char * evfd_init_doc[] = {
     "",
     "USAGE: evfd_init",
     "",
@@ -166,7 +163,7 @@ struct builtin evfd_init_struct = {
 };
 
 // evfd_wait
-static char *evfd_wait_doc[] = {
+static char * evfd_wait_doc[] = {
     "",
     "USAGE: evfd_wait [<read_fd>] [<signal_fd>] [<notify_fd>]",
     "",
@@ -189,6 +186,15 @@ static int evfd_wait_main(int argc, char ** argv) {
         if (argc == 4) status_fd = atoi(argv[3]);
     }
 
+    // 1) Check for unread data
+    off_t cur = lseek(read_fd, 0, SEEK_CUR);
+    off_t end = lseek(read_fd, 0, SEEK_END);
+    if (cur < end) {
+        lseek(read_fd, cur, SEEK_SET);
+        if (status_fd >= 0) dprintf(status_fd, "0\n");
+        return EXECUTION_SUCCESS;
+    }
+
     // Determine tmpdir for .done/.quit
     const char * tmpdir = getenv("FORKRUN_TMPDIR");
     if (!tmpdir) tmpdir = "/tmp";
@@ -196,52 +202,31 @@ static int evfd_wait_main(int argc, char ** argv) {
     snprintf(donepath, sizeof(donepath), "%s/.done", tmpdir);
     snprintf(quitpath, sizeof(quitpath), "%s/.quit", tmpdir);
 
-    // 1) If .quit exists, immediately signal done
-    if (access(quitpath, F_OK) == 0 || access(donepath, F_OK) == 0) {
+    // 2) Check for final-batch marker
+    if (access(donepath, F_OK) == 0 || access(quitpath, F_OK) == 0) {
         bind_variable("doneIndicatorFlag", "true", 0);
         if (status_fd >= 0) dprintf(status_fd, "0\n");
         return EXECUTION_SUCCESS;
     }
 
-    struct pollfd pfds[2];
-    int nfds = 0;
-
-    if (read_fd >= 0) {
-        pfds[nfds].fd = read_fd;
-        pfds[nfds].events = POLLIN | POLLHUP;
-        nfds++;
-    }
-
-    pfds[nfds].fd = sig_fd;
-    pfds[nfds].events = POLLIN;
-    nfds++;
-
-    // Wait for either data/hangup on read_fd or event on evfd
-    int ret = poll(pfds, nfds, -1);
+    // 3) Block on eventfd alone
+    struct pollfd pfd = {
+        .fd = sig_fd,
+        .events = POLLIN
+    };
+    int ret = poll( & pfd, 1, -1);
     if (ret < 0) {
         builtin_error("evfd_wait: poll failed: %s", strerror(errno));
         return EXECUTION_FAILURE;
     }
-
-    // 2) Handle read_fd events
-    if (read_fd >= 0) {
-        if (pfds[0].revents & POLLIN) {
-            // Data ready
-            if (status_fd >= 0) dprintf(status_fd, "0\n");
-            return EXECUTION_SUCCESS;
-        }
-    }
-
-    // 3) Handle eventfd signal
-    if (pfds[nfds - 1].revents & POLLIN) {
+    if (pfd.revents & POLLIN) {
         uint64_t cnt;
         if (read(sig_fd, & cnt, sizeof(cnt)) != sizeof(cnt)) {
-            builtin_error("evfd_wait: eventfd read failed: %s", strerror(errno));
+            builtin_error("evfd_wait: read eventfd: %s", strerror(errno));
             return EXECUTION_FAILURE;
         }
         if (status_fd >= 0) dprintf(status_fd, "1\n");
     }
-
     return EXECUTION_SUCCESS;
 }
 
@@ -255,7 +240,7 @@ struct builtin evfd_wait_struct = {
 };
 
 // evfd_signal
-static char *evfd_signal_doc[] = {
+static char * evfd_signal_doc[] = {
     "",
     "USAGE: evfd_signal [<signal_fd>]",
     "",
@@ -286,7 +271,7 @@ struct builtin evfd_signal_struct = {
 };
 
 // evfd_splice
-static char *evfd_splice_doc[] = {
+static char * evfd_splice_doc[] = {
     "",
     "USAGE: evfd_splice <output_fd>",
     "",
@@ -325,7 +310,7 @@ struct builtin evfd_splice_struct = {
 };
 
 // evfd_close
-static char *evfd_close_doc[] = {
+static char * evfd_close_doc[] = {
     "",
     "USAGE: evfd_close",
     "",
@@ -350,7 +335,7 @@ struct builtin evfd_close_struct = {
 /* -------------------------------------------------- */
 /* childusage builtin                                */
 /* -------------------------------------------------- */
-static char *childusage_doc[] = {
+static char * childusage_doc[] = {
     "",
     "USAGE: childusage [ -q | --quiet ]",
     "",
@@ -420,7 +405,7 @@ struct builtin childusage_struct = {
 /* -------------------------------------------------- */
 /* cpuusage helpers and builtin                      */
 /* -------------------------------------------------- */
-static char *cpuusage_doc[] = {
+static char * cpuusage_doc[] = {
     "",
     "USAGE: cpuusage <worker_pid> [worker_pid ...]",
     "",
@@ -628,7 +613,7 @@ static int fr_builtin(WORD_LIST * list) {
         ret = EXECUTION_FAILURE;
     }
 
-    xfree(argv); 
+    xfree(argv);
     return ret;
 }
 
