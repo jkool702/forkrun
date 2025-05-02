@@ -270,17 +270,16 @@ struct builtin evfd_signal_struct = {
 };
 
 // evfd_signal
-static char * evfd_signal_doc[] = {
+static char * evfd_splice_doc[] = {
     "",
-    "USAGE: evfd_signal <output_fd>",
+    "USAGE: evfd_splice <output_fd>",
     "",
     "Continuously splice from stdin to output_fd in chunks.",
     "After each chunk, signal eventfd to wake readers.",
     NULL
 };
 
-static size_t pick_chunk_size(int fd)
-{
+static size_t pick_chunk_size(int fd) {
     size_t chunk;
     struct stat st;
     const char *e;
@@ -308,76 +307,73 @@ static size_t pick_chunk_size(int fd)
 }
 
 
-static int evfd_signal_main(int argc, char **argv)
-{
-    if (argc != 3) {
-        builtin_error("evfd_signal: wrong args");
+static int evfd_splice_main(int argc, char **argv) {
+    if (argc < 2 || argc > 3) {
+        builtin_error("evfd_splice: wrong args (usage: evfd_splice <out_fd> [in_fd])");
         return EXECUTION_FAILURE;
     }
+
     int outfd = atoi(argv[1]);
-    int infd  = atoi(argv[2]);
+    int infd  = (argc == 3 ? atoi(argv[2]) : STDIN_FILENO);
+
+    // pick_chunk_size() as before…
     size_t chunk = pick_chunk_size(outfd);
     uint64_t one = 1;
 
     struct stat st;
     if (fstat(infd, &st) < 0) {
-        builtin_error("evfd_signal: fstat: %s", strerror(errno));
+        builtin_error("evfd_splice: fstat(in_fd): %s", strerror(errno));
         return EXECUTION_FAILURE;
     }
 
     if (S_ISREG(st.st_mode)) {
-        // infd is a regular file → we need the pipe trampoline
+        // Regular-file path → pipe trampoline
         int pipefd[2];
         if (pipe(pipefd) < 0) {
-            builtin_error("evfd_signal: pipe: %s", strerror(errno));
+            builtin_error("evfd_splice: pipe: %s", strerror(errno));
             return EXECUTION_FAILURE;
         }
         while (1) {
-            // stage 1: file → pipe
             ssize_t n = splice(infd, NULL, pipefd[1], NULL,
                                chunk, SPLICE_F_MOVE|SPLICE_F_MORE);
             if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) break;  // EOF or error
-            // stage 2: pipe → outfd
+            if (n <= 0) break;
             ssize_t m = splice(pipefd[0], NULL, outfd, NULL,
                                n, SPLICE_F_MOVE|SPLICE_F_MORE);
             if (m < 0) {
-                builtin_error("evfd_signal: splice out: %s", strerror(errno));
+                builtin_error("evfd_splice: splice out: %s", strerror(errno));
                 close(pipefd[0]); close(pipefd[1]);
                 return EXECUTION_FAILURE;
             }
-            // signal eventfd
             write(evfd, &one, sizeof(one));  // ignore EAGAIN
         }
         close(pipefd[0]);
         close(pipefd[1]);
     }
     else {
-        // infd is already a pipe/socket/etc → single splice
+        // Pipe/socket/etc → single splice
         while (1) {
             ssize_t n = splice(infd, NULL, outfd, NULL,
                                chunk, SPLICE_F_MOVE|SPLICE_F_MORE);
             if (n < 0 && errno == EINTR) continue;
             if (n < 0) {
-                builtin_error("evfd_signal: splice: %s", strerror(errno));
+                builtin_error("evfd_splice: splice: %s", strerror(errno));
                 return EXECUTION_FAILURE;
             }
-            if (n == 0)  // EOF
+            if (n == 0)
                 break;
-            // signal eventfd
             write(evfd, &one, sizeof(one));  // ignore EAGAIN
         }
     }
 
     return EXECUTION_SUCCESS;
 }
-
-struct builtin evfd_signal_struct = {
-    "evfd_signal",
+struct builtin evfd_splice_struct = {
+    "evfd_splice",
     fr_builtin,
     BUILTIN_ENABLED,
-    evfd_signal_doc,
-    "evfd_signal <output_fd>",
+    evfd_splice_doc,
+    "evfd_splice <output_fd>",
     0
 };
 
@@ -665,8 +661,8 @@ static int fr_builtin(WORD_LIST * list) {
         ret = evfd_wait_main(argc, argv);
     } else if (strcmp(sub, "evfd_init") == 0) {
         ret = evfd_init_main(argc, argv);
-    } else if (strcmp(sub, "evfd_signal") == 0) {
-        ret = evfd_signal_main(argc, argv);
+    } else if (strcmp(sub, "evfd_splice") == 0) {
+        ret = evfd_splice_main(argc, argv);
     } else if (strcmp(sub, "evfd_signal") == 0) {
         ret = evfd_signal_main(argc, argv);
     } else if (strcmp(sub, "evfd_close") == 0) {
@@ -688,7 +684,7 @@ int setup_builtin_forkrun_loadables(void) {
     add_builtin( & lseek_struct, 1);
     add_builtin( & evfd_init_struct, 1);
     add_builtin( & evfd_wait_struct, 1);
-    add_builtin( & evfd_signal_struct, 1);
+    add_builtin( & evfd_splice_struct, 1);
     add_builtin( & evfd_signal_struct, 1);
     add_builtin( & evfd_close_struct, 1);
     add_builtin( & childusage_struct, 1);
