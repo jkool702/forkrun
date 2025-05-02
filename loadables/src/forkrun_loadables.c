@@ -5,7 +5,7 @@
 #define _GNU_SOURCE
 #endif
 
-// System headers\
+// System headers
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -283,6 +283,7 @@ static size_t pick_chunk_size(int fd)
 {
     size_t chunk;
     struct stat st;
+    const char *e;
 
     // 1) Try filesystem-preferred block size
     if (fstat(fd, &st) == 0 && st.st_blksize > 0) {
@@ -296,7 +297,7 @@ static size_t pick_chunk_size(int fd)
     if (chunk > 256 * 1024)  chunk = 256 * 1024;
 
     // 3) Optional override via env var FORKRUN_CHUNK
-    if (const char *e = getenv("FORKRUN_CHUNK")) {
+    if (e = getenv("FORKRUN_CHUNK")) {
         long val = strtol(e, NULL, 10);
         if (val > 0 && val <= INT_MAX) {
             chunk = (size_t)val;

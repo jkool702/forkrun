@@ -279,7 +279,7 @@ forkrun() {
         LANG=C
         IFS=
 
-        enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_splice lseek cpuusage childusage
+        enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_copy lseek cpuusage childusage
 
         export LC_ALL=C LANG=C IFS=
         FORKRUN_TMPDIR="$tmpDir"
@@ -564,9 +564,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 trap 'trap - TERM INT HUP USR1' USR1
 
                 case ${writeFileProgType} in
-                    1) evfd_copy ${fd_write} <&${fd_stdin} || cat <&${fd_stdin} | evfd_copy ${fd_write} ;;
-                    2) head -z -n ${nLinesReadLimit} <&${fd_stdin} | evfd_splice ${fd_write} ;;
-                    3) head -n ${nLinesReadLimit} <&${fd_stdin} | evfd_splice ${fd_write} ;;
+                    1) if ! evfd_copy ${fd_write} ${fd_stdin}; then cat <&${fd_stdin} | evfd_copy ${fd_write} 0; fi ;;
+                    2) head -z -n ${nLinesReadLimit} <&${fd_stdin} | evfd_copy ${fd_write} ;;
+                    3) head -n ${nLinesReadLimit} <&${fd_stdin} | evfd_copy ${fd_write} ;;
                 esac
                     
                 : >"${tmpDir}"/.done
@@ -1975,9 +1975,9 @@ _forkrun_loadable_setup() {
 }
 
 #_forkrun_loadable_setup
-enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_splice lseek cpuusage childusage
+#enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_splice lseek cpuusage childusage
 
-enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_splice lseek cpuusage childusage
+enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_copy lseek cpuusage childusage
 
 
 export -fp _forkrun_getVal &>/dev/null && export -nf _forkrun_getVal
