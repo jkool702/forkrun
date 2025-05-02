@@ -1169,7 +1169,6 @@ echo """
     printf '\\n' >&${fd_continue}
     echo 0 >\"${tmpDir}\"/.wait/p{<#>}
     [[ \${#A[@]} == 0 ]] && {
-        echo \"empty read (worker {<#>})\" >&${fd_stderr}
         \${doneIndicatorFlag} || { 
           [[ -f \"${tmpDir}\"/.done ]] && {"""
             if ${lseekFlag}; then 
