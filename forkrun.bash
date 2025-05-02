@@ -853,7 +853,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     for kk in "${!A[@]}"; do
                         case "${A[$kk]}" in
                             l[0-9]*)  (( runLinesA[$kkProcsRun] += ${A[$kk]#l} ))  ;;
-                            t[0-9]*)  (( runTimesA[$kkProcsRun] += ${A[$kk]#t} ))  ;;
+                            t[0-9]*)  (( runTimeA[$kkProcsRun] += ${A[$kk]#t} ))  ;;
                             k[0-9]*)  kkProcsRun0=$kkProcsRun; (( kkProcsRun += ${A[$kk]#k}))  ;;
                             0)  ((runAllA[$kkProcsRun]++))  ;;
                             1)  ((runAllA[$kkProcsRun]++)); ((runWaitA[$kkProcsRun]++))  ;;
@@ -890,18 +890,18 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     inTimeDelta=$(( inTime - inTime0 ))
                       
                     # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
-                    pAdd_lineRate=$(( ( ( ( ${runTimeA[${kkProcsRun}]} * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) ) - kkProcsRun ))
+		    pAdd_lineRate=$(( ( ( ( ( 1 + ${runTimeA[${kkProcsRun}]} ) * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) ) - kkProcsRun ))
                        
                     (( pAdd_lineRate > pAddMax )) && pAddMax=${pAddMax}
                     (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
 
-                    (( pAdd = ( 1 + ( ( ( ( pAdd_lineRate << 1 ) + pAddMax ) >> 1 ) * ( 1 + runWaitA[${kkProcsRun}] ) / ( 1 + runWAllA[${kkProcsRun}] ) ) ) ))
+                    (( pAdd = ( 1 + ( ( ( ( pAdd_lineRate << 1 ) + pAddMax ) >> 1 ) * ( 1 + runWaitA[${kkProcsRun}] ) / ( 1 + runAllA[${kkProcsRun}] ) ) ) ))
                     
                     # compare how much our lineRate increased to how much our worker count increased
                     # ideally, increasing kkProcs by X% will increase lineRate_run by X%
                     # if lineRate_run increases less than this then e are starting to hit other bottlenecks and should slow down new coproc spawning
                     # requires that coprocs have been spawned (by pSpawn) at least once already
-                    (( kkProcs0 > 0 )) && pAdd=$(( ( (  pAdd * ( 1 + nProcsMax - kkProcsRun ) * ( ( ( kkProcs0 * runTimeA[${kkProcsRun0}] * runLinesA[${kkProcsRun}] ) + ( ( kkProcsRun * nCPU ) >> 1 ) ) / ( kkProcsRun * nCPU ) ) ) + ( ( runLinesA[${kkProcsRun0}] * runTimeA[${kkProcsRun}] ) >>  1 ) ) / ( runLinesA[${kkProcsRun0}] * runTimeA[${kkProcsRun}] ) ))
+                    (( kkProcs0 > 0 )) && pAdd=$(( ( (  pAdd * ( 1 + nProcsMax - kkProcsRun ) * ( ( ( kkProcs0 * runTimeA[${kkProcsRun0}] * runLinesA[${kkProcsRun}] ) + ( ( kkProcsRun * nCPU ) >> 1 ) ) / ( kkProcsRun * nCPU ) ) ) + ( ( runLinesA[${kkProcsRun0}] * runTimeA[${kkProcsRun}] ) >>  1 ) ) / ( 1 + runLinesA[${kkProcsRun0}] * runTimeA[${kkProcsRun}] ) ))
                     
                     # make sure estimate is between [0::pAddMax]. continue to next loop iteration if pAdd is 0 (or is somehow negative).
                     (( pAdd < 1 )) && continue
