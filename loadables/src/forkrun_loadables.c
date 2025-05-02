@@ -5,7 +5,7 @@
 #define _GNU_SOURCE
 #endif
 
-// System headers
+// System headers\
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -46,7 +46,7 @@ static int lseek_main(int argc, char ** argv);
 static int evfd_init_main(int argc, char ** argv);
 static int evfd_wait_main(int argc, char ** argv);
 static int evfd_signal_main(int argc, char ** argv);
-static int evfd_splice_main(int argc, char ** argv);
+static int evfd_copy_main(int argc, char ** argv);
 static int evfd_close_main(int argc, char ** argv);
 static int childusage_main(int argc, char ** argv);
 static int cpuusage_main(int argc, char ** argv);
@@ -269,58 +269,93 @@ struct builtin evfd_signal_struct = {
     0
 };
 
-// evfd_splice
-static char * evfd_splice_doc[] = {
+// evfd_copy
+static char * evfd_copy_doc[] = {
     "",
-    "USAGE: evfd_splice <output_fd>",
+    "USAGE: evfd_copy <output_fd>",
     "",
     "Continuously splice from stdin to output_fd in chunks.",
     "After each chunk, signal eventfd to wake readers.",
     NULL
 };
 
-static int evfd_splice_main(int argc, char **argv)
+static size_t pick_chunk_size(int fd)
 {
-    if (argc != 2) {
-        builtin_error("evfd_splice: wrong args");
+    size_t chunk;
+    struct stat st;
+
+    // 1) Try filesystem-preferred block size
+    if (fstat(fd, &st) == 0 && st.st_blksize > 0) {
+        chunk = st.st_blksize;
+    } else {
+        chunk = 128 * 1024;          // fallback to 128 KiB
+    }
+
+    // 2) Clamp into the 128 KiB–256 KiB range
+    if (chunk < 128 * 1024)  chunk = 128 * 1024;
+    if (chunk > 256 * 1024)  chunk = 256 * 1024;
+
+    // 3) Optional override via env var FORKRUN_CHUNK
+    if (const char *e = getenv("FORKRUN_CHUNK")) {
+        long val = strtol(e, NULL, 10);
+        if (val > 0 && val <= INT_MAX) {
+            chunk = (size_t)val;
+        }
+    }
+
+    return chunk;
+}
+
+static int evfd_copy_main(int argc, char **argv)
+{
+    if (argc != 3) {
+        builtin_error("evfd_copy: wrong args");
         return EXECUTION_FAILURE;
     }
     int outfd = atoi(argv[1]);
+    int infd  = atoi(argv[2]);
     const size_t CHUNK = 128 * 1024;
     uint64_t one = 1;
 
+    // 1) Try in-kernel file→file
     while (1) {
-        ssize_t n = splice(
-            STDIN_FILENO, NULL,
-            outfd,       NULL,
-            CHUNK,
-            SPLICE_F_MOVE | SPLICE_F_MORE
-        );
+        ssize_t n = copy_file_range(infd, NULL, outfd, NULL, CHUNK, 0);
+        if (n > 0) {
+            write(evfd, &one, sizeof(one));  // ignore EAGAIN
+            continue;
+        }
+        if (n == 0)  // EOF
+            return EXECUTION_SUCCESS;
+        if (errno == EINTR)
+            continue;
+        // On EINVAL/ENOSYS, kernel/FS doesn’t support it → break to splice
+        if (errno == EINVAL || errno == ENOSYS)
+            break;
+        builtin_error("evfd_copy: copy_file_range: %s", strerror(errno));
+        return EXECUTION_FAILURE;
+    }
+
+    // 2) Fallback: splice (requires a pipe on infd)
+    while (1) {
+        ssize_t n = splice(infd, NULL, outfd, NULL,
+                           CHUNK, SPLICE_F_MOVE | SPLICE_F_MORE);
         if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            builtin_error("evfd_splice: splice failed: %s", strerror(errno));
+            if (errno == EINTR) continue;
+            builtin_error("evfd_copy: splice failed: %s", strerror(errno));
             return EXECUTION_FAILURE;
         }
         if (n == 0)  // EOF
-            break;
-
-        // Simply write the eventfd; it won't block thanks to EFD_NONBLOCK.
-        if (write(evfd, &one, sizeof(one)) != sizeof(one) && errno != EAGAIN) {
-            builtin_error("evfd_splice: eventfd write: %s", strerror(errno));
-            return EXECUTION_FAILURE;
-        }
+            return EXECUTION_SUCCESS;
+        write(evfd, &one, sizeof(one));  // ignore EAGAIN
     }
-
-    return EXECUTION_SUCCESS;
 }
 
-struct builtin evfd_splice_struct = {
-    "evfd_splice",
+struct builtin evfd_copy_struct = {
+    "evfd_copy",
     fr_builtin,
     BUILTIN_ENABLED,
-    evfd_splice_doc,
-    "evfd_splice <output_fd>",
+    evfd_copy_doc,
+    "evfd_copy <output_fd>",
     0
 };
 
@@ -610,8 +645,8 @@ static int fr_builtin(WORD_LIST * list) {
         ret = evfd_init_main(argc, argv);
     } else if (strcmp(sub, "evfd_signal") == 0) {
         ret = evfd_signal_main(argc, argv);
-    } else if (strcmp(sub, "evfd_splice") == 0) {
-        ret = evfd_splice_main(argc, argv);
+    } else if (strcmp(sub, "evfd_copy") == 0) {
+        ret = evfd_copy_main(argc, argv);
     } else if (strcmp(sub, "evfd_close") == 0) {
         ret = evfd_close_main(argc, argv);
     } else if (strcmp(sub, "cpuusage") == 0) {
@@ -632,7 +667,7 @@ int setup_builtin_forkrun_loadables(void) {
     add_builtin( & evfd_init_struct, 1);
     add_builtin( & evfd_wait_struct, 1);
     add_builtin( & evfd_signal_struct, 1);
-    add_builtin( & evfd_splice_struct, 1);
+    add_builtin( & evfd_copy_struct, 1);
     add_builtin( & evfd_close_struct, 1);
     add_builtin( & childusage_struct, 1);
     add_builtin( & cpuusage_struct, 1);
