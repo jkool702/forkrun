@@ -1,5 +1,5 @@
 # speedtest computing 13 different checksums on 680k files taking up 20 gb
-# average file size is ~28 kb. Max file size is 1.5 mb.
+# average file size is ~28 kb. Max file size is 32 mb.
 # each speedtest is run twice - in one inputs are newline seperated, in the other they are NULL seperated
 # lists containing filenames are pre-generated. These lists as well as the acrual files are all on a ramdisk (tmpfs)
 # test was run on Fedora 41 (kernel 6.13.12-200.fc41.x86_64) on May 5th 2025
