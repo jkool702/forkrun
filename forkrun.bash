@@ -3,7 +3,7 @@
 
 shopt -s extglob
 
-forkrun() {
+forkrun() (
 ## Efficiently parallelize a loop / run many tasks in parallel *extremely* fast using bash coprocs
 #
 # USAGE: printf '%s\n' "${args[@]}" | forkrun [-flags] [--] parFunc ["${args0[@]}"]
@@ -253,6 +253,8 @@ forkrun() {
 
     mkdir -p "${tmpDir}"/.run
     : >"${fPath}"
+
+    ${rmTmpDirFlag} && trap '\rm -rf "'"${tmpDir}"'" 2>/dev/null' EXIT
 
     # # # # # BEGIN MAIN SUBSHELL # # # # #
 
@@ -793,7 +795,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
 
                 # set traps and global vars
                 export LC_ALL=C LANG=C IFS= 
-                trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto}"'; printf '"'"'\n'"'"' >&'"${fd_nSpawn0}"'; [[ -f "'"${tmpDir}"'"/.run/pSpawn ]] && \rm -f "'"${tmpDir}"'"/.run/pSpawn' EXIT
+                trap 'printf '"'"'q\n'"'"' >&'"${fd_nAuto}"'; printf '"'"'q\n'"'"' >&'"${fd_nSpawn0}"'; [[ -f "'"${tmpDir}"'"/.run/pSpawn ]] && \rm -f "'"${tmpDir}"'"/.run/pSpawn' EXIT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}"; kill -INT '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' INT
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}";  kill -TERM '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' TERM
                 trap 'trap - TERM INT HUP USR1; kill -USR1 "${p_PID[@]}" "${p_PID0[@]}";  kill -HUP '"${PID0}"' ${BASHPID} "${p_PID[@]}" "${p_PID0[@]}"' HUP
@@ -954,7 +956,8 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                 done
 
                 # wait for spawned coproc workers to finish
-                [[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
+                #[[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
+		wait
 
               } 2>&${fd_stderr}
             } 2>/dev/null
@@ -982,8 +985,6 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
         #
         # NOTE: because the (uncommented) coproc code generation dynamically adapts to all of forkrun's possible options, this part is...well...hard to follow. 
         # To see the resulting coproc code for a given set of forkrun options, run:  `echo | forkrun -vvvv <FLAGS> :`
-
-        echo '0' >"${tmpDir}"/.lastReadPos
 
         coprocSrcCode="$( echo """
 local p{<#>} p{<#>}_PID
@@ -1091,7 +1092,7 @@ else
     (( ( nLinesReadLimit - nLinesRead ) < nLinesCur )) && nLinesCur=\$(( nLinesReadLimit - nLinesRead ))
     (( nLinesCur == 0 )) && A=() || """
     echo """ {
-    evfd_wait ${fd_read} '' ${fd_nSpawn}"""
+    evfd_wait ${fd_nSpawn}"""
     printf '%s ' "mapfile"
     ${lseekFlag} && printf '%s ' '-t'
     printf '%s ' '-n' "\${nLinesCur}" '-u'
@@ -1272,7 +1273,6 @@ p_PID+=(\${p{<#>}_PID})""" )"
         
     
         # if removing tmpdir delete it in trap
-        ${rmTmpDirFlag} && exitTrapStr+='\rm -rf "'"${tmpDir}"'" 2>/dev/null; '$'\n'
         exitTrapStr+='trap - INT TERM HUP USR1; 
         return ${returnVal:-0}'
         
@@ -1388,9 +1388,16 @@ p_PID+=(\${p{<#>}_PID})""" )"
         # wait for coprocs to finish
         (( ${verboseLevel} > 1 )) && printf '\n\nWAITING FOR WORKER COPROCS TO FINISH\n\n' >&${fd_stderr}
         #p_PID=($(_forkrun_rmdups "${p_PID[@]}" $(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null)))
-        #p_PID+=($(cat </dev/null "${tmpDir}"/.run/p[0-9]* 2>/dev/null))
-        wait "${p_PID[@]}" "${pSpawn_PID}" &>/dev/null; 
-        ${nSpawnFlag} && read -r -u ${fd_nSpawn0}
+        #p_PID+=($(: | cat "${tmpDir}"/.run/p[0-9]* 2>/dev/null))
+        if ${nSpawnFlag}; then
+            read -r -u ${fd_nSpawn0}
+            until [[ "${REPLY}" == 'q' ]]; do
+                read -r -u ${fd_nSpawn0}
+            done
+	    wait "${pSpawn_PID}" &>/dev/null
+        else
+            wait "${p_PID[@]}" &>/dev/null; 
+        fi
 
         # print final nLines count
         (( ${verboseLevel} > 1 )) && {
@@ -1399,12 +1406,13 @@ p_PID+=(\${p{<#>}_PID})""" )"
         } >&${fd_stderr} 
         
     ${nSpawnFlag} && printf 'final worker process count: %s\n' "$(<"${tmpDir}"/.nWorkers)" >&${fd_stderr}
+    #${nOrderFlag} && kill -9 "${pOrder_PID}"
 
 
     # open anonymous pipes + other misc file descriptors for the above code block
     ) {fd_continue}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nSpawn}<><(:) {fd_nSpawn0}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
 
-}
+)
 
 # set up completion for forkrun
 _forkrun_complete() {
