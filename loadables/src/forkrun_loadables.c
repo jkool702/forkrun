@@ -128,29 +128,45 @@ struct builtin lseek_struct = {
 /* -------------------------------------------------- */
 /* evfd_* builtins                                   */
 /* -------------------------------------------------- */
-static int evfd = -1;
+static int evfd_data = -1;   // signals “new data available”
+static int evfd_term = -1;   // semaphore for final-EOF wakeups
 
 // evfd_init
-
 static char * evfd_init_doc[] = {
     "",
     "USAGE: evfd_init",
     "",
-    "Create a new eventfd, store FD number in $EVFD_FD.",
+    "initialize two eventfd's, store FD numbers in EVFD_DATA and EVFD_TERM.",
     "Must be called once before using evfd_wait / evfd_signal.",
     NULL
 };
 
-static int evfd_init_main(int argc, char ** argv) {
-    if (evfd >= 0) close(evfd);
-    evfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (evfd < 0) {
-        builtin_error("evfd_init: %s", strerror(errno));
+static int evfd_init_main(int argc, char **argv) {
+    // clean up old fds if re-init called
+    if (evfd_data >= 0) close(evfd_data);
+    if (evfd_term >= 0) close(evfd_term);
+
+    // data FD: counter mode, nonblocking
+    evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (evfd_data < 0) {
+        builtin_error("evfd_init: data eventfd: %s", strerror(errno));
         return EXECUTION_FAILURE;
     }
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%d", evfd);
-    bind_variable("EVFD_FD", buf, 0);
+    // term FD: semaphore mode, nonblocking
+    evfd_term = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+    if (evfd_term < 0) {
+        builtin_error("evfd_init: term eventfd: %s", strerror(errno));
+        close(evfd_data);
+        evfd_data = -1;
+        return EXECUTION_FAILURE;
+    }
+
+    // Export both to bash
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", evfd_data);
+    bind_variable("EVFD_DATA", buf, 0);
+    snprintf(buf, sizeof(buf), "%d", evfd_term);
+    bind_variable("EVFD_TERM", buf, 0);
     return EXECUTION_SUCCESS;
 }
 
@@ -166,68 +182,58 @@ struct builtin evfd_init_struct = {
 // evfd_wait
 static char * evfd_wait_doc[] = {
     "",
-    "USAGE: evfd_wait [<read_fd>] [<signal_fd>] [<notify_fd>]",
+    "USAGE: evfd_wait[<notify_fd>]",
     "",
-    "Wait until data is available to read or an eventfd is signaled.",
+    "Wait until data is available to read or an eventfd is signaled",
+    "by polling both evfd_data and evfd_term.",
     "",
-    "- read_fd: Optional FD to check for unread data.",
-    "- signal_fd: Optional eventfd FD (defaults to EVFD_FD).",
-    "- notify_fd: Optional FD to write '0' (no wait) or '1' (waited).",
+    "<notify_fd>: Optional FD to write '0' (no wait) or '1' (waited).",
     NULL
 };
 
-static int evfd_wait_main(int argc, char ** argv) {
-
-    int read_fd = -1, sig_fd = evfd, status_fd = -1;
+static int evfd_wait_main(int argc, char **argv) {
+    int status_fd = -1;
     if (argc == 2) {
-        read_fd = atoi(argv[1]);
-    } else if (argc >= 3) {
-        read_fd = atoi(argv[1]);
-        if (argv[2][0] != '\0') sig_fd = atoi(argv[2]);
-        if (argc == 4) status_fd = atoi(argv[3]);
-    }
-
-    // 1) Check for unread data
-    off_t cur = lseek(read_fd, 0, SEEK_CUR);
-    off_t end = lseek(read_fd, 0, SEEK_END);
-    if (cur < end) {
-        lseek(read_fd, cur, SEEK_SET);
-        if (status_fd >= 0) dprintf(status_fd, "0\n");
-        return EXECUTION_SUCCESS;
-    }
-
-    // Determine tmpdir for .done/.quit
-    const char * tmpdir = getenv("FORKRUN_TMPDIR");
-    if (!tmpdir) tmpdir = "/tmp";
-    char donepath[PATH_MAX], quitpath[PATH_MAX];
-    snprintf(donepath, sizeof(donepath), "%s/.done", tmpdir);
-    snprintf(quitpath, sizeof(quitpath), "%s/.quit", tmpdir);
-
-    // 2) Check for final-batch marker
-    if (access(donepath, F_OK) == 0 || access(quitpath, F_OK) == 0) {
-        bind_variable("doneIndicatorFlag", "true", 0);
-        if (status_fd >= 0) dprintf(status_fd, "0\n");
-        return EXECUTION_SUCCESS;
-    }
-
-    // 3) Block on eventfd alone
-    struct pollfd pfd = {
-        .fd = sig_fd,
-        .events = POLLIN
-    };
-    int ret = poll( & pfd, 1, -1);
-    if (ret < 0) {
-        builtin_error("evfd_wait: poll failed: %s", strerror(errno));
+        status_fd = atoi(argv[1]);
+    } else if (argc > 2) {
+        builtin_error("evfd_wait: wrong args");
         return EXECUTION_FAILURE;
     }
-    if (pfd.revents & POLLIN) {
+
+    struct pollfd pfds[2] = {
+        { .fd = evfd_data, .events = POLLIN },
+        { .fd = evfd_term, .events = POLLIN }
+    };
+
+    int ret = poll(pfds, 2, -1);
+    if (ret < 0) {
+        builtin_error("evfd_wait: poll: %s", strerror(errno));
+        return EXECUTION_FAILURE;
+    }
+
+    // 1) New-data wakeups
+    if (pfds[0].revents & POLLIN) {
         uint64_t cnt;
-        if (read(sig_fd, & cnt, sizeof(cnt)) != sizeof(cnt)) {
-            builtin_error("evfd_wait: read eventfd: %s", strerror(errno));
+        if (read(evfd_data, &cnt, sizeof(cnt)) != sizeof(cnt)) {
+            builtin_error("evfd_wait: read data_evfd: %s", strerror(errno));
             return EXECUTION_FAILURE;
         }
-        if (status_fd >= 0) dprintf(status_fd, "1\n");
+        if (status_fd >= 0) dprintf(status_fd, "0\n");
+        return EXECUTION_SUCCESS;
     }
+
+    // 2) Termination semaphore wakeups
+    if (pfds[1].revents & POLLIN) {
+        uint64_t v;
+        if (read(evfd_term, &v, sizeof(v)) != sizeof(v)) {
+            builtin_error("evfd_wait: read term_evfd: %s", strerror(errno));
+            return EXECUTION_FAILURE;
+        }
+        if (status_fd >= 0) dprintf(status_fd, "0\n");
+        return EXECUTION_SUCCESS;
+    }
+
+    // Shouldn’t reach here
     return EXECUTION_SUCCESS;
 }
 
@@ -236,28 +242,53 @@ struct builtin evfd_wait_struct = {
     fr_builtin,
     BUILTIN_ENABLED,
     evfd_wait_doc,
-    "evfd_wait [<read_fd>] [<signal_fd>] [<notify_fd>]",
+    "evfd_wait [<notify_fd>]",
     0
 };
 
-// evfd_signal
 static char * evfd_signal_doc[] = {
     "",
-    "USAGE: evfd_signal [<signal_fd>]",
+    "USAGE: evfd_signal [<term_fd> [<increment_count>] ]",
     "",
-    "Signal an eventfd to wake waiters.",
-    "Defaults to $EVFD_FD if no FD given.",
+    "Signal EOF: writes <increment_count> to <term_fd>",
+    "    Default term_fd is EVFD_TERM",
+    "    Default increment_count is UINT64_MAX  / 2",
     NULL
 };
 
-static int evfd_signal_main(int argc, char ** argv) {
-    int fd = (argc > 1 ? atoi(argv[1]) : evfd);
-    uint64_t one = 1;
+static int evfd_signal_main(int argc, char **argv) {
+    // Defaults
+    int fd = evfd_term;
+    uint64_t big = UINT64_MAX / 2;
 
-    if (write(fd, &one, sizeof(one)) != sizeof(one) && errno != EAGAIN) {
-        builtin_error("evfd_signal: %s", strerror(errno));
+    if (argc >= 2) {
+        fd = atoi(argv[1]);
+    }
+    if (argc == 3) {
+        // parse the desired increment
+        char *end;
+        errno = 0;
+        unsigned long long val = strtoull(argv[2], &end, 10);
+        if (errno || *end != '\0') {
+            builtin_error("evfd_signal: invalid count '%s'", argv[2]);
+            return EXECUTION_FAILURE;
+        }
+        // clamp to [0, UINT64_MAX/2]
+        if (val > (UINT64_MAX/2)) {
+            big = UINT64_MAX / 2;
+        } else {
+            big = (uint64_t)val;
+        }
+    }
+    else if (argc > 3) {
+        builtin_error("evfd_signal: wrong number of args");
+        return EXECUTION_FAILURE;
     }
 
+    if (write(fd, &big, sizeof(big)) != sizeof(big) && errno != EAGAIN) {
+        builtin_error("evfd_signal: write: %s", strerror(errno));
+        return EXECUTION_FAILURE;
+    }
     return EXECUTION_SUCCESS;
 }
 
@@ -266,17 +297,18 @@ struct builtin evfd_signal_struct = {
     fr_builtin,
     BUILTIN_ENABLED,
     evfd_signal_doc,
-    "evfd_signal [<signal_fd>]",
+    "evfd_signal [<term_fd> [<increment_count>] ]",
     0
 };
 
-// evfd_signal
+// evfd_copy
 static char * evfd_copy_doc[] = {
     "",
-    "USAGE: evfd_copy <output_fd>",
+    "USAGE: evfd_copy <output_fd> [<input_fd>]",
     "",
     "Continuously splice from stdin to output_fd in chunks.",
     "After each chunk, signal eventfd to wake readers.",
+    "Default <input_fd> is stdin",
     NULL
 };
 
@@ -307,12 +339,7 @@ static size_t pick_chunk_size(int fd) {
     return chunk;
 }
 
-// assumes pick_chunk_size() from earlier
-extern size_t pick_chunk_size(int fd);
-extern int evfd;  // your global eventfd
-
-static int evfd_copy_main(int argc, char **argv)
-{
+static int evfd_copy_main(int argc, char **argv) {
     if (argc < 2 || argc > 3) {
         builtin_error("evfd_copy: usage: evfd_copy <out_fd> [in_fd]");
         return EXECUTION_FAILURE;
@@ -337,7 +364,7 @@ static int evfd_copy_main(int argc, char **argv)
             ssize_t n = sendfile(outfd, infd, &offset, chunk);
             if (n > 0) {
                 // signal eventfd
-                write(evfd, &one, sizeof(one));  // ignore EAGAIN
+                write(evfd_data, &one, sizeof(one));  // ignore EAGAIN
                 continue;
             }
             if (n == 0)  // EOF
@@ -388,7 +415,7 @@ static int evfd_copy_main(int argc, char **argv)
                 close(pipefd[0]); close(pipefd[1]);
                 return EXECUTION_FAILURE;
             }
-            write(evfd, &one, sizeof(one));  // ignore EAGAIN
+            write(evfd_data, &one, sizeof(one));  // ignore EAGAIN
         }
 
         close(pipefd[0]);
@@ -408,7 +435,7 @@ static int evfd_copy_main(int argc, char **argv)
             }
             if (n == 0)  // EOF
                 break;
-            write(evfd, &one, sizeof(one));  // ignore EAGAIN
+            write(evfd_data, &one, sizeof(one));  // ignore EAGAIN
         }
     }
 
@@ -420,7 +447,7 @@ struct builtin evfd_copy_struct = {
     fr_builtin,
     BUILTIN_ENABLED,
     evfd_copy_doc,
-    "evfd_copy <output_fd>",
+    "evfd_copy <output_fd> [<input_fd>]",
     0
 };
 
@@ -429,12 +456,16 @@ static char * evfd_close_doc[] = {
     "",
     "USAGE: evfd_close",
     "",
-    "Close and clean up the eventfd, unset $EVFD_FD.",
+    "Close both eventfds and unset variables.",
     NULL
 };
 
 static int evfd_close_main(int argc, char ** argv) {
-    if (evfd >= 0) close(evfd);
+    if (evfd_data >= 0) close(evfd_data);
+    if (evfd_term >= 0) close(evfd_term);
+    evfd_data = evfd_term = -1;
+    unset_variable("EVFD_DATA");
+    unset_variable("EVFD_TERM");
     return EXECUTION_SUCCESS;
 }
 
