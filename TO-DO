@@ -1,2 +1,0 @@
-add lseekGetFDPosFlag to forkrun to check if lseek loadable will return file descriptor positions
-add "fast path" that uses lseek to get file descriptor positions (instead of /proc/self/fdinfo) if lseekGetFDPosFlag is true

@@ -28,7 +28,7 @@ forkrun() (
 
     # make all variables local
     local +i nLines nLines0 nLinesMax nBytes nProcs nProcsMax  
-    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur tmpDirRoot returnVal tmpVar t0 tStart0 tStart1 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag lseekFlag lseekPosFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
+    local tmpDir fPath outStr delimiterVal delimiterReadStr delimiterRemoveStr exitTrapStr exitTrapStr_kill nOrder tTimeout coprocSrcCode outCur outCurHex outRead tmpDirRoot returnVal tmpVar t0 tStart0 tStart1 readBytesProg nullDelimiterProg ddQuietStr pLOAD0 trailingNullFlag lseekFlag lseekPosFlag fallocateFlag nLinesAutoFlag nLinesReadLimitFlag nSpawnFlag substituteStringFlag substituteStringIDFlag nOrderFlag readBytesFlag readBytesExactFlag nullDelimiterFlag subshellRunFlag stdinRunFlag pipeReadFlag rmTmpDirFlag exportOrderFlag noFuncFlag unescapeFlag optParseFlag continueFlag doneIndicatorFlag FORCE_allowCarriageReturnsFlag ddAvailableFlag pAddFlag fd_continue fd_nAuto fd_nAuto0 fd_nOrder fd_nOrder0 fd_read fd_read0 fd_write fd_stdout fd_stdin fd_stdin0 fd_stderr pWrite pOrder pAuto pSpawn pWrite_PID pOrder_PID pAuto_PID pSpawn_PID  DEBUG_FORKRUN
     local -i PID0 nLinesCur nLinesNew nLinesRead nLinesReadLimit nRead nWait nOrder0 nBytesRead nSpawn nSpawnLast nSpawnLastCount nCPU writeFileProgType v9 kkMax kkCur kk kkProcs kkProcs0 verboseLevel pLOAD_max pLOAD_target pAd pAdd_sysLoad pAdd_lineRated tStart fd_read_pos fd_read_pos0 fd_read_pos_old fd_write_pos pAdd0 pAdd1 inLines inTime inLines0 inTime0 inLines1 nTime1 inLinesDelta inTimeDelta pAddCount pAddMin pAddSum pAddMax 
     local -a A p_PID p_PID0 runCmd outHave outPrint pLOADA pLOADA0 runLines runTime 
     local -a -i runLinesA runTimeA runWaitA runAllA spawnTimeA pLOAD1
@@ -281,7 +281,7 @@ forkrun() (
         LANG=C
         IFS=
 
-        enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_copy lseek cpuusage childusage
+        enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_copy order_init order_get lseek cpuusage childusage
 
         export LC_ALL=C LANG=C IFS=
         FORKRUN_TMPDIR="$tmpDir"
@@ -410,7 +410,7 @@ forkrun() (
         { ${nSpawnFlag} && (( ${nProcs} < ${nProcsMax} )); } || : "${nSpawnFlag:=false}"
 
         # if reading 1 line at a time (and not automatically adjusting it) skip saving the data in a tmpfile and read directly from stdin pipe
-        ${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
+        #${nLinesAutoFlag} || { [[ ${nLines} == 1 ]] && : "${pipeReadFlag:=true}"; }
 
         # set defaults for control flags/parameters
         : "${nOrderFlag:=false}" "${rmTmpDirFlag:=true}" "${nLinesMax:=1024}" "${subshellRunFlag:=false}" "${pipeReadFlag:=false}" "${substituteStringFlag:=false}" "${substituteStringIDFlag:=false}" "${exportOrderFlag:=false}" "${unescapeFlag:=false}" "${stdinRunFlag:=false}" 
@@ -422,21 +422,22 @@ forkrun() (
 
         doneIndicatorFlag=false
 
+        # check for conflict in flags that were  defined on the commandline when forkrun was called
+        ${pipeReadFlag} && ${nLinesAutoFlag} && (( ${verboseLevel} >= 0 )) && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
+
 #        # check for inotifywait
 #        type -a inotifywait &>/dev/null && ! ${pipeReadFlag} && : "${inotifyFlag:=true}" || : "${inotifyFlag:=false}"
 
         # check for fallocate
         type -a fallocate &>/dev/null && ! ${pipeReadFlag} && : "${fallocateFlag:=true}" || : "${fallocateFlag:=false}"
 
-        # check for conflict in flags that were  defined on the commandline when forkrun was called
-        ${pipeReadFlag} && ${nLinesAutoFlag} && (( ${verboseLevel} >= 0 )) && { printf '%s\n' '' 'WARNING: automatically adjusting number of lines used per function call not supported when reading directly from stdin pipe' '         Disabling reading directly from stdin pipe...a tmpfile will be used' '' >&${fd_stderr}; pipeReadFlag=false; }
-
         # require -k to use -K
         ${exportOrderFlag} && nOrderFlag=true
 
         # setup delimiter
         ${readBytesFlag} || {
-            if ${nullDelimiterFlag}; then
+            ${pipeReadFlag} && { lseekFlag=false; lseekPosFlag=false; }
+             if ${nullDelimiterFlag}; then
                 delimiterReadStr="-d ''"
                 ${lseekFlag} && : "${nullDelimiterProg:='lseek'}"
                 : "${nullDelimiterProg:=bash}"
@@ -591,40 +592,42 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
             mkdir -p "${tmpDir}"/.out
             outStr='>"'"${tmpDir}"'"/.out/x${nOrder}'
 
-            printf '%s\n' {10..89} >&${fd_nOrder}
+            order_init
 
-            # fork coproc to populate a pipe (fd_nOrder) with ordered output file name indicies for the worker copropcs to use
-            { coproc pOrder {
-
-                export LC_ALL=C LANG=C IFS=
-
-                trap - EXIT
-                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
-                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
-                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
-                trap 'trap - TERM INT HUP USR1' USR1
-
-                # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
-                # start at 10 so that bash wont try to treat x0_ as an octal
-                printf '%s\n' {9000..9899} {990000..998999} >&${fd_nOrder}
-
-                # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
-                v9='99'
-                kkMax='8'
-                until [[ -f "${tmpDir}"/.quit ]]; do
-                    v9="${v9}9"
-                    kkMax="${kkMax}9"
-
-                    for (( kk=0 ; kk<=kkMax ; kk++ )); do
-                        kkCur="$(printf '%0.'"${#kkMax}"'d' "$kk")"
-                        { source /proc/self/fd/0 >&${fd_nOrder}; }<<<"printf '%s\n' {${v9}${kkCur}000..${v9}${kkCur}999}"
-                    done
-                done
-
-              }
-            } 2>/dev/null
-
-            exitTrapStr_kill+="${pOrder_PID} "
+#            printf '%s\n' {10..89} >&${fd_nOrder}
+#
+#            # fork coproc to populate a pipe (fd_nOrder) with ordered output file name indicies for the worker copropcs to use
+#            { coproc pOrder {
+#
+#                export LC_ALL=C LANG=C IFS=
+#
+#                trap - EXIT
+#                trap 'trap - TERM INT HUP USR1; kill -INT '"${PID0}"' ${BASHPID}' INT
+#                trap 'trap - TERM INT HUP USR1; kill -TERM '"${PID0}"' ${BASHPID}' TERM
+#                trap 'trap - TERM INT HUP USR1; kill -HUP '"${PID0}"' ${BASHPID}' HUP
+#                trap 'trap - TERM INT HUP USR1' USR1
+#
+#                # generate enough nOrder indices (~10000) to fill up 64 kb pipe buffer
+#                # start at 10 so that bash wont try to treat x0_ as an octal
+#                printf '%s\n' {9000..9899} {990000..998999} >&${fd_nOrder}
+#
+#                # now that pipe buffer is full, add additional indices 1000 at a time (as needed)
+#                v9='99'
+#                kkMax='8'
+#                until [[ -f "${tmpDir}"/.quit ]]; do
+#                    v9="${v9}9"
+#                    kkMax="${kkMax}9"
+#
+#                    for (( kk=0 ; kk<=kkMax ; kk++ )); do
+#                        kkCur="$(printf '%0.'"${#kkMax}"'d' "$kk")"
+#                        { source /proc/self/fd/0 >&${fd_nOrder}; }<<<"printf '%s\n' {${v9}${kkCur}000..${v9}${kkCur}999}"
+#                    done
+#                done
+#
+#              }
+#            } 2>/dev/null
+#
+#            exitTrapStr_kill+="${pOrder_PID} "
         else
             outStr='>&'"${fd_stdout}";
         fi
@@ -684,15 +687,14 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         ;;
                     esac
 
-                    #if ${lseekPosFlag}; then
-                    #    lseek $fd_read 0 SEEK_CUR fd_read_pos
-                    #    lseek $fd_write 0 SEEK_CUR fd_write_pos
-                    #else
-                        IFS=$'\t'
-                        read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}
-                        read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
-                        IFS=
-                    #fi
+                    if ${lseekPosFlag}; then
+                        lseek $fd_read 0 SEEK_CUR fd_read_pos
+                        lseek $fd_write 0 SEEK_CUR fd_write_pos
+                    else
+                        
+                        IFS=$'\t' read -r _ fd_read_pos </proc/self/fdinfo/${fd_read}
+                        IFS=$'\t' read -r _ fd_write_pos </proc/self/fdinfo/${fd_write}
+                    fi
 
                     { ${nLinesAutoFlag} || ${nSpawnFlag}; } && nLinesEst=$(( ( ( 1 + ${nLinesRead} ) * ( 1 + ${fd_write_pos} ) ) / ( 1 + ${fd_read_pos} ) ))
 
@@ -863,11 +865,9 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                         esac
                     done
 
-                    
-
                     [[ -f "${tmpDir}"/.done ]] || {
                         # update count of lines / time for lines arriving on stdin
-                        read -r inLines1 inTime1 <"${tmpDir}"/.stdin_lines_time
+                        IFS=' ' read -r inLines1 inTime1 <"${tmpDir}"/.stdin_lines_time
 
                         (( inLines1 > inLines )) && (( inTime1 > inTime )) && {
                             inLines0=${inLines}
@@ -892,7 +892,7 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                     inTimeDelta=$(( inTime - inTime0 ))
                       
                     # estimate how many additional workers are needed (at current lineRate_run increase rate) to make lines process as fast as they arrive on stdin  
-		    pAdd_lineRate=$(( ( ( ( ( 1 + ${runTimeA[${kkProcsRun}]} ) * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) ) - kkProcsRun ))
+                    pAdd_lineRate=$(( ( ( ( ( 1 + ${runTimeA[${kkProcsRun}]} ) * ( ( ( inLines * inTimeDelta ) + ( inTime * inLinesDelta ) + inTimeDelta ) / ( 1 + ( inTimeDelta << 1 ) ) ) ) + ( ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) >> 1 ) ) /  ( 1 + ( ${runLinesA[${kkProcsRun}]} * inTime ) ) ) - kkProcsRun ))
                        
                     (( pAdd_lineRate > pAddMax )) && pAddMax=${pAddMax}
                     (( pAdd_lineRate < 0 )) && pAdd_lineRate=0
@@ -925,39 +925,39 @@ kill -USR1 $(cat </dev/null "'"${tmpDir}"'"/.run/p* 2>/dev/null) 2>/dev/null; '$
                    
                     (( ${verboseLevel} > 2 )) && printf '\nSPAWNED %s NEW WORKER COPROCS. There are now %s worker coprocs.\n' "${pAdd}" "${kkProcs}" >&${fd_stderr}
                    
-                    runTime0=
-                    kkProcs01="${kkProcs0}"
-                    ((kkProcs01++))
-                    while true; do
-                        IFS=','
-                        read -r -u ${fd_nSpawn} -d ' ' runLines runTime
-                        IFS=
-                        if (( ${runTime} < spawnTimeA[${kkProcs01}] )); then
-                            (( runLinesA[$kkProcs0]+=${runLines} ))
-                            #(( runLines < nLines )) && noReadLinesA[$kkProcs0]=$(( noReadLinesA[$kkProcs0] + nLines - runLines ))
-
-                            runTime0=${runTime}
-                            
-                        elif (( ${runTime} >= spawnTimeA[${kkProcs}] )); then
-                            (( runLinesA[$kkProcs]=${runLines} ))
-                            #(( runLines < nLines )) && noReadLinesA[$kkProcs]=$(( nLines - runLines )) || noReadLinesA[$kkProcs]=0
-                            runTimeA[${kkProcs}]=$(( runTime - spawnTimeA[${kkProcs}] )) || runTimeA[${kkProcs}]=$(( ${EPOCHREALTIME//./} - spawnTimeA[${kkProcs}] ))
-                            runTimeA[${kkProcs}]=${runTimeA[${kkProcs}]##+(0)}
-
-                            [[ ${runTime0} ]] && {
-                                runTimeA[${kkProcs0}]=$(( runTime0 - spawnTimeA[${kkProcs0}] ))
-                                runTimeA[${kkProcs0}]=${runTimeA[${kkProcs0}]##+(0)}
-                            }
-
-                            break
-                        fi
-                    done
+#                    runTime0=
+#                    kkProcs01="${kkProcs0}"
+#                    ((kkProcs01++))
+#                    while true; do
+#                        
+#                        IFS=',' read -r -u ${fd_nSpawn} -d ' ' runLines runTime
+#                        IFS=
+#                        if (( ${runTime} < spawnTimeA[${kkProcs01}] )); then
+#                            (( runLinesA[$kkProcs0]+=${runLines} ))
+#                            #(( runLines < nLines )) && noReadLinesA[$kkProcs0]=$(( noReadLinesA[$kkProcs0] + nLines - runLines ))
+#
+#                            runTime0=${runTime}
+#                            
+#                        elif (( ${runTime} >= spawnTimeA[${kkProcs}] )); then
+#                            (( runLinesA[$kkProcs]=${runLines} ))
+#                            #(( runLines < nLines )) && noReadLinesA[$kkProcs]=$(( nLines - runLines )) || noReadLinesA[$kkProcs]=0
+#                            runTimeA[${kkProcs}]=$(( runTime - spawnTimeA[${kkProcs}] )) || runTimeA[${kkProcs}]=$(( ${EPOCHREALTIME//./} - spawnTimeA[${kkProcs}] ))
+#                            runTimeA[${kkProcs}]=${runTimeA[${kkProcs}]##+(0)}
+#
+#                            [[ ${runTime0} ]] && {
+#                                runTimeA[${kkProcs0}]=$(( runTime0 - spawnTimeA[${kkProcs0}] ))
+#                                runTimeA[${kkProcs0}]=${runTimeA[${kkProcs0}]##+(0)}
+#                            }
+#
+#                            break
+#                        fi
+#                    done
 
                 done
 
                 # wait for spawned coproc workers to finish
                 #[[ ${#p_PID[@]} == 0 ]] || wait "${p_PID[@]}"
-		wait
+                wait
 
               } 2>&${fd_stderr}
             } 2>/dev/null
@@ -1091,8 +1091,9 @@ else
     ${nLinesReadLimitFlag} && printf '%s' """read -r nLinesRead <\"${tmpDir}\"/.nLinesRead
     (( ( nLinesReadLimit - nLinesRead ) < nLinesCur )) && nLinesCur=\$(( nLinesReadLimit - nLinesRead ))
     (( nLinesCur == 0 )) && A=() || """
-    echo """ {
-    evfd_wait ${fd_nSpawn}"""
+    echo "{"
+    ${nOrderFlag} && echo "order_get nOrder"
+    ${pipeReadFlag} || echo "evfd_wait ${fd_nSpawn}"
     printf '%s ' "mapfile"
     ${lseekFlag} && printf '%s ' '-t'
     printf '%s ' '-n' "\${nLinesCur}" '-u'
@@ -1157,7 +1158,6 @@ else
     }
 fi
 ${pipeReadFlag} || { ${nullDelimiterFlag} && [[ -z ${nullDelimiterProg} ]]; } || ${readBytesFlag} || echo "}"
-${nOrderFlag} && echo "read -r -u ${fd_nOrder} nOrder"
 ${nLinesReadLimitFlag} && echo """
 nLinesRead+=\${#A[@]}
 echo \${nLinesRead} >\"${tmpDir}\"/.nLinesRead
@@ -1172,7 +1172,7 @@ echo """
     [[ \${#A[@]} == 0 ]] && {
         \${doneIndicatorFlag} || { 
           [[ -f \"${tmpDir}\"/.done ]] && {"""
-            if ${lseekFlag}; then 
+            if ${lseekPosFlag}; then 
                 echo """
             lseek $fd_read 0 SEEK_CUR fd_read_pos 
             lseek $fd_write 0 SEEK_CUR fd_write_pos"""
@@ -1220,7 +1220,7 @@ ${pipeReadFlag} || ${nullDelimiterFlag} || ${readBytesFlag} || ${lseekFlag} || {
         }"""
 }
 ${subshellRunFlag} && echo '(' || echo '{'
-{ ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="$(( ${nOrder##*(9)*(0)} + ${nOrder%%*(0)${nOrder##*(9)*(0)}}0 - 9 ))"'
+{ ${exportOrderFlag} || { ${nOrderFlag} && ${substituteStringIDFlag}; }; } && echo 'nOrder0="${nOrder:1}"'
 ${exportOrderFlag} && echo "printf '\034%s:\035\n' \"\${nOrder0}\""
 printf '%s ' "${runCmd[@]}"
 if ${readBytesFlag} && ! { [[ ${readBytesProg} == 'bash' ]] && ! ${stdinRunFlag}; }; then
@@ -1325,12 +1325,16 @@ p_PID+=(\${p{<#>}_PID})""" )"
             declare -p fd_continue fd_nAuto fd_nOrder fd_nOrder0 fd_nSpawn fd_read fd_write fd_stdin fd_stdout fd_stderr 
         } >&${fd_stderr}
 
+        declare -p >"${tmpDir}"/.vars
+
         # # # # # WAIT FOR THEM TO FINISH # # # # #
         #  #  #   PRINT OUTPUT IF ORDERED   #  #  #
 
         if ${nOrderFlag}; then
             # initialize real-time printing of ordered output as forkrun runs
-            outCur=10
+            outCur=0
+            printf -v outCurHex '%X' "${outCur}"
+            printf -v outCurHex '%X%s' "${#outCurHex}" "${outCurHex}"
             continueFlag=true
             outPrint=()
 
@@ -1338,14 +1342,15 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
                 # read order indices that are done running. 
                 read -r -u ${fd_nOrder0}
+                (( outRead = ( 16#"${REPLY:1}" ) ))
                 case "${REPLY}" in
-                    +([0-9]))
+                    +([0-9A-Fa-f]))
                         # index has an output file
-                        outHave[${REPLY}]=1
+                        outHave[${outRead}]=1
                     ;;
-                    x+([0-9]))
+                    x+([0-9A-Fa-f]))
                         # index was empty
-                        outHave[${REPLY#x}]=0
+                        outHave[${outRead}]=0
                     ;;
                     '')
                         # end condition was met
@@ -1358,13 +1363,14 @@ p_PID+=(\${p{<#>}_PID})""" )"
                 
                 while [[ "${outHave[${outCur}]}" ]]; do
 
-                    [[ "${outHave[${outCur}]}" == 1 ]] && outPrint+=("${tmpDir}/.out/x${outCur}")
+                    [[ "${outHave[${outCur}]}" == 1 ]] && outPrint+=("${tmpDir}/.out/x${outCurHex}")
                     
                     unset "outHave[${outCur}]"
             
                     # advance outCur by 1
                     ((outCur++))
-                    [[ "${outCur}" == +(9)+(0) ]] && outCur="${outCur}00"
+                    printf -v outCurHex '%X' "${outCur}"
+                    printf -v outCurHex '%X%s' "${#outCurHex}" "${outCurHex}"
                 
                     [[ ${#outPrint[@]} == 128 ]] && {
                         cat "${outPrint[@]}"
@@ -1394,7 +1400,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
             until [[ "${REPLY}" == 'q' ]]; do
                 read -r -u ${fd_nSpawn0}
             done
-	    wait "${pSpawn_PID}" &>/dev/null
+            wait "${pSpawn_PID}" &>/dev/null
         else
             wait "${p_PID[@]}" &>/dev/null; 
         fi
@@ -1411,7 +1417,7 @@ p_PID+=(\${p{<#>}_PID})""" )"
 
     # open anonymous pipes + other misc file descriptors for the above code block
     ) {fd_continue}<><(:) {fd_nAuto}<><(:) {fd_nOrder}<><(:) {fd_nOrder0}<><(:) {fd_nSpawn}<><(:) {fd_nSpawn0}<><(:) {fd_read}<"${fPath}" {fd_read0}<"${fPath}" {fd_write}>"${fPath}" {fd_stdin}<&${fd_stdin0} {fd_stdout}>&1 {fd_stderr}>&2
-
+    wait
 )
 
 # set up completion for forkrun
@@ -1984,7 +1990,7 @@ _forkrun_loadable_setup() {
 #_forkrun_loadable_setup
 #enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_copy lseek cpuusage childusage
 
-enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_copy lseek cpuusage childusage
+enable -f forkrun_loadables.so evfd_init evfd_wait evfd_signal evfd_close evfd_copy order_init order_get lseek cpuusage childusage
 
 
 export -fp _forkrun_getVal &>/dev/null && export -nf _forkrun_getVal

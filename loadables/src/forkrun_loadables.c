@@ -24,6 +24,8 @@
 #include <sys/sendfile.h>
 #include <poll.h>
 #include <limits.h>
+#include <sys/mman.h>
+#include <inttypes.h>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -49,9 +51,12 @@ static int evfd_wait_main(int argc, char ** argv);
 static int evfd_signal_main(int argc, char ** argv);
 static int evfd_signal_main(int argc, char ** argv);
 static int evfd_close_main(int argc, char ** argv);
+static int order_init_main(int argc, char ** argv);
+static int order_get_main(int argc, char ** argv);
 static int childusage_main(int argc, char ** argv);
 static int cpuusage_main(int argc, char ** argv);
 static char * get_persistent_dir(void);
+static uint64_t *order_counter = NULL;
 
 /* -------------------------------------------------- */
 /* lseek builtin                                     */
@@ -464,8 +469,8 @@ static int evfd_close_main(int argc, char ** argv) {
     if (evfd_data >= 0) close(evfd_data);
     if (evfd_term >= 0) close(evfd_term);
     evfd_data = evfd_term = -1;
-    unset_variable("EVFD_DATA");
-    unset_variable("EVFD_TERM");
+    unbind_variable("EVFD_DATA");
+    unbind_variable("EVFD_TERM");
     return EXECUTION_SUCCESS;
 }
 
@@ -477,6 +482,102 @@ struct builtin evfd_close_struct = {
     "evfd_close",
     0
 };
+
+// --------------------------------------------------
+// order_init: create a shared, anonymous counter
+// --------------------------------------------------
+static char *order_init_doc[] = {
+    "",
+    "USAGE: order_init",
+    "",
+    "Initialize a shared 64-bit counter for order_get.",
+    NULL
+};
+
+static int order_init_main(int argc, char **argv) {
+    if (argc != 1) {
+        builtin_error("order_init: wrong args");
+        return EXECUTION_FAILURE;
+    }
+    if (order_counter) {
+        // already initialized: reset to zero
+        __atomic_store_n(order_counter, 0, __ATOMIC_RELAXED);
+        return EXECUTION_SUCCESS;
+    }
+    // Allocate an anonymous, shared page for the counter
+    void *p = mmap(NULL, sizeof(uint64_t),
+                   PROT_READ|PROT_WRITE,
+                   MAP_SHARED|MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        builtin_error("order_init: mmap: %s", strerror(errno));
+        return EXECUTION_FAILURE;
+    }
+    order_counter = (uint64_t *)p;
+    __atomic_store_n(order_counter, 0, __ATOMIC_RELAXED);
+    return EXECUTION_SUCCESS;
+}
+
+struct builtin order_init_struct = {
+    "order_init",
+    fr_builtin,
+    BUILTIN_ENABLED,
+    order_init_doc,
+    "order_init",
+    0
+};
+
+// --------------------------------------------------
+// order_get: bump & return next counter as hex string
+// --------------------------------------------------
+static char *order_get_doc[] = {
+    "",
+    "USAGE: order_get <VAR>",
+    "",
+    "Atomically bump a shared counter and store it in <VAR>",
+    "as a 16-digit, zero-padded uppercase hex string.",
+    NULL
+};
+
+static int order_get_main(int argc, char **argv) {
+    if (argc != 2) {
+        builtin_error("order_get: usage: order_get <VAR>");
+        return EXECUTION_FAILURE;
+    }
+    if (!order_counter) {
+        builtin_error("order_get: counter not initialized");
+        return EXECUTION_FAILURE;
+    }
+
+    // 1) Atomically fetch-and-increment
+    uint64_t v = __atomic_fetch_add(order_counter, 1, __ATOMIC_RELAXED);
+
+    // 2) Render v as a minimal hex string (no leading zeros)
+    char hexbuf[17];
+    int hexlen = snprintf(hexbuf, sizeof(hexbuf), "%" PRIx64, v);
+    // hexlen is at least 1 (for v==0), up to 16
+
+    // 3) Prefix with single‐hex‐digit length (1–F)
+    char outbuf[18];
+    static const char *hex_digits = "0123456789ABCDEF";
+    outbuf[0] = hex_digits[hexlen];
+    memcpy(outbuf + 1, hexbuf, hexlen);
+    outbuf[1 + hexlen] = '\0';
+
+    // 4) Export into the requested variable
+    bind_variable(argv[1], outbuf, 0);
+    return EXECUTION_SUCCESS;
+}
+
+
+struct builtin order_get_struct = {
+    "order_get",
+    fr_builtin,
+    BUILTIN_ENABLED,
+    order_get_doc,
+    "order_get <VAR>",
+    0
+};
+
 
 /* -------------------------------------------------- */
 /* childusage builtin                                */
@@ -745,6 +846,10 @@ static int fr_builtin(WORD_LIST * list) {
         ret = evfd_signal_main(argc, argv);
     } else if (strcmp(sub, "evfd_close") == 0) {
         ret = evfd_close_main(argc, argv);
+    } else if (strcmp(sub, "order_init") == 0) {
+        ret = order_init_main(argc, argv);
+    } else if (strcmp(sub, "order_get") == 0) {
+        ret = order_get_main(argc, argv);
     } else if (strcmp(sub, "cpuusage") == 0) {
         ret = cpuusage_main(argc, argv);
     } else if (strcmp(sub, "childusage") == 0) {
@@ -759,13 +864,15 @@ static int fr_builtin(WORD_LIST * list) {
 }
 
 int setup_builtin_forkrun_loadables(void) {
-    add_builtin( & lseek_struct, 1);
-    add_builtin( & evfd_init_struct, 1);
-    add_builtin( & evfd_wait_struct, 1);
-    add_builtin( & evfd_copy_struct, 1);
+    add_builtin( & lseek_struct,       1);
+    add_builtin( & evfd_init_struct,   1);
+    add_builtin( & evfd_wait_struct,   1);
+    add_builtin( & evfd_copy_struct,   1);
     add_builtin( & evfd_signal_struct, 1);
-    add_builtin( & evfd_close_struct, 1);
-    add_builtin( & childusage_struct, 1);
-    add_builtin( & cpuusage_struct, 1);
+    add_builtin( & evfd_close_struct,  1);
+    add_builtin( & order_init_struct,  1);
+    add_builtin( & order_get_struct,   1);
+    add_builtin( & childusage_struct,  1);
+    add_builtin( & cpuusage_struct,    1);
     return 0;
 }
