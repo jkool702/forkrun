@@ -2091,6 +2091,82 @@ _forkrun_getLoad() {
 
 }
 
+_forkrun_hex_to_base54() {
+    ## convert hexadecimal stream into base64 encoded stream using base native 64#<#> encoding (3 hex chars --> 2 base64 chars)
+    # hex stream may be passed on stdin or as commandline args. if stdin is not a terminal then only stdin will be used.
+    # hex input stream will have all whitespace removed and will be output as a single stream wuthout whitespace
+    
+    local h nn k1 k2 IFS
+    local -a H charmap
+    IFS=
+    shopt -s extglob
+    
+    if ! [[ -t 0 ]]; then
+        h="$(cat)"
+    else
+        h="${*}"
+    fi
+    h="${h//@{[[:space:}})/}"
+    H=(${h//@([0-9a-fA-F])@([0-9a-fA-F])@([0-9a-fA-F])/& })
+    unset h
+    
+    charmap=($(printf '%s ' {0..9} {a..z} {A..Z} '@' '_'))
+    
+    for nn in "${H[@]}"; do
+        (( k1 = ( 16#$nn / 64 ) ))
+        (( k2 = ( 16#$nn % 64 ) ))
+        printf '%s%s' "${charmap[$k1]}" "${charmap[$k2]}"
+    done
+    
+    printf '\n'
+    
+}
+
+_forkrun_file_to_base64() {
+    ## encode a file as a base64 ascii string
+    # uses hexdump to get the file representation in hexadecimal, then uses sed + tr + _forkrun_hex_to_base64 to convert to base64
+    # inputs are file path[s]. each file's base64 is output as a single ascii string followed by a newline.
+    
+    local ff
+    
+    for ff in "$@"; do
+        if [[ -f "$ff" ]]; then
+            hexdump -v -x <"$ff" | sed -E 's/^[^ ]*//; s/ //g' | tr -d '\n' | _forkrun_hex_to_base64
+        else
+            printf '\nERROR: file %s not found\n' "$ff" >&2
+        fi
+    done
+}
+
+_forkrun_base64_to_file() {
+    ## re-creates a file from its base64 encoded ascii string (generated using _forkrun_file_to_base64)
+    # pass base64-encoded file string[s] as a newline-seperated list on stdin
+    # pass the file paths for re-created files as commandline args
+    # the number of newlines in the stdin stream should equal the number of commandline args
+    
+    local fPath fData fHex
+    local -a fBase64 
+    
+    shopt -s extglob
+    
+    while (( $# > 0 )); do
+        fPath="$1"
+        shift 1
+        read -r fData <&0 || break
+        
+        fBase64=(${fData//@([0-9a-zA-Z@_])@([0-9a-zA-Z@_])/& })
+        
+        for kk in "${!fBase64[@]}"; do
+            (( fBase64[$kk] = ( 64#${fBase64[$kk]} ) ))
+        done
+        
+        printf -v fHex '\\x%X' "${fBase64[@]}"
+        
+        printf "${fHex}" >"$fPath"
+    done
+}
+    
+
 
 # export -fp _forkrun_getLoad &>/dev/null && export -nf _forkrun_getLoad
 # 
