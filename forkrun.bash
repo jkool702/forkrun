@@ -2096,7 +2096,7 @@ _forkrun_base64_to_file() {
         fPath="$1"
         shift 1
         read -r fData <&0 || break
-        sha512_cksum= "${fData:0:128}"
+        sha512_cksum="${fData:0:128}"
         if [[ -z "${sha512_cksum//@([0-9a-f])/}" ]] && [[ "${fData:128:1}" == ' ' ]]; then
             fData="${fData:129}"
             sha512_flag=true
@@ -2112,13 +2112,17 @@ _forkrun_base64_to_file() {
         
         printf -v fHex '\\x%X' "${fBase64[@]}"
         
-        printf "${fHex}" >"$fPath"
+        printf "${fHex}" >"${fPath}"
 
         if ${sha512_flag}; then
             [[ "$(sha512sum "$fPath")" == *"${sha512_cksum}"* ]] || {
                 printf '\nERROR: sha12sum or re-created file does not match the sha512sum enmbedded in the ascii-encoded base64 sequence!!! ABORTING!!!\n\n'
                 return 1
             }
+        fi
+
+        [[ "${fPath}" == *.so ]] && chmod +x "${fPath}"
+        
     done
 }
     
