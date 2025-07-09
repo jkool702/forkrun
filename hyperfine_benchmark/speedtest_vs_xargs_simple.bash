@@ -5,10 +5,32 @@
 # test was run on Fedora 41 (kernel 6.13.12-200.fc41.x86_64) on May 5th 2025
 # system CPU is a 14-core/28-thread i9-7940x
 
+# # # # # setup # # # # #
+
+ff() {
+sha1sum "${@}" >>/mnt/ramdisk/sum.sha1sum
+sha256sum "${@}" >>/mnt/ramdisk/sum.sha256sum
+sha512sum "${@}" >>/mnt/ramdisk/sum.sha512sum
+sha224sum "${@}" >>/mnt/ramdisk/sum.sha224sum
+sha384sum "${@}" >>/mnt/ramdisk/sum.sha384sum
+md5sum "${@}" >>/mnt/ramdisk/sum.md5sum
+sum -s "${@}" >>/mnt/ramdisk/sum.sum_s
+sum -r "${@}" >>/mnt/ramdisk/sum.sum_r
+cksum "${@}" >>/mnt/ramdisk/sum.cksum
+b2sum "${@}" >>/mnt/ramdisk/sum.b2sum
+cksum -a sm3 "${@}" >>/mnt/ramdisk/sum.cksum_a_sm3
+xxhsum "${@}" >>/mnt/ramdisk/sum.xxhsum
+xxhsum -H3 "${@}" >>/mnt/ramdisk/sum.xxhsum_H3
+}
+
+export -f ff
+
+
 
 # # # # # forkrun # # # # #
 
 # time { for nn in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3"; do forkrun -z $nn <filelist0; forkrun $nn <filelist; done |wc -l; }
+# time { forkrun -z ff <filelist0; forkrun ff <filelist; }
 
 17680286
 
@@ -21,6 +43,7 @@ sys     3m50.480s
 
 
 # time { for nn in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3"; do xargs -P 28 -0 $nn <filelist0; xargs -P 28 -d $'\n' $nn <filelist; done |wc -l; }
+# time { xargs -P 28 -0 "$BASH" -c 'ff' <filelist0; xargs -P 28 -d $'\n'  "$BASH" -c 'ff' <filelist; }
 
 17680286
 
