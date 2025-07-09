@@ -3,7 +3,7 @@
 # each speedtest is run twice - in one inputs are newline seperated, in the other they are NULL seperated
 # lists containing filenames are pre-generated. These lists as well as the acrual files are all on a ramdisk (tmpfs)
 # test was run on Fedora 41 (kernel 6.13.12-200.fc41.x86_64) on May 5th 2025
-# system CPU is a 28-core i9-7940x
+# system CPU is a 14-core/28-thread i9-7940x
 
 
 # # # # # forkrun # # # # #
