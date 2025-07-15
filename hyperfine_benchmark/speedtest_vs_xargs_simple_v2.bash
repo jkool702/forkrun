@@ -7,6 +7,13 @@
 
 # # # # # setup # # # # #
 
+mkdir -p /mnt/ramdisk
+mount | grep -qE '^tmpfs on /mnt/ramdisk ' || sudo mount -t tmpfs tmpfs /mnt/ramdisk 
+mkdir -p /mnt/ramdisk/usr
+rsync -a --max-size=$((1<<22)) /usr/* /mnt/ramdisk/usr
+find /mnt/ramdisk/usr -type f >/mnt/ramdisk/flist
+find /mnt/ramdisk/usr -type f -print0 >/mnt/ramdisk/flist0
+
 ff() {
 sha1sum "${@}" >>/mnt/ramdisk/sum.sha1sum
 sha256sum "${@}" >>/mnt/ramdisk/sum.sha256sum
@@ -49,7 +56,7 @@ sys     3m16.714s
 # # # # # xargs # # # # #
 
 
-# time { for nn in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3"; do xargs -P 28 -0 $nn </mnt/ramdisk/flist0; xargs -P 28 -d $'\n' $nn </mnt/ramdisk/flist; done |wc -l; }
+# time { for nn in sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3"; do xargs -P $(nproc) -0 $nn </mnt/ramdisk/flist0; xargs -P $(nproc) -d $'\n' $nn </mnt/ramdisk/flist; done |wc -l; }
 17591444
 
 real    0m59.565s
