@@ -2030,101 +2030,52 @@ _forkrun_getVal() {
     local +n vOut
 }
 
+_forkrun_file_to_base64() { 
+    local ff nn k1 k2;
+    charmap=($(printf '%s ' {0..9} {a..z} {A..Z} '@' '_'))
 
-_forkrun_hex_to_base64() {
-    ## convert hexadecimal stream into base64 encoded stream using base native 64#<#> encoding (3 hex chars --> 2 base64 chars)
-    # hex stream may be passed on stdin or as commandline args. if stdin is not a terminal then only stdin will be used.
-    # hex input stream will have all whitespace removed and will be output as a single stream wuthout whitespace
-    
-    local h nn k1 k2 IFS
-    local -a H charmap
-    IFS=
-    shopt -s extglob
-    
-    if ! [[ -t 0 ]]; then
-        h="$(cat)"
-    else
-        h="${*}"
-    fi
-    h="${h//@{[[:space:}})/}"
-    H=(${h//@([0-9a-fA-F])@([0-9a-fA-F])@([0-9a-fA-F])/& })
-    unset h
+    [[ -f "${1}" ]] || { 
+        printf '\nERROR: "%s" not found. ABORTING.\n' "${1}"; >&2
+        return 1                                              
+    }
     
     charmap=($(printf '%s ' {0..9} {a..z} {A..Z} '@' '_'))
     
-    for nn in "${H[@]}"; do
-        (( k1 = ( 16#$nn / 64 ) ))
-        (( k2 = ( 16#$nn % 64 ) ))
-        printf '%s%s' "${charmap[$k1]}" "${charmap[$k2]}"
-    done
-    
-    printf '\n'
-    
-}
-
-_forkrun_file_to_base64() {
-    ## encode a file as a base64 ascii string. The original file's sha512sum (followed by a space) preceeds the ascii-encoded base64 sequence.
-    # uses hexdump to get the file representation in hexadecimal, then uses sed + tr + _forkrun_hex_to_base64 to convert to base64
-    # inputs are file path[s]. each file's base64 is output as a single ascii string followed by a newline.
-    
-    local ff
-    
-    for ff in "$@"; do
-        if [[ -f "$ff" ]]; then
-            printf '%s ' "$(sha512sum "$ff" | sed -E s/' .*$'//)"
-            hexdump -v -x <"$ff" | sed -E 's/^[^ ]*//; s/ //g' | tr -d '\n' | _forkrun_hex_to_base64
-        else
-            printf '\nERROR: file %s not found\n' "$ff" >&2
-        fi
-    done
-}
+    while read -r -N 3 nn; do
+        (( k1 = ( 16#${nn} >> 6 ) ));
+        (( k2 = ( 16#${nn} % 64 ) ));
+        printf '%s%s' "${charmap[$k1]}" "${charmap[$k2]}";
+    done < <(hexdump -v -x < "${1}" | sed -E 's/^[^ ]*//; s/ //g' | sed -zE s/'\n'//g);                                                                           
+} 
 
 _forkrun_base64_to_file() {
-    ## re-creates a file from its base64 encoded ascii string (generated using _forkrun_file_to_base64)
-    # pass base64-encoded file string[s] as a newline-seperated list on stdin
-    # pass the file paths for re-created files as commandline args
-    # the number of newlines in the stdin stream should equal the number of commandline args
-    # each ascii-encoded base64 line may optionally start with a sha512sum checksum followed by a space. 
-    #     if present, the re-created file will be checked against this checksum.
-    
-    local fPath fData fHex sha512_cksum sha512_flag
-    local -a fBase64 
-    
-    shopt -s extglob
-    
-    while (( $# > 0 )); do
-        fPath="$1"
-        shift 1
-        read -r fData <&0 || break
-        sha512_cksum="${fData:0:128}"
-        if [[ -z "${sha512_cksum//@([0-9a-f])/}" ]] && [[ "${fData:128:1}" == ' ' ]]; then
-            fData="${fData:129}"
-            sha512_flag=true
-        else
-            sha512_flag=false
-        fi
-        
-        fBase64=(${fData//@([0-9a-zA-Z@_])@([0-9a-zA-Z@_])/& })
-        
-        for kk in "${!fBase64[@]}"; do
-            (( fBase64[$kk] = ( 64#${fBase64[$kk]} ) ))
-        done
-        
-        printf -v fHex '\\x%X' "${fBase64[@]}"
-        
-        printf "${fHex}" >"${fPath}"
+    local b fd0 fd1
 
-        if ${sha512_flag}; then
-            [[ "$(sha512sum "$fPath")" == *"${sha512_cksum}"* ]] || {
-                printf '\nERROR: sha12sum or re-created file does not match the sha512sum enmbedded in the ascii-encoded base64 sequence!!! ABORTING!!!\n\n'
-                return 1
-            }
-        fi
+    [[ -t 0 ]] && {
+        printf '\nERROR: pass the base64-encoded sequence on stdin. ABORTING.\n'  >&2
+        return 1
+    }
 
-        [[ "${fPath}" == *.so ]] && chmod +x "${fPath}"
-        
-    done
+    exec {fd0}<&0
+    if (( $# > 0 )); then
+        exec {fd1}>"$1"
+    else
+        exec {fd1}>&1
+    fi
+    
+    {
+        printf "$(while read -r -u "${fd0}" -N 4 b; do 
+        printf -v b '%0.6X' "$(( 64#${b} ))"
+        printf '\\x%s' "${b:0:2}" "${b:2:2}" "${b:4}";
+        done)" >&"${fd1}"
+    } 
+    
+    exec {fd0}>&-
+    exec {fd1}>&-
 }
+
+
+
     
 _forkrun_getLoad() {
     ## computes a "smoothed average system CPU load" using info gathered from /proc/stat
