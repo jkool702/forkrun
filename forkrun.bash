@@ -2031,7 +2031,7 @@ _forkrun_getVal() {
 }
 
 
-_forkrun_hex_to_base54() {
+_forkrun_hex_to_base64() {
     ## convert hexadecimal stream into base64 encoded stream using base native 64#<#> encoding (3 hex chars --> 2 base64 chars)
     # hex stream may be passed on stdin or as commandline args. if stdin is not a terminal then only stdin will be used.
     # hex input stream will have all whitespace removed and will be output as a single stream wuthout whitespace
