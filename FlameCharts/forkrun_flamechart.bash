@@ -83,6 +83,8 @@ export A
 
 mkdir -p ./test1 ./test2
 
+# -s -d -T -P --aio=4 --call-graph {lbr,dwarf}
+
 cd ./test1
   perf record -b -g -F max /bin/bash -O extglob -c 'forkrun -z ff </mnt/ramdisk/filelist >/dev/null'
     perf script > out.perf
