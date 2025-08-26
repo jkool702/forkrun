@@ -15,29 +15,27 @@ find /mnt/ramdisk/usr -type f >/mnt/ramdisk/flist
 find /mnt/ramdisk/usr -type f -print0 >/mnt/ramdisk/flist0
 
 ff() {
-sha1sum "${@}" >>/mnt/ramdisk/sum.sha1sum
-sha256sum "${@}" >>/mnt/ramdisk/sum.sha256sum
-sha512sum "${@}" >>/mnt/ramdisk/sum.sha512sum
-sha224sum "${@}" >>/mnt/ramdisk/sum.sha224sum
-sha384sum "${@}" >>/mnt/ramdisk/sum.sha384sum
-md5sum "${@}" >>/mnt/ramdisk/sum.md5sum
-sum -s "${@}" >>/mnt/ramdisk/sum.sum_s
-sum -r "${@}" >>/mnt/ramdisk/sum.sum_r
-cksum "${@}" >>/mnt/ramdisk/sum.cksum
-b2sum "${@}" >>/mnt/ramdisk/sum.b2sum
-cksum -a sm3 "${@}" >>/mnt/ramdisk/sum.cksum_a_sm3
-xxhsum "${@}" >>/mnt/ramdisk/sum.xxhsum
-xxhsum -H3 "${@}" >>/mnt/ramdisk/sum.xxhsum_H3
+sha1sum "${@}" 
+sha256sum "${@}" 
+sha512sum "${@}" 
+sha224sum "${@}" 
+sha384sum "${@}" 
+md5sum "${@}" 
+sum -s "${@}" 
+sum -r "${@}" 
+cksum "${@}" 
+b2sum "${@}" 
+cksum -a sm3 "${@}" 
+xxhsum "${@}" 
+xxhsum -H3 "${@}" 
 }
-
 export -f ff
 
 
 
 # # # # # forkrun # # # # #
 
-# time { forkrun -z ff <../flist0; forkrun ff <../flist; cat /mnt/ramdisk/sum* | wc -l; }
-
+# time { { forkrun -z ff </mnt/ramdisk/flist0; forkrun ff </mnt/ramdisk/flist; } | wc -l; }
 17591444
 
 real    0m47.447s
