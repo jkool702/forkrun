@@ -1,10 +1,9 @@
 // forkrun_ring_loadables.c
-// Forkrun v5 Ring Buffer Architecture (Final Gold Master + Streaming Patch)
+// Forkrun v5 Ring Buffer Architecture (Final Gold Master + Streaming + Fused Lseek)
 // Features: Zero-Copy, SPMC Ticket Lock, Dynamic Batch Sizing, 16-bit Strides
 // Hardening: Adaptive Timeouts, Immediate EOF Clamping, Explicit Memory Ordering
 // Streaming: Supports active pipes via ring_ingest signal
-
-// forkrun_ring_loadables.c (v5.2 - Dynamic Spawning & Overflow Protection)
+// Optimization: ring_claim performs internal lseek
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -51,8 +50,10 @@
 #include "variables.h"
 
 extern int add_builtin(struct builtin *bp, int keep);
+
 static int forkrun_ring_builtin(WORD_LIST *list);
 static int ring_init_main(int argc, char **argv);
+static int ring_destroy_main(int argc, char **argv);
 static int ring_scanner_main(int argc, char **argv);
 static int ring_claim_main(int argc, char **argv);
 static int ring_worker_main(int argc, char **argv);
@@ -350,14 +351,16 @@ static int ring_scanner_main(int argc, char **argv) {
 // ==============================================================
 
 static int ring_claim_main(int argc, char **argv) {
-    if (argc != 3) return EXECUTION_FAILURE;
+    if (argc < 3 || argc > 4) return EXECUTION_FAILURE;
     const char *var_offset = argv[1];
     const char *var_count  = argv[2];
+    int seek_fd = -1;
+    if (argc == 4) seek_fd = atoi(argv[3]);
 
     uint64_t w_idx = atomic_load_acquire(&state->write_idx);
     uint64_t r_idx_snapshot = atomic_load_acquire(&state->read_idx);
 
-    // --- 1. Adaptive Wait Phase (Unchanged) ---
+    // --- 1. Adaptive Wait Phase ---
     int spin_count = 0;
     int poll_timeout = 0; 
 
@@ -384,16 +387,19 @@ static int ring_claim_main(int argc, char **argv) {
         r_idx_snapshot = atomic_load_acquire(&state->read_idx);
     }
 
-    // --- 2. Calculate Claim (Unchanged) ---
+    // --- 2. Calculate Claim (Heuristic) ---
     int64_t sbatch = atomic_load_acquire(&state->signed_batch_size);
     uint64_t slots_to_claim = 1;
 
     if (sbatch > 0) {
+        // FAST PATH: 1 slot
         slots_to_claim = 1;
     } else {
+        // SLOW PATH: Coalescing Heuristic
         uint64_t target = (uint64_t)llabs(sbatch);
         uint16_t stride_val = state->stride_ring[r_idx_snapshot & RING_MASK];
         uint64_t lines_per_slot = (stride_val == 0) ? 1 : stride_val;
+        
         uint64_t guess = (target + lines_per_slot - 1) / lines_per_slot;
         
         uint64_t avail = w_idx - r_idx_snapshot;
@@ -406,7 +412,7 @@ static int ring_claim_main(int argc, char **argv) {
         if (slots_to_claim > 1024) slots_to_claim = 1024; 
     }
 
-    // --- 3. Reservation (Unchanged) ---
+    // --- 3. Ticket Reservation (Pre-Flight) ---
     uint64_t my_start, my_end;
     while (1) {
         if (r_idx_snapshot >= w_idx) {
@@ -425,7 +431,7 @@ static int ring_claim_main(int argc, char **argv) {
         break;
     }
 
-    // --- 3.5. EOF Clamping (Unchanged) ---
+    // --- 3.5. EOF Clamping ---
     if (my_end > w_idx) {
         struct pollfd peof = { .fd = evfd_eof, .events = POLLIN };
         if (poll(&peof, 1, 0) > 0) {
@@ -437,14 +443,12 @@ static int ring_claim_main(int argc, char **argv) {
         }
     }
 
-    // --- 4. Unified Processing (FIXED) ---
+    // --- 4. Unified Processing ---
     uint64_t total_lines = 0;
     uint64_t start_byte = 0;
 
     // 4a. Wait for the FIRST slot (with Stale Data Protection)
     while (my_start >= w_idx) {
-        // FIX: Refresh w_idx BEFORE checking EOF. 
-        // This ensures we see late-arriving data even if EOF is set.
         uint64_t fresh_w = atomic_load_acquire(&state->write_idx);
         if (fresh_w > w_idx) {
             w_idx = fresh_w;
@@ -463,14 +467,15 @@ static int ring_claim_main(int argc, char **argv) {
     start_byte = packed & 0xFFFFFFFFFFFFULL;
 
     if (slots_to_claim == 1) {
+        // Fast Path / Single Slot
         total_lines = packed >> 48;
     } else {
+        // Unified Slow Path: Sum from stride array (Cache Friendly)
         total_lines = state->stride_ring[my_start & RING_MASK];
 
         for (uint64_t i = my_start + 1; i < my_end; i++) {
             // Barrier for subsequent slots
             while (i >= w_idx) {
-                // Same Fix here: Refresh before Abort
                 uint64_t fresh_w = atomic_load_acquire(&state->write_idx);
                 if (fresh_w > w_idx) {
                     w_idx = fresh_w;
@@ -493,6 +498,11 @@ report:
     bind_variable(var_offset, buf, 0);
     snprintf(buf, sizeof(buf), "%" PRIu64, total_lines);
     bind_variable(var_count, buf, 0);
+
+    // --- FUSED LSEEK ---
+    if (seek_fd >= 0 && total_lines > 0) {
+        lseek(seek_fd, (off_t)start_byte, SEEK_SET);
+    }
 
     return 0;
 }
@@ -581,10 +591,10 @@ static int lseek_main(int argc, char ** argv) {
 struct builtin ring_init_struct     = { "ring_init",    forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_init", 0 };
 struct builtin ring_destroy_struct  = { "ring_destroy", forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_destroy", 0 };
 struct builtin ring_scanner_struct  = { "ring_scanner", forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_scanner <fd> [spawn_fd]", 0 };
-struct builtin ring_claim_struct    = { "ring_claim",   forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_claim <OFF> <CNT>", 0 };
+struct builtin ring_claim_struct    = { "ring_claim",   forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_claim <OFF> <CNT> [FD]", 0 };
 struct builtin ring_worker_struct   = { "ring_worker",  forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_worker [inc|dec]", 0 };
 struct builtin ring_ingest_struct   = { "ring_ingest",  forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_ingest", 0 };
-struct builtin lseek_struct         = { "lseek",        forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]", 0 };
+struct builtin lseek_struct         = { "lseek",        forkrun_ring_builtin, BUILTIN_ENABLED, lseek_doc, "lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]", 0 };
 
 // ==============================================================
 // ========================== DISPATCHER ========================

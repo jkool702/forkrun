@@ -1,58 +1,27 @@
 #!/usr/bin/bash
 
-enable -f /mnt/ramdisk/forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_destroy ring_transfer lseek
-
-test_stdin_flag=true
-
-: "${test_stdin_flag:=false}"
-
-if ${test_stdin_flag}; then
+enable -f /mnt/ramdisk/forkrun_ring.so ring_init ring_scanner ring_claim ring_worker lseek
 
 spawn_worker() {
     (
         {
-            ITER=0
-            Pcur=$BASHPID
             ring_worker inc  # Register ourselves as 1 worker
-            while true; do
-                { ring_transfer $fd_read 1 || kill $Pcur ; } | :
-                [[ "$CNT" == "0" ]] && break
-                ((ITER++))
-                echo "$ITER" >./total.${1}
-            done
-            ring_worker dec  # de-register worker
-            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "???" "$ITER" "???" >./total.${1}
-            
-        } {fd_read}<test.dat
-    ) &
-    P+=($!)
-}
-else
-
-spawn_worker() {
-    (
-        {
-            ITER=0
-            ring_worker inc  # Register ourselves as 1 worker
-            while ring_claim OFF CNT $fd_read; do
+            while ring_claim OFF CNT; do
                 [[ "$CNT" == "0" ]] && break
                 ((total+=CNT))
+                lseek $fd_read $OFF SEEK_SET ''
                 echo "$total" >./total.${1}
-                ((ITER++))
-                mapfile -t -u $fd_read -n $CNT A
-                : "${A[@]}"
+                #mapfile -t -u $fd_read -n $CNT A
+                #: "${A[@]}"
             done
             ring_worker dec  # de-register worker
-            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./total.${1}
             
         } {fd_read}<test.dat
     ) &
     P+=($!)
 }
 
-fi
-
-dataN=1000000000
+dataN=100000000
 
 echo "Generating test data..."
 yes $'\n' | head -n $dataN > test.dat
@@ -83,7 +52,7 @@ done
 
 while true; do
     read -r -u $fd_spawn N
-    [[ "$N" == 'x' ]] && { printf '\nSCANNER HIT EOF\nelapsed time = %s us\n' $(( ${EPOCHREALTIME//./} - start_time )); break; }
+    [[ "$N" == 'x' ]] && { echo 'SCANNER HIT EOF'; break; }
     nWorkers0="$nWorkers"
     (( ( nWorkers0 + N ) > nWorkersMax )) && (( N = nWorkersMax - nWorkers0 ))
     (( N > 0 )) && for ((nn=nWorkers0; nn<nWorkers0+N; nn++)); do
@@ -107,11 +76,8 @@ echo "Total Lines Consumed: $total (Expected: $dataN)"
 echo "Time: ${elapsed}us"
 
 # Cleanup
-ring_destroy
 kill $SCANNER_PID 2>/dev/null
 wait $SCANNER_PID 2>/dev/null
 
 exec {fd_spawn}>&- 
 exec {fd_scan}>&-
-
-cat ./total*
