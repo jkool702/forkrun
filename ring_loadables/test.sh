@@ -20,7 +20,8 @@ spawn_worker() {
                 ((ITER++))
             done
             ring_worker dec  # de-register worker
-            printf 'TOTAL=%s    ITER=%s    AVG=%s    FINAL=%s\n' "$total" "$ITER" "$((total/ITER))" "$CNT" >./total.${1}
+	    echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
             
         } {fd_read}<test.dat
     ) &
@@ -42,7 +43,8 @@ spawn_worker() {
                 mapfile -t -u $fd_read -n $CNT A
             done
             ring_worker dec  # de-register worker
-            printf 'TOTAL=%s    ITER=%s    AVG=%s    FINAL=%s\n' "$total" "$ITER" "$((total/ITER))" "$CNT" >./total.${1}
+	    echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
             
         } {fd_read}<test.dat
     ) &
@@ -66,7 +68,8 @@ spawn_worker() {
                 : "${A[@]}"
             done
             ring_worker dec  # de-register worker
-            printf 'TOTAL=%s    ITER=%s    AVG=%s    FINAL=%s\n' "$total" "$ITER" "$((total/ITER))" "$CNT" >./total.${1}
+	    echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
             
         } {fd_read}<test.dat
     ) &
@@ -87,7 +90,8 @@ spawn_worker() {
                 #echo "$ITER" >./total.${1}
             done
             ring_worker dec  # de-register worker
-            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "???" "$ITER" "???" >./total.${1}
+	    echo "$ITER" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
             
         } {fd_read}<test.dat
     ) &
@@ -102,7 +106,7 @@ dataN=1000000000
 echo "Generating test data..."
 yes $'\n' | head -n $dataN > test.dat
 
-\rm ./total.*
+\rm ./total.* ./count.* ./final.*
 
 exec {fd_scan}<test.dat
 exec {fd_spawn}<><(:)
@@ -159,6 +163,6 @@ wait $SCANNER_PID 2>/dev/null
 exec {fd_spawn}>&- 
 exec {fd_scan}>&-
 
-cat ./total*
+cat ./final.*
 )
 

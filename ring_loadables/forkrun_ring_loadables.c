@@ -1,7 +1,7 @@
 // forkrun_ring_loadables.c
-// Forkrun v6.5 Ring Buffer Architecture
-// Features: Zero-Copy, SPMC Ticket Lock, Quadratic Scaling, Density Calibration
-// Fixes: Removed O_NONBLOCK on shared pipe, Added Poll-before-Read, Calib Cap
+// Forkrun v6.10 Ring Buffer Architecture
+// Features: Zero-Copy, SPMC Ticket Lock, Quadratic Scaling, Geometric Slow-Start
+// Fixes: Livelock (Urgent check removed from hot loop), Syntax Errors (Truncation fixed)
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -197,7 +197,6 @@ static int ring_scanner_main(int argc, char **argv) {
     int fd_spawn = -1;
     if (argc >= 3) {
         fd_spawn = atoi(argv[2]);
-        // FIX: Removed O_NONBLOCK setting to prevent Bash read errors
     }
 
     struct stat st;
@@ -234,49 +233,49 @@ static int ring_scanner_main(int argc, char **argv) {
     uint64_t local_write_idx = atomic_load_relaxed(&state->write_idx);
     uint64_t total_scanned = 0;
     uint64_t last_batch_change = 0;
+    uint64_t ramp_up_counter = 0;
 
     const size_t CHUNK = 1024 * 1024 * 4; 
     char *buf = xmalloc(CHUNK);
     
     uint64_t current_file_offset = (uint64_t)lseek(fd, 0, SEEK_CUR);
     uint64_t batch_start = current_file_offset;
+    uint64_t scan_head_offset = current_file_offset;
     uint64_t local_count = 0;
     bool first_chunk = true;
 
     // --- QUADRATIC SCALING MACRO ---
     #define DO_SPAWN_CHECK() do { \
         uint64_t cur_w = atomic_load_relaxed(&state->active_workers); \
-        uint64_t consumed = atomic_load_relaxed(&state->total_lines_consumed); \
-        uint64_t backlog = total_scanned - consumed; \
-        uint64_t term = (backlog * (uint64_t)nWorkersMax) / (uint64_t)nLinesMax; \
-        uint64_t target_w = fast_isqrt(term); \
-        if (target_w > (uint64_t)nWorkersMax) target_w = nWorkersMax; \
-        if (target_w < (uint64_t)nWorkers) target_w = nWorkers; \
-        \
-        /* 1. Spawn */ \
-        if (cur_w < (uint64_t)nWorkersMax && fd_spawn >= 0 && target_w > cur_w) { \
-            uint64_t diff = target_w - cur_w; \
-            char sbuf[32]; \
-            int len = snprintf(sbuf, sizeof(sbuf), "%lu\n", diff); \
-            try_write_spawn(fd_spawn, sbuf, len); \
-        } \
-        \
-        /* 2. Scale Batch Size */ \
-        if (nLines == 0) { \
-            uint64_t new_batch = (target_w * (uint64_t)nLinesMax) / (uint64_t)nWorkersMax; \
-            if (new_batch < 1) new_batch = 1; \
-            if (new_batch > current_batch) { \
-                current_batch = new_batch; \
-                int64_t old_s = atomic_load_relaxed(&state->signed_batch_size); \
-                int64_t new_s = (old_s < 0) ? -(int64_t)current_batch : (int64_t)current_batch; \
-                atomic_store_release(&state->signed_batch_size, new_s); \
-                last_batch_change = consumed; \
+        if (cur_w < (uint64_t)nWorkersMax) { \
+            uint64_t consumed = atomic_load_relaxed(&state->total_lines_consumed); \
+            uint64_t backlog = total_scanned - consumed; \
+            uint64_t term = (backlog * (uint64_t)nWorkersMax) / (uint64_t)nLinesMax; \
+            uint64_t target_w = fast_isqrt(term); \
+            if (target_w > (uint64_t)nWorkersMax) target_w = nWorkersMax; \
+            if (target_w < (uint64_t)nWorkers) target_w = nWorkers; \
+            if (fd_spawn >= 0 && target_w > cur_w) { \
+                uint64_t diff = target_w - cur_w; \
+                char sbuf[32]; \
+                int len = snprintf(sbuf, sizeof(sbuf), "%lu\n", diff); \
+                try_write_spawn(fd_spawn, sbuf, len); \
+            } \
+            if (nLines == 0) { \
+                uint64_t new_batch = (target_w * (uint64_t)nLinesMax) / (uint64_t)nWorkersMax; \
+                if (new_batch < 1) new_batch = 1; \
+                if (new_batch > current_batch) { \
+                    current_batch = new_batch; \
+                    int64_t old_s = atomic_load_relaxed(&state->signed_batch_size); \
+                    int64_t new_s = (old_s < 0) ? -(int64_t)current_batch : (int64_t)current_batch; \
+                    atomic_store_release(&state->signed_batch_size, new_s); \
+                    last_batch_change = consumed; \
+                } \
             } \
         } \
-        /* 3. Fast Path Transition */ \
         if (nLines == 0) { \
             int64_t sbatch = atomic_load_relaxed(&state->signed_batch_size); \
             if (sbatch < 0) { \
+                uint64_t consumed = atomic_load_relaxed(&state->total_lines_consumed); \
                 if (consumed > last_batch_change + ((uint64_t)nWorkersMax * current_batch * 4)) { \
                     atomic_store_release(&state->signed_batch_size, (int64_t)current_batch); \
                 } \
@@ -299,6 +298,15 @@ static int ring_scanner_main(int argc, char **argv) {
             uint64_t one = 1; \
             write(evfd_data, &one, sizeof(one)); \
         } \
+        if (nLines == 0 && current_batch < (uint64_t)nLinesMax) { \
+             ramp_up_counter++; \
+             if (ramp_up_counter >= (uint64_t)nWorkersMax) { \
+                 current_batch <<= 1; \
+                 if (current_batch > (uint64_t)nLinesMax) current_batch = nLinesMax; \
+                 atomic_store_release(&state->signed_batch_size, -(int64_t)current_batch); \
+                 ramp_up_counter = 0; \
+             } \
+        } \
         if ((local_write_idx & 1023) == 0) DO_SPAWN_CHECK(); \
         local_count = 0; \
     } while(0)
@@ -307,18 +315,20 @@ static int ring_scanner_main(int argc, char **argv) {
         int64_t sbatch = atomic_load_relaxed(&state->signed_batch_size);
         uint64_t target = (sbatch <= 0) ? current_batch : (uint64_t)llabs(sbatch);
 
-        // FIX: Poll before read to handle non-blocking requirements without O_NONBLOCK
+        // Poll Loop with Timeout Flush
         while(1) {
             struct pollfd pfd = { .fd = fd, .events = POLLIN };
-            // 1ms timeout to check urgent flag if idle
-            int ret = poll(&pfd, 1, 1);
+            int ret = poll(&pfd, 1, 1); // 1ms timeout
             
             if (ret > 0) break; // Data ready
             
-            // Check urgent/spawn even if no data
-            if (local_count > 0 && atomic_load_relaxed(&state->urgent_flag)) FLUSH_BATCH();
+            // Timeout: Flush if pending data exists
+            if (local_count > 0) {
+                 FLUSH_BATCH();
+                 batch_start = scan_head_offset;
+            }
             
-            if (atomic_load_acquire(&state->ingest_complete)) break; // Force read to hit 0
+            if (atomic_load_acquire(&state->ingest_complete)) break; 
             if (ret < 0 && errno != EINTR) break; 
         }
 
@@ -332,7 +342,7 @@ static int ring_scanner_main(int argc, char **argv) {
         if (n == 0) {
             if (local_count > 0) {
                 FLUSH_BATCH();
-                batch_start = current_file_offset;
+                batch_start = scan_head_offset;
             }
             if (is_regular || atomic_load_acquire(&state->ingest_complete)) break;
             usleep(100); 
@@ -341,28 +351,19 @@ static int ring_scanner_main(int argc, char **argv) {
 
         // --- CALIBRATION (First Chunk) ---
         if (first_chunk && nLines == 0 && n > 0) {
+            size_t limit = (n > 65536) ? 65536 : n;
             size_t calib_lines = 0;
             void *p = buf;
-            // Cap calibration scan at saturation point
-            size_t max_calib = (uint64_t)nWorkersMax * (uint64_t)nLinesMax;
-            
             while (1) {
-                void *nl = memchr(p, delim, (buf + n) - (char*)p);
+                void *nl = memchr(p, delim, (buf + limit) - (char*)p);
                 if (!nl) break;
                 calib_lines++;
-                if (calib_lines >= max_calib) break; // Enough data found
                 p = (char*)nl + 1;
             }
-            
             if (calib_lines > 0) {
-                uint64_t total_est = calib_lines;
-                // If we didn't scan the whole chunk because we hit cap, don't ratio
-                if (calib_lines < max_calib) {
-                     // Ratio estimation only if we scanned whole chunk
-                     // Actually, just using what we found is safer/simpler for initial batch
-                }
-                
-                uint64_t ideal = calib_lines / nWorkers;
+                double ratio = (double)n / limit;
+                uint64_t total_est = calib_lines * ratio;
+                uint64_t ideal = total_est / nWorkers;
                 if (ideal < 1) ideal = 1;
                 if (ideal > (uint64_t)nLinesMax) ideal = nLinesMax;
                 
@@ -383,20 +384,24 @@ static int ring_scanner_main(int argc, char **argv) {
                 local_count++;
                 total_scanned++;
                 p = nl + 1;
+                
+                scan_head_offset = current_file_offset + (uint64_t)((char*)p - buf);
 
-                if (local_count >= target || atomic_load_relaxed(&state->urgent_flag)) {
+                if (local_count >= target) {
+                    // Backpressure check
                     while (local_write_idx - atomic_load_acquire(&state->read_idx) >= RING_SIZE) {
-                        if (atomic_load_relaxed(&state->urgent_flag)) {
-                            if (atomic_exchange(&state->urgent_flag, 0)) {
-                                uint64_t one = 1;
-                                write(evfd_data, &one, sizeof(one));
-                            }
-                        }
-                        usleep(500); 
+                         // Still check urgency if blocked
+                         if (atomic_load_relaxed(&state->urgent_flag)) {
+                             if (atomic_exchange(&state->urgent_flag, 0)) {
+                                 uint64_t one = 1;
+                                 write(evfd_data, &one, sizeof(one));
+                             }
+                         }
+                         usleep(500);
                     }
                     
                     FLUSH_BATCH();
-                    batch_start = current_file_offset + (uint64_t)(p - buf);
+                    batch_start = scan_head_offset;
                 }
             } else {
                 p = end; 
@@ -488,6 +493,7 @@ static int ring_claim_main(int argc, char **argv) {
         if (fair_share < 1) fair_share = 1;
         
         slots_to_claim = (guess < fair_share) ? guess : fair_share;
+        if (slots_to_claim > workers) slots_to_claim = workers; // Clamp to ramp-up plateau
         if (slots_to_claim > 1024) slots_to_claim = 1024; 
     }
 
@@ -623,6 +629,7 @@ static int ring_transfer_main(int argc, char **argv) {
         uint64_t fair = avail / workers;
         if (fair < 1) fair = 1;
         slots = (guess < fair) ? guess : fair;
+        if (slots > workers) slots = workers;
         if (slots > 1024) slots = 1024;
     }
 
