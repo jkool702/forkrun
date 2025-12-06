@@ -1,34 +1,12 @@
 #!/usr/bin/bash
 
-enable -f /mnt/ramdisk/forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_destroy ring_transfer lseek
+ring_test() (
 
-test_stdin_flag=true
+	(( $(enable -p | grep -F 'enable ring' | wc -l) >= 6 )) ||  enable -f forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_destroy ring_transfer lseek
 
-: "${test_stdin_flag:=false}"
+case "$1" in
 
-if ${test_stdin_flag}; then
-
-spawn_worker() {
-    (
-        {
-            ITER=0
-            Pcur=$BASHPID
-            ring_worker inc  # Register ourselves as 1 worker
-            while true; do
-                { ring_transfer $fd_read 1 || kill $Pcur ; } | :
-                [[ "$CNT" == "0" ]] && break
-                ((ITER++))
-                echo "$ITER" >./total.${1}
-            done
-            ring_worker dec  # de-register worker
-            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "???" "$ITER" "???" >./total.${1}
-            
-        } {fd_read}<test.dat
-    ) &
-    P+=($!)
-}
-else
-
+0)
 spawn_worker() {
     (
         {
@@ -38,19 +16,86 @@ spawn_worker() {
                 [[ "$CNT" == "0" ]] && break
                 ((total+=CNT))
                 echo "$total" >./total.${1}
+		echo "$CNT" >> ./count.${1}
                 ((ITER++))
-                mapfile -t -u $fd_read -n $CNT A
-                : "${A[@]}"
             done
             ring_worker dec  # de-register worker
-            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s    FINAL=%s\n' "$total" "$ITER" "$((total/ITER))" "$CNT" >./total.${1}
             
         } {fd_read}<test.dat
     ) &
     P+=($!)
 }
+;;
+1)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+		echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                mapfile -t -u $fd_read -n $CNT A
+            done
+            ring_worker dec  # de-register worker
+            printf 'TOTAL=%s    ITER=%s    AVG=%s    FINAL=%s\n' "$total" "$ITER" "$((total/ITER))" "$CNT" >./total.${1}
+            
+        } {fd_read}<test.dat
+    ) &
+    P+=($!)
+}
+;;
 
-fi
+2)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+		echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                mapfile -t -u $fd_read -n $CNT A
+                : "${A[@]}"
+            done
+            ring_worker dec  # de-register worker
+            printf 'TOTAL=%s    ITER=%s    AVG=%s    FINAL=%s\n' "$total" "$ITER" "$((total/ITER))" "$CNT" >./total.${1}
+            
+        } {fd_read}<test.dat
+    ) &
+    P+=($!)
+}
+;;
+
+*)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            Pcur=$BASHPID
+            ring_worker inc  # Register ourselves as 1 worker
+            while true; do
+                { ring_transfer $fd_read 1 || kill $Pcur ; } | :
+                ((ITER++))
+                #echo "$ITER" >./total.${1}
+            done
+            ring_worker dec  # de-register worker
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "???" "$ITER" "???" >./total.${1}
+            
+        } {fd_read}<test.dat
+    ) &
+    P+=($!)
+}
+;;
+
+esac
 
 dataN=1000000000
 
@@ -115,3 +160,5 @@ exec {fd_spawn}>&-
 exec {fd_scan}>&-
 
 cat ./total*
+)
+
