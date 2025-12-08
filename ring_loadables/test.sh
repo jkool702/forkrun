@@ -78,22 +78,23 @@ spawn_worker() {
 ;;
 
 *)
+exec {fd_splice}<><(:)
+cat test.dat >&${fd_splice} &
 spawn_worker() {
     (
         {
             ITER=0
             Pcur=$BASHPID
             ring_worker inc  # Register ourselves as 1 worker
-            while true; do
-                { ring_transfer $fd_read 1 || kill $Pcur ; } | :
+            while ring_transfer $fd_read 1; do
                 ((ITER++))
-                #echo "$ITER" >./total.${1}
+                echo "$ITER" >./count.${1}
             done
             ring_worker dec  # de-register worker
 	    echo "$ITER" >./total.${1}
             printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
             
-        } {fd_read}<test.dat
+        } {fd_read}<&${fd_splice}
     ) &
     P+=($!)
 }
