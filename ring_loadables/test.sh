@@ -2,7 +2,7 @@
 
 ring_test() (
 
-	(( $(enable -p | grep -F 'enable ring' | wc -l) >= 6 )) ||  enable -f forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_destroy ring_transfer lseek
+	(( $(enable -p | grep -F 'enable ring' | wc -l) >= 6 )) ||  enable -f forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_destroy lseek
 
 case "$1" in
 
@@ -41,6 +41,7 @@ spawn_worker() {
 		echo "$CNT" >> ./count.${1}
                 ((ITER++))
                 mapfile -t -u $fd_read -n $CNT A
+		:
             done
             ring_worker dec  # de-register worker
 	    echo "$total" >./total.${1}
@@ -126,7 +127,7 @@ export nWorkers=1
 export nWorkersMax=$(( 1 * $(nproc) ))
 
 start_time=${EPOCHREALTIME//./}
-
+sleep 0.1s
 for (( nn=0; nn<nWorkers; nn++)); do
     spawn_worker "$nn"
 done
