@@ -1,9 +1,9 @@
 // forkrun_ring.c
-// Forkrun v6.41 Ring Buffer Architecture
+// Forkrun v6.39 Ring Buffer Architecture
 // Features: Scanner-Driven Hysteresis, 3-Phase Ramp-up, Semaphore Wait Logic
 // Optimization: Ticket Lock Claiming, Hybrid Wait, Stall-Flush
 // Safety: Worker-Managed Wait Counts, Periodic Blind Pulse, EOF Trap Fix
-// Fixes: Smart Worker Spawning (Max of Bandwidth vs Backlog)
+// Fixes: Phase 1 Startup Jitter, Restored Dispatcher Structs
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -218,6 +218,7 @@ static int ring_destroy_main(int argc, char **argv) {
     } \
 } while(0)
 
+// Safety Pulse: Same as Wake, distinct macro for semantic clarity
 #define SCANNER_SAFETY_PULSE() do { \
     if (atomic_load_relaxed(&state->active_waiters) > 0) { \
         uint64_t one = 1; \
@@ -245,7 +246,7 @@ static int ring_destroy_main(int argc, char **argv) {
     local_write_idx++; \
     atomic_store_release(&state->write_idx, local_write_idx); \
     SCANNER_WAKE_WORKERS(); \
-    /* Periodic Pulse every 64 batches for safety */ \
+    /* Safety: Pulse every 64 batches to fix potential lost tokens */ \
     if ((local_write_idx & 63) == 0) SCANNER_SAFETY_PULSE(); \
 } while(0)
 
@@ -318,7 +319,7 @@ static int ring_scanner_main(int argc, char **argv) {
 
     int refill_status = STATUS_OK;
 
-    // REFILL: Use lseek to handle boundaries cleanly (Seekable Input Required)
+    // REFILL: Use lseek to handle boundaries cleanly
     #define REFILL_BUFFER() ({ \
         refill_status = STATUS_OK; \
         uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf); \
@@ -413,27 +414,18 @@ static int ring_scanner_main(int argc, char **argv) {
     }
     finish_phase_1:
 
-    // Prepare Phase 2 (Always Execute)
-    atomic_store_release(&state->batch_change_idx, local_write_idx);
-    atomic_store_release(&state->signed_batch_size, -(int64_t)L);
+    // Prepare Phase 2
+    if (refill_status != STATUS_EOF) {
+        atomic_store_release(&state->batch_change_idx, local_write_idx);
+        atomic_store_release(&state->signed_batch_size, -(int64_t)L);
 
-    // Calculate worker count: Max of (Bandwidth vs Backlog)
-    // 1. Bandwidth Strategy (L based)
-    uint64_t saturation_point = 2048;
-    if (saturation_point > Lmax) saturation_point = Lmax;
-    uint64_t w_bandwidth = 1 + ((L * ((uint64_t)nWorkersMax - 1)) / saturation_point);
-
-    // 2. Backlog Strategy (Ns based) - Spawns 1 worker per 16 pending items
-    uint64_t w_backlog = (Ns > 0) ? (1 + (Ns / 16)) : 1;
-
-    // Take Max
-    uint64_t target_W = (w_backlog > w_bandwidth) ? w_backlog : w_bandwidth;
-    if (target_W > (uint64_t)nWorkersMax) target_W = nWorkersMax;
-
-    if (fd_spawn >= 0 && target_W > W) {
-        dprintf(fd_spawn, "%lu\n", target_W - W);
-        W = target_W;
-        atomic_store_relaxed(&state->active_workers, W);
+        uint64_t target_W = 1 + ((L * ((uint64_t)nWorkersMax - 1)) / Lmax);
+        if (target_W > (uint64_t)nWorkersMax) target_W = nWorkersMax;
+        if (fd_spawn >= 0 && target_W > W) {
+            dprintf(fd_spawn, "%lu\n", target_W - W);
+            W = target_W;
+            atomic_store_relaxed(&state->active_workers, W);
+        }
     }
 
     // Phase 2: Quadratic with Stall Meter
@@ -811,4 +803,3 @@ int setup_builtin_forkrun_ring(void) {
     add_builtin(&lseek_struct, 1);
     return 0;
 }
-

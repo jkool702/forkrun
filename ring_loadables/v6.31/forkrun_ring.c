@@ -1,9 +1,9 @@
 // forkrun_ring.c
-// Forkrun v6.41 Ring Buffer Architecture
+// Forkrun v6.31 Ring Buffer Architecture
 // Features: Scanner-Driven Hysteresis, 3-Phase Ramp-up, Semaphore Wait Logic
-// Optimization: Ticket Lock Claiming, Hybrid Wait, Stall-Flush
-// Safety: Worker-Managed Wait Counts, Periodic Blind Pulse, EOF Trap Fix
-// Fixes: Smart Worker Spawning (Max of Bandwidth vs Backlog)
+// Optimization: Stall Meter, Clamped CAS, Stall-Flush
+// Safety: Periodic "Blind Pulse", EOF Trap Fix
+// Fixes: Buffer Boundary Data Loss (memmove), Pointer Overhead in Byte Limit
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -102,8 +102,7 @@ struct SharedState {
     char pad1[32];
 
     uint16_t stride_ring[RING_SIZE] ALIGNED(4096);
-    // offset_ring uses int64_t for sign-bit metadata (MSB=Partial Batch)
-    int64_t offset_ring[RING_SIZE] ALIGNED(4096);
+    uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
 };
 
 static struct SharedState *state = NULL;
@@ -210,14 +209,19 @@ static int ring_destroy_main(int argc, char **argv) {
 // ========================= SCANNER ============================
 // ==============================================================
 
-// WAKE: Check if anyone is waiting, then write. Do NOT decrement.
+// Standard Wake: Decrements waiter count, writes 1
 #define SCANNER_WAKE_WORKERS() do { \
-    if (atomic_load_relaxed(&state->active_waiters) > 0) { \
-        uint64_t one = 1; \
-        write(evfd_data, &one, sizeof(one)); \
+    uint32_t w = atomic_load_relaxed(&state->active_waiters); \
+    if (w > 0) { \
+        if (atomic_compare_exchange(&state->active_waiters, &w, w - 1)) { \
+            uint64_t one = 1; \
+            atomic_thread_fence_release(); \
+            write(evfd_data, &one, sizeof(one)); \
+        } \
     } \
 } while(0)
 
+// Safety Pulse: Blindly writes 1 if waiters exist (Does not decrement)
 #define SCANNER_SAFETY_PULSE() do { \
     if (atomic_load_relaxed(&state->active_waiters) > 0) { \
         uint64_t one = 1; \
@@ -238,14 +242,12 @@ static int ring_destroy_main(int argc, char **argv) {
         SCANNER_WAKE_WORKERS(); \
         usleep(100); \
     } \
-    int64_t packed = (int64_t)batch_start; \
-    if (cnt != L) packed |= (int64_t)(1ULL << 63); /* Set Dirty Flag */ \
+    uint64_t packed = ((uint64_t)(cnt) << 48) | batch_start; \
     state->offset_ring[local_write_idx & RING_MASK] = packed; \
     state->stride_ring[local_write_idx & RING_MASK] = (uint16_t)(cnt); \
     local_write_idx++; \
     atomic_store_release(&state->write_idx, local_write_idx); \
     SCANNER_WAKE_WORKERS(); \
-    /* Periodic Pulse every 64 batches for safety */ \
     if ((local_write_idx & 63) == 0) SCANNER_SAFETY_PULSE(); \
 } while(0)
 
@@ -308,9 +310,8 @@ static int ring_scanner_main(int argc, char **argv) {
     char *p = buf;
     char *end = buf;
 
-    // Track offsets absolutely
-    uint64_t buf_base_offset = (uint64_t)lseek(fd, 0, SEEK_CUR);
-    uint64_t batch_start = buf_base_offset;
+    uint64_t current_file_offset = (uint64_t)lseek(fd, 0, SEEK_CUR);
+    uint64_t batch_start = current_file_offset;
 
     #define STATUS_OK 0
     #define STATUS_EOF 1
@@ -318,19 +319,20 @@ static int ring_scanner_main(int argc, char **argv) {
 
     int refill_status = STATUS_OK;
 
-    // REFILL: Use lseek to handle boundaries cleanly (Seekable Input Required)
+    // REFILL: Use memmove to preserve partial lines
     #define REFILL_BUFFER() ({ \
         refill_status = STATUS_OK; \
-        uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf); \
-        if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) { } \
-        ssize_t n = read(fd, buf, CHUNK); \
+        size_t tail = (size_t)(end - p); \
+        /* Advance file offset by what we consumed before moving tail */ \
+        current_file_offset += (p - buf); \
+        if (tail > 0 && p != buf) memmove(buf, p, tail); \
+        p = buf; \
+        ssize_t n = read(fd, buf + tail, CHUNK - tail); \
         if (n > 0) { \
-            buf_base_offset = current_p_offset; \
-            p = buf; \
-            end = buf + n; \
+            end = buf + tail + n; \
         } else if (n < 0) { \
-            if (errno == EINTR) { /* retry */ } \
-            else refill_status = STATUS_EOF; \
+            if (errno == EINTR) { /* ignore */ } \
+            refill_status = STATUS_EOF; \
         } else { \
             if (is_regular || atomic_load_acquire(&state->ingest_complete)) { \
                 refill_status = STATUS_EOF; \
@@ -341,7 +343,7 @@ static int ring_scanner_main(int argc, char **argv) {
         refill_status; \
     })
 
-    // SCAN: Check nLinesMax AND nBytesMax
+    // SCAN: Add 8 bytes per line to payload for pointer overhead
     #define SCAN_BATCH(target_L) ({ \
         uint64_t lines_found = 0; \
         while (lines_found < (target_L)) { \
@@ -353,7 +355,7 @@ static int ring_scanner_main(int argc, char **argv) {
             char *nl = memchr(p, '\n', end - p); \
             if (nl) { \
                 if (BytesMax > 0 && lines_found > 0) { \
-                    uint64_t line_end_offset = buf_base_offset + (uint64_t)((nl + 1) - buf); \
+                    uint64_t line_end_offset = current_file_offset + (uint64_t)((nl + 1) - buf); \
                     uint64_t payload = line_end_offset - batch_start; \
                     uint64_t overhead = (lines_found + 1) * 8; \
                     if ((payload + overhead) > BytesMax) break; \
@@ -371,41 +373,23 @@ static int ring_scanner_main(int argc, char **argv) {
                 if (status == STATUS_STALL) break; \
             } \
         } \
+        batch_start = current_file_offset + (uint64_t)((char*)p - buf); \
         lines_found; \
     })
 
     // Phase 1: Geometric
-    int startup_retries = 0;
     while (L < Lmax) {
         for (uint64_t G = 0; G < (uint64_t)nWorkersMax; G++) {
              uint64_t cnt = SCAN_BATCH(L);
-             if (cnt > 0) {
-                 SCANNER_FLUSH(cnt);
-                 batch_start = buf_base_offset + (uint64_t)(p - buf);
-                 startup_retries = 0; // Data flow reset
-             }
+             if (cnt > 0) SCANNER_FLUSH(cnt);
 
              if (refill_status == STATUS_EOF) goto finish_phase_1;
 
              if (refill_status == STATUS_STALL) {
                  SCANNER_WAKE_WORKERS();
-
-                 // Retry if we have NO data, covering startup latency (~10ms)
-                 if (cnt == 0 && startup_retries < 20) {
-                     usleep(500);
-                     startup_retries++;
-                     G--;
-                     continue;
-                 }
-
-                 // If Partial Batch: Check 1/4 Heuristic
-                 if (cnt > 0 && cnt >= (L >> 2)) {
-                     // Sufficient data flow to keep ramping
-                     continue;
-                 }
-
-                 // Else: Too slow, transition to Phase 2
-                 goto finish_phase_1;
+                 usleep(500);
+                 G--;
+                 continue;
              }
         }
         L *= 2;
@@ -413,27 +397,18 @@ static int ring_scanner_main(int argc, char **argv) {
     }
     finish_phase_1:
 
-    // Prepare Phase 2 (Always Execute)
-    atomic_store_release(&state->batch_change_idx, local_write_idx);
-    atomic_store_release(&state->signed_batch_size, -(int64_t)L);
+    // Prepare Phase 2
+    if (refill_status != STATUS_EOF) {
+        atomic_store_release(&state->batch_change_idx, local_write_idx);
+        atomic_store_release(&state->signed_batch_size, -(int64_t)L);
 
-    // Calculate worker count: Max of (Bandwidth vs Backlog)
-    // 1. Bandwidth Strategy (L based)
-    uint64_t saturation_point = 2048;
-    if (saturation_point > Lmax) saturation_point = Lmax;
-    uint64_t w_bandwidth = 1 + ((L * ((uint64_t)nWorkersMax - 1)) / saturation_point);
-
-    // 2. Backlog Strategy (Ns based) - Spawns 1 worker per 16 pending items
-    uint64_t w_backlog = (Ns > 0) ? (1 + (Ns / 16)) : 1;
-
-    // Take Max
-    uint64_t target_W = (w_backlog > w_bandwidth) ? w_backlog : w_bandwidth;
-    if (target_W > (uint64_t)nWorkersMax) target_W = nWorkersMax;
-
-    if (fd_spawn >= 0 && target_W > W) {
-        dprintf(fd_spawn, "%lu\n", target_W - W);
-        W = target_W;
-        atomic_store_relaxed(&state->active_workers, W);
+        uint64_t target_W = 1 + ((L * ((uint64_t)nWorkersMax - 1)) / Lmax);
+        if (target_W > (uint64_t)nWorkersMax) target_W = nWorkersMax;
+        if (fd_spawn >= 0 && target_W > W) {
+            dprintf(fd_spawn, "%lu\n", target_W - W);
+            W = target_W;
+            atomic_store_relaxed(&state->active_workers, W);
+        }
     }
 
     // Phase 2: Quadratic with Stall Meter
@@ -446,12 +421,9 @@ static int ring_scanner_main(int argc, char **argv) {
 
         for (uint64_t G = 0; G < G0; G++) {
             uint64_t cnt = SCAN_BATCH(L);
-            if (cnt > 0) {
-                SCANNER_FLUSH(cnt);
-                batch_start = buf_base_offset + (uint64_t)(p - buf);
-            }
+            if (cnt > 0) SCANNER_FLUSH(cnt);
 
-            // Stall Meter
+            // Stall Meter: Also counts byte-limited batches as "not full"
             if (cnt < L) {
                 stall_meter = (stall_meter + 31) >> 1;
             } else {
@@ -510,8 +482,7 @@ static int ring_scanner_main(int argc, char **argv) {
     finish_phase_2:
 
     // Sentinel
-    uint64_t final_sentinel_offset = buf_base_offset + (uint64_t)(p - buf);
-    state->offset_ring[local_write_idx & RING_MASK] = (int64_t)final_sentinel_offset | (int64_t)(1ULL << 63);
+    state->offset_ring[local_write_idx & RING_MASK] = ((uint64_t)0 << 48) | current_file_offset;
     state->stride_ring[local_write_idx & RING_MASK] = 0;
     local_write_idx++;
     atomic_store_release(&state->write_idx, local_write_idx);
@@ -551,7 +522,7 @@ static int ring_claim_main(int argc, char **argv) {
         uint64_t r_curr = atomic_load_relaxed(&state->read_idx);
 
         if (r_curr >= w_snap) {
-            // WAIT STATE
+            // WAIT STATE (Case 1: No Ticket Yet)
             if (spin_count < 100) {
                 cpu_relax();
                 spin_count++;
@@ -571,10 +542,7 @@ static int ring_claim_main(int argc, char **argv) {
                 if (pfds[0].revents & POLLIN) {
                     uint64_t v;
                     ssize_t s = read(evfd_data, &v, sizeof(v));
-                    if (s == sizeof(v)) {
-                        // Got token. Break to Decrement active_waiters and Retry Claim.
-                        break;
-                    }
+                    if (s == sizeof(v)) break; // Got token, retry claim
                 }
 
                 if (pfds[1].revents & POLLIN) {
@@ -588,7 +556,6 @@ static int ring_claim_main(int argc, char **argv) {
                     break;
                 }
             }
-            atomic_fetch_sub(&state->active_waiters, 1);
             spin_count = 0;
             continue; // Loop back to try claim again
         }
@@ -625,10 +592,11 @@ static int ring_claim_main(int argc, char **argv) {
         my_read_idx = atomic_fetch_add(&state->read_idx, claim_count);
 
         // 4. CHECK: Did we overshoot? (Case 2 detection)
+        // Note: We check against current write_idx, not snap
         uint64_t w_fresh = atomic_load_acquire(&state->write_idx);
 
         if (my_read_idx + claim_count > w_fresh) {
-             // Case 2: Have Ticket, Need Data.
+             // Case 2: We have a ticket, but data isn't ready.
              atomic_fetch_add(&state->active_waiters, 1);
 
              // Wait Loop for Data
@@ -641,7 +609,7 @@ static int ring_claim_main(int argc, char **argv) {
                  int ret = poll(pfds, 2, -1);
 
                  if (ret > 0 && (pfds[0].revents & POLLIN)) {
-                     // Check if OUR data is ready. Do NOT read token here (Peek).
+                     // Do NOT read. Just loop check.
                      if (my_read_idx + claim_count > atomic_load_acquire(&state->write_idx)) {
                          usleep(1);
                      }
@@ -672,34 +640,23 @@ static int ring_claim_main(int argc, char **argv) {
             uint64_t Ib = atomic_load_relaxed(&state->batch_change_idx);
             if (my_read_idx > Ib) {
                  int64_t target = -sbatch;
-                 atomic_compare_exchange(&state->signed_batch_size, &sbatch, target);
+                 atomic_store_relaxed(&state->signed_batch_size, target);
             }
         }
 
         break; // Claim successful
     }
 
-    // --- 5. PROCESS (Unpack logic) ---
+    // --- 5. PROCESS ---
     uint64_t final_lines = 0;
     uint64_t final_offset = 0;
 
-    int64_t packed_val = state->offset_ring[my_read_idx & RING_MASK];
-
-    // Mask off MSB to get absolute offset
-    final_offset = (uint64_t)(packed_val & ~(1ULL << 63));
+    uint64_t packed_start = state->offset_ring[my_read_idx & RING_MASK];
+    final_offset = packed_start & 0xFFFFFFFFFFFFULL;
 
     if (claim_count == 1) {
-        // Fast Path Optimization:
-        // If sbatch > 0 (Fast Mode) AND MSB is clear (Full Batch), use sbatch.
-        int64_t sbatch_now = atomic_load_relaxed(&state->signed_batch_size);
-        if (sbatch_now > 0 && packed_val >= 0) {
-            final_lines = (uint64_t)sbatch_now;
-        } else {
-            // Partial or Slow Path: Read stride
-            final_lines = state->stride_ring[my_read_idx & RING_MASK];
-        }
+        final_lines = packed_start >> 48;
     } else {
-        // Multi-claim: Must sum strides
         for (uint64_t i = 0; i < claim_count; i++) {
              final_lines += state->stride_ring[(my_read_idx + i) & RING_MASK];
         }
@@ -811,4 +768,3 @@ int setup_builtin_forkrun_ring(void) {
     add_builtin(&lseek_struct, 1);
     return 0;
 }
-
