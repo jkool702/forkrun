@@ -2,7 +2,7 @@
 
 ring_test() (
 
-	(( $(enable -p | grep -F 'enable ring' | wc -l) >= 6 )) ||  enable -f forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_destroy lseek
+	(( $(enable -p | grep -F 'enable ring' | wc -l) >= 6 )) ||  enable -f forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_exec ring_destroy lseek
 
 case "$1" in
 
@@ -161,6 +161,29 @@ spawn_worker() {
 ;;
 
 6)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+                echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                ring_exec $fd_read $CNT ':'
+            done
+            ring_worker dec  # de-register worker
+	    echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
+
+        } {fd_read}<test.dat
+    ) &
+    P+=($!)
+}
+;;
+7)
 
 ff() {
 sha1sum "${@}"
@@ -238,7 +261,7 @@ esac
 [[ $(echo ./total.* ./count.* ./final.* ) ]] && \rm ./total.* ./count.* ./final.*
 
 case "$1" in
-6)
+7)
 exec {fd_scan}</mnt/ramdisk/flist
 dataN="$(wc -l /mnt/ramdisk/flist)"
 ;;
@@ -266,9 +289,9 @@ P=()
 
 export nWorkers=1
 export nWorkersMax=$(( 1 * $(nproc) ))
-export nBytesMax=ARG_MAX
-export nLinesMax=1024
-export nBatchMax=1024
+#export nBytesMax=ARG_MAX
+export nLinesMax=4096
+#export nBatchMax=4096
 
 start_time=${EPOCHREALTIME//./}
 
