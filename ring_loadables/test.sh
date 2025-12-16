@@ -67,7 +67,7 @@ spawn_worker() {
                 ((ITER++))
                 mapfile -t -u $fd_read -n $CNT A
                 (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
-                : ${A[@]}
+                : "${A[@]}"
             done
             ring_worker dec  # de-register worker
 	    echo "$total" >./total.${1}
