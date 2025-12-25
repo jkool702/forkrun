@@ -185,23 +185,6 @@ spawn_worker() {
 ;;
 7)
 
-ff() {
-sha1sum "${@}"
-sha256sum "${@}"
-sha512sum "${@}"
-sha224sum "${@}"
-sha384sum "${@}"
-md5sum "${@}"
-sum -s "${@}"
-sum -r "${@}"
-cksum "${@}"
-b2sum "${@}"
-cksum -a sm3 "${@}"
-xxhsum "${@}"
-xxhsum -H3 "${@}"
-}
-export -f ff
-
 spawn_worker() {
   {
     (
@@ -230,7 +213,35 @@ spawn_worker() {
   } {fd1}>&1 {fd2}>&2
 }
 ;;
+8)
 
+spawn_worker() {
+  {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            exec {fd_count}<><(:)
+            #{ cat <&$fd_count | wc -l > ./count.final.${1} } &
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+                echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                ring_exec $fd_read $CNT 'ff'
+            done
+            ring_worker dec  # de-register worker
+            #exec {fd_count}>&-
+	    echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
+
+        } {fd_read}</mnt/ramdisk/flist 1>&${fd1} 2>&${fd2}
+    ) &
+    P+=($!)
+  } {fd1}>&1 {fd2}>&2
+}
+;;
 *)
 exec {fd_splice}<><(:)
 cat test.dat >&${fd_splice} &
@@ -260,26 +271,40 @@ esac
 
 [[ $(echo ./total.* ./count.* ./final.* ) ]] && \rm ./total.* ./count.* ./final.*
 
-case "$1" in
-7)
-exec {fd_scan}</mnt/ramdisk/flist
-dataN="$(wc -l /mnt/ramdisk/flist)"
-;;
-*)
 
 dataN=1000000000
 
 echo "Generating test data..." >&2
 case "$1" in
+	7|8)
+        dataN="$(wc -l /mnt/ramdisk/flist)"
+	    exec {fd_scan}</mnt/ramdisk/flist
+
+ff() {
+sha1sum "${@}"
+sha256sum "${@}"
+sha512sum "${@}"
+sha224sum "${@}"
+sha384sum "${@}"
+md5sum "${@}"
+sum -s "${@}"
+sum -r "${@}"
+cksum "${@}"
+b2sum "${@}"
+cksum -a sm3 "${@}"
+xxhsum "${@}"
+xxhsum -H3 "${@}"
+}
+        export -f ff
+    ;;
 	4|5)
 		seq $dataN >test.dat
+        exec {fd_scan}<test.dat
 	;;
 	*)
 		yes $'\n' | head -n $dataN > test.dat
+        exec {fd_scan}<test.dat
 	;;
-esac
-exec {fd_scan}<test.dat
-;;
 esac
 
 
@@ -288,7 +313,7 @@ total=0
 P=()
 
 export nWorkers=1
-export nWorkersMax=$(( 1 * $(nproc) ))
+export nWorkersMax=$(( $(nproc) ))
 #export nBytesMax=ARG_MAX
 export nLinesMax=4096
 #export nBatchMax=4096

@@ -1,8 +1,9 @@
 // forkrun_ring.c
-// Forkrun v6.55 Ring Buffer Architecture
-// Features: Escrow Work-Stealing, Cache-Aligned State, Unified Wait Logic
-// Optimization: Raw Buffered I/O for Exec, No-Rollback
-// Author: jkool702 / Refactored by AI
+// Forkrun v6.53 Ring Buffer Architecture
+// Features: Scanner-Driven Hysteresis, 3-Phase Ramp-up, Semaphore Wait Logic
+// Optimization: Ticket Lock Claiming, Hybrid Wait, Stall-Flush
+// Safety: Worker-Managed Wait Counts, Periodic Blind Pulse, EOF Trap Fix
+// Fixes: Truncation fixed, ring_exec manual struct construction
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -89,23 +90,19 @@ static int lseek_main(int argc, char ** argv);
 #define CACHE_LINE_SIZE 256
 #define ALIGNED(x) __attribute__((aligned(x > CACHE_LINE_SIZE ? x : CACHE_LINE_SIZE)))
 
-// Padding to prevent False Sharing between Read (Workers) and Write (Scanner)
 struct SharedState {
-    // --- WORKER HOT CACHE LINE ---
     uint64_t read_idx ALIGNED(CACHE_LINE_SIZE);
     uint64_t active_workers;
     uint64_t total_lines_consumed;
     uint32_t active_waiters; 
-    char pad0[128]; // Explicit padding
+    char pad0[32];
 
-    // --- SCANNER HOT CACHE LINE ---
     uint64_t write_idx ALIGNED(CACHE_LINE_SIZE);
     int64_t  signed_batch_size; 
     uint64_t batch_change_idx;  
     uint8_t  ingest_complete;
-    char pad1[128]; // Explicit padding
+    char pad1[32];
 
-    // --- DATA RINGS ---
     uint16_t stride_ring[RING_SIZE] ALIGNED(4096);
     int64_t offset_ring[RING_SIZE] ALIGNED(4096);
 };
@@ -113,13 +110,18 @@ struct SharedState {
 static struct SharedState *state = NULL;
 static int evfd_data = -1;
 static int evfd_eof  = -1;
-static int fd_escrow[2] = { -1, -1 }; // [0]=Read, [1]=Write
 
-struct EscrowPacket {
-    uint64_t idx;
-    uint64_t cnt;
-};
+static inline uint64_t fast_isqrt(uint64_t val) __attribute__((hot));
+static inline uint64_t fast_isqrt(uint64_t val) {
+    if (val < 2) return val;
+    int log2_val = 63 - __builtin_clzll(val);
+    int k = (log2_val + 1) >> 1; 
+    uint64_t base = 1ULL << k;
+    uint64_t remainder = val ^ (1ULL << log2_val);
+    return base + (remainder >> (k + 1));
+}
 
+static inline void u64toa(uint64_t value, char* buffer) __attribute__((hot));
 static inline void u64toa(uint64_t value, char* buffer) {
     char temp[24];
     char *p = temp;
@@ -142,7 +144,6 @@ static inline void u64toa(uint64_t value, char* buffer) {
 static int ring_init_main(int argc, char **argv) {
     (void)argc; (void)argv;
     if (state != NULL) {
-        // Soft reset
         atomic_store_relaxed(&state->read_idx, 0);
         atomic_store_relaxed(&state->write_idx, 0);
         atomic_store_relaxed(&state->signed_batch_size, 0);
@@ -151,12 +152,6 @@ static int ring_init_main(int argc, char **argv) {
         atomic_store_relaxed(&state->active_waiters, 0);
         atomic_store_relaxed(&state->batch_change_idx, 0);
         atomic_store_relaxed(&state->ingest_complete, 0);
-        
-        // Flush escrow
-        if (fd_escrow[0] >= 0) {
-            char dump[1024];
-            while(read(fd_escrow[0], dump, sizeof(dump)) > 0) {}
-        }
         return EXECUTION_SUCCESS;
     }
 
@@ -175,17 +170,6 @@ static int ring_init_main(int argc, char **argv) {
 
     evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     evfd_eof  = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-    
-    // Create Escrow Pipe
-    if (pipe(fd_escrow) < 0) {
-        builtin_error("ring_init: pipe failed");
-        return EXECUTION_FAILURE;
-    }
-    // Set nonblock/cloexec
-    fcntl(fd_escrow[0], F_SETFL, O_NONBLOCK);
-    fcntl(fd_escrow[1], F_SETFL, O_NONBLOCK);
-    fcntl(fd_escrow[0], F_SETFD, FD_CLOEXEC);
-    fcntl(fd_escrow[1], F_SETFD, FD_CLOEXEC);
 
     if (evfd_data < 0 || evfd_eof < 0) {
         builtin_error("ring_init: eventfd failed");
@@ -211,8 +195,6 @@ static int ring_destroy_main(int argc, char **argv) {
     }
     if (evfd_data >= 0) { close(evfd_data); evfd_data = -1; }
     if (evfd_eof >= 0)  { close(evfd_eof);  evfd_eof = -1; }
-    if (fd_escrow[0] >= 0) { close(fd_escrow[0]); fd_escrow[0] = -1; }
-    if (fd_escrow[1] >= 0) { close(fd_escrow[1]); fd_escrow[1] = -1; }
     
     unbind_variable("EVFD_RING_DATA");
     unbind_variable("EVFD_RING_EOF");
@@ -226,7 +208,12 @@ static int ring_destroy_main(int argc, char **argv) {
     } \
 } while(0)
 
-#define SCANNER_SAFETY_PULSE() SCANNER_WAKE_WORKERS()
+#define SCANNER_SAFETY_PULSE() do { \
+    if (atomic_load_relaxed(&state->active_waiters) > 0) { \
+        uint64_t one = 1; \
+        write(evfd_data, &one, sizeof(one)); \
+    } \
+} while(0)
 
 #define SCANNER_FLUSH(cnt) do { \
     if (batch_start & 0xFFFF000000000000ULL) { \
@@ -310,6 +297,7 @@ static int ring_scanner_main(int argc, char **argv) {
     char *p = buf;
     char *end = buf;
     
+    // Track offsets absolutely
     uint64_t buf_base_offset = (uint64_t)lseek(fd, 0, SEEK_CUR);
     uint64_t batch_start = buf_base_offset;
 
@@ -374,7 +362,7 @@ static int ring_scanner_main(int argc, char **argv) {
         lines_found; \
     })
 
-    // Phase 1: Geometric Ramp-up
+    // Phase 1: Geometric
     int startup_retries = 0;
     while (L < Lmax) {
         for (uint64_t G = 0; G < (uint64_t)nWorkersMax; G++) {
@@ -524,27 +512,11 @@ static int ring_claim_main(int argc, char **argv) {
     uint64_t claim_count = 1;
     int spin_count = 0;
 
-    // ==========================================================
-    // STEP 1: ACQUIRE A RESERVATION (TICKET)
-    // ==========================================================
     while (1) {
-        // Priority 1: Check Escrow Pipe for stolen work
-        struct EscrowPacket ep;
-        // Non-blocking read. If empty, returns -1 (EAGAIN)
-        if (fd_escrow[0] >= 0 && read(fd_escrow[0], &ep, sizeof(ep)) == sizeof(ep)) {
-            my_read_idx = ep.idx;
-            claim_count = ep.cnt;
-            // Proceed to Step 2 (Verification)
-            break; 
-        }
-
-        // Priority 2: Check Global Ring
         uint64_t w_snap = atomic_load_acquire(&state->write_idx);
         uint64_t r_curr = atomic_load_relaxed(&state->read_idx);
 
         if (r_curr >= w_snap) {
-            // RING EMPTY OR CONTENTION -> WAIT STATE
-            
             if (spin_count < 100) { 
                 cpu_relax();
                 spin_count++;
@@ -553,71 +525,49 @@ static int ring_claim_main(int argc, char **argv) {
 
             atomic_fetch_add(&state->active_waiters, 1);
             
-            struct pollfd pfds[3] = { 
+            struct pollfd pfds[2] = { 
                 { .fd = evfd_data, .events = POLLIN }, 
-                { .fd = evfd_eof,  .events = POLLIN },
-                { .fd = fd_escrow[0], .events = POLLIN }
+                { .fd = evfd_eof,  .events = POLLIN } 
             };
 
             while (1) {
-                // Wait for signal
-                int ret = poll(pfds, 3, -1); // Indefinite wait
+                int ret = poll(pfds, 2, 100);
 
-                if (ret < 0) { if (errno == EINTR) continue; break; }
-
-                // Check Escrow (Higher Priority)
-                if (pfds[2].revents & POLLIN) {
-                    if (read(fd_escrow[0], &ep, sizeof(ep)) == sizeof(ep)) {
-                        my_read_idx = ep.idx;
-                        claim_count = ep.cnt;
-                        atomic_fetch_sub(&state->active_waiters, 1);
-                        goto verify_claim; // JUMP OUT
-                    }
+                if (ret == 0) {
+                    uint32_t z = 0;
+                    atomic_compare_exchange(&state->active_waiters, &z, 1);
+                    continue; 
                 }
 
-                // Check Data Signal
                 if (pfds[0].revents & POLLIN) {
                     uint64_t v; 
-                    read(evfd_data, &v, sizeof(v)); // Clear signal
-                    // Loop back to try atomic claim or escrow again
-                    break;
+                    ssize_t s = read(evfd_data, &v, sizeof(v));
+                    if (s == sizeof(v)) break; 
                 }
 
-                // Check EOF
                 if (pfds[1].revents & POLLIN) {
-                    // One last check: is there data?
                     if (atomic_load_acquire(&state->write_idx) <= atomic_load_relaxed(&state->read_idx)) {
-                         // Double check escrow before dying
-                         if (read(fd_escrow[0], &ep, sizeof(ep)) == sizeof(ep)) {
-                             my_read_idx = ep.idx;
-                             claim_count = ep.cnt;
-                             atomic_fetch_sub(&state->active_waiters, 1);
-                             goto verify_claim;
-                         }
-                         atomic_fetch_sub(&state->active_waiters, 1);
-                         bind_variable(var_count, "0", 0); 
-                         return 1; // CLEAN EXIT
+                        atomic_fetch_sub(&state->active_waiters, 1);
+                        bind_variable(var_count, "0", 0); 
+                        return 1; 
                     }
                     break; 
                 }
             }
             atomic_fetch_sub(&state->active_waiters, 1);
             spin_count = 0;
-            continue; // Retry loop
+            continue; 
         }
 
-        // --- CALCULATE BATCH SIZE (Ticket Lock Logic) ---
         int64_t sbatch = atomic_load_relaxed(&state->signed_batch_size); 
         claim_count = 1;
 
         if (sbatch < 0) {
-            // Adaptive mode
             uint64_t L_target = (uint64_t)(-sbatch);
             uint64_t Ib = atomic_load_acquire(&state->batch_change_idx);
             
-            // If we are past the change point, use new size
-            // Note: Simplification here, we don't strictly enforce mixed batches within a claim
-            
+            if (r_curr > Ib) { /* batch size */ }
+
             uint16_t L0 = state->stride_ring[r_curr & RING_MASK];
             if (L0 == 0) L0 = 1;
             uint64_t Wmax = atomic_load_relaxed(&state->active_workers); 
@@ -628,17 +578,48 @@ static int ring_claim_main(int argc, char **argv) {
             claim_count = B;
         }
 
-        // Clamp to available (Prevent standard overshoot if data exists)
         if (r_curr + claim_count > w_snap) {
             claim_count = w_snap - r_curr;
         }
         if (claim_count < 1) claim_count = 1; 
 
-        // Atomic Claim
         my_read_idx = atomic_fetch_add(&state->read_idx, claim_count);
 
-        // Check if we raced and the batch changed size retroactively? 
-        // (Minor edge case logic from v6.53 preserved)
+        uint64_t w_fresh = atomic_load_acquire(&state->write_idx);
+        
+        if (my_read_idx + claim_count > w_fresh) {
+             atomic_fetch_add(&state->active_waiters, 1);
+             
+             while (my_read_idx + claim_count > atomic_load_acquire(&state->write_idx)) {
+                 struct pollfd pfds[2] = { 
+                    { .fd = evfd_data, .events = POLLIN }, 
+                    { .fd = evfd_eof,  .events = POLLIN } 
+                 };
+                 
+                 int ret = poll(pfds, 2, -1);
+                 
+                 if (ret > 0 && (pfds[0].revents & POLLIN)) {
+                     if (my_read_idx + claim_count > atomic_load_acquire(&state->write_idx)) {
+                         usleep(1);
+                     }
+                 }
+
+                 if (pfds[1].revents & POLLIN) {
+                      uint64_t w_final = atomic_load_acquire(&state->write_idx);
+                      if (w_final <= my_read_idx) {
+                          atomic_fetch_sub(&state->active_waiters, 1);
+                          bind_variable(var_count, "0", 0);
+                          return 1;
+                      }
+                      if (w_final < my_read_idx + claim_count) {
+                          claim_count = w_final - my_read_idx;
+                      }
+                      break; 
+                 }
+             }
+             atomic_fetch_sub(&state->active_waiters, 1);
+        }
+
         if (sbatch < 0) {
             uint64_t Ib = atomic_load_relaxed(&state->batch_change_idx);
             if (my_read_idx > Ib) {
@@ -649,89 +630,12 @@ static int ring_claim_main(int argc, char **argv) {
         break; 
     }
 
-verify_claim:;
-    // ==========================================================
-    // STEP 2: VERIFY DATA AVAILABILITY & OVERSHOOT HANDLING
-    // ==========================================================
-    // We possess 'my_read_idx' with length 'claim_count'. 
-    // This is ours. No one else can take it.
-    // However, the Scanner may not have written it yet.
-
-    uint64_t w_fresh = atomic_load_acquire(&state->write_idx);
-        
-    if (my_read_idx + claim_count > w_fresh) {
-         // OVERSHOOT DETECTED
-         atomic_fetch_add(&state->active_waiters, 1);
-         
-         while (1) {
-             uint64_t w_curr = atomic_load_acquire(&state->write_idx);
-
-             // A: SOME DATA IS READY (Work Stealing Opportunity)
-             if (w_curr > my_read_idx) {
-                 uint64_t avail = w_curr - my_read_idx;
-                 
-                 // If we have LESS than we claimed
-                 if (avail < claim_count) {
-                     uint64_t remain = claim_count - avail;
-                     
-                     // 1. Escrow the remainder
-                     struct EscrowPacket ep;
-                     ep.idx = my_read_idx + avail;
-                     ep.cnt = remain;
-                     write(fd_escrow[1], &ep, sizeof(ep));
-                     
-                     // 2. Adjust our local claim
-                     claim_count = avail;
-
-                     // 3. Wake others (Pipe is readable, but pulse evfd for good measure)
-                     uint64_t one = 1;
-                     write(evfd_data, &one, sizeof(one));
-                 }
-                 // If avail >= claim_count, we are good.
-                 break; // Proceed to processing
-             }
-
-             // B: NO DATA READY (Wait)
-             struct pollfd pfds[2] = { 
-                { .fd = evfd_data, .events = POLLIN }, 
-                { .fd = evfd_eof,  .events = POLLIN } 
-             };
-             
-             int ret = poll(pfds, 2, -1);
-             
-             if (ret > 0 && (pfds[0].revents & POLLIN)) {
-                 uint64_t v; read(evfd_data, &v, sizeof(v));
-                 // Loop back and check w_curr
-             }
-
-             if (pfds[1].revents & POLLIN) {
-                  // EOF Handling
-                  uint64_t w_final = atomic_load_acquire(&state->write_idx);
-                  if (w_final <= my_read_idx) {
-                      // Phantom claim (Scanner died before filling our reservation)
-                      atomic_fetch_sub(&state->active_waiters, 1);
-                      bind_variable(var_count, "0", 0);
-                      return 1;
-                  }
-                  if (w_final < my_read_idx + claim_count) {
-                      claim_count = w_final - my_read_idx;
-                  }
-                  break; 
-             }
-         }
-         atomic_fetch_sub(&state->active_waiters, 1);
-    }
-
-    // ==========================================================
-    // STEP 3: PROCESS BATCH
-    // ==========================================================
     uint64_t final_lines = 0;
     uint64_t final_offset = 0;
 
     int64_t packed_val = state->offset_ring[my_read_idx & RING_MASK];
     final_offset = (uint64_t)(packed_val & ~(1ULL << 63));
 
-    // Calculate line count
     if (claim_count == 1) {
         int64_t sbatch_now = atomic_load_relaxed(&state->signed_batch_size);
         if (sbatch_now > 0 && packed_val >= 0) {
@@ -757,6 +661,79 @@ verify_claim:;
         lseek(fd_read, (off_t)final_offset, SEEK_SET);
     }
     return 0;
+}
+
+static int ring_exec_main(int argc, char **argv) {
+    if (argc < 4) {
+        builtin_error("ring_exec: usage: ring_exec <FD> <COUNT> <COMMAND> [args...]");
+        return EXECUTION_FAILURE;
+    }
+
+    int fd = atoi(argv[1]);
+    uint64_t count = (uint64_t)atoll(argv[2]);
+
+    if (count == 0) return EXECUTION_SUCCESS;
+
+    int static_argc = argc - 3;
+    size_t total_args = static_argc + count + 1; 
+    char **exec_argv = xmalloc(total_args * sizeof(char *));
+
+    for (int i = 0; i < static_argc; i++) {
+        exec_argv[i] = argv[3 + i]; 
+    }
+
+    int fd_dup = dup(fd);
+    if (fd_dup < 0) { xfree(exec_argv); return EXECUTION_FAILURE; }
+    
+    FILE *fp = fdopen(fd_dup, "r");
+    if (!fp) { close(fd_dup); xfree(exec_argv); return EXECUTION_FAILURE; }
+
+    char *line = NULL;
+    size_t line_cap = 0;
+    ssize_t line_len;
+    uint64_t lines_read = 0;
+
+    while (lines_read < count && (line_len = getline(&line, &line_cap, fp)) > 0) {
+        if (line_len > 0 && line[line_len - 1] == '\n') {
+            line[line_len - 1] = '\0';
+        }
+        exec_argv[static_argc + lines_read] = savestring(line);
+        lines_read++;
+    }
+
+    free(line); 
+    fclose(fp); 
+
+    if (lines_read == 0) {
+        xfree(exec_argv);
+        return EXECUTION_SUCCESS;
+    }
+
+    exec_argv[static_argc + lines_read] = NULL;
+
+    WORD_LIST *wl = NULL;
+    for (int64_t i = static_argc + lines_read - 1; i >= 0; i--) {
+        WORD_DESC *wd = make_bare_word(exec_argv[i]);
+        wd->flags |= W_QUOTED; 
+        wl = make_word_list(wd, wl);
+        if (i >= static_argc) xfree(exec_argv[i]);
+    }
+    xfree(exec_argv);
+
+    COMMAND *cmd = (COMMAND *)xmalloc(sizeof(COMMAND));
+    memset(cmd, 0, sizeof(COMMAND));
+    cmd->type = cm_simple;
+    
+    SIMPLE_COM *sc = (SIMPLE_COM *)xmalloc(sizeof(SIMPLE_COM));
+    memset(sc, 0, sizeof(SIMPLE_COM));
+    sc->words = wl;
+    
+    cmd->value.Simple = sc;
+
+    int result = execute_command(cmd);
+    
+    dispose_command(cmd);
+    return result;
 }
 
 static int ring_worker_main(int argc, char **argv) {
@@ -807,147 +784,6 @@ static int lseek_main(int argc, char ** argv) {
         printf("%lld\n", (long long)new_offset);
     }
     return EXECUTION_SUCCESS;
-}
-
-// Optimized ring_exec: Raw buffering, no stdio, no rollback
-static int ring_exec_main(int argc, char **argv) {
-    if (argc < 4) {
-        builtin_error("ring_exec: usage: ring_exec <FD> <COUNT> <COMMAND> [args...]");
-        return EXECUTION_FAILURE;
-    }
-
-    int fd = atoi(argv[1]);
-    uint64_t count = (uint64_t)atoll(argv[2]);
-
-    if (count == 0) return EXECUTION_SUCCESS;
-
-    // --- 1. Setup Static Args (Command + Initial Args) ---
-    int static_argc = argc - 3;
-    
-    WORD_LIST *head = NULL;
-    WORD_LIST *tail = NULL;
-
-    // Add Command and Static Args to WORD_LIST
-    for (int i = 0; i < static_argc; i++) {
-        WORD_DESC *wd = make_bare_word(argv[3 + i]);
-        WORD_LIST *wl = make_word_list(wd, NULL);
-        if (!head) head = wl;
-        else tail->next = wl;
-        tail = wl;
-    }
-
-    // --- 2. Buffered Read & Parse ---
-    size_t buf_size = 65536; // 64KB chunks
-    char *buf = xmalloc(buf_size);
-    ssize_t n_read;
-    uint64_t lines_found = 0;
-    
-    char *partial = NULL;
-    size_t partial_len = 0;
-
-    while (lines_found < count) {
-        n_read = read(fd, buf, buf_size);
-        if (n_read < 0 && errno == EINTR) continue;
-        if (n_read <= 0) break; // EOF or Error
-
-        char *p = buf;
-        char *end = buf + n_read;
-        char *line_start = p;
-
-        while (p < end && lines_found < count) {
-            // Fast scan for newline
-            char *nl = memchr(p, '\n', end - p);
-            
-            if (nl) {
-                // Found a line
-                *nl = '\0'; 
-                
-                WORD_DESC *wd;
-                if (partial) {
-                    size_t frag_len = nl - line_start;
-                    char *full_line = xmalloc(partial_len + frag_len + 1);
-                    memcpy(full_line, partial, partial_len);
-                    memcpy(full_line + partial_len, line_start, frag_len);
-                    full_line[partial_len + frag_len] = '\0';
-                    
-                    wd = make_bare_word(full_line);
-                    free(full_line);
-                    
-                    free(partial);
-                    partial = NULL;
-                    partial_len = 0;
-                } else {
-                    wd = make_bare_word(line_start);
-                }
-
-                wd->flags |= W_QUOTED; 
-                WORD_LIST *wl = make_word_list(wd, NULL);
-                if (!head) head = wl;
-                else tail->next = wl;
-                tail = wl;
-
-                lines_found++;
-                line_start = nl + 1;
-                p = nl + 1;
-            } else {
-                p = end;
-            }
-        }
-
-        // Handle leftovers in buffer
-        if (line_start < end) {
-            // If we finished count, we ignore the rest (No rollback needed)
-            if (lines_found < count) {
-                // We ran out of buffer but need more lines. 
-                // Save the partial line.
-                size_t len = end - line_start;
-                if (partial) {
-                    partial = xrealloc(partial, partial_len + len);
-                    memcpy(partial + partial_len, line_start, len);
-                    partial_len += len;
-                } else {
-                    partial = xmalloc(len);
-                    memcpy(partial, line_start, len);
-                    partial_len = len;
-                }
-            }
-        }
-    }
-
-    // If we hit EOF with a partial line, treat it as the final argument
-    if (partial && lines_found < count) {
-        // Null terminate and add
-        char *final_s = xrealloc(partial, partial_len + 1);
-        final_s[partial_len] = '\0';
-        WORD_DESC *wd = make_bare_word(final_s);
-        wd->flags |= W_QUOTED;
-        WORD_LIST *wl = make_word_list(wd, NULL);
-        if (!head) head = wl;
-        else tail->next = wl;
-        free(final_s);
-    } else if (partial) {
-        free(partial);
-    }
-    
-    free(buf);
-
-    if (!head) return EXECUTION_SUCCESS; // Nothing to run
-
-    // --- 3. Execute ---
-    COMMAND *cmd = (COMMAND *)xmalloc(sizeof(COMMAND));
-    memset(cmd, 0, sizeof(COMMAND));
-    cmd->type = cm_simple;
-    
-    SIMPLE_COM *sc = (SIMPLE_COM *)xmalloc(sizeof(SIMPLE_COM));
-    memset(sc, 0, sizeof(SIMPLE_COM));
-    sc->words = head;
-    
-    cmd->value.Simple = sc;
-
-    int result = execute_command(cmd);
-    
-    dispose_command(cmd);
-    return result;
 }
 
 static int forkrun_ring_builtin(WORD_LIST *list) {
