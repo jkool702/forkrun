@@ -2,7 +2,7 @@
 
 ring_test() (
 
- enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_exec ring_destroy ring_ingest lseek
+ enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_destroy ring_ingest ring_order lseek
 
 case "$1" in
 
@@ -163,29 +163,7 @@ spawn_worker() {
 }
 ;;
 
-6)
-spawn_worker() {
-    (
-        {
-            ITER=0
-            ring_worker inc  # Register ourselves as 1 worker
-            while ring_claim OFF CNT $fd_read; do
-                [[ "$CNT" == "0" ]] && break
-                ((total+=CNT))
-                echo "$total" >./total.${1}
-                echo "$CNT" >> ./count.${1}
-                ((ITER++))
-                ring_exec $fd_read $CNT ':' $'\n'
-            done
-            ring_worker dec  # de-register worker
-	    echo "$total" >./total.${1}
-            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
 
-        } {fd_read}<test.dat
-    ) &
-    P+=($!)
-}
-;;
 7)
 
 spawn_worker() {
@@ -217,35 +195,7 @@ spawn_worker() {
   } {fd1}>&1 {fd2}>&2
 }
 ;;
-8)
 
-spawn_worker() {
-  {
-    (
-        {
-            ITER=0
-            ring_worker inc  # Register ourselves as 1 worker
-            exec {fd_count}<><(:)
-            #{ cat <&$fd_count | wc -l > ./count.final.${1} } &
-            while ring_claim OFF CNT $fd_read; do
-                [[ "$CNT" == "0" ]] && break
-                ((total+=CNT))
-                echo "$total" >./total.${1}
-                echo "$CNT" >> ./count.${1}
-                ((ITER++))
-                ring_exec $fd_read $CNT 'ff' $'\n'
-            done
-            ring_worker dec  # de-register worker
-            #exec {fd_count}>&-
-	    echo "$total" >./total.${1}
-            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
-
-        } {fd_read}</mnt/ramdisk/flist 1>&${fd1} 2>&${fd2}
-    ) &
-    P+=($!)
-  } {fd1}>&1 {fd2}>&2
-}
-;;
 
 esac
 
@@ -280,7 +230,7 @@ xxhsum -H3 "${@}"
         export -f ff
     ;;
 	4|5)
-		seq $dataN >test.dat
+	#	seq $dataN >test.dat
         exec {fd_scan}<test.dat
 	;;
 	*)
@@ -297,7 +247,7 @@ P=()
 export nWorkers=1
 export nWorkersMax=$(( $(nproc) ))
 #export nBytesMax=ARG_MAX
-export nLinesMax=4096
+#export nLinesMax=4096
 #export nBatchMax=4096
 
 start_time=${EPOCHREALTIME//./}

@@ -1,7 +1,6 @@
-// forkrun_ring.c v6.79
+// forkrun_ring.c v6.74
 // Architecture: Universal Ingest, Zero-Copy Ring, Escrow Stealing
-// Features: Decoupled Fallow, Index-Based Reclamation, Real-Time Ordered Output
-// Fixes: Compile Error (Moved struct Interval definition to top)
+// Features: Decoupled Fallow (ring_ack), Index-Based Reclamation, No-Syscall Reporting
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -77,9 +76,9 @@ static int ring_scanner_main(int argc, char **argv);
 static int ring_claim_main(int argc, char **argv);
 static int ring_worker_main(int argc, char **argv);
 static int ring_ingest_main(int argc, char **argv);
+static int ring_exec_main(int argc, char **argv);
 static int ring_fallow_main(int argc, char **argv);
 static int ring_ack_main(int argc, char **argv);
-static int ring_order_main(int argc, char **argv);
 static int evfd_copy_main(int argc, char **argv);
 static int evfd_signal_main(int argc, char **argv);
 static int lseek_main(int argc, char ** argv);
@@ -120,7 +119,6 @@ static __thread bool is_waiting_on_ring = false;
 
 struct EscrowPacket { uint64_t idx; uint64_t cnt; };
 struct IndexPacket  { uint64_t idx; uint64_t cnt; };
-struct Interval     { uint64_t s; uint64_t e; struct Interval *next; };
 
 static inline void u64toa(uint64_t value, char* buffer) {
     char temp[24];
@@ -140,39 +138,6 @@ static inline uint64_t get_us_time() {
 static inline uint64_t fast_log2(uint64_t v) {
     if (v < 2) return 0;
     return 63 - __builtin_clzll(v);
-}
-
-// --- Tuning Helpers ---
-static uint64_t get_cache_bytes() {
-    long sz = -1;
-#ifdef _SC_LEVEL2_CACHE_SIZE
-    sz = sysconf(_SC_LEVEL2_CACHE_SIZE);
-#endif
-    if (sz <= 0) {
-#ifdef _SC_LEVEL3_CACHE_SIZE
-        sz = sysconf(_SC_LEVEL3_CACHE_SIZE);
-#endif
-    }
-    if (sz <= 0) return 512 * 1024; // Default 512KB
-    return (uint64_t)sz;
-}
-
-static uint64_t get_arg_max_bytes() {
-    long sys_arg_max = sysconf(_SC_ARG_MAX);
-    if (sys_arg_max <= 0) return 2097152; // Default 2MB
-
-    // Subtract environment size to be safe
-    size_t env_len = 0;
-    extern char **environ;
-    for (char **ep = environ; *ep; ++ep) {
-        env_len += strlen(*ep) + 1;
-    }
-
-    if ((long)env_len < sys_arg_max) {
-        // Leave 1/16th padding for other args/overhead
-        return (uint64_t)((sys_arg_max - (long)env_len) * 15 / 16);
-    }
-    return 32768; // Minimal safe buffer
 }
 
 // --- Init/Destroy ---
@@ -254,45 +219,12 @@ static int ring_scanner_main(int argc, char **argv) {
     int fd = atoi(argv[1]);
     int fd_spawn = (argc >= 3) ? atoi(argv[2]) : -1;
 
-    // --- Configuration Logic ---
-    uint64_t val_l2  = get_cache_bytes();
-    uint64_t val_arg = get_arg_max_bytes();
-
-    uint64_t L = 1;
-    uint64_t Lmax = 4096; // Default
-    uint64_t BytesMax = (val_l2 < val_arg) ? val_l2 : val_arg; // Default: min(L2, ARG)
+    uint64_t L = 1, Lmax = 65535, BytesMax = 0;
     uint64_t W = 1;
     char *tmp_var;
 
-    // nLinesMax
-    if ((tmp_var = get_string_value("nLinesMax"))) {
-        char *endptr;
-        long val = strtol(tmp_var, &endptr, 10);
-        if (endptr == tmp_var) {
-            Lmax = 4096; // Invalid -> Default
-        } else if (val <= 0) {
-            Lmax = 65535; // <=0 -> Max
-        } else {
-            Lmax = (uint64_t)((val > 65535) ? 65535 : val); // Cap
-        }
-    }
-
-    // nBytesMax
-    if ((tmp_var = get_string_value("nBytesMax"))) {
-        if (strcmp(tmp_var, "L2") == 0) {
-            BytesMax = val_l2;
-        } else if (strcmp(tmp_var, "ARG_MAX") == 0) {
-            BytesMax = val_arg;
-        } else {
-            char *endptr;
-            long long val = strtoll(tmp_var, &endptr, 10);
-            if (endptr != tmp_var) { // If valid number
-                if (val <= 0) BytesMax = 0; // Disabled
-                else BytesMax = (uint64_t)val;
-            }
-            // If invalid (endptr == tmp_var), keep default
-        }
-    }
+    if ((tmp_var = get_string_value("nLinesMax"))) Lmax = atol(tmp_var);
+    if ((tmp_var = get_string_value("nBytesMax"))) BytesMax = atoll(tmp_var);
 
     long nWorkersMax = sysconf(_SC_NPROCESSORS_ONLN);
     if ((tmp_var = get_string_value("nWorkersMax"))) {
@@ -677,7 +609,7 @@ verify_claim:;
     u64toa(final_offset, buf); bind_variable(v_off, buf, 0);
     u64toa(final_lines, buf); bind_variable(v_cnt, buf, 0);
 
-    // Export Batch Index/Slots for ring_ack
+    // NEW: Export Batch Index/Slots for ring_ack
     u64toa(my_read_idx, buf); bind_variable("RING_BATCH_IDX", buf, 0);
     u64toa(claim_count, buf); bind_variable("RING_BATCH_SLOTS", buf, 0);
 
@@ -685,105 +617,153 @@ verify_claim:;
     return 0;
 }
 
-// --- Ring Ack (Supports Multicast & Optional Fallow) ---
-static int ring_ack_main(int argc, char **argv) {
-    if (argc < 2) return EXECUTION_FAILURE;
+// --- Exec (Legacy - kept for compat) ---
+static WORD_DESC* make_quoted_wd(char *str) {
+    size_t len = strlen(str);
+    bool has_single = false;
+    if (len == 0) {
+        WORD_DESC *w = make_bare_word("''");
+        w->flags |= W_QUOTED; return w;
+    }
+    for (size_t i=0; i<len; i++) { if (str[i] == '\'') { has_single = true; break; } }
 
-    int fd_fallow = -1;
-    if (argv[1][0] != '\0') fd_fallow = atoi(argv[1]);
+    if (!has_single) {
+        char *q = xmalloc(len + 3);
+        q[0] = '\''; memcpy(q+1, str, len); q[len+1] = '\''; q[len+2] = '\0';
+        WORD_DESC *w = make_bare_word(q); free(q);
+        w->flags |= W_QUOTED; return w;
+    } else {
+        size_t cap = len + 16;
+        char *q = xmalloc(cap);
+        size_t idx = 0;
+        q[idx++] = '\'';
+        for (size_t i=0; i<len; i++) {
+            if (idx + 4 >= cap) { cap *= 2; q = xrealloc(q, cap); }
+            if (str[i] == '\'') {
+                q[idx++] = '\''; q[idx++] = '\\'; q[idx++] = '\''; q[idx++] = '\'';
+            } else {
+                q[idx++] = str[i];
+            }
+        }
+        q[idx++] = '\''; q[idx] = '\0';
+        WORD_DESC *w = make_bare_word(q); free(q);
+        w->flags |= W_QUOTED; return w;
+    }
+}
 
-    int fd_order  = (argc >= 3) ? atoi(argv[2]) : -1;
+static int ring_exec_main(int argc, char **argv) {
+    if (argc < 4) { builtin_error("ring_exec usage"); return EXECUTION_FAILURE; }
+    int fd = atoi(argv[1]);
+    uint64_t count = atoll(argv[2]);
+    if (count == 0) return EXECUTION_SUCCESS;
 
+    // NO lseek here! We rely on the FD being positioned by ring_claim (or previous read)
+
+    int static_argc = argc - 3;
+    WORD_LIST *head = NULL, *tail = NULL;
+    for (int i = 0; i < static_argc; i++) {
+        WORD_DESC *wd = make_bare_word(argv[3 + i]);
+        WORD_LIST *wl = make_word_list(wd, NULL);
+        if (!head) head = wl; else tail->next = wl;
+        tail = wl;
+    }
+
+    size_t buf_size = 65536;
+    char *buf = xmalloc(buf_size);
+    ssize_t n_read;
+    uint64_t lines_found = 0;
+    char *partial = NULL;
+    size_t partial_len = 0;
+
+    while (lines_found < count) {
+        n_read = read(fd, buf, buf_size);
+        if (n_read < 0 && errno == EINTR) continue;
+        if (n_read <= 0) break;
+        char *p = buf, *end = buf + n_read, *line_start = p;
+        while (p < end && lines_found < count) {
+            char *nl = memchr(p, '\n', end - p);
+            if (nl) {
+                *nl = '\0';
+                WORD_DESC *wd;
+                if (partial) {
+                    size_t frag_len = nl - line_start;
+                    char *full = xmalloc(partial_len + frag_len + 1);
+                    memcpy(full, partial, partial_len);
+                    memcpy(full + partial_len, line_start, frag_len);
+                    full[partial_len + frag_len] = '\0';
+                    wd = make_quoted_wd(full);
+                    free(full); free(partial); partial = NULL; partial_len = 0;
+                } else {
+                    wd = make_quoted_wd(line_start);
+                }
+                WORD_LIST *wl = make_word_list(wd, NULL);
+                if (!head) head = wl; else tail->next = wl;
+                tail = wl;
+                lines_found++;
+                line_start = nl + 1; p = nl + 1;
+            } else p = end;
+        }
+        if (line_start < end && lines_found < count) {
+            size_t len = end - line_start;
+            if (partial) {
+                partial = xrealloc(partial, partial_len + len);
+                memcpy(partial + partial_len, line_start, len);
+                partial_len += len;
+            } else {
+                partial = xmalloc(len);
+                memcpy(partial, line_start, len);
+                partial_len = len;
+            }
+        }
+    }
+    if (partial) {
+        if (lines_found < count) {
+            char *fin = xrealloc(partial, partial_len + 1); fin[partial_len] = '\0';
+            WORD_DESC *wd = make_quoted_wd(fin); free(fin);
+            WORD_LIST *wl = make_word_list(wd, NULL);
+            if (!head) head = wl; else tail->next = wl;
+        } else free(partial);
+    }
+    free(buf);
+
+    if (!head) return EXECUTION_SUCCESS;
+    COMMAND *cmd = xmalloc(sizeof(COMMAND)); memset(cmd, 0, sizeof(COMMAND));
+    cmd->type = cm_simple;
+    SIMPLE_COM *sc = xmalloc(sizeof(SIMPLE_COM)); memset(sc, 0, sizeof(SIMPLE_COM));
+    sc->words = head;
+    cmd->value.Simple = sc;
+    int result = execute_command(cmd);
+    dispose_command(cmd);
+
+    // Legacy support for ring_exec doing the ack
+    const char *s_fd = get_string_value("FD_RING_FALLOC");
     const char *s_idx = get_string_value("RING_BATCH_IDX");
     const char *s_cnt = get_string_value("RING_BATCH_SLOTS");
+    if (s_fd && s_idx && s_cnt) {
+        int fd_f = atoi(s_fd);
+        if (fd_f > 0) {
+            struct IndexPacket ip = {
+                .idx = (uint64_t)atoll(s_idx),
+                .cnt = (uint64_t)atoll(s_cnt)
+            };
+            if(write(fd_f, &ip, sizeof(ip))){};
+        }
+    }
+    return result;
+}
 
-    if (s_idx && s_cnt) {
+// --- Ring Ack (NEW) ---
+static int ring_ack_main(int argc, char **argv) {
+    if (argc < 2) return EXECUTION_FAILURE;
+    int fd = atoi(argv[1]);
+    const char *s_idx = get_string_value("RING_BATCH_IDX");
+    const char *s_cnt = get_string_value("RING_BATCH_SLOTS");
+    if (fd > 0 && s_idx && s_cnt) {
         struct IndexPacket ip = {
             .idx = (uint64_t)atoll(s_idx),
             .cnt = (uint64_t)atoll(s_cnt)
         };
-
-        if (fd_fallow > 0) {
-            if (write(fd_fallow, &ip, sizeof(ip)) != sizeof(ip)) return EXECUTION_FAILURE;
-        }
-
-        if (fd_order > 0) {
-            if (write(fd_order, &ip, sizeof(ip)) != sizeof(ip)) { /* ignore error on order pipe */ }
-        }
-    }
-    return EXECUTION_SUCCESS;
-}
-
-// --- Ring Order (Output Consumer) ---
-static int ring_order_main(int argc, char **argv) {
-    if (argc < 3) {
-        builtin_error("usage: ring_order <FD_IN> <DIR_PREFIX>");
-        return EXECUTION_FAILURE;
-    }
-
-    int fd_in = atoi(argv[1]);
-    const char *prefix = argv[2];
-
-    struct Interval *head = NULL;
-    uint64_t next_idx = 0;
-    struct IndexPacket ip;
-    char path[256];
-
-    while (read(fd_in, &ip, sizeof(ip)) == sizeof(ip)) {
-        // Optimization: Handle In-Order immediately
-        if (ip.idx == next_idx) {
-            // Process file: prefix.IDX
-            snprintf(path, sizeof(path), "%s.%lu", prefix, ip.idx);
-            int fd_file = open(path, O_RDONLY);
-            if (fd_file >= 0) {
-                struct stat st;
-                if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-                    off_t off = 0;
-                    // sendfile loop to stdout
-                    while (off < st.st_size) {
-                        if (sendfile(1, fd_file, &off, st.st_size - off) <= 0) break;
-                    }
-                }
-                close(fd_file);
-                unlink(path);
-            }
-
-            next_idx += ip.cnt;
-
-            // Check buffered items
-            while (head && head->s == next_idx) {
-                struct Interval *tmp = head;
-
-                // Process buffered item
-                snprintf(path, sizeof(path), "%s.%lu", prefix, tmp->s);
-                fd_file = open(path, O_RDONLY);
-                if (fd_file >= 0) {
-                    struct stat st;
-                    if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-                        off_t off = 0;
-                        while (off < st.st_size) {
-                            if (sendfile(1, fd_file, &off, st.st_size - off) <= 0) break;
-                        }
-                    }
-                    close(fd_file);
-                    unlink(path);
-                }
-
-                next_idx = tmp->e; // e holds s + cnt here
-                head = tmp->next;
-                free(tmp);
-            }
-        } else {
-            // Out of order: buffer it
-            struct Interval *n = xmalloc(sizeof(struct Interval));
-            n->s = ip.idx;
-            n->e = ip.idx + ip.cnt; // Storing 'next expected' in e
-
-            struct Interval **curr = &head;
-            while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
-            n->next = *curr;
-            *curr = n;
-        }
+        if(write(fd, &ip, sizeof(ip)) != sizeof(ip)) return EXECUTION_FAILURE;
     }
     return EXECUTION_SUCCESS;
 }
@@ -835,6 +815,7 @@ static int evfd_signal_main(int argc, char **argv) {
 }
 
 // --- Fallow (Index-Aware) ---
+struct Interval { uint64_t s; uint64_t e; struct Interval *next; };
 static int ring_fallow_main(int argc, char **argv) {
     if (argc != 3) return EXECUTION_FAILURE;
     int fd_in = atoi(argv[1]);
@@ -900,9 +881,9 @@ DEFINE_DISPATCHER(dispatch_ring_scanner, ring_scanner_main)
 DEFINE_DISPATCHER(dispatch_ring_claim,   ring_claim_main)
 DEFINE_DISPATCHER(dispatch_ring_worker,  ring_worker_main)
 DEFINE_DISPATCHER(dispatch_ring_ingest,  ring_ingest_main)
+DEFINE_DISPATCHER(dispatch_ring_exec,    ring_exec_main)
 DEFINE_DISPATCHER(dispatch_ring_fallow,  ring_fallow_main)
 DEFINE_DISPATCHER(dispatch_ring_ack,     ring_ack_main)
-DEFINE_DISPATCHER(dispatch_ring_order,   ring_order_main)
 DEFINE_DISPATCHER(dispatch_evfd_copy,    evfd_copy_main)
 DEFINE_DISPATCHER(dispatch_evfd_signal,  evfd_signal_main)
 DEFINE_DISPATCHER(dispatch_lseek,        lseek_main)
@@ -913,9 +894,9 @@ struct builtin ring_scanner_struct  = { "ring_scanner", dispatch_ring_scanner, B
 struct builtin ring_claim_struct    = { "ring_claim",   dispatch_ring_claim,   BUILTIN_ENABLED, NULL, "ring_claim <OFF> <CNT> [FD]", 0 };
 struct builtin ring_worker_struct   = { "ring_worker",  dispatch_ring_worker,  BUILTIN_ENABLED, NULL, "ring_worker [inc|dec]", 0 };
 struct builtin ring_ingest_struct   = { "ring_ingest",  dispatch_ring_ingest,  BUILTIN_ENABLED, NULL, "ring_ingest", 0 };
+struct builtin ring_exec_struct     = { "ring_exec",    dispatch_ring_exec,    BUILTIN_ENABLED, NULL, "ring_exec <FD> <CNT> <CMD>...", 0 };
 struct builtin ring_fallow_struct   = { "ring_fallow",  dispatch_ring_fallow,  BUILTIN_ENABLED, NULL, "ring_fallow <PIPE> <FILE>", 0 };
 struct builtin ring_ack_struct      = { "ring_ack",     dispatch_ring_ack,     BUILTIN_ENABLED, NULL, "ring_ack <FD>", 0 };
-struct builtin ring_order_struct    = { "ring_order",   dispatch_ring_order,   BUILTIN_ENABLED, NULL, "ring_order <FD> <PFX>", 0 };
 struct builtin evfd_copy_struct     = { "evfd_copy",    dispatch_evfd_copy,    BUILTIN_ENABLED, NULL, "evfd_copy <OUT> <IN>", 0 };
 struct builtin evfd_signal_struct   = { "evfd_signal",  dispatch_evfd_signal,  BUILTIN_ENABLED, NULL, "evfd_signal <FD>", 0 };
 struct builtin lseek_struct         = { "lseek",        dispatch_lseek,        BUILTIN_ENABLED, lseek_doc, "lseek <FD> <OFF>...", 0 };
@@ -927,9 +908,9 @@ int setup_builtin_forkrun_ring(void) {
     add_builtin(&ring_claim_struct, 1);
     add_builtin(&ring_worker_struct, 1);
     add_builtin(&ring_ingest_struct, 1);
+    add_builtin(&ring_exec_struct, 1);
     add_builtin(&ring_fallow_struct, 1);
     add_builtin(&ring_ack_struct, 1);
-    add_builtin(&ring_order_struct, 1);
     add_builtin(&evfd_copy_struct, 1);
     add_builtin(&evfd_signal_struct, 1);
     add_builtin(&lseek_struct, 1);
