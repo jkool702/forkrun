@@ -297,18 +297,18 @@ P=()
 export nWorkers=1
 export nWorkersMax=$(( $(nproc) ))
 #export nBytesMax=ARG_MAX
-export nLinesMax=4096
+#export nLinesMax=4096
 #export nBatchMax=4096
 
 start_time=${EPOCHREALTIME//./}
 
 ring_init
 if enable -f forkrun_ring.so evfd_copy evfd_signal; then
-echo "Starting splicer..." >&2
+echo "starting splicer..." >&2
     mkdir -p /dev/shm/.forkrun
     TMPDIR="$(mktemp -d -p  /dev/shm/.forkrun -t forkrun.XXXXXXXX)"
     : > ${TMPDIR}/stdin
-    echo "Sending stdin to ${TMPDIR}/stdin" >&2
+    echo "sending stdin to ${TMPDIR}/stdin" >&2
     exec {fd_scan}>&-
     {
     (
@@ -326,7 +326,7 @@ SCANNER_PID=$!
 
 if  enable -f forkrun_ring.so ring_fallow ring_ack; then
 exec {fd_falloc}<><(:)
-echo "Starting falloc..." >&2
+echo "starting falloc..." >&2
     export RING_FALLOC_FLAG=true
     ( ring_fallow ${fd_falloc} ${fd_write} ) &
     FALLOC_PID=$!

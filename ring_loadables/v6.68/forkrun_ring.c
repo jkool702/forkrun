@@ -1,6 +1,7 @@
-// forkrun_ring.c v6.74
-// Architecture: Universal Ingest, Zero-Copy Ring, Escrow Stealing
-// Features: Decoupled Fallow (ring_ack), Index-Based Reclamation, No-Syscall Reporting
+// forkrun_ring.c v6.68
+// Architecture: Universal Ingest, Zero-Copy Ring, Escrow Stealing, Interval GC
+// Features: Dynamic Scaling (PID+Ramp), Thread-Local Safety, Fast Quoting
+// Status: GOLD MASTER
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -78,7 +79,6 @@ static int ring_worker_main(int argc, char **argv);
 static int ring_ingest_main(int argc, char **argv);
 static int ring_exec_main(int argc, char **argv);
 static int ring_fallow_main(int argc, char **argv);
-static int ring_ack_main(int argc, char **argv);
 static int evfd_copy_main(int argc, char **argv);
 static int evfd_signal_main(int argc, char **argv);
 static int lseek_main(int argc, char ** argv);
@@ -114,11 +114,11 @@ static int evfd_ingest_data = -1;
 static int evfd_ingest_eof  = -1;
 static int fd_escrow[2] = { -1, -1 };
 
-// Thread Local Storage
+// Thread Local Storage for Safety
 static __thread bool is_waiting_on_ring = false;
 
 struct EscrowPacket { uint64_t idx; uint64_t cnt; };
-struct IndexPacket  { uint64_t idx; uint64_t cnt; };
+struct RangePacket  { uint64_t start; uint64_t end; };
 
 static inline void u64toa(uint64_t value, char* buffer) {
     char temp[24];
@@ -263,6 +263,8 @@ static int ring_scanner_main(int argc, char **argv) {
     uint64_t last_calc_read = 0;
     uint64_t stall_counter = 0;
 
+    uint64_t last_gc_idx = 0;
+
     atomic_store_relaxed(&state->write_idx, 0);
     atomic_store_relaxed(&state->read_idx, 0);
     atomic_store_relaxed(&state->signed_batch_size, (int64_t)L);
@@ -282,32 +284,32 @@ static int ring_scanner_main(int argc, char **argv) {
                 } \
                 lines_found++; \
                 p = nl + 1; \
-            } else { \
-                if (status == 1) { \
-                    if (p < end) { lines_found++; p = end; } \
-                } \
-                break; \
-            } \
+            } else { break; } \
         } \
         lines_found; \
     })
 
-    bool force_refill = false;
+    while (status != 1) {
+        // GC
+        uint64_t r_curr = atomic_load_relaxed(&state->read_idx);
+        if (r_curr > last_gc_idx + 2048) {
+            uint64_t packed = state->offset_ring[r_curr & RING_MASK];
+            uint64_t safe_off = (uint64_t)(packed & ~FLAG_PARTIAL_BATCH);
+            if (safe_off > 0) {
+                if(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, (off_t)safe_off)){};
+                last_gc_idx = r_curr;
+            }
+        }
 
-    while (status != 1 || p < end) {
-
-        // --- REFILL LOGIC ---
-        if ((p >= end || force_refill) && status != 1) {
-            force_refill = false;
-
+        // Refill
+        if (p >= end) {
             uint64_t curr_off = buf_base_offset + (p - buf);
             if (lseek(fd, (off_t)curr_off, SEEK_SET) < 0) {}
             ssize_t n = read(fd, buf, CHUNK);
 
             if (n > 0) {
                 buf_base_offset = curr_off;
-                p = buf;
-                end = buf + n;
+                p = buf; end = buf + n;
                 status = 0;
             } else {
                 struct pollfd pfds[2] = {
@@ -316,7 +318,6 @@ static int ring_scanner_main(int argc, char **argv) {
                 };
 
                 SCANNER_WAKE();
-
                 int ret = poll(pfds, 2, 0);
 
                 bool d_ready = (ret > 0 && (pfds[0].revents & POLLIN));
@@ -329,10 +330,10 @@ static int ring_scanner_main(int argc, char **argv) {
                     atomic_store_release(&state->ingest_complete, 1);
                     status = 1;
                 } else {
-                    if (atomic_load_acquire(&state->ingest_complete)) {
-                        status = 1;
-                    } else {
-                        ret = poll(pfds, 2, 100);
+                    if (atomic_load_acquire(&state->ingest_complete)) status = 1;
+                    else {
+                        int timeout = (phase == 0) ? 100 : 100;
+                        ret = poll(pfds, 2, timeout);
                         if (ret > 0 && (pfds[0].revents & POLLIN)) {
                              uint64_t v; if(read(evfd_ingest_data, &v, 8)){}; status = 2;
                         } else if (ret > 0 && (pfds[1].revents & POLLIN)) {
@@ -345,22 +346,21 @@ static int ring_scanner_main(int argc, char **argv) {
                 }
 
                 if (status == 2) {
+                    if (p < end) break;
                     stall_counter += 10;
-                    if (p < end) force_refill = true;
                     continue;
                 }
+                if (status == 1 && p >= end) break;
             }
         }
 
         uint64_t lines = SCAN_BATCH(L);
 
-        if (lines > 0) {
+        if (lines == L || (status == 1 && lines > 0) || (status == 2 && lines > 0)) {
             SCANNER_FLUSH(lines);
             batch_start = buf_base_offset + (uint64_t)(p - buf);
             batch_counter++;
-            force_refill = false;
 
-            // --- Ramp / PID Logic ---
             target_count = W * 4;
             if (target_count < 4) target_count = 4;
 
@@ -371,26 +371,37 @@ static int ring_scanner_main(int argc, char **argv) {
                 }
             }
             else if (phase == 1) {
-                if (status == 2) phase = 2;
+                if (status == 2) {
+                    phase = 2;
+                }
                 else if (batch_counter >= target_count) {
                     L *= 2;
-                    if (L >= Lmax) { L = Lmax; phase = 2; }
 
                     if (W < W_max_val) {
-                            uint64_t l_log = fast_log2(L);
-                            uint64_t num = 4 * (W_max_val - W) * L2;
-                            uint64_t den = X_const * (L2 + l_log);
-                            if (den == 0) den = 1;
-                            uint64_t n_spawn = num / den;
-                            if (n_spawn < 1) n_spawn = 1;
-                            if (n_spawn > (W_max_val - W)) n_spawn = W_max_val - W;
-                            if (fd_spawn >= 0) {
-                                dprintf(fd_spawn, "%lu\n", n_spawn);
-                                W += n_spawn;
-                                atomic_store_relaxed(&state->active_workers, W);
-                            }
+                        uint64_t l_log = fast_log2(L);
+                        uint64_t num = 4 * (W_max_val - W) * L2;
+                        uint64_t den = X_const * (L2 + l_log);
+                        if (den == 0) den = 1;
+                        uint64_t n_spawn = num / den;
+                        if (n_spawn < 1) n_spawn = 1;
+                        if (n_spawn > (W_max_val - W)) n_spawn = W_max_val - W;
+
+                        if (fd_spawn >= 0) {
+                            dprintf(fd_spawn, "%lu\n", n_spawn);
+                            W += n_spawn;
+                            atomic_store_relaxed(&state->active_workers, W);
+                        }
                     }
 
+                    if (L >= Lmax) {
+                        L = Lmax;
+                        phase = 2;
+                        if (W < W_max_val && fd_spawn >= 0) {
+                            dprintf(fd_spawn, "%lu\n", W_max_val - W);
+                            W = W_max_val;
+                            atomic_store_relaxed(&state->active_workers, W);
+                        }
+                    }
                     atomic_store_release(&state->batch_change_idx, local_write_idx);
                     atomic_store_release(&state->signed_batch_size, -(int64_t)L);
                     batch_counter = 0;
@@ -399,17 +410,21 @@ static int ring_scanner_main(int argc, char **argv) {
             else {
                 uint64_t now_us = get_us_time();
                 if (now_us - last_calc_us > 5000) {
+
                     uint64_t d_in  = local_write_idx - last_calc_write;
                     uint64_t r_con = atomic_load_relaxed(&state->total_lines_consumed);
                     uint64_t d_out = r_con - last_calc_read;
+
                     last_calc_write = local_write_idx;
                     last_calc_read  = r_con;
                     last_calc_us    = now_us;
 
                     if (d_out > 0) {
-                        uint64_t rate = d_out / W; if(rate==0) rate=1;
-                        uint64_t w_ideal = d_in / rate;
+                        uint64_t rate_per_worker = d_out / W;
+                        if (rate_per_worker == 0) rate_per_worker = 1;
+                        uint64_t w_ideal = d_in / rate_per_worker;
                         if (w_ideal > W_max_val) w_ideal = W_max_val;
+
                         if (w_ideal > W) {
                             uint64_t grow = (w_ideal - W + 1) / 2;
                             if (fd_spawn >= 0) dprintf(fd_spawn, "%lu\n", grow);
@@ -422,27 +437,33 @@ static int ring_scanner_main(int argc, char **argv) {
                     int64_t backlog = (int64_t)local_write_idx - (int64_t)r_idx;
                     if (backlog < 0) backlog = 0;
 
-                    uint64_t l_target = (backlog / W);
+                    uint64_t l_target = (uint64_t)backlog / W;
                     if (l_target > Lmax) l_target = Lmax;
                     if (l_target < 1) l_target = 1;
 
+                    bool update_l = false;
+
                     if (l_target > L) {
                         L = l_target;
+                        update_l = true;
+                    } else if (l_target < L) {
+                        uint32_t waiters = atomic_load_relaxed(&state->active_waiters);
+                        if (waiters > 0 && stall_counter > 5) {
+                            L = (L + l_target) / 2;
+                            if (L < 1) L = 1;
+                            update_l = true;
+                            stall_counter = 0;
+                        }
+                    }
+                    if (update_l) {
                         atomic_store_release(&state->batch_change_idx, local_write_idx);
                         atomic_store_release(&state->signed_batch_size, -(int64_t)L);
-                    } else if (l_target < L && stall_counter > 5) {
-                        L = (L + l_target) / 2;
-                        if (L < 1) L = 1;
-                        atomic_store_release(&state->batch_change_idx, local_write_idx);
-                        atomic_store_release(&state->signed_batch_size, -(int64_t)L);
-                        stall_counter = 0;
                     }
                 }
             }
             if (lines < L) stall_counter++; else stall_counter = 0;
         } else {
             if (status == 1) break;
-            force_refill = true;
         }
     }
 
@@ -608,16 +629,11 @@ verify_claim:;
     char buf[64];
     u64toa(final_offset, buf); bind_variable(v_off, buf, 0);
     u64toa(final_lines, buf); bind_variable(v_cnt, buf, 0);
-
-    // NEW: Export Batch Index/Slots for ring_ack
-    u64toa(my_read_idx, buf); bind_variable("RING_BATCH_IDX", buf, 0);
-    u64toa(claim_count, buf); bind_variable("RING_BATCH_SLOTS", buf, 0);
-
     if (fd_read >= 0 && final_lines > 0) lseek(fd_read, (off_t)final_offset, SEEK_SET);
     return 0;
 }
 
-// --- Exec (Legacy - kept for compat) ---
+// --- Exec (Fast Quoter Helper) ---
 static WORD_DESC* make_quoted_wd(char *str) {
     size_t len = strlen(str);
     bool has_single = false;
@@ -657,7 +673,7 @@ static int ring_exec_main(int argc, char **argv) {
     uint64_t count = atoll(argv[2]);
     if (count == 0) return EXECUTION_SUCCESS;
 
-    // NO lseek here! We rely on the FD being positioned by ring_claim (or previous read)
+    off_t start_pos = lseek(fd, 0, SEEK_CUR);
 
     int static_argc = argc - 3;
     WORD_LIST *head = NULL, *tail = NULL;
@@ -735,37 +751,16 @@ static int ring_exec_main(int argc, char **argv) {
     int result = execute_command(cmd);
     dispose_command(cmd);
 
-    // Legacy support for ring_exec doing the ack
     const char *s_fd = get_string_value("FD_RING_FALLOC");
-    const char *s_idx = get_string_value("RING_BATCH_IDX");
-    const char *s_cnt = get_string_value("RING_BATCH_SLOTS");
-    if (s_fd && s_idx && s_cnt) {
+    if (s_fd) {
         int fd_f = atoi(s_fd);
-        if (fd_f > 0) {
-            struct IndexPacket ip = {
-                .idx = (uint64_t)atoll(s_idx),
-                .cnt = (uint64_t)atoll(s_cnt)
-            };
-            if(write(fd_f, &ip, sizeof(ip))){};
+        off_t end_pos = lseek(fd, 0, SEEK_CUR);
+        if (fd_f > 0 && end_pos > start_pos) {
+            struct RangePacket rp = { .start = (uint64_t)start_pos, .end = (uint64_t)end_pos };
+            if(write(fd_f, &rp, sizeof(rp))){};
         }
     }
     return result;
-}
-
-// --- Ring Ack (NEW) ---
-static int ring_ack_main(int argc, char **argv) {
-    if (argc < 2) return EXECUTION_FAILURE;
-    int fd = atoi(argv[1]);
-    const char *s_idx = get_string_value("RING_BATCH_IDX");
-    const char *s_cnt = get_string_value("RING_BATCH_SLOTS");
-    if (fd > 0 && s_idx && s_cnt) {
-        struct IndexPacket ip = {
-            .idx = (uint64_t)atoll(s_idx),
-            .cnt = (uint64_t)atoll(s_cnt)
-        };
-        if(write(fd, &ip, sizeof(ip)) != sizeof(ip)) return EXECUTION_FAILURE;
-    }
-    return EXECUTION_SUCCESS;
 }
 
 // --- Evfd Copy/Signal ---
@@ -814,7 +809,7 @@ static int evfd_signal_main(int argc, char **argv) {
     return EXECUTION_SUCCESS;
 }
 
-// --- Fallow (Index-Aware) ---
+// --- Fallow ---
 struct Interval { uint64_t s; uint64_t e; struct Interval *next; };
 static int ring_fallow_main(int argc, char **argv) {
     if (argc != 3) return EXECUTION_FAILURE;
@@ -822,29 +817,20 @@ static int ring_fallow_main(int argc, char **argv) {
     int fd_file = atoi(argv[2]);
     struct Interval *head = NULL;
     uint64_t limit = 0;
-
-    struct IndexPacket ip;
-    while (read(fd_in, &ip, sizeof(ip)) == sizeof(ip)) {
-        // Resolve Index to Byte Range using Shared Memory
-        uint64_t start = state->offset_ring[ip.idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-        uint64_t end   = state->offset_ring[(ip.idx + ip.cnt) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-
-        // Consolidate & Punch Holes
-        if (start == limit) {
-            limit = end;
-            // Eat contiguous intervals from the sorted list
+    struct RangePacket rp;
+    while (read(fd_in, &rp, sizeof(rp)) == sizeof(rp)) {
+        if (rp.start == limit) {
+            limit = rp.end;
             while (head && head->s == limit) {
                 struct Interval *tmp = head; limit = tmp->e; head = tmp->next; free(tmp);
             }
-            // Align to 4K page size for fallocate
             off_t aligned = (off_t)((limit / 4096) * 4096);
             if (aligned > 0) if(fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned)){};
-        } else if (start > limit) {
-            // Out of order completion: Insert into linked list sorted by start
+        } else if (rp.start > limit) {
             struct Interval *n = xmalloc(sizeof(struct Interval));
-            n->s = start; n->e = end;
+            n->s = rp.start; n->e = rp.end;
             struct Interval **curr = &head;
-            while (*curr && (*curr)->s < start) curr = &((*curr)->next);
+            while (*curr && (*curr)->s < rp.start) curr = &((*curr)->next);
             n->next = *curr; *curr = n;
         }
     }
@@ -864,55 +850,43 @@ static int ring_worker_main(int argc, char **argv) {
 static char * lseek_doc[] = { "Usage: lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]", NULL };
 static int lseek_main(int argc, char ** argv) { if (argc < 3 || argc > 5) return EXECUTION_FAILURE; int fd = atoi(argv[1]); off_t off = atoll(argv[2]); int whence = SEEK_CUR; if (argc > 3) { if (!strcmp(argv[3], "SEEK_SET")) whence = SEEK_SET; else if (!strcmp(argv[3], "SEEK_END")) whence = SEEK_END; } off_t no = lseek(fd, off, whence); if (no == -1) return EXECUTION_FAILURE; if (argc >= 4 && argv[argc-1][0]) { char buf[32]; snprintf(buf,32,"%lld",(long long)no); bind_variable(argv[argc-1], buf, 0); } else printf("%lld\n", (long long)no); return EXECUTION_SUCCESS; }
 
-// --- BOILERPLATE MACRO ---
-#define DEFINE_DISPATCHER(func_name, main_func) \
-static int func_name(WORD_LIST *list) { \
-    int argc; \
-    char **argv = make_builtin_argv(list, &argc); \
-    int ret = EXECUTION_FAILURE; \
-    if (argv[0]) ret = main_func(argc, argv); \
-    xfree(argv); \
-    return ret; \
+static int forkrun_ring_builtin(WORD_LIST *list) {
+    int argc; char **argv = make_builtin_argv(list, &argc);
+    int ret = EXECUTION_FAILURE;
+    if (!argv[0]) return ret;
+    if (!strcmp(argv[0], "ring_init")) ret = ring_init_main(argc, argv);
+    else if (!strcmp(argv[0], "ring_destroy")) ret = ring_destroy_main(argc, argv);
+    else if (!strcmp(argv[0], "ring_scanner")) ret = ring_scanner_main(argc, argv);
+    else if (!strcmp(argv[0], "ring_claim")) ret = ring_claim_main(argc, argv);
+    else if (!strcmp(argv[0], "ring_worker")) ret = ring_worker_main(argc, argv);
+    else if (!strcmp(argv[0], "ring_ingest")) ret = ring_ingest_main(argc, argv);
+    else if (!strcmp(argv[0], "ring_exec")) ret = ring_exec_main(argc, argv);
+    else if (!strcmp(argv[0], "ring_fallow")) ret = ring_fallow_main(argc, argv);
+    else if (!strcmp(argv[0], "evfd_copy")) ret = evfd_copy_main(argc, argv);
+    else if (!strcmp(argv[0], "evfd_signal")) ret = evfd_signal_main(argc, argv);
+    else if (!strcmp(argv[0], "lseek")) ret = lseek_main(argc, argv);
+    xfree(argv);
+    return ret;
 }
 
-DEFINE_DISPATCHER(dispatch_ring_init,    ring_init_main)
-DEFINE_DISPATCHER(dispatch_ring_destroy, ring_destroy_main)
-DEFINE_DISPATCHER(dispatch_ring_scanner, ring_scanner_main)
-DEFINE_DISPATCHER(dispatch_ring_claim,   ring_claim_main)
-DEFINE_DISPATCHER(dispatch_ring_worker,  ring_worker_main)
-DEFINE_DISPATCHER(dispatch_ring_ingest,  ring_ingest_main)
-DEFINE_DISPATCHER(dispatch_ring_exec,    ring_exec_main)
-DEFINE_DISPATCHER(dispatch_ring_fallow,  ring_fallow_main)
-DEFINE_DISPATCHER(dispatch_ring_ack,     ring_ack_main)
-DEFINE_DISPATCHER(dispatch_evfd_copy,    evfd_copy_main)
-DEFINE_DISPATCHER(dispatch_evfd_signal,  evfd_signal_main)
-DEFINE_DISPATCHER(dispatch_lseek,        lseek_main)
-
-struct builtin ring_init_struct     = { "ring_init",    dispatch_ring_init,    BUILTIN_ENABLED, NULL, "ring_init", 0 };
-struct builtin ring_destroy_struct  = { "ring_destroy", dispatch_ring_destroy, BUILTIN_ENABLED, NULL, "ring_destroy", 0 };
-struct builtin ring_scanner_struct  = { "ring_scanner", dispatch_ring_scanner, BUILTIN_ENABLED, NULL, "ring_scanner <fd> [spawn_fd]", 0 };
-struct builtin ring_claim_struct    = { "ring_claim",   dispatch_ring_claim,   BUILTIN_ENABLED, NULL, "ring_claim <OFF> <CNT> [FD]", 0 };
-struct builtin ring_worker_struct   = { "ring_worker",  dispatch_ring_worker,  BUILTIN_ENABLED, NULL, "ring_worker [inc|dec]", 0 };
-struct builtin ring_ingest_struct   = { "ring_ingest",  dispatch_ring_ingest,  BUILTIN_ENABLED, NULL, "ring_ingest", 0 };
-struct builtin ring_exec_struct     = { "ring_exec",    dispatch_ring_exec,    BUILTIN_ENABLED, NULL, "ring_exec <FD> <CNT> <CMD>...", 0 };
-struct builtin ring_fallow_struct   = { "ring_fallow",  dispatch_ring_fallow,  BUILTIN_ENABLED, NULL, "ring_fallow <PIPE> <FILE>", 0 };
-struct builtin ring_ack_struct      = { "ring_ack",     dispatch_ring_ack,     BUILTIN_ENABLED, NULL, "ring_ack <FD>", 0 };
-struct builtin evfd_copy_struct     = { "evfd_copy",    dispatch_evfd_copy,    BUILTIN_ENABLED, NULL, "evfd_copy <OUT> <IN>", 0 };
-struct builtin evfd_signal_struct   = { "evfd_signal",  dispatch_evfd_signal,  BUILTIN_ENABLED, NULL, "evfd_signal <FD>", 0 };
-struct builtin lseek_struct         = { "lseek",        dispatch_lseek,        BUILTIN_ENABLED, lseek_doc, "lseek <FD> <OFF>...", 0 };
+struct builtin ring_init_struct     = { "ring_init",    forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_init", 0 };
+struct builtin ring_destroy_struct  = { "ring_destroy", forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_destroy", 0 };
+struct builtin ring_scanner_struct  = { "ring_scanner", forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_scanner <fd> [spawn_fd]", 0 };
+struct builtin ring_claim_struct    = { "ring_claim",   forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_claim <OFF> <CNT> [FD]", 0 };
+struct builtin ring_worker_struct   = { "ring_worker",  forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_worker [inc|dec]", 0 };
+struct builtin ring_ingest_struct   = { "ring_ingest",  forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_ingest", 0 };
+struct builtin ring_exec_struct     = { "ring_exec",    forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_exec <FD> <CNT> <CMD>...", 0 };
+struct builtin ring_fallow_struct   = { "ring_fallow",  forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "ring_fallow <PIPE> <FILE>", 0 };
+struct builtin evfd_copy_struct     = { "evfd_copy",    forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "evfd_copy <OUT> <IN>", 0 };
+struct builtin evfd_signal_struct   = { "evfd_signal",  forkrun_ring_builtin, BUILTIN_ENABLED, NULL, "evfd_signal <FD>", 0 };
+struct builtin lseek_struct         = { "lseek",        forkrun_ring_builtin, BUILTIN_ENABLED, lseek_doc, "lseek <FD> <OFF>...", 0 };
 
 int setup_builtin_forkrun_ring(void) {
-    add_builtin(&ring_init_struct, 1);
-    add_builtin(&ring_destroy_struct, 1);
-    add_builtin(&ring_scanner_struct, 1);
-    add_builtin(&ring_claim_struct, 1);
-    add_builtin(&ring_worker_struct, 1);
-    add_builtin(&ring_ingest_struct, 1);
-    add_builtin(&ring_exec_struct, 1);
-    add_builtin(&ring_fallow_struct, 1);
-    add_builtin(&ring_ack_struct, 1);
-    add_builtin(&evfd_copy_struct, 1);
-    add_builtin(&evfd_signal_struct, 1);
+    add_builtin(&ring_init_struct, 1); add_builtin(&ring_destroy_struct, 1);
+    add_builtin(&ring_scanner_struct, 1); add_builtin(&ring_claim_struct, 1);
+    add_builtin(&ring_worker_struct, 1); add_builtin(&ring_ingest_struct, 1);
+    add_builtin(&ring_exec_struct, 1); add_builtin(&ring_fallow_struct, 1);
+    add_builtin(&evfd_copy_struct, 1); add_builtin(&evfd_signal_struct, 1);
     add_builtin(&lseek_struct, 1);
     return 0;
 }

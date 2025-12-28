@@ -8,7 +8,7 @@ frun() {
     : > ${TMPDIR}/stdin
 
     (
-    enable -f forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_exec ring_destroy ring_fallow ring_ingest evfd_copy evfd_signal lseek
+    enable -f forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_exec ring_destroy lseek
 
 
 if [[ "$1" == '--ring_exec' ]]; then
