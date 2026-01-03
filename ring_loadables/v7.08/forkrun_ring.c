@@ -1,7 +1,7 @@
-// forkrun_ring.c v7.15
+// forkrun_ring.c v7.08
 // Architecture: Universal Ingest, Zero-Copy Ring, Escrow Stealing
-// Features: Lookahead Buffer, Single-Ring Tail Strategy, Gradient Ramp Down
-// Fixes: Tail Ramp-Down Aggregation Prevention (tail_idx check in Slow Path)
+// Features: Lookahead Buffer, Dual-Ring Tail Strategy, Gradient Ramp Down
+// Changes: Updated ring_fallow to support Tail Ring lookups
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -62,6 +62,8 @@
 #define CACHE_LINE     256
 #define ALIGNED(x)     __attribute__((aligned(x > CACHE_LINE ? x : CACHE_LINE)))
 
+#define TAIL_RING_SIZE 4096
+
 #define atomic_load_acquire(ptr)       __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
 #define atomic_load_relaxed(ptr)       __atomic_load_n(ptr, __ATOMIC_RELAXED)
 #define atomic_store_release(ptr, val) __atomic_store_n(ptr, val, __ATOMIC_RELEASE)
@@ -113,12 +115,18 @@ struct SharedState {
     
     uint64_t min_idx; 
     uint8_t  fallow_active;
+    
+    // Tail Logic State
+    uint8_t  tail_active;
+    uint64_t tail_read_idx;
+    uint64_t tail_write_idx;
+    
     uint8_t  scanner_finished;
     
-    // Tail Logic: Start Index of the Ramp Down
+    // Global Tail Start Index (Synchronization Point)
     uint64_t tail_idx; 
     
-    char pad0[96]; 
+    char pad0[48]; 
 
     uint64_t write_idx ALIGNED(CACHE_LINE);
     int64_t  signed_batch_size; 
@@ -128,6 +136,10 @@ struct SharedState {
 
     uint16_t stride_ring[RING_SIZE] ALIGNED(4096);
     uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
+    
+    // Secondary Tail Rings
+    uint16_t tail_stride[TAIL_RING_SIZE] ALIGNED(4096);
+    uint64_t tail_offset[TAIL_RING_SIZE] ALIGNED(4096);
 };
 
 static struct SharedState *state = NULL;
@@ -200,6 +212,9 @@ static int ring_init_main(int argc, char **argv) {
         atomic_store_relaxed(&state->total_lines_consumed, 0);
         atomic_store_relaxed(&state->min_idx, 0);
         atomic_store_relaxed(&state->fallow_active, 0);
+        atomic_store_relaxed(&state->tail_active, 0);
+        atomic_store_relaxed(&state->tail_read_idx, 0);
+        atomic_store_relaxed(&state->tail_write_idx, 0);
         atomic_store_relaxed(&state->scanner_finished, 0);
         atomic_store_relaxed(&state->tail_idx, 0);
         
@@ -527,8 +542,8 @@ static int ring_scanner_main(int argc, char **argv) {
                         
                         if (W < W_max_val) {
                                 uint64_t l_log = fast_log2(L);
-                                // Aggressive Spawning Multiplier (x8)
-                                uint64_t num =((W_max_val - W) * L2) << 3;
+                                // Aggressive Spawning Multiplier (x6)
+                                uint64_t num = 6 * (W_max_val - W) * L2;
                                 uint64_t den = X_const * (L2 + l_log);
                                 if (den == 0) den = 1;
                                 uint64_t n_spawn = num / den;
@@ -600,7 +615,7 @@ static int ring_scanner_main(int argc, char **argv) {
         }
     }
 
-    // --- EOF Tail Logic (Single Ring Overwrite Strategy) ---
+    // --- EOF Tail Logic (Dual-Ring Gradient Ramp Down) ---
     
     // 1. Count remaining lines in current buffer
     uint64_t L_tail = pending_lines;
@@ -618,30 +633,7 @@ static int ring_scanner_main(int argc, char **argv) {
         }
     }
     
-    // 3. FINAL BURST WORKER SPAWNING (Simplified)
-    if (fd_spawn >= 0) {
-        uint64_t W_curr = atomic_load_relaxed(&state->active_workers);
-        if (W_curr < W_max_val) {
-            uint64_t r_idx = atomic_load_relaxed(&state->read_idx);
-            
-            // Calculate Batches in Main Ring (Backlog)
-            uint64_t backlog = 0;
-            if (local_scan_idx > r_idx) backlog = local_scan_idx - r_idx;
-            
-            uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog;
-            
-            if (W_target > W_curr) {
-                uint64_t needed = W_target - W_curr;
-                if (needed > 0) {
-                    dprintf(fd_spawn, "%lu\n", needed);
-                    W += needed;
-                    atomic_store_relaxed(&state->active_workers, W);
-                }
-            }
-        }
-    }
-
-    // 4. Determine Rewind Offset
+    // 3. Determine Rewind Offset
     uint64_t tail_start_offset;
     if (local_scan_idx > local_write_idx) {
         tail_start_offset = state->offset_ring[local_write_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
@@ -649,9 +641,7 @@ static int ring_scanner_main(int argc, char **argv) {
         tail_start_offset = batch_start;
     }
     
-    // 5. Reset Scanner Internal State (Overwrite Mode)
-    local_scan_idx = local_write_idx;
-    
+    // 4. Reset Scanner Internal State for Tail Ring
     int64_t buf_rel = (int64_t)tail_start_offset - (int64_t)buf_base_offset;
     if (buf_rel >= 0 && buf_rel < (int64_t)CHUNK) {
          p = buf + buf_rel;
@@ -665,8 +655,7 @@ static int ring_scanner_main(int argc, char **argv) {
          end = buf + (n > 0 ? n : 0);
     }
     
-    // 6. Compute R (Reduction Factor) - NEW INTERPOLATED FORMULA
-/*
+    // 5. Compute R (Reduction Factor) - NEW INTERPOLATED FORMULA
     uint64_t R = 1;
     uint64_t R0 = 1;
     if (L > 0) {
@@ -677,6 +666,7 @@ static int ring_scanner_main(int argc, char **argv) {
     uint64_t W_curr = atomic_load_relaxed(&state->active_workers);
     if (W_curr < 1) W_curr = 1;
     
+    // I = local_write_idx
     uint64_t work_metric = W_curr * local_write_idx;
     uint64_t mSWI = (work_metric < RING_SIZE) ? work_metric : RING_SIZE;
     
@@ -684,21 +674,16 @@ static int ring_scanner_main(int argc, char **argv) {
     uint64_t term2 = mSWI * (1ULL << R0);
     
     R = (term1 + term2) / RING_SIZE;
-*/
-    uint64_t R = 1;
-    if (L > 0) {
-        uint64_t inner_log = fast_log2(2 + L);
-        R = fast_log2(2 + inner_log);
-    }
     if (R < 1) R = 1;
 
-    // 7. Generate Gradient Batches (Overwriting into Main Ring)
+    // 6. Generate Gradient Batches into TAIL RING
     uint64_t L_tail_done = 0;
+    uint64_t tail_idx = 0; 
     
-    // MARK THE START OF TAIL (For Slow Path Checking)
+    // Mark global tail start index (synced with Main Ring End)
     atomic_store_release(&state->tail_idx, local_write_idx);
 
-    while (L_tail_done < L_tail) {
+    while (L_tail_done < L_tail && tail_idx < TAIL_RING_SIZE) {
         uint64_t target = 0;
         if (L_tail > 0) target = (L * (L_tail - L_tail_done)) / L_tail;
         
@@ -732,21 +717,9 @@ static int ring_scanner_main(int argc, char **argv) {
         }
         
         if (lines_found > 0) {
-            uint64_t pk = (uint64_t)batch_start;
-            if (lines_found != L) pk |= FLAG_PARTIAL_BATCH;
-            
-            // Wait for space in ring
-            while(1) {
-                 uint64_t limit;
-                 if (atomic_load_relaxed(&state->fallow_active)) limit = atomic_load_acquire(&state->min_idx); 
-                 else limit = atomic_load_acquire(&state->read_idx); 
-                 if ((local_scan_idx - limit) < RING_SIZE) break;
-                 SCANNER_WAKE(); usleep(100);
-            }
-            
-            state->offset_ring[local_scan_idx & RING_MASK] = pk;
-            state->stride_ring[local_scan_idx & RING_MASK] = (uint16_t)lines_found;
-            local_scan_idx++;
+            state->tail_offset[tail_idx] = (uint64_t)batch_start;
+            state->tail_stride[tail_idx] = (uint16_t)lines_found;
+            tail_idx++;
             
             batch_start = buf_base_offset + (uint64_t)(p - buf);
             L_tail_done += lines_found;
@@ -755,12 +728,10 @@ static int ring_scanner_main(int argc, char **argv) {
         }
     }
 
-    // 8. Final Sentinel & Commit
-    uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
-    state->offset_ring[local_scan_idx & RING_MASK] = (uint64_t)final_sentinel | FLAG_PARTIAL_BATCH;
-    local_scan_idx++;
+    // 7. Commit Tail Ring and Activate
+    atomic_store_release(&state->tail_write_idx, tail_idx);
+    atomic_store_release(&state->tail_active, 1);
     
-    atomic_store_release(&state->write_idx, local_scan_idx);
     atomic_store_release(&state->scanner_finished, 1);
     
     SCANNER_WAKE();
@@ -780,6 +751,7 @@ static int ring_claim_main(int argc, char **argv) {
 
     uint64_t my_read_idx;
     uint64_t claim_count = 1;
+    bool using_tail_ring = false;
     int spin = 0;
 
 restart_loop:
@@ -797,36 +769,19 @@ restart_loop:
         // 1. Check Main Ring
         if (r_curr < w_snap) {
             int64_t sbatch = atomic_load_relaxed(&state->signed_batch_size); 
-            
             claim_count = 1;
             
             if (sbatch < 0) {
-                // SLOW PATH AGGREGATION
+                uint16_t L0 = state->stride_ring[r_curr & RING_MASK];
+                if (L0 == 0) L0 = 1;
+                uint64_t Wmax = atomic_load_relaxed(&state->active_workers); 
+                if (Wmax == 0) Wmax = 1;
+                uint64_t B = ((uint64_t)(-sbatch)) / L0;
+                if (B > Wmax) B = Wmax;
+                if (B < 1) B = 1;
+                claim_count = B;
                 
-                // Tail Check: If we entered the tail, STOP AGGREGATING.
-                uint64_t t_start = atomic_load_acquire(&state->tail_idx);
-                if (t_start != 0 && r_curr >= t_start) {
-                     // Force claim 1.
-                     claim_count = 1;
-                     // Switch global state to Fast Path to save other workers from checking
-                     if (sbatch < 0) {
-                         int64_t abs_L = -sbatch;
-                         atomic_store_relaxed(&state->signed_batch_size, abs_L);
-                     }
-                } 
-                else {
-                    // Normal Ramp Up Aggregation
-                    uint16_t L0 = state->stride_ring[r_curr & RING_MASK];
-                    if (L0 == 0) L0 = 1;
-                    uint64_t Wmax = atomic_load_relaxed(&state->active_workers); 
-                    if (Wmax == 0) Wmax = 1;
-                    uint64_t B = ((uint64_t)(-sbatch)) / L0;
-                    if (B > Wmax) B = Wmax;
-                    if (B < 1) B = 1;
-                    claim_count = B;
-                    
-                    if (claim_count > 64) claim_count = 64;
-                }
+                if (claim_count > 64) claim_count = 64;
             }
             
             if (r_curr + claim_count > w_snap) claim_count = w_snap - r_curr;
@@ -843,10 +798,25 @@ restart_loop:
             break;
         }
 
-        // Ring is empty. Check if done.
-        if (atomic_load_acquire(&state->scanner_finished)) {
-            bind_variable(v_cnt, "0", 0);
-            return 1;
+        // 2. Main Ring Empty? Check Tail.
+        if (atomic_load_acquire(&state->tail_active)) {
+             uint64_t t_w = atomic_load_acquire(&state->tail_write_idx);
+             uint64_t t_r = atomic_load_relaxed(&state->tail_read_idx);
+             
+             if (t_r < t_w) {
+                 using_tail_ring = true;
+                 claim_count = 1; 
+                 my_read_idx = atomic_fetch_add(&state->tail_read_idx, 1);
+                 
+                 if (my_read_idx >= t_w) {
+                     // Lost race, tail finished
+                     bind_variable(v_cnt, "0", 0); return 1; 
+                 }
+                 break;
+             }
+             
+             // Tail Empty + Active = Done
+             bind_variable(v_cnt, "0", 0); return 1; 
         }
 
         // 3. Wait Strategy
@@ -862,6 +832,7 @@ restart_loop:
         
         while(1) {
              if (atomic_load_acquire(&state->write_idx) > atomic_load_relaxed(&state->read_idx)) break;
+             if (atomic_load_acquire(&state->tail_active)) break;
 
              poll(pfds, 3, -1);
              if (pfds[2].revents & POLLIN) break; 
@@ -873,67 +844,82 @@ restart_loop:
         spin = 0;
     }
 
-    uint64_t w_curr = atomic_load_acquire(&state->write_idx);
-    
-    // CHECK FOR OVERSHOOT (Clamp & Restart logic)
-    if (my_read_idx + claim_count > w_curr) {
-         
-         if (atomic_load_acquire(&state->scanner_finished)) {
-             int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
-             if (diff < 0) diff = 0;
-             claim_count = (uint64_t)diff;
+    if (!using_tail_ring) {
+        uint64_t w_curr = atomic_load_acquire(&state->write_idx);
+        
+        // CHECK FOR OVERSHOOT (Clamp & Restart logic)
+        if (my_read_idx + claim_count > w_curr) {
              
-             if (claim_count == 0) { spin = 0; goto restart_loop; }
-         } 
-         else {
-             atomic_fetch_add(&state->active_waiters, 1);
-             is_waiting_on_ring = true;
-             while (1) {
-                 w_curr = atomic_load_acquire(&state->write_idx);
-                 if (w_curr > my_read_idx) {
-                     uint64_t avail = w_curr - my_read_idx;
-                     if (avail < claim_count) {
-                         struct EscrowPacket ep = { .idx = my_read_idx + avail, .cnt = claim_count - avail };
-                         if (write(fd_escrow[1], &ep, sizeof(ep)) == sizeof(ep)) {
-                             claim_count = avail;
-                             uint64_t one=1; if(write(evfd_data, &one, 8)){};
+             // 1. Check if scanner is done (Tail logic active means Main Ring is closed)
+             if (atomic_load_acquire(&state->tail_active)) {
+                 // Clamp to valid range
+                 int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
+                 if (diff < 0) diff = 0;
+                 claim_count = (uint64_t)diff;
+                 
+                 // If we claimed 'ghost' slots (0 valid), restart loop
+                 if (claim_count == 0) { spin = 0; goto restart_loop; }
+             } 
+             else {
+                 // 2. Standard Wait (Scanner active)
+                 atomic_fetch_add(&state->active_waiters, 1);
+                 is_waiting_on_ring = true;
+                 while (1) {
+                     w_curr = atomic_load_acquire(&state->write_idx);
+                     if (w_curr > my_read_idx) {
+                         uint64_t avail = w_curr - my_read_idx;
+                         if (avail < claim_count) {
+                             struct EscrowPacket ep = { .idx = my_read_idx + avail, .cnt = claim_count - avail };
+                             if (write(fd_escrow[1], &ep, sizeof(ep)) == sizeof(ep)) {
+                                 claim_count = avail;
+                                 uint64_t one=1; if(write(evfd_data, &one, 8)){};
+                             }
                          }
+                         break; 
                      }
-                     break; 
+                     
+                     // If scanner closes Main Ring while we wait
+                     if (atomic_load_acquire(&state->tail_active)) {
+                         int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
+                         if (diff < 0) diff = 0;
+                         claim_count = (uint64_t)diff;
+                         break;
+                     }
+                     
+                     struct pollfd pfds[2] = { { .fd = evfd_data, .events = POLLIN }, { .fd = evfd_eof, .events = POLLIN } };
+                     poll(pfds, 2, -1);
+                     if (pfds[0].revents) { uint64_t v; if(read(evfd_data, &v, 8)){}; }
+                     if (pfds[1].revents) break; 
                  }
+                 atomic_fetch_sub(&state->active_waiters, 1);
+                 is_waiting_on_ring = false;
                  
-                 // Scanner finished while waiting
-                 if (atomic_load_acquire(&state->scanner_finished)) {
-                     int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
-                     if (diff < 0) diff = 0;
-                     claim_count = (uint64_t)diff;
-                     break;
-                 }
-                 
-                 struct pollfd pfds[2] = { { .fd = evfd_data, .events = POLLIN }, { .fd = evfd_eof, .events = POLLIN } };
-                 poll(pfds, 2, -1);
-                 if (pfds[0].revents) { uint64_t v; if(read(evfd_data, &v, 8)){}; }
-                 if (pfds[1].revents) break; 
+                 if (claim_count == 0) { spin = 0; goto restart_loop; }
              }
-             atomic_fetch_sub(&state->active_waiters, 1);
-             is_waiting_on_ring = false;
-             
-             if (claim_count == 0) { spin = 0; goto restart_loop; }
-         }
+        }
     }
 
     uint64_t final_lines = 0;
-    uint64_t final_offset = state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+    uint64_t final_offset = 0;
 
-    if (claim_count == 1) {
-        int64_t sbatch_now = atomic_load_relaxed(&state->signed_batch_size);
-        if (sbatch_now > 0 && !(state->offset_ring[my_read_idx & RING_MASK] & FLAG_PARTIAL_BATCH)) {
-            final_lines = sbatch_now;
-        } else {
-            final_lines = state->stride_ring[my_read_idx & RING_MASK];
+    if (using_tail_ring) {
+        if (my_read_idx < TAIL_RING_SIZE) {
+            final_offset = state->tail_offset[my_read_idx];
+            final_lines  = state->tail_stride[my_read_idx];
         }
     } else {
-        for (uint64_t i = 0; i < claim_count; i++) final_lines += state->stride_ring[(my_read_idx + i) & RING_MASK];
+        // Main Ring Access
+        final_offset = state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+        if (claim_count == 1) {
+             int64_t sbatch_now = atomic_load_relaxed(&state->signed_batch_size);
+             if (sbatch_now > 0 && !(state->offset_ring[my_read_idx & RING_MASK] & FLAG_PARTIAL_BATCH)) {
+                 final_lines = sbatch_now;
+             } else {
+                 final_lines = state->stride_ring[my_read_idx & RING_MASK];
+             }
+        } else {
+             for (uint64_t i = 0; i < claim_count; i++) final_lines += state->stride_ring[(my_read_idx + i) & RING_MASK];
+        }
     }
 
     atomic_fetch_add(&state->total_lines_consumed, final_lines);
@@ -941,100 +927,148 @@ restart_loop:
     u64toa(final_offset, buf); bind_variable(v_off, buf, 0);
     u64toa(final_lines, buf); bind_variable(v_cnt, buf, 0);
     
-    u64toa(my_read_idx, buf); bind_variable("RING_BATCH_IDX", buf, 0);
+    // Explicit use of tail_idx for synthetic monotonicity
+    uint64_t t_start_idx = atomic_load_relaxed(&state->tail_idx);
+    uint64_t export_idx = using_tail_ring ? (t_start_idx + my_read_idx) : my_read_idx;
+    
+    u64toa(export_idx, buf); bind_variable("RING_BATCH_IDX", buf, 0);
     u64toa(claim_count, buf); bind_variable("RING_BATCH_SLOTS", buf, 0);
 
     if (fd_read >= 0 && final_lines > 0) lseek(fd_read, (off_t)final_offset, SEEK_SET);
     return 0;
 }
 
-// ... [Boilerplate Dispatchers] ...
-
+// --- Ring Ack (Supports Multicast & Optional Fallow) ---
 static int ring_ack_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
-    int fd_fallow = -1; if (argv[1][0] != '\0') fd_fallow = atoi(argv[1]);
+    
+    int fd_fallow = -1;
+    if (argv[1][0] != '\0') fd_fallow = atoi(argv[1]);
+    
     int fd_order  = (argc >= 3) ? atoi(argv[2]) : -1;
+    
     const char *s_idx = get_string_value("RING_BATCH_IDX");
     const char *s_cnt = get_string_value("RING_BATCH_SLOTS");
+    
     if (s_idx && s_cnt) {
-        struct IndexPacket ip = { .idx = (uint64_t)atoll(s_idx), .cnt = (uint64_t)atoll(s_cnt) };
-        if (fd_fallow > 0) if (write(fd_fallow, &ip, sizeof(ip)) != sizeof(ip)) return EXECUTION_FAILURE;
-        if (fd_order > 0) if (write(fd_order, &ip, sizeof(ip)) != sizeof(ip)) { /* ignore */ }
-    }
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_order_main(int argc, char **argv) {
-    if (argc < 3) return EXECUTION_FAILURE;
-    int fd_in = atoi(argv[1]);
-    const char *prefix = argv[2];
-    struct Interval *head = NULL;
-    uint64_t next_idx = 0;
-    struct IndexPacket ip;
-    char path[256];
-    while (read(fd_in, &ip, sizeof(ip)) == sizeof(ip)) {
-        if (ip.idx == next_idx) {
-            snprintf(path, sizeof(path), "%s.%lu", prefix, ip.idx);
-            int fd_file = open(path, O_RDONLY);
-            if (fd_file >= 0) {
-                off_t offset = 0; struct stat st;
-                if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-                    while (offset < st.st_size) {
-                        ssize_t sent = sendfile(1, fd_file, &offset, st.st_size - offset);
-                        if (sent < 0) {
-                            if (errno == EINTR) continue;
-                            if (errno == EINVAL || errno == ENOSYS || errno == ENOTSOCK || errno == EBADF) {
-                                char buf[32768]; ssize_t n; lseek(fd_file, offset, SEEK_SET);
-                                while ((n = read(fd_file, buf, sizeof(buf))) > 0) write(1, buf, n);
-                            }
-                            break; 
-                        }
-                    }
-                }
-                close(fd_file); unlink(path);
-            }
-            next_idx += ip.cnt;
-            while (head && head->s == next_idx) {
-                struct Interval *tmp = head;
-                snprintf(path, sizeof(path), "%s.%lu", prefix, tmp->s);
-                fd_file = open(path, O_RDONLY);
-                if (fd_file >= 0) {
-                    off_t offset = 0; struct stat st;
-                    if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-                        while (offset < st.st_size) {
-                            ssize_t sent = sendfile(1, fd_file, &offset, st.st_size - offset);
-                            if (sent < 0) {
-                                if (errno == EINTR) continue;
-                                if (errno == EINVAL || errno == ENOSYS || errno == ENOTSOCK || errno == EBADF) {
-                                    char buf[32768]; ssize_t n; lseek(fd_file, offset, SEEK_SET);
-                                    while ((n = read(fd_file, buf, sizeof(buf))) > 0) write(1, buf, n);
-                                }
-                                break; 
-                            }
-                        }
-                    }
-                    close(fd_file); unlink(path);
-                }
-                next_idx = tmp->e; head = tmp->next; free(tmp);
-            }
-        } else {
-            struct Interval *n = xmalloc(sizeof(struct Interval));
-            n->s = ip.idx; n->e = ip.idx + ip.cnt;
-            struct Interval **curr = &head;
-            while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
-            n->next = *curr; *curr = n;
+        struct IndexPacket ip = { 
+            .idx = (uint64_t)atoll(s_idx), 
+            .cnt = (uint64_t)atoll(s_cnt) 
+        };
+        
+        if (fd_fallow > 0) {
+            if (write(fd_fallow, &ip, sizeof(ip)) != sizeof(ip)) return EXECUTION_FAILURE;
+        }
+        
+        if (fd_order > 0) {
+            if (write(fd_order, &ip, sizeof(ip)) != sizeof(ip)) { /* ignore error */ }
         }
     }
     return EXECUTION_SUCCESS;
 }
 
+// --- Ring Order (Output Consumer) ---
+static int ring_order_main(int argc, char **argv) {
+    if (argc < 3) {
+        builtin_error("usage: ring_order <FD_IN> <DIR_PREFIX>");
+        return EXECUTION_FAILURE;
+    }
+    
+    int fd_in = atoi(argv[1]);
+    const char *prefix = argv[2];
+    
+    struct Interval *head = NULL;
+    uint64_t next_idx = 0;
+    struct IndexPacket ip;
+    char path[256];
+    
+    while (read(fd_in, &ip, sizeof(ip)) == sizeof(ip)) {
+        if (ip.idx == next_idx) {
+            snprintf(path, sizeof(path), "%s.%lu", prefix, ip.idx);
+            int fd_file = open(path, O_RDONLY);
+            if (fd_file >= 0) {
+                off_t offset = 0;
+                struct stat st;
+                if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
+                    ssize_t sent = 0;
+                    while (offset < st.st_size) {
+                        sent = sendfile(1, fd_file, &offset, st.st_size - offset);
+                        if (sent < 0) {
+                            if (errno == EINTR) continue;
+                            if (errno == EINVAL || errno == ENOSYS || errno == ENOTSOCK || errno == EBADF) {
+                                char buf[32768];
+                                ssize_t n;
+                                lseek(fd_file, offset, SEEK_SET);
+                                while ((n = read(fd_file, buf, sizeof(buf))) > 0) {
+                                    write(1, buf, n);
+                                }
+                            }
+                            break; 
+                        }
+                    }
+                }
+                close(fd_file);
+                unlink(path);
+            }
+            
+            next_idx += ip.cnt;
+            
+            while (head && head->s == next_idx) {
+                struct Interval *tmp = head;
+                snprintf(path, sizeof(path), "%s.%lu", prefix, tmp->s);
+                fd_file = open(path, O_RDONLY);
+                if (fd_file >= 0) {
+                    off_t offset = 0;
+                    struct stat st;
+                    if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
+                        ssize_t sent = 0;
+                        while (offset < st.st_size) {
+                            sent = sendfile(1, fd_file, &offset, st.st_size - offset);
+                            if (sent < 0) {
+                                if (errno == EINTR) continue;
+                                if (errno == EINVAL || errno == ENOSYS || errno == ENOTSOCK || errno == EBADF) {
+                                    char buf[32768];
+                                    ssize_t n;
+                                    lseek(fd_file, offset, SEEK_SET);
+                                    while ((n = read(fd_file, buf, sizeof(buf))) > 0) {
+                                        write(1, buf, n);
+                                    }
+                                }
+                                break; 
+                            }
+                        }
+                    }
+                    close(fd_file);
+                    unlink(path);
+                }
+                
+                next_idx = tmp->e; 
+                head = tmp->next;
+                free(tmp);
+            }
+        } else {
+            struct Interval *n = xmalloc(sizeof(struct Interval));
+            n->s = ip.idx; 
+            n->e = ip.idx + ip.cnt; 
+            struct Interval **curr = &head;
+            while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
+            n->next = *curr;
+            *curr = n;
+        }
+    }
+    return EXECUTION_SUCCESS;
+}
+
+// --- Evfd Copy/Signal (Ingest Splicer with OOM Backpressure) ---
 static int evfd_copy_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
     int outfd = atoi(argv[1]);
     int infd  = (argc == 3) ? atoi(argv[2]) : 0;
     size_t chunk = HUGE_PAGE_SIZE; 
     struct stat st;
-    uint64_t oom_threshold = 134217728; 
+    
+    // Calculate dynamic OOM threshold (max(128MB, TotalRAM/128))
+    uint64_t oom_threshold = 134217728; // Default 128MB
     struct sysinfo si_init;
     if (sysinfo(&si_init) == 0) {
         uint64_t mu = (uint64_t)si_init.mem_unit ? si_init.mem_unit : 1;
@@ -1042,14 +1076,18 @@ static int evfd_copy_main(int argc, char **argv) {
         uint64_t t = total / 128;
         if (t > oom_threshold) oom_threshold = t;
     }
+
     uint64_t total_moved = 0;
     uint64_t next_check = 16 * 1024 * 1024;
+    
     if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
         off_t off = 0;
         while(1) {
             ssize_t n = sendfile(outfd, infd, &off, chunk);
             if (n <= 0) break;
             if (evfd_ingest_data >= 0) { uint64_t v=1; if(write(evfd_ingest_data, &v, 8)){}; }
+            
+            // Check OOM
             total_moved += n;
             if (total_moved > next_check) {
                 struct sysinfo si;
@@ -1060,8 +1098,10 @@ static int evfd_copy_main(int argc, char **argv) {
                         if (state && atomic_load_relaxed(&state->fallow_active)) {
                             int r = 0;
                             while (free_b < oom_threshold && r < 10000) {
-                                usleep(100); sysinfo(&si);
-                                free_b = (uint64_t)si.freeram * mu; r++;
+                                usleep(100);
+                                sysinfo(&si);
+                                free_b = (uint64_t)si.freeram * mu;
+                                r++;
                             }
                         }
                     }
@@ -1074,6 +1114,8 @@ static int evfd_copy_main(int argc, char **argv) {
         if (n >= 0) {
             do {
                 if (n > 0 && evfd_ingest_data >= 0) { uint64_t v=1; if(write(evfd_ingest_data, &v, 8)){}; }
+                
+                // Check OOM
                 total_moved += n;
                 if (total_moved > next_check) {
                     struct sysinfo si;
@@ -1084,14 +1126,17 @@ static int evfd_copy_main(int argc, char **argv) {
                             if (state && atomic_load_relaxed(&state->fallow_active)) {
                                 int r = 0;
                                 while (free_b < oom_threshold && r < 10000) {
-                                    usleep(100); sysinfo(&si);
-                                    free_b = (uint64_t)si.freeram * mu; r++;
+                                    usleep(100);
+                                    sysinfo(&si);
+                                    free_b = (uint64_t)si.freeram * mu;
+                                    r++;
                                 }
                             }
                         }
                     }
                     next_check += 16 * 1024 * 1024;
                 }
+                
                 n = splice(infd, NULL, outfd, NULL, chunk, SPLICE_F_MOVE|SPLICE_F_MORE);
             } while (n > 0);
         } else if (errno == EINVAL) {
@@ -1104,6 +1149,8 @@ static int evfd_copy_main(int argc, char **argv) {
                 ssize_t m = splice(pipefd[0], NULL, outfd, NULL, n, SPLICE_F_MOVE|SPLICE_F_MORE);
                 if (m <= 0) break;
                 if (evfd_ingest_data >= 0) { uint64_t v=1; if(write(evfd_ingest_data, &v, 8)){}; }
+                
+                // Check OOM
                 total_moved += n;
                 if (total_moved > next_check) {
                     struct sysinfo si;
@@ -1114,8 +1161,10 @@ static int evfd_copy_main(int argc, char **argv) {
                             if (state && atomic_load_relaxed(&state->fallow_active)) {
                                 int r = 0;
                                 while (free_b < oom_threshold && r < 10000) {
-                                    usleep(100); sysinfo(&si);
-                                    free_b = (uint64_t)si.freeram * mu; r++;
+                                    usleep(100);
+                                    sysinfo(&si);
+                                    free_b = (uint64_t)si.freeram * mu;
+                                    r++;
                                 }
                             }
                         }
@@ -1137,14 +1186,18 @@ static int evfd_signal_main(int argc, char **argv) {
     return EXECUTION_SUCCESS;
 }
 
+// --- Fallow (Index-Aware + Dry Run Support) ---
 static int ring_fallow_main(int argc, char **argv) {
     if (argc < 3) return EXECUTION_FAILURE;
     int fd_in = atoi(argv[1]);
     int fd_file = atoi(argv[2]);
     bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
+    
     if (state) atomic_store_release(&state->fallow_active, 1);
+
     struct Interval *head = NULL;
     uint64_t next_idx = 0; 
+    
     struct IndexPacket ip;
     while (read(fd_in, &ip, sizeof(ip)) == sizeof(ip)) {
         if (ip.idx == next_idx) {
@@ -1155,18 +1208,38 @@ static int ring_fallow_main(int argc, char **argv) {
                 head = tmp->next;
                 free(tmp);
             }
+            
             if (state) atomic_store_release(&state->min_idx, next_idx);
+            
             if (!dry_run) {
-                uint64_t byte_limit = state->offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+                // Modified Fallow Logic for Dual Ring
+                uint64_t byte_limit = 0;
+                
+                uint64_t t_start = atomic_load_acquire(&state->tail_idx);
+                bool t_active = atomic_load_acquire(&state->tail_active);
+                
+                if (t_active && next_idx >= t_start) {
+                     uint64_t t_offset = next_idx - t_start;
+                     if (t_offset < TAIL_RING_SIZE) {
+                         byte_limit = state->tail_offset[t_offset];
+                     }
+                } else {
+                     byte_limit = state->offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+                }
+
                 off_t aligned = (off_t)((byte_limit / 4096) * 4096);
-                if (aligned > 0) fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned);
+                if (aligned > 0) {
+                    fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned);
+                }
             }
         } else if (ip.idx > next_idx) {
             struct Interval *n = xmalloc(sizeof(struct Interval));
-            n->s = ip.idx; n->e = ip.idx + ip.cnt;
+            n->s = ip.idx;
+            n->e = ip.idx + ip.cnt;
             struct Interval **curr = &head;
             while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
-            n->next = *curr; *curr = n;
+            n->next = *curr;
+            *curr = n;
         }
     }
     return EXECUTION_SUCCESS;
@@ -1185,6 +1258,7 @@ static int ring_worker_main(int argc, char **argv) {
 static char * lseek_doc[] = { "Usage: lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]", NULL };
 static int lseek_main(int argc, char ** argv) { if (argc < 3 || argc > 5) return EXECUTION_FAILURE; int fd = atoi(argv[1]); off_t off = atoll(argv[2]); int whence = SEEK_CUR; if (argc > 3) { if (!strcmp(argv[3], "SEEK_SET")) whence = SEEK_SET; else if (!strcmp(argv[3], "SEEK_END")) whence = SEEK_END; } off_t no = lseek(fd, off, whence); if (no == -1) return EXECUTION_FAILURE; if (argc >= 4 && argv[argc-1][0]) { char buf[32]; snprintf(buf,32,"%lld",(long long)no); bind_variable(argv[argc-1], buf, 0); } else printf("%lld\n", (long long)no); return EXECUTION_SUCCESS; }
 
+// --- BOILERPLATE MACRO ---
 #define DEFINE_DISPATCHER(func_name, main_func) \
 static int func_name(WORD_LIST *list) { \
     int argc; \
