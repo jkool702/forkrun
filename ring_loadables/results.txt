@@ -1,3 +1,47 @@
+v8.03
+
+time { ring_test 7 >/dev/null; }
+Generating test data...
+Starting splicer...
+Sending stdin to /dev/shm/.forkrun/forkrun.ss4s6Wef/stdin
+Starting scanner...
+Starting falloc...
+
+Consuming...
+
+SPAWNING 7 WORKERS (elapsed time = 11714 us)
+SPAWNING 4 WORKERS (elapsed time = 15240 us)
+SPAWNING 3 WORKERS (elapsed time = 17913 us)
+SPAWNING 1 WORKERS (elapsed time = 20060 us)
+SPAWNING 1 WORKERS (elapsed time = 20682 us)
+SPAWNING 1 WORKERS (elapsed time = 21614 us)
+SPAWNING 1 WORKERS (elapsed time = 22394 us)
+SPAWNING 1 WORKERS (elapsed time = 23153 us)
+SPAWNING 1 WORKERS (elapsed time = 26132 us)
+SPAWNING 1 WORKERS (elapsed time = 26840 us)
+
+SPLICER HIT EOF
+elapsed time = 341602 us
+
+SCANNER HIT EOF
+elapsed time = 356828 us
+
+
+Done!
+
+Total Lines Consumed: 7792389 (Expected: 7792389)
+
+Time: 168057462 us
+
+
+real    2m48.259s
+user    64m12.020s
+sys     12m36.496s
+
+
+----------------------------------------------------------
+
+
 perf stat -d -d -d /usr/bin/bash -c 'ring_test 2'; perf stat -d -d -d /usr/bin/bash -c 'ring_test 3';
 Generating test data...
 starting splicer...

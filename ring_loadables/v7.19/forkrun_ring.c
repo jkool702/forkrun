@@ -1,7 +1,7 @@
-// forkrun_ring.c v8.03
+// forkrun_ring.c v7.19
 // Architecture: Universal Ingest, Zero-Copy Ring, Escrow Stealing
 // Features: Lookahead Buffer, Single-Ring Tail Strategy, Gradient Ramp Down
-// Fixes: Tail Refill Logic (Prevents Missing Start of Line)
+// Fixes: Corrected EOF handling to ensure tail ramp-down engages (prevents premature lookahead commit)
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -55,8 +55,7 @@
 #endif
 
 #define FLAG_PARTIAL_BATCH (1ULL << 63)
-#define INGRESS_CHUNK_SIZE (2 * 1024 * 1024)
-#define SCANNER_CHUNK_SIZE (2 * 1024 * 1024)
+#define HUGE_PAGE_SIZE (2 * 1024 * 1024) 
 #define RING_SIZE_LOG2 20
 #define RING_SIZE      (1ULL << RING_SIZE_LOG2)
 #define RING_MASK      (RING_SIZE - 1)
@@ -98,11 +97,10 @@ static int ring_order_main(int argc, char **argv);
 static int evfd_copy_main(int argc, char **argv);
 static int evfd_signal_main(int argc, char **argv);
 static int lseek_main(int argc, char ** argv);
-static int ring_cleanup_waiter_main(int argc, char **argv);
 
 static void *xmalloc_aligned(size_t size) {
     void *ptr;
-    if (posix_memalign(&ptr, SCANNER_CHUNK_SIZE, size) != 0) ptr = xmalloc(size);
+    if (posix_memalign(&ptr, HUGE_PAGE_SIZE, size) != 0) ptr = xmalloc(size);
     return ptr;
 }
 
@@ -163,15 +161,6 @@ static inline uint64_t get_us_time() {
 static inline uint64_t fast_log2(uint64_t v) {
     if (v < 2) return 0;
     return 63 - __builtin_clzll(v);
-}
-
-static inline void cleanup_waiter_state() {
-    if (is_waiting_on_ring) {
-        if (state && atomic_load_relaxed(&state->active_waiters) > 0) {
-            atomic_fetch_sub(&state->active_waiters, 1);
-        }
-        is_waiting_on_ring = false;
-    }
 }
 
 // --- Tuning Helpers ---
@@ -277,7 +266,6 @@ static inline void scanner_adaptive_commit(bool force) {
         uint64_t W = atomic_load_relaxed(&state->active_workers);
         if (W < 1) W = 1;
 
-        // Force Commit: If explicitly forced (Stall+Starvation) or workers waiting
         if (force || atomic_load_relaxed(&state->active_waiters) > 0) {
             atomic_store_release(&state->write_idx, local_scan_idx);
             local_write_idx = local_scan_idx;
@@ -285,17 +273,16 @@ static inline void scanner_adaptive_commit(bool force) {
             return;
         }
 
-        // Adaptive Commit: Maintain Lookahead Buffer
         uint64_t r_idx = atomic_load_relaxed(&state->read_idx);
-        uint64_t pending = local_scan_idx - r_idx; // Total In-Flight (Buffer + Unclaimed)
+        uint64_t pending = local_scan_idx - r_idx; 
         uint64_t current_buffer = local_scan_idx - local_write_idx;
 
         uint64_t target_buffer = 0;
 
         if (pending >= 10 * W) {
-            target_buffer = (W << 2); // Saturation Zone: Cap buffer at 4*W
+            target_buffer = (W << 2); 
         } else if (pending > (W << 1)) {
-            // Transition Zone: max(0, min(pending/2, current_buffer) - W)
+            // Transition Zone: Linear Scale with Dampening
             uint64_t linear = pending >> 1;
             uint64_t intermediate = (linear < current_buffer) ? linear : current_buffer;
             
@@ -319,7 +306,6 @@ static inline void scanner_adaptive_commit(bool force) {
         if (atomic_load_relaxed(&state->fallow_active)) limit = atomic_load_acquire(&state->min_idx); \
         else limit = atomic_load_acquire(&state->read_idx); \
         if ((local_scan_idx - limit) < RING_SIZE) break; \
-        /* Ring Full: Force commit to clear space */ \
         scanner_adaptive_commit(true); \
         usleep(100); \
     } \
@@ -328,7 +314,6 @@ static inline void scanner_adaptive_commit(bool force) {
     state->offset_ring[local_scan_idx & RING_MASK] = pk; \
     state->stride_ring[local_scan_idx & RING_MASK] = (uint16_t)cnt; \
     local_scan_idx++; \
-    /* Standard Commit: Adaptive buffer maintenance */ \
     scanner_adaptive_commit(false); \
 } while(0)
 
@@ -390,7 +375,7 @@ static int ring_scanner_main(int argc, char **argv) {
     local_scan_idx = 0;
     local_write_idx = 0;
 
-    size_t CHUNK = SCANNER_CHUNK_SIZE;
+    size_t CHUNK = HUGE_PAGE_SIZE;
     char *buf = xmalloc_aligned(CHUNK);
     char *p = buf, *end = buf;
     
@@ -463,53 +448,50 @@ static int ring_scanner_main(int argc, char **argv) {
                 p = buf; 
                 end = buf + n;
                 status = 0;
-            } else {
-                // FIXED LOGIC: Stall vs Starvation Distinction
-                
-                struct pollfd pfds[2] = { 
-                    { .fd = evfd_ingest_data, .events = POLLIN }, 
-                    { .fd = evfd_ingest_eof,  .events = POLLIN } 
-                };
-
-                // 1. Non-blocking check for EOF signal
-                if (poll(pfds, 2, 0) > 0) {
-                    if (pfds[1].revents & POLLIN) {
-                        atomic_store_release(&state->ingest_complete, 1);
-                    }
-                }
-                
+            } else { // n == 0 (EOF or STALL)
                 if (atomic_load_acquire(&state->ingest_complete)) {
+                    // FINAL EOF: Do not commit here, break to tail logic
                     status = 1;
-                }
-                
-                if (status != 1) {
-                    // 2. Not EOF = Producer Stall.
-                    // Only Force Commit if Workers are STARVING (waiters > 0).
-                    bool starving = (atomic_load_relaxed(&state->active_waiters) > 0);
-                    scanner_adaptive_commit(starving);
+                } else {
+                    // TEMPORARY STALL: Commit and wait
+                    scanner_adaptive_commit(true); // Flush all current lookahead
+                    
+                    struct pollfd pfds[2] = { 
+                        { .fd = evfd_ingest_data, .events = POLLIN }, 
+                        { .fd = evfd_ingest_eof,  .events = POLLIN } 
+                    };
                     
                     SCANNER_WAKE();
-                    int ret = poll(pfds, 2, 100);
                     
-                    if (ret > 0) {
-                        if (pfds[0].revents & POLLIN) {
-                            uint64_t v; if(read(evfd_ingest_data, &v, 8)){};
-                            status = 2; 
-                        }
-                        if (pfds[1].revents & POLLIN) {
-                            atomic_store_release(&state->ingest_complete, 1);
+                    int ret = poll(pfds, 2, 100); // Short poll for new data
+                    
+                    bool d_ready = (ret > 0 && (pfds[0].revents & POLLIN));
+                    bool e_sig   = (ret > 0 && (pfds[1].revents & POLLIN));
+                    
+                    if (d_ready) {
+                        uint64_t v; if(read(evfd_ingest_data, &v, 8)){};
+                        status = 2; // New data available, reset status to non-EOF
+                    } else if (e_sig) {
+                        atomic_store_release(&state->ingest_complete, 1);
+                        status = 1; // Real EOF, will break loop next iter
+                    } else {
+                        if (atomic_load_acquire(&state->ingest_complete)) {
                             status = 1;
+                        } else {
+                            // poll wait, keep status as 2 (STALL)
                         }
                     }
                 }
-
-                if (status == 2) {
+                
+                if (status == 2) { // Only increment stall_meter if it's a true stall, not a final EOF
                     stall_meter = (stall_meter + 33) >> 1; 
                     if (p < end) force_refill = true;
                     continue; 
                 }
             }
         }
+
+        if (status == 1) break; // Break from main loop on actual EOF
 
         uint64_t scan_target = (L > pending_lines) ? (L - pending_lines) : 0;
         if (scan_target == 0 && !limit_reached) scan_target = 1; 
@@ -606,7 +588,6 @@ static int ring_scanner_main(int argc, char **argv) {
                             atomic_store_release(&state->batch_change_idx, local_scan_idx);
                             atomic_store_release(&state->signed_batch_size, -(int64_t)L);
                         } 
-                        // v8.00 Strict Stall AND Starvation Requirement
                         else if (l_target < L && wait_meter >= 30 && stall_meter >= 30) {
                             L = (L + l_target) / 2;
                             if (L < 1) L = 1;
@@ -627,7 +608,6 @@ static int ring_scanner_main(int argc, char **argv) {
     }
 
     // --- EOF Tail Logic (Single Ring Overwrite Strategy) ---
-    // DO NOT force commit here. We keep lookahead to recall it.
     
     // 1. Count remaining lines in current buffer
     uint64_t L_tail = pending_lines;
@@ -651,7 +631,7 @@ static int ring_scanner_main(int argc, char **argv) {
         if (W_curr < W_max_val) {
             uint64_t r_idx = atomic_load_relaxed(&state->read_idx);
             
-            // Calculate Batches in Main Ring (Backlog)
+            // Backlog includes lookahead batches + tail lines
             uint64_t backlog = 0;
             if (local_scan_idx > r_idx) backlog = local_scan_idx - r_idx;
             
@@ -692,18 +672,38 @@ static int ring_scanner_main(int argc, char **argv) {
          end = buf + (n > 0 ? n : 0);
     }
     
-    // 6. Compute R (Reduction Factor) - Simplified
+    // 6. Compute R (Reduction Factor)
     uint64_t R = 1;
-    if (L > 0) {
+        if (L > 0) {
         uint64_t inner_log = fast_log2(2 + L);
         R = fast_log2(2 + inner_log);
     }
     if (R < 1) R = 1;
+/*
+    uint64_t R0 = 1;
+    if (L > 0) {
+        uint64_t inner_log = fast_log2(2 + L);
+        R0 = fast_log2(2 + inner_log);
+    }
+    
+    uint64_t W_curr = atomic_load_relaxed(&state->active_workers);
+    if (W_curr < 1) W_curr = 1;
+    
+    uint64_t work_metric = W_curr * local_write_idx;
+    uint64_t mSWI = (work_metric < RING_SIZE) ? work_metric : RING_SIZE;
+    
+    uint64_t term1 = (RING_SIZE - mSWI) * R0;
+    uint64_t term2 = mSWI * (1ULL << R0);
+    
+    R = (term1 + term2) / RING_SIZE;
+    if (R < 1) R = 1;
+*/
+
 
     // 7. Generate Gradient Batches (Overwriting into Main Ring)
     uint64_t L_tail_done = 0;
     
-    // MARK THE START OF TAIL (Force Stride Mode)
+    // MARK THE START OF TAIL (For Slow Path Checking)
     atomic_store_release(&state->tail_idx, local_write_idx);
 
     while (L_tail_done < L_tail) {
@@ -717,8 +717,6 @@ static int ring_scanner_main(int argc, char **argv) {
         
         uint64_t lines_found = 0;
         while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
-            
-            // FIX: Robust Tail Refill Logic to prevent split lines
             if (p >= end) {
                 uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
                 lseek(fd, (off_t)current_p_offset, SEEK_SET);
@@ -736,37 +734,16 @@ static int ring_scanner_main(int argc, char **argv) {
                 lines_found++;
                 p = nl + 1;
             } else {
-                // No newline in current buffer chunk.
-                // IMMEDIATE REFILL reusing current 'p' offset
-                uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-                lseek(fd, (off_t)current_p_offset, SEEK_SET);
-                ssize_t n = read(fd, buf, CHUNK);
-                
-                if (n > 0) {
-                    buf_base_offset = current_p_offset;
-                    p = buf; 
-                    end = buf + n;
-                    // Loop continues with p at start of partial line
-                } else {
-                    // True EOF with partial line
-                    p = end; // Consume remainder
-                    break; 
-                }
+                if (p < end) { lines_found++; p = end; }
+                break;
             }
         }
         
-        // Handle final partial line at True EOF
-        if (lines_found < target && (lines_found + L_tail_done) < L_tail) {
-             if (p >= end) {
-                 uint64_t remainder = L_tail - L_tail_done - lines_found;
-                 lines_found += remainder;
-             }
-        }
-
         if (lines_found > 0) {
             uint64_t pk = (uint64_t)batch_start;
             if (lines_found != L) pk |= FLAG_PARTIAL_BATCH;
             
+            // Wait for space in ring
             while(1) {
                  uint64_t limit;
                  if (atomic_load_relaxed(&state->fallow_active)) limit = atomic_load_acquire(&state->min_idx); 
@@ -792,7 +769,7 @@ static int ring_scanner_main(int argc, char **argv) {
     local_scan_idx++;
     
     atomic_store_release(&state->write_idx, local_scan_idx);
-    atomic_store_release(&state->scanner_finished, 1);
+    atomic_store_release(&state->scanner_finished, 1); // <--- Set AFTER all tail batches are committed
     
     SCANNER_WAKE();
     if (fd_spawn >= 0) if(write(fd_spawn, "x\n", 2)){};
@@ -837,7 +814,9 @@ restart_loop:
                 // Tail Check: If we entered the tail, STOP AGGREGATING.
                 uint64_t t_start = atomic_load_acquire(&state->tail_idx);
                 if (t_start != 0 && r_curr >= t_start) {
+                     // Force claim 1.
                      claim_count = 1;
+                     // Switch global state to Fast Path to save other workers from checking
                      if (sbatch < 0) {
                          int64_t abs_L = -sbatch;
                          atomic_store_relaxed(&state->signed_batch_size, abs_L);
@@ -873,6 +852,7 @@ restart_loop:
         }
 
         // Ring is empty. Check if done.
+        // Moved scanner_finished check here to prevent busy-waiting.
         if (atomic_load_acquire(&state->scanner_finished)) {
             bind_variable(v_cnt, "0", 0);
             return 1;
@@ -892,12 +872,16 @@ restart_loop:
         while(1) {
              if (atomic_load_acquire(&state->write_idx) > atomic_load_relaxed(&state->read_idx)) break;
 
+             // Check if scanner_finished flag set while waiting, before blocking again
+             if (atomic_load_acquire(&state->scanner_finished)) break; // Break to the exit path
+             
              poll(pfds, 3, -1);
              if (pfds[2].revents & POLLIN) break; 
              if (pfds[0].revents) { uint64_t v; if(read(evfd_data, &v, 8)){}; break; }
              if (pfds[1].revents) break; 
         }
-        cleanup_waiter_state();
+        atomic_fetch_sub(&state->active_waiters, 1);
+        is_waiting_on_ring = false;
         spin = 0;
     }
 
@@ -906,6 +890,7 @@ restart_loop:
     // CHECK FOR OVERSHOOT (Clamp & Restart logic)
     if (my_read_idx + claim_count > w_curr) {
          
+         // If scanner is definitively finished, clamp and restart loop (which leads to exit)
          if (atomic_load_acquire(&state->scanner_finished)) {
              int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
              if (diff < 0) diff = 0;
@@ -914,6 +899,7 @@ restart_loop:
              if (claim_count == 0) { spin = 0; goto restart_loop; }
          } 
          else {
+             // Standard Wait (Scanner active, potentially filling more data for the overshoot)
              atomic_fetch_add(&state->active_waiters, 1);
              is_waiting_on_ring = true;
              while (1) {
@@ -930,7 +916,7 @@ restart_loop:
                      break; 
                  }
                  
-                 // Scanner finished while waiting
+                 // If scanner finishes while we wait, break and clamp
                  if (atomic_load_acquire(&state->scanner_finished)) {
                      int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
                      if (diff < 0) diff = 0;
@@ -943,7 +929,8 @@ restart_loop:
                  if (pfds[0].revents) { uint64_t v; if(read(evfd_data, &v, 8)){}; }
                  if (pfds[1].revents) break; 
              }
-             cleanup_waiter_state();
+             atomic_fetch_sub(&state->active_waiters, 1);
+             is_waiting_on_ring = false;
              
              if (claim_count == 0) { spin = 0; goto restart_loop; }
          }
@@ -955,14 +942,22 @@ restart_loop:
     if (claim_count == 1) {
         int64_t sbatch_now = atomic_load_relaxed(&state->signed_batch_size);
         
-        // Also check tail_idx here for Fast Path workers
+        // Check for Tail in Fast Path (retains partial flag override)
+        // If sbatch is positive, it means we are in the "fast path".
+        // However, if we hit a partial batch or are in the tail (marked by scanner_finished),
+        // we must explicitly read the stride.
+        // No, tail_idx should indicate a change in average batch size and thus forces stride read.
+        // Let's use the tail_idx to explicitly force stride reading
         uint64_t tail_start = atomic_load_acquire(&state->tail_idx);
-        bool in_tail = (tail_start != 0 && my_read_idx >= tail_start);
+        bool in_tail_or_partial_fast_path = (tail_start != 0 && my_read_idx >= tail_start) || 
+                                            !(state->offset_ring[my_read_idx & RING_MASK] & FLAG_PARTIAL_BATCH);
         
-        if (!in_tail && sbatch_now > 0 && !(state->offset_ring[my_read_idx & RING_MASK] & FLAG_PARTIAL_BATCH)) {
-            final_lines = sbatch_now;
+        // If it's a "known good" fixed-size batch (sbatch > 0, not partial, not in tail section)
+        if (sbatch_now > 0 && (state->offset_ring[my_read_idx & RING_MASK] & FLAG_PARTIAL_BATCH) == 0 && 
+            (tail_start == 0 || my_read_idx < tail_start)) {
+             final_lines = sbatch_now;
         } else {
-            final_lines = state->stride_ring[my_read_idx & RING_MASK];
+             final_lines = state->stride_ring[my_read_idx & RING_MASK];
         }
     } else {
         for (uint64_t i = 0; i < claim_count; i++) final_lines += state->stride_ring[(my_read_idx + i) & RING_MASK];
@@ -1064,7 +1059,7 @@ static int evfd_copy_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
     int outfd = atoi(argv[1]);
     int infd  = (argc == 3) ? atoi(argv[2]) : 0;
-    size_t chunk = INGRESS_CHUNK_SIZE; 
+    size_t chunk = HUGE_PAGE_SIZE; 
     struct stat st;
     uint64_t oom_threshold = 134217728; 
     struct sysinfo si_init;
@@ -1205,23 +1200,15 @@ static int ring_fallow_main(int argc, char **argv) {
 }
 
 static int ring_ingest_main(int argc, char **argv) { (void)argc; (void)argv; if (state) atomic_store_release(&state->ingest_complete, 1); return EXECUTION_SUCCESS; }
-
 static int ring_worker_main(int argc, char **argv) {
     if (argc!=2) return EXECUTION_FAILURE;
     if (!strcmp(argv[1],"inc")) atomic_fetch_add(&state->active_workers,1);
     else if (!strcmp(argv[1],"dec")) {
-        cleanup_waiter_state();
+        if (is_waiting_on_ring) { atomic_fetch_sub(&state->active_waiters, 1); is_waiting_on_ring = false; }
         atomic_fetch_sub(&state->active_workers, 1);
     }
     return EXECUTION_SUCCESS;
 }
-
-static int ring_cleanup_waiter_main(int argc, char **argv) {
-    (void)argc; (void)argv;
-    cleanup_waiter_state();
-    return EXECUTION_SUCCESS;
-}
-
 static char * lseek_doc[] = { "Usage: lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]", NULL };
 static int lseek_main(int argc, char ** argv) { if (argc < 3 || argc > 5) return EXECUTION_FAILURE; int fd = atoi(argv[1]); off_t off = atoll(argv[2]); int whence = SEEK_CUR; if (argc > 3) { if (!strcmp(argv[3], "SEEK_SET")) whence = SEEK_SET; else if (!strcmp(argv[3], "SEEK_END")) whence = SEEK_END; } off_t no = lseek(fd, off, whence); if (no == -1) return EXECUTION_FAILURE; if (argc >= 4 && argv[argc-1][0]) { char buf[32]; snprintf(buf,32,"%lld",(long long)no); bind_variable(argv[argc-1], buf, 0); } else printf("%lld\n", (long long)no); return EXECUTION_SUCCESS; }
 
@@ -1240,7 +1227,6 @@ DEFINE_DISPATCHER(dispatch_ring_destroy, ring_destroy_main)
 DEFINE_DISPATCHER(dispatch_ring_scanner, ring_scanner_main)
 DEFINE_DISPATCHER(dispatch_ring_claim,   ring_claim_main)
 DEFINE_DISPATCHER(dispatch_ring_worker,  ring_worker_main)
-DEFINE_DISPATCHER(dispatch_ring_cleanup_waiter, ring_cleanup_waiter_main)
 DEFINE_DISPATCHER(dispatch_ring_ingest,  ring_ingest_main)
 DEFINE_DISPATCHER(dispatch_ring_fallow,  ring_fallow_main)
 DEFINE_DISPATCHER(dispatch_ring_ack,     ring_ack_main)
@@ -1254,7 +1240,6 @@ struct builtin ring_destroy_struct  = { "ring_destroy", dispatch_ring_destroy, B
 struct builtin ring_scanner_struct  = { "ring_scanner", dispatch_ring_scanner, BUILTIN_ENABLED, NULL, "ring_scanner <fd> [spawn_fd]", 0 };
 struct builtin ring_claim_struct    = { "ring_claim",   dispatch_ring_claim,   BUILTIN_ENABLED, NULL, "ring_claim <OFF> <CNT> [FD]", 0 };
 struct builtin ring_worker_struct   = { "ring_worker",  dispatch_ring_worker,  BUILTIN_ENABLED, NULL, "ring_worker [inc|dec]", 0 };
-struct builtin ring_cleanup_waiter_struct = { "ring_cleanup_waiter", dispatch_ring_cleanup_waiter, BUILTIN_ENABLED, NULL, "ring_cleanup_waiter", 0 };
 struct builtin ring_ingest_struct   = { "ring_ingest",  dispatch_ring_ingest,  BUILTIN_ENABLED, NULL, "ring_ingest", 0 };
 struct builtin ring_fallow_struct   = { "ring_fallow",  dispatch_ring_fallow,  BUILTIN_ENABLED, NULL, "ring_fallow <PIPE> <FILE> [dry]", 0 };
 struct builtin ring_ack_struct      = { "ring_ack",     dispatch_ring_ack,     BUILTIN_ENABLED, NULL, "ring_ack <FD>", 0 };
@@ -1269,7 +1254,6 @@ int setup_builtin_forkrun_ring(void) {
     add_builtin(&ring_scanner_struct, 1);
     add_builtin(&ring_claim_struct, 1);
     add_builtin(&ring_worker_struct, 1);
-    add_builtin(&ring_cleanup_waiter_struct, 1);
     add_builtin(&ring_ingest_struct, 1);
     add_builtin(&ring_fallow_struct, 1);
     add_builtin(&ring_ack_struct, 1);
