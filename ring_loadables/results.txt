@@ -110,179 +110,178 @@ Time: 168718659 us
 perf stat -d -d -d /usr/bin/bash -c 'ring_test 2'
 Generating test data...
 Starting splicer...
-Sending stdin to /dev/shm/.forkrun/forkrun.HK4BYVvx/stdin
+Sending stdin to /dev/shm/.forkrun/forkrun.euU08JbR/stdin
 Starting scanner...
 Starting falloc...
 
 Consuming...
 
-SPAWNING 7 WORKERS (elapsed time = 10257 us)
-SPAWNING 4 WORKERS (elapsed time = 11779 us)
-SPAWNING 3 WORKERS (elapsed time = 12927 us)
-SPAWNING 1 WORKERS (elapsed time = 13801 us)
-SPAWNING 1 WORKERS (elapsed time = 14150 us)
-SPAWNING 1 WORKERS (elapsed time = 14498 us)
-SPAWNING 1 WORKERS (elapsed time = 14832 us)
-SPAWNING 1 WORKERS (elapsed time = 15167 us)
-SPAWNING 1 WORKERS (elapsed time = 17613 us)
-SPAWNING 1 WORKERS (elapsed time = 17987 us)
+SPAWNING 7 WORKERS (elapsed time = 12532 us)
+SPAWNING 4 WORKERS (elapsed time = 14109 us)
+SPAWNING 3 WORKERS (elapsed time = 15336 us)
+SPAWNING 1 WORKERS (elapsed time = 16226 us)
+SPAWNING 1 WORKERS (elapsed time = 16570 us)
+SPAWNING 1 WORKERS (elapsed time = 16932 us)
+SPAWNING 1 WORKERS (elapsed time = 17275 us)
+SPAWNING 1 WORKERS (elapsed time = 17633 us)
+SPAWNING 1 WORKERS (elapsed time = 18038 us)
+SPAWNING 1 WORKERS (elapsed time = 20172 us)
 
 SPLICER HIT EOF
-elapsed time = 467611 us
+elapsed time = 495220 us
 
 SCANNER HIT EOF
-elapsed time = 8277114 us
+elapsed time = 8628066 us
 
 
 Done!
 
 Total Lines Consumed: 1000000000 (Expected: 1000000000)
 
-Time: 40083772 us
+Time: 40719122 us
 
-TOTAL=37227497    ITER=9101    AVG=4090
-TOTAL=36208467    ITER=8852    AVG=4090
-TOTAL=34896790    ITER=8529    AVG=4091
-TOTAL=34755205    ITER=8496    AVG=4090
-TOTAL=36752666    ITER=8981    AVG=4092
-TOTAL=37198899    ITER=9090    AVG=4092
-TOTAL=35963542    ITER=8788    AVG=4092
-TOTAL=36562308    ITER=8934    AVG=4092
-TOTAL=35363786    ITER=8642    AVG=4092
-TOTAL=37035851    ITER=9050    AVG=4092
-TOTAL=36677517    ITER=8963    AVG=4092
-TOTAL=36411205    ITER=8898    AVG=4092
-TOTAL=35216863    ITER=8610    AVG=4090
-TOTAL=34301955    ITER=8382    AVG=4092
-TOTAL=37340434    ITER=9125    AVG=4092
-TOTAL=33811055    ITER=8262    AVG=4092
-TOTAL=34744869    ITER=8490    AVG=4092
-TOTAL=34915502    ITER=8532    AVG=4092
-TOTAL=36561964    ITER=8934    AVG=4092
-TOTAL=34808844    ITER=8506    AVG=4092
-TOTAL=36606408    ITER=8944    AVG=4092
-TOTAL=34350441    ITER=8398    AVG=4090
-TOTAL=35257072    ITER=8619    AVG=4090
-TOTAL=34596406    ITER=8458    AVG=4090
-TOTAL=33930685    ITER=8305    AVG=4085
-TOTAL=36954061    ITER=9031    AVG=4091
-TOTAL=36027524    ITER=8811    AVG=4088
-TOTAL=35522184    ITER=8680    AVG=4092
+TOTAL=34940112    ITER=8540    AVG=4091
+TOTAL=35112284    ITER=8582    AVG=4091
+TOTAL=35724337    ITER=8730    AVG=4092
+TOTAL=35963995    ITER=8788    AVG=4092
+TOTAL=34961252    ITER=8544    AVG=4091
+TOTAL=36900584    ITER=9017    AVG=4092
+TOTAL=35101182    ITER=8577    AVG=4092
+TOTAL=36670908    ITER=8960    AVG=4092
+TOTAL=36154771    ITER=8835    AVG=4092
+TOTAL=35467057    ITER=8667    AVG=4092
+TOTAL=35606821    ITER=8701    AVG=4092
+TOTAL=37589549    ITER=9185    AVG=4092
+TOTAL=35552834    ITER=8690    AVG=4091
+TOTAL=34640355    ITER=8465    AVG=4092
+TOTAL=34226202    ITER=8363    AVG=4092
+TOTAL=37625826    ITER=9194    AVG=4092
+TOTAL=34764605    ITER=8495    AVG=4092
+TOTAL=37446069    ITER=9150    AVG=4092
+TOTAL=33798642    ITER=8259    AVG=4092
+TOTAL=35333087    ITER=8634    AVG=4092
+TOTAL=34581262    ITER=8450    AVG=4092
+TOTAL=34474006    ITER=8430    AVG=4089
+TOTAL=35946853    ITER=8791    AVG=4089
+TOTAL=35890532    ITER=8773    AVG=4091
+TOTAL=36392832    ITER=8895    AVG=4091
+TOTAL=37714033    ITER=9216    AVG=4092
+TOTAL=35856939    ITER=8763    AVG=4091
+TOTAL=35563071    ITER=8690    AVG=4092
 
- Performance counter stats for '/usr/bin/bash -c ring_test 2':
+ Performance counter stats for '/usr/bin/bash -c ring_test -n 2':
 
- 1,119,002,075,302      task-clock                       #   27.195 CPUs utilized             
-           574,902      context-switches                 #  513.763 /sec                      
-           210,239      cpu-migrations                   #  187.881 /sec                      
-            19,942      page-faults                      #   17.821 /sec                      
- 6,253,669,430,809      instructions                     #    1.38  insn per cycle              (38.46%)
- 4,531,367,057,824      cycles                           #    4.049 GHz                         (38.46%)
- 1,463,342,116,352      branches                         #    1.308 G/sec                       (38.46%)
-     1,502,124,537      branch-misses                    #    0.10% of all branches             (38.46%)
- 1,456,506,745,190      L1-dcache-loads                  #    1.302 G/sec                       (38.46%)
-    44,068,884,100      L1-dcache-load-misses            #    3.03% of all L1-dcache accesses   (30.77%)
-     1,457,913,470      LLC-loads                        #    1.303 M/sec                       (30.77%)
-       267,284,967      LLC-load-misses                  #   18.33% of all LL-cache accesses    (30.77%)
-     5,296,168,733      L1-icache-load-misses                                                   (30.77%)
- 1,456,314,394,056      dTLB-loads                       #    1.301 G/sec                       (30.77%)
-        64,810,994      dTLB-load-misses                 #    0.00% of all dTLB cache accesses  (30.77%)
-       150,830,876      iTLB-loads                       #  134.791 K/sec                       (30.77%)
-        48,923,117      iTLB-load-misses                 #   32.44% of all iTLB cache accesses  (30.77%)
+ 1,135,152,739,855      task-clock                       #   27.783 CPUs utilized             
+           499,382      context-switches                 #  439.925 /sec                      
+           210,499      cpu-migrations                   #  185.437 /sec                      
+            19,932      page-faults                      #   17.559 /sec                      
+ 6,352,650,086,385      instructions                     #    1.38  insn per cycle              (38.46%)
+ 4,597,756,695,252      cycles                           #    4.050 GHz                         (38.47%)
+ 1,483,412,165,686      branches                         #    1.307 G/sec                       (38.46%)
+     1,419,184,431      branch-misses                    #    0.10% of all branches             (38.46%)
+ 1,475,730,547,580      L1-dcache-loads                  #    1.300 G/sec                       (38.46%)
+    44,279,711,366      L1-dcache-load-misses            #    3.00% of all L1-dcache accesses   (30.77%)
+     1,438,907,249      LLC-loads                        #    1.268 M/sec                       (30.77%)
+       280,822,116      LLC-load-misses                  #   19.52% of all LL-cache accesses    (30.77%)
+     5,271,281,002      L1-icache-load-misses                                                   (30.77%)
+ 1,475,770,805,006      dTLB-loads                       #    1.300 G/sec                       (30.77%)
+        62,071,911      dTLB-load-misses                 #    0.00% of all dTLB cache accesses  (30.77%)
+       140,744,538      iTLB-loads                       #  123.987 K/sec                       (30.77%)
+        40,081,411      iTLB-load-misses                 #   28.48% of all iTLB cache accesses  (30.77%)
 
-      41.147675939 seconds time elapsed
+      40.857806851 seconds time elapsed
 
-    1093.581909000 seconds user
-      12.431698000 seconds sys
-
+    1110.641846000 seconds user
+      11.260441000 seconds sys
 
 ----------------------------------------------------------
 
 perf stat -d -d -d /usr/bin/bash -c 'ring_test 3'
 Generating test data...
 Starting splicer...
-Sending stdin to /dev/shm/.forkrun/forkrun.1hQ0SIiP/stdin
+Sending stdin to /dev/shm/.forkrun/forkrun.hFUt6hsn/stdin
 Starting scanner...
 Starting falloc...
 
 Consuming...
 
-SPAWNING 7 WORKERS (elapsed time = 10039 us)
-SPAWNING 4 WORKERS (elapsed time = 11511 us)
-SPAWNING 3 WORKERS (elapsed time = 12614 us)
-SPAWNING 1 WORKERS (elapsed time = 13472 us)
-SPAWNING 1 WORKERS (elapsed time = 13818 us)
-SPAWNING 1 WORKERS (elapsed time = 14152 us)
-SPAWNING 1 WORKERS (elapsed time = 14490 us)
-SPAWNING 1 WORKERS (elapsed time = 14823 us)
-SPAWNING 1 WORKERS (elapsed time = 15188 us)
-SPAWNING 1 WORKERS (elapsed time = 17818 us)
+SPAWNING 7 WORKERS (elapsed time = 14798 us)
+SPAWNING 4 WORKERS (elapsed time = 16529 us)
+SPAWNING 3 WORKERS (elapsed time = 17802 us)
+SPAWNING 1 WORKERS (elapsed time = 18816 us)
+SPAWNING 1 WORKERS (elapsed time = 19217 us)
+SPAWNING 1 WORKERS (elapsed time = 19616 us)
+SPAWNING 1 WORKERS (elapsed time = 20002 us)
+SPAWNING 1 WORKERS (elapsed time = 20389 us)
+SPAWNING 1 WORKERS (elapsed time = 20792 us)
+SPAWNING 1 WORKERS (elapsed time = 22663 us)
 
 SPLICER HIT EOF
-elapsed time = 464560 us
+elapsed time = 506151 us
 
 SCANNER HIT EOF
-elapsed time = 8036633 us
+elapsed time = 8778491 us
 
 
 Done!
 
 Total Lines Consumed: 1000000000 (Expected: 1000000000)
 
-Time: 14272728 us
+Time: 14291774 us
 
-TOTAL=35880076    ITER=8771    AVG=4090
-TOTAL=37250145    ITER=9106    AVG=4090
-TOTAL=35841409    ITER=8759    AVG=4091
-TOTAL=34946150    ITER=8541    AVG=4091
-TOTAL=35342798    ITER=8636    AVG=4092
-TOTAL=34371490    ITER=8399    AVG=4092
-TOTAL=37445873    ITER=9150    AVG=4092
-TOTAL=35545474    ITER=8686    AVG=4092
-TOTAL=37057131    ITER=9055    AVG=4092
-TOTAL=34957432    ITER=8542    AVG=4092
-TOTAL=37368736    ITER=9131    AVG=4092
-TOTAL=36498558    ITER=8918    AVG=4092
-TOTAL=34025320    ITER=8318    AVG=4090
-TOTAL=34181298    ITER=8352    AVG=4092
-TOTAL=35696266    ITER=8722    AVG=4092
-TOTAL=35693982    ITER=8722    AVG=4092
-TOTAL=37571810    ITER=9180    AVG=4092
-TOTAL=35830114    ITER=8755    AVG=4092
-TOTAL=36529570    ITER=8926    AVG=4092
-TOTAL=37176308    ITER=9084    AVG=4092
-TOTAL=33469956    ITER=8178    AVG=4092
-TOTAL=35354248    ITER=8642    AVG=4090
-TOTAL=35898739    ITER=8775    AVG=4091
-TOTAL=34631926    ITER=8472    AVG=4087
-TOTAL=35931962    ITER=8783    AVG=4091
-TOTAL=35535014    ITER=8684    AVG=4092
-TOTAL=35711914    ITER=8730    AVG=4090
-TOTAL=34256301    ITER=8374    AVG=4090
+TOTAL=35779397    ITER=8750    AVG=4089
+TOTAL=36669619    ITER=8964    AVG=4090
+TOTAL=35018958    ITER=8559    AVG=4091
+TOTAL=32880426    ITER=8036    AVG=4091
+TOTAL=37555790    ITER=9177    AVG=4092
+TOTAL=33783220    ITER=8256    AVG=4091
+TOTAL=35131056    ITER=8585    AVG=4092
+TOTAL=36691251    ITER=8965    AVG=4092
+TOTAL=34588030    ITER=8452    AVG=4092
+TOTAL=35289865    ITER=8624    AVG=4092
+TOTAL=36816935    ITER=8996    AVG=4092
+TOTAL=37165987    ITER=9082    AVG=4092
+TOTAL=34092705    ITER=8334    AVG=4090
+TOTAL=35960817    ITER=8787    AVG=4092
+TOTAL=35587403    ITER=8696    AVG=4092
+TOTAL=35524608    ITER=8673    AVG=4096
+TOTAL=36506181    ITER=8921    AVG=4092
+TOTAL=34275794    ITER=8376    AVG=4092
+TOTAL=37072886    ITER=9059    AVG=4092
+TOTAL=35922031    ITER=8778    AVG=4092
+TOTAL=35588390    ITER=8696    AVG=4092
+TOTAL=37545019    ITER=9177    AVG=4091
+TOTAL=36269056    ITER=8874    AVG=4087
+TOTAL=34645052    ITER=8469    AVG=4090
+TOTAL=34889477    ITER=8529    AVG=4090
+TOTAL=37324865    ITER=9123    AVG=4091
+TOTAL=35549808    ITER=8687    AVG=4092
+TOTAL=35875374    ITER=8767    AVG=4092
 
- Performance counter stats for '/usr/bin/bash -c ring_test 3':
+ Performance counter stats for '/usr/bin/bash -c ring_test -n 3':
 
-   399,472,597,431      task-clock                       #   25.833 CPUs utilized             
-           390,343      context-switches                 #  977.146 /sec                      
-           134,258      cpu-migrations                   #  336.088 /sec                      
-            17,994      page-faults                      #   45.044 /sec                      
- 2,198,303,496,571      instructions                     #    1.36  insn per cycle              (38.46%)
- 1,615,823,132,567      cycles                           #    4.045 GHz                         (38.45%)
-   520,532,991,615      branches                         #    1.303 G/sec                       (38.45%)
-       902,982,365      branch-misses                    #    0.17% of all branches             (38.46%)
-   502,964,152,600      L1-dcache-loads                  #    1.259 G/sec                       (38.46%)
-    15,929,532,262      L1-dcache-load-misses            #    3.17% of all L1-dcache accesses   (30.77%)
-       739,065,681      LLC-loads                        #    1.850 M/sec                       (30.77%)
-        78,944,132      LLC-load-misses                  #   10.68% of all LL-cache accesses    (30.77%)
-     4,576,476,235      L1-icache-load-misses                                                   (30.77%)
-   502,814,082,106      dTLB-loads                       #    1.259 G/sec                       (30.77%)
-        32,105,116      dTLB-load-misses                 #    0.01% of all dTLB cache accesses  (30.77%)
-       138,981,607      iTLB-loads                       #  347.913 K/sec                       (30.77%)
-        31,594,547      iTLB-load-misses                 #   22.73% of all iTLB cache accesses  (30.76%)
+   398,243,020,883      task-clock                       #   27.593 CPUs utilized             
+           304,399      context-switches                 #  764.355 /sec                      
+           132,519      cpu-migrations                   #  332.759 /sec                      
+            17,219      page-faults                      #   43.237 /sec                      
+ 2,187,139,337,379      instructions                     #    1.36  insn per cycle              (38.46%)
+ 1,611,661,741,607      cycles                           #    4.047 GHz                         (38.46%)
+   516,811,607,272      branches                         #    1.298 G/sec                       (38.46%)
+       880,611,356      branch-misses                    #    0.17% of all branches             (38.46%)
+   501,173,190,721      L1-dcache-loads                  #    1.258 G/sec                       (38.46%)
+    15,838,276,785      L1-dcache-load-misses            #    3.16% of all L1-dcache accesses   (30.77%)
+       732,823,700      LLC-loads                        #    1.840 M/sec                       (30.77%)
+        84,411,678      LLC-load-misses                  #   11.52% of all LL-cache accesses    (30.77%)
+     4,521,657,956      L1-icache-load-misses                                                   (30.77%)
+   501,236,729,013      dTLB-loads                       #    1.259 G/sec                       (30.77%)
+        30,591,675      dTLB-load-misses                 #    0.01% of all dTLB cache accesses  (30.77%)
+       141,057,692      iTLB-loads                       #  354.200 K/sec                       (30.77%)
+        22,199,565      iTLB-load-misses                 #   15.74% of all iTLB cache accesses  (30.77%)
 
-      15.463417552 seconds time elapsed
+      14.432952741 seconds time elapsed
 
-     384.796724000 seconds user
-       9.881873000 seconds sys
+     384.480591000 seconds user
+       8.912012000 seconds sys
 
 ----------------------------------------------------------
 
