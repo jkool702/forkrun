@@ -5,6 +5,14 @@ ring_test() {
 
  enable -f ./forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_destroy ring_ingest ring_order lseek
 
+if [[ "$1" == '-n' ]]; then
+    nogenFlag=true
+    shift 1
+else
+    nogenFlag=false
+fi
+    
+
 case "$1" in
 
 0)
@@ -221,13 +229,9 @@ esac
 
 
 dataN=1000000000
-
 echo "Generating test data..." >&2
 case "$1" in
     7|8)
-        dataN="$(wc -l /mnt/ramdisk/flist)"
-        targetFile=/mnt/ramdisk/flist
-
 ff() {
 sha1sum "${@}"
 sha256sum "${@}"
@@ -244,17 +248,20 @@ xxhsum "${@}"
 xxhsum -H3 "${@}"
 }
         export -f ff
+        targetFile=/mnt/ramdisk/flist
+
     ;;
     4|5)
 #        seq $dataN >test.dat
         targetFile=./test.dat
     ;;
     *)
-        yes $'\n' | head -n $dataN > test.dat
+        ${nogenFlag} || { 
+		yes $'\n' | head -n $dataN > test.dat
+}
         targetFile=./test.dat
     ;;
 esac
-
 dataN=$(wc -l <"$targetFile")
 
 exec {fd_spawn}<><(:)
@@ -288,7 +295,8 @@ echo "Starting splicer..." >&2
 else
     targetFile0="$targetFile"
 fi
-    exec {fd_scan}<"${targetFile0}"
+
+exec {fd_scan}<"${targetFile0}"
 
 echo "Starting scanner..." >&2
 ( ring_scanner ${fd_scan} ${fd_spawn} ) &
