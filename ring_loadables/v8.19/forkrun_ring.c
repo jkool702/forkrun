@@ -1,8 +1,8 @@
-// forkrun_ring.c v8.27
+// forkrun_ring.c v8.19
 // Architecture: Universal Ingest, Zero-Copy Ring, Escrow Stealing
 // Features: Lookahead Buffer, Single-Ring Tail Strategy, Gradient Ramp Down
-// New Features: X-Macro Management, Auto-Discovery "ring_enable", Batched Ordering
-// Changes: Fix pointer dereference syntax error in ring_fallow_phys
+// New Features: Robust Copy Inner-Loop, Hardened Memory Ordering
+// Changes: Added FORKRUN_FORCE_FALLBACK, Paranoid FD validation
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -34,7 +34,6 @@
 #include <time.h> 
 #include <sys/syscall.h>
 #include <ctype.h>
-// Removed dlfcn.h
 
 // --- Architecture Specific Pause Logic ---
 #if defined(__x86_64__) || defined(__i386__)
@@ -76,8 +75,6 @@
 #define RING_MASK      (RING_SIZE - 1)
 #define CACHE_LINE     256
 #define ALIGNED(x)     __attribute__((aligned(x > CACHE_LINE ? x : CACHE_LINE)))
-#define MAX_CHUNK_SIZE (32 * 1024 * 1024)
-#define DAMPING_OFFSET 6
 
 #define atomic_load_acquire(ptr)       __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
 #define atomic_load_relaxed(ptr)       __atomic_load_n(ptr, __ATOMIC_RELAXED)
@@ -110,35 +107,30 @@ static int g_debug = 0;
     } \
 } while(0)
 
-// --- X-MACRO DEFINITION ---
-#define FORKRUN_LOADABLES(X) \
-    X(ring_init,            ring_init_main,           "ring_init [out_array]",          "Initialize ring state and optional output array") \
-    X(ring_destroy,         ring_destroy_main,        "ring_destroy",                   "Destroy ring state and free resources") \
-    X(ring_scanner,         ring_scanner_main,        "ring_scanner <fd> [spawn_fd]",   "Run the ring scanner/producer") \
-    X(ring_claim,           ring_claim_main,          "ring_claim <OFF> <CNT> [FD]",    "Claim a batch of work from the ring") \
-    X(ring_worker,          ring_worker_main,         "ring_worker [inc|dec]",          "Increment/Decrement worker count") \
-    X(ring_cleanup_waiter,  ring_cleanup_waiter_main, "ring_cleanup_waiter",            "Cleanup waiter state on exit") \
-    X(ring_ingest,          ring_ingest_main,         "ring_ingest",                    "Signal ingest completion") \
-    X(ring_fallow,          ring_fallow_main,         "ring_fallow <PIPE> <FILE> [dry]","Logical fallow (hole punching)") \
-    X(ring_ack,             ring_ack_main,            "ring_ack <FD> <FD_OUT>",         "Acknowledge batch completion") \
-    X(ring_order,           ring_order_main,          "ring_order <FD> <PFX|memfd>",    "Reorder output") \
-    X(ring_copy,            ring_copy_main,           "ring_copy <OUT> <IN>",           "Zero-copy ingest") \
-    X(ring_signal,          ring_signal_main,         "ring_signal <FD>",               "Signal eventfd") \
-    X(lseek,                lseek_main,               "lseek <FD> <OFF>...",            "Seek file descriptor") \
-    X(ring_indexer,         ring_indexer_main,        "ring_indexer",                   "NUMA Indexer") \
-    X(ring_fetcher,         ring_fetcher_main,        "ring_fetcher",                   "NUMA Fetcher") \
-    X(ring_fallow_phys,     ring_fallow_phys_main,    "ring_fallow_phys",               "Physical fallow (hole punching)") \
-    X(ring_memfd_create,    ring_memfd_create_main,   "ring_memfd_create <VAR>",        "Create anonymous memfd") \
-    X(ring_list,            ring_list_main,           "ring_list [VAR]",                "List all available loadables")
+static int ring_init_main(int argc, char **argv);
+static int ring_destroy_main(int argc, char **argv);
+static int ring_scanner_main(int argc, char **argv);
+static int ring_claim_main(int argc, char **argv);
+static int ring_worker_main(int argc, char **argv);
+static int ring_ingest_main(int argc, char **argv);
+static int ring_fallow_main(int argc, char **argv);
+static int ring_ack_main(int argc, char **argv);
+static int ring_order_main(int argc, char **argv);
+static int ring_copy_main(int argc, char **argv);
+static int ring_signal_main(int argc, char **argv);
+static int lseek_main(int argc, char ** argv);
+static int ring_cleanup_waiter_main(int argc, char **argv);
+static int ring_memfd_create_main(int argc, char **argv);
 
-#define X(name, func, usage, doc) static int func(int argc, char **argv);
-FORKRUN_LOADABLES(X)
-#undef X
+// NUMA Extensions
+static int ring_indexer_main(int argc, char **argv);
+static int ring_fetcher_main(int argc, char **argv);
+static int ring_fallow_phys_main(int argc, char **argv);
 
+// Always align to 2MB for Transparent Huge Page benefits
 static void *xmalloc_aligned(size_t size) {
     void *ptr;
-    // Uses libc malloc via posix_memalign - MUST use free()
-    if (posix_memalign(&ptr, HUGE_PAGE_SIZE, size) != 0) ptr = malloc(size);
+    if (posix_memalign(&ptr, HUGE_PAGE_SIZE, size) != 0) ptr = xmalloc(size);
     return ptr;
 }
 
@@ -173,31 +165,30 @@ static SHELL_VAR *bind_var_or_array(const char *name, char *value, int flags) {
         var = make_new_array_variable(base_s);
         if (!var) {
             builtin_error("failed to create array: %s", base_s);
-            xfree(base_s); xfree(idx_s); xfree(val_s);
+            free(base_s); free(idx_s); free(val_s);
             return NULL;
         }
     }
 
-    SHELL_VAR *ret = NULL;
     if (assoc_p(var)) {
-        ret = bind_assoc_variable(var, base_s, idx_s, val_s, flags);
-    } else if (array_p(var)) {
+        return bind_assoc_variable(var, base_s, idx_s, val_s, flags);
+    }
+
+    if (array_p(var)) {
         char *endp = NULL;
         errno = 0;
         long n = strtol(idx_s, &endp, 10);
         if (endp == idx_s || *endp != '\0' || errno == ERANGE) {
             builtin_error("invalid numeric index for indexed array: %s", idx_s);
-        } else {
-            ret = bind_array_variable(base_s, (arrayind_t)n, val_s, flags);
+            free(base_s); free(idx_s); free(val_s);
+            return NULL;
         }
-    } else {
-        builtin_error("%s: not an array", base_s);
+        return bind_array_variable(base_s, (arrayind_t)n, val_s, flags);
     }
 
-    xfree(base_s); 
-    xfree(idx_s); 
-    xfree(val_s);
-    return ret;
+    builtin_error("%s: not an array", base_s);
+    free(base_s); free(idx_s); free(val_s);
+    return NULL;
 }
 
 // --- Tuning Helpers ---
@@ -244,7 +235,7 @@ static uint64_t get_optimal_chunk_size() {
     uint64_t mask = HUGE_PAGE_SIZE - 1;
     target = (target + mask) & ~mask;
     if (target < HUGE_PAGE_SIZE) target = HUGE_PAGE_SIZE;
-    if (target > MAX_CHUNK_SIZE) target = MAX_CHUNK_SIZE;
+    if (target > 32 * 1024 * 1024) target = 32 * 1024 * 1024;
     return target;
 }
 
@@ -259,19 +250,23 @@ static uint64_t get_arg_max_bytes() {
 }
 
 static int xcreate_anon_file(const char *name) {
+    // 0. Force Fallback Debug Flag
     const char *force_fallback = get_string_value("FORKRUN_FORCE_FALLBACK");
     bool use_memfd = true;
     if (force_fallback && (strcmp(force_fallback, "1") == 0)) use_memfd = false;
 
+    // 1. Try memfd
     if (use_memfd) {
         int fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
         if (fd >= 0) return fd;
+        // Retry without flags if EINVAL
         if (errno == EINVAL) {
             fd = syscall(__NR_memfd_create, name, 0);
             if (fd >= 0) return fd;
         }
     }
     
+    // 2. Fallbacks (O_TMPFILE / mkstemp)
     int fd = open("/dev/shm", O_TMPFILE | O_RDWR | O_EXCL, 0600);
     if (fd >= 0) return fd;
     
@@ -443,10 +438,10 @@ static int ring_init_main(int argc, char **argv) {
 
         if (failure) {
             for(int k=0; k<created_cnt; k++) close(created_fds[k]);
-            xfree(created_fds);
+            free(created_fds);
             return EXECUTION_FAILURE;
         }
-        xfree(created_fds);
+        free(created_fds);
     }
 
     return EXECUTION_SUCCESS;
@@ -652,7 +647,7 @@ static int ring_scanner_main(int argc, char **argv) {
                     }
                 }
                 if (status == 2) {
-                    uint64_t xLim = W + DAMPING_OFFSET;
+                    uint64_t xLim = W + 6;
                     stall_meter = (stall_meter + xLim) >> 1; 
                     if (p < end) force_refill = true;
                     continue; 
@@ -670,12 +665,10 @@ static int ring_scanner_main(int argc, char **argv) {
                 batch_start = buf_base_offset + (uint64_t)(p - buf);
                 batch_counter++;
                 batches_since_calc++;
-                
-                uint64_t xLim = W + DAMPING_OFFSET;
+                uint64_t xLim = W + 6;
                 if (starvation) starve_meter = (starve_meter + xLim) >> 1;
                 else starve_meter >>= 1;
                 if (pending_lines >= L) stall_meter >>= 1;
-                
                 pending_lines = 0;
                 force_refill = false;
                 target_count = W * 4;
@@ -953,20 +946,16 @@ restart_loop:
                          if (write(fd_escrow[1], &ep, sizeof(ep)) == sizeof(ep)) {
                              claim_count = avail;
                              uint64_t one=1; SYS_CHK(write(evfd_data, &one, 8));
-                             break;
                          }
-                     } else {
-                         break;
                      }
+                     break; 
                  }
-                 
                  if (atomic_load_acquire(&state->scanner_finished)) {
                      int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
                      if (diff < 0) diff = 0;
                      claim_count = (uint64_t)diff;
                      break;
                  }
-                 
                  struct pollfd pfds[2] = { { .fd = evfd_data, .events = POLLIN }, { .fd = evfd_eof, .events = POLLIN } };
                  poll(pfds, 2, -1);
                  if (pfds[0].revents) { uint64_t v; if(read(evfd_data, &v, 8)){}; }
@@ -1124,54 +1113,49 @@ static int ring_order_main(int argc, char **argv) {
     } else {
         struct BufferedPacket *head = NULL;
         uint64_t next_idx = 0;
-        struct OrderPacket ops[64];
+        struct OrderPacket op;
         
-        ssize_t n_read;
-        while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
-            int count = n_read / sizeof(struct OrderPacket);
-            for (int i = 0; i < count; i++) {
-                struct OrderPacket *op = &ops[i];
-                if (op->idx == next_idx) {
-                    off_t offset = (off_t)op->off;
-                    ssize_t sent = sendfile(1, op->fd, &offset, op->len);
-                    
-                    if (sent < 0 || (uint64_t)sent < op->len) {
-                         char *tbuf = xmalloc(65536);
-                         uint64_t done = (sent > 0) ? (uint64_t)sent : 0;
-                         if (lseek(op->fd, op->off + done, SEEK_SET) >= 0) {
-                             while(done < op->len) {
-                                 size_t req = (op->len - done > 65536) ? 65536 : (op->len - done);
-                                 ssize_t n = read(op->fd, tbuf, req);
-                                 if (n <= 0) break; 
-                                 write(1, tbuf, n);
-                                 done += n;
-                             }
+        while (read(fd_in, &op, sizeof(op)) == sizeof(op)) {
+            if (op.idx == next_idx) {
+                off_t offset = (off_t)op.off;
+                ssize_t sent = sendfile(1, op.fd, &offset, op.len);
+                
+                if (sent < 0 || (uint64_t)sent < op.len) {
+                     char *tbuf = xmalloc(65536);
+                     uint64_t done = (sent > 0) ? (uint64_t)sent : 0;
+                     if (lseek(op.fd, op.off + done, SEEK_SET) >= 0) {
+                         while(done < op.len) {
+                             size_t req = (op.len - done > 65536) ? 65536 : (op.len - done);
+                             ssize_t n = read(op.fd, tbuf, req);
+                             if (n <= 0) break; 
+                             write(1, tbuf, n);
+                             done += n;
                          }
-                         xfree(tbuf);
-                    }
-                    
-                    if (fallocate(op->fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)op->off, (off_t)op->len) < 0) {
-                        if (g_debug) fprintf(stderr, "forkrun [DEBUG] fallocate failed: %s\n", strerror(errno));
-                    }
-                    next_idx += op->cnt;
-
-                    while (head && head->pkt.idx == next_idx) {
-                        struct BufferedPacket *tmp = head;
-                        offset = (off_t)tmp->pkt.off;
-                        sendfile(1, tmp->pkt.fd, &offset, tmp->pkt.len);
-                        fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)tmp->pkt.off, (off_t)tmp->pkt.len);
-                        next_idx += tmp->pkt.cnt;
-                        head = tmp->next;
-                        free(tmp);
-                    }
-                } else {
-                    struct BufferedPacket *n = xmalloc(sizeof(struct BufferedPacket));
-                    n->pkt = *op;
-                    struct BufferedPacket **curr = &head;
-                    while (*curr && (*curr)->pkt.idx < op->idx) curr = &((*curr)->next);
-                    n->next = *curr;
-                    *curr = n;
+                     }
+                     free(tbuf);
                 }
+                
+                if (fallocate(op.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)op.off, (off_t)op.len) < 0) {
+                    if (g_debug) fprintf(stderr, "forkrun [DEBUG] fallocate failed: %s\n", strerror(errno));
+                }
+                next_idx += op.cnt;
+
+                while (head && head->pkt.idx == next_idx) {
+                    struct BufferedPacket *tmp = head;
+                    offset = (off_t)tmp->pkt.off;
+                    sendfile(1, tmp->pkt.fd, &offset, tmp->pkt.len);
+                    fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)tmp->pkt.off, (off_t)tmp->pkt.len);
+                    next_idx += tmp->pkt.cnt;
+                    head = tmp->next;
+                    free(tmp);
+                }
+            } else {
+                struct BufferedPacket *n = xmalloc(sizeof(struct BufferedPacket));
+                n->pkt = op;
+                struct BufferedPacket **curr = &head;
+                while (*curr && (*curr)->pkt.idx < op.idx) curr = &((*curr)->next);
+                n->next = *curr;
+                *curr = n;
             }
         }
     }
@@ -1222,13 +1206,14 @@ static int ring_copy_main(int argc, char **argv) {
                 next_check += 16 * 1024 * 1024;
             }
 
-             loff_t current_off = off;
+             loff_t off_in = off;
              size_t to_copy = (size_t)(st.st_size - off);
              if (to_copy > chunk) to_copy = chunk;
              size_t copied_in_chunk = 0;
              
              // Inner Loop: Handle Partial Copies
              while (copied_in_chunk < to_copy) {
+                 loff_t current_off = off + copied_in_chunk;
                  ssize_t n = copy_file_range(infd, &current_off, outfd, NULL, to_copy - copied_in_chunk, 0);
                  
                  if (n < 0) { 
@@ -1382,33 +1367,28 @@ static int ring_fallow_main(int argc, char **argv) {
     if (state) atomic_store_release(&state->fallow_active, 1);
     struct Interval *head = NULL;
     uint64_t next_idx = 0; 
-    struct IndexPacket ops[64];
-    ssize_t n_read;
-    while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
-        int count = n_read / sizeof(struct IndexPacket);
-        for (int i=0; i<count; i++) {
-            struct IndexPacket *ip = &ops[i];
-            if (ip->idx == next_idx) {
-                next_idx += ip->cnt;
-                while (head && head->s == next_idx) {
-                    struct Interval *tmp = head;
-                    next_idx = tmp->e;
-                    head = tmp->next;
-                    free(tmp);
-                }
-                if (state) atomic_store_release(&state->min_idx, next_idx);
-                if (!dry_run) {
-                    uint64_t byte_limit = state->offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-                    off_t aligned = (off_t)((byte_limit / 4096) * 4096);
-                    if (aligned > 0) fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned);
-                }
-            } else if (ip->idx > next_idx) {
-                struct Interval *n = xmalloc(sizeof(struct Interval));
-                n->s = ip->idx; n->e = ip->idx + ip->cnt;
-                struct Interval **curr = &head;
-                while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
-                n->next = *curr; *curr = n;
+    struct IndexPacket ip;
+    while (read(fd_in, &ip, sizeof(ip)) == sizeof(ip)) {
+        if (ip.idx == next_idx) {
+            next_idx += ip.cnt;
+            while (head && head->s == next_idx) {
+                struct Interval *tmp = head;
+                next_idx = tmp->e;
+                head = tmp->next;
+                free(tmp);
             }
+            if (state) atomic_store_release(&state->min_idx, next_idx);
+            if (!dry_run) {
+                uint64_t byte_limit = state->offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+                off_t aligned = (off_t)((byte_limit / 4096) * 4096);
+                if (aligned > 0) fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned);
+            }
+        } else if (ip.idx > next_idx) {
+            struct Interval *n = xmalloc(sizeof(struct Interval));
+            n->s = ip.idx; n->e = ip.idx + ip.cnt;
+            struct Interval **curr = &head;
+            while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
+            n->next = *curr; *curr = n;
         }
     }
     return EXECUTION_SUCCESS;
@@ -1422,6 +1402,7 @@ static int ring_worker_main(int argc, char **argv) {
     return EXECUTION_SUCCESS;
 }
 static int ring_cleanup_waiter_main(int argc, char **argv) { (void)argc; (void)argv; cleanup_waiter_state(); return EXECUTION_SUCCESS; }
+static char * lseek_doc[] = { "Usage: lseek <FD> <OFFSET> [<SEEK_TYPE>] [<VAR>]", NULL };
 static int lseek_main(int argc, char ** argv) { if (argc < 3 || argc > 5) return EXECUTION_FAILURE; int fd = atoi(argv[1]); off_t off = atoll(argv[2]); int whence = SEEK_CUR; if (argc > 3) { if (!strcmp(argv[3], "SEEK_SET")) whence = SEEK_SET; else if (!strcmp(argv[3], "SEEK_END")) whence = SEEK_END; } off_t no = lseek(fd, off, whence); if (no == -1) return EXECUTION_FAILURE; if (argc >= 4 && argv[argc-1][0]) { char buf[32]; snprintf(buf,32,"%lld",(long long)no); bind_var_or_array(argv[argc-1], buf, 0); } else printf("%lld\n", (long long)no); return EXECUTION_SUCCESS; }
 
 static int ring_memfd_create_main(int argc, char **argv) {
@@ -1502,7 +1483,7 @@ static int ring_fetcher_main(int argc, char **argv) {
                 write(fd_local, buf, to_read);
                 copied += to_read;
             }
-            xfree(buf);
+            free(buf);
         }
         uint64_t one = 1; SYS_CHK(write(fd_local_sig, &one, 8));
         SYS_CHK(write(fd_global_ack, &pp, sizeof(pp)));
@@ -1516,85 +1497,92 @@ static int ring_fallow_phys_main(int argc, char **argv) {
     int fd_file = atoi(argv[2]);
     struct Interval *head = NULL;
     uint64_t limit = 0; 
-    struct PhysPacket ops[64];
-    ssize_t n_read;
-    while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
-        int count = n_read / sizeof(struct PhysPacket);
-        for (int i=0; i<count; i++) {
-            struct PhysPacket *pp = &ops[i];
-            if (pp->off == limit) {
-                limit += pp->len;
-                while (head && head->s == limit) {
-                    struct Interval *tmp = head;
-                    limit = tmp->e;
-                    head = tmp->next;
-                    free(tmp);
-                }
-                off_t aligned = (off_t)((limit / 4096) * 4096);
-                if (aligned > 0) fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned);
-            } else if (pp->off > limit) {
-                struct Interval *n = xmalloc(sizeof(struct Interval));
-                n->s = pp->off; n->e = pp->off + pp->len;
-                struct Interval **curr = &head;
-                while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
-                n->next = *curr; *curr = n;
+    struct PhysPacket pp;
+    while (read(fd_in, &pp, sizeof(pp)) == sizeof(pp)) {
+        if (pp.off == limit) {
+            limit += pp.len;
+            while (head && head->s == limit) {
+                struct Interval *tmp = head;
+                limit = tmp->e;
+                head = tmp->next;
+                free(tmp);
             }
+            off_t aligned = (off_t)((limit / 4096) * 4096);
+            if (aligned > 0) fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned);
+        } else if (pp.off > limit) {
+            struct Interval *n = xmalloc(sizeof(struct Interval));
+            n->s = pp.off; n->e = pp.off + pp.len;
+            struct Interval **curr = &head;
+            while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
+            n->next = *curr; *curr = n;
         }
     }
     return EXECUTION_SUCCESS;
 }
 
-// --- X-MACRO GENERATION ---
-
-// 1. Generate Dispatchers
-#define DEFINE_DISPATCHER_X(name, func, usage, doc) \
-static int dispatch_##name(WORD_LIST *list) { \
+#define DEFINE_DISPATCHER(func_name, main_func) \
+static int func_name(WORD_LIST *list) { \
     int argc; \
     char **argv = make_builtin_argv(list, &argc); \
     int ret = EXECUTION_FAILURE; \
-    if (argv[0]) ret = func(argc, argv); \
+    if (argv[0]) ret = main_func(argc, argv); \
     xfree(argv); \
     return ret; \
 }
-FORKRUN_LOADABLES(DEFINE_DISPATCHER_X)
-#undef DEFINE_DISPATCHER_X
 
-// 2. Generate Structs
-#define DEFINE_STRUCT_X(name, func, usage, doc) \
-static char *name##_doc[] = { doc, usage, NULL }; \
-struct builtin name##_struct = { #name, dispatch_##name, BUILTIN_ENABLED, name##_doc, usage, 0 };
-FORKRUN_LOADABLES(DEFINE_STRUCT_X)
-#undef DEFINE_STRUCT_X
+DEFINE_DISPATCHER(dispatch_ring_init,    ring_init_main)
+DEFINE_DISPATCHER(dispatch_ring_destroy, ring_destroy_main)
+DEFINE_DISPATCHER(dispatch_ring_scanner, ring_scanner_main)
+DEFINE_DISPATCHER(dispatch_ring_claim,   ring_claim_main)
+DEFINE_DISPATCHER(dispatch_ring_worker,  ring_worker_main)
+DEFINE_DISPATCHER(dispatch_ring_cleanup_waiter, ring_cleanup_waiter_main)
+DEFINE_DISPATCHER(dispatch_ring_ingest,  ring_ingest_main)
+DEFINE_DISPATCHER(dispatch_ring_fallow,  ring_fallow_main)
+DEFINE_DISPATCHER(dispatch_ring_ack,     ring_ack_main)
+DEFINE_DISPATCHER(dispatch_ring_order,   ring_order_main)
+DEFINE_DISPATCHER(dispatch_ring_copy,    ring_copy_main)
+DEFINE_DISPATCHER(dispatch_ring_signal,  ring_signal_main)
+DEFINE_DISPATCHER(dispatch_lseek,        lseek_main)
+DEFINE_DISPATCHER(dispatch_ring_indexer, ring_indexer_main)
+DEFINE_DISPATCHER(dispatch_ring_fetcher, ring_fetcher_main)
+DEFINE_DISPATCHER(dispatch_ring_fallow_phys, ring_fallow_phys_main)
+DEFINE_DISPATCHER(dispatch_ring_memfd_create, ring_memfd_create_main)
 
-// 3. ring_list Implementation (Replaces ring_enable)
-static int ring_list_main(int argc, char **argv) {
-    if (argc >= 2) {
-        const char *var_name = argv[1];
-        SHELL_VAR *v = find_variable(var_name);
-        if (v && !array_p(v)) { unbind_variable(var_name); v = NULL; }
-        if (!v) v = make_new_array_variable(var_name);
-        if (!v) return EXECUTION_FAILURE;
+struct builtin ring_init_struct     = { "ring_init",    dispatch_ring_init,    BUILTIN_ENABLED, NULL, "ring_init [out_array]", 0 };
+struct builtin ring_destroy_struct  = { "ring_destroy", dispatch_ring_destroy, BUILTIN_ENABLED, NULL, "ring_destroy", 0 };
+struct builtin ring_scanner_struct  = { "ring_scanner", dispatch_ring_scanner, BUILTIN_ENABLED, NULL, "ring_scanner <fd> [spawn_fd]", 0 };
+struct builtin ring_claim_struct    = { "ring_claim",   dispatch_ring_claim,   BUILTIN_ENABLED, NULL, "ring_claim <OFF> <CNT> [FD]", 0 };
+struct builtin ring_worker_struct   = { "ring_worker",  dispatch_ring_worker,  BUILTIN_ENABLED, NULL, "ring_worker [inc|dec]", 0 };
+struct builtin ring_cleanup_waiter_struct = { "ring_cleanup_waiter", dispatch_ring_cleanup_waiter, BUILTIN_ENABLED, NULL, "ring_cleanup_waiter", 0 };
+struct builtin ring_ingest_struct   = { "ring_ingest",  dispatch_ring_ingest,  BUILTIN_ENABLED, NULL, "ring_ingest", 0 };
+struct builtin ring_fallow_struct   = { "ring_fallow",  dispatch_ring_fallow,  BUILTIN_ENABLED, NULL, "ring_fallow <PIPE> <FILE> [dry]", 0 };
+struct builtin ring_ack_struct      = { "ring_ack",     dispatch_ring_ack,     BUILTIN_ENABLED, NULL, "ring_ack <FD> <FD_OUT>", 0 };
+struct builtin ring_order_struct    = { "ring_order",   dispatch_ring_order,   BUILTIN_ENABLED, NULL, "ring_order <FD> <PFX|memfd>", 0 };
+struct builtin ring_copy_struct     = { "ring_copy",    dispatch_ring_copy,    BUILTIN_ENABLED, NULL, "ring_copy <OUT> <IN>", 0 };
+struct builtin ring_signal_struct   = { "ring_signal",  dispatch_ring_signal,  BUILTIN_ENABLED, NULL, "ring_signal <FD>", 0 };
+struct builtin lseek_struct         = { "lseek",        dispatch_lseek,        BUILTIN_ENABLED, lseek_doc, "lseek <FD> <OFF>...", 0 };
+struct builtin ring_indexer_struct  = { "ring_indexer", dispatch_ring_indexer, BUILTIN_ENABLED, NULL, "ring_indexer", 0 };
+struct builtin ring_fetcher_struct  = { "ring_fetcher", dispatch_ring_fetcher, BUILTIN_ENABLED, NULL, "ring_fetcher", 0 };
+struct builtin ring_fallow_phys_struct = { "ring_fallow_phys", dispatch_ring_fallow_phys, BUILTIN_ENABLED, NULL, "ring_fallow_phys", 0 };
+struct builtin ring_memfd_create_struct = { "ring_memfd_create", dispatch_ring_memfd_create, BUILTIN_ENABLED, NULL, "ring_memfd_create <VAR>", 0 };
 
-        int i = 0;
-        #define ADD_TO_ARR(name, ...) \
-            if (strcmp(#name, "ring_list") != 0) \
-                bind_array_element(v, i++, #name, 0);
-        FORKRUN_LOADABLES(ADD_TO_ARR)
-        #undef ADD_TO_ARR
-    } else {
-        #define PRINT_NAME(name, ...) \
-            if (strcmp(#name, "ring_list") != 0) \
-                printf("%s\n", #name);
-        FORKRUN_LOADABLES(PRINT_NAME)
-        #undef PRINT_NAME
-    }
-    return EXECUTION_SUCCESS;
-}
-
-// 4. Setup Function (Registration)
 int setup_builtin_forkrun_ring(void) {
-    #define REGISTER_X(name, func, usage, doc) add_builtin(&name##_struct, 1);
-    FORKRUN_LOADABLES(REGISTER_X)
-    #undef REGISTER_X
+    add_builtin(&ring_init_struct, 1);
+    add_builtin(&ring_destroy_struct, 1);
+    add_builtin(&ring_scanner_struct, 1);
+    add_builtin(&ring_claim_struct, 1);
+    add_builtin(&ring_worker_struct, 1);
+    add_builtin(&ring_cleanup_waiter_struct, 1);
+    add_builtin(&ring_ingest_struct, 1);
+    add_builtin(&ring_fallow_struct, 1);
+    add_builtin(&ring_ack_struct, 1);
+    add_builtin(&ring_order_struct, 1);
+    add_builtin(&ring_copy_struct, 1);
+    add_builtin(&ring_signal_struct, 1);
+    add_builtin(&lseek_struct, 1);
+    add_builtin(&ring_indexer_struct, 1);
+    add_builtin(&ring_fetcher_struct, 1);
+    add_builtin(&ring_fallow_phys_struct, 1);
+    add_builtin(&ring_memfd_create_struct, 1);
     return 0;
 }

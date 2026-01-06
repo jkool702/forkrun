@@ -1,0 +1,464 @@
+#!/usr/bin/bash
+
+ring_test() {
+(
+
+ enable -f ./forkrun_ring.so ring_init ring_scanner ring_claim ring_worker ring_destroy ring_ingest ring_order ring_fallow ring_ack ring_order ring_copy ring_signal ring_memfd_create ring_cleanup_waiter lseek
+
+ local -ga fd_out args
+ local -g pCode
+ local -gx order_flag nogen_flag $fd_falloc
+
+nogen_flag=false
+order_flag=false
+while true; do
+    case "$1" in
+        -o|--order) order_flag=true ;;
+        -n|--nogen) nogen_flag=true ;;
+        *) break
+    esac
+    shift 1
+done
+    
+test_type="$1"
+shift 1
+
+: "${test_type:=0}"
+
+[[ "${test_type}" == [0-9]* ]] || { printf '\n\nERROR! invalid test type. ABORTING. \n\n' >&2; return 1; }
+
+case "${test_type}" in
+    0|1) pCode="$1"; shift 1 ;;
+esac
+
+(( $# > 0 )) && args=("$@")
+
+case "${test_type}" in
+0)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+                echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                mapfile -t -u $fd_read -n $CNT A
+                (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
+                if ${order_flag}; then
+                    "$pCode" "${args[@]}" "${A[@]}" >&${fd_out[$1]}
+                    ring_ack $fd_falloc ${fd_out[$1]}
+                else
+                    "$pCode" "${args[@]}" "${A[@]}"
+                    ring_ack $fd_falloc
+                fi
+            done
+            ring_worker dec  # de-register worker
+        echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
+
+        } {fd_read}<"${targetFile0}" 1>&${fd1} 2>&${fd2}
+    ) &
+    P+=($!)
+}
+;;
+
+1)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            IFS=' '
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+                echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                mapfile -t -u $fd_read -n $CNT A
+                (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
+                if ${order_flag}; then
+                    "$pCode" ${args[*]} ${A[*]} >&${fd_out[$1]}
+                    ring_ack $fd_falloc ${fd_out[$1]}
+                else
+                    "$pCode" ${args[*]} ${A[*]}
+                    ring_ack $fd_falloc
+                fi
+            done
+            ring_worker dec  # de-register worker
+        echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
+
+        } {fd_read}<"${targetFile0}" 1>&${fd1} 2>&${fd2}
+    ) &
+    P+=($!)
+}
+;;
+
+2)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+                echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                mapfile -t -u $fd_read -n $CNT A
+                (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
+                if ${order_flag}; then
+                    : "${args[@]}" "${A[@]}" >&${fd_out[$1]}
+                    ring_ack $fd_falloc ${fd_out[$1]}
+                else
+                    : "${args[@]}" "${A[@]}"
+                    ring_ack $fd_falloc
+                fi
+            done
+            ring_worker dec  # de-register worker
+        echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
+            
+        } {fd_read}<"${targetFile0}" 1>&${fd1} 2>&${fd2}
+    ) &
+    P+=($!)
+}
+;;
+
+3)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            IFS=' '
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+                echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                mapfile -t -u $fd_read -n $CNT A
+                (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
+                if ${order_flag}; then
+                    IFS=$'\n' : ${args[*]} ${A[*]} >&${fd_out[$1]}
+                    ring_ack $fd_falloc ${fd_out[$1]}
+                else
+                    IFS=$'\n' : ${args[*]} ${A[*]}
+                    ring_ack $fd_falloc
+                fi
+            done
+            ring_worker dec  # de-register worker
+        echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
+            
+        } {fd_read}<"${targetFile0}" 1>&${fd1} 2>&${fd2}
+    ) &
+    P+=($!)
+}
+;;
+
+4)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+                echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                mapfile -t -u $fd_read -n $CNT A
+                (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
+                if ${order_flag}; then
+                    printf '%s\n' "${args[@]}" "${A[@]}" >>./count.out.${1}
+                    printf '%s\n' "${args[@]}" "${A[@]}" >&${fd_out[$1]}
+                    ring_ack $fd_falloc ${fd_out[$1]}
+                else
+                    printf '%s\n' "${args[@]}" "${A[@]}" >>./count.out.${1}
+                    ring_ack $fd_falloc
+                fi
+            done
+            ring_worker dec  # de-register worker
+        echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
+            
+        } {fd_read}<"${targetFile0}" 1>&${fd1} 2>&${fd2}
+    ) &
+    P+=($!)
+}
+;;
+
+5)
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+                echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                mapfile -t -u $fd_read -n $CNT A
+                (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
+                if ${order_flag}; then
+                    IFS=$'\n' printf '%s\n' ${args[*]} ${A[*]} >>./count.out.${1}
+                    IFS=$'\n' printf '%s\n' ${args[*]} ${A[*]} >&${fd_out[$1]}
+                    ring_ack $fd_falloc ${fd_out[$1]}
+                else
+                    IFS=$'\n' printf '%s\n' ${args[*]} ${A[*]} >>./count.out.${1}
+                    ring_ack $fd_falloc
+                fi
+            done
+            ring_worker dec  # de-register worker
+        echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
+            
+        } {fd_read}<"${targetFile0}" 1>&${fd1} 2>&${fd2}
+    ) &
+    P+=($!)
+}
+;;
+
+
+7)
+
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                ((total+=CNT))
+                echo "$total" >./total.${1}
+                echo "$CNT" >> ./count.${1}
+                ((ITER++))
+                mapfile -t -u $fd_read -n $CNT A
+                if ${order_flag}; then
+                    ff "${args[@]}" "${A[@]}" >&${fd_out[$1]}
+                    ring_ack $fd_falloc ${fd_out[$1]}
+                else
+                    ff "${args[@]}" "${A[@]}"
+                    ring_ack $fd_falloc
+                fi
+            done
+            ring_worker dec  # de-register worker
+            #exec {fd_count}>&-
+            echo "$total" >./total.${1}
+            printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
+
+        } {fd_read}<"${targetFile0}" 1>&${fd1} 2>&${fd2}
+    ) &
+    P+=($!)
+}
+;;
+
+8)
+
+spawn_worker() {
+    (
+        {
+            ITER=0
+            ring_worker inc  # Register ourselves as 1 worker
+            while ring_claim OFF CNT $fd_read; do
+                [[ "$CNT" == "0" ]] && break
+                mapfile -t -u $fd_read -n $CNT A
+                ff "${args[@]}" "${A[@]}"
+                ring_ack $fd_falloc
+            done
+            ring_worker dec  # de-register worker
+
+        } {fd_read}<"${targetFile0}" 1>&${fd1} 2>&${fd2}
+    ) &
+    P+=($!)
+}
+;;
+
+esac
+
+
+
+[[ $(echo ./total.* ./count.* ./final.* ) ]] && \rm ./total.* ./count.* ./final.*
+
+
+dataN=1000000000
+echo "Generating test data..." >&2
+case "${test_type}" in
+    7|8)
+ff() {
+sha1sum "${@}"
+sha256sum "${@}"
+sha512sum "${@}"
+sha224sum "${@}"
+sha384sum "${@}"
+md5sum "${@}"
+sum -s "${@}"
+sum -r "${@}"
+cksum "${@}"
+b2sum "${@}"
+cksum -a sm3 "${@}"
+xxhsum "${@}"
+xxhsum -H3 "${@}"
+}
+        export -f ff
+        targetFile=/mnt/ramdisk/flist
+
+    ;;
+    4|5)
+        ${nogen_flag} || {
+        seq $dataN >test.dat
+}
+        targetFile=./test.dat
+    ;;
+    0|1|2|3)
+        ${nogen_flag} || {
+        yes $'\n' | head -n $dataN > test.dat
+}
+        targetFile=./test.dat
+    ;;
+esac
+
+if ${nogen_flag} && ! [[ -t 0 ]]; then
+    targetFile='&0'
+    dataN='???'
+else
+    dataN=$(wc -l <"$targetFile")
+fi
+
+exec {fd_spawn}<><(:)
+exec {fd_spawn}<><(:)
+
+total=0
+P=()
+
+export nWorkers=1
+export nWorkersMax=$(nproc)
+#export nBytesMax=0
+#export nLinesMax=2048
+#export nBatchMax=4096
+export FORKRUN_FORCE_FALLBACK=1
+
+start_time=${EPOCHREALTIME//./}
+ring_init
+ring_memfd_create ingress_memfd
+
+targetFile0="/proc/${BASHPID}/fd/${ingress_memfd}"
+
+echo "Starting copy..." >&2
+    echo "Sending stdin to ingress memfd ${ingress_memfd}"  >&2
+    exec {fd_write}>"$targetFile0"
+    if ${nogen_flag} && ! [[ -t 0 ]]; then
+        exec {fd_stdin}<&0
+    else
+        exec {fd_stdin}<"$targetFile"
+    fi
+
+    (
+        ring_copy ${fd_write} $ingress_memfd
+        ring_signal
+         printf '\nCOPY HIT EOF\nelapsed time = %s us\n' $(( ${EPOCHREALTIME//./} - start_time )) >&$fd2
+    ) &
+    COPY_PID=$!
+
+
+echo "Starting scanner..." >&2
+exec {fd_scan}<"$targetFile0"
+(
+    ring_scanner ${fd_scan} ${fd_spawn};
+    printf '\nSCANNER HIT EOF\nelapsed time = %s us\n' $(( ${EPOCHREALTIME//./} - start_time )) >&$fd2;
+) &
+SCANNER_PID=$!
+
+exec {fd_falloc}<><(:)
+echo "Starting fallow..." >&2
+    export RING_FALLOC_FLAG=true
+    ( ring_fallow ${fd_falloc} ${fd_write}; printf '\nFALLOW HIT EOF\nelapsed time = %s us\n' $(( ${EPOCHREALTIME//./} - start_time )) >&$fd2;  ) &
+    FALLOC_PID=$!
+
+${order_flag} && {
+    echo "Starting order..." >&2
+    exec {fd_order}<><(:)
+    export FD_ORDER_PIPE=$fd_order
+    fd_out=()
+    for (( nn=0; nn<${nWorkersMax:-$(nproc)}; nn++ )); do
+        ring_memfd_create "fd_out[$nn]"
+    done
+
+    ( ring_order $fd_order "memfd" >&${fd1}; printf '\nORDER HIT EOF\nelapsed time = %s us\n' $(( ${EPOCHREALTIME//./} - start_time )) >&$fd2;  ) &
+    ORDER_PID=$!
+}
+
+# 4. Consumer Loop
+printf "\nConsuming...\n\n" >&2
+
+printf 'INITIALLY SPAWNING %s WORKERS (elapsed time = %s us)\n' $nWorkers $(( ${EPOCHREALTIME//./} - start_time )) >&2
+for (( nn=0; nn<nWorkers; nn++)); do
+    spawn_worker "$nn"
+done
+
+jobs
+ps
+declare -p
+shopt -s globstar
+for p in $BASHPID $(jobs -p); do
+for nn in /proc/$p/fdinfo/*; do
+printf '%s: %s\n' $nn "$(cat $nn)"
+done
+done
+
+while true; do
+    read -r -u $fd_spawn N
+    [[ "$N" == 'x' ]] && break
+    printf 'SPAWNING %s WORKERS (elapsed time = %s us)\n' $N $(( ${EPOCHREALTIME//./} - start_time )) >&2
+    nWorkers0="$nWorkers"
+    (( ( nWorkers0 + N ) > nWorkersMax )) && (( N = nWorkersMax - nWorkers0 ))
+    (( N > 0 )) && for ((nn=nWorkers0; nn<nWorkers0+N; nn++)); do
+        spawn_worker "$nn"
+        ((nWorkers++))
+    done
+done
+
+wait "${P[@]}" 
+
+end_time=${EPOCHREALTIME//./}
+elapsed=$(( end_time - start_time ))
+
+for nn in ./total.*; do
+    read -r total0 <$nn
+(( total = total + total0 ))
+done
+
+printf  '\n\nDone!\n\nTotal Lines Consumed: %s (Expected: %s)\n\nTime: %s us\n\n' "$total" "$dataN" "${elapsed}" >&2
+
+# Cleanup
+ring_destroy
+for p in $COPY_PID $SCANNER_PID $FALLOC_PID $ORDER_PID; do
+kill $p 2>/dev/null
+wait $p 2>/dev/null
+done
+
+exec {fd_spawn}>&- 
+exec {fd_scan}>&-
+exec {fd_falloc}>&-
+exec {fd_stdin}>&-
+exec {fd_write}>&-
+exec {ingress_memfd}>&-
+${order_flag} && exec {fd_order}>&-
+
+
+cat ./final.*
+
+)  {fd1}>&1 {fd2}>&2
+}
+
