@@ -17,8 +17,20 @@ while true; do
     shift 1
 done
     
+test_type="$1"
+shift 1
 
-case "$1" in
+: "${test_type:=0}"
+
+[[ "${test_type}" == [0-9]* ]] || { printf '\n\nERROR! invalid test type. ABORTING. \n\n' >&2; return 1; }
+
+case "${test_type}" in
+    0|1) pCode="$1"; shift 1 ;;
+esac
+
+args=("$@")
+
+case "${test_type}" in
 0)
 spawn_worker() {
     (
@@ -34,10 +46,10 @@ spawn_worker() {
                 mapfile -t -u $fd_read -n $CNT A
                 (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
                 if ${order_flag}; then
-                    "$pCode" "${A[@]}" >&${fd_out[$1]}
+                    "$pCode" "${args[@]}" "${A[@]}" >&${fd_out[$1]}
                     ring_ack $fd_falloc ${fd_out[$1]}
                 else
-                    "$pCode" "${A[@]}"
+                    "$pCode" "${args[@]}" "${A[@]}"
                     ring_ack $fd_falloc
                 fi
             done
@@ -67,10 +79,10 @@ spawn_worker() {
                 mapfile -t -u $fd_read -n $CNT A
                 (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
                 if ${order_flag}; then
-                    "$pCode" ${A[*]} >&${fd_out[$1]}
+                    "$pCode" ${args[*]} ${A[*]} >&${fd_out[$1]}
                     ring_ack $fd_falloc ${fd_out[$1]}
                 else
-                    "$pCode" ${A[*]}
+                    "$pCode" ${args[*]} ${A[*]}
                     ring_ack $fd_falloc
                 fi
             done
@@ -99,10 +111,10 @@ spawn_worker() {
                 mapfile -t -u $fd_read -n $CNT A
                 (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
                 if ${order_flag}; then
-                    : "${A[@]}" >&${fd_out[$1]}
+                    : "${args[@]}" "${A[@]}" >&${fd_out[$1]}
                     ring_ack $fd_falloc ${fd_out[$1]}
                 else
-                    : "${A[@]}"
+                    : "${args[@]}" "${A[@]}"
                     ring_ack $fd_falloc
                 fi
             done
@@ -132,10 +144,10 @@ spawn_worker() {
                 mapfile -t -u $fd_read -n $CNT A
                 (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
                 if ${order_flag}; then
-                    IFS=$'\n' : ${A[*]} >&${fd_out[$1]}
+                    IFS=$'\n' : ${args[*]} ${A[*]} >&${fd_out[$1]}
                     ring_ack $fd_falloc ${fd_out[$1]}
                 else
-                    IFS=$'\n' : ${A[*]}
+                    IFS=$'\n' : ${args[*]} ${A[*]}
                     ring_ack $fd_falloc
                 fi
             done
@@ -164,11 +176,11 @@ spawn_worker() {
                 mapfile -t -u $fd_read -n $CNT A
                 (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
                 if ${order_flag}; then
-                    printf '%s\n' "${A[@]}" >>./count.out.${1}
-                    printf '%s\n' "${A[@]}" >&${fd_out[$1]}
+                    printf '%s\n' "${args[@]}" "${A[@]}" >>./count.out.${1}
+                    printf '%s\n' "${args[@]}" "${A[@]}" >&${fd_out[$1]}
                     ring_ack $fd_falloc ${fd_out[$1]}
                 else
-                    printf '%s\n' "${A[@]}" >>./count.out.${1}
+                    printf '%s\n' "${args[@]}" "${A[@]}" >>./count.out.${1}
                     ring_ack $fd_falloc
                 fi
             done
@@ -197,14 +209,13 @@ spawn_worker() {
                 mapfile -t -u $fd_read -n $CNT A
                 (( ${#A[@]} == CNT )) || echo "ERROR on iteration $ITER: expected $CNT values, got ${#A[@]} values" >&2
                 if ${order_flag}; then
-                    IFS=$'\n' printf '%s\n' ${A[*]} >>./count.out.${1}
-                    IFS=$'\n' printf '%s\n' ${A[*]} >&${fd_out[$1]}
+                    IFS=$'\n' printf '%s\n' ${args[*]} ${A[*]} >>./count.out.${1}
+                    IFS=$'\n' printf '%s\n' ${args[*]} ${A[*]} >&${fd_out[$1]}
                     ring_ack $fd_falloc ${fd_out[$1]}
                 else
-                    IFS=$'\n' printf '%s\n' ${A[*]} >>./count.out.${1}
+                    IFS=$'\n' printf '%s\n' ${args[*]} ${A[*]} >>./count.out.${1}
                     ring_ack $fd_falloc
                 fi
-            done
             done
             ring_worker dec  # de-register worker
         echo "$total" >./total.${1}
@@ -232,16 +243,16 @@ spawn_worker() {
                 ((ITER++))
                 mapfile -t -u $fd_read -n $CNT A
                 if ${order_flag}; then
-                    ff "${A[@]}" >&${fd_out[$1]}
+                    ff "${args[@]}" "${A[@]}" >&${fd_out[$1]}
                     ring_ack $fd_falloc ${fd_out[$1]}
                 else
-                    ff "${A[@]}"
+                    ff "${args[@]}" "${A[@]}"
                     ring_ack $fd_falloc
                 fi
             done
             ring_worker dec  # de-register worker
             #exec {fd_count}>&-
-        echo "$total" >./total.${1}
+            echo "$total" >./total.${1}
             printf 'TOTAL=%s    ITER=%s    AVG=%s\n' "$total" "$ITER" "$((total/ITER))" >./final.${1}
 
         } {fd_read}<"${targetFile0}" 1>&${fd1} 2>&${fd2}
@@ -260,7 +271,7 @@ spawn_worker() {
             while ring_claim OFF CNT $fd_read; do
                 [[ "$CNT" == "0" ]] && break
                 mapfile -t -u $fd_read -n $CNT A
-                ff "${A[@]}"
+                ff "${args[@]}" "${A[@]}"
                 ring_ack $fd_falloc
             done
             ring_worker dec  # de-register worker
@@ -280,7 +291,7 @@ esac
 
 dataN=1000000000
 echo "Generating test data..." >&2
-case "$1" in
+case "${test_type}" in
     7|8)
 ff() {
 sha1sum "${@}"
@@ -307,7 +318,7 @@ xxhsum -H3 "${@}"
 }
         targetFile=./test.dat
     ;;
-    1|2|3|4)
+    0|1|2|3)
         ${nogen_flag} || {
         yes $'\n' | head -n $dataN > test.dat
 }
@@ -326,7 +337,7 @@ exec {fd_spawn}<><(:)
 total=0
 P=()
 
-export nWorkers=$(( $(nproc) / 4 ))
+export nWorkers=1
 export nWorkersMax=$(nproc)
 #export nBytesMax=0
 #export nLinesMax=2048
@@ -336,6 +347,9 @@ start_time=${EPOCHREALTIME//./}
 
 if ${order_flag}; then
     fd_out=()
+    exec {fd_order}<><(:)
+    export FD_ORDER_PIPE=$fd_order
+
     ring_init 'fd_out'
 else
     ring_init
@@ -345,35 +359,44 @@ ring_memfd_create ingress_memfd
 
 targetFile0="/proc/${BASHPID}/fd/${ingress_memfd}"
 
-echo "Starting splicer..." >&2
-    mkdir -p /dev/shm/.forkrun
+echo "Starting copy..." >&2
     echo "Sending stdin to ingress memfd ${ingress_memfd}"  >&2
-    {
+    exec {fd_write}>"$targetFile0"
+    if ${nogen_flag} && ! [[ -t 0 ]]; then
+        exec {fd_stdin}<&0
+    else
+        exec {fd_stdin}<"$targetFile"
+    fi
+
     (
         ring_copy ${fd_write} ${fd_stdin}
         ring_signal
          printf '\nSPLICER HIT EOF\nelapsed time = %s us\n' $(( ${EPOCHREALTIME//./} - start_time )) >&$fd2
     ) &
-    } {fd_write}>"$targetFile0" {fd_stdin}<"$targetFile" {fd2}>&2
     SPLICE_PID=$!
-    targetFile0="${TMPDIR}/stdin"
 
-exec {fd_scan}<"${targetFile0}"
 
 echo "Starting scanner..." >&2
 ( ring_scanner ${fd_scan} ${fd_spawn} ) &
 SCANNER_PID=$!
 
 exec {fd_falloc}<><(:)
-echo "Starting falloc..." >&2
+echo "Starting fallow..." >&2
     export RING_FALLOC_FLAG=true
     ( ring_fallow ${fd_falloc} ${fd_write} ) &
     FALLOC_PID=$!
 
+${order_flag} && {
+    echo "Starting order..." >&2
+
+    ( ring_order $fd_order "memfd" >&${fd1} ) &
+    ORDER_PID=$!
+}
+
 # 4. Consumer Loop
 printf "\nConsuming...\n\n" >&2
 
-
+printf 'INITIALLY SPAWNING %s WORKERS (elapsed time = %s us)\n' $nWorkers $(( ${EPOCHREALTIME//./} - start_time )) >&2
 for (( nn=0; nn<nWorkers; nn++)); do
     spawn_worker "$nn"
 done
@@ -411,7 +434,12 @@ done
 
 exec {fd_spawn}>&- 
 exec {fd_scan}>&-
-${RING_FALLOC_FLAG} && exec {fd_falloc}>&-
+exec {fd_falloc}>&-
+exec {fd_stdin}>&-
+exec {fd_write}>&-
+exec {ingress_memfd}>&-
+${order_flag} && exec {fd_order}>&-
+
 
 cat ./final.*
 
