@@ -271,7 +271,7 @@ _forkrun_get_arch() {
 }
 
 _forkrun_bootstrap_setup() {
-    local tmp_so dir bootstrap_flag force_flag
+    local tmp_so dir success_flag bootstrap_flag force_flag
     local -a candidates ring_funcs
 
     force_flag=false
@@ -296,33 +296,43 @@ _forkrun_bootstrap_setup() {
         "$PWD"                       # Last resort
     )
 
+	# set ARCH
 	_forkrun_get_arch "$1"
 
     bootstrap_flag=false
 
-    if ! enable | grep -qE '(ring_[((memfd_create)|(seal)|(list))].*){3}'; then
+    if ! echo $(enable) | grep -qE '(ring_((memfd_create)|(seal)|(list)) .*){3}'; then
+
+	    # ring_memfd_create isnt loaded. bootstrap it.
+
+        # make sure we have the base64 sequences
+		(( ${#b64[@]} > 0 )) || { 
+		    printf '\n\nERROR: ring_memfd_create is not loaded and there is no b64 array variable to generate the .so from. ABORTING!\nNOTE: to re-load the b64 array and setup the loadables again, run '. forkrun.bash' again.\n\n' >&2
+			return 1
+		}
     
         bootstrap_flag=true
+		success_flag=false
 
         for dir in "${candidates[@]}"; do
             # Skip empty, non-existent, or non-writable directories
             [[ -n "$dir" && -d "$dir" && -w "$dir" ]] || continue
 
-            # Generate path with high entropy (30-bit random hex)
+            # Generate unique path with high entropy (30-bit random hex)
             until [[ $tmp_so ]] && ! [[ -f "$tmp_so" ]]; do
                 printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
             done
 
-            # 2. Try to write
+            # 2. Try to enable loadable
             if _forkrun_base64_to_file "$tmp_so" <<<"${b64[$ARCH]}"; then
                 
                 # 3. CRITICAL TEST: Try to Enable
                 # This verifies the filesystem allows execution (noexec check)
-                if enable -f "$tmp_so" ring_memfd_create ring_memfd_seal ring_list 2>/dev/null; then
-                    # SUCCESS! 
-                    # The builtin is loaded. Delete disk artifact immediately.
+                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list 2>/dev/null; then
+                    # SUCCESS! The builtin is loaded. Delete disk artifact immediately.
                     \rm -f "$tmp_so"
-                    return 0
+                    success_flag=true
+					break
                 fi
 
                 # If enable failed, clean up and try next candidate
@@ -331,9 +341,10 @@ _forkrun_bootstrap_setup() {
         done
 
         # If we get here, we failed everywhere
-        echo "forkrun: fatal: could not write and load bootloader in any temp directory." >&2
-        echo "forkrun: checked: ${candidates[*]}" >&2
-        return 1
+		${success_flag} || {
+            printf '\nERROR: could not write and load bootloader for loadable in any temp directory. ABORTING!\n directories checked: %s\n\n' "${candidates[*]}" >&2
+            return 1
+		}
 
     elif (( ${#b64[@]} == 0 )) && [[ $FORKRUN_MEMFD_LOADABLES_BASE64 ]] && [[ -f "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES_BASE64}" ]]; then
 
