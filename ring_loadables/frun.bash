@@ -114,8 +114,9 @@ P+=($!)
         eval "${worker_func_src}"
 
         # spawn initial workers
-        for (( nn=0; nn<nWorkers; nn++)); do
-            spawn_worker "$nn" "$@"
+        nWorkers0="$nWorkers"
+        for (( nWorkers=0; nWorkers<nWorkers0; nWorkers++)); do
+            spawn_worker "$nWorkers" "$@"
         done
 
         # spawn additional workers dynamically
@@ -125,7 +126,7 @@ P+=($!)
             nWorkers0="$nWorkers"
             (( ( nWorkers0 + N ) > nWorkersMax )) && (( N = nWorkersMax - nWorkers0 ))
             (( N > 0 )) && for (( nWorkers=nWorkers0; nWorkers<nWorkers0+N; nWorkers++ )); do
-                spawn_worker "$nn" "$@"
+                spawn_worker "$nWorkers" "$@"
             done
         done
 
@@ -144,11 +145,11 @@ P+=($!)
 
         # close the fd's
         exec {fd_spawn}>&-
-        exec {fd_scan}>&-
         exec {fd_fallow}>&-
-        exec {fd_write}>&-
-        exec {ingress_memfd}>&-
         exec {fd_order}>&-
+        exec {fd_write}>&-
+        exec {fd_scan}>&-
+        exec {ingress_memfd}>&-
 
     } {fd_spawn}<><(:) {fd_fallow}<><(:) {fd_order}<><(:) {fd_write}>"/proc/${BASHPID}/fd/${ingress_memfd}" {fd_scan}<"/proc/${BASHPID}/fd/${ingress_memfd}" {fd0}<&0 {fd1}>&1 {fd2}>&2
 )
