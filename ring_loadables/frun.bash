@@ -387,7 +387,7 @@ _forkrun_base64_to_file() {
 
             # Try to extract loadable
             if _forkrun_base64_to_file "$tmp_so" <<<"${b64[$ARCH]}"; then
-                chmod 700 "$tmp_so"
+                chmod +x "$tmp_so"
 
                 # CRITICAL TEST: Try to Enable loadable
                 # This verifies the filesystem allows execution (noexec check)
