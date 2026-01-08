@@ -1,8 +1,8 @@
-// forkrun_ring.c v8.30
+// forkrun_ring.c v8.27
 // Architecture: Universal Ingest, Zero-Copy Ring, Escrow Stealing
 // Features: Lookahead Buffer, Single-Ring Tail Strategy, Gradient Ramp Down
-// New Features: ring_seal, ring_list, Unified Build
-// Changes: Consolidated v8.2x fixes, added sealing support, single-file structure
+// New Features: X-Macro Management, Auto-Discovery "ring_enable", Batched Ordering
+// Changes: Fix pointer dereference syntax error in ring_fallow_phys
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -34,6 +34,7 @@
 #include <time.h> 
 #include <sys/syscall.h>
 #include <ctype.h>
+// Removed dlfcn.h
 
 // --- Architecture Specific Pause Logic ---
 #if defined(__x86_64__) || defined(__i386__)
@@ -57,7 +58,6 @@
 #define FALLOC_FL_PUNCH_HOLE 0x02
 #endif
 
-// Compat definitions for older kernels/headers
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif
@@ -66,21 +66,6 @@
 #endif
 #ifndef O_TMPFILE
 #define O_TMPFILE 020200000
-#endif
-#ifndef F_ADD_SEALS
-#define F_ADD_SEALS 1033
-#endif
-#ifndef F_SEAL_SEAL
-#define F_SEAL_SEAL 0x0001
-#endif
-#ifndef F_SEAL_SHRINK
-#define F_SEAL_SHRINK 0x0002
-#endif
-#ifndef F_SEAL_GROW
-#define F_SEAL_GROW 0x0004
-#endif
-#ifndef F_SEAL_WRITE
-#define F_SEAL_WRITE 0x0008
 #endif
 
 #define FLAG_PARTIAL_BATCH (1ULL << 63)
@@ -144,8 +129,7 @@ static int g_debug = 0;
     X(ring_fetcher,         ring_fetcher_main,        "ring_fetcher",                   "NUMA Fetcher") \
     X(ring_fallow_phys,     ring_fallow_phys_main,    "ring_fallow_phys",               "Physical fallow (hole punching)") \
     X(ring_memfd_create,    ring_memfd_create_main,   "ring_memfd_create <VAR>",        "Create anonymous memfd") \
-    X(ring_seal,            ring_seal_main,           "ring_seal <FD>",                 "Seal memfd (Make Read-Only)") \
-    X(ring_list,            ring_list_main,           "ring_list [VAR]",                "List available loadables")
+    X(ring_list,            ring_list_main,           "ring_list [VAR]",                "List all available loadables")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -975,12 +959,14 @@ restart_loop:
                          break;
                      }
                  }
+                 
                  if (atomic_load_acquire(&state->scanner_finished)) {
                      int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
                      if (diff < 0) diff = 0;
                      claim_count = (uint64_t)diff;
                      break;
                  }
+                 
                  struct pollfd pfds[2] = { { .fd = evfd_data, .events = POLLIN }, { .fd = evfd_eof, .events = POLLIN } };
                  poll(pfds, 2, -1);
                  if (pfds[0].revents) { uint64_t v; if(read(evfd_data, &v, 8)){}; }
@@ -1449,17 +1435,6 @@ static int ring_memfd_create_main(int argc, char **argv) {
     char val[32];
     snprintf(val, sizeof(val), "%d", fd);
     bind_var_or_array(var_name, val, 0);
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_seal_main(int argc, char **argv) {
-    if (argc < 2) return EXECUTION_FAILURE;
-    int fd = atoi(argv[1]);
-    int seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
-    if (fcntl(fd, F_ADD_SEALS, seals) == -1) {
-        if (g_debug) fprintf(stderr, "forkrun [DEBUG] ring_seal failed: %s\n", strerror(errno));
-        return EXECUTION_FAILURE;
-    }
     return EXECUTION_SUCCESS;
 }
 
