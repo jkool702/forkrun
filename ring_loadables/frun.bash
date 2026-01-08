@@ -1,41 +1,50 @@
 #!/usr/bin/bash
 
-frun() {
-  (
+frun() (
 
-    local -ga fd_out args
-    local -g pCode
-    local -gx order_flag nogen_flag
+    # # # # # SETUP # # # # #
+
+    local test_type worker_func_src nn N nWorkers0
+    local -g pCode fd_order fd_spawn ingress_memfd nWorkers nWorkersMax
+    local -gx order_flag
+    local -ga fd_out args P
 
     : "${nWorkers:=1}" "${nWorkersMax:=$(nproc)}"
 
+    # export vars to tune workers
     export nWorkers="${nWorkers}"
     export nWorkersMax="${nWorkersMax}"
 
-    nogen_flag=false
     order_flag=false
+    delimiter_val=$'\n'
     while true; do
         case "$1" in
-            -o|--order) order_flag=true ;;
-            -n|--nogen) nogen_flag=true ;;
-            *) break
+            -o|--order)
+                order_flag=true
+                ;;
+            -d|--delim|--delimiter)
+                shift 1
+                delimiter_val="${1}"
+                (( ${#delimiter_val} > 1 )) && {
+                    printf '\nWARNING: multi-byte delimiters are not supported...only the first byte will be used.\n' >&2
+                    delimiter_val="${delimiter_val[0]}"
+                }
+                ;;
+            --)
+                shift 1
+                break
+                ;;
+            *)
+                break
+                ;;
         esac
         shift 1
     done
 
-    test_type="$1"
-    shift 1
-    : "${test_type:=0}"
-    [[ "${test_type}" == [0-9]* ]] || { printf '\n\nERROR! invalid test type.\n\n' >&2; return 1; }
-
-    pCode="$1"
-    shift 1
-
-    (( $# > 0 )) && args=("$@")
-
+    # setup loadables if needed
     _forkrun_bootstrap_setup --fast
 
-    # 1. Ring Init
+    # initialize rings with ring_init and create data memfd with ring_memfd_create
     if ${order_flag}; then
         export FD_ORDER_PIPE=$fd_order
         ring_init 'fd_out'
@@ -46,8 +55,136 @@ frun() {
     ring_memfd_create ingress_memfd
 
 
+    # # # # # MAIN # # # # #
+    {
+        # # SPAWN "HELPER PROCESSES" # #
+        # these keep the worker pool fed
 
-  ) {fd_spawn}<><(:) {fd_order}<><(:)
+        # start ring_copy to populate memfd with data from stdin
+        (
+            ring_copy ${fd_write} ${fd0}
+            ring_signal
+        ) &
+        COPY_PID=$!
+
+        # start ring_scanner to scan memfd for line breaks
+        (
+            ring_scanner ${fd_scan} ${fd_spawn} "${delimiter_val}"
+        ) &
+        SCANNER_PID=$!
+
+        # start ring_fallow to remove already-consumed data from memfd and free memory
+        (
+            ring_fallow ${fd_fallow} ${fd_write}
+        ) &
+        FALLOW_PID=$!
+
+        # (if enabled) start ring_order to reorder output to the order that running inputs sequentially would have produced
+        ${order_flag} && {
+            (
+                ring_order $fd_order "memfd" >&${fd1}
+            ) &
+            ORDER_PID=$!
+        }
+
+        # # SPAWN WORKER POOL # #
+
+        # define spawning function (use JIT-like optimization)
+        worker_func_src='spawn_worker() {
+(
+  {
+    ID="$1"
+    shift 1
+    ring_worker inc
+    while ring_claim OFF CNT $fd_read; do
+        [[ "$CNT" == "0" ]] && break
+        mapfile -t -u ${fd_read} -n ${CNT} -d '"${delimiter_val@Q}"' A
+        "${@}" "${A[@]}"'
+        order_flag && worker_func_src+=' >&${fd_out[$ID]}'
+        worker_func_src+='
+        ring_ack $fd_fallow'
+        order_flag && worker_func_src+=' ${fd_out[$ID]}'
+        worker_func_src+='
+    done
+    ring_worker dec
+  } {fd_read}<"/proc/'"${BASHPID}"'/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
+) &
+P+=($!)
+}'
+        eval "${worker_func_src}"
+
+        # spawn initial workers
+        for (( nn=0; nn<nWorkers; nn++)); do
+            spawn_worker "$nn" "$@"
+        done
+
+        # spawn additional workers dynamically
+        while true; do
+            read -r -u $fd_spawn N
+            [[ "$N" == 'x' ]] && break
+            nWorkers0="$nWorkers"
+            (( ( nWorkers0 + N ) > nWorkersMax )) && (( N = nWorkersMax - nWorkers0 ))
+            (( N > 0 )) && for (( nWorkers=nWorkers0; nWorkers<nWorkers0+N; nWorkers++ )); do
+                spawn_worker "$nn" "$@"
+            done
+        done
+
+        # wait for workers to finish
+        wait "${P[@]}"
+
+        # # CLEANUP # #
+
+        # destroy the rings
+        ring_destroy
+
+        # ensure helper processes are dead
+        kill $COPY_PID $SCANNER_PID $FALLOC_PID $ORDER_PID $(jobs -p) 2>/dev/null
+        kill -9 $COPY_PID $SCANNER_PID $FALLOC_PID $ORDER_PID $(jobs -p) 2>/dev/null
+        wait $COPY_PID $SCANNER_PID $FALLOC_PID $ORDER_PID $(jobs -p) 2>/dev/null
+
+        # close the fd's
+        exec {fd_spawn}>&-
+        exec {fd_scan}>&-
+        exec {fd_fallow}>&-
+        exec {fd_write}>&-
+        exec {ingress_memfd}>&-
+        exec {fd_order}>&-
+
+    } {fd_spawn}<><(:) {fd_fallow}<><(:) {fd_order}<><(:) {fd_write}>"/proc/${BASHPID}/fd/${ingress_memfd}" {fd_scan}<"/proc/${BASHPID}/fd/${ingress_memfd}" {fd0}<&0 {fd1}>&1 {fd2}>&2
+)
+
+_forkrun_bootstrap_setup() {
+## HELPER FUNCTION TO LOAD THE RING LOADABLES USED BY FORKRUN
+
+# Define helper functions used by _forkrun_bootstrap_setup
+_forkrun_get_arch() {
+
+    local ARCH0="$1"
+
+    : "${ARCH0:=$(uname -m)}"
+
+    case "$ARCH0" in
+    x86_64[-_]v[2-4])
+        ARCH="${ARCH0//_v/-v}"
+        ;;
+    x86_64)
+        if grep -qE '( avx512[((cd)|(bw)|dq)|(vl)|(f))].*){5}' </proc/cpuinfo; then
+            ARCH='x86_64-v4'
+        elif grep -qF 'avx2' </proc/cpuinfo; then
+            ARCH='x86_64-v3'
+        else
+            ARCH='x86_64-v2'
+        fi
+        ;;
+    aarch64|armv7|riscv64|s390x|ppcle64)
+        ARCH="$ARCH0"
+        ;;
+    *)
+        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: x86_64 aarch64 armv7 riscv64 s390x ppcle64\n\n' >&2
+        return 1
+        ;;
+    esac
+    return 0
 }
 
 
@@ -158,6 +295,155 @@ _forkrun_base64_to_file() {
     fi
 }
 
+    local tmp_so dir rf bootstrap_flag need_memfd_create_flag need_memfd_b64_flag need_b64_flag force_flag fast_flag
+    local -a candidates ring_funcs
+
+    need_memfd_create_flag=false
+    need_memfd_b64_flag=false
+    need_b64_flag=false
+    force_flag=false
+    fast_flag=false
+    bootstrap_flag=false
+
+    # check for -f|--force as input arg
+    while true; do
+        case "$1" in
+            --fast)      fast_flag=true            ;;
+            -f|--force)  force_flag=true; shift 1  ;;
+            *)           break                     ;;
+        esac
+    done
+
+    # fast "is everything already set up" check for runtime checks
+    ${fast_flag} && {
+        if ring_list 'ring_funcs' 2>/dev/null && (( ${#ring_funcs[@]} > 0 )); then
+            for rf in "${ring_funcs[@]}"; do
+                enable -a "$rf" 2>/dev/null || {
+                    fast_flag=false
+                    break
+                }
+            done
+        else
+            fast_flag=false
+        fi
+    }
+    ${fast_flag} && return 0
+
+    # check for existing b64 array
+    (( ${#b64[@]} > 0 )) || need_b64_flag=true
+
+    # check for existing memfd holding b64
+    { [[ $FORKRUN_MEMFD_LOADABLES_BASE64 ]] && (( FORKRUN_MEMFD_LOADABLES_BASE64 > 2 )) && [[ -f "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES_BASE64}" ]]; } || need_memfd_b64_flag=true
+
+    # if we dont have the b64 array and there isnt already a memfd holding it (to recover it from) abort
+    ${need_b64_flag} && ${need_memfd_b64_flag} && {
+        printf '\n\nERROR: There is no b64 array variable to generate the .so from and no memfd to recover the b64 array from. ABORTING!\nNOTE: to re-load the b64 array and setup the loadables again, run '. forkrun.bash' again.\n\n' >&2
+        return 1
+    }
+
+    # check for the memfd_create loadable
+    enable | sed -zE 's/\n/ /g' | grep -qE '(ring_((memfd_create)|(seal)|(list)) .*){3}' || need_memfd_create_flag=true
+
+
+    # set ARCH
+    _forkrun_get_arch "$1"
+
+    # if we need the b64 get it from the memfd
+    ${need_b64_flag} && {
+        . "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES_BASE64}"
+        (( ${#b64[@]} == 0 )) && {
+            printf '\n\nERROR: ring_memfd_create is not loaded and there is no b64 array variable to generate the .so from. ABORTING!\nNOTE: to re-load the b64 array and setup the loadables again, run '. forkrun.bash' again.\n\n' >&2
+            return 1
+        }
+        need_b64_flag=false
+    }
+
+    # if ring_memfd_create isnt loaded then bootstrap it by briefly creating the .so in in a tmpfile and loading it
+    if ${need_memfd_create_flag}; then
+
+        bootstrap_flag=true
+
+        # Define candidates in order of preference
+        candidates=(
+            "${FORKRUN_TMPDIR:-}"        # user override via env var
+            "${XDG_RUNTIME_DIR:-}"       # Best: Standard, private tmpfs
+            "/run/user/${EUID}"          # Fallback XDG
+            "/dev/shm"                   # Standard shared memory
+            "/run/shm"                   # Legacy shared memory
+            "${TMPDIR:-}"                # Standard env var
+            "/tmp"                       # Universal fallback
+            "${HOME}/.cache"             # User disk fallback
+            "$PWD"                       # Last resort
+        )
+
+        # try various places to make the tmp .so file to bootstrap
+        for dir in "${candidates[@]}"; do
+            # Skip empty, non-existent, or non-writable directories
+            [[ -n "$dir" && -d "$dir" && -w "$dir" ]] || continue
+
+            # Generate path with high entropy (30-bit random hex)
+            printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
+
+            # Try to extract loadable
+            if _forkrun_base64_to_file "$tmp_so" <<<"${b64[$ARCH]}"; then
+                chmod 700 "$tmp_so"
+
+                # CRITICAL TEST: Try to Enable loadable
+                # This verifies the filesystem allows execution (noexec check)
+                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list 2>/dev/null; then
+                    # SUCCESS! The builtin is loaded. Delete disk artifact immediately.
+                    \rm -f "$tmp_so"
+                    need_memfd_create_flag=false
+                    break
+                fi
+
+                # If enable failed, clean up and try next candidate
+                \rm -f "$tmp_so"
+            fi
+        done
+
+        # If we get here and stil dont have memfd_create we failed --> couldnt find a writable location
+        ${need_memfd_create_flag} && {
+            printf '\nERROR: could not write and load bootloader for loadable in any temp directory. ABORTING!\n directories checked: %s\nPlease specify a writable directory by calling "FORKRUN_TMPDIR=/path/to/writable/dir _forkrun_bootstrap_setup"\n\n' "${candidates[*]}" >&2
+            return 1
+        }
+
+    }
+
+    # if we bootstrapped or if force_flag is set, forcible re-create + seal the base64 memfd backup. if force_flag is set close the previous one
+    if { ${bootstrap_flag} || ${force_flag}; } && (( ${#b64[@]} > 0 )); then
+
+        # if force_flag is set then close the old base64 memfd
+        ! ${need_memfd_b64_flag} && ${force_flag} && exec {FORKRUN_MEMFD_LOADABLES_BASE64}>&-
+
+        # open a memfd, write b64 to it, and seal it
+        ring_memfd_create 'FORKRUN_MEMFD_LOADABLES_BASE64'
+        declare -p b64 >&${FORKRUN_MEMFD_LOADABLES_BASE64}
+        ring_seal "${FORKRUN_MEMFD_LOADABLES_BASE64}"
+        need_memfd_b64_flag=false
+    fi
+
+    # open a memfd, extract loadable .so to it, and seal it
+    ring_memfd_create 'FORKRUN_MEMFD_LOADABLES'
+    _forkrun_base64_to_file "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES}" <<<"${b64[$ARCH]}"
+    ring_seal "${FORKRUN_MEMFD_LOADABLES}"
+
+    # get list of loadables
+    ring_list 'ring_funcs'
+
+    # unload existing ring loadables
+    if ${bootstrap_flag}; then
+        enable -d ring_memfd_create ring_seal ring_list
+    else
+        enable -d "${ring_funcs[@]}" 2>/dev/null || true
+    fi
+
+    # load ring loadables exclusively from memfd
+    enable -f "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES}" "${ring_funcs[@]}"
+
+    # clear massive b64 array
+    unset "b64"
+}
 
 _forkrun_file_to_base64() {
 
@@ -284,186 +570,6 @@ _forkrun_file_to_base64() {
     else
         printf '%s' "${outF}"
     fi
-}
-
-_forkrun_get_arch() {
-
-    local ARCH0="$1"
-
-    : "${ARCH0:=$(uname -m)}"
-
-    case "$ARCH0" in
-    x86_64[-_]v[2-4])
-        ARCH="${ARCH0//_v/-v}"
-        ;;
-    x86_64)
-        if grep -qE '( avx512[((cd)|(bw)|dq)|(vl)|(f))].*){5}' </proc/cpuinfo; then
-            ARCH='x86_64-v4'
-        elif grep -qF 'avx2' </proc/cpuinfo; then
-            ARCH='x86_64-v3'
-        else
-            ARCH='x86_64-v2'
-        fi
-        ;;
-    aarch64|armv7|riscv64|s390x|ppcle64)
-        ARCH="$ARCH0"
-        ;;
-    *)
-        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: x86_64 aarch64 armv7 riscv64 s390x ppcle64\n\n' >&2
-        return 1
-        ;;
-    esac
-    return 0
-}
-
-_forkrun_bootstrap_setup() {
-    local tmp_so dir rf bootstrap_flag need_memfd_create_flag need_memfd_b64_flag need_b64_flag force_flag fast_flag
-    local -a candidates ring_funcs
-
-    need_memfd_create_flag=false
-    need_memfd_b64_flag=false
-    need_b64_flag=false
-    force_flag=false
-    fast_flag=false
-    bootstrap_flag=false
-
-    # check for -f|--force as input arg
-    while true; do
-        case "$1" in
-            --fast)      fast_flag=true            ;;
-            -f|--force)  force_flag=true; shift 1  ;;
-            *)           break                     ;;
-        esac
-    done
-
-    # fast "is everything already set up" check for runtime checks
-    ${fast_flag} && {
-        if ring_list 'ring_funcs' 2>/dev/null && (( ${#ring_funcs[@]} > 0 )); then
-            for rf in "${ring_funcs[@]}"; do
-                enable -a "$rf" 2>/dev/null || {
-                    fast_flag=false
-                    break
-                }
-            done
-        else
-            fast_flag=false
-        fi
-    }
-    ${fast_flag} && return 0
-
-    # check for existing b64 array
-    (( ${#b64[@]} > 0 )) || need_b64_flag=true
-
-    # check for existing memfd holding b64
-    { [[ $FORKRUN_MEMFD_LOADABLES_BASE64 ]] && (( FORKRUN_MEMFD_LOADABLES_BASE64 > 2 )) && [[ -f "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES_BASE64}" ]]; } || need_memfd_b64_flag=true
-
-    # if we dont have the b64 array and there isnt already a memfd holding it (to recover it from) abort
-    ${need_b64_flag} && ${need_memfd_b64_flag} && {
-        printf '\n\nERROR: There is no b64 array variable to generate the .so from and no memfd to recover the b64 array from. ABORTING!\nNOTE: to re-load the b64 array and setup the loadables again, run '. forkrun.bash' again.\n\n' >&2
-        return 1
-    }
-
-    # check for the memfd_create loadable
-    enable | sed -zE 's/\n/ /g' | grep -qE '(ring_((memfd_create)|(seal)|(list)) .*){3}' || need_memfd_create_flag=true
-
-
-    # set ARCH
-    _forkrun_get_arch "$1"
-
-    # if we need the b64 get it from the memfd
-    ${need_b64_flag} && {
-        . "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES_BASE64}"
-        (( ${#b64[@]} == 0 )) && {
-            printf '\n\nERROR: ring_memfd_create is not loaded and there is no b64 array variable to generate the .so from. ABORTING!\nNOTE: to re-load the b64 array and setup the loadables again, run '. forkrun.bash' again.\n\n' >&2
-            return 1
-        }
-        need_b64_flag=false
-    }
-
-    # if ring_memfd_create isnt loaded then bootstrap it by briefly creating the .so in in a tmpfile and loading it
-    if ${need_memfd_create_flag}; then
-
-        bootstrap_flag=true
-
-        # Define candidates in order of preference
-        candidates=(
-            "${FORKRUN_TMPDIR:-}"        # user override via env var
-            "${XDG_RUNTIME_DIR:-}"       # Best: Standard, private tmpfs
-            "/run/user/${EUID}"          # Fallback XDG
-            "/dev/shm"                   # Standard shared memory
-            "/run/shm"                   # Legacy shared memory
-            "${TMPDIR:-}"                # Standard env var
-            "/tmp"                       # Universal fallback
-            "${HOME}/.cache"             # User disk fallback
-            "$PWD"                       # Last resort
-        )
-
-        # try various places to make the tmp .so file to bootstrap
-        for dir in "${candidates[@]}"; do
-            # Skip empty, non-existent, or non-writable directories
-            [[ -n "$dir" && -d "$dir" && -w "$dir" ]] || continue
-
-            # Generate path with high entropy (30-bit random hex)
-            printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
-
-            # 2. Try to enable loadable
-            if _forkrun_base64_to_file "$tmp_so" <<<"${b64[$ARCH]}"; then
-
-                # 3. CRITICAL TEST: Try to Enable
-                # This verifies the filesystem allows execution (noexec check)
-                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list 2>/dev/null; then
-                    # SUCCESS! The builtin is loaded. Delete disk artifact immediately.
-                    \rm -f "$tmp_so"
-                    need_memfd_create_flag=false
-                    break
-                fi
-
-                # If enable failed, clean up and try next candidate
-                \rm -f "$tmp_so"
-            fi
-        done
-
-        # If we get here and stil dont have memfd_create we failed --> couldnt find a writable location
-        ${need_memfd_create_flag} && {
-            printf '\nERROR: could not write and load bootloader for loadable in any temp directory. ABORTING!\n directories checked: %s\nPlease specify a writable directory by calling "FORKRUN_TMPDIR=/path/to/writable/dir _forkrun_bootstrap_setup"\n\n' "${candidates[*]}" >&2
-            return 1
-        }
-
-    }
-
-    # if we bootstrapped or if force_flag is set, forcible re-create + seal the base64 memfd backup. if force_flag is set close the previous one
-    if { ${bootstrap_flag} || ${force_flag}; } && (( ${#b64[@]} > 0 )); then
-
-        # if force_flag is set then close the old base64 memfd
-        ! ${need_memfd_b64_flag} && ${force_flag} && exec {FORKRUN_MEMFD_LOADABLES_BASE64}>&-
-
-        # open a memfd, write b64 to it, and seal it
-        ring_memfd_create 'FORKRUN_MEMFD_LOADABLES_BASE64'
-        declare -p b64 >&${FORKRUN_MEMFD_LOADABLES_BASE64}
-        ring_seal "${FORKRUN_MEMFD_LOADABLES_BASE64}"
-        need_memfd_b64_flag=false
-    fi
-
-    # open a memfd, extract loadable .so to it, and seal it
-    ring_memfd_create 'FORKRUN_MEMFD_LOADABLES'
-    _forkrun_base64_to_file "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES}" <<<"${b64[$ARCH]}"
-    ring_seal "${FORKRUN_MEMFD_LOADABLES}"
-
-    # get list of loadables
-    ring_list 'ring_funcs'
-
-    # unload existing ring loadables
-    if ${bootstrap_flag}; then
-        enable -d ring_memfd_create ring_seal ring_list
-    else
-        enable -d "${ring_funcs[@]}" 2>/dev/null || true
-    fi
-
-    # load ring loadables exclusively from memfd
-    enable -f "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES}" "${ring_funcs[@]}"
-
-    # clear massive b64 array
-    unset "b64"
 }
 
 # list compressed base64 strings
