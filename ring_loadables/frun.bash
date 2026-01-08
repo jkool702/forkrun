@@ -4,9 +4,9 @@ frun() (
 
     # # # # # SETUP # # # # #
 
-    local test_type worker_func_src nn N nWorkers0
-    local -g pCode fd_order fd_spawn ingress_memfd nWorkers nWorkersMax
-    local -gx order_flag
+    local test_type worker_func_src nn N nWorkers0 cmdline_str ring_ack_str delimiter_str delimiter_val
+    local -g pCode fd_order fd_spawn ingress_memfd nWorkers nWorkersMax 
+    local -gx order_flag unsafe_flag
     local -ga fd_out args P
 
     : "${nWorkers:=1}" "${nWorkersMax:=$(nproc)}"
@@ -16,11 +16,18 @@ frun() (
     export nWorkersMax="${nWorkersMax}"
 
     order_flag=false
+    unsafe_flag=false
     delimiter_val=$'\n'
     while true; do
         case "$1" in
             -o|--order)
                 order_flag=true
+                ;;
+            -u|--unsafe)
+                unsafe_flag=true
+                ;;
+            -z|--null)
+                delimiter_val=''
                 ;;
             -d|--delim|--delimiter)
                 shift 1
@@ -89,6 +96,24 @@ frun() (
 
         # # SPAWN WORKER POOL # #
 
+        # determione cmdline string
+        printf -v cmdline_str '%q ' "$@"
+        if ${unsafe_flag}; then
+            cmdline_str='IFS='"${delimiter_var@Q}"' '"$cmdline_str"' ${A[*]}'
+        else
+            cmdline_str+=' "${A[@]}"'
+        fi
+        ring_ack_str='ring_ack $fd_fallow'
+        ${order_flag} && { 
+            cmdline_str+=' >&${fd_out[$ID]}'
+            ring_ack_str+=' ${fd_out[$ID]}'
+        }
+        if [[ ${delimiter_val} ]]; then
+            printf -v delimiter_str '%q' "${delimiter_val}"
+        else
+            delimiter_str="''"
+        fi
+        
         # define spawning function (use JIT-like optimization)
         worker_func_src='spawn_worker() {
 (
@@ -98,13 +123,9 @@ frun() (
     ring_worker inc
     while ring_claim OFF CNT $fd_read; do
         [[ "$CNT" == "0" ]] && break
-        mapfile -t -u ${fd_read} -n ${CNT} -d '"${delimiter_val@Q}"' A
-        "${@}" "${A[@]}"'
-        ${order_flag} && worker_func_src+=' >&${fd_out[$ID]}'
-        worker_func_src+='
-        ring_ack $fd_fallow'
-        ${order_flag} && worker_func_src+=' ${fd_out[$ID]}'
-        worker_func_src+='
+        mapfile -t -u ${fd_read} -n ${CNT} -d '"${delimiter_str}"' A
+        '"${cmdline_str}"'
+        '"${ring_ack_str}"'
     done
     ring_worker dec
   } {fd_read}<"/proc/'"${BASHPID}"'/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
@@ -116,7 +137,7 @@ P+=($!)
         # spawn initial workers
         nWorkers0="$nWorkers"
         for (( nWorkers=0; nWorkers<nWorkers0; nWorkers++)); do
-            spawn_worker "$nWorkers" "$@"
+            spawn_worker "$nWorkers"
         done
 
         # spawn additional workers dynamically
@@ -126,7 +147,7 @@ P+=($!)
             nWorkers0="$nWorkers"
             (( ( nWorkers0 + N ) > nWorkersMax )) && (( N = nWorkersMax - nWorkers0 ))
             (( N > 0 )) && for (( nWorkers=nWorkers0; nWorkers<nWorkers0+N; nWorkers++ )); do
-                spawn_worker "$nWorkers" "$@"
+                spawn_worker "$nWorkers"
             done
         done
 
