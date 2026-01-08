@@ -380,7 +380,7 @@ _forkrun_base64_to_file() {
         # try various places to make the tmp .so file to bootstrap
         for dir in "${candidates[@]}"; do
             # Skip empty, non-existent, or non-writable directories
-            [[ -n "$dir" && -d "$dir" && -w "$dir" ]] || continue
+            { [[ $dir ]] && [[ -d "$dir" ]] && [[ -w "$dir" ]]; } || continue
 
             # Generate path with high entropy (30-bit random hex)
             printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
@@ -393,13 +393,14 @@ _forkrun_base64_to_file() {
                 # This verifies the filesystem allows execution (noexec check)
                 if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list 2>/dev/null; then
                     # SUCCESS! The builtin is loaded. Delete disk artifact immediately.
-                    \rm -f "$tmp_so"
                     need_memfd_create_flag=false
-                    break
                 fi
 
                 # If enable failed, clean up and try next candidate
                 \rm -f "$tmp_so"
+
+                # break outof loop if we found someplace that works
+                ${need_memfd_create_flag} || break
             fi
         done
 
@@ -415,7 +416,7 @@ _forkrun_base64_to_file() {
     if { ${bootstrap_flag} || ${force_flag}; } && (( ${#b64[@]} > 0 )); then
 
         # if force_flag is set then close the old base64 memfd
-        ! ${need_memfd_b64_flag} && ${force_flag} && exec {FORKRUN_MEMFD_LOADABLES_BASE64}>&-
+        ${force_flag} && ! ${need_memfd_b64_flag} && exec {FORKRUN_MEMFD_LOADABLES_BASE64}>&-
 
         # open a memfd, write b64 to it, and seal it
         ring_memfd_create 'FORKRUN_MEMFD_LOADABLES_BASE64'
