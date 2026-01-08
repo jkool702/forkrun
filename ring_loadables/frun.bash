@@ -100,10 +100,10 @@ frun() (
         [[ "$CNT" == "0" ]] && break
         mapfile -t -u ${fd_read} -n ${CNT} -d '"${delimiter_val@Q}"' A
         "${@}" "${A[@]}"'
-        order_flag && worker_func_src+=' >&${fd_out[$ID]}'
+        ${order_flag} && worker_func_src+=' >&${fd_out[$ID]}'
         worker_func_src+='
         ring_ack $fd_fallow'
-        order_flag && worker_func_src+=' ${fd_out[$ID]}'
+        ${order_flag} && worker_func_src+=' ${fd_out[$ID]}'
         worker_func_src+='
     done
     ring_worker dec
@@ -296,12 +296,13 @@ _forkrun_base64_to_file() {
     fi
 }
 
-    local tmp_so dir rf bootstrap_flag need_memfd_create_flag need_memfd_b64_flag need_b64_flag force_flag fast_flag
+    local tmp_so dir rf bootstrap_flag need_memfd_create_flag need_memfd_b64_flag need_b64_flag have_memfd_loadables_flag force_flag fast_flag
     local -a candidates ring_funcs
 
     need_memfd_create_flag=false
     need_memfd_b64_flag=false
     need_b64_flag=false
+    have_memfd_loadables_flag=false
     force_flag=false
     fast_flag=false
     bootstrap_flag=false
@@ -309,17 +310,22 @@ _forkrun_base64_to_file() {
     # check for -f|--force as input arg
     while true; do
         case "$1" in
-            --fast)      fast_flag=true            ;;
+            --fast)      fast_flag=true;  shift 1  ;;
             -f|--force)  force_flag=true; shift 1  ;;
             *)           break                     ;;
         esac
     done
 
+    [[ $FORKRUN_MEMFD_LOADABLES ]] && (( FORKRUN_MEMFD_LOADABLES > 2 )) && [[ -f /proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES} ]] && have_memfd_loadables_flag=true
+
     # fast "is everything already set up" check for runtime checks
     ${fast_flag} && {
+        enable ring_list || { 
+            ${have_memfd_loadables_flag} && enable -f /proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES} ring_list
+        }
         if ring_list 'ring_funcs' 2>/dev/null && (( ${#ring_funcs[@]} > 0 )); then
             for rf in "${ring_funcs[@]}"; do
-                enable -a "$rf" 2>/dev/null || {
+                enable "$rf" 2>/dev/null || {
                     fast_flag=false
                     break
                 }
@@ -391,7 +397,7 @@ _forkrun_base64_to_file() {
 
                 # CRITICAL TEST: Try to Enable loadable
                 # This verifies the filesystem allows execution (noexec check)
-                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list lseek 2>/dev/null; then
+                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list 2>/dev/null; then
                     # SUCCESS! The builtin is loaded. Delete disk artifact immediately.
                     need_memfd_create_flag=false
                 fi
@@ -426,7 +432,7 @@ _forkrun_base64_to_file() {
     fi
 
     # open a memfd, extract loadable .so to it, and seal it
-    ${force_flag} && [[ $FORKRUN_MEMFD_LOADABLES ]] && (( FORKRUN_MEMFD_LOADABLES > 2 )) && [[ -f /proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES} ]] && exec {FORKRUN_MEMFD_LOADABLES}>&-
+    ${force_flag} && ${have_memfd_loadables_flag} && exec {FORKRUN_MEMFD_LOADABLES}>&-
     unset "FORKRUN_MEMFD_LOADABLES"
     ring_memfd_create 'FORKRUN_MEMFD_LOADABLES'
     _forkrun_base64_to_file  <<<"${b64[$ARCH]}" >"/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES}"
@@ -437,13 +443,13 @@ _forkrun_base64_to_file() {
 
     # unload existing ring loadables
     if ${bootstrap_flag}; then
-        enable -d ring_memfd_create ring_seal ring_list lseek
+        enable -d ring_memfd_create ring_seal ring_list
     else
         enable -d "${ring_funcs[@]}" 2>/dev/null || true
     fi
 
     # load ring loadables exclusively from memfd
-    enable -f "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES}" "${ring_funcs[@]}"
+    enable -f "/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES}" "${ring_funcs[@]}" ring_list
 
     # clear massive b64 array
     unset "b64"
