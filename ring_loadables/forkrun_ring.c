@@ -1,4 +1,4 @@
-// forkrun_ring.c v8.30
+// forkrun_ring.c v8.31
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -57,6 +57,7 @@
 #include <time.h> 
 #include <sys/syscall.h>
 #include <ctype.h>
+#include <sys/socket.h> // Required for shutdown() in ring_fcntl
 
 // --- Architecture Specific Pause Logic ---
 // cpu_relax() tells the CPU we are in a spin-wait loop.
@@ -160,8 +161,6 @@ static int g_debug = 0;
 } while(0)
 
 // --- X-MACRO DEFINITION: The Master List of Loadables ---
-// This allows us to define the function prototypes, the dispatchers, the structs,
-// and the registration code all in one place, avoiding boilerplate and typos.
 // Format: X(NAME, FUNCTION_MAIN, USAGE_STRING, DOC_STRING)
 #define FORKRUN_LOADABLES(X) \
     X(ring_init,            ring_init_main,           "ring_init [out_array]",          "Initialize ring state and optional output array") \
@@ -182,6 +181,7 @@ static int g_debug = 0;
     X(ring_fallow_phys,     ring_fallow_phys_main,    "ring_fallow_phys",               "Physical fallow (hole punching)") \
     X(ring_memfd_create,    ring_memfd_create_main,   "ring_memfd_create <VAR>",        "Create anonymous memfd") \
     X(ring_seal,            ring_seal_main,           "ring_seal <FD>",                 "Seal memfd (Make Read-Only)") \
+    X(ring_fcntl,           ring_fcntl_main,          "ring_fcntl <FD> <cmd>",          "File control (shutdown/close)") \
     X(ring_list,            ring_list_main,           "ring_list [VAR]",                "List available loadables")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
@@ -1345,62 +1345,86 @@ static int ring_order_main(int argc, char **argv) {
             }
         }
     } else {
-        // Memfd Mode (Batched)
+        // Memfd Mode (Batched with POLL loop)
         struct BufferedPacket *head = NULL;
         uint64_t next_idx = 0;
         struct OrderPacket ops[64];
         
-        ssize_t n_read;
-        while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
-            int count = n_read / sizeof(struct OrderPacket);
-            for (int i = 0; i < count; i++) {
-                struct OrderPacket *op = &ops[i];
-                if (op->idx == next_idx) {
-                    off_t offset = (off_t)op->off;
-                    ssize_t sent = sendfile(1, op->fd, &offset, op->len);
-                    
-                    if (sent < 0 || (uint64_t)sent < op->len) {
-                         char *tbuf = xmalloc(65536);
-                         uint64_t done = (sent > 0) ? (uint64_t)sent : 0;
-                         if (lseek(op->fd, op->off + done, SEEK_SET) >= 0) {
-                             while(done < op->len) {
-                                 size_t req = (op->len - done > 65536) ? 65536 : (op->len - done);
-                                 ssize_t n = read(op->fd, tbuf, req);
-                                 if (n <= 0) break; 
-                                 write(1, tbuf, n);
-                                 done += n;
-                             }
-                         }
-                         xfree(tbuf);
-                    }
-                    
-                    if (fallocate(op->fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)op->off, (off_t)op->len) < 0) {
-                        if (g_debug) fprintf(stderr, "forkrun [DEBUG] fallocate failed: %s\n", strerror(errno));
-                    }
-                    next_idx += op->cnt;
+        struct pollfd pfd;
+        pfd.fd = fd_in;
+        pfd.events = POLLIN; // Poll for Data or HUP
 
-                    while (head && head->pkt.idx == next_idx) {
-                        struct BufferedPacket *tmp = head;
-                        offset = (off_t)tmp->pkt.off;
-                        sendfile(1, tmp->pkt.fd, &offset, tmp->pkt.len);
-                        fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)tmp->pkt.off, (off_t)tmp->pkt.len);
-                        next_idx += tmp->pkt.cnt;
-                        head = tmp->next;
-                        free(tmp); // free() because linked list nodes use malloc in legacy? No, wait. BufferedPacket uses xmalloc usually.
-                        // Correction: In ring_order_main memfd mode below, I use xmalloc.
-                        // I must ensure cleanup uses xfree.
+        while(1) {
+            int ret = poll(&pfd, 1, -1);
+            if (ret < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+
+            if (pfd.revents & (POLLIN | POLLHUP | POLLERR)) {
+                ssize_t n_read = read(fd_in, ops, sizeof(ops));
+                
+                // EOF Check: Pipe closed by all writers
+                if (n_read == 0) break;
+                
+                if (n_read < 0) {
+                    if (errno == EAGAIN || errno == EINTR) continue;
+                    break;
+                }
+
+                int count = n_read / sizeof(struct OrderPacket);
+                for (int i = 0; i < count; i++) {
+                    struct OrderPacket *op = &ops[i];
+                    if (op->idx == next_idx) {
+                        off_t offset = (off_t)op->off;
+                        ssize_t sent = sendfile(1, op->fd, &offset, op->len);
+                        
+                        if (sent < 0 || (uint64_t)sent < op->len) {
+                             char *tbuf = xmalloc(65536);
+                             uint64_t done = (sent > 0) ? (uint64_t)sent : 0;
+                             if (lseek(op->fd, op->off + done, SEEK_SET) >= 0) {
+                                 while(done < op->len) {
+                                     size_t req = (op->len - done > 65536) ? 65536 : (op->len - done);
+                                     ssize_t n = read(op->fd, tbuf, req);
+                                     if (n <= 0) break; 
+                                     write(1, tbuf, n);
+                                     done += n;
+                                 }
+                             }
+                             xfree(tbuf);
+                        }
+                        
+                        if (fallocate(op->fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)op->off, (off_t)op->len) < 0) {
+                            if (g_debug) fprintf(stderr, "forkrun [DEBUG] fallocate failed: %s\n", strerror(errno));
+                        }
+                        next_idx += op->cnt;
+
+                        while (head && head->pkt.idx == next_idx) {
+                            struct BufferedPacket *tmp = head;
+                            offset = (off_t)tmp->pkt.off;
+                            sendfile(1, tmp->pkt.fd, &offset, tmp->pkt.len);
+                            fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, (off_t)tmp->pkt.off, (off_t)tmp->pkt.len);
+                            next_idx += tmp->pkt.cnt;
+                            head = tmp->next;
+                            xfree(tmp); // Corrected to xfree to match allocation
+                        }
+                    } else {
+                        struct BufferedPacket *n = xmalloc(sizeof(struct BufferedPacket));
+                        n->pkt = *op;
+                        struct BufferedPacket **curr = &head;
+                        while (*curr && (*curr)->pkt.idx < op->idx) curr = &((*curr)->next);
+                        n->next = *curr;
+                        *curr = n;
                     }
-                } else {
-                    struct BufferedPacket *n = xmalloc(sizeof(struct BufferedPacket));
-                    n->pkt = *op;
-                    struct BufferedPacket **curr = &head;
-                    while (*curr && (*curr)->pkt.idx < op->idx) curr = &((*curr)->next);
-                    n->next = *curr;
-                    *curr = n;
                 }
             }
         }
-        // Cleanup leftover buffer logic if needed (omitted for brevity)
+        // Cleanup leftover buffer
+        while (head) {
+             struct BufferedPacket *tmp = head;
+             head = head->next;
+             xfree(tmp);
+        }
     }
     return EXECUTION_SUCCESS;
 }
@@ -1590,6 +1614,12 @@ static int ring_copy_main(int argc, char **argv) {
             close(pipefd[0]); close(pipefd[1]);
         }
     }
+    
+    // Explicitly signal completion to Scanner
+    if (evfd_ingest_eof >= 0) {
+        uint64_t val = 1;
+        write(evfd_ingest_eof, &val, 8);
+    }
     return EXECUTION_SUCCESS;
 }
 
@@ -1607,37 +1637,63 @@ static int ring_fallow_main(int argc, char **argv) {
     int fd_file = atoi(argv[2]);
     bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
     if (state) atomic_store_release(&state->fallow_active, 1);
+    
     struct Interval *head = NULL;
     uint64_t next_idx = 0; 
     struct IndexPacket ops[64];
-    ssize_t n_read;
-    while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
-        int count = n_read / sizeof(struct IndexPacket);
-        for (int i=0; i<count; i++) {
-            struct IndexPacket *ip = &ops[i];
-            if (ip->idx == next_idx) {
-                next_idx += ip->cnt;
-                while (head && head->s == next_idx) {
-                    struct Interval *tmp = head;
-                    next_idx = tmp->e;
-                    head = tmp->next;
-                    free(tmp);
+    
+    // Poll loop to detect pipe closure
+    struct pollfd pfd;
+    pfd.fd = fd_in;
+    pfd.events = POLLIN; // Wake on data or HUP (EOF)
+
+    while (1) {
+        int ret = poll(&pfd, 1, -1);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            break; 
+        }
+
+        if (pfd.revents & (POLLIN | POLLHUP | POLLERR)) {
+            ssize_t n_read = read(fd_in, ops, sizeof(ops));
+            
+            // EOF: Pipe closed by all writers
+            if (n_read == 0) break;
+            
+            if (n_read < 0) {
+                if (errno == EAGAIN || errno == EINTR) continue;
+                break;
+            }
+
+            int count = n_read / sizeof(struct IndexPacket);
+            for (int i=0; i<count; i++) {
+                struct IndexPacket *ip = &ops[i];
+                if (ip->idx == next_idx) {
+                    next_idx += ip->cnt;
+                    while (head && head->s == next_idx) {
+                        struct Interval *tmp = head;
+                        next_idx = tmp->e;
+                        head = tmp->next;
+                        free(tmp);
+                    }
+                    if (state) atomic_store_release(&state->min_idx, next_idx);
+                    if (!dry_run) {
+                        uint64_t byte_limit = state->offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+                        off_t aligned = (off_t)((byte_limit / 4096) * 4096);
+                        if (aligned > 0) fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned);
+                    }
+                } else if (ip->idx > next_idx) {
+                    struct Interval *n = xmalloc(sizeof(struct Interval));
+                    n->s = ip->idx; n->e = ip->idx + ip->cnt;
+                    struct Interval **curr = &head;
+                    while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
+                    n->next = *curr; *curr = n;
                 }
-                if (state) atomic_store_release(&state->min_idx, next_idx);
-                if (!dry_run) {
-                    uint64_t byte_limit = state->offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-                    off_t aligned = (off_t)((byte_limit / 4096) * 4096);
-                    if (aligned > 0) fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned);
-                }
-            } else if (ip->idx > next_idx) {
-                struct Interval *n = xmalloc(sizeof(struct Interval));
-                n->s = ip->idx; n->e = ip->idx + ip->cnt;
-                struct Interval **curr = &head;
-                while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
-                n->next = *curr; *curr = n;
             }
         }
     }
+    
+    while(head) { struct Interval *tmp = head; head = head->next; free(tmp); }
     return EXECUTION_SUCCESS;
 }
 
@@ -1671,6 +1727,41 @@ static int ring_seal_main(int argc, char **argv) {
     int seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
     if (fcntl(fd, F_ADD_SEALS, seals) == -1) {
         if (g_debug) fprintf(stderr, "forkrun [DEBUG] ring_seal failed: %s\n", strerror(errno));
+        return EXECUTION_FAILURE;
+    }
+    return EXECUTION_SUCCESS;
+}
+
+// --- Ring Fcntl (Shutdown Helper) ---
+static int ring_fcntl_main(int argc, char **argv) {
+    if (argc < 3) return EXECUTION_FAILURE;
+    int fd = atoi(argv[1]);
+    const char *cmd = argv[2];
+    
+    if (strcmp(cmd, "shutdown_w") == 0) {
+        if (shutdown(fd, SHUT_WR) < 0) {
+            // Note: On standard pipes, shutdown() may fail with ENOTSOCK.
+            // This is primarily for socketpairs/sockets.
+            if (g_debug) fprintf(stderr, "forkrun [DEBUG] shutdown(WR) failed: %s\n", strerror(errno));
+            return EXECUTION_FAILURE;
+        }
+    } else if (strcmp(cmd, "shutdown_r") == 0) {
+        if (shutdown(fd, SHUT_RD) < 0) {
+            if (g_debug) fprintf(stderr, "forkrun [DEBUG] shutdown(RD) failed: %s\n", strerror(errno));
+            return EXECUTION_FAILURE;
+        }
+    } else if (strcmp(cmd, "shutdown_rw") == 0) {
+        if (shutdown(fd, SHUT_RDWR) < 0) {
+            if (g_debug) fprintf(stderr, "forkrun [DEBUG] shutdown(RDWR) failed: %s\n", strerror(errno));
+            return EXECUTION_FAILURE;
+        }
+    } else if (strcmp(cmd, "close") == 0) {
+        if (close(fd) < 0) {
+            if (g_debug) fprintf(stderr, "forkrun [DEBUG] close failed: %s\n", strerror(errno));
+            return EXECUTION_FAILURE;
+        }
+    } else {
+        builtin_error("unknown command: %s", cmd);
         return EXECUTION_FAILURE;
     }
     return EXECUTION_SUCCESS;
@@ -1804,7 +1895,7 @@ struct builtin name##_struct = { #name, dispatch_##name, BUILTIN_ENABLED, name##
 FORKRUN_LOADABLES(DEFINE_STRUCT_X)
 #undef DEFINE_STRUCT_X
 
-// 3. ring_list Implementation (Replaces ring_enable)
+// 3. ring_list Implementation
 static int ring_list_main(int argc, char **argv) {
     if (argc >= 2) {
         const char *var_name = argv[1];
