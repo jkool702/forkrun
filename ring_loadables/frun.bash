@@ -82,16 +82,20 @@ frun() (
 
         # start ring_fallow to remove already-consumed data from memfd and free memory
         (
+            ring_fcntl ${fd_fallow} 'shutdown_w'
             ring_fallow ${fd_fallow} ${fd_write}
         ) &
         FALLOW_PID=$!
+        ring_fcntl ${fd_fallow} 'shutdown_r'
 
         # (if enabled) start ring_order to reorder output to the order that running inputs sequentially would have produced
         ${order_flag} && {
             (
-                ring_order $fd_order "memfd" >&${fd1}
+                ring_fcntl ${fd_order} 'shutdown_w'
+                ring_order ${fd_order} 'memfd' >&${fd1}
             ) &
             ORDER_PID=$!
+            ring_fcntl ${fd_order} 'shutdown_r'
         }
 
         # # SPAWN WORKER POOL # #
@@ -152,7 +156,9 @@ P+=($!)
         done
 
         # wait for everything to finish
-        wait "${P[@]}" ${ORDER_PID:-}
+        #wait "${P[@]}" ${ORDER_PID:-}
+        declare -p  fd_fallow fd_order fd_spawn fd_write fd_scan ingress_memfd >&$fd2
+        wait
 
         # # CLEANUP # #
 
@@ -160,9 +166,9 @@ P+=($!)
         ring_destroy
 
         # ensure helper processes are dead
-        kill $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
-        kill -9 $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
-        wait $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
+        #kill $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
+        #kill -9 $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
+        #wait $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
 
         # close the fd's
         exec {fd_spawn}>&-
