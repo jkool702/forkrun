@@ -152,7 +152,7 @@ P+=($!)
         done
 
         # wait for everything to finish
-        wait
+        wait "${P[@]}" ${ORDER_PID:-}
 
         # # CLEANUP # #
 
@@ -160,9 +160,9 @@ P+=($!)
         ring_destroy
 
         # ensure helper processes are dead
-        kill $COPY_PID $SCANNER_PID $FALLOC_PID $ORDER_PID $(jobs -p) 2>/dev/null
-        kill -9 $COPY_PID $SCANNER_PID $FALLOC_PID $ORDER_PID $(jobs -p) 2>/dev/null
-        wait $COPY_PID $SCANNER_PID $FALLOC_PID $ORDER_PID $(jobs -p) 2>/dev/null
+        kill $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
+        kill -9 $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
+        wait $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
 
         # close the fd's
         exec {fd_spawn}>&-
