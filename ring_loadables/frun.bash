@@ -75,7 +75,7 @@ frun() (
         COPY_PID=$!
 
         # start ring_scanner to scan memfd for line breaks
-        ring_pipe_main 'fd_spawn'
+        ring_pipe 'fd_spawn'
         (
             exec {fd_spawn[0]}<&-
             ring_scanner ${fd_scan} ${fd_spawn} "${delimiter_val}"
@@ -84,7 +84,7 @@ frun() (
         exec {fd_spawn[1]}>&-
 
         # start ring_fallow to remove already-consumed data from memfd and free memory
-        ring_pipe_main 'fd_fallow'
+        ring_pipe 'fd_fallow'
         (
             exec {fd_fallow[1]}>&-
             ring_fallow ${fd_fallow} ${fd_write}
@@ -94,7 +94,7 @@ frun() (
 
         # (if enabled) start ring_order to reorder output to the order that running inputs sequentially would have produced
         ${order_flag} && {
-            ring_pipe_main 'fd_order'
+            ring_pipe 'fd_order'
             (
                 exec {fd_order[1]}>&-
                 ring_order ${fd_order} 'memfd' >&${fd1}
@@ -188,6 +188,8 @@ P+=($!)
 
 _forkrun_bootstrap_setup() {
 ## HELPER FUNCTION TO LOAD THE RING LOADABLES USED BY FORKRUN
+    local LC_ALL=C
+
 
 # Define helper functions used by _forkrun_bootstrap_setup
 _forkrun_get_arch() {
@@ -228,6 +230,8 @@ _forkrun_base64_to_file() {
     local LC_ALL=C
     local -I extglobState
 
+    {
+
     # parse options
     [[ "${extglobState}" == '-'[su] ]] || {
         if shopt extglob &>/dev/null; then
@@ -250,8 +254,6 @@ _forkrun_base64_to_file() {
         outFile="$1"
         : >"${outFile}"
         exec {fd1}>"${outFile}"
-    else
-        exec {fd1}>&1
     fi
 
     # read dataheader and data
@@ -260,7 +262,7 @@ _forkrun_base64_to_file() {
     exec {fd0}>&-
 
     if [[ -z ${out} ]]; then
-        # if data header is mising then the base64 may have been made with standard base64 decoding. attempt to work with this.
+        # if data header is missing then the base64 may have been made with standard base64 decoding. attempt to work with this.
         out="${out0}"
         grep -F '+' <<<"${out}" | grep -qF '/' && { base64 -d <<<"${out}" >&$fd1; return; }
         noVerifyFlag=true
@@ -330,6 +332,8 @@ _forkrun_base64_to_file() {
     elif ! { ${noVerifyFlag} || [[ "${nnSum}" == '0' ]]; }; then
         nnSumF="$("${nnSum%%\:*}" <(printf '%b' "${outF}"))"; nnSumF="${nnSumF%% *}"; grep -qF "${nnSum#*\:}" <<<"${nnSumF}" || { printf '\n\nWARNING FOR EXTRACTED LOADABLE:\n"%s"\n\nCHECKSUM DOES NOT MATCH EXPECTED VALUE!!!\nDO NOT CONTINUE UNLESS THIS WAS EXPECTED!!!\n\nEXPECTED: %s\nGOT: %s\n\nTHIS CODE WILL NOW REMOVE THE EXTRACTTED .SO FILE AND ABORT\nTO FORCE KEEPING THE [POTENTIALLY CORRUPT] .SO FILE, RE-RUN THIS CODE WITH THE "--force" FLAG'  "${outFile:-\(STDOUT\)}" "${nnSum}" "${nnSumF}" >&2; read -r -u ${fd_sleep} -t 2; \rm -f "${outFile}"; return 1; };
     fi
+
+    } {fd1}>&1
 
     { (( ${#FUNCNAME[@]} > 1 )) && [[ "${FUNCNAME[1]}" == 'frun' ]]; } || shopt ${extglobState} extglob
 }
@@ -405,7 +409,6 @@ _forkrun_base64_to_file() {
     }
 
     # if ring_memfd_create isnt loaded then bootstrap it by briefly creating the .so in in a tmpfile and loading it
-    ${need_memfd_create_flag} && {
 
         bootstrap_flag=true
 
@@ -436,13 +439,14 @@ _forkrun_base64_to_file() {
 
                 # CRITICAL TEST: Try to Enable loadable
                 # This verifies the filesystem allows execution (noexec check)
-                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list 2>/dev/null; then
+                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe >/dev/null; then
                     # SUCCESS! The builtin is loaded. Delete disk artifact immediately.
                     need_memfd_create_flag=false
-                fi
+		else
 
                 # If enable failed, clean up and try next candidate
-                \rm -f "$tmp_so"
+                    \rm -f "$tmp_so"
+		fi
 
                 # break outof loop if we found someplace that works
                 ${need_memfd_create_flag} || break
@@ -455,7 +459,6 @@ _forkrun_base64_to_file() {
             return 1
         }
 
-    }
 
     # if we bootstrapped or if force_flag is set, forcible re-create + seal the base64 memfd backup. if force_flag is set close the previous one
     if { ${bootstrap_flag} || ${force_flag}; } && (( ${#b64[@]} > 0 )); then
@@ -474,7 +477,9 @@ _forkrun_base64_to_file() {
     ${force_flag} && ${have_memfd_loadables_flag} && exec {FORKRUN_MEMFD_LOADABLES}>&-
     unset "FORKRUN_MEMFD_LOADABLES"
     ring_memfd_create 'FORKRUN_MEMFD_LOADABLES'
-    _forkrun_base64_to_file  <<<"${b64[$ARCH]}" >"/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES}"
+    cat "$tmp_so" >&$FORKRUN_MEMFD_LOADABLES
+    \rm -f "$tmp_so"
+#    _forkrun_base64_to_file  <<<"${b64[$ARCH]}" >"/proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES}"
     ring_seal "${FORKRUN_MEMFD_LOADABLES}"
 
     # get list of loadables
