@@ -13,6 +13,10 @@ echo; echo "time frun $Gk $Ck <$Fk >/dev/null"
 time frun $Gk $Ck <$Fk >/dev/null
 echo; echo "time frun $Gk $Ck <$Fk | wc -l"
 time frun $Gk $Ck <$Fk | wc -l
+echo; echo "time { cat $Fk | frun $Gk $Ck >/dev/null; }"
+time { cat $Fk | frun $Gk $Ck >/dev/null; }
+echo; echo "time { cat $Fk | frun $Gk $Ck | wc -l; }"
+time { cat $Fk | frun $Gk $Ck | wc -l; }
 done
 done
 done
