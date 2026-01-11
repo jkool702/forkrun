@@ -61,69 +61,80 @@ frun() (
 
     ring_memfd_create ingress_memfd
 
-
     # # # # # MAIN # # # # #
     {
         # # SPAWN "HELPER PROCESSES" # #
-        # these keep the worker pool fed
 
-        # start ring_copy to populate memfd with data from stdin
+        # start ring_copy
         (
             ring_copy ${fd_write} ${fd0}
             ring_signal
         ) &
         COPY_PID=$!
 
-        # start ring_scanner to scan memfd for line breaks
-        ring_pipe 'fd_spawn'
+        # start ring_scanner
+        # Create explicit Read/Write variables
+        ring_pipe fd_spawn_r fd_spawn_w
         (
-            exec {fd_spawn[0]}<&-
-            ring_scanner ${fd_scan} ${fd_spawn} "${delimiter_val}"
+            exec {fd_spawn_r}<&-  # Close Read end in child
+            # Pass WRITE end to scanner
+            ring_scanner ${fd_scan} ${fd_spawn_w} "${delimiter_val}"
         ) &
         SCANNER_PID=$!
-        exec {fd_spawn[1]}>&-
+        exec {fd_spawn_w}>&-      # Close Write end in parent (parent reads)
 
-        # start ring_fallow to remove already-consumed data from memfd and free memory
-        ring_pipe 'fd_fallow'
+        # start ring_fallow
+        ring_pipe fd_fallow_r fd_fallow_w
         (
-            exec {fd_fallow[1]}>&-
-            ring_fallow ${fd_fallow} ${fd_write}
+            exec {fd_fallow_w}>&- # Close Write end in child
+            # Pass READ end to fallow
+            ring_fallow ${fd_fallow_r} ${fd_write}
         ) &
         FALLOW_PID=$!
-        exec {fd_fallow[0]}<&-
+        exec {fd_fallow_r}<&-     # Close Read end in parent (parent holds write)
 
-        # (if enabled) start ring_order to reorder output to the order that running inputs sequentially would have produced
+        # (if enabled) start ring_order
         ${order_flag} && {
-            ring_pipe 'fd_order'
+            ring_pipe fd_order_r fd_order_w
             (
-                exec {fd_order[1]}>&-
-                ring_order ${fd_order} 'memfd' >&${fd1}
+                exec {fd_order_w}>&- # Close Write end in child
+                # Pass READ end to order
+                ring_order ${fd_order_r} 'memfd' >&${fd1}
             ) &
             ORDER_PID=$!
-            exec {fd_order[0]}<&-
+            exec {fd_order_r}<&-     # Close Read end in parent
+
+            # Export WRITE end for ring_ack
+            export FD_ORDER_PIPE=$fd_order_w
         }
 
-        # # SPAWN WORKER POOL # #
+        # # DYNAMICALLY GENERATE OPTIMIZED WORKER CODE # #
 
-        # determine cmdline string
+        # generate cmdline string
         printf -v cmdline_str '%q ' "$@"
         if ${unsafe_flag}; then
             cmdline_str='IFS='"${delimiter_val@Q}"' '"$cmdline_str"' ${A[*]}'
         else
             cmdline_str+=' "${A[@]}"'
         fi
-        ring_ack_str='ring_ack $fd_fallow'
-        ${order_flag} && { 
+
+        # generate ring_ack string
+        ring_ack_str="ring_ack $fd_fallow_w"
+
+        ${order_flag} && {
             cmdline_str+=' >&${fd_out[$ID]}'
-            ring_ack_str+=' ${fd_out[$ID]}'
+            # Use WRITE end for order
+            ring_ack_str+=" $fd_order_w"
         }
+
+        # deal with custom delimiters
         if [[ ${delimiter_val} ]]; then
             printf -v delimiter_str '%q' "${delimiter_val}"
         else
             delimiter_str="''"
         fi
-        
-        # define spawning function (use JIT-like optimization)
+
+        # generate spawning function
         worker_func_src='spawn_worker() {
 (
   {
@@ -141,7 +152,10 @@ frun() (
 ) &
 P+=($!)
 }'
+        # source the generated spawning function
         eval "${worker_func_src}"
+
+        # # SPAWN WORKER POOL # #
 
         # spawn initial workers
         nWorkers0="$nWorkers"
@@ -151,7 +165,8 @@ P+=($!)
 
         # spawn additional workers dynamically
         while true; do
-            read -r -u $fd_spawn N
+            # Read from READ end
+            read -r -u $fd_spawn_r N
             [[ "$N" == 'x' ]] && break
             nWorkers0="$nWorkers"
             (( ( nWorkers0 + N ) > nWorkersMax )) && (( N = nWorkersMax - nWorkers0 ))
@@ -160,31 +175,20 @@ P+=($!)
             done
         done
 
+        # Close Parent's copies of pipes to allow EOF propagation
+        exec {fd_spawn_r}<&-
+        exec {fd_fallow_w}>&-
+        ${order_flag} && exec {fd_order_w}>&-
 
-        exec {fd_spawn[0]}<&-
-        exec {fd_fallow[1]}>&-
-        ${order_flag} && exec {fd_order[1]}>&-
-        # wait for everything to finish
-        #wait "${P[@]}" ${ORDER_PID:-}
-        #declare -p  fd_fallow fd_order fd_spawn fd_write fd_scan ingress_memfd P COPY_PID SCANNER_PID FALLOW_PID ORDER_PID >&$fd2
         wait
 
         # # CLEANUP # #
-
-        # destroy the rings
         ring_destroy
-
-        # close the fd's
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
-
-        # ensure helper processes are dead
-        #kill $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
-        #kill -9 $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
-        #wait $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
-
 
     } {fd_write}>"/proc/${BASHPID}/fd/${ingress_memfd}" {fd_scan}<"/proc/${BASHPID}/fd/${ingress_memfd}" {fd0}<&0 {fd1}>&1 {fd2}>&2
 )
+
 
 _forkrun_bootstrap_setup() {
 ## HELPER FUNCTION TO LOAD THE RING LOADABLES USED BY FORKRUN
