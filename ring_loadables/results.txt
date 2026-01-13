@@ -1,373 +1,956 @@
-v8.03
------
-
-# ring_test 7 info 
-
-# INPUT LINE COUNT: 7792389
-# TOTAL INPUT SIZE: 631512937 bytes
-# AVG INPUT LINE SIZE: 81 bytes
-
-# INPUTS ARE A LIST OF FILE PATHS 
-# ALL FILES ARE ON A RAMDISK
-
-# MAX FILE SIZE: 1048576 bytes
-# TOTAL COMBINED FILE SIZE: 122133794816 bytes
-# TOTAL CHECKSUMS COMPUTED: 101301057  (13 * 7792389)
-# CODE PARALLELIZED: ff
-
-ff() {
-sha1sum "${@}"
-sha256sum "${@}"
-sha512sum "${@}"
-sha224sum "${@}"
-sha384sum "${@}"
-md5sum "${@}"
-sum -s "${@}"
-sum -r "${@}"
-cksum "${@}"
-b2sum "${@}"
-cksum -a sm3 "${@}"
-xxhsum "${@}"
-xxhsum -H3 "${@}"
-}
-
-perf stat -d -d -d /usr/bin/bash -c 'ring_test 7 >/dev/null'
-Generating test data...
-Starting splicer...
-Sending stdin to /dev/shm/.forkrun/forkrun.tlJOH3r5/stdin
-Starting scanner...
-Starting falloc...
-
-Consuming...
-
-SPAWNING 7 WORKERS (elapsed time = 10567 us)
-SPAWNING 4 WORKERS (elapsed time = 12279 us)
-SPAWNING 3 WORKERS (elapsed time = 13491 us)
-SPAWNING 1 WORKERS (elapsed time = 14492 us)
-SPAWNING 1 WORKERS (elapsed time = 14892 us)
-SPAWNING 1 WORKERS (elapsed time = 15294 us)
-SPAWNING 1 WORKERS (elapsed time = 15636 us)
-SPAWNING 1 WORKERS (elapsed time = 17998 us)
-SPAWNING 1 WORKERS (elapsed time = 18359 us)
-SPAWNING 1 WORKERS (elapsed time = 18742 us)
-
-SPLICER HIT EOF
-elapsed time = 350420 us
-
-SCANNER HIT EOF
-elapsed time = 382068 us
-
-
-Done!
-
-Total Lines Consumed: 7792389 (Expected: 7792389)
-
-Time: 168718659 us
-
-
- Performance counter stats for '/usr/bin/bash -c ring_test 7 >/dev/null':
-
- 4,642,606,517,278      task-clock                       #   27.484 CPUs utilized             
-           291,536      context-switches                 #   62.796 /sec                      
-             7,117      cpu-migrations                   #    1.533 /sec                      
-        56,428,991      page-faults                      #   12.155 K/sec                     
-26,613,157,752,225      instructions                     #    1.45  insn per cycle              (38.47%)
-18,316,975,574,082      cycles                           #    3.945 GHz                         (38.47%)
- 1,847,816,801,723      branches                         #  398.013 M/sec                       (38.47%)
-     6,295,215,557      branch-misses                    #    0.34% of all branches             (38.46%)
- 3,324,718,048,765      L1-dcache-loads                  #  716.132 M/sec                       (38.46%)
-   132,387,257,319      L1-dcache-load-misses            #    3.98% of all L1-dcache accesses   (30.76%)
-    19,261,455,106      LLC-loads                        #    4.149 M/sec                       (30.76%)
-    13,975,143,324      LLC-load-misses                  #   72.55% of all LL-cache accesses    (30.76%)
-   133,977,129,414      L1-icache-load-misses                                                   (30.76%)
- 3,324,110,072,839      dTLB-loads                       #  716.001 M/sec                       (30.77%)
-     1,241,045,655      dTLB-load-misses                 #    0.04% of all dTLB cache accesses  (30.77%)
-     1,252,316,620      iTLB-loads                       #  269.744 K/sec                       (30.77%)
-     1,043,611,525      iTLB-load-misses                 #   83.33% of all iTLB cache accesses  (30.78%)
-
-     168.920457363 seconds time elapsed
-
-    3852.738676000 seconds user
-     748.637588000 seconds sys
-
----------------------------------------------------------------------------------------------------------
----------------------------------------------------------------------------------------------------------
-
-# ring_test {2,3,4} info
-
-# INPUT IS 1 BILLION NEWLINES
-
-# INPUT LINE COUNT: 1000000000
-# TOTAL INPUT SIZE: 1000000000 bytes
-# AVG INPUT LINE SIZE: 1 byte
-
-# CODE PARALLELIZED:
-
-# ring_test 2:  `: "${A[@]}"
-# ring_test 3:  `:  ${A[*]}
-# ring_test 4:  `: "${A[@]}" > outfile.$ID
-
-perf stat -d -d -d /usr/bin/bash -c 'ring_test 2'
-Generating test data...
-Starting splicer...
-Sending stdin to /dev/shm/.forkrun/forkrun.euU08JbR/stdin
-Starting scanner...
-Starting falloc...
-
-Consuming...
-
-SPAWNING 7 WORKERS (elapsed time = 12532 us)
-SPAWNING 4 WORKERS (elapsed time = 14109 us)
-SPAWNING 3 WORKERS (elapsed time = 15336 us)
-SPAWNING 1 WORKERS (elapsed time = 16226 us)
-SPAWNING 1 WORKERS (elapsed time = 16570 us)
-SPAWNING 1 WORKERS (elapsed time = 16932 us)
-SPAWNING 1 WORKERS (elapsed time = 17275 us)
-SPAWNING 1 WORKERS (elapsed time = 17633 us)
-SPAWNING 1 WORKERS (elapsed time = 18038 us)
-SPAWNING 1 WORKERS (elapsed time = 20172 us)
-
-SPLICER HIT EOF
-elapsed time = 495220 us
-
-SCANNER HIT EOF
-elapsed time = 8628066 us
-
-
-Done!
-
-Total Lines Consumed: 1000000000 (Expected: 1000000000)
-
-Time: 40719122 us
-
-TOTAL=34940112    ITER=8540    AVG=4091
-TOTAL=35112284    ITER=8582    AVG=4091
-TOTAL=35724337    ITER=8730    AVG=4092
-TOTAL=35963995    ITER=8788    AVG=4092
-TOTAL=34961252    ITER=8544    AVG=4091
-TOTAL=36900584    ITER=9017    AVG=4092
-TOTAL=35101182    ITER=8577    AVG=4092
-TOTAL=36670908    ITER=8960    AVG=4092
-TOTAL=36154771    ITER=8835    AVG=4092
-TOTAL=35467057    ITER=8667    AVG=4092
-TOTAL=35606821    ITER=8701    AVG=4092
-TOTAL=37589549    ITER=9185    AVG=4092
-TOTAL=35552834    ITER=8690    AVG=4091
-TOTAL=34640355    ITER=8465    AVG=4092
-TOTAL=34226202    ITER=8363    AVG=4092
-TOTAL=37625826    ITER=9194    AVG=4092
-TOTAL=34764605    ITER=8495    AVG=4092
-TOTAL=37446069    ITER=9150    AVG=4092
-TOTAL=33798642    ITER=8259    AVG=4092
-TOTAL=35333087    ITER=8634    AVG=4092
-TOTAL=34581262    ITER=8450    AVG=4092
-TOTAL=34474006    ITER=8430    AVG=4089
-TOTAL=35946853    ITER=8791    AVG=4089
-TOTAL=35890532    ITER=8773    AVG=4091
-TOTAL=36392832    ITER=8895    AVG=4091
-TOTAL=37714033    ITER=9216    AVG=4092
-TOTAL=35856939    ITER=8763    AVG=4091
-TOTAL=35563071    ITER=8690    AVG=4092
-
- Performance counter stats for '/usr/bin/bash -c ring_test -n 2':
-
- 1,135,152,739,855      task-clock                       #   27.783 CPUs utilized             
-           499,382      context-switches                 #  439.925 /sec                      
-           210,499      cpu-migrations                   #  185.437 /sec                      
-            19,932      page-faults                      #   17.559 /sec                      
- 6,352,650,086,385      instructions                     #    1.38  insn per cycle              (38.46%)
- 4,597,756,695,252      cycles                           #    4.050 GHz                         (38.47%)
- 1,483,412,165,686      branches                         #    1.307 G/sec                       (38.46%)
-     1,419,184,431      branch-misses                    #    0.10% of all branches             (38.46%)
- 1,475,730,547,580      L1-dcache-loads                  #    1.300 G/sec                       (38.46%)
-    44,279,711,366      L1-dcache-load-misses            #    3.00% of all L1-dcache accesses   (30.77%)
-     1,438,907,249      LLC-loads                        #    1.268 M/sec                       (30.77%)
-       280,822,116      LLC-load-misses                  #   19.52% of all LL-cache accesses    (30.77%)
-     5,271,281,002      L1-icache-load-misses                                                   (30.77%)
- 1,475,770,805,006      dTLB-loads                       #    1.300 G/sec                       (30.77%)
-        62,071,911      dTLB-load-misses                 #    0.00% of all dTLB cache accesses  (30.77%)
-       140,744,538      iTLB-loads                       #  123.987 K/sec                       (30.77%)
-        40,081,411      iTLB-load-misses                 #   28.48% of all iTLB cache accesses  (30.77%)
-
-      40.857806851 seconds time elapsed
-
-    1110.641846000 seconds user
-      11.260441000 seconds sys
-
-----------------------------------------------------------
-
-perf stat -d -d -d /usr/bin/bash -c 'ring_test 3'
-Generating test data...
-Starting splicer...
-Sending stdin to /dev/shm/.forkrun/forkrun.hFUt6hsn/stdin
-Starting scanner...
-Starting falloc...
-
-Consuming...
-
-SPAWNING 7 WORKERS (elapsed time = 14798 us)
-SPAWNING 4 WORKERS (elapsed time = 16529 us)
-SPAWNING 3 WORKERS (elapsed time = 17802 us)
-SPAWNING 1 WORKERS (elapsed time = 18816 us)
-SPAWNING 1 WORKERS (elapsed time = 19217 us)
-SPAWNING 1 WORKERS (elapsed time = 19616 us)
-SPAWNING 1 WORKERS (elapsed time = 20002 us)
-SPAWNING 1 WORKERS (elapsed time = 20389 us)
-SPAWNING 1 WORKERS (elapsed time = 20792 us)
-SPAWNING 1 WORKERS (elapsed time = 22663 us)
-
-SPLICER HIT EOF
-elapsed time = 506151 us
-
-SCANNER HIT EOF
-elapsed time = 8778491 us
-
-
-Done!
-
-Total Lines Consumed: 1000000000 (Expected: 1000000000)
-
-Time: 14291774 us
-
-TOTAL=35779397    ITER=8750    AVG=4089
-TOTAL=36669619    ITER=8964    AVG=4090
-TOTAL=35018958    ITER=8559    AVG=4091
-TOTAL=32880426    ITER=8036    AVG=4091
-TOTAL=37555790    ITER=9177    AVG=4092
-TOTAL=33783220    ITER=8256    AVG=4091
-TOTAL=35131056    ITER=8585    AVG=4092
-TOTAL=36691251    ITER=8965    AVG=4092
-TOTAL=34588030    ITER=8452    AVG=4092
-TOTAL=35289865    ITER=8624    AVG=4092
-TOTAL=36816935    ITER=8996    AVG=4092
-TOTAL=37165987    ITER=9082    AVG=4092
-TOTAL=34092705    ITER=8334    AVG=4090
-TOTAL=35960817    ITER=8787    AVG=4092
-TOTAL=35587403    ITER=8696    AVG=4092
-TOTAL=35524608    ITER=8673    AVG=4096
-TOTAL=36506181    ITER=8921    AVG=4092
-TOTAL=34275794    ITER=8376    AVG=4092
-TOTAL=37072886    ITER=9059    AVG=4092
-TOTAL=35922031    ITER=8778    AVG=4092
-TOTAL=35588390    ITER=8696    AVG=4092
-TOTAL=37545019    ITER=9177    AVG=4091
-TOTAL=36269056    ITER=8874    AVG=4087
-TOTAL=34645052    ITER=8469    AVG=4090
-TOTAL=34889477    ITER=8529    AVG=4090
-TOTAL=37324865    ITER=9123    AVG=4091
-TOTAL=35549808    ITER=8687    AVG=4092
-TOTAL=35875374    ITER=8767    AVG=4092
-
- Performance counter stats for '/usr/bin/bash -c ring_test -n 3':
-
-   398,243,020,883      task-clock                       #   27.593 CPUs utilized             
-           304,399      context-switches                 #  764.355 /sec                      
-           132,519      cpu-migrations                   #  332.759 /sec                      
-            17,219      page-faults                      #   43.237 /sec                      
- 2,187,139,337,379      instructions                     #    1.36  insn per cycle              (38.46%)
- 1,611,661,741,607      cycles                           #    4.047 GHz                         (38.46%)
-   516,811,607,272      branches                         #    1.298 G/sec                       (38.46%)
-       880,611,356      branch-misses                    #    0.17% of all branches             (38.46%)
-   501,173,190,721      L1-dcache-loads                  #    1.258 G/sec                       (38.46%)
-    15,838,276,785      L1-dcache-load-misses            #    3.16% of all L1-dcache accesses   (30.77%)
-       732,823,700      LLC-loads                        #    1.840 M/sec                       (30.77%)
-        84,411,678      LLC-load-misses                  #   11.52% of all LL-cache accesses    (30.77%)
-     4,521,657,956      L1-icache-load-misses                                                   (30.77%)
-   501,236,729,013      dTLB-loads                       #    1.259 G/sec                       (30.77%)
-        30,591,675      dTLB-load-misses                 #    0.01% of all dTLB cache accesses  (30.77%)
-       141,057,692      iTLB-loads                       #  354.200 K/sec                       (30.77%)
-        22,199,565      iTLB-load-misses                 #   15.74% of all iTLB cache accesses  (30.77%)
-
-      14.432952741 seconds time elapsed
-
-     384.480591000 seconds user
-       8.912012000 seconds sys
-
-----------------------------------------------------------
-
-Generating test data...
-Starting splicer...
-Sending stdin to /dev/shm/.forkrun/forkrun.L6HEHUsm/stdin
-Starting scanner...
-Starting falloc...
-
-Consuming...
-
-SPAWNING 7 WORKERS (elapsed time = 11211 us)
-SPAWNING 4 WORKERS (elapsed time = 12751 us)
-SPAWNING 3 WORKERS (elapsed time = 13896 us)
-SPAWNING 1 WORKERS (elapsed time = 14767 us)
-SPAWNING 1 WORKERS (elapsed time = 15132 us)
-SPAWNING 1 WORKERS (elapsed time = 15519 us)
-SPAWNING 1 WORKERS (elapsed time = 15920 us)
-SPAWNING 1 WORKERS (elapsed time = 16326 us)
-SPAWNING 1 WORKERS (elapsed time = 16751 us)
-SPAWNING 1 WORKERS (elapsed time = 21233 us)
-
-SPLICER HIT EOF
-elapsed time = 493818 us
-
-SCANNER HIT EOF
-elapsed time = 7986625 us
-
-
-Done!
-
-Total Lines Consumed: 1000000000 (Expected: 1000000000)
-
-Time: 74256485 us
-
-TOTAL=36301037    ITER=8873    AVG=4091
-TOTAL=36788674    ITER=8992    AVG=4091
-TOTAL=36648515    ITER=8956    AVG=4092
-TOTAL=34753690    ITER=8493    AVG=4092
-TOTAL=36490615    ITER=8917    AVG=4092
-TOTAL=35177171    ITER=8596    AVG=4092
-TOTAL=35143627    ITER=8588    AVG=4092
-TOTAL=36905656    ITER=9018    AVG=4092
-TOTAL=34376773    ITER=8400    AVG=4092
-TOTAL=35705883    ITER=8725    AVG=4092
-TOTAL=36317756    ITER=8874    AVG=4092
-TOTAL=35140302    ITER=8587    AVG=4092
-TOTAL=36933181    ITER=9027    AVG=4091
-TOTAL=37442040    ITER=9149    AVG=4092
-TOTAL=35620292    ITER=8704    AVG=4092
-TOTAL=34345002    ITER=8392    AVG=4092
-TOTAL=34612005    ITER=8458    AVG=4092
-TOTAL=36741113    ITER=8978    AVG=4092
-TOTAL=36638882    ITER=8953    AVG=4092
-TOTAL=35489720    ITER=8672    AVG=4092
-TOTAL=36454215    ITER=8908    AVG=4092
-TOTAL=35247251    ITER=8618    AVG=4089
-TOTAL=36102068    ITER=8827    AVG=4089
-TOTAL=35069878    ITER=8572    AVG=4091
-TOTAL=35015329    ITER=8559    AVG=4091
-TOTAL=34380859    ITER=8402    AVG=4091
-TOTAL=35027454    ITER=8560    AVG=4091
-TOTAL=35131012    ITER=8585    AVG=4092
-
- Performance counter stats for '/usr/bin/bash -c ring_test 4':
-
- 2,071,244,717,367      task-clock                       #   27.842 CPUs utilized             
-           569,371      context-switches                 #  274.893 /sec                      
-           226,209      cpu-migrations                   #  109.214 /sec                      
-            19,616      page-faults                      #    9.471 /sec                      
- 8,657,387,681,646      instructions                     #    1.03  insn per cycle              (38.46%)
- 8,395,149,333,979      cycles                           #    4.053 GHz                         (38.46%)
- 1,968,267,407,052      branches                         #  950.282 M/sec                       (38.46%)
-     5,709,453,563      branch-misses                    #    0.29% of all branches             (38.46%)
- 2,120,152,224,515      L1-dcache-loads                  #    1.024 G/sec                       (38.46%)
-    52,019,075,606      L1-dcache-load-misses            #    2.45% of all L1-dcache accesses   (30.77%)
-     1,544,833,111      LLC-loads                        #  745.848 K/sec                       (30.77%)
-       299,899,626      LLC-load-misses                  #   19.41% of all LL-cache accesses    (30.77%)
-    20,094,797,981      L1-icache-load-misses                                                   (30.77%)
- 2,120,131,199,175      dTLB-loads                       #    1.024 G/sec                       (30.77%)
-     1,076,018,259      dTLB-load-misses                 #    0.05% of all dTLB cache accesses  (30.77%)
-     1,714,703,838      iTLB-loads                       #  827.862 K/sec                       (30.77%)
-     1,052,448,438      iTLB-load-misses                 #   61.38% of all iTLB cache accesses  (30.77%)
-
-      74.392028316 seconds time elapsed
-
-    1586.418264000 seconds user
-     464.599431000 seconds sys
+time frun  : <f1 >/dev/null
+
+real    0m4.840s
+user    1m54.852s
+sys     0m0.599s
+
+time frun  : <f1 | wc -l
+0
+
+real    0m4.850s
+user    1m55.587s
+sys     0m0.596s
+
+time { cat f1 | frun  : >/dev/null; }
+
+real    0m4.878s
+user    1m55.805s
+sys     0m0.575s
+
+time { cat f1 | frun  : | wc -l; }
+0
+
+real    0m4.852s
+user    1m55.433s
+sys     0m0.706s
+
+time frun  echo <f1 >/dev/null
+
+real    0m5.197s
+user    2m4.520s
+sys     0m0.637s
+
+time frun  echo <f1 | wc -l
+24440
+
+real    0m5.194s
+user    2m4.303s
+sys     0m0.911s
+
+time { cat f1 | frun  echo >/dev/null; }
+
+real    0m5.210s
+user    2m4.244s
+sys     0m0.658s
+
+time { cat f1 | frun  echo | wc -l; }
+24440
+
+real    0m5.199s
+user    2m4.310s
+sys     0m0.992s
+
+time frun  printf '%s\n' <f1 >/dev/null
+
+real    0m8.474s
+user    2m51.826s
+sys     0m40.593s
+
+time frun  printf '%s\n' <f1 | wc -l
+100000000
+
+real    0m27.930s
+user    2m14.079s
+sys     9m59.966s
+
+time { cat f1 | frun  printf '%s\n' >/dev/null; }
+
+real    0m8.424s
+user    2m52.976s
+sys     0m37.871s
+
+time { cat f1 | frun  printf '%s\n' | wc -l; }
+100000000
+
+real    0m25.629s
+user    2m15.662s
+sys     8m54.510s
+
+time frun -o : <f1 >/dev/null
+
+real    0m4.915s
+user    1m56.282s
+sys     0m0.933s
+
+time frun -o : <f1 | wc -l
+0
+
+real    0m4.917s
+user    1m56.972s
+sys     0m0.957s
+
+time { cat f1 | frun -o : >/dev/null; }
+
+real    0m4.938s
+user    1m56.033s
+sys     0m1.012s
+
+time { cat f1 | frun -o : | wc -l; }
+0
+
+real    0m4.913s
+user    1m57.173s
+sys     0m0.993s
+
+time frun -o echo <f1 >/dev/null
+
+real    0m5.262s
+user    2m5.228s
+sys     0m1.238s
+
+time frun -o echo <f1 | wc -l
+24440
+
+real    0m5.303s
+user    2m6.011s
+sys     0m1.292s
+
+time { cat f1 | frun -o echo >/dev/null; }
+
+real    0m5.275s
+user    2m5.269s
+sys     0m1.267s
+
+time { cat f1 | frun -o echo | wc -l; }
+24440
+
+real    0m5.293s
+user    2m5.679s
+sys     0m1.310s
+
+time frun -o printf '%s\n' <f1 >/dev/null
+
+real    0m8.865s
+user    2m54.179s
+sys     0m48.654s
+
+time frun -o printf '%s\n' <f1 | wc -l
+100000000
+
+real    0m8.884s
+user    2m54.127s
+sys     0m48.940s
+
+time { cat f1 | frun -o printf '%s\n' >/dev/null; }
+
+real    0m8.899s
+user    2m55.387s
+sys     0m48.819s
+
+time { cat f1 | frun -o printf '%s\n' | wc -l; }
+100000000
+
+real    0m8.842s
+user    2m54.025s
+sys     0m48.683s
+
+time frun -u : <f1 >/dev/null
+
+real    0m1.918s
+user    0m37.860s
+sys     0m0.493s
+
+time frun -u : <f1 | wc -l
+0
+
+real    0m1.935s
+user    0m37.894s
+sys     0m0.458s
+
+time { cat f1 | frun -u : >/dev/null; }
+
+real    0m1.917s
+user    0m37.886s
+sys     0m0.513s
+
+time { cat f1 | frun -u : | wc -l; }
+0
+
+real    0m1.958s
+user    0m37.846s
+sys     0m0.487s
+
+time frun -u echo <f1 >/dev/null
+
+real    0m1.919s
+user    0m37.743s
+sys     0m0.495s
+
+time frun -u echo <f1 | wc -l
+24440
+
+real    0m1.957s
+user    0m38.063s
+sys     0m0.585s
+
+time { cat f1 | frun -u echo >/dev/null; }
+
+real    0m1.934s
+user    0m38.047s
+sys     0m0.501s
+
+time { cat f1 | frun -u echo | wc -l; }
+24440
+
+real    0m1.926s
+user    0m38.057s
+sys     0m0.742s
+
+time frun -u printf '%s\n' <f1 >/dev/null
+
+real    0m1.920s
+user    0m38.149s
+sys     0m0.464s
+
+time frun -u printf '%s\n' <f1 | wc -l
+24440
+
+real    0m1.931s
+user    0m38.108s
+sys     0m0.832s
+
+time { cat f1 | frun -u printf '%s\n' >/dev/null; }
+
+real    0m1.940s
+user    0m38.280s
+sys     0m0.540s
+
+time { cat f1 | frun -u printf '%s\n' | wc -l; }
+24440
+
+real    0m1.930s
+user    0m38.148s
+sys     0m0.692s
+
+time frun -o -u : <f1 >/dev/null
+
+real    0m1.966s
+user    0m38.410s
+sys     0m0.751s
+
+time frun -o -u : <f1 | wc -l
+0
+
+real    0m1.959s
+user    0m38.681s
+sys     0m0.770s
+
+time { cat f1 | frun -o -u : >/dev/null; }
+
+real    0m1.954s
+user    0m38.694s
+sys     0m0.802s
+
+time { cat f1 | frun -o -u : | wc -l; }
+0
+
+real    0m1.950s
+user    0m38.633s
+sys     0m0.763s
+
+time frun -o -u echo <f1 >/dev/null
+
+real    0m1.956s
+user    0m38.314s
+sys     0m0.827s
+
+time frun -o -u echo <f1 | wc -l
+24440
+
+real    0m1.973s
+user    0m38.582s
+sys     0m0.783s
+
+time { cat f1 | frun -o -u echo >/dev/null; }
+
+real    0m1.995s
+user    0m38.857s
+sys     0m0.935s
+
+time { cat f1 | frun -o -u echo | wc -l; }
+24440
+
+real    0m1.979s
+user    0m38.726s
+sys     0m0.843s
+
+time frun -o -u printf '%s\n' <f1 >/dev/null
+
+real    0m1.951s
+user    0m38.506s
+sys     0m0.873s
+
+time frun -o -u printf '%s\n' <f1 | wc -l
+24441
+
+real    0m1.956s
+user    0m38.726s
+sys     0m0.852s
+
+time { cat f1 | frun -o -u printf '%s\n' >/dev/null; }
+
+real    0m1.975s
+user    0m38.832s
+sys     0m0.787s
+
+time { cat f1 | frun -o -u printf '%s\n' | wc -l; }
+24440
+
+real    0m1.962s
+user    0m38.780s
+sys     0m0.890s
+
+time frun  : <f2 >/dev/null
+
+real    0m6.437s
+user    2m34.106s
+sys     0m1.217s
+
+time frun  : <f2 | wc -l
+0
+
+real    0m6.425s
+user    2m33.971s
+sys     0m1.227s
+
+time { cat f2 | frun  : >/dev/null; }
+
+real    0m6.475s
+user    2m34.434s
+sys     0m1.465s
+
+time { cat f2 | frun  : | wc -l; }
+0
+
+real    0m6.442s
+user    2m33.972s
+sys     0m1.481s
+
+time frun  echo <f2 >/dev/null
+
+real    0m6.842s
+user    2m45.067s
+sys     0m1.191s
+
+time frun  echo <f2 | wc -l
+24440
+
+real    0m6.903s
+user    2m44.627s
+sys     0m2.620s
+
+time { cat f2 | frun  echo >/dev/null; }
+
+real    0m6.851s
+user    2m45.210s
+sys     0m1.587s
+
+time { cat f2 | frun  echo | wc -l; }
+24440
+
+real    0m6.904s
+user    2m45.192s
+sys     0m2.851s
+
+time frun  printf '%s\n' <f2 >/dev/null
+
+real    0m9.623s
+user    3m31.640s
+sys     0m29.168s
+
+time frun  printf '%s\n' <f2 | wc -l
+100000000
+
+real    0m25.863s
+user    2m48.996s
+sys     8m27.698s
+
+time { cat f2 | frun  printf '%s\n' >/dev/null; }
+
+real    0m9.811s
+user    3m30.763s
+sys     0m35.487s
+
+time { cat f2 | frun  printf '%s\n' | wc -l; }
+100000000
+
+real    0m25.832s
+user    2m49.331s
+sys     8m26.228s
+
+time frun -o : <f2 >/dev/null
+
+real    0m6.500s
+user    2m36.055s
+sys     0m1.651s
+
+time frun -o : <f2 | wc -l
+0
+
+real    0m6.482s
+user    2m35.975s
+sys     0m1.604s
+
+time { cat f2 | frun -o : >/dev/null; }
+
+real    0m6.486s
+user    2m36.405s
+sys     0m1.848s
+
+time { cat f2 | frun -o : | wc -l; }
+0
+
+real    0m6.470s
+user    2m35.838s
+sys     0m1.847s
+
+time frun -o echo <f2 >/dev/null
+
+real    0m6.906s
+user    2m46.671s
+sys     0m2.356s
+
+time frun -o echo <f2 | wc -l
+24440
+
+real    0m6.910s
+user    2m46.321s
+sys     0m2.594s
+
+time { cat f2 | frun -o echo >/dev/null; }
+
+real    0m6.932s
+user    2m47.474s
+sys     0m2.578s
+
+time { cat f2 | frun -o echo | wc -l; }
+24440
+
+real    0m6.932s
+user    2m46.777s
+sys     0m2.826s
+
+time frun -o printf '%s\n' <f2 >/dev/null
+
+real    0m10.420s
+user    3m33.460s
+sys     0m49.441s
+
+time frun -o printf '%s\n' <f2 | wc -l
+100000000
+
+real    0m10.440s
+user    3m33.258s
+sys     0m50.344s
+
+time { cat f2 | frun -o printf '%s\n' >/dev/null; }
+
+real    0m10.445s
+user    3m34.146s
+sys     0m49.687s
+
+time { cat f2 | frun -o printf '%s\n' | wc -l; }
+100000000
+
+real    0m10.468s
+user    3m34.077s
+sys     0m50.415s
+
+time frun -u : <f2 >/dev/null
+
+real    0m5.359s
+user    2m6.416s
+sys     0m1.179s
+
+time frun -u : <f2 | wc -l
+0
+
+real    0m5.336s
+user    2m5.938s
+sys     0m1.154s
+
+time { cat f2 | frun -u : >/dev/null; }
+
+real    0m5.349s
+user    2m5.865s
+sys     0m1.362s
+
+time { cat f2 | frun -u : | wc -l; }
+0
+
+real    0m5.351s
+user    2m6.168s
+sys     0m1.430s
+
+time frun -u echo <f2 >/dev/null
+
+real    0m5.754s
+user    2m17.147s
+sys     0m1.293s
+
+time frun -u echo <f2 | wc -l
+24440
+
+real    0m5.833s
+user    2m16.482s
+sys     0m2.638s
+
+time { cat f2 | frun -u echo >/dev/null; }
+
+real    0m5.763s
+user    2m17.356s
+sys     0m1.489s
+
+time { cat f2 | frun -u echo | wc -l; }
+24440
+
+real    0m5.842s
+user    2m16.706s
+sys     0m2.766s
+
+time frun -u printf '%s\n' <f2 >/dev/null
+
+real    0m8.719s
+user    3m8.787s
+sys     0m28.119s
+
+time frun -u printf '%s\n' <f2 | wc -l
+100000000
+
+real    0m27.841s
+user    2m25.862s
+sys     9m44.361s
+
+time { cat f2 | frun -u printf '%s\n' >/dev/null; }
+
+real    0m8.696s
+user    3m8.864s
+sys     0m28.465s
+
+time { cat f2 | frun -u printf '%s\n' | wc -l; }
+100000000
+
+real    0m27.819s
+user    2m26.331s
+sys     9m43.670s
+
+time frun -o -u : <f2 >/dev/null
+
+real    0m5.388s
+user    2m6.233s
+sys     0m1.559s
+
+time frun -o -u : <f2 | wc -l
+0
+
+real    0m5.383s
+user    2m6.937s
+sys     0m1.525s
+
+time { cat f2 | frun -o -u : >/dev/null; }
+
+real    0m5.401s
+user    2m6.977s
+sys     0m1.785s
+
+time { cat f2 | frun -o -u : | wc -l; }
+0
+
+real    0m5.394s
+user    2m7.033s
+sys     0m1.778s
+
+time frun -o -u echo <f2 >/dev/null
+
+real    0m5.848s
+user    2m18.416s
+sys     0m2.240s
+
+time frun -o -u echo <f2 | wc -l
+24440
+
+real    0m5.861s
+user    2m18.080s
+sys     0m2.520s
+
+time { cat f2 | frun -o -u echo >/dev/null; }
+
+real    0m5.849s
+user    2m18.638s
+sys     0m2.512s
+
+time { cat f2 | frun -o -u echo | wc -l; }
+24440
+
+real    0m5.855s
+user    2m17.859s
+sys     0m2.758s
+
+time frun -o -u printf '%s\n' <f2 >/dev/null
+
+real    0m9.477s
+user    3m5.345s
+sys     0m51.574s
+
+time frun -o -u printf '%s\n' <f2 | wc -l
+100000000
+
+real    0m9.513s
+user    3m5.861s
+sys     0m51.579s
+
+time { cat f2 | frun -o -u printf '%s\n' >/dev/null; }
+
+real    0m9.575s
+user    3m8.071s
+sys     0m51.391s
+
+time { cat f2 | frun -o -u printf '%s\n' | wc -l; }
+100000000
+
+real    0m9.478s
+user    3m6.390s
+sys     0m51.516s
+
+time frun  : <f3 >/dev/null
+
+real    0m0.587s
+user    0m13.516s
+sys     0m0.350s
+
+time frun  : <f3 | wc -l
+0
+
+real    0m0.586s
+user    0m13.484s
+sys     0m0.309s
+
+time { cat f3 | frun  : >/dev/null; }
+
+real    0m0.620s
+user    0m13.435s
+sys     0m0.399s
+
+time { cat f3 | frun  : | wc -l; }
+0
+
+real    0m0.625s
+user    0m13.459s
+sys     0m0.426s
+
+time frun  echo <f3 >/dev/null
+
+real    0m0.610s
+user    0m13.980s
+sys     0m0.343s
+
+time frun  echo <f3 | wc -l
+650
+
+real    0m0.621s
+user    0m13.885s
+sys     0m0.483s
+
+time { cat f3 | frun  echo >/dev/null; }
+
+real    0m0.634s
+user    0m13.869s
+sys     0m0.427s
+
+time { cat f3 | frun  echo | wc -l; }
+650
+
+real    0m0.649s
+user    0m13.954s
+sys     0m0.530s
+
+time frun  printf '%s\n' <f3 >/dev/null
+
+real    0m0.669s
+user    0m14.983s
+sys     0m0.937s
+
+time frun  printf '%s\n' <f3 | wc -l
+2553170
+
+real    0m0.947s
+user    0m13.761s
+sys     0m9.747s
+
+time { cat f3 | frun  printf '%s\n' >/dev/null; }
+
+real    0m0.702s
+user    0m15.142s
+sys     0m0.969s
+
+time { cat f3 | frun  printf '%s\n' | wc -l; }
+2553170
+
+real    0m0.974s
+user    0m13.783s
+sys     0m9.771s
+
+time frun -o : <f3 >/dev/null
+
+real    0m0.592s
+user    0m13.538s
+sys     0m0.351s
+
+time frun -o : <f3 | wc -l
+0
+
+real    0m0.595s
+user    0m13.505s
+sys     0m0.345s
+
+time { cat f3 | frun -o : >/dev/null; }
+
+real    0m0.629s
+user    0m13.473s
+sys     0m0.433s
+
+time { cat f3 | frun -o : | wc -l; }
+0
+
+real    0m0.615s
+user    0m13.432s
+sys     0m0.397s
+
+time frun -o echo <f3 >/dev/null
+
+real    0m0.612s
+user    0m13.995s
+sys     0m0.463s
+
+time frun -o echo <f3 | wc -l
+650
+
+real    0m0.620s
+user    0m14.040s
+sys     0m0.528s
+
+time { cat f3 | frun -o echo >/dev/null; }
+
+real    0m0.641s
+user    0m13.938s
+sys     0m0.542s
+
+time { cat f3 | frun -o echo | wc -l; }
+650
+
+real    0m0.644s
+user    0m14.045s
+sys     0m0.597s
+
+time frun -o printf '%s\n' <f3 >/dev/null
+
+real    0m0.705s
+user    0m15.148s
+sys     0m1.618s
+
+time frun -o printf '%s\n' <f3 | wc -l
+2553170
+
+real    0m0.707s
+user    0m15.311s
+sys     0m1.684s
+
+time { cat f3 | frun -o printf '%s\n' >/dev/null; }
+
+real    0m0.732s
+user    0m15.073s
+sys     0m1.699s
+
+time { cat f3 | frun -o printf '%s\n' | wc -l; }
+2553170
+
+real    0m0.739s
+user    0m15.223s
+sys     0m1.747s
+
+time frun -u : <f3 >/dev/null
+
+real    0m0.436s
+user    0m9.464s
+sys     0m0.291s
+
+time frun -u : <f3 | wc -l
+0
+
+real    0m0.432s
+user    0m9.342s
+sys     0m0.303s
+
+time { cat f3 | frun -u : >/dev/null; }
+
+real    0m0.467s
+user    0m9.315s
+sys     0m0.376s
+
+time { cat f3 | frun -u : | wc -l; }
+0
+
+real    0m0.455s
+user    0m9.363s
+sys     0m0.333s
+
+time frun -u echo <f3 >/dev/null
+
+real    0m0.446s
+user    0m9.760s
+sys     0m0.297s
+
+time frun -u echo <f3 | wc -l
+650
+
+real    0m0.466s
+user    0m9.841s
+sys     0m0.439s
+
+time { cat f3 | frun -u echo >/dev/null; }
+
+real    0m0.475s
+user    0m9.690s
+sys     0m0.354s
+
+time { cat f3 | frun -u echo | wc -l; }
+650
+
+real    0m0.478s
+user    0m9.709s
+sys     0m0.489s
+
+time frun -u printf '%s\n' <f3 >/dev/null
+
+real    0m0.518s
+user    0m10.974s
+sys     0m1.008s
+
+time frun -u printf '%s\n' <f3 | wc -l
+2593651
+
+real    0m0.825s
+user    0m9.873s
+sys     0m10.715s
+
+time { cat f3 | frun -u printf '%s\n' >/dev/null; }
+
+real    0m0.546s
+user    0m10.906s
+sys     0m1.024s
+
+time { cat f3 | frun -u printf '%s\n' | wc -l; }
+2593651
+
+real    0m0.860s
+user    0m9.810s
+sys     0m10.850s
+
+time frun -o -u : <f3 >/dev/null
+
+real    0m0.433s
+user    0m9.397s
+sys     0m0.300s
+
+time frun -o -u : <f3 | wc -l
+0
+
+real    0m0.432s
+user    0m9.375s
+sys     0m0.310s
+
+time { cat f3 | frun -o -u : >/dev/null; }
+
+real    0m0.458s
+user    0m9.386s
+sys     0m0.346s
+
+time { cat f3 | frun -o -u : | wc -l; }
+0
+
+real    0m0.459s
+user    0m9.363s
+sys     0m0.381s
+
+time frun -o -u echo <f3 >/dev/null
+
+real    0m0.454s
+user    0m9.836s
+sys     0m0.440s
+
+time frun -o -u echo <f3 | wc -l
+650
+
+real    0m0.460s
+user    0m9.888s
+sys     0m0.477s
+
+time { cat f3 | frun -o -u echo >/dev/null; }
+
+real    0m0.486s
+user    0m9.766s
+sys     0m0.495s
+
+time { cat f3 | frun -o -u echo | wc -l; }
+650
+
+real    0m0.501s
+user    0m9.891s
+sys     0m0.586s
+
+time frun -o -u printf '%s\n' <f3 >/dev/null
+
+real    0m0.549s
+user    0m11.064s
+sys     0m1.632s
+
+time frun -o -u printf '%s\n' <f3 | wc -l
+2593651
+
+real    0m0.550s
+user    0m11.055s
+sys     0m1.727s
+
+time { cat f3 | frun -o -u printf '%s\n' >/dev/null; }
+
+real    0m0.571s
+user    0m11.007s
+sys     0m1.669s
+
+time { cat f3 | frun -o -u printf '%s\n' | wc -l; }
+2593651
+
+real    0m0.581s
+user    0m11.056s
+sys     0m1.779s
+
+
+-----------------------------
+INPUTS DATA STATS
+
+
+
+NAME: f1
+SIZE: 100000000 bytes
+LINE COUNT: 100000000 lines
+
+
+NAME: f2
+SIZE: 888888898 bytes
+LINE COUNT: 100000000 lines
+
+
+NAME: f3
+SIZE: 175231567 bytes
+LINE COUNT: 2553170 lines
 

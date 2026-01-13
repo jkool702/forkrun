@@ -1,4 +1,4 @@
-. ./frun.bash || . "$(find ./ -type f -maxdepth 1 -name frun.bash | head -n 1)"
+. "$(find ./ -type f -maxdepth 1 -name frun.new.bash | head -n 1)"
 
 yes $'\n'|head -n 100000000 >f1
 seq 100000000 >f2

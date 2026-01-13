@@ -69,7 +69,7 @@ a1=''
  #   echo "a0 has $(wc -l <<<"$a0") lines"
     while true; do
         read -r  -u $fd_r  a
-        [[ "$a" == 'b64['*']=$'* ]] && break
+	[[ "$a" == 'declare -A b64=(['*']=$'*')' ]] && break
         a1+="${a}"$'\n'
     done    
     } {fd_r}<&0
@@ -81,8 +81,8 @@ eval "${a1}"
 
 for f in forkrun_ring.*.so; do
   a="${f%.so}"
-  a="${a%%*forkrun_ring.}"
-  b64[$a]="$(_forkrun_file_to_base64 "$f")"
+  a="${a##*forkrun_ring.}"
+  b64[${a}]="$(_forkrun_file_to_base64 "$f")"
 done
   
   
