@@ -4,10 +4,13 @@ frun() (
 
     # # # # # SETUP # # # # #
 
-    local test_type worker_func_src nn N nWorkers0 cmdline_str ring_ack_str delimiter_str delimiter_val
+    local test_type worker_func_src nn N nWorkers0 cmdline_str ring_ack_str delimiter_str delimiter_val IFS IFS0
     local -g pCode fd_order fd_spawn ingress_memfd nWorkers nWorkersMax 
-    local -gx order_flag unsafe_flag
+    local -gx order_flag unsafe_flag LC_ALL
     local -ga fd_out args P
+    local -a nWorkersA
+
+    LC_ALL=C
 
     : "${nWorkers:=1}" "${nWorkersMax:=$(nproc)}"
 
@@ -53,7 +56,7 @@ frun() (
 
     # initialize rings with ring_init and create data memfd with ring_memfd_create
     if ${order_flag}; then
-        ring_init 'fd_out'
+	    ring_init 'fd_out' --workers-max=$(( $(nproc) + 1 ))
     else
         ring_init
     fi
@@ -143,13 +146,10 @@ P+=($!)
 }'
         eval "${worker_func_src}"
 
-        # spawn initial workers
-        nWorkers0="$nWorkers"
-        for (( nWorkers=0; nWorkers<nWorkers0; nWorkers++)); do
-            spawn_worker "$nWorkers"
-        done
 
-        # spawn additional workers dynamically
+        # spawn  workers dynamically
+	
+	nWorkers=0
         while true; do
             read -r -u $fd_spawn_r N
             [[ "$N" == 'x' ]] && break
@@ -158,7 +158,13 @@ P+=($!)
             (( N > 0 )) && for (( nWorkers=nWorkers0; nWorkers<nWorkers0+N; nWorkers++ )); do
                 spawn_worker "$nWorkers"
             done
+	    nWorkersA+=("$N")
         done
+
+	IFS0="$IFS"
+	IFS=' '
+	printf '\n\nFINAL WORKER COUNT: %s (%s)\n\n' "${nWorkers}" "${nWorkersA[*]}" >&2
+	IFS="$IFS0"
 
 
         exec {fd_spawn_r}<&- {fd_fallow_w}>&-
