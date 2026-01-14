@@ -1,11 +1,11 @@
-// forkrun_ring.c v8.41
+// forkrun_ring.c v8.38
 // ======================================================================================
-// CHANGES vs v8.40:
-// 1. OPTIMIZATION: Byte Mode skips Stride Ring entirely.
-//    - Scanner does not write to stride_ring in Byte Mode (saves bandwidth).
-//    - Claim assumes stride=1 per slot in Byte Mode (saves bandwidth).
-// 2. LOGIC: Byte Mode (--bytes/--bytes0) automatically implies --return-bytes.
-// 3. USABILITY: 'ring_splice' accepts "" (empty arg) to mean "Use Current Offset".
+// CHANGES vs v8.37:
+// 1. OPTIMIZATION: Reduced memory bandwidth in Scanner Hot Path.
+//    - Removed redundant write of 'offset[i]' (Start Offset).
+//    - Relies on 'offset[i]' being populated as 'offset[i+1]' by the previous iteration.
+//    - Only writes 'offset[i]' if a Flag needs setting (Partial Batch) or in Overwrite Mode (Tail).
+// 2. SAFETY: Added 'overwrite' param to SCANNER_FLUSH to handle Tail logic correctly.
 // ======================================================================================
 
 #ifndef _GNU_SOURCE
@@ -133,7 +133,7 @@ static int g_debug = 0;
     X(ring_init,            ring_init_main,           "ring_init [FLAGS]",              "Initialize ring with config") \
     X(ring_destroy,         ring_destroy_main,        "ring_destroy",                   "Destroy ring") \
     X(ring_scanner,         ring_scanner_main,        "ring_scanner <fd> [spawn_fd]",   "Run scanner") \
-    X(ring_claim,           ring_claim_main,          "ring_claim [VAR] [FD]",          "Claim batch") \
+    X(ring_claim,           ring_claim_main,          "ring_claim <OFF> <CNT> [BYTES] [FD]", "Claim batch") \
     X(ring_worker,          ring_worker_main,         "ring_worker [inc|dec]",          "Worker control") \
     X(ring_cleanup_waiter,  ring_cleanup_waiter_main, "ring_cleanup_waiter",            "Cleanup waiter") \
     X(ring_ingest,          ring_ingest_main,         "ring_ingest",                    "Signal ingest") \
@@ -320,7 +320,6 @@ struct SharedState {
     uint8_t  mode_byte;        // 1=Byte, 0=Line
     uint8_t  fixed_workers;    // 1=Static W
     uint8_t  fixed_batch;      // 1=Static Batch
-    uint8_t  cfg_return_bytes; // 1=ring_claim returns bytes
     
     uint16_t stride_ring[RING_SIZE] ALIGNED(4096);
     uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
@@ -394,6 +393,7 @@ static int ring_init_main(int argc, char **argv) {
         atomic_store_relaxed(&state->tail_idx, 0);
         atomic_store_relaxed(&state->scanner_finished, 0);
         
+        // Ensure offset[0] is zeroed on reset (though usually assumed)
         state->offset_ring[0] = 0;
         
         if (fd_escrow[0] >= 0) {
@@ -408,8 +408,9 @@ static int ring_init_main(int argc, char **argv) {
     void *p = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) { builtin_error("mmap: %s", strerror(errno)); return EXECUTION_FAILURE; }
     state = (struct SharedState *)p;
-    memset(p, 0, total_size);
+    memset(p, 0, total_size); // Implicitly sets offset_ring[0] = 0
 
+    // --- DEFAULTS ---
     long nproc = sysconf(_SC_NPROCESSORS_ONLN);
     if (nproc < 1) nproc = 1;
     
@@ -439,11 +440,11 @@ static int ring_init_main(int argc, char **argv) {
     state->cfg_batch_max = env_l_max;
     state->cfg_batch_start = 1;
     state->cfg_line_max = env_b_max;
-    state->cfg_limit = 0; 
-    state->cfg_timeout_us = 0; 
+    state->cfg_limit = 0; // Infinite
+    state->cfg_timeout_us = 0; // Default greedy
     state->mode_byte = 0; 
-    state->cfg_return_bytes = 0;
 
+    // --- FLAG PARSING ---
     const char *out_array_name = NULL;
     int64_t lines_arg = -1;
     int64_t bytes_arg = -1;
@@ -475,8 +476,6 @@ static int ring_init_main(int argc, char **argv) {
             state->cfg_timeout_us = atoll(argv[i]+10);
         } else if (strncmp(argv[i], "--greedy", 8) == 0) {
             state->cfg_timeout_us = 0;
-        } else if (strncmp(argv[i], "--return-bytes", 14) == 0) {
-            state->cfg_return_bytes = 1;
         } else if (strncmp(argv[i], "--out=", 6) == 0) {
             out_array_name = argv[i]+6;
         } else if (argv[i][0] != '-') {
@@ -486,7 +485,6 @@ static int ring_init_main(int argc, char **argv) {
 
     if (lines_arg == 0 || (lines_arg < 0 && bytes_arg > 0)) {
         state->mode_byte = 1;
-        state->cfg_return_bytes = 1; // Auto-set return bytes
         if (bytes_arg > 0) {
             state->cfg_batch_start = bytes_arg;
             state->cfg_batch_max = bytes_arg;
@@ -601,7 +599,7 @@ static inline void scanner_adaptive_commit(bool force) {
     }
 }
 
-// Updated SCANNER_FLUSH with Byte Mode Optimization (Skip Stride)
+// Updated SCANNER_FLUSH with Implicit Start optimization + Overwrite Mode
 #define SCANNER_FLUSH(cnt, overwrite) do { \
     while(1) { \
         uint64_t limit; \
@@ -613,7 +611,7 @@ static inline void scanner_adaptive_commit(bool force) {
     } \
     uint64_t pk = (uint64_t)batch_start; \
     if (cnt != L) pk |= FLAG_PARTIAL_BATCH; \
-    if (!byte_mode) state->stride_ring[local_scan_idx & RING_MASK] = (uint16_t)cnt; \
+    state->stride_ring[local_scan_idx & RING_MASK] = (uint16_t)cnt; \
     uint64_t next_pk = current_p_offset; \
     state->offset_ring[(local_scan_idx + 1) & RING_MASK] = next_pk; \
     if ((pk & FLAG_PARTIAL_BATCH) || (overwrite)) { \
@@ -640,6 +638,7 @@ static int ring_scanner_main(int argc, char **argv) {
     bool     fixed_batch = state->fixed_batch;
     bool     fixed_workers = state->fixed_workers;
 
+    // Constants for PID
     uint64_t W2 = fast_log2(W_max_val);
     uint64_t L2 = fast_log2(Lmax);
     uint64_t X_const = fast_log2(W2 + L2) * W2;
@@ -676,6 +675,7 @@ static int ring_scanner_main(int argc, char **argv) {
     uint64_t pending_lines = 0;
     bool force_refill = false;
 
+    // Initial Spawn
     if (fd_spawn >= 0 && W > 0) {
         char sbuf[64];
         int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
@@ -711,6 +711,7 @@ static int ring_scanner_main(int argc, char **argv) {
     })
 
     while (status != 1 || p < end) {
+        // --- 1. REFILL ---
         if ((p >= end || force_refill) && status != 1) {
             force_refill = false;
             uint64_t current_p_offset = buf_base_offset + (p - buf);
@@ -767,6 +768,7 @@ static int ring_scanner_main(int argc, char **argv) {
             }
         }
 
+        // --- 2. SCANNING ---
         bool flush = false;
         
         if (byte_mode) {
@@ -844,6 +846,7 @@ static int ring_scanner_main(int argc, char **argv) {
             }
         }
 
+        // --- 3. ADAPTATION ---
         if (flush) {
             batch_counter++;
             batches_since_calc++;
@@ -1034,6 +1037,7 @@ static int ring_scanner_main(int argc, char **argv) {
                      SCANNER_WAKE(); usleep(100);
                 }
                 uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
+                // Force Overwrite Mode for Tail
                 SCANNER_FLUSH(lines_found, true);
                 batch_start = current_p_offset;
                 L_tail_done += lines_found;
@@ -1060,15 +1064,18 @@ static bool is_variable_name(const char *s) {
 }
 
 static int ring_claim_main(int argc, char **argv) {
-    const char *v_target = "REPLY";
+    if (argc < 3) return EXECUTION_FAILURE;
+    const char *v_off = argv[1];
+    const char *v_cnt = argv[2];
+    const char *v_bytes = NULL;
     int fd_read = -1;
 
-    if (argc >= 2) {
-        if (isdigit(argv[1][0])) {
-            fd_read = atoi(argv[1]);
+    if (argc >= 4) {
+        if (is_variable_name(argv[3])) {
+            v_bytes = argv[3];
+            if (argc >= 5) fd_read = atoi(argv[4]);
         } else {
-            v_target = argv[1];
-            if (argc >= 3) fd_read = atoi(argv[2]);
+            fd_read = atoi(argv[3]);
         }
     }
 
@@ -1125,7 +1132,7 @@ restart_loop:
             if (atomic_fetch_sub(&state->active_workers, 1) == 1) {
                  return 2; 
             }
-            bind_var_or_array(v_target, "0", 0);
+            bind_var_or_array(v_cnt, "0", 0);
             return 1;
         }
         if (spin < 100) { cpu_relax(); spin++; continue; }
@@ -1187,60 +1194,43 @@ restart_loop:
          }
     }
 
-    uint64_t final_val = 0;
-    if (state->cfg_return_bytes) {
-        // Byte Mode or Line Mode requesting Bytes
-        uint64_t start = state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-        uint64_t end = state->offset_ring[(my_read_idx + claim_count) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-        final_val = end - start;
-    } else {
-        // Line Mode requesting Lines (Default)
-        // Optimization: Do NOT read offset_ring[i+1] (fencepost) to avoid cache contention.
-        // Also skip stride read if Byte Mode (implicit 1), though this block is !cfg_return_bytes so it implies lines.
-        if (claim_count == 1) {
-             int64_t sbatch = atomic_load_relaxed(&state->signed_batch_size);
-             if (sbatch > 0 && !(state->offset_ring[my_read_idx & RING_MASK] & FLAG_PARTIAL_BATCH)) {
-                 final_val = sbatch;
-             } else {
-                 final_val = state->stride_ring[my_read_idx & RING_MASK];
-             }
-        } else {
-            for (uint64_t i = 0; i < claim_count; i++) {
-                final_val += state->stride_ring[(my_read_idx + i) & RING_MASK];
-            }
-        }
-    }
+    uint64_t final_lines = 0;
+    uint64_t final_offset = state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+    uint64_t final_bytes = 0;
 
-    // Update Stats: If Byte Mode, we count "chunks" (claim_count). If Line Mode, we count lines.
-    // If we are in Line Mode but returning Bytes, tracking stats is tricky.
-    // Compromise: Add 'final_val' if Line Mode (lines), or 'claim_count' if Byte Mode (chunks).
-    // What if Line Mode + Return Bytes? We don't calculate lines.
-    // Let's rely on mode_byte flag for stats intent.
-    uint64_t stat_add = 0;
-    if (state->mode_byte) stat_add = claim_count; // chunks
-    else {
-        if (!state->cfg_return_bytes) stat_add = final_val; // lines
-        else stat_add = 0; // Line Mode + Return Bytes = We don't know line count cheaply. Skip stats? Or approximation?
-        // Let's approximate with claim_count (batches) for now to avoid calc overhead, or just skip.
-        // Actually, skipping prevents PID logic from working correctly. PID relies on total_lines_consumed.
-        // If user requests Bytes in Line Mode, we break PID unless we calculate lines.
-        // Fix: If !mode_byte but return_bytes, we MUST calculate stride sum for stats.
-        if (!state->mode_byte && state->cfg_return_bytes) {
-            for (uint64_t i = 0; i < claim_count; i++) stat_add += state->stride_ring[(my_read_idx + i) & RING_MASK];
+    if (claim_count == 1) {
+        int64_t sbatch_now = atomic_load_relaxed(&state->signed_batch_size);
+        uint64_t tail_start = atomic_load_acquire(&state->tail_idx);
+        bool in_tail = (tail_start != 0 && my_read_idx >= tail_start);
+        if (!in_tail && sbatch_now > 0 && !(state->offset_ring[my_read_idx & RING_MASK] & FLAG_PARTIAL_BATCH)) {
+            final_lines = sbatch_now;
+        } else {
+            final_lines = state->stride_ring[my_read_idx & RING_MASK];
         }
+        uint64_t end_off = state->offset_ring[(my_read_idx + 1) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+        final_bytes = end_off - final_offset;
+    } else {
+        for (uint64_t i = 0; i < claim_count; i++) {
+            final_lines += state->stride_ring[(my_read_idx + i) & RING_MASK];
+        }
+        uint64_t start = state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+        uint64_t end   = state->offset_ring[(my_read_idx + claim_count) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+        final_bytes = end - start;
     }
     
-    if (stat_add > 0) atomic_fetch_add(&state->total_lines_consumed, stat_add);
-
+    atomic_fetch_add(&state->total_lines_consumed, final_lines);
+    
     char buf[64];
-    u64toa(final_val, buf); bind_var_or_array(v_target, buf, 0);
+    u64toa(final_offset, buf); bind_var_or_array(v_off, buf, 0);
+    u64toa(final_lines, buf); bind_var_or_array(v_cnt, buf, 0);
+    if (v_bytes) { u64toa(final_bytes, buf); bind_var_or_array(v_bytes, buf, 0); }
+
     u64toa(my_read_idx, buf); bind_variable("RING_BATCH_IDX", buf, 0);
     u64toa(claim_count, buf); bind_variable("RING_BATCH_SLOTS", buf, 0);
     
-    if (fd_read >= 0) {
-        uint64_t start_offset = state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-        if (lseek(fd_read, (off_t)start_offset, SEEK_SET) == (off_t)-1) {
-             if (g_debug) fprintf(stderr, "forkrun [DEBUG] ring_claim lseek failed: %s\n", strerror(errno));
+    if (fd_read >= 0 && final_lines > 0) {
+        if (lseek(fd_read, (off_t)final_offset, SEEK_SET) == (off_t)-1) {
+            if (g_debug) fprintf(stderr, "forkrun [DEBUG] ring_claim lseek failed: %s\n", strerror(errno));
         }
     }
     return 0;
@@ -1725,12 +1715,14 @@ static int ring_pipe_main(int argc, char **argv) {
     char buf[32];
     if (argc == 2) {
         const char *arr_name = argv[1];
-        SHELL_VAR *v = find_variable(arr_name);
-        if (v && !array_p(v)) { unbind_variable(arr_name); v = NULL; }
-        if (!v) v = make_new_array_variable(arr_name);
-        if (!v) { close(pfd[0]); close(pfd[1]); return EXECUTION_FAILURE; }
-        snprintf(buf, sizeof(buf), "%d", pfd[0]); bind_array_element(v, 0, buf, 0);
-        snprintf(buf, sizeof(buf), "%d", pfd[1]); bind_array_element(v, 1, buf, 0);
+        snprintf(buf, sizeof(buf), "%d", pfd[0]);
+        if (bind_array_variable((char*)arr_name, 0, buf, 0) == NULL) { 
+            close(pfd[0]); close(pfd[1]); return EXECUTION_FAILURE; 
+        }
+        snprintf(buf, sizeof(buf), "%d", pfd[1]);
+        if (bind_array_variable((char*)arr_name, 1, buf, 0) == NULL) {
+            close(pfd[0]); close(pfd[1]); return EXECUTION_FAILURE;
+        }
     } else {
         snprintf(buf, sizeof(buf), "%d", pfd[0]); bind_var_or_array(argv[1], buf, 0);
         snprintf(buf, sizeof(buf), "%d", pfd[1]); bind_var_or_array(argv[2], buf, 0);
@@ -1742,26 +1734,18 @@ static int ring_splice_main(int argc, char **argv) {
     if (argc < 5) return EXECUTION_FAILURE;
     int fd_in  = atoi(argv[1]); 
     int fd_out = atoi(argv[2]); 
-    
-    // Parse offset, allowing empty string as current offset
-    off_t off = 0;
-    off_t *p_off = NULL;
-    if (argv[3][0] != '\0') {
-        off_t parsed = (off_t)atoll(argv[3]);
-        if (parsed != -1) {
-            off = parsed;
-            p_off = &off;
-        }
-    }
-
+    off_t off  = (off_t)atoll(argv[3]);
     size_t len = (size_t)atoll(argv[4]);
     bool close_out = (argc > 5 && strcmp(argv[5], "close") == 0);
     
+    // OPTIMIZATION: Attempt to expand pipe buffer to 1MB.
+    // If fd_out is a regular file/socket, this fails harmlessly.
+    // If it's a pipe (even a standard Bash pipe), it accelerates throughput.
     fcntl(fd_out, F_SETPIPE_SZ, 1048576);
 
     size_t written = 0;
     while (written < len) {
-        ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written, SPLICE_F_MOVE|SPLICE_F_MORE);
+        ssize_t s = splice(fd_in, &off, fd_out, NULL, len - written, SPLICE_F_MOVE|SPLICE_F_MORE);
         if (s < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN) continue; 

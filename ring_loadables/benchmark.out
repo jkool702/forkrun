@@ -1,0 +1,380 @@
+
+(1): time frun  : <f1 >/dev/null
+
+(2): time frun  : <f1 | wc -l
+0
+
+(3): time { cat f1 | frun  : >/dev/null; }
+
+(4): time { cat f1 | frun  : | wc -l; }
+0
+
+(5): time frun  echo <f1 >/dev/null
+
+(6): time frun  echo <f1 | wc -l
+24440
+
+(7): time { cat f1 | frun  echo >/dev/null; }
+
+(8): time { cat f1 | frun  echo | wc -l; }
+24440
+
+(9): time frun  printf '%s\n' <f1 >/dev/null
+
+(10): time frun  printf '%s\n' <f1 | wc -l
+100000000
+
+(11): time { cat f1 | frun  printf '%s\n' >/dev/null; }
+
+(12): time { cat f1 | frun  printf '%s\n' | wc -l; }
+100000000
+
+(13): time frun -o : <f1 >/dev/null
+
+(14): time frun -o : <f1 | wc -l
+0
+
+(15): time { cat f1 | frun -o : >/dev/null; }
+
+(16): time { cat f1 | frun -o : | wc -l; }
+0
+
+(17): time frun -o echo <f1 >/dev/null
+
+(18): time frun -o echo <f1 | wc -l
+24440
+
+(19): time { cat f1 | frun -o echo >/dev/null; }
+
+(20): time { cat f1 | frun -o echo | wc -l; }
+24440
+
+(21): time frun -o printf '%s\n' <f1 >/dev/null
+
+(22): time frun -o printf '%s\n' <f1 | wc -l
+100000000
+
+(23): time { cat f1 | frun -o printf '%s\n' >/dev/null; }
+
+(24): time { cat f1 | frun -o printf '%s\n' | wc -l; }
+100000000
+
+(25): time frun -u : <f1 >/dev/null
+
+(26): time frun -u : <f1 | wc -l
+0
+
+(27): time { cat f1 | frun -u : >/dev/null; }
+
+(28): time { cat f1 | frun -u : | wc -l; }
+0
+
+(29): time frun -u echo <f1 >/dev/null
+
+(30): time frun -u echo <f1 | wc -l
+24440
+
+(31): time { cat f1 | frun -u echo >/dev/null; }
+
+(32): time { cat f1 | frun -u echo | wc -l; }
+24440
+
+(33): time frun -u printf '%s\n' <f1 >/dev/null
+
+(34): time frun -u printf '%s\n' <f1 | wc -l
+24440
+
+(35): time { cat f1 | frun -u printf '%s\n' >/dev/null; }
+
+(36): time { cat f1 | frun -u printf '%s\n' | wc -l; }
+24440
+
+(37): time frun -o -u : <f1 >/dev/null
+
+(38): time frun -o -u : <f1 | wc -l
+0
+
+(39): time { cat f1 | frun -o -u : >/dev/null; }
+
+(40): time { cat f1 | frun -o -u : | wc -l; }
+0
+
+(41): time frun -o -u echo <f1 >/dev/null
+
+(42): time frun -o -u echo <f1 | wc -l
+24440
+
+(43): time { cat f1 | frun -o -u echo >/dev/null; }
+
+(44): time { cat f1 | frun -o -u echo | wc -l; }
+24440
+
+(45): time frun -o -u printf '%s\n' <f1 >/dev/null
+
+(46): time frun -o -u printf '%s\n' <f1 | wc -l
+24440
+
+(47): time { cat f1 | frun -o -u printf '%s\n' >/dev/null; }
+
+(48): time { cat f1 | frun -o -u printf '%s\n' | wc -l; }
+24440
+
+(49): time frun  : <f2 >/dev/null
+
+(50): time frun  : <f2 | wc -l
+0
+
+(51): time { cat f2 | frun  : >/dev/null; }
+
+(52): time { cat f2 | frun  : | wc -l; }
+0
+
+(53): time frun  echo <f2 >/dev/null
+
+(54): time frun  echo <f2 | wc -l
+24440
+
+(55): time { cat f2 | frun  echo >/dev/null; }
+
+(56): time { cat f2 | frun  echo | wc -l; }
+24440
+
+(57): time frun  printf '%s\n' <f2 >/dev/null
+
+(58): time frun  printf '%s\n' <f2 | wc -l
+100000000
+
+(59): time { cat f2 | frun  printf '%s\n' >/dev/null; }
+
+(60): time { cat f2 | frun  printf '%s\n' | wc -l; }
+100000000
+
+(61): time frun -o : <f2 >/dev/null
+
+(62): time frun -o : <f2 | wc -l
+0
+
+(63): time { cat f2 | frun -o : >/dev/null; }
+
+(64): time { cat f2 | frun -o : | wc -l; }
+0
+
+(65): time frun -o echo <f2 >/dev/null
+
+(66): time frun -o echo <f2 | wc -l
+24440
+
+(67): time { cat f2 | frun -o echo >/dev/null; }
+
+(68): time { cat f2 | frun -o echo | wc -l; }
+24440
+
+(69): time frun -o printf '%s\n' <f2 >/dev/null
+
+(70): time frun -o printf '%s\n' <f2 | wc -l
+100000000
+
+(71): time { cat f2 | frun -o printf '%s\n' >/dev/null; }
+
+(72): time { cat f2 | frun -o printf '%s\n' | wc -l; }
+100000000
+
+(73): time frun -u : <f2 >/dev/null
+
+(74): time frun -u : <f2 | wc -l
+0
+
+(75): time { cat f2 | frun -u : >/dev/null; }
+
+(76): time { cat f2 | frun -u : | wc -l; }
+0
+
+(77): time frun -u echo <f2 >/dev/null
+
+(78): time frun -u echo <f2 | wc -l
+24440
+
+(79): time { cat f2 | frun -u echo >/dev/null; }
+
+(80): time { cat f2 | frun -u echo | wc -l; }
+24440
+
+(81): time frun -u printf '%s\n' <f2 >/dev/null
+
+(82): time frun -u printf '%s\n' <f2 | wc -l
+100000000
+
+(83): time { cat f2 | frun -u printf '%s\n' >/dev/null; }
+
+(84): time { cat f2 | frun -u printf '%s\n' | wc -l; }
+100000000
+
+(85): time frun -o -u : <f2 >/dev/null
+
+(86): time frun -o -u : <f2 | wc -l
+0
+
+(87): time { cat f2 | frun -o -u : >/dev/null; }
+
+(88): time { cat f2 | frun -o -u : | wc -l; }
+0
+
+(89): time frun -o -u echo <f2 >/dev/null
+
+(90): time frun -o -u echo <f2 | wc -l
+24440
+
+(91): time { cat f2 | frun -o -u echo >/dev/null; }
+
+(92): time { cat f2 | frun -o -u echo | wc -l; }
+24440
+
+(93): time frun -o -u printf '%s\n' <f2 >/dev/null
+
+(94): time frun -o -u printf '%s\n' <f2 | wc -l
+100000000
+
+(95): time { cat f2 | frun -o -u printf '%s\n' >/dev/null; }
+
+(96): time { cat f2 | frun -o -u printf '%s\n' | wc -l; }
+100000000
+
+(97): time frun  : <f3 >/dev/null
+
+(98): time frun  : <f3 | wc -l
+0
+
+(99): time { cat f3 | frun  : >/dev/null; }
+
+(100): time { cat f3 | frun  : | wc -l; }
+0
+
+(101): time frun  echo <f3 >/dev/null
+
+(102): time frun  echo <f3 | wc -l
+618
+
+(103): time { cat f3 | frun  echo >/dev/null; }
+
+(104): time { cat f3 | frun  echo | wc -l; }
+618
+
+(105): time frun  printf '%s\n' <f3 >/dev/null
+
+(106): time frun  printf '%s\n' <f3 | wc -l
+2425341
+
+(107): time { cat f3 | frun  printf '%s\n' >/dev/null; }
+
+(108): time { cat f3 | frun  printf '%s\n' | wc -l; }
+2425341
+
+(109): time frun -o : <f3 >/dev/null
+
+(110): time frun -o : <f3 | wc -l
+0
+
+(111): time { cat f3 | frun -o : >/dev/null; }
+
+(112): time { cat f3 | frun -o : | wc -l; }
+0
+
+(113): time frun -o echo <f3 >/dev/null
+
+(114): time frun -o echo <f3 | wc -l
+618
+
+(115): time { cat f3 | frun -o echo >/dev/null; }
+
+(116): time { cat f3 | frun -o echo | wc -l; }
+618
+
+(117): time frun -o printf '%s\n' <f3 >/dev/null
+
+(118): time frun -o printf '%s\n' <f3 | wc -l
+2425341
+
+(119): time { cat f3 | frun -o printf '%s\n' >/dev/null; }
+
+(120): time { cat f3 | frun -o printf '%s\n' | wc -l; }
+2425341
+
+(121): time frun -u : <f3 >/dev/null
+
+(122): time frun -u : <f3 | wc -l
+0
+
+(123): time { cat f3 | frun -u : >/dev/null; }
+
+(124): time { cat f3 | frun -u : | wc -l; }
+0
+
+(125): time frun -u echo <f3 >/dev/null
+
+(126): time frun -u echo <f3 | wc -l
+618
+
+(127): time { cat f3 | frun -u echo >/dev/null; }
+
+(128): time { cat f3 | frun -u echo | wc -l; }
+618
+
+(129): time frun -u printf '%s\n' <f3 >/dev/null
+
+(130): time frun -u printf '%s\n' <f3 | wc -l
+2465853
+
+(131): time { cat f3 | frun -u printf '%s\n' >/dev/null; }
+
+(132): time { cat f3 | frun -u printf '%s\n' | wc -l; }
+2465853
+
+(133): time frun -o -u : <f3 >/dev/null
+
+(134): time frun -o -u : <f3 | wc -l
+0
+
+(135): time { cat f3 | frun -o -u : >/dev/null; }
+
+(136): time { cat f3 | frun -o -u : | wc -l; }
+0
+
+(137): time frun -o -u echo <f3 >/dev/null
+
+(138): time frun -o -u echo <f3 | wc -l
+618
+
+(139): time { cat f3 | frun -o -u echo >/dev/null; }
+
+(140): time { cat f3 | frun -o -u echo | wc -l; }
+618
+
+(141): time frun -o -u printf '%s\n' <f3 >/dev/null
+
+(142): time frun -o -u printf '%s\n' <f3 | wc -l
+2465853
+
+(143): time { cat f3 | frun -o -u printf '%s\n' >/dev/null; }
+
+(144): time { cat f3 | frun -o -u printf '%s\n' | wc -l; }
+2465853
+
+
+-----------------------------
+INPUTS DATA STATS
+
+
+
+NAME: f1
+SIZE: 100000000 bytes
+LINE COUNT: 100000000 lines
+
+
+NAME: f2
+SIZE: 888888898 bytes
+LINE COUNT: 100000000 lines
+
+
+NAME: f3
+SIZE: 171088873 bytes
+LINE COUNT: 2425341 lines

@@ -130,7 +130,7 @@ frun() (
     ID="$1"
     shift 1
     ring_worker inc
-    while ring_claim OFF CNT $fd_read; do
+    while ring_claim CNT $fd_read; do
         [[ "$CNT" == "0" ]] && break
         mapfile -t -u ${fd_read} -n ${CNT} -d '"${delimiter_str}"' A
         '"${cmdline_str}"'
