@@ -1,5 +1,6 @@
 #!/bin/bash
 
+(
 # Compiler Flags
 # -O3: Max optimization
 # -flto=auto: Link Time Optimization
@@ -69,15 +70,16 @@ a1=''
  #   echo "a0 has $(wc -l <<<"$a0") lines"
     while true; do
         read -r  -u $fd_r  a
-	[[ "$a" == 'declare -A b64=(['*']=$'*')' ]] && break
         a1+="${a}"$'\n'
+	[[ "$a" == '# <@@@@@< _BASE64_START_ >@@@@@> #'* ]] && break
     done    
     } {fd_r}<&0
 #        echo "a1 has $(wc -l <<<"$a1") lines"
 } <./frun.bash
 
-eval "${a1}"
+declare -A b64
 
+eval "${a1}"
 
 for f in forkrun_ring.*.so; do
   a="${f%.so}"
@@ -92,6 +94,6 @@ echo "$a1"
 declare -p b64
 printf '\n\n_forkrun_bootstrap_setup --force\n\n'
 } >./frun.new.bash
-
+)
 
 

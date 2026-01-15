@@ -9,6 +9,12 @@ frun() (
     local -gx order_flag unsafe_flag
     local -ga fd_out args P
 
+    tStart="${EPOCHREALTIME//./}"
+
+    toc() {
+	    printf '\n%s finished at +%s us\n' "$*" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
+    }
+
     : "${nWorkers:=1}" "${nWorkersMax:=$(nproc)}"
 
     # export vars to tune workers
@@ -17,9 +23,7 @@ frun() (
 
     order_flag=false
     unsafe_flag=false
-    verbose_flag=false
     delimiter_val=$'\n'
-
     while true; do
         case "$1" in
             -o|--order)
@@ -39,9 +43,6 @@ frun() (
                     delimiter_val="${delimiter_val[0]}"
                 }
                 ;;
-            -v|--verbose)
-                verbose_flag=true
-                ;;
             --)
                 shift 1
                 break
@@ -52,15 +53,6 @@ frun() (
         esac
         shift 1
     done
-
-    if ${verbose_flag}; then
-        tStart="${EPOCHREALTIME//./}"
-toc() {
-    printf '\n%s finished at +%s us\n' "$*" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
-}
-    else
-toc() { :; }
-    fi
 
     # setup loadables if needed
     _forkrun_bootstrap_setup --fast
@@ -85,7 +77,7 @@ toc() { :; }
         (
             ring_copy ${fd_write} ${fd0}
             ring_signal
-        toc ring_copy
+	    toc ring_copy
         ) &
         COPY_PID=$!
 
@@ -94,7 +86,7 @@ toc() { :; }
         (
             exec {fd_spawn_r}<&-
             ring_scanner ${fd_scan} ${fd_spawn_w} "${delimiter_val}"
-        toc ring_scanner
+	    toc ring_scanner
         ) &
         SCANNER_PID=$!
         exec {fd_spawn_w}>&-
@@ -104,7 +96,7 @@ toc() { :; }
         (
             exec {fd_fallow_w}>&-
             ring_fallow ${fd_fallow_r} ${fd_write}
-            toc ring_fallow
+	    toc ring_fallow
         ) &
         FALLOW_PID=$!
         exec {fd_fallow_r}<&-
@@ -115,7 +107,7 @@ toc() { :; }
             (
                 exec {fd_order_w}>&-
                 ring_order ${fd_order_r} 'memfd' >&${fd1}
-                toc ring_order
+		toc ring_order
             ) &
             ORDER_PID=$!
             exec {fd_order_r}<&-
@@ -163,24 +155,24 @@ P+=($!)
 }'
         eval "${worker_func_src}"
 
-        toc 'initial setup'
+	toc 'initial setup'
 
         # spawn workers dynamically
         nWorkers=0
         while true; do
             read -r -u $fd_spawn_r N
             [[ "$N" == 'x' ]] && break
-            ${verbose_flag} && printf '\npreparing to spawn %s workers at +%s us...' "$N" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
+            printf '\npreparing to spawn %s workers at +%s us...' "$N" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
             nWorkers0="$nWorkers"
             (( ( nWorkers0 + N ) > nWorkersMax )) && (( N = nWorkersMax - nWorkers0 ))
             (( N > 0 )) && for (( nWorkers=nWorkers0; nWorkers<nWorkers0+N; nWorkers++ )); do
                 spawn_worker "$nWorkers"
             done
-            ${verbose_flag} && printf '\nspawned %s workers at +%s us\n' "$N" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
+            printf '\nspawned %s workers at +%s us\n' "$N" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
             nWorkersA+=("$N")
         done
 
-        toc 'spawning workers'
+	toc 'spawning workers'
 
 
         exec {fd_spawn_r}<&- {fd_fallow_w}>&-
@@ -196,8 +188,6 @@ P+=($!)
 
         # close the fd's
         exec {fd_write}>&- {fd_scan}<&- {ingress_memfd}>&-
-
-        toc 'MAIN FUNCTION'
 
         # ensure helper processes are dead
         #kill $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null

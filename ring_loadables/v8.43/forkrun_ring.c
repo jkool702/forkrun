@@ -1,12 +1,12 @@
-// forkrun_ring.c v8.46
+// forkrun_ring.c v8.44
 // ======================================================================================
-// CHANGES vs v8.45:
-// 1. RESTORATION: Restored "Geometric Worker Spawning" in Phase 1 (Ramp-Up).
-//    - Calculates exact worker count needed when Batch Size doubles.
-//    - Ensures aggressive spawning during startup (restoring v8.30-v8.36 behavior).
-// 2. LOGIC: Separated Phase 0/1 (Warmup) from Phase 2 (Steady State) more cleanly
-//    to prevent fighting between the deterministic Ramp logic and reactive PID logic.
-// 3. PRESERVED: "Cold Start" backlog check (v8.45) for Fixed-Batch modes.
+// CHANGES vs v8.43:
+// 1. SIMPLIFICATION: Unified Scanner Write Strategy.
+//    - Reverted "Adaptive Write". Scanner ALWAYS uses Fencepost method.
+//    - Writes offset[i+1] (Next Start).
+//    - Skips offset[i] (Current Start) unless Partial Flag needs setting or Overwrite mode.
+//    - This keeps the code simple while supporting O(1) byte calculation if needed later.
+// 2. Preserved Blocking Read fix for ring_fallow/ring_order (from v8.43).
 // ======================================================================================
 
 #ifndef _GNU_SOURCE
@@ -554,7 +554,7 @@ static int ring_init_main(int argc, char **argv) {
 }
 
 static int ring_destroy_main(int argc, char **argv) {
-    (void)argc;    (void)argv;
+    (void)argc;  (void)argv;
     if (state) { munmap(state, sizeof(struct SharedState)); state = NULL; }
     if (evfd_data >= 0) { close(evfd_data); evfd_data = -1; }
     if (evfd_eof >= 0) { close(evfd_eof); evfd_eof = -1; }
@@ -603,7 +603,11 @@ static inline void scanner_adaptive_commit(bool force) {
     }
 }
 
-#define SCANNER_FLUSH(cnt, do_fencepost, overwrite) do { \
+// UNIFIED SCANNER_FLUSH (ALWAYS FENCEPOST)
+// Writes offset[i+1] (Next Start).
+// Writes offset[i] (Current Start) ONLY if Flag needed or Overwrite.
+// Skips Stride in Byte Mode.
+#define SCANNER_FLUSH(cnt, overwrite) do { \
     while(1) { \
         uint64_t limit; \
         if (atomic_load_relaxed(&state->fallow_active)) limit = atomic_load_acquire(&state->min_idx); \
@@ -615,13 +619,8 @@ static inline void scanner_adaptive_commit(bool force) {
     uint64_t pk = (uint64_t)batch_start; \
     if (cnt != L) pk |= FLAG_PARTIAL_BATCH; \
     if (!byte_mode) state->stride_ring[local_scan_idx & RING_MASK] = (uint16_t)cnt; \
-    \
-    if (do_fencepost) { \
-        state->offset_ring[(local_scan_idx + 1) & RING_MASK] = current_p_offset; \
-        if ((pk & FLAG_PARTIAL_BATCH) || (overwrite)) { \
-            state->offset_ring[local_scan_idx & RING_MASK] = pk; \
-        } \
-    } else { \
+    state->offset_ring[(local_scan_idx + 1) & RING_MASK] = current_p_offset; \
+    if ((pk & FLAG_PARTIAL_BATCH) || (overwrite)) { \
         state->offset_ring[local_scan_idx & RING_MASK] = pk; \
     } \
     local_scan_idx++; \
@@ -644,8 +643,7 @@ static int ring_scanner_main(int argc, char **argv) {
     bool     byte_mode = state->mode_byte;
     bool     fixed_batch = state->fixed_batch;
     bool     fixed_workers = state->fixed_workers;
-    bool     return_bytes = state->cfg_return_bytes; // Read from config
-
+    
     uint64_t W2 = fast_log2(W_max_val);
     uint64_t L2 = fast_log2(Lmax);
     uint64_t X_const = fast_log2(W2 + L2) * W2;
@@ -801,7 +799,7 @@ static int ring_scanner_main(int argc, char **argv) {
             
             if (flush) {
                 uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf) + take;
-                SCANNER_FLUSH(1, true, false); 
+                SCANNER_FLUSH(1, false);
                 p += take;
                 batch_start += take;
                 total_scanned++;
@@ -838,8 +836,8 @@ static int ring_scanner_main(int argc, char **argv) {
                 
                 if (flush) {
                     uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-                    // Adaptive Flush: Only write fencepost if bytes requested
-                    SCANNER_FLUSH(pending_lines, return_bytes, false);
+                    // Pass 'overwrite=false'
+                    SCANNER_FLUSH(pending_lines, false);
                     batch_start = current_p_offset;
                     pending_lines = 0;
                     first_wait_ts = 0;
@@ -863,7 +861,6 @@ static int ring_scanner_main(int argc, char **argv) {
             
             target_count = W * 4; if (target_count < 4) target_count = 4;
 
-            // --- RESTORED: Geometric Spawning during Ramp Up ---
             if (!fixed_batch && !byte_mode) {
                 if (phase == 0) {
                     if (batch_counter >= target_count) { phase = 1; batch_counter = 0; }
@@ -872,25 +869,6 @@ static int ring_scanner_main(int argc, char **argv) {
                     else if (batch_counter >= target_count) {
                         L *= 2;
                         if (L >= Lmax) { L = Lmax; phase = 2; }
-                        
-                        // Restored Logic:
-                        if (W < W_max_val && !fixed_workers) {
-                            uint64_t l_log = fast_log2(L);
-                            uint64_t num = 6 * (W_max_val - W) * L2;
-                            uint64_t den = X_const * (L2 + l_log);
-                            if (den == 0) den = 1;
-                            uint64_t n_spawn = num / den;
-                            if (n_spawn < 1) n_spawn = 1;
-                            if (n_spawn > (W_max_val - W)) n_spawn = W_max_val - W;
-                            if (fd_spawn >= 0) {
-                                char sbuf[64];
-                                int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", n_spawn);
-                                if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
-                                W += n_spawn;
-                                atomic_store_relaxed(&state->active_workers, W);
-                            }
-                        }
-                        
                         atomic_store_release(&state->batch_change_idx, local_scan_idx);
                         atomic_store_release(&state->signed_batch_size, -(int64_t)L);
                         batch_counter = 0;
@@ -917,20 +895,14 @@ static int ring_scanner_main(int argc, char **argv) {
                     if (fixed_batch) {
                         if (backlog > W && starvation == 0) spawn = true; 
                     } else {
-                        // Rate extrapolation check (Case C)
                         if (d_out > 0) {
                             uint64_t rate = d_out / W; if(rate==0) rate=1;
                             uint64_t w_ideal = d_in / rate;
                             if (w_ideal > W) spawn = true;
-                        } 
-                        // Cold Start Fallback: If rates are 0 but backlog is high
-                        else if (backlog > (W * 4) && starvation == 0) {
-                             spawn = true;
                         }
                     }
-                    
-                    // Only run generic spawn logic if NOT in phase 1 (to avoid conflict)
-                    if (spawn && phase != 1) {
+
+                    if (spawn) {
                         grow = 1; 
                         if (!fixed_batch) grow = (W + 1) / 2;
                         if (W + grow > W_max_val) grow = W_max_val - W;
@@ -1068,7 +1040,7 @@ static int ring_scanner_main(int argc, char **argv) {
                 }
                 uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
                 // Force Overwrite Mode for Tail
-                SCANNER_FLUSH(lines_found, true, true);
+                SCANNER_FLUSH(lines_found, true);
                 batch_start = current_p_offset;
                 L_tail_done += lines_found;
             } else break; 
