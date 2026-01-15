@@ -34,6 +34,8 @@ t_sys=${t_sys//[.s:]/}
 cpu=$(( 1000 * ( 60000 * ( 10#0${t_user%m*} + 10#0${t_sys%m*} ) + 10#0${t_user#*m} + 10#0${t_sys#*m} ) /  ( 60000 * 10#0${t_real%m*} + 10#0${t_real#*m} ) ))
 
 printf '\nCPU UTILIZATION: %0.1d.%0.3d / %d\n' "${cpu:0:$((${#cpu}-3))}" "${cpu:$((${#cpu}-3))}" "$(nproc)"
+printf '\n-----------------------------------------\n'
+
 exec {fd_time}<&-
 }
 
