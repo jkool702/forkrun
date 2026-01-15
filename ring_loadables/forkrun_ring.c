@@ -1,12 +1,13 @@
-// forkrun_ring.c v8.46
+// forkrun_ring.c v8.48 (Golden Master - Regression Fix)
 // ======================================================================================
-// CHANGES vs v8.45:
-// 1. RESTORATION: Restored "Geometric Worker Spawning" in Phase 1 (Ramp-Up).
-//    - Calculates exact worker count needed when Batch Size doubles.
-//    - Ensures aggressive spawning during startup (restoring v8.30-v8.36 behavior).
-// 2. LOGIC: Separated Phase 0/1 (Warmup) from Phase 2 (Steady State) more cleanly
-//    to prevent fighting between the deterministic Ramp logic and reactive PID logic.
-// 3. PRESERVED: "Cold Start" backlog check (v8.45) for Fixed-Batch modes.
+// CHANGES vs v8.47:
+// 1. REGRESSION FIX: Restored strict "Batch Shrink" logic from v8.35.
+//    - Now requires BOTH Starvation (workers waiting) AND Stall (Scanner waiting)
+//      counters to be high before reducing batch size.
+//    - Prevents unnecessary overhead increase when system is CPU-bound (workers slow).
+// 2. CLEANUP: Removed unused 'is_variable_name' function.
+// 3. CLEANUP: Fixed signed/unsigned comparison warnings in ring_init loops.
+// 4. CLEANUP: Added (void) casts for unused args in minor loadables.
 // ======================================================================================
 
 #ifndef _GNU_SOURCE
@@ -339,6 +340,7 @@ static __thread bool is_waiting_on_ring = false;
 static __thread off_t last_ack_offset = 0; 
 static __thread int ack_cached_target_fd = -1;
 static __thread int ack_cached_mode = 0; 
+static __thread int worker_cached_fd = -1;
 
 struct EscrowPacket { uint64_t idx; uint64_t cnt; };
 struct IndexPacket  { uint64_t idx; uint64_t cnt; }; 
@@ -394,7 +396,9 @@ static int ring_init_main(int argc, char **argv) {
         atomic_store_relaxed(&state->fallow_active, 0);
         atomic_store_relaxed(&state->tail_idx, 0);
         atomic_store_relaxed(&state->scanner_finished, 0);
+        
         state->offset_ring[0] = 0;
+        
         if (fd_escrow[0] >= 0) {
             char dump[1024];
             while(read(fd_escrow[0], dump, sizeof(dump)) > 0) {}
@@ -414,7 +418,7 @@ static int ring_init_main(int argc, char **argv) {
     if (nproc < 1) nproc = 1;
     
     char *tv;
-    uint64_t env_w_max = nproc;
+    uint64_t env_w_max = (uint64_t)nproc;
     uint64_t env_w_start = 1;
     uint64_t env_l_max = 4096;
     uint64_t env_b_max = 0; 
@@ -554,7 +558,7 @@ static int ring_init_main(int argc, char **argv) {
 }
 
 static int ring_destroy_main(int argc, char **argv) {
-    (void)argc;    (void)argv;
+    (void)argc; (void)argv;
     if (state) { munmap(state, sizeof(struct SharedState)); state = NULL; }
     if (evfd_data >= 0) { close(evfd_data); evfd_data = -1; }
     if (evfd_eof >= 0) { close(evfd_eof); evfd_eof = -1; }
@@ -644,7 +648,7 @@ static int ring_scanner_main(int argc, char **argv) {
     bool     byte_mode = state->mode_byte;
     bool     fixed_batch = state->fixed_batch;
     bool     fixed_workers = state->fixed_workers;
-    bool     return_bytes = state->cfg_return_bytes; // Read from config
+    bool     return_bytes = state->cfg_return_bytes; 
 
     uint64_t W2 = fast_log2(W_max_val);
     uint64_t L2 = fast_log2(Lmax);
@@ -859,11 +863,11 @@ static int ring_scanner_main(int argc, char **argv) {
             uint64_t xLim = W + DAMPING_OFFSET;
             if (starvation) starve_meter = (starve_meter + xLim) >> 1;
             else starve_meter >>= 1;
+            // Stall meter tracks scanner waiting on IO (Refill status 2)
             stall_meter >>= 1; 
             
             target_count = W * 4; if (target_count < 4) target_count = 4;
 
-            // --- RESTORED: Geometric Spawning during Ramp Up ---
             if (!fixed_batch && !byte_mode) {
                 if (phase == 0) {
                     if (batch_counter >= target_count) { phase = 1; batch_counter = 0; }
@@ -873,7 +877,6 @@ static int ring_scanner_main(int argc, char **argv) {
                         L *= 2;
                         if (L >= Lmax) { L = Lmax; phase = 2; }
                         
-                        // Restored Logic:
                         if (W < W_max_val && !fixed_workers) {
                             uint64_t l_log = fast_log2(L);
                             uint64_t num = 6 * (W_max_val - W) * L2;
@@ -917,19 +920,15 @@ static int ring_scanner_main(int argc, char **argv) {
                     if (fixed_batch) {
                         if (backlog > W && starvation == 0) spawn = true; 
                     } else {
-                        // Rate extrapolation check (Case C)
                         if (d_out > 0) {
                             uint64_t rate = d_out / W; if(rate==0) rate=1;
                             uint64_t w_ideal = d_in / rate;
                             if (w_ideal > W) spawn = true;
-                        } 
-                        // Cold Start Fallback: If rates are 0 but backlog is high
-                        else if (backlog > (W * 4) && starvation == 0) {
+                        } else if (backlog > (W * 4) && starvation == 0) {
                              spawn = true;
                         }
                     }
                     
-                    // Only run generic spawn logic if NOT in phase 1 (to avoid conflict)
                     if (spawn && phase != 1) {
                         grow = 1; 
                         if (!fixed_batch) grow = (W + 1) / 2;
@@ -957,12 +956,14 @@ static int ring_scanner_main(int argc, char **argv) {
                         L = l_target;
                         atomic_store_release(&state->batch_change_idx, local_scan_idx);
                         atomic_store_release(&state->signed_batch_size, -(int64_t)L);
-                    } else if (l_target < L && starve_meter >= (xLim - 3)) {
+                    } else if (l_target < L && starve_meter >= (xLim - 3) && stall_meter >= (xLim - 3)) {
+                        // FIXED: Reverted to requiring BOTH starve and stall to shrink
                         L = (L + l_target) / 2;
                         if (L < 1) L = 1;
                         atomic_store_release(&state->batch_change_idx, local_scan_idx);
                         atomic_store_release(&state->signed_batch_size, -(int64_t)L);
                         starve_meter = 0; 
+                        stall_meter = 0;
                     }
                 }
             }
@@ -1103,6 +1104,9 @@ static int ring_claim_main(int argc, char **argv) {
     uint64_t my_read_idx;
     uint64_t claim_count = 1;
     int spin = 0;
+    
+    // Use cached FD if not provided
+    if (fd_read < 0) fd_read = worker_cached_fd;
     
 restart_loop:
     while (1) {
@@ -1669,9 +1673,16 @@ static int ring_fallow_main(int argc, char **argv) {
 
 static int ring_ingest_main(int argc, char **argv) { (void)argc; (void)argv; if (state) atomic_store_release(&state->ingest_complete, 1); return EXECUTION_SUCCESS; }
 static int ring_worker_main(int argc, char **argv) {
-    if (argc!=2) return EXECUTION_FAILURE;
-    if (!strcmp(argv[1],"inc")) atomic_fetch_add(&state->active_workers,1);
-    else if (!strcmp(argv[1],"dec")) { cleanup_waiter_state(); atomic_fetch_sub(&state->active_workers, 1); }
+    if (argc < 2) return EXECUTION_FAILURE;
+    if (!strcmp(argv[1],"inc")) {
+        atomic_fetch_add(&state->active_workers,1);
+        if (argc >= 3 && isdigit(argv[2][0])) worker_cached_fd = atoi(argv[2]);
+    }
+    else if (!strcmp(argv[1],"dec")) { 
+        cleanup_waiter_state(); 
+        atomic_fetch_sub(&state->active_workers, 1); 
+        worker_cached_fd = -1;
+    }
     return EXECUTION_SUCCESS;
 }
 static int ring_cleanup_waiter_main(int argc, char **argv) { (void)argc; (void)argv; cleanup_waiter_state(); return EXECUTION_SUCCESS; }

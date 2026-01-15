@@ -68,7 +68,33 @@ for f in f1 f2 f3; do
 printf '\n\nNAME: %s\nSIZE: %s bytes\nLINE COUNT: %s lines\n' "$f" "$(du -d 0 -b "$f" | sed -E s/'[ \t].*$//')" "$(wc -l <"$f")"
 done
 
-) {fd1}>&1 {fd2}>&2
 
-{ for f in real user sys; do grep -E '^'"$f" <benchmark.out | sed -E 's/^'"$f"'[ \t]*//'| { declare -i v=0;  while read -r nn; do m=${nn%%m*}; s=${nn#*m}; s=${s//[^0-9]/}; v=$(( v + (60000 * 10#0${m}) + 10#0${s} )); done; printf '\ntotal %s = %s us\n' "$f" "$v" >&$fd2; }; done; } {fd2}>&2
 ) | tee benchmark.out
+
+unset outA;
+declare -A outA;
+for f in real user sys; do
+	{ 
+		{
+		declare -i v=0;  
+		while read -r -u $fd0 nn; do 
+			m=${nn%%m*}; 
+			s=${nn#*m}; 
+			s=${s//[^0-9]/};
+			v=$(( v + (60000 * 10#0${m}) + 10#0${s} )); 
+		done; 
+		outA[$f]="$v"
+		} {fd2}>&2 {fd0}<&0
+	} < <(grep -E '^'"$f" <benchmark.out | sed -E 's/^'"$f"'[ \t]*//')
+done
+
+for f in "${!outA[@]}"; do
+	v="${outA[$f]}"
+	printf '\ntotal %s = %s us\n' "$f" "$v" | tee -a benchmark.out >&$fd2
+done
+
+cpu=$(( 1000 * ( 10#0${outA[user]} + 10#0${outA[sys]} ) / 10#0${outA[real]} ))
+printf '\n\nOVERALL CPU UTILIZATION: %d.%0.3d / %s\n\n' "${cpu:0:$((${#cpu}-3))}" "${cpu:$((${#cpu}-3))}" "$(nproc)" |  tee -a benchmark.out >&$fd2
+
+\rm f1 f2 f3
+) {fd1}>&1 {fd2}>&2
