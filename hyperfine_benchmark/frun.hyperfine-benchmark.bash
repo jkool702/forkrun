@@ -11,10 +11,14 @@ renice --priority -20 --pid $$
 	for nn in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo 'performance' >"${nn}"; done
 }
 
+declare -F forkrun &>/dev/null || { 
+    [[ -f ./forkrun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_async-i0_3/forkrun.bash
+    . ./forkrun.bash
+}
 declare -F frun &>/dev/null || { 
-    #[[ -f ./frun.bash ]] || wget  https://raw.githubusercontent.com/jkool702/frun/main/frun.bash
-    [[ -f ./frun.bash ]] || wget https://raw.githubusercontent.com/jkool702/frun/refs/heads/frun_testing_nSpawn_5/frun.bash
+    [[ -f ./frun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_async-i0_3/ring_loadables/frun.bash
     . ./frun.bash
+	export -f frun
 }
 #export -f frun
 
@@ -168,7 +172,7 @@ for jj in "${!C0[@]}"; do
            'frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\
            'xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --',\
            'forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--'\
-           --export-json ""${hfdir}"/results/frun.${c// /_}.f${kk}.hyperfine.results" --style=full \
+           --export-json ""${hfdir}"/results/frun.${c// /_}.${fA[$ckk]}${kk}.hyperfine.results" --style=full \
            --setup 'shopt -s extglob && renice --priority -20 --pid $$' \
            --prepare 'shopt -s extglob && renice --priority -20 --pid $$' \
            '. /mnt/ramdisk/forkrun/forkrun.bash && enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_list} &&  '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
@@ -177,7 +181,7 @@ for jj in "${!C0[@]}"; do
                'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\
                'frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\
                'xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --'\
-               --export-json ""${hfdir}"/results/frun.${c// /_}.f${kk}.hyperfine.results" --style=full \
+               --export-json ""${hfdir}"/results/frun.${c// /_}.${fA[$ckk]}${kk}.hyperfine.results" --style=full \
                --setup 'shopt -s extglob && renice --priority -20 --pid $$' \
                --prepare 'shopt -s extglob && renice --priority -20 --pid $$' \
                'enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_list} && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
@@ -198,8 +202,9 @@ for jj in "${!C0[@]}"; do
         printf '\n\n'; 
         for kk in "${!nArgs[@]}"; do [[ "$kk" == 0 ]] && continue
             printf '%s\t' "${nArgs[$kk]}"
-            for c in "${cksumAlgsA[@]}"; do
-                printf '%0.12s\t' $(grep -F "$t" < "${hfdir}"/results/frun."${c// /_}".f${kk}.hyperfine.results | sed -E s/'^.*\:'//)
+            for ckk in "${!cksumAlgsA[@]}"; do
+		        c="${cksumAlgsA[$ckk]}"
+		        printf '%0.12s\t' $(grep -F "$t" < "${hfdir}"/results/frun."${c// /_}".${fA[$ckk]}${kk}.hyperfine.results | sed -E s/'^.*\:'//)
             done
             printf '\n'
         done
@@ -280,16 +285,17 @@ for jj in "${!C0[@]}"; do
         T1=0.0
         T2=0.0
         ${testForkrunFlag} && T3=0.0
-        for c in "${cksumAlgsA[@]}"; do
+        for ckk in "${!cksumAlgsA[@]}"; do
+		    c=-"${cksumAlgsA[$ckk]}"
             if [[ "${c}" == 'OVERALL' ]]; then
                 if ${testForkrunFlag}; then
-		    A0=(${T0} ${T1} ${T2} ${T3})
+		            A0=(${T0} ${T1} ${T2} ${T3})
                 else
                     A0=(${T0} ${T1} ${T2})
                 fi
                 printf '\n'
             else
-                mapfile -t A0 < <(grep -F "mean" < "${hfdir}"/results/frun."${c// /_}".f${kk}.hyperfine.results | sed -E s/'^.*\:'//)
+                mapfile -t A0 < <(grep -F "mean" < "${hfdir}"/results/frun."${c// /_}".${fA[$ckk]}${kk}.hyperfine.results | sed -E s/'^.*\:'//)
                 A0=("${A0[@]//[ ,]/}")
 
                 T0="$(bc <<<"${T0} + ${A0[0]}")"
