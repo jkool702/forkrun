@@ -81,21 +81,21 @@ testForkrunFlag=false
 declare -a C0 C1
 
 C0[0]=''
-C1[0]=' <"'"${hfdir0}"'"/file_lists/f${kk}'
+C1[0]=' <"'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk}'
 
-#C0[1]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
+#C0[1]='cat "'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} | '
 #C1[1]=''
 
 #C0[2]=''
-#C1[2]=' <"'"${hfdir0}"'"/file_lists/f${kk} | wc -l'
+#C1[2]=' <"'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} | wc -l'
 
-#C0[3]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
+#C0[3]='cat "'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} | '
 #C1[3]=' | wc -l'
 
 #C0[4]=''
-#C1[4]=' <"'"${hfdir0}"'"/file_lists/f${kk} >/dev/null'
+#C1[4]=' <"'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} >/dev/null'
 
-#C0[5]='cat "'"${hfdir0}"'"/file_lists/f${kk} | '
+#C0[5]='cat "'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} | '
 #C1[5]=' >/dev/null'
 
 mkdir -p "${hfdir0}"/file_lists
@@ -111,6 +111,16 @@ nArgs+=(${nArgsMax})
 
 cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "sum -r" cksum b2sum "cksum -a sm3" xxhsum "xxhsum -H3")
 
+testAlgsA=(':' 'echo' 'printf '"'"'%s\n'"'")
+
+fA=("${cksumAlgsA//*/f}")
+fA+=(s s s n n n)
+
+cksumAlgsA+=("${testAlgsA[@]}" "${testAlgsA[@]}")
+
+seq 100000000 >"${hfdir0}"/file_lists/s0
+yes $'\n' | head -n 100000000 >"${hfdir0}"/file_lists/n0
+nA=()
 
 #if ${nullFlag}; then
 #    nArgsMax="$(tr $'\x00' $'\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
@@ -120,6 +130,13 @@ cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "su
 for (( kk=1; kk<${#nArgs[@]}; kk++ )); do
 
 	shuf $(${nullFlag} && printf '%s' '-z') -n ${nArgs[$kk]} >"${hfdir0}"/file_lists/f${kk} <"${hfdir0}"/file_lists/f0
+
+	(( K = 8 + kk - ${#nArgs[@]} ))
+	(( K = (K >= 0) ? 10 ** K : 1 ))
+	nA+=($K)
+
+	head -n $K <"${hfdir0}"/file_lists/s0 >"${hfdir0}"/file_lists/s${kk}
+	head -n $K <"${hfdir0}"/file_lists/n0 >"${hfdir0}"/file_lists/n${kk}
 
 #    (( nArgs[$kk] >= nArgsMax )) && {
 #        nArgs=("${nArgs[@]:0:$((kk+1))}")
@@ -134,10 +151,16 @@ for jj in "${!C0[@]}"; do
     mkdir -p "${hfdir}"/results
 
     for (( kk=1; kk<${#nArgs[@]}; kk++ )); do
-        printf '\n-------------------------------- STARTING TESTING FOR %s VALUES --------------------------------\n\n' "${nArgs[$kk]}"; 
+        printf '\n-------------------------------- STARTING TESTING FOR %s CHECKSUMS / %s VALUES --------------------------------\n\n' "${nArgs[$kk]}" "${nA[$kk]}"; 
 
-        for c in "${cksumAlgsA[@]}"; do 
-            printf '\n---------------- %s (%s) ----------------\n\n' "$c" "${nArgs[$kk]}"; 
+        for ckk in "${!cksumAlgsA[@]}"; do
+		c="${cksumAlgsA[$ckk]}"
+		case "${fA[$ckk]}" in
+		f) printf '\n---------------- %s (%s) (cksum) ----------------\n\n' "$c" "${nArgs[$kk]}" ;;
+		s) printf '\n---------------- %s (%s) (seq) ------------------\n\n' "$c" "${nArgs[$kk]}" ;;
+		n) printf '\n---------------- %s (%s) (newline) --------------\n\n' "$c" "${nArgs[$kk]}" ;;
+		esac
+		
 
             if ${testForkrunFlag}; then
 		       hyperfine -w 1 -i --shell=bash --parameter-list cmd \
@@ -161,7 +184,7 @@ for jj in "${!C0[@]}"; do
             fi
 
         done
-    done | tee -a "${hfdir}"/results/frun.stdout.results
+    done  | tee -a "${hfdir}"/results/frun.stdout.results
 
     # generare quick table of results (raw times)
 
