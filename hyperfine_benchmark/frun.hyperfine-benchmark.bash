@@ -20,6 +20,9 @@ declare -F frun &>/dev/null || {
     . ./frun.bash
 	export -f frun
 }
+ring_list 'ring_listA'
+printf -v ring_list '%s ' "${ring_listA[@]}"
+export ring_list="${ring_list% }"
 #export -f frun
 
 : <<EOC
@@ -53,8 +56,7 @@ findDirDefault='/usr'
     ramdiskTransferFlag=false
 }
 
-: "${findDir:="${findDirDefault}"}" "${ramdiskTransferFlag:=true}" "${nullFlag:=true}"
-
+: "${findDir:="${findDirDefault}"}" "${ramdiskTransferFlag:=true}" "${nullFlag:=false}"
 findDir="$(realpath "${findDir}")"
 findDir="${findDir%/}"
 
@@ -80,26 +82,26 @@ else
 
 fi
 "${testForkrunFlag:=true}"
-testForkrunFlag=false
+testForkrunFlag=true
 
 declare -a C0 C1
 
 C0[0]=''
-C1[0]=' <"'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk}'
+C1[0]=' <"'"${hfdir0}"'"/file_lists/f${kk}'
 
-#C0[1]='cat "'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} | '
+#C0[1]='cat "'"${hfdir0}"'"/file_lists/@f${kk} | '
 #C1[1]=''
 
 #C0[2]=''
-#C1[2]=' <"'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} | wc -l'
+#C1[2]=' <"'"${hfdir0}"'"/file_lists/@f${kk} | wc -l'
 
-#C0[3]='cat "'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} | '
+#C0[3]='cat "'"${hfdir0}"'"/file_lists/@f${kk} | '
 #C1[3]=' | wc -l'
 
 #C0[4]=''
-#C1[4]=' <"'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} >/dev/null'
+#C1[4]=' <"'"${hfdir0}"'"/file_lists/@f${kk} >/dev/null'
 
-#C0[5]='cat "'"${hfdir0}"'"/file_lists/${fA[$ckk]}${kk} | '
+#C0[5]='cat "'"${hfdir0}"'"/file_lists/@f${kk} | '
 #C1[5]=' >/dev/null'
 
 mkdir -p "${hfdir0}"/file_lists
@@ -107,7 +109,7 @@ mkdir -p "${hfdir0}"/file_lists
 find "${findDir}" -type f $(${nullFlag} && printf '%s' '-print0') >"${hfdir0}"/file_lists/f0
 
 nArgsMax="$(tr '\0' '\n' <"${hfdir0}"/file_lists/f0 | wc -l)"
-nArgs=('' 1024 )
+nArgs=('' 4096)
 until (( ( 4 * nArgs[-1] ) >= nArgsMax )); do
 	nArgs+=($((4 * nArgs[-1])))
 done
@@ -117,7 +119,7 @@ cksumAlgsA=(sha1sum sha256sum sha512sum sha224sum sha384sum md5sum  "sum -s" "su
 
 testAlgsA=(':' 'echo' 'printf '"'"'%s\n'"'")
 
-fA=("${cksumAlgsA//*/f}")
+fA=("${cksumAlgsA[@]//*/f}")
 fA+=(s s s n n n)
 
 cksumAlgsA+=("${testAlgsA[@]}" "${testAlgsA[@]}")
@@ -147,6 +149,7 @@ for (( kk=1; kk<${#nArgs[@]}; kk++ )); do
 #        break
 #    }
 done
+nA+=($(( ${nA[-1]} * 10 )))
 
 for jj in "${!C0[@]}"; do
         
@@ -159,33 +162,26 @@ for jj in "${!C0[@]}"; do
 
         for ckk in "${!cksumAlgsA[@]}"; do
 		c="${cksumAlgsA[$ckk]}"
+		fC=${fA[$ckk]}
 		case "${fA[$ckk]}" in
 		f) printf '\n---------------- %s (%s) (cksum) ----------------\n\n' "$c" "${nArgs[$kk]}" ;;
-		s) printf '\n---------------- %s (%s) (seq) ------------------\n\n' "$c" "${nArgs[$kk]}" ;;
-		n) printf '\n---------------- %s (%s) (newline) --------------\n\n' "$c" "${nArgs[$kk]}" ;;
+		s) printf '\n---------------- %s (%s) (seq) ------------------\n\n' "$c" "${nA[$kk]}" ;;
+		n) printf '\n---------------- %s (%s) (newline) --------------\n\n' "$c" "${nA[$kk]}" ;;
 		esac
 		
 
-            if ${testForkrunFlag}; then
-		       hyperfine -w 1 -i --shell=bash --parameter-list cmd \
-           'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\
-           'frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\
-           'xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --',\
-           'forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--'\
-           --export-json ""${hfdir}"/results/frun.${c// /_}.${fA[$ckk]}${kk}.hyperfine.results" --style=full \
-           --setup 'shopt -s extglob && renice --priority -20 --pid $$' \
-           --prepare 'shopt -s extglob && renice --priority -20 --pid $$' \
-           '. /mnt/ramdisk/forkrun/forkrun.bash && enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_list} &&  '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
-            else
-               hyperfine -w 1 -i --shell=bash --parameter-list cmd \
-               'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\
-               'frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\
-               'xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --'\
-               --export-json ""${hfdir}"/results/frun.${c// /_}.${fA[$ckk]}${kk}.hyperfine.results" --style=full \
-               --setup 'shopt -s extglob && renice --priority -20 --pid $$' \
-               --prepare 'shopt -s extglob && renice --priority -20 --pid $$' \
-               'enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_list} && '"${C0[$jj]//'${kk}'/${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'${kk}'/${kk}}"
-            fi
+#            if ${testForkrunFlag}; then
+		       hyperfine -w 1 -i --shell=bash --parameter-list cmd 'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --','frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --','forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--' --export-json ""${hfdir}"/results/frun.${c// /_}.${fC}${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_list} &&  '"${C0[$jj]//'f${kk}'/${fC}${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'f${kk}'/${fC}${kk}}"
+#            else
+#               hyperfine -w 1 -i --shell=bash --parameter-list cmd \
+#               'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\
+#               'frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\
+#               'xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --'\
+#               --export-json ""${hfdir}"/results/frun.${c// /_}.${fA[$ckk]}${kk}.hyperfine.results" --style=full \
+#               --setup 'shopt -s extglob && renice --priority -20 --pid $$' \
+#               --prepare 'shopt -s extglob && renice --priority -20 --pid $$' \
+#               'enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_list} && '"${C0[$jj]//'f${kk}'/${fA[$ckk]}${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'f${kk}'/${fA[$ckk]}${kk}}"
+#            fi
 
         done
     done  | tee -a "${hfdir}"/results/frun.stdout.results
