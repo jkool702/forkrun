@@ -12,11 +12,11 @@ renice --priority -20 --pid $$
 }
 
 declare -F forkrun &>/dev/null || { 
-    [[ -f ./forkrun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_async-i0_3/forkrun.bash
+    [[ -f ./forkrun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_async-io_3/forkrun.bash
     . ./forkrun.bash
 }
 declare -F frun &>/dev/null || { 
-    [[ -f ./frun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_async-i0_3/ring_loadables/frun.bash
+    [[ -f ./frun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_async-io_3/ring_loadables/frun.bash
     . ./frun.bash
 	export -f frun
 }
