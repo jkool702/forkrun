@@ -2,6 +2,8 @@
 
 frun() (
 
+    [[ "${1}" == '__exec__' ]] || {
+
     # setup loadables if needed
     _forkrun_bootstrap_setup --fast
 
@@ -9,7 +11,7 @@ frun() (
     export FORKRUN_MEMFD_LOADABLES
     
     # Export the logic function
-    export -f _frun_main
+    export -f frun
 
     printf -v ring_enable '%s ' "${ring_funcs[@]}" 
 
@@ -17,13 +19,11 @@ frun() (
     enable -f "/proc/'"${BASHPID}"'/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
     export LC_ALL=C
     set +m
-    _frun_main "$@"
+    frun  __exec__ "$@"
     ' -- "$@"
+    }
 
-)
-
-_frun_main() (
-
+    shift 1
 
     # # # # # SETUP # # # # #
 
@@ -357,7 +357,7 @@ _forkrun_base64_to_file() {
         [[ ${b0} ]] || break
         (( b1 = 64#0${b0}))
 
-        if ((outN < 6 )); then
+        if (( outN < 6 )); then
             printf -v b '%0.'"${outN}"'X' "${b1}"
             b="${b:0:${outN}}"
         else
@@ -535,7 +535,7 @@ _forkrun_base64_to_file() {
     if ${bootstrap_flag}; then
         enable -d ring_memfd_create ring_seal ring_list
     else
-        enable -d "${ring_funcs[@]}" 2>/dev/null || true
+        enable -d "${ring_funcs[@]}" ring_list 2>/dev/null || true
     fi
 
     # load ring loadables exclusively from memfd
