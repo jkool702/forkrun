@@ -2,7 +2,7 @@
 (
 # source frun 
 shopt -s globstar
-printf -v frun_path '%s\n' "${BASH_SOURCE[0]%\/*}"/**/frun.{new.,}bash
+printf -v frun_path '%s\n' {.,"${BASH_SOURCE[0]%\/*}"}/**/frun.{new.,}bash
 . "${frun_path%%$'\n'*}"
 
 # setup test files
@@ -45,19 +45,19 @@ for Gk in "${G[@]}"; do
 for Ck in "${C[@]}"; do
 
 ((K++)); echo; echo "($K): time frun $Gk $Ck <$Fk >/dev/null"
-{ time { frun $Gk $Ck <$Fk >/dev/null; } 2>&$fd2; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+{ time { frun  $Gk $Ck <$Fk >/dev/null} 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
 getCPU
 
 ((K++)); echo; echo "($K): time frun $Gk $Ck <$Fk | wc -l"
-{ time { frun $Gk $Ck <$Fk | wc -l; } 1>&$fd1 2>&$fd2; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+{ time { frun  $Gk $Ck <$Fk 2>&$fd2 | wc -l; } 1>&$fd1 ; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
 getCPU
 
 ((K++)); echo; echo "($K): time { cat $Fk | frun $Gk $Ck >/dev/null; }"
-{ time { cat $Fk | frun $Gk $Ck >/dev/null; } 2>&$fd2; } 2>&1 | sed -zE 's/^.*real/real/' |  tee ./.time
+{ time { cat $Fk | frun  $Gk $Ck >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' |  tee ./.time
 getCPU
 
 ((K++)); echo; echo "($K): time { cat $Fk | frun $Gk $Ck | wc -l; }"
-{ time { cat $Fk | frun $Gk $Ck | wc -l; } 1>&$fd1 2>&$fd2; } 2>&1 | sed -zE 's/^.*real/real/' |  tee ./.time
+{ time { cat $Fk | frun  $Gk $Ck  2>&$fd2 | wc -l; } 1>&$fd1; } 2>&1 | sed -zE 's/^.*real/real/' |  tee ./.time
 getCPU
 
 done

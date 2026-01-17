@@ -1,29 +1,11 @@
-// forkrun_ring.c v9.0 (Golden Master)
+// forkrun_ring.c v8.49 (Experimental Stagger)
 // ======================================================================================
-// ARCHITECTURE OVERVIEW:
-//
-// 1. Zero-Copy Ingest:
-//    Data is moved from stdin to a memory-backed file (memfd) using splice/copy_file_range.
-//
-// 2. The Ring:
-//    A shared memory ring buffer. Stores 64-bit OFFSETS into the memfd.
-//    "Fencepost" Logic: To define Batch N, we write Offset[N] (Start) and Offset[N+1] (End).
-//
-// 3. Unified Scanner:
-//    Handles Line Mode vs Byte Mode.
-//    Handles Dynamic vs Static Batch Sizing (PID Loop).
-//    Handles Dynamic vs Static Worker Spawning (Backlog/Rate logic).
-//    Includes "Cold Start" logic to spawn workers aggressively during ramp-up.
-//
-// 4. Robust Output:
-//    ring_order detects Output Type.
-//    - Files: Uses Zero-Copy (sendfile) + Fallocate Punch Hole (rounded to pages).
-//    - Pipes: Uses Robust Deep Copy (read/write loop) to prevent race conditions.
-//
-// 5. Zero-Fork Feeding:
-//    ring_pipe creates 1MB buffered pipes.
-//    ring_splice moves data from memfd to pipe without subshells, auto-closing output.
-//
+// CHANGES vs v8.48:
+// 1. EXPERIMENTAL: Added "Thundering Herd" mitigation in 'ring_claim'.
+//    - Captures 'read_idx' snapshot before atomic increment.
+//    - If the claimed index is > snapshot (contention detected), sleeps for
+//      (diff * 1024) nanoseconds.
+//    - Goal: Desynchronize worker lseek/read calls to reduce cache/memory bus contention.
 // ======================================================================================
 
 #ifndef _GNU_SOURCE
@@ -1138,14 +1120,17 @@ restart_loop:
             claim_count = ep.cnt;
             break; 
         }
+
+        // --- EXPERIMENTAL STAGGER LOGIC (v8.49) ---
+        uint64_t idx_pre = atomic_load_relaxed(&state->read_idx);
+        
         uint64_t w_snap = atomic_load_acquire(&state->write_idx);
-        uint64_t r_curr = atomic_load_relaxed(&state->read_idx);
-        if (r_curr < w_snap) {
+        if (idx_pre < w_snap) {
             int64_t sbatch = atomic_load_relaxed(&state->signed_batch_size); 
             claim_count = 1;
             if (sbatch < 0) {
                 uint64_t t_start = atomic_load_acquire(&state->tail_idx);
-                if (t_start != 0 && r_curr >= t_start) {
+                if (t_start != 0 && idx_pre >= t_start) {
                      claim_count = 1;
                      if (sbatch < 0) {
                          int64_t abs_L = -sbatch;
@@ -1153,7 +1138,7 @@ restart_loop:
                      }
                 } 
                 else {
-                    uint16_t L0 = state->stride_ring[r_curr & RING_MASK];
+                    uint16_t L0 = state->stride_ring[idx_pre & RING_MASK];
                     if (L0 == 0) L0 = 1;
                     uint64_t Wmax = atomic_load_relaxed(&state->active_workers); 
                     if (Wmax == 0) Wmax = 1;
@@ -1164,8 +1149,20 @@ restart_loop:
                     if (claim_count > 64) claim_count = 64;
                 }
             }
-            if (r_curr + claim_count > w_snap) claim_count = w_snap - r_curr;
+            if (idx_pre + claim_count > w_snap) claim_count = w_snap - idx_pre;
+            
             my_read_idx = atomic_fetch_add(&state->read_idx, claim_count);
+            
+            // Apply Stagger if contention detected
+            if (my_read_idx > idx_pre) {
+                uint64_t diff = my_read_idx - idx_pre;
+                if (diff > 10) diff = 10;
+                if (diff > 11) {
+                     struct timespec ts = {0, (long)(diff << 10)};
+                     nanosleep(&ts, NULL);
+                }
+            }
+
             if (sbatch < 0) {
                 uint64_t Ib = atomic_load_relaxed(&state->batch_change_idx);
                 if (my_read_idx > Ib) {

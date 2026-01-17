@@ -89,8 +89,7 @@ done
   
   
 {
-echo "$a0"
-echo "$a1"
+printf '%s\n%s' "$a0" "$a1"
 declare -p b64
 printf '\n\n_forkrun_bootstrap_setup --force\n\n'
 } >./frun.new.bash

@@ -151,8 +151,8 @@ static int g_debug = 0;
     X(ring_init,            ring_init_main,           "ring_init [FLAGS]",              "Initialize ring with config") \
     X(ring_destroy,         ring_destroy_main,        "ring_destroy",                   "Destroy ring") \
     X(ring_scanner,         ring_scanner_main,        "ring_scanner <fd> [spawn_fd]",   "Run scanner") \
-    X(ring_claim,           ring_claim_main,          "ring_claim [OFF] [VAR] [FD]",    "Claim batch") \
-    X(ring_worker,          ring_worker_main,         "ring_worker [inc|dec]",          "Worker control") \
+    X(ring_claim,           ring_claim_main,          "ring_claim [VAR] [FD]",          "Claim batch") \
+    X(ring_worker,          ring_worker_main,         "ring_worker [inc|dec] [FD]",     "Worker control") \
     X(ring_cleanup_waiter,  ring_cleanup_waiter_main, "ring_cleanup_waiter",            "Cleanup waiter") \
     X(ring_ingest,          ring_ingest_main,         "ring_ingest",                    "Signal ingest") \
     X(ring_fallow,          ring_fallow_main,         "ring_fallow <PIPE> <FILE> [dry]","Logical fallow") \
@@ -352,7 +352,9 @@ static int evfd_ingest_eof  = -1;
 static int fd_escrow[2] = { -1, -1 };
 static int evfd_starve = -1;
 
+// WORKER CACHED FD (Optimization)
 static __thread bool is_waiting_on_ring = false;
+static __thread int worker_cached_fd = -1; 
 static __thread off_t last_ack_offset = 0; 
 static __thread int ack_cached_target_fd = -1;
 static __thread int ack_cached_mode = 0; 
@@ -411,7 +413,9 @@ static int ring_init_main(int argc, char **argv) {
         atomic_store_relaxed(&state->fallow_active, 0);
         atomic_store_relaxed(&state->tail_idx, 0);
         atomic_store_relaxed(&state->scanner_finished, 0);
+        
         state->offset_ring[0] = 0;
+        
         if (fd_escrow[0] >= 0) {
             char dump[1024];
             while(read(fd_escrow[0], dump, sizeof(dump)) > 0) {}
@@ -968,12 +972,13 @@ static int ring_scanner_main(int argc, char **argv) {
                         L = l_target;
                         atomic_store_release(&state->batch_change_idx, local_scan_idx);
                         atomic_store_release(&state->signed_batch_size, -(int64_t)L);
-                    } else if (l_target < L && starve_meter >= (xLim - 3)) {
+                    } else if (l_target < L && starve_meter >= (xLim - 3) && stall_meter >= (xLim - 3)) {
                         L = (L + l_target) / 2;
                         if (L < 1) L = 1;
                         atomic_store_release(&state->batch_change_idx, local_scan_idx);
                         atomic_store_release(&state->signed_batch_size, -(int64_t)L);
                         starve_meter = 0; 
+                        stall_meter = 0;
                     }
                 }
             }
@@ -1098,37 +1103,32 @@ static int ring_scanner_main(int argc, char **argv) {
     return EXECUTION_SUCCESS;
 }
 
-static bool is_variable_name(const char *s) {
-    if (!s || !*s) return false;
-    if (isdigit(s[0])) return false; 
-    return true;
-}
-
 static int ring_claim_main(int argc, char **argv) {
     const char *v_target = "REPLY";
     int fd_read = -1;
 
-    // Arg parsing: [OFF] [CNT|VAR] [FD]
-    // 1. Check for legacy 3-arg form: OFF CNT FD
-    if (argc >= 4 && isdigit(argv[argc-1][0]) && isdigit(argv[argc-2][0]) == 0) {
-        // Assume Legacy: OFF CNT FD
-        // Ignore OFF (argv[1]), bind CNT (argv[2]) to VAR
+    // Arg parsing: [VAR] [FD] | [OFF] [VAR] [FD]
+    // 1. Legacy 3-arg check: OFF VAR FD (ignore OFF)
+    if (argc >= 4 && isdigit(argv[argc-1][0]) && !isdigit(argv[argc-2][0])) {
         v_target = argv[2];
         fd_read = atoi(argv[3]);
-    } 
-    // 2. Check for Optimized form: [VAR] [FD] or [FD]
+    }
+    // 2. Standard check: [VAR] [FD] or [FD]
     else if (argc >= 2) {
         if (isdigit(argv[1][0])) {
-            fd_read = atoi(argv[1]);
+            fd_read = atoi(argv[1]); // ring_claim FD
         } else {
-            v_target = argv[1];
-            if (argc >= 3) fd_read = atoi(argv[2]);
+            v_target = argv[1]; // ring_claim VAR
+            if (argc >= 3) fd_read = atoi(argv[2]); // ring_claim VAR FD
         }
     }
 
     uint64_t my_read_idx;
     uint64_t claim_count = 1;
     int spin = 0;
+    
+    // Use cached FD if not provided
+    if (fd_read < 0) fd_read = worker_cached_fd;
     
 restart_loop:
     while (1) {
@@ -1695,9 +1695,16 @@ static int ring_fallow_main(int argc, char **argv) {
 
 static int ring_ingest_main(int argc, char **argv) { (void)argc; (void)argv; if (state) atomic_store_release(&state->ingest_complete, 1); return EXECUTION_SUCCESS; }
 static int ring_worker_main(int argc, char **argv) {
-    if (argc!=2) return EXECUTION_FAILURE;
-    if (!strcmp(argv[1],"inc")) atomic_fetch_add(&state->active_workers,1);
-    else if (!strcmp(argv[1],"dec")) { cleanup_waiter_state(); atomic_fetch_sub(&state->active_workers, 1); }
+    if (argc < 2) return EXECUTION_FAILURE;
+    if (!strcmp(argv[1],"inc")) {
+        atomic_fetch_add(&state->active_workers,1);
+        if (argc >= 3 && isdigit(argv[2][0])) worker_cached_fd = atoi(argv[2]);
+    }
+    else if (!strcmp(argv[1],"dec")) { 
+        cleanup_waiter_state(); 
+        atomic_fetch_sub(&state->active_workers, 1); 
+        worker_cached_fd = -1;
+    }
     return EXECUTION_SUCCESS;
 }
 static int ring_cleanup_waiter_main(int argc, char **argv) { (void)argc; (void)argv; cleanup_waiter_state(); return EXECUTION_SUCCESS; }
