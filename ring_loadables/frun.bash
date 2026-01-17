@@ -2,26 +2,27 @@
 
 frun() (
 
-    [[ "${1}" == '__exec__' ]] || {
+[[ "${1}" == '__exec__' ]] || {
 
     # setup loadables if needed
-    _forkrun_bootstrap_setup --fast
+    { ${FORKRUN_RING_ENABLED:-false} && [[ ${FORKRUN_MEMFD_LOADABLES} ]] && (( FORKRUN_MEMFD_LOADABLES > 0 )); } || _forkrun_bootstrap_setup --fast
 
-    # Export the FD number so the child knows where to look
-    export FORKRUN_MEMFD_LOADABLES
-    
     # Export the logic function
     export -f frun
 
-    printf -v ring_enable '%s ' "${ring_funcs[@]}" 
+    # make saure we have loadable add list
+    (( ${#ring_funcs[@]} > 1 )) || ring_list 'ring_funcs'
+    printf -v ring_enable '%s ' "${ring_funcs[@]}" ring_list
 
+    # call frun in a clean env
     exec "${BASH:-bash}" --norc --noprofile -c '
-    enable -f "/proc/'"${BASHPID}"'/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
+    enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' 
     export LC_ALL=C
+    export LOCALE=C
     set +m
-    frun  __exec__ "$@"
+    frun __exec__ "$@"
     ' -- "$@"
-    }
+}
 
     shift 1
 

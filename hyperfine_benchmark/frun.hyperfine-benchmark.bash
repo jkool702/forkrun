@@ -15,36 +15,38 @@ declare -F forkrun &>/dev/null || {
     [[ -f ./forkrun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_async-io_3/forkrun.bash
     . ./forkrun.bash
 }
-declare -F frun &>/dev/null || { 
-    [[ -f ./frun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_async-io_3/ring_loadables/frun.bash
+#declare -F frun &>/dev/null || { 
+#    [[ -f ./frun.bash ]] || wget https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/forkrun_testing_async-io_3/ring_loadables/frun.bash
     . ./frun.bash
 	export -f frun
-}
+	export FORKRUN_MEMFD_LOADABLES="${FORKRUN_MEMFD_LOADABLES}"
+        export FORKRUN_RING_ENABLED=true	
+#}
 ring_list 'ring_listA'
-printf -v ring_list '%s ' "${ring_listA[@]}"
-export ring_list="${ring_list% }"
+printf -v ring_enable '%s ' "${ring_listA[@]}" 'ring_list'
+export ring_enable="${ring_enable% }"
 #export -f frun
 
 : <<EOC
 source /proc/self/fd/0 <<EOI
-_frun_export() {
+_forkrun_export() {
 shopt -s extglob
 source /proc/self/fd/0 <<'EeEOoOFfF'
-$(declare -f frun)
-$(declare -f _frun_complete)
-$(declare -f _frun_displayHelp)
-$(declare -f _frun_lseek_setup)
-complete -o bashdefault -o nosort -F _frun_complete frun
-_frun_lseek_setup
-export -f frun
-export -f _frun_complete
-export -f _frun_displayHelp
-export -f _frun_lseek_setup
+$(declare -f forkrun)
+$(declare -f _forkrun_complete)
+$(declare -f _forkrun_displayHelp)
+$(declare -f _forkrun_lseek_setup)
+complete -o bashdefault -o nosort -F _forkrun_complete forkrun
+_forkrun_lseek_setup
+export -f forkrun
+export -f _forkrun_complete
+export -f _forkrun_displayHelp
+export -f _forkrun_lseek_setup
 EeEOoOFfF
 }
 EOI
 
-export -f _frun_export
+export -f _forkrun_export
 EOC
 
 findDirDefault='/usr'
@@ -171,7 +173,7 @@ for jj in "${!C0[@]}"; do
 		
 
 #            if ${testForkrunFlag}; then
-		       hyperfine -w 1 -i --shell=bash --parameter-list cmd 'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --','frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --','forkrun '"$(${nullFlag} && printf '%s' '-z ')"'--' --export-json ""${hfdir}"/results/frun.${c// /_}.${fC}${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' '. /mnt/ramdisk/forkrun/forkrun.bash && enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_list} &&  '"${C0[$jj]//'f${kk}'/${fC}${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'f${kk}'/${fC}${kk}}"
+		       hyperfine -w 1 -i --shell=bash --parameter-list cmd 'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --','frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --','/usr/bin/bash -O extglob -c . /mnt/ramdisk/forkrun/forkrun.bash && forkrun '"$(${nullFlag} && printf '%s' '-z ')" --export-json ""${hfdir}"/results/frun.${c// /_}.${fC}${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' 'enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_enable} &&  '"${C0[$jj]//'f${kk}'/${fC}${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'f${kk}'/${fC}${kk}}"
 #            else
 #               hyperfine -w 1 -i --shell=bash --parameter-list cmd \
 #               'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\

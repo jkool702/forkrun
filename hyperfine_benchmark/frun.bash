@@ -2,28 +2,29 @@
 
 frun() (
 
+[[ "${1}" == '__exec__' ]] || {
+
     # setup loadables if needed
-    _forkrun_bootstrap_setup --fast
+    { ${FORKRUN_RING_ENABLED:-false} && [[ ${FORKRUN_MEMFD_LOADABLES} ]] && (( FORKRUN_MEMFD_LOADABLES > 0 )); } || _forkrun_bootstrap_setup --fast
 
-    # Export the FD number so the child knows where to look
-    export FORKRUN_MEMFD_LOADABLES
-    
     # Export the logic function
-    export -f _frun_main
+    export -f frun
 
-    printf -v ring_enable '%s ' "${ring_funcs[@]}" 
+    # make saure we have loadable add list
+    (( ${#ring_funcs[@]} > 1 )) || ring_list 'ring_funcs'
+    printf -v ring_enable '%s ' "${ring_funcs[@]}" ring_list
 
+    # call frun in a clean env
     exec "${BASH:-bash}" --norc --noprofile -c '
-    enable -f "/proc/'"${BASHPID}"'/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
+    enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' 
     export LC_ALL=C
+    export LOCALE=C
     set +m
-    _frun_main "$@"
+    frun __exec__ "$@"
     ' -- "$@"
+}
 
-)
-
-_frun_main() (
-
+    shift 1
 
     # # # # # SETUP # # # # #
 
@@ -357,7 +358,7 @@ _forkrun_base64_to_file() {
         [[ ${b0} ]] || break
         (( b1 = 64#0${b0}))
 
-        if ((outN < 6 )); then
+        if (( outN < 6 )); then
             printf -v b '%0.'"${outN}"'X' "${b1}"
             b="${b:0:${outN}}"
         else
@@ -535,7 +536,7 @@ _forkrun_base64_to_file() {
     if ${bootstrap_flag}; then
         enable -d ring_memfd_create ring_seal ring_list
     else
-        enable -d "${ring_funcs[@]}" 2>/dev/null || true
+        enable -d "${ring_funcs[@]}" ring_list 2>/dev/null || true
     fi
 
     # load ring loadables exclusively from memfd
