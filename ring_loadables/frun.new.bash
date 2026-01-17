@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 frun() (
     # 1. WRAPPER LOGIC (Current Shell)
-    if [[ "${1}" != '__exec__' ]]; then
+    [[ "${1}" == '__exec__' ]] || {
 
         # Check if already setup (and FD is valid), otherwise bootstrap
         { ${FORKRUN_RING_ENABLED:-false} && [[ -n ${FORKRUN_MEMFD_LOADABLES} ]] && (( FORKRUN_MEMFD_LOADABLES > 0 )); } || _forkrun_bootstrap_setup --fast
@@ -25,19 +25,22 @@ frun() (
         ' -- "$@"
         
         # (Exec replaces process, so we never reach here)
-    fi
+    }
 
     # 2. WORKER LOGIC (Clean Shell)
     shift 1 # Remove __exec__
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str delimiter_val ring_init_opts pCode extglob_was_set
-    local -g fd_order_w fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w
-    local -g ingress_memfd fd_write fd_scan 
-    local -g order_flag unsafe_flag stdin_flag mode_byte
+    local cmdline_str ring_ack_str delimiter_val ring_init_opts pCode extglob_was_set worker_func_src nn N nWorkers0 fd0 fd1 fd2
+    local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
+    local -gx order_flag unsafe_flag stdin_flag mode_byte order_flag unsafe_flag LC_ALL LOCALE
     local -ga fd_out P
 
-        if shopt -q extglob; then
+    LC_ALL=C
+    LOCALE=C
+    set +m
+
+    if shopt -q extglob; then
 		extglob_was_set=true;
 	else 
 		shopt -s extglob; 
@@ -48,12 +51,6 @@ frun() (
         local type="$1"
         local val="$2"
         local extglob_was_set=false
-        
-        if shopt -q extglob; then
-		extglob_was_set=true;
-	else 
-		shopt -s extglob; 
-	fi
 
         case "$val" in
             +([0-9])) 
@@ -76,7 +73,6 @@ frun() (
 		
 		[[ "$type" == 'workers' ]] && [[ ${val#*:} ]] && nWorkersMax="${val#*:}"
         
-        ${extglob_was_set} || shopt -u extglob
     }
         
     ${extglob_was_set} || shopt -u extglob
@@ -85,6 +81,7 @@ frun() (
     order_flag=false
     unsafe_flag=false
     mode_byte=false
+    verbose_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
 
@@ -100,6 +97,9 @@ frun() (
             -s|--stdin)    stdin_flag=true ;;
             +s|--no-stdin) stdin_flag=false ;; 
             
+            -v|--verbose) verbose_flag=true ;;
+            +v|--no-verbose) verbose_flag=false ;;
+
             -z|--null)    delimiter_val='' ;;
             
             -n|--lines|--limit) 
@@ -124,6 +124,15 @@ frun() (
         esac
         shift
     done
+
+    if ${verbose_flag}; then
+        tStart="${EPOCHREALTIME//./}"
+toc() {
+    printf '\n%s finished at +%s us\n' "$*" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
+}
+    else
+toc() { :; }
+    fi
 
 	: "${nWorkersMax:=$(nproc)}"
 
@@ -170,7 +179,7 @@ frun() (
         exec {fd_fallow_r}<&- 
 
         # --- 4. RING ORDER ---
-        if ${order_flag}; then
+        ${order_flag} && {
             ring_pipe fd_order_r fd_order_w
             (
                 exec {fd_order_w}>&-
@@ -178,7 +187,7 @@ frun() (
             ) &
             exec {fd_order_r}<&- 
             export FD_ORDER_PIPE=$fd_order_w
-        fi
+        }
 
         # --- WORKER DEFINITION ---
         printf -v cmdline_str '%q ' "$@"
@@ -201,7 +210,7 @@ frun() (
             # BYTE ARGS PAYLOAD
             pCode='
             read -r -u $fd_read -N $REPLY A
-            '"$cmdline_str"
+            '"$cmdline_str"' "${A}"'
             
         else
             # LINE ARGS PAYLOAD (Default)
@@ -245,15 +254,12 @@ P+=($!)
         eval "${worker_func_src}"
 
         # --- SPAWN LOOP ---
-        spawn_worker 0
-        
 		nWorkers=0
-        
         while true; do
             read -r -u $fd_spawn_r N
             [[ "$N" == 'x' ]] && break
             
-            local target=$(( nWorkers + N ))
+            target=$(( nWorkers + N ))
             (( target > nWorkersMax )) && target=$nWorkersMax
             
             for (( ; nWorkers < target; nWorkers++ )); do
@@ -261,9 +267,10 @@ P+=($!)
             done
         done
 
+        ${verbose_flag} && printf '\nSPAWNED %s workers (%s)\n' "${nWorkers}" "${nWorkersA[*]}" >&2
+
         # --- SHUTDOWN ---
-        exec {fd_spawn_r}<&-
-        exec {fd_fallow_w}>&-
+        exec {fd_spawn_r}<&- {fd_fallow_w}>&-
         ${order_flag} && exec {fd_order_w}>&-
         
         wait
