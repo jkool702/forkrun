@@ -3,8 +3,9 @@
 # source frun 
 shopt -s globstar
 shopt -s extglob
-printf -v frun_path '%s\n' {.,"${BASH_SOURCE[0]%\/*}"}/**/frun.{new.,}bash
-. "${frun_path%%$'\n'*}"
+. ./frun.new.bash
+#printf -v frun_path '%s\n' {.,"${BASH_SOURCE[0]%\/*}"}/**/frun.{new.,}bash
+#. "${frun_path%%$'\n'*}"
 
 # setup test files
 yes $'\n'|head -n 100000000 >f1
@@ -39,6 +40,7 @@ printf '\n-----------------------------------------\n'
 
 exec {fd_time}<&-
 }
+getCPU() { :; }
 
 ## RUN BENCHMARK
 for Fk in "${F[@]}"; do
