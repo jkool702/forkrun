@@ -1,237 +1,267 @@
 #!/usr/bin/bash
-
 frun() (
+    # 1. WRAPPER LOGIC (Current Shell)
+    if [[ "${1}" != '__exec__' ]]; then
 
-[[ "${1}" == '__exec__' ]] || {
+        # Check if already setup (and FD is valid), otherwise bootstrap
+        { ${FORKRUN_RING_ENABLED:-false} && [[ -n ${FORKRUN_MEMFD_LOADABLES} ]] && (( FORKRUN_MEMFD_LOADABLES > 0 )); } || _forkrun_bootstrap_setup --fast
 
-    # setup loadables if needed
-    { ${FORKRUN_RING_ENABLED:-false} && [[ ${FORKRUN_MEMFD_LOADABLES} ]] && (( FORKRUN_MEMFD_LOADABLES > 0 )); } || _forkrun_bootstrap_setup --fast
+        # Export FD for reference
+        export FORKRUN_MEMFD_LOADABLES
+        
+        # Export the function so the new shell can find it
+        export -f frun
 
-    # Export the logic function
-    export -f frun
+        # Generate list of loadables to enable in the new shell
+        (( ${#ring_funcs[@]} > 0 )) || ring_list 'ring_funcs'
+        printf -v ring_enable '%s ' "${ring_funcs[@]}" 
 
-    # make saure we have loadable add list
-    (( ${#ring_funcs[@]} > 1 )) || ring_list 'ring_funcs'
-    printf -v ring_enable '%s ' "${ring_funcs[@]}" ring_list
+        # EXEC into Clean Room
+        # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
+        exec "${BASH:-bash}" --norc --noprofile -c '
+            enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
+            export LC_ALL=C
+            set +m
+            frun __exec__ "$@"
+        ' -- "$@"
+        
+        # (Exec replaces process, so we never reach here)
+    fi
 
-    # call frun in a clean env
-    exec "${BASH:-bash}" --norc --noprofile -c '
-    enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' 
-    export LC_ALL=C
-    export LOCALE=C
-    set +m
-    frun __exec__ "$@"
-    ' -- "$@"
-}
-
-    shift 1
+    # 2. WORKER LOGIC (Clean Shell)
+    shift 1 # Remove __exec__
 
     # # # # # SETUP # # # # #
+    local cmdline_str ring_ack_str delimiter_val ring_init_opts pCode
+    local -g fd_order_w fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w
+    local -g ingress_memfd fd_write fd_scan 
+    local -g order_flag unsafe_flag stdin_flag mode_byte
+    local -ga fd_out P
 
-    local test_type worker_func_src nn N nWorkers0 cmdline_str ring_ack_str delimiter_str delimiter_val fd0 fd1 fd2
-    local -g pCode fd_order fd_spawn ingress_memfd nWorkers nWorkersMax tStart 
-    local -gx order_flag unsafe_flag LC_ALL LOCALE
-    local -ga fd_out args P
-
-    LC_ALL=C
-    LOCALE=C
-    set +m
-
-    : "${nWorkers:=1}" "${nWorkersMax:=$(nproc)}"
-
-    # export vars to tune workers
-    export nWorkers="${nWorkers}"
-    export nWorkersMax="${nWorkersMax}"
-
-    order_flag=false
-    unsafe_flag=false
-    verbose_flag=false
-    delimiter_val=$'\n'
-
-    while true; do
-        case "$1" in
-            -o|--order)
-                order_flag=true
+    # --- HELPER: Parse Ranges (N, N:M, :M, N:) ---
+    parse_count() {
+        local type="$1"
+        local val="$2"
+        local extglob_was_set=false
+        
+        if shopt -q extglob; then
+		    extglob_was_set=true;
+		else 
+		    shopt -s extglob; 
+		fi
+        
+        case "$val" in
+            +([0-9])) 
+                # Static / Limit value
+                ring_init_opts+=("--${type}=${val}") 
                 ;;
-            -u|--unsafe)
-                unsafe_flag=true
-                ;;
-            -z|--null)
-                delimiter_val=''
-                ;;
-            -d|--delim|--delimiter)
-                shift 1
-                delimiter_val="${1}"
-                (( ${#delimiter_val} > 1 )) && {
-                    printf '\nWARNING: multi-byte delimiters are not supported...only the first byte will be used.\n' >&2
-                    delimiter_val="${delimiter_val[0]}"
-                }
-                ;;
-            -v|--verbose)
-                verbose_flag=true
-                ;;
-            --)
-                shift 1
-                break
+            *([0-9]):*([0-9]))
+                # Range value
+                if [[ ${val%:*} ]]; then
+                    ring_init_opts+=("--${type}0=${val%:*}") 
+                fi
+                if [[ ${val#*:} ]]; then
+                    ring_init_opts+=("--${type}-max=${val#*:}") 
+                fi
                 ;;
             *)
-                break
+                printf '\nWARNING: INPUT "%s" IS MALFORMED. IGNORING\n' "$val" >&2
                 ;;
         esac
-        shift 1
+		
+		[[ "$type" == 'workers' ]] && [[ ${val#*:} ]] && nWorkersMax="${val#*:}"
+        
+        ${extglob_was_set} || shopt -u extglob
+    }
+
+    # Config Vars
+    order_flag=false
+    unsafe_flag=false
+    mode_byte=false
+    delimiter_val=$'\n'
+    ring_init_opts=()
+
+    # Parse Arguments
+    while true; do
+        case "$1" in
+            -o|--order)    order_flag=true ;;
+            +o|--no-order) order_flag=false ;;
+            
+            -u|--unsafe)   unsafe_flag=true ;;
+            +u|--safe)     unsafe_flag=false ;;
+            
+            -s|--stdin)    stdin_flag=true ;;
+            +s|--no-stdin) stdin_flag=false ;; 
+            
+            -z|--null)    delimiter_val='' ;;
+            
+            -n|--lines|--limit) 
+                shift; parse_count "lines" "$1" ;;
+            
+            -b|--bytes) 
+                shift; parse_count "bytes" "$1" 
+                mode_byte=true ;;
+                
+            --workers)  
+			    shift; parse_count "workers" "$1" ;;
+			
+            --timeout)  
+			    shift; ring_init_opts+=("--timeout=$1") ;;
+            
+            -d|--delim|--delimiter)
+                shift; delimiter_val="${1:0:1}" ;;
+				
+            --) shift; break ;;
+			
+            *) break ;;
+        esac
+        shift
     done
 
-    if ${verbose_flag}; then
-        tStart="${EPOCHREALTIME//./}"
-toc() {
-    printf '\n%s finished at +%s us\n' "$*" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
-}
+	: "${nWorkersMax:=$(nproc)}"
+
+    # Resolve Default Modes
+    if ${mode_byte}; then
+        : "${stdin_flag:=true}"
     else
-toc() { :; }
+        : "${stdin_flag:=false}"
+    fi
+    
+    if ${stdin_flag}; then
+        ring_init_opts+=("--return-bytes")
     fi
 
-    # initialize rings with ring_init and create data memfd with ring_memfd_create
+    # Initialize Ring
     if ${order_flag}; then
-        ring_init 'fd_out'
+        ring_init "${ring_init_opts[@]}" --out=fd_out
     else
-        ring_init
+        ring_init "${ring_init_opts[@]}"
     fi
-    toc ring_init
 
+    # Create Data Memfd
     ring_memfd_create ingress_memfd
 
     # # # # # MAIN # # # # #
     {
-        # # SPAWN "HELPER PROCESSES" # #
-        # these keep the worker pool fed
-
-        # start ring_copy to populate memfd with data from stdin
-        (
-            ring_copy ${fd_write} ${fd0}
-            ring_signal
-            toc ring_copy
-        ) &
-        COPY_PID=$!
-
-        # start ring_scanner to scan memfd for line breaks
-        ring_pipe 'fd_spawn_r' 'fd_spawn_w'
+        # --- 1. RING COPY ---
+        ( ring_copy ${fd_write} ${fd0}; ring_signal ) &
+        
+        # --- 2. RING SCANNER ---
+        ring_pipe fd_spawn_r fd_spawn_w
         (
             exec {fd_spawn_r}<&-
-            ring_scanner ${fd_scan} ${fd_spawn_w} "${delimiter_val}"
-            toc ring_scanner
+            ring_scanner ${fd_scan} ${fd_spawn_w}
         ) &
-        SCANNER_PID=$!
-        exec {fd_spawn_w}>&-
+        exec {fd_spawn_w}>&- 
 
-        # start ring_fallow to remove already-consumed data from memfd and free memory
-        ring_pipe 'fd_fallow_r' 'fd_fallow_w'
+        # --- 3. RING FALLOW ---
+        ring_pipe fd_fallow_r fd_fallow_w
         (
             exec {fd_fallow_w}>&-
             ring_fallow ${fd_fallow_r} ${fd_write}
-            toc ring_fallow
         ) &
-        FALLOW_PID=$!
-        exec {fd_fallow_r}<&-
+        exec {fd_fallow_r}<&- 
 
-        # (if enabled) start ring_order to reorder output to the order that running inputs sequentially would have produced
-        ${order_flag} && {
-            ring_pipe 'fd_order_r' 'fd_order_w'
+        # --- 4. RING ORDER ---
+        if ${order_flag}; then
+            ring_pipe fd_order_r fd_order_w
             (
                 exec {fd_order_w}>&-
                 ring_order ${fd_order_r} 'memfd' >&${fd1}
-                toc ring_order
             ) &
-            ORDER_PID=$!
-            exec {fd_order_r}<&-
-            export FD_ORDER_PIPE="$fd_order_w"
-        }
+            exec {fd_order_r}<&- 
+            export FD_ORDER_PIPE=$fd_order_w
+        fi
 
-        # # SPAWN WORKER POOL # #
-
-        # determine cmdline string
+        # --- WORKER DEFINITION ---
         printf -v cmdline_str '%q ' "$@"
-        if ${unsafe_flag}; then
-            cmdline_str='IFS='"${delimiter_val@Q}"' '"$cmdline_str"' ${A[*]}'
+        ring_ack_str="ring_ack $fd_fallow_w"
+        ${order_flag} && ring_ack_str+=" $fd_order_w"
+
+        if ${stdin_flag}; then
+            # STDIN PAYLOAD
+            pCode='
+            if (( REPLY < 1048576 )); then
+                ring_pipe pr pw
+                ring_splice $fd_read $pw "" $REPLY "close"
+                '"$cmdline_str"' <&$pr
+                exec {pr}>&-
+            else
+                ( ring_splice $fd_read 1 '"''"' $REPLY "close" ) | '"$cmdline_str"'
+            fi'
+            
+        elif ${mode_byte}; then
+            # BYTE ARGS PAYLOAD
+            pCode='
+            read -r -u $fd_read -N $REPLY A
+            '"$cmdline_str"
+            
         else
-            cmdline_str+=' "${A[@]}"'
+            # LINE ARGS PAYLOAD (Default)
+            if ${unsafe_flag}; then
+                cmdline_str='IFS='"${delimiter_val@Q}"' '"$cmdline_str"' ${A[*]}'
+            else
+                cmdline_str+=' "${A[@]}"'
+            fi
+            
+            if [[ ${delimiter_val} ]]; then
+                printf -v delimiter_str '%q' "${delimiter_val}"
+            else
+                delimiter_str="''"
+            fi
+            
+            pCode='
+            mapfile -t -u $fd_read -n $REPLY -d '"${delimiter_str}"' A
+            '"$cmdline_str"
         fi
-        ring_ack_str='ring_ack $fd_fallow_w'
-        ${order_flag} && { 
-            cmdline_str+=' >&${fd_out[$ID]}'
-            ring_ack_str+=' ${fd_out[$ID]}'
-        }
-        if [[ ${delimiter_val} ]]; then
-            printf -v delimiter_str '%q' "${delimiter_val}"
-        else
-            delimiter_str="''"
-        fi
-        
-        # define spawning function (use JIT-like optimization)
+
         worker_func_src='spawn_worker() {
-(
-  LC_ALL=C
-  LOCALE=C
-  set +m
-  {
-    ID="$1"
-    shift 1
-    ring_worker inc $fd_read
-    while ring_claim; do
-        [[ "$REPLY" == "0" ]] && break
-        mapfile -t -u ${fd_read} -n ${REPLY} -d '"${delimiter_str}"' A
-        '"${cmdline_str}"'
-        '"${ring_ack_str}"'
-    done
-    ring_worker dec
-  } {fd_read}<"/proc/'"${BASHPID}"'/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
-toc '"'"'worker '"'"'"$ID"
-) &
-P+=($!)
-}'
+        (
+            ID="$1"; shift
+            exec {fd_fallow_w}>&- {fd_spawn_r}>&-
+            '"${order_flag} && echo 'exec {fd_order_w}>&-' "'
+            
+            ring_worker inc $fd_read
+            local pr pw
+            
+            while ring_claim; do
+                [[ "$REPLY" == "0" ]] && break
+                '"$pCode"'
+                '"$ring_ack_str"'
+            done
+            ring_worker dec
+        ) &
+        P+=($!)
+        }'
+
         eval "${worker_func_src}"
 
-        toc 'initial setup'
-
-        # spawn workers dynamically
-        nWorkers=0
+        # --- SPAWN LOOP ---
+        spawn_worker 0
+        
+		nWorkers=0
+        
         while true; do
             read -r -u $fd_spawn_r N
             [[ "$N" == 'x' ]] && break
-            ${verbose_flag} && printf '\npreparing to spawn %s workers at +%s us...' "$N" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
-            nWorkers0="$nWorkers"
-            (( ( nWorkers0 + N ) > nWorkersMax )) && (( N = nWorkersMax - nWorkers0 ))
-            (( N > 0 )) && for (( nWorkers=nWorkers0; nWorkers<nWorkers0+N; nWorkers++ )); do
+            
+            local target=$(( nWorkers + N ))
+            (( target > nWorkersMax )) && target=$nWorkersMax
+            
+            for (( ; nWorkers < target; nWorkers++ )); do
                 spawn_worker "$nWorkers"
             done
-            ${verbose_flag} && printf '\nspawned %s workers at +%s us\n' "$N" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
-            nWorkersA+=("$N")
         done
 
-        toc 'spawning workers'
-	printf '\nSPAWNED %s workers (%s)\n' "${nWorkers}" "${nWorkersA[*]}" >&2
-
-
-        exec {fd_spawn_r}<&- {fd_fallow_w}>&-
+        # --- SHUTDOWN ---
+        exec {fd_spawn_r}<&-
+        exec {fd_fallow_w}>&-
         ${order_flag} && exec {fd_order_w}>&-
-
-        # wait for everything to finish
+        
         wait
-
-        # # CLEANUP # #
-
-        # destroy the rings
+        
         ring_destroy
-
-        # close the fd's
-        exec {fd_write}>&- {fd_scan}<&- {ingress_memfd}>&-
-
-        toc 'MAIN FUNCTION'
-
-        # ensure helper processes are dead
-        #kill $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
-        #kill -9 $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
-        #wait $COPY_PID $SCANNER_PID $FALLOW_PID $ORDER_PID $(jobs -p) 2>/dev/null
-
+        exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
 
     } {fd_write}>"/proc/${BASHPID}/fd/${ingress_memfd}" {fd_scan}<"/proc/${BASHPID}/fd/${ingress_memfd}" {fd0}<&0 {fd1}>&1 {fd2}>&2
 )

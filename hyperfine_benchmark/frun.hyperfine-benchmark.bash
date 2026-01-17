@@ -86,6 +86,11 @@ fi
 "${testForkrunFlag:=true}"
 testForkrunFlag=true
 
+export -f forkrun
+export -f _forkrun_getVal
+export -f _forkrun_SETUP
+
+
 declare -a C0 C1
 
 C0[0]=''
@@ -173,7 +178,8 @@ for jj in "${!C0[@]}"; do
 		
 
 #            if ${testForkrunFlag}; then
-		       hyperfine -w 1 -i --shell=bash --parameter-list cmd 'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --','frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --','/usr/bin/bash -O extglob -c . /mnt/ramdisk/forkrun/forkrun.bash && forkrun '"$(${nullFlag} && printf '%s' '-z ')" --export-json ""${hfdir}"/results/frun.${c// /_}.${fC}${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' 'enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_enable} &&  '"${C0[$jj]//'f${kk}'/${fC}${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'f${kk}'/${fC}${kk}}"
+#		       hyperfine -w 1 -i --shell=bash --parameter-list cmd 'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --','frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --','/usr/bin/bash -O extglob -c . /mnt/ramdisk/forkrun/forkrun.bash && forkrun '"$(${nullFlag} && printf '%s' '-z ')" --export-json ""${hfdir}"/results/frun.${c// /_}.${fC}${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' 'enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_enable} &&  '"${C0[$jj]//'f${kk}'/${fC}${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'f${kk}'/${fC}${kk}}"
+		       hyperfine -w 1 -i --shell=bash --parameter-list cmd 'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --','frun '"$(${nullFlag} && printf '%s' '-d '"''")"' --','xargs -P '"$(nproc)"' '"$(${nullFlag} && printf '%s' '-0 '|| printf '%s' '-d $'"'"'\n'"'")"' --','. /mnt/ramdisk/forkrun/forkrun.bash && forkrun '"$(${nullFlag} && printf '%s' '-z ')" --export-json ""${hfdir}"/results/frun.${c// /_}.${fC}${kk}.hyperfine.results" --style=full --setup 'shopt -s extglob && renice --priority -20 --pid $$' --prepare 'shopt -s extglob && renice --priority -20 --pid $$' 'enable -f /mnt/ramdisk/forkrun/ring_loadables/forkrun_ring.native.so ${ring_enable} &&  '"${C0[$jj]//'f${kk}'/${fC}${kk}}"' {cmd} '"${c}"' '"${C1[$jj]//'f${kk}'/${fC}${kk}}"
 #            else
 #               hyperfine -w 1 -i --shell=bash --parameter-list cmd \
 #               'frun -o '"$(${nullFlag} && printf '%s' '-d '"''")"' --',\

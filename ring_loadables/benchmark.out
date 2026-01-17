@@ -1,83 +1,11 @@
 
 (1): time frun  : <f1 >/dev/null
-real	0m4.182s
-user	1m50.590s
-sys	0m0.555s
+real	0m0.000s
+user	0m0.000s
+sys	0m0.000s
 
-CPU UTILIZATION: 26.576 / 28
+total sys = 0 us
 
------------------------------------------
+total user = 0 us
 
-(2): time frun  : <f1 | wc -l
-real	0m4.155s
-user	1m50.288s
-sys	0m0.560s
-
-CPU UTILIZATION: 26.678 / 28
-
------------------------------------------
-
-(3): time { cat f1 | frun  : >/dev/null; }
-real	0m4.146s
-user	1m49.973s
-sys	0m0.612s
-
-CPU UTILIZATION: 26.672 / 28
-
------------------------------------------
-
-(4): time { cat f1 | frun  : | wc -l; }
-real	0m4.161s
-user	1m50.445s
-sys	0m0.575s
-
-CPU UTILIZATION: 26.681 / 28
-
------------------------------------------
-
-(5): time frun  echo <f1 >/dev/null
-real	0m4.549s
-user	2m0.623s
-sys	0m0.703s
-
-CPU UTILIZATION: 26.670 / 28
-
------------------------------------------
-
-(6): time frun  echo <f1 | wc -l
-real	0m4.540s
-user	2m0.277s
-sys	0m0.800s
-
-CPU UTILIZATION: 26.668 / 28
-
------------------------------------------
-
-(7): time { cat f1 | frun  echo >/dev/null; }
-real	0m4.507s
-user	1m59.640s
-sys	0m0.584s
-
-CPU UTILIZATION: 26.674 / 28
-
------------------------------------------
-
-(8): time { cat f1 | frun  echo | wc -l; }
-real	0m4.590s
-user	2m1.638s
-sys	0m0.804s
-
-CPU UTILIZATION: 26.675 / 28
-
------------------------------------------
-
-(9): time frun  printf '%s\n' <f1 >/dev/null
-real	0m57.957s
-user	1m59.310s
-sys	23m41.951s
-
-CPU UTILIZATION: 26.593 / 28
-
------------------------------------------
-
-(10): time frun  printf '%s\n' <f1 | wc -l
+total real = 0 us

@@ -2,6 +2,7 @@
 (
 # source frun 
 shopt -s globstar
+shopt -s extglob
 printf -v frun_path '%s\n' {.,"${BASH_SOURCE[0]%\/*}"}/**/frun.{new.,}bash
 . "${frun_path%%$'\n'*}"
 
