@@ -40,7 +40,9 @@ printf '\n-----------------------------------------\n'
 
 exec {fd_time}<&-
 }
-getCPU() { :; }
+#getCPU() { :; }
+
+sleep 0.1s
 
 ## RUN BENCHMARK
 for Fk in "${F[@]}"; do

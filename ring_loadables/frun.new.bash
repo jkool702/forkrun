@@ -3,12 +3,6 @@ frun() {
 (
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
-
-        # Check if already setup (and FD is valid), otherwise bootstrap
-        { ${FORKRUN_RING_ENABLED:-false} && [[ -n ${FORKRUN_MEMFD_LOADABLES} ]] && (( FORKRUN_MEMFD_LOADABLES > 0 )); } || _forkrun_bootstrap_setup --fast
-
-        # Export FD for reference
-        export FORKRUN_MEMFD_LOADABLES
         
         # Generate list of loadables to enable in the new shell
         (( ${#ring_funcs[@]} > 0 )) || ring_list 'ring_funcs'
@@ -34,11 +28,10 @@ frun() {
     # # # # # SETUP # # # # #
     local cmdline_str ring_ack_str delimiter_val ring_init_opts pCode extglob_was_set worker_func_src nn N nWorkers0 fd0 fd1 fd2
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
-    local -gx order_flag unsafe_flag stdin_flag mode_byte order_flag unsafe_flag LC_ALL LOCALE
+    local -gx order_flag unsafe_flag stdin_flag mode_byte order_flag unsafe_flag LC_ALL
     local -ga fd_out P
 
     LC_ALL=C
-    LOCALE=C
     set +m
 
     if shopt -q extglob; then
@@ -192,8 +185,8 @@ toc() { :; }
 
         # --- WORKER DEFINITION ---
         printf -v cmdline_str '%q ' "$@"
+
         ring_ack_str="ring_ack $fd_fallow_w"
-        ${order_flag} && ring_ack_str+=" $fd_order_w"
 
         if ${stdin_flag}; then
             # STDIN PAYLOAD
@@ -216,7 +209,7 @@ toc() { :; }
         else
             # LINE ARGS PAYLOAD (Default)
             if ${unsafe_flag}; then
-                cmdline_str='IFS='"${delimiter_val@Q}"' '"$cmdline_str"' ${A[*]}'
+                cmdline_str='IFS='"'"' '"'"' '"${cmdline_str}"' ${A[*]}'
             else
                 cmdline_str+=' "${A[@]}"'
             fi
@@ -232,10 +225,14 @@ toc() { :; }
             '"$cmdline_str"
         fi
 
+        ${order_flag} && {
+            pCode+=' >&${fd_out[$ID]}'
+            ring_ack_str+=' ${fd_out[$ID]}'
+        }
+
         worker_func_src='spawn_worker() {
 (
   LC_ALL=C
-  LOCALE=C
   set +m
   {
     ID="$1"
