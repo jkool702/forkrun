@@ -1,5 +1,6 @@
 #!/usr/bin/bash
-frun() (
+frun() {
+(
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
 
@@ -22,7 +23,7 @@ frun() (
 	    shopt -s extglob
 	    '"$(declare -f frun)"'
             frun __exec__ "$@"
-        ' -- "$@"
+        ' -- "$@" 0<&${fd00} 1>&${fd11} 2>&${fd22}
         
         # (Exec replaces process, so we never reach here)
     }
@@ -279,7 +280,8 @@ P+=($!)
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
 
     } {fd_write}>"/proc/${BASHPID}/fd/${ingress_memfd}" {fd_scan}<"/proc/${BASHPID}/fd/${ingress_memfd}" {fd0}<&0 {fd1}>&1 {fd2}>&2
-)
+  ) {fd00}<&0 {fd11}>&1 {fd22}>&2
+}
 
 _forkrun_bootstrap_setup() {
 ## HELPER FUNCTION TO LOAD THE RING LOADABLES USED BY FORKRUN
