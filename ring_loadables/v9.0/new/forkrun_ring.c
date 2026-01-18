@@ -1,4 +1,4 @@
-// forkrun_ring.c v9.2 (Atomic Output & TLS Optimized)
+// forkrun_ring.c v9.0 (Golden Master)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -13,14 +13,16 @@
 //    Handles Line Mode vs Byte Mode.
 //    Handles Dynamic vs Static Batch Sizing (PID Loop).
 //    Handles Dynamic vs Static Worker Spawning (Backlog/Rate logic).
+//    Includes "Cold Start" logic to spawn workers aggressively during ramp-up.
 //
 // 4. Robust Output:
-//    - Realtime: Workers write directly to stdout (fastest, but kernel lock contention possible).
-//    - Buffered: Workers write to memfd, ring_order drains serially (Atomic Fan-In).
-//    - Ordered:  Workers write to memfd, ring_order drains in sequence (Atomic Sorted Fan-In).
+//    ring_order detects Output Type.
+//    - Files: Uses Zero-Copy (sendfile) + Fallocate Punch Hole (rounded to pages).
+//    - Pipes: Uses Robust Deep Copy (read/write loop) to prevent race conditions.
 //
 // 5. Zero-Fork Feeding:
 //    ring_pipe creates 1MB buffered pipes.
+//    ring_splice moves data from memfd to pipe without subshells, auto-closing output.
 //
 // ======================================================================================
 
@@ -155,7 +157,7 @@ static int g_debug = 0;
     X(ring_ingest,          ring_ingest_main,         "ring_ingest",                    "Signal ingest") \
     X(ring_fallow,          ring_fallow_main,         "ring_fallow <PIPE> <FILE> [dry]","Logical fallow") \
     X(ring_ack,             ring_ack_main,            "ring_ack <FD> <FD_OUT>",         "Ack batch") \
-    X(ring_order,           ring_order_main,          "ring_order <FD> <PFX|memfd> [unordered]", "Reorder output") \
+    X(ring_order,           ring_order_main,          "ring_order <FD> <PFX|memfd>",    "Reorder output") \
     X(ring_copy,            ring_copy_main,           "ring_copy <OUT> <IN>",           "Zero-copy ingest") \
     X(ring_signal,          ring_signal_main,         "ring_signal <FD>",               "Signal eventfd") \
     X(lseek,                lseek_main,               "lseek <FD> <OFF>...",            "Seek fd") \
@@ -356,9 +358,6 @@ static __thread int worker_cached_fd = -1;
 static __thread off_t last_ack_offset = 0; 
 static __thread int ack_cached_target_fd = -1;
 static __thread int ack_cached_mode = 0; 
-// TLS OPTIMIZATION: Cache claim metadata to avoid C->Bash->C roundtrip in ring_ack
-static __thread uint64_t worker_last_idx = 0;
-static __thread uint64_t worker_last_cnt = 0;
 
 struct EscrowPacket { uint64_t idx; uint64_t cnt; };
 struct IndexPacket  { uint64_t idx; uint64_t cnt; }; 
@@ -1264,12 +1263,6 @@ restart_loop:
     
     atomic_fetch_add(&state->total_lines_consumed, (state->cfg_return_bytes) ? claim_count : final_val);
 
-    // --- OPTIMIZATION START ---
-    // Cache these for ring_ack to use without string parsing
-    worker_last_idx = my_read_idx;
-    worker_last_cnt = claim_count;
-    // --- OPTIMIZATION END ---
-
     char buf[64];
     u64toa(final_val, buf); bind_var_or_array(v_target, buf, 0);
     u64toa(my_read_idx, buf); bind_variable("RING_BATCH_IDX", buf, 0);
@@ -1289,22 +1282,11 @@ static int ring_ack_main(int argc, char **argv) {
     int fd_fallow = atoi(argv[1]);
     int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
     struct IndexPacket ip;
-
-    // --- OPTIMIZATION START ---
-    // Try to use cached values first to avoid get_string_value overhead
-    if (worker_last_cnt > 0) {
-        ip.idx = worker_last_idx;
-        ip.cnt = worker_last_cnt;
-    } else {
-        // Fallback for safety (or if used outside standard loop)
-        const char *s_idx = get_string_value("RING_BATCH_IDX");
-        const char *s_cnt = get_string_value("RING_BATCH_SLOTS");
-        if (!s_idx || !s_cnt) return EXECUTION_SUCCESS;
-        ip.idx = (uint64_t)atoll(s_idx);
-        ip.cnt = (uint64_t)atoll(s_cnt);
-    }
-    // --- OPTIMIZATION END ---
-
+    const char *s_idx = get_string_value("RING_BATCH_IDX");
+    const char *s_cnt = get_string_value("RING_BATCH_SLOTS");
+    if (!s_idx || !s_cnt) return EXECUTION_SUCCESS;
+    ip.idx = (uint64_t)atoll(s_idx);
+    ip.cnt = (uint64_t)atoll(s_cnt);
     if (fd_fallow > 0) SYS_CHK(write(fd_fallow, &ip, sizeof(ip)));
     if (fd_target > 0) {
         if (fd_target != ack_cached_target_fd) {
@@ -1373,9 +1355,6 @@ static int ring_order_main(int argc, char **argv) {
     int fd_in = atoi(argv[1]);
     bool memfd_mode = (strcmp(argv[2], "memfd") == 0);
     const char *prefix = argv[2]; 
-    
-    // NEW: Check for unordered mode
-    bool unordered_mode = (argc > 3 && strcmp(argv[3], "unordered") == 0);
 
     bool use_zerocopy = false;
     struct stat st_out;
@@ -1389,7 +1368,7 @@ static int ring_order_main(int argc, char **argv) {
         struct IndexPacket ip;
         char path[256];
         while (read(fd_in, &ip, sizeof(ip)) == sizeof(ip)) {
-            if (unordered_mode || ip.idx == next_idx) {
+            if (ip.idx == next_idx) {
                 snprintf(path, sizeof(path), "%s.%lu", prefix, ip.idx);
                 int fd_file = open(path, O_RDONLY);
                 if (fd_file >= 0) {
@@ -1409,32 +1388,29 @@ static int ring_order_main(int argc, char **argv) {
                     }
                     close(fd_file); unlink(path);
                 }
-                
-                if (!unordered_mode) {
-                    next_idx += ip.cnt;
-                    while (head && head->s == next_idx) {
-                        struct Interval *tmp = head;
-                        snprintf(path, sizeof(path), "%s.%lu", prefix, tmp->s);
-                        fd_file = open(path, O_RDONLY);
-                        if (fd_file >= 0) {
-                            off_t offset = 0; struct stat st;
-                            if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-                                while (offset < st.st_size) {
-                                    ssize_t sent = sendfile(1, fd_file, &offset, st.st_size - offset);
-                                    if (sent < 0) {
-                                        if (errno == EINTR) continue;
-                                        if (errno == EINVAL || errno == ENOSYS || errno == ENOTSOCK || errno == EBADF) {
-                                            char buf[32768]; ssize_t n; lseek(fd_file, offset, SEEK_SET);
-                                            while ((n = read(fd_file, buf, sizeof(buf))) > 0) write(1, buf, n);
-                                        }
-                                        break; 
+                next_idx += ip.cnt;
+                while (head && head->s == next_idx) {
+                    struct Interval *tmp = head;
+                    snprintf(path, sizeof(path), "%s.%lu", prefix, tmp->s);
+                    fd_file = open(path, O_RDONLY);
+                    if (fd_file >= 0) {
+                        off_t offset = 0; struct stat st;
+                        if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
+                            while (offset < st.st_size) {
+                                ssize_t sent = sendfile(1, fd_file, &offset, st.st_size - offset);
+                                if (sent < 0) {
+                                    if (errno == EINTR) continue;
+                                    if (errno == EINVAL || errno == ENOSYS || errno == ENOTSOCK || errno == EBADF) {
+                                        char buf[32768]; ssize_t n; lseek(fd_file, offset, SEEK_SET);
+                                        while ((n = read(fd_file, buf, sizeof(buf))) > 0) write(1, buf, n);
                                     }
+                                    break; 
                                 }
                             }
-                            close(fd_file); unlink(path);
                         }
-                        next_idx = tmp->e; head = tmp->next; free(tmp);
+                        close(fd_file); unlink(path);
                     }
+                    next_idx = tmp->e; head = tmp->next; free(tmp);
                 }
             } else {
                 struct Interval *n = xmalloc(sizeof(struct Interval));
@@ -1454,7 +1430,7 @@ static int ring_order_main(int argc, char **argv) {
             int count = n_read / sizeof(struct OrderPacket);
             for (int i = 0; i < count; i++) {
                 struct OrderPacket *op = &ops[i];
-                if (unordered_mode || op->idx == next_idx) {
+                if (op->idx == next_idx) {
                     off_t offset = (off_t)op->off;
                     
                     if (use_zerocopy) {
@@ -1467,23 +1443,21 @@ static int ring_order_main(int argc, char **argv) {
                     off_t aligned_len = (op->off + op->len) - aligned_start;
                     fallocate(op->fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, aligned_len);
                     
-                    if (!unordered_mode) {
-                        next_idx += op->cnt;
-                        while (head && head->pkt.idx == next_idx) {
-                            struct BufferedPacket *tmp = head;
-                            offset = (off_t)tmp->pkt.off;
-                            
-                            if (use_zerocopy) sendfile(1, tmp->pkt.fd, &offset, tmp->pkt.len);
-                            else ring_copy_chunk(tmp->pkt.fd, 1, offset, tmp->pkt.len);
-                            
-                            aligned_start = (tmp->pkt.off / 4096) * 4096;
-                            aligned_len = (tmp->pkt.off + tmp->pkt.len) - aligned_start;
-                            fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, aligned_len);
-                            
-                            next_idx += tmp->pkt.cnt;
-                            head = tmp->next;
-                            xfree(tmp); 
-                        }
+                    next_idx += op->cnt;
+                    while (head && head->pkt.idx == next_idx) {
+                        struct BufferedPacket *tmp = head;
+                        offset = (off_t)tmp->pkt.off;
+                        
+                        if (use_zerocopy) sendfile(1, tmp->pkt.fd, &offset, tmp->pkt.len);
+                        else ring_copy_chunk(tmp->pkt.fd, 1, offset, tmp->pkt.len);
+                        
+                        aligned_start = (tmp->pkt.off / 4096) * 4096;
+                        aligned_len = (tmp->pkt.off + tmp->pkt.len) - aligned_start;
+                        fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, aligned_len);
+                        
+                        next_idx += tmp->pkt.cnt;
+                        head = tmp->next;
+                        xfree(tmp); 
                     }
                 } else {
                     struct BufferedPacket *n = xmalloc(sizeof(struct BufferedPacket));

@@ -8,13 +8,13 @@ shopt -s extglob
 #. "${frun_path%%$'\n'*}"
 
 # setup test files
-yes $'\n'|head -n 100000000 >f1
-seq 100000000 >f2
-find / -type f >f3
+[[ -f ./f1 ]] || yes $'\n'|head -n 100000000 >f1
+[[ -f ./f2 ]] || seq 100000000 >f2
+[[ -f ./f3 ]] || find / -type f >f3
 
 # setup tests
 F=(f1 f2 f3)
-G=('' '-o' '-u' '-o -u')
+G=('' '-k' '-u' '-U')
 C=(':' 'echo' "printf '%s\n'")
 
 N=$(( ${#F[@]} * ${#G[@]} * ${#C[@]} * 4 ))
@@ -50,7 +50,7 @@ for Gk in "${G[@]}"; do
 for Ck in "${C[@]}"; do
 
 ((K++)); echo; echo "($K): time frun $Gk $Ck <$Fk >/dev/null"
-{ time { frun  $Gk $Ck <$Fk >/dev/null} 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+{ time { frun  $Gk $Ck <$Fk >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
 getCPU
 
 ((K++)); echo; echo "($K): time frun $Gk $Ck <$Fk | wc -l"
