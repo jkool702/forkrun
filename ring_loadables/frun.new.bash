@@ -72,16 +72,26 @@ set -xv
         val="$2"
         if [[ "$val" == *:* ]]; then
             v1="${val%:*}"; v2="${val#*:}"
+            
             _expand_unit "$v1"; ring_init_opts+=("--${type}0=${REPLY}");
+            [[ $REPLY ]] && case "${type}" in
+                lines)    byte_mode_flag=false   ;;
+                bytes)    byte_mode_flag=true    ;;
+            esac
+            
             _expand_unit "$v2"; ring_init_opts+=("--${type}-max=${REPLY}")
-        else
-            _expand_unit "$val"; ring_init_opts+=("--${type}=${REPLY}")
-        fi
             [[ $REPLY ]] && case "${type}" in
                 workers)  nWorkersMax="${REPLY}" ;;
-                lines)    bytes_mode_flag=false  ;;
-                bytes)    { [[ ${v1} ]] || [[ ${val} ]]; } && bytes_mode_flag=true   ;;
+                lines)    byte_mode_flag=false   ;;
             esac
+         else
+            _expand_unit "$val"; ring_init_opts+=("--${type}=${REPLY}")
+            case "${type}" in
+                workers)  [[ $REPLY ]] && nWorkersMax="${REPLY}" ;;
+                lines)    byte_mode_flag=false   ;;
+                bytes)    byte_mode_flag=true    ;;
+            esac
+         fi
         return 0
     }
 
@@ -112,39 +122,39 @@ set -xv
             -z|--null)    delimiter_val='' ;;
 
             # --- LIMIT (-n 100) ---
-            @(-n|--limit)?(?([= ])+([0-9+-])))
-                arg="${1#@(-n|--limit)?([= ])}";
+            @(-n|--limit)?(?([= $'\t'])+([0-9+-])))
+                arg="${1#@(-n|--limit)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9+-])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--limit='"$REPLY") ;;
 
             # --- LINES / BATCH (-l 1k or -l 100:1k) ---
-            @(-l|--lines|--batchsize)?(?([= ])+([0-9a-zA-Z:+-])))
-                arg="${1#@(-l|--lines|--batchsize)?([= ])}";
+            @(-l|--lines|--batchsize)?(?([= $'\t'])+([0-9a-zA-Z:+-])))
+                arg="${1#@(-l|--lines|--batchsize)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9a-zA-Z:+-])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _parse_count "lines" "${arg}";;
 
             # --- BYTES (-b 1M) ---
-            @(-b|--bytes)?(?([= ])+([0-9a-zA-Z:+-])))
-                arg="${1#@(-b|--bytes)?([= ])}";
+            @(-b|--bytes)?(?([= $'\t'])+([0-9a-zA-Z:+-])))
+                arg="${1#@(-b|--bytes)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9a-zA-Z:+-])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _parse_count "bytes" "${arg:-0}" && ring_init_opts+=("--return-bytes") ;;
 
             # --- WORKERS (-j 4 or -j 1:8) ---
-            @(-j|-P|--workers)?(?([= ])+([0-9a-zA-Z:+-])))
-                arg="${1#@(-j|-P|--workers)?([= ])}";
+            @(-j|-P|--workers)?(?([= $'\t'])+([0-9a-zA-Z:+-])))
+                arg="${1#@(-j|-P|--workers)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9a-zA-Z:+-])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _parse_count "workers" "${arg}" ;;
 
             # --- TIMEOUT (-t 5000) ---
-            @(-t|--timeout)?(?([= ])+([0-9.+-])))
-                arg="${1#@(-t|--timeout)?([= ])}";
+            @(-t|--timeout)?(?([= $'\t'])+([0-9.+-])))
+                arg="${1#@(-t|--timeout)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9.+-])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _expand_unit "${arg}" &&  ring_init_opts+=('--timeout='"${REPLY}") ;;
 
             # --- ORDER (-o buffered) ---
-            @(-o|--order)?(?([= ])@(realtime|unbuffered|buffered|atomic|order|ordered)))
-                arg="${1#@(-o|--order)?([= ])}";
-                [[ ${arg}${2//@(realtime|unbuffered|buffered|atomic|order|ordered)/} ]] || { shift; arg="$1"; }
+            @(-o|--order)?(?([= $'\t'])@(realtime|unbuffered|buffered|atomic|order?(ed))))
+                arg="${1#@(-o|--order)?([= $'\t'])}";
+                [[ ${arg}${2//@(realtime|unbuffered|buffered|atomic|order?(ed))/} ]] || { shift; arg="$1"; }
                 case "${arg}" in
                     realtime|unbuffered) order_mode='realtime' ;;
                     buffered|atomic)     order_mode='buffered' ;;
@@ -153,8 +163,8 @@ set -xv
                 esac  ;;
 
             # --- DELIMITER (-d x) ---
-            @(-d|--delim|--delimiter)?(?([= ])*))
-                arg="${1#@(-d|--delim|--delimiter)?([= ])}";
+            @(-d|--delim|--delimiter)?(?([= $'\t'])*))
+                arg="${1#@(-d|--delim|--delimiter)?([= $'\t'])}";
                 [[ ${arg} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && delimiter_val="${arg:0:1}" ;;
 
@@ -190,17 +200,19 @@ toc() { :; }
     if ${stdin_flag:-false}; then
         unsafe_flag=false
         ring_init_opts+=('--stdin')
-    elif ${bytes_mode_flag:-false}; then
+    elif ${byte_mode_flag:-false}; then
         : "${stdin_flag:=true}"
         ring_init_opts+=('--stdin')
     elif ${unsafe_flag:-false}; then
         stdin_flag=false
     fi
 
-    ${bytes_mode_flag:-false} || ring_init_opts+=('--bytes=x')
+    ${byte_mode_flag:-false} || ring_init_opts+=('--bytes=x')
 
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
-declare -p
+    
+declare -p cmdline_str ring_ack_str delimiter_val ring_init_opts pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart fd_out P order_args
+
 # Initialize Ring
     ring_init "${ring_init_opts[@]}"
 
