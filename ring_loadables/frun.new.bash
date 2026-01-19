@@ -37,7 +37,7 @@ frun __exec__ "$@"
     # # # # # SETUP # # # # #
     local cmdline_str ring_ack_str delimiter_val ring_init_opts pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
-    local -gx order_flag unsafe_flag stdin_flag mode_byte order_mode unsafe_flag LC_ALL
+    local -gx order_mode unsafe_flag stdin_flag byte_mode_flag order_mode unsafe_flag LC_ALL
     local -ga fd_out P order_args
 
     LC_ALL=C
@@ -49,24 +49,46 @@ frun __exec__ "$@"
         shopt -s extglob;
     fi
 
+    _expand_unit() {
+        local val iec num p
+        val="${1,,}"
+        iec=false
+        [[ "${val}" == +* ]] && { iec=true; val="${val#+}"; }
+        num="${val%%[^0-9]*}"
+        [[ $num ]] || return 1
+        [[ "${num}" == "${val}" ]] && { REPLY="${num}"; return 0; }
+        [[ "${val}" == *i* ]] && iec=true
+        p=0
+        case "${val}" in
+            *k*) p=1 ;; *m*) p=2 ;; *g*) p=3 ;; *t*) p=4 ;; *p*) p=5 ;; *e*) p=6 ;;
+        esac
+        if ${iec}; then REPLY="$(( num << (10 * p) ))"; else REPLY="$(( num * (1000 ** p) ))"; fi
+        return 0
+    }
+
     # --- HELPER: Parse Ranges (N, N:M, :M, N:) ---
     parse_count() {
-        local type="$1"
-        local val="$2"
-        local extglob_was_set=false
+        local type val
+        type="$1"
+        val="$2"
 
-        case "$val" in
-            +([0-9])) 
+        case "$2" in
+            +([0-9]))
                 # Static / Limit value
-                ring_init_opts+=("--${type}=${val}") 
+                _expand_unit "$val"
+                ring_init_opts+=("--${type}=${REPLY}")
                 ;;
             *([0-9]):*([0-9]))
+                v1="${val%:*}"
+                v2="${val#*:}"
                 # Range value
-                if [[ ${val%:*} ]]; then
-                    ring_init_opts+=("--${type}0=${val%:*}") 
+                if [[ ${v1} ]]; then
+                    _expand_unit "$v1"
+                    ring_init_opts+=("--${type}0=${REPLY}")
                 fi
-                if [[ ${val#*:} ]]; then
-                    ring_init_opts+=("--${type}-max=${val#*:}") 
+                if [[ ${v2} ]]; then
+                     _expand_unit "$v2"
+                    ring_init_opts+=("--${type}-max=${REPLY}")
                 fi
                 ;;
             *)
@@ -75,14 +97,31 @@ frun __exec__ "$@"
         esac
 
         [[ "$type" == 'workers' ]] && [[ ${val#*:} ]] && nWorkersMax="${val#*:}"
-        
-    }
-        
 
+    }
+    _parse_count() {
+        local type val v1 v2
+        type="$1"
+        val="$2"
+        if [[ "$val" == *:* ]]; then
+            v1="${val%:*}"; v2="${val#*:}"
+            if [[ "$v1" ]]; then
+                _expand_unit "$v1"; ring_init_opts+=("--${type}0=${REPLY}")
+            fi
+            if [[ "$v2" ]]; then
+                _expand_unit "$v2"; ring_init_opts+=("--${type}-max=${REPLY}")
+                [[ "$type" == 'workers' ]] && nWorkersMax="${REPLY}"
+            fi
+        else
+            _expand_unit "$val"; ring_init_opts+=("--${type}=${REPLY}")
+            [[ "$type" == 'workers' ]] && nWorkersMax="${REPLY}"
+        fi
+        return 0
+    }
     # Config Vars
     order_mode='buffered'
     unsafe_flag=false
-    mode_byte=false
+    byte_mode_flag=false
     verbose_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
@@ -93,50 +132,64 @@ frun __exec__ "$@"
             -k|--keep-order|--ordered)   order_mode='ordered'  ;;
             -u|--unbuffered|--realtime)  order_mode='realtime' ;;
             --buffered|--atomic)         order_mode='buffered' ;;
-            
+
             -U|--unsafe)   unsafe_flag=true  ;;
             +U|--safe)     unsafe_flag=false ;;
-            
+
             -s|--stdin)    stdin_flag=true  ;;
-            +s|--no-stdin) stdin_flag=false ;; 
-            
+            +s|--no-stdin) stdin_flag=false ;;
+
             -v|--verbose)    verbose_flag=true  ;;
             +v|--no-verbose) verbose_flag=false ;;
 
             -z|--null)    delimiter_val='' ;;
-            
-            -n|--limit)
-                arg="${1#@(-n|--limit)?(=)}"; [[ ${arg}${2//+([0-9])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && ring_init_opts+=('--limit '"${arg}") ;;
 
-            -l|--lines|--batchsize)
-                arg="${1#@(-l|--lines|--batchsize)?(=)}"; [[ ${arg}${2//+([0-9:])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && parse_count "lines" "${arg}" ;;
+            # --- LIMIT (-n 100) ---
+            @(-n|--limit)?(?(=)+([0-9\-])))
+                arg="${1#@(-n|--limit)?(=)}";
+                [[ ${arg}${2//+([0-9\-])/} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--limit='"$REPLY") ;;
 
-            -b|--bytes) 
-                arg="${1#@(-b|--bytes)?(=)}"; [[ ${arg}${2//+([0-9:])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && { parse_count "bytes" "${arg}"; mode_byte=true; } ;;
-                
-            -j|-P|--workers)
-                arg="${1#@(-j|-P|--workers)?(=)}"; [[ ${arg}${2//+([0-9:])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && parse_count "workers" "${arg}" ;;
+            # --- LINES / BATCH (-l 1k or -l 100:1k) ---
+            @(-l|--lines|--batchsize)?(?(=)+([0-9a-zA-Z:+-])))
+                arg="${1#@(-l|--lines|--batchsize)?(=)}";
+                [[ ${arg}${2//+([0-9a-zA-Z:+-])/} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && _parse_count "lines" "${arg}";;
 
-            -t|--timeout)
-                arg="${1#@(-t|--timeout)?(=)}"; [[ ${arg}${2//+([0-9])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && ring_init_opts+=("--timeout=${arg}") ;;
+            # --- BYTES (-b 1M) ---
+            @(-b|--bytes)?(?(=)+([0-9a-zA-Z:+-])))
+                byte_mode_flag=true
+                arg="${1#@(-b|--bytes)?(=)}";
+                [[ ${arg}${2//+([0-9a-zA-Z:+-])/} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && _parse_count "bytes" "${arg}" && ring_init_opts+=("--return-bytes") ;;
 
-            -o|--order)
+            # --- WORKERS (-j 4 or -j 1:8) ---
+            @(-j|-P|--workers)?(?(=)+([0-9a-zA-Z:+-])))
+                arg="${1#@(-j|-P|--workers)?(=)}";
+                [[ ${arg}${2//+([0-9a-zA-Z:+-])/} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && _parse_count "workers" "${arg}" ;;
+
+            # --- TIMEOUT (-t 5000) ---
+            @(-t|--timeout)?(?(=)+([0-9.\-])))
+                arg="${1#@(-t|--timeout)?(=)}";
+                [[ ${arg}${2//+([0-9.\-])/} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && _expand_unit "${arg}" &&  ring_init_opts+=('--timeout='"${REPLY}") ;;
+
+            # --- ORDER (-o buffered) ---
+            @(-o|--order)?(?(=)@(realtime|unbuffered|buffered|atomic|order|ordered)))
                 arg="${1#@(-o|--order)?(=)}";
                 [[ ${arg}${2//@(realtime|unbuffered|buffered|atomic|order|ordered)/} ]] || { shift; arg="$1"; }
                 case "${arg}" in
                     realtime|unbuffered) order_mode='realtime' ;;
                     buffered|atomic)     order_mode='buffered' ;;
-                    order|ordered|"")    order_mode='ordered'  ;;
+                    order|ordered|'')    order_mode='ordered'  ;;
                     *)                   order_mode='buffered' ;;
                 esac  ;;
 
-            -d|--delim|--delimiter)
-                arg="${1#@(-d|--delim|--delimiter)?(=)}"; [[ ${arg} ]] || { shift; arg="$1"; }
+            # --- DELIMITER (-d x) ---
+            @(-d|--delim|--delimiter)?(=)*)
+                arg="${1#@(-d|--delim|--delimiter)?(=)}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && delimiter_val="${arg:0:1}" ;;
 
             --) shift; break ;;
@@ -161,16 +214,21 @@ toc() { :; }
     : "${nWorkersMax:=$(nproc)}"
 
     # Resolve Default Modes
-    if ${mode_byte}; then
-        : "${stdin_flag:=true}"
-    else
-        : "${stdin_flag:=false}"
-    fi
+    [[ -z ${stdin_flag} ]] && {
+        if ${byte_mode_flag:-false}; then
+           stdin_flag=true
+        else
+           stdin_flag=false
+        fi
+    }
     
     if ${stdin_flag}; then
         ring_init_opts+=("--return-bytes")
+        unsafe_flag=false
+    elif ${unsafe_flag}; then
+        stdin_flag=false
     fi
-
+declare -p ring_init_opts
     # Initialize Ring
     if [[ "${order_mode}" == "realtime" ]]; then
         ring_init "${ring_init_opts[@]}"
@@ -234,7 +292,7 @@ toc() { :; }
                 ( ring_splice $fd_read 1 '"''"' $REPLY "close" ) | '"$cmdline_str"'
             fi'
             
-        elif ${mode_byte}; then
+        elif ${byte_mode_flag}; then
             # BYTE ARGS PAYLOAD
             pCode='
             read -r -u $fd_read -N $REPLY A

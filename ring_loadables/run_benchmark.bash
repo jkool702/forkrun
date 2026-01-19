@@ -14,8 +14,8 @@ shopt -s extglob
 
 # setup tests
 F=(f1 f2 f3)
-G=('' '-k' '-u' '-U')
-C=(':' 'echo' "printf '%s\n'")
+G=('' '-s' '-k' '-u' '-U')
+C=('cat' 'tee' ':' 'echo' "printf '%s\n'")
 
 N=$(( ${#F[@]} * ${#G[@]} * ${#C[@]} * 4 ))
 K=0
@@ -48,6 +48,10 @@ sleep 0.1s
 for Fk in "${F[@]}"; do
 for Gk in "${G[@]}"; do
 for Ck in "${C[@]}"; do
+
+if [[ "${Gk}" == '-s' ]]; then
+[[ "${Ck}" == 'cat' ]] || [[ "${Ck}" == 'cat' ]] || continue;
+fi
 
 ((K++)); echo; echo "($K): time frun $Gk $Ck <$Fk >/dev/null"
 { time { frun  $Gk $Ck <$Fk >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
