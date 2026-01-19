@@ -77,9 +77,10 @@ a1=''
 #        echo "a1 has $(wc -l <<<"$a1") lines"
 } <./frun.bash
 
+eval "${a1}"
+unset b64
 declare -A b64
 
-eval "${a1}"
 
 for f in forkrun_ring.*.so; do
   a="${f%.so}"

@@ -1,4 +1,4 @@
-// forkrun_ring.c v9.3 (Golden Master)
+// forkrun_ring.c v9.2 (Atomic Output & TLS Optimized)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -395,91 +395,6 @@ static inline void cleanup_waiter_state() {
     }
 }
 
-// --- INIT: CONFIG PARSING HELPERS ---
-#define CONF_UNSET 0
-#define CONF_SET   1
-#define CONF_DISABLE -2 
-
-typedef struct {
-    uint64_t a; // start
-    uint64_t b; // max
-    int state_a;
-    int state_b;
-} ConfigPair;
-
-static uint64_t get_v_def(const char* type, bool stdin_mode) {
-    if (!strcmp(type, "workers")) return sysconf(_SC_NPROCESSORS_ONLN);
-    if (!strcmp(type, "lines"))   return 4096;
-    if (!strcmp(type, "bytes"))   { 
-        uint64_t l2 = get_cache_bytes(); 
-        if (stdin_mode) return (l2 < (1ULL<<19)) ? l2 : (1ULL<<19); // Min(L2, 512KB) for Stdin
-        uint64_t arg = get_arg_max_bytes();
-        return (l2 < arg) ? l2 : arg; // Min(L2, ARG_MAX) for Args
-    }
-    return 1;
-}
-
-static uint64_t get_v_max(const char* type, bool stdin_mode) {
-    if (!strcmp(type, "workers")) return sysconf(_SC_NPROCESSORS_ONLN) * 2;
-    if (!strcmp(type, "lines"))   return 65535;
-    if (!strcmp(type, "bytes"))   {
-        if (stdin_mode) {
-            // Pipe buffer limit (1MB), but respect L2 if weirdly small
-            uint64_t l2 = get_cache_bytes();
-            return (l2 < (1ULL<<20)) ? l2 : (1ULL<<20); 
-        } else {
-            // Argument max limit
-            return get_arg_max_bytes();
-        }
-    }
-    return 1;
-}
-
-static void parse_config_arg(ConfigPair *cfg, const char *arg, char which, uint64_t v_def, uint64_t v_max) {
-    if (strcmp(arg, "x") == 0) {
-        cfg->state_a = CONF_DISABLE;
-        cfg->state_b = CONF_DISABLE;
-        return;
-    }
-    uint64_t val_a = 0, val_b = 0;
-    if (arg[0] == '\0') {
-        val_a = 1; val_b = v_def;
-    } else if (strcmp(arg, "-1") == 0) {
-        val_a = 1; val_b = v_max;
-    } else if (strcmp(arg, "0") == 0) {
-        val_a = v_def; val_b = v_def;
-    } else if (strcmp(arg, "-0") == 0) {
-        val_a = 1; val_b = 1;
-    } else if (strcmp(arg, "+0") == 0) {
-        val_a = v_max; val_b = v_max;
-    } else {
-        uint64_t v = (uint64_t)atoll(arg);
-        if (v < 1) v = 1;
-        val_a = v; val_b = v;
-    }
-    if (which == 0 || which == 1) { cfg->a = val_a; cfg->state_a = CONF_SET; }
-    if (which == 0 || which == 2) { cfg->b = val_b; cfg->state_b = CONF_SET; }
-}
-
-static void resolve_config(ConfigPair *cfg, uint64_t v_def, uint64_t v_max) {
-    if (cfg->state_a == CONF_DISABLE || cfg->state_b == CONF_DISABLE) return;
-    if (cfg->state_a != CONF_SET && cfg->state_b != CONF_SET) {
-        cfg->a = 1; cfg->b = v_def;
-    } else if (cfg->state_a == CONF_SET && cfg->state_b != CONF_SET) {
-        if (cfg->a > v_max) cfg->a = v_max;
-        cfg->b = (cfg->a > v_def) ? cfg->a : v_def;
-    } else if (cfg->state_a != CONF_SET && cfg->state_b == CONF_SET) {
-        if (cfg->b > v_max) cfg->b = v_max;
-        cfg->a = (cfg->b < v_def) ? cfg->b : v_def;
-    } else {
-        if (cfg->a > v_max) cfg->a = v_max;
-        if (cfg->b > v_max) cfg->b = v_max;
-        if (cfg->a > cfg->b) cfg->a = cfg->b;
-    }
-    if (cfg->a < 1) cfg->a = 1;
-    if (cfg->b < 1) cfg->b = 1;
-}
-
 // --- INIT: CONFIG PARSING ---
 static int ring_init_main(int argc, char **argv) {
     const char *dbg_env = get_string_value("FORKRUN_DEBUG");
@@ -499,8 +414,13 @@ static int ring_init_main(int argc, char **argv) {
         atomic_store_relaxed(&state->fallow_active, 0);
         atomic_store_relaxed(&state->tail_idx, 0);
         atomic_store_relaxed(&state->scanner_finished, 0);
+        
         state->offset_ring[0] = 0;
-        if (fd_escrow[0] >= 0) { char dump[1024]; while(read(fd_escrow[0], dump, sizeof(dump)) > 0) {} }
+        
+        if (fd_escrow[0] >= 0) {
+            char dump[1024];
+            while(read(fd_escrow[0], dump, sizeof(dump)) > 0) {}
+        }
         return EXECUTION_SUCCESS;
     }
 
@@ -511,85 +431,103 @@ static int ring_init_main(int argc, char **argv) {
     state = (struct SharedState *)p;
     memset(p, 0, total_size);
 
-    // Initial Defaults
-    ConfigPair cfg_w = {0}, cfg_l = {0}, cfg_b = {0};
-    int stdin_explicit_state = -1; // -1 unset, 0 false, 1 true
-    const char *out_array_name = NULL;
-
-    // Parse Flags
-    for (int i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-        if (strncmp(arg, "--workers=", 10) == 0) parse_config_arg(&cfg_w, arg+10, 0, 0, 0);
-        else if (strncmp(arg, "--workers0=", 11) == 0) parse_config_arg(&cfg_w, arg+11, 1, 0, 0);
-        else if (strncmp(arg, "--workers-max=", 14) == 0) parse_config_arg(&cfg_w, arg+14, 2, 0, 0);
-        
-        else if (strncmp(arg, "--lines=", 8) == 0) { parse_config_arg(&cfg_l, arg+8, 0, 0, 0); cfg_b.state_a = CONF_DISABLE; }
-        else if (strncmp(arg, "--lines0=", 9) == 0) parse_config_arg(&cfg_l, arg+9, 1, 0, 0);
-        else if (strncmp(arg, "--lines-max=", 12) == 0) parse_config_arg(&cfg_l, arg+12, 2, 0, 0);
-        
-        else if (strncmp(arg, "--bytes=", 8) == 0) { parse_config_arg(&cfg_b, arg+8, 0, 0, 0); cfg_l.state_a = CONF_DISABLE; }
-        else if (strncmp(arg, "--bytes0=", 9) == 0) parse_config_arg(&cfg_b, arg+9, 1, 0, 0);
-        else if (strncmp(arg, "--bytes-max=", 12) == 0) parse_config_arg(&cfg_b, arg+12, 2, 0, 0);
-        
-        else if (strncmp(arg, "--limit=", 8) == 0) state->cfg_limit = (uint64_t)atoll(arg+8);
-        else if (strncmp(arg, "--timeout=", 10) == 0) state->cfg_timeout_us = atoll(arg+10);
-        else if (strncmp(arg, "--greedy", 8) == 0) state->cfg_timeout_us = 0;
-        else if (strncmp(arg, "--return-bytes", 14) == 0) state->cfg_return_bytes = 1;
-        else if (strncmp(arg, "--out=", 6) == 0) out_array_name = arg+6;
-        else if (strncmp(arg, "--stdin", 7) == 0) stdin_explicit_state = 1;
-        else if (strncmp(arg, "--no-stdin", 10) == 0) stdin_explicit_state = 0;
-        else if (arg[0] != '-') out_array_name = arg;
-    }
-
-    // Resolve Mode and Stdin
-    bool byte_mode = false;
-    if (cfg_l.state_a == CONF_DISABLE || cfg_b.state_a == CONF_SET || cfg_b.state_b == CONF_SET) {
-        byte_mode = true;
-    }
-    bool stdin_mode = false;
-    if (stdin_explicit_state != -1) stdin_mode = (stdin_explicit_state == 1);
-    else stdin_mode = byte_mode; // Default: Byte=Stdin, Line=Args
-
-    // Resolve Hardware Limits
-    uint64_t w_def = get_v_def("workers", false); uint64_t w_max = get_v_max("workers", false);
-    uint64_t l_def = get_v_def("lines", false);   uint64_t l_max = get_v_max("lines", false);
-    uint64_t b_def = get_v_def("bytes", stdin_mode); uint64_t b_max = get_v_max("bytes", stdin_mode);
-
-    // Resolve Values
-    resolve_config(&cfg_w, w_def, w_max);
-    resolve_config(&cfg_l, l_def, l_max);
-    resolve_config(&cfg_b, b_def, b_max);
-
-    // Commit to State
-    state->cfg_w_start = cfg_w.a;
-    state->cfg_w_max   = cfg_w.b;
-    state->mode_byte   = byte_mode ? 1 : 0;
+    // --- DEFAULTS ---
+    long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nproc < 1) nproc = 1;
     
-    if (byte_mode) {
-        state->cfg_batch_start = cfg_b.a;
-        state->cfg_batch_max   = cfg_b.b;
-        state->cfg_chunk_bytes = cfg_b.b;
-        state->cfg_line_max    = cfg_b.b;
-        if (state->cfg_return_bytes == 0) state->cfg_return_bytes = 1; // Implicit
+    char *tv;
+    uint64_t env_w_max = (uint64_t)nproc;
+    uint64_t env_w_start = 1;
+    uint64_t env_l_max = 4096;
+    uint64_t env_b_max = 0; 
+    
+    if ((tv=get_string_value("nWorkersMax"))) { long v=atol(tv); if(v>0) env_w_max=v; }
+    if ((tv=get_string_value("nWorkers"))) { long v=atol(tv); if(v>0) env_w_start=v; }
+    if ((tv=get_string_value("nLinesMax"))) { long v=atol(tv); if(v>0) env_l_max=v; }
+    
+    uint64_t val_l2 = (get_cache_bytes() * 3) >> 2; 
+    uint64_t val_arg = (get_arg_max_bytes() * 3) >> 2; 
+    uint64_t def_bytes = (val_l2 < val_arg) ? val_l2 : val_arg;
+    if ((tv=get_string_value("nBytesMax"))) {
+        if (!strcmp(tv,"L2")) env_b_max=val_l2;
+        else if (!strcmp(tv,"ARG_MAX")) env_b_max=val_arg;
+        else { long long v=atoll(tv); if(v>0) env_b_max=v; }
     } else {
-        state->cfg_batch_start = cfg_l.a;
-        state->cfg_batch_max   = cfg_l.b;
-        state->cfg_line_max    = b_max; // Use max bytes as safeguard for line mode
+        env_b_max = def_bytes;
     }
 
-    if (state->cfg_timeout_us == 0 && byte_mode && state->cfg_timeout_us == 0) {
-         // Keep greedy if set explicitly, else maybe default timeout for bytes? 
-         // Logic from wrapper implies -1 if bytes mode?
-         // Wrapper passes --timeout if set. If not set, it is 0 here.
-         // Previous logic: if byte mode and no timeout set, set to -1.
-         // We can assume wrapper handles this or default to -1 here?
-         // Let's rely on explicit --timeout passed. If 0, it is 0.
-         // Actually, wrapper defaults timeout to -1 for bytes if not set.
+    state->cfg_w_max = env_w_max;
+    state->cfg_w_start = env_w_start;
+    state->cfg_batch_max = env_l_max;
+    state->cfg_batch_start = 1;
+    state->cfg_line_max = env_b_max;
+    state->cfg_limit = 0; 
+    state->cfg_timeout_us = 0; 
+    state->mode_byte = 0; 
+    state->cfg_return_bytes = 0;
+
+    // --- FLAG PARSING ---
+    const char *out_array_name = NULL;
+    int64_t lines_arg = -1;
+    int64_t bytes_arg = -1;
+
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--workers-max=", 14) == 0) {
+            long v = atol(argv[i]+14); if(v>0) state->cfg_w_max = v;
+        } else if (strncmp(argv[i], "--workers0=", 11) == 0) {
+            long v = atol(argv[i]+11); if(v>0) state->cfg_w_start = v;
+        } else if (strncmp(argv[i], "--workers=", 10) == 0) {
+            long v = atol(argv[i]+10); 
+            if(v>0) { state->cfg_w_start = v; state->cfg_w_max = v; }
+        } else if (strncmp(argv[i], "--lines-max=", 12) == 0) {
+            long v = atol(argv[i]+12); if(v>0) state->cfg_batch_max = v;
+        } else if (strncmp(argv[i], "--lines0=", 9) == 0) {
+            long v = atol(argv[i]+9); if(v>0) state->cfg_batch_start = v;
+        } else if (strncmp(argv[i], "--lines=", 8) == 0) {
+            lines_arg = atoll(argv[i]+8);
+            if (lines_arg > 0) { state->cfg_batch_start=lines_arg; state->cfg_batch_max=lines_arg; }
+        } else if (strncmp(argv[i], "--bytes-max=", 12) == 0) {
+            long v = atol(argv[i]+12); if(v>0) { state->cfg_line_max=v; state->cfg_chunk_bytes=v; }
+        } else if (strncmp(argv[i], "--bytes0=", 9) == 0) {
+            long v = atol(argv[i]+9); if(v>0) { state->cfg_batch_start=v; }
+        } else if (strncmp(argv[i], "--bytes=", 8) == 0) {
+            bytes_arg = atoll(argv[i]+8);
+        } else if (strncmp(argv[i], "--limit=", 8) == 0) {
+            state->cfg_limit = (uint64_t)atoll(argv[i]+8);
+        } else if (strncmp(argv[i], "--timeout=", 10) == 0) {
+            state->cfg_timeout_us = atoll(argv[i]+10);
+        } else if (strncmp(argv[i], "--greedy", 8) == 0) {
+            state->cfg_timeout_us = 0;
+        } else if (strncmp(argv[i], "--return-bytes", 14) == 0) {
+            state->cfg_return_bytes = 1;
+        } else if (strncmp(argv[i], "--out=", 6) == 0) {
+            out_array_name = argv[i]+6;
+        } else if (argv[i][0] != '-') {
+            out_array_name = argv[i];
+        }
+    }
+
+    if (lines_arg == 0 || (lines_arg < 0 && bytes_arg > 0)) {
+        state->mode_byte = 1;
+        state->cfg_return_bytes = 1; // Auto-set return bytes
+        if (bytes_arg > 0) {
+            state->cfg_batch_start = bytes_arg;
+            state->cfg_batch_max = bytes_arg;
+        } else {
+            state->cfg_batch_start = env_b_max; 
+            state->cfg_batch_max = env_b_max;
+        }
+        state->cfg_chunk_bytes = state->cfg_batch_max;
+        bool timeout_set = false;
+        for(int i=1;i<argc;i++) if(strncmp(argv[i],"--timeout",9)==0) timeout_set=true;
+        if (!timeout_set) state->cfg_timeout_us = -1;
+    } else {
+        state->mode_byte = 0;
     }
 
     state->fixed_workers = (state->cfg_w_start == state->cfg_w_max);
-    state->fixed_batch   = (state->cfg_batch_start == state->cfg_batch_max);
-    
+    state->fixed_batch = (state->cfg_batch_start == state->cfg_batch_max);
+
     if (state->mode_byte) {
         atomic_store_relaxed(&state->signed_batch_size, 1);
     } else {
