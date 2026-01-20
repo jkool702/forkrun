@@ -634,6 +634,32 @@ static int ring_init_main(int argc, char **argv) {
         if (failure) { for(int k=0; k<created_cnt; k++) close(created_fds[k]); xfree(created_fds); return EXECUTION_FAILURE; }
         xfree(created_fds);
     }
+
+    // --- PROBE PIPE PHYSICS ---
+    // Create a temporary pipe to measure the OS limit for F_SETPIPE_SZ
+    int probe_fd[2];
+    int pipe_cap = 65536; // Safe default
+    if (pipe(probe_fd) == 0) {
+        int ret = fcntl(probe_fd[1], F_SETPIPE_SZ, 1048576);
+        if (ret >= 0) pipe_cap = ret;
+        else {
+            ret = fcntl(probe_fd[1], F_GETPIPE_SZ);
+            if (ret > 0) pipe_cap = ret;
+        }
+        close(probe_fd[0]);
+        close(probe_fd[1]);
+    }
+
+    char var_buf[64];
+    // 1. Export Actual Pipe Capacity
+    snprintf(var_buf, sizeof(var_buf), "%d", pipe_cap);
+    bind_variable("RING_PIPE_CAPACITY", var_buf, 0);
+
+    // 2. Export Configured Max Bytes (Logic determined earlier in function)
+    // state->cfg_line_max holds the byte limit for both Line Mode (if capped) and Byte Mode.
+    snprintf(var_buf, sizeof(var_buf), "%lu", state->cfg_line_max);
+    bind_variable("RING_BYTES_MAX", var_buf, 0);
+
     return EXECUTION_SUCCESS;
 }
 
@@ -1831,7 +1857,10 @@ static int ring_pipe_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
     int pfd[2];
     if (pipe(pfd) < 0) { builtin_error("pipe failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
+    
+    // Best effort maximize, don't check return, fast path only
     fcntl(pfd[1], F_SETPIPE_SZ, 1048576); 
+
     char buf[32];
     if (argc == 2) {
         const char *arr_name = argv[1];
