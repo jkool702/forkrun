@@ -19,7 +19,7 @@ frun() {
 
         # EXEC into Clean Room
         # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
-        exec -c "${BASH:-bash}" --norc --noprofile -c 'enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
+        exec "${BASH:-bash}" --norc --noprofile -c 'enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
 export LC_ALL=C
 set +m
 shopt -s extglob
@@ -29,7 +29,6 @@ frun __exec__ "$@"
         
         # (Exec replaces process, so we never reach here)
     }
-set -xv
     # 2. WORKER LOGIC (Clean Shell)
     shift 1 # Remove __exec__
 
@@ -211,8 +210,7 @@ toc() { :; }
 
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
     
-declare -p cmdline_str ring_ack_str delimiter_val ring_init_opts pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart fd_out P order_args
-
+declare -p
 # Initialize Ring
     ring_init "${ring_init_opts[@]}"
 
@@ -316,7 +314,7 @@ declare -p cmdline_str ring_ack_str delimiter_val ring_init_opts pCode extglob_w
         '"${ring_ack_str}"'
     done
     ring_worker dec
-  } {fd_read}<"/proc/'"${BASHPID}"'/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
+  } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &
 P+=($!)
 }'
