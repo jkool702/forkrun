@@ -14,8 +14,6 @@ shopt -s extglob
 
 # setup tests
 F=(f1 f2 f3)
-G=('' '-s' '-k' '-u' '-U')
-C=('cat' 'tee' ':' 'echo' "printf '%s\n'")
 
 N=$(( ${#F[@]} * ${#G[@]} * ${#C[@]} * 4 ))
 K=0
@@ -43,33 +41,29 @@ exec {fd_time}<&-
 #getCPU() { :; }
 
 sleep 0.1s
-
+declare -i K=0
 ## RUN BENCHMARK
 for Fk in "${F[@]}"; do
-for Gk in "${G[@]}"; do
-for Ck in "${C[@]}"; do
+for GCk in {,-k,-u,-U}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,cat,tee}$'\n'; do
 
-if [[ "${Gk}" == '-s' ]]; then
-[[ "${Ck}" == 'cat' ]] || [[ "${Ck}" == 'cat' ]] || continue;
-fi
+GCk="${GCk%$'\n'}";
 
-((K++)); echo; echo "($K): time frun $Gk $Ck <$Fk >/dev/null"
-{ time { frun  $Gk $Ck <$Fk >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+((K++)); echo; echo "($K): time { frun $GCk <$Fk >/dev/null; }"
+{ time { frun  $GCk <$Fk >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
 getCPU
 
-((K++)); echo; echo "($K): time frun $Gk $Ck <$Fk | wc -l"
-{ time { frun  $Gk $Ck <$Fk 2>&$fd2 | wc -l; } 1>&$fd1 ; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+((K++)); echo; echo "($K): time { frun $GCk <$Fk | wc -l; }"
+{ time { frun  $GCk <$Fk 2>&$fd2 | wc -l; } 1>&$fd1 ; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
 getCPU
 
-((K++)); echo; echo "($K): time { cat $Fk | frun $Gk $Ck >/dev/null; }"
-{ time { cat $Fk | frun  $Gk $Ck >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' |  tee ./.time
+((K++)); echo; echo "($K): time { cat $Fk | frun $GCk >/dev/null; }"
+{ time { cat $Fk | frun  $GCk >/dev/null 2>&$fd2; }; } 2>&1 | sed -zE 's/^.*real/real/' |  tee ./.time
 getCPU
 
-((K++)); echo; echo "($K): time { cat $Fk | frun $Gk $Ck | wc -l; }"
-{ time { cat $Fk | frun  $Gk $Ck  2>&$fd2 | wc -l; } 1>&$fd1; } 2>&1 | sed -zE 's/^.*real/real/' |  tee ./.time
+((K++)); echo; echo "($K): time { cat $Fk | frun $GCk | wc -l; }"
+{ time { cat $Fk | frun  $GCk 2>&$fd2 | wc -l; } 1>&$fd1; } 2>&1 | sed -zE 's/^.*real/real/' |  tee ./.time
 getCPU
 
-done
 done
 done
 
