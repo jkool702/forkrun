@@ -1,4 +1,4 @@
-// forkrun_ring.c v9.5 (Golden Master)
+// forkrun_ring.c v9.3 (Golden Master)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -13,7 +13,6 @@
 //    Handles Line Mode vs Byte Mode.
 //    Handles Dynamic vs Static Batch Sizing (PID Loop).
 //    Handles Dynamic vs Static Worker Spawning (Backlog/Rate logic).
-//    Includes "Stall Physics" to prevent fragmentation when input is fast.
 //
 // 4. Robust Output:
 //    - Realtime: Workers write directly to stdout (fastest, but kernel lock contention possible).
@@ -396,46 +395,26 @@ static inline void cleanup_waiter_state() {
     }
 }
 
-// --- BITMASK CONFIGURATION CONSTANTS ---
-#define S_USER 0
-#define S_MIN  1 // 001
-#define S_DEF  2 // 010
-#define S_MAX  4 // 100
+// --- INIT: CONFIG PARSING HELPERS ---
+#define CONF_UNSET 0
+#define CONF_SET   1
+#define CONF_DISABLE -2 
 
-// Shifts
-#define SH_W_A 0
-#define SH_W_B 3
-#define SH_L_A 6
-#define SH_L_B 9
-#define SH_B_A 12
-#define SH_B_B 15
-#define SH_STDIN 19
-#define SH_BMODE 20
+typedef struct {
+    uint64_t a; // start
+    uint64_t b; // max
+    int state_a;
+    int state_b;
+} ConfigPair;
 
-// Masks (for 3-bit slots)
-#define M_W_A (7 << SH_W_A)
-#define M_W_B (7 << SH_W_B)
-#define M_L_A (7 << SH_L_A)
-#define M_L_B (7 << SH_L_B)
-#define M_B_A (7 << SH_B_A)
-#define M_B_B (7 << SH_B_B)
-#define M_STDIN (1 << SH_STDIN)
-#define M_BMODE (1 << SH_BMODE)
-
-// Combined Masks
-#define M_W_ALL (M_W_A | M_W_B)
-#define M_L_ALL (M_L_A | M_L_B)
-#define M_B_ALL (M_B_A | M_B_B)
-
-// Hardware Limit Helpers
 static uint64_t get_v_def(const char* type, bool stdin_mode) {
     if (!strcmp(type, "workers")) return sysconf(_SC_NPROCESSORS_ONLN);
     if (!strcmp(type, "lines"))   return 4096;
     if (!strcmp(type, "bytes"))   { 
         uint64_t l2 = get_cache_bytes(); 
-        if (stdin_mode) return (l2 < (1ULL<<19)) ? l2 : (1ULL<<19); 
+        if (stdin_mode) return (l2 < (1ULL<<19)) ? l2 : (1ULL<<19); // Min(L2, 512KB) for Stdin
         uint64_t arg = get_arg_max_bytes();
-        return (l2 < arg) ? l2 : arg; 
+        return (l2 < arg) ? l2 : arg; // Min(L2, ARG_MAX) for Args
     }
     return 1;
 }
@@ -445,93 +424,60 @@ static uint64_t get_v_max(const char* type, bool stdin_mode) {
     if (!strcmp(type, "lines"))   return 65535;
     if (!strcmp(type, "bytes"))   {
         if (stdin_mode) {
+            // Pipe buffer limit (1MB), but respect L2 if weirdly small
             uint64_t l2 = get_cache_bytes();
             return (l2 < (1ULL<<20)) ? l2 : (1ULL<<20); 
         } else {
+            // Argument max limit
             return get_arg_max_bytes();
         }
     }
     return 1;
 }
 
-// Global State for Init
-static uint32_t cfg_state = 0;
-static uint64_t user_vals[6] = {0}; // WA, WB, LA, LB, BA, BB
-
-static void apply_config(char type, char sub, const char *arg) {
-    // type: 0=Work, 1=Line, 2=Byte
-    // sub:  0=Both, 1=Start(A), 2=Max(B)
-    
-    uint32_t clear_mask = 0;
-    uint32_t set_mask = 0;
-    
-    int val_code = S_USER;
-    uint64_t u_val = 0;
-
-    // 1. Parse Argument Intent
+static void parse_config_arg(ConfigPair *cfg, const char *arg, char which, uint64_t v_def, uint64_t v_max) {
     if (strcmp(arg, "x") == 0) {
-        // Disable mode
-        if (type == 1) { // Line=x -> Byte Mode
-            clear_mask |= M_L_ALL; // Clear Lines
-            set_mask   |= M_BMODE; // Set Byte Mode
-        } else if (type == 2) { // Byte=x -> Line Mode
-            clear_mask |= (M_B_ALL | M_BMODE); // Clear Bytes, Clear Bmode
-        }
-    } else {
-        if (arg[0] == '\0')          val_code = S_DEF; // Empty = Default
-        else if (strcmp(arg,"0")==0) val_code = S_DEF;
-        else if (strcmp(arg,"-0")==0) val_code = S_MIN;
-        else if (strcmp(arg,"+0")==0) val_code = S_MAX;
-        else if (strcmp(arg,"-1")==0) val_code = S_MAX; // -1 maps to Max for convenience
-        else {
-            val_code = S_USER;
-            u_val = (uint64_t)atoll(arg);
-            if (u_val < 1) u_val = 1;
-        }
-
-        // 2. State Transitions based on Type
-        if (type == 1) { // Lines
-             cfg_state &= ~M_BMODE;
-             cfg_state &= ~M_B_ALL; 
-        }
-        if (type == 2) { // Bytes
-             cfg_state |= M_BMODE;
-             cfg_state |= M_STDIN;
-             cfg_state &= ~M_L_ALL;
-        }
-
-        if (type == 0) { // Workers
-            clear_mask |= M_W_ALL; // Reset bits we are about to touch
-        }
-        if (type == 1) { // Lines
-            clear_mask |= M_L_ALL;
-        }
-        if (type == 2) { // Bytes
-            clear_mask |= M_B_ALL;
-        }
-
-        // Helper to apply to one slot
-        #define APPLY_SLOT(idx_u, sh) do { \
-            if (val_code == S_USER) { user_vals[idx_u] = u_val; } \
-            else { set_mask |= (val_code << sh); } \
-        } while(0)
-
-        // Refined Mask Application based on Sub
-        if (type == 0) { // Workers
-            if (sub == 0 || sub == 1) { cfg_state &= ~M_W_A; APPLY_SLOT(0, SH_W_A); }
-            if (sub == 0 || sub == 2) { cfg_state &= ~M_W_B; APPLY_SLOT(1, SH_W_B); }
-        }
-        if (type == 1) { // Lines
-            if (sub == 0 || sub == 1) { cfg_state &= ~M_L_A; APPLY_SLOT(2, SH_L_A); }
-            if (sub == 0 || sub == 2) { cfg_state &= ~M_L_B; APPLY_SLOT(3, SH_L_B); }
-        }
-        if (type == 2) { // Bytes
-            if (sub == 0 || sub == 1) { cfg_state &= ~M_B_A; APPLY_SLOT(4, SH_B_A); }
-            if (sub == 0 || sub == 2) { cfg_state &= ~M_B_B; APPLY_SLOT(5, SH_B_B); }
-        }
+        cfg->state_a = CONF_DISABLE;
+        cfg->state_b = CONF_DISABLE;
+        return;
     }
-    
-    cfg_state |= set_mask;
+    uint64_t val_a = 0, val_b = 0;
+    if (arg[0] == '\0') {
+        val_a = 1; val_b = v_def;
+    } else if (strcmp(arg, "-1") == 0) {
+        val_a = 1; val_b = v_max;
+    } else if (strcmp(arg, "0") == 0) {
+        val_a = v_def; val_b = v_def;
+    } else if (strcmp(arg, "-0") == 0) {
+        val_a = 1; val_b = 1;
+    } else if (strcmp(arg, "+0") == 0) {
+        val_a = v_max; val_b = v_max;
+    } else {
+        uint64_t v = (uint64_t)atoll(arg);
+        if (v < 1) v = 1;
+        val_a = v; val_b = v;
+    }
+    if (which == 0 || which == 1) { cfg->a = val_a; cfg->state_a = CONF_SET; }
+    if (which == 0 || which == 2) { cfg->b = val_b; cfg->state_b = CONF_SET; }
+}
+
+static void resolve_config(ConfigPair *cfg, uint64_t v_def, uint64_t v_max) {
+    if (cfg->state_a == CONF_DISABLE || cfg->state_b == CONF_DISABLE) return;
+    if (cfg->state_a != CONF_SET && cfg->state_b != CONF_SET) {
+        cfg->a = 1; cfg->b = v_def;
+    } else if (cfg->state_a == CONF_SET && cfg->state_b != CONF_SET) {
+        if (cfg->a > v_max) cfg->a = v_max;
+        cfg->b = (cfg->a > v_def) ? cfg->a : v_def;
+    } else if (cfg->state_a != CONF_SET && cfg->state_b == CONF_SET) {
+        if (cfg->b > v_max) cfg->b = v_max;
+        cfg->a = (cfg->b < v_def) ? cfg->b : v_def;
+    } else {
+        if (cfg->a > v_max) cfg->a = v_max;
+        if (cfg->b > v_max) cfg->b = v_max;
+        if (cfg->a > cfg->b) cfg->a = cfg->b;
+    }
+    if (cfg->a < 1) cfg->a = 1;
+    if (cfg->b < 1) cfg->b = 1;
 }
 
 // --- INIT: CONFIG PARSING ---
@@ -565,107 +511,80 @@ static int ring_init_main(int argc, char **argv) {
     state = (struct SharedState *)p;
     memset(p, 0, total_size);
 
-    // INITIALIZE STATE MACHINE
-    // Workers: A=MIN(1), B=MAX(4) -> 100 001
-    // Lines: A=MIN(1), B=DEF(2) -> 010 001
-    // Bytes: A=MIN(1), B=DEF(2) -> 010 001
-    // Bits: 0 0 010 001 010 001 100 001 -> 0x44921
-    cfg_state = 0x44921; 
-    
-    int stdin_explicit = -1; // -1 unset, 0 false, 1 true
+    // Initial Defaults
+    ConfigPair cfg_w = {0}, cfg_l = {0}, cfg_b = {0};
+    int stdin_explicit_state = -1; // -1 unset, 0 false, 1 true
     const char *out_array_name = NULL;
 
+    // Parse Flags
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
-        if (strncmp(arg, "--workers=", 10) == 0)      apply_config(0, 0, arg+10);
-        else if (strncmp(arg, "--workers0=", 11) == 0) apply_config(0, 1, arg+11);
-        else if (strncmp(arg, "--workers-max=", 14) == 0) apply_config(0, 2, arg+14);
+        if (strncmp(arg, "--workers=", 10) == 0) parse_config_arg(&cfg_w, arg+10, 0, 0, 0);
+        else if (strncmp(arg, "--workers0=", 11) == 0) parse_config_arg(&cfg_w, arg+11, 1, 0, 0);
+        else if (strncmp(arg, "--workers-max=", 14) == 0) parse_config_arg(&cfg_w, arg+14, 2, 0, 0);
         
-        else if (strncmp(arg, "--lines=", 8) == 0)     apply_config(1, 0, arg+8);
-        else if (strncmp(arg, "--lines0=", 9) == 0)    apply_config(1, 1, arg+9);
-        else if (strncmp(arg, "--lines-max=", 12) == 0) apply_config(1, 2, arg+12);
+        else if (strncmp(arg, "--lines=", 8) == 0) { parse_config_arg(&cfg_l, arg+8, 0, 0, 0); cfg_b.state_a = CONF_DISABLE; }
+        else if (strncmp(arg, "--lines0=", 9) == 0) parse_config_arg(&cfg_l, arg+9, 1, 0, 0);
+        else if (strncmp(arg, "--lines-max=", 12) == 0) parse_config_arg(&cfg_l, arg+12, 2, 0, 0);
         
-        else if (strncmp(arg, "--bytes=", 8) == 0)     apply_config(2, 0, arg+8);
-        else if (strncmp(arg, "--bytes0=", 9) == 0)    apply_config(2, 1, arg+9);
-        else if (strncmp(arg, "--bytes-max=", 12) == 0) apply_config(2, 2, arg+12);
+        else if (strncmp(arg, "--bytes=", 8) == 0) { parse_config_arg(&cfg_b, arg+8, 0, 0, 0); cfg_l.state_a = CONF_DISABLE; }
+        else if (strncmp(arg, "--bytes0=", 9) == 0) parse_config_arg(&cfg_b, arg+9, 1, 0, 0);
+        else if (strncmp(arg, "--bytes-max=", 12) == 0) parse_config_arg(&cfg_b, arg+12, 2, 0, 0);
         
         else if (strncmp(arg, "--limit=", 8) == 0) state->cfg_limit = (uint64_t)atoll(arg+8);
         else if (strncmp(arg, "--timeout=", 10) == 0) state->cfg_timeout_us = atoll(arg+10);
         else if (strncmp(arg, "--greedy", 8) == 0) state->cfg_timeout_us = 0;
         else if (strncmp(arg, "--return-bytes", 14) == 0) state->cfg_return_bytes = 1;
         else if (strncmp(arg, "--out=", 6) == 0) out_array_name = arg+6;
-        else if (strncmp(arg, "--stdin", 7) == 0) stdin_explicit = 1;
-        else if (strncmp(arg, "--no-stdin", 10) == 0) stdin_explicit = 0;
+        else if (strncmp(arg, "--stdin", 7) == 0) stdin_explicit_state = 1;
+        else if (strncmp(arg, "--no-stdin", 10) == 0) stdin_explicit_state = 0;
         else if (arg[0] != '-') out_array_name = arg;
     }
 
-    // Resolve Stdin
-    if (stdin_explicit != -1) {
-        if (stdin_explicit) cfg_state |= M_STDIN;
-        else cfg_state &= ~M_STDIN;
-    } else {
-        if (cfg_state & M_BMODE) cfg_state |= M_STDIN;
-        else cfg_state &= ~M_STDIN;
+    // Resolve Mode and Stdin
+    bool byte_mode = false;
+    if (cfg_l.state_a == CONF_DISABLE || cfg_b.state_a == CONF_SET || cfg_b.state_b == CONF_SET) {
+        byte_mode = true;
     }
-    
-    bool stdin_mode = (cfg_state & M_STDIN);
-    bool byte_mode = (cfg_state & M_BMODE);
+    bool stdin_mode = false;
+    if (stdin_explicit_state != -1) stdin_mode = (stdin_explicit_state == 1);
+    else stdin_mode = byte_mode; // Default: Byte=Stdin, Line=Args
 
-    // Resolve Values using Hardware Limits
-    uint64_t vals[6]; // WA, WB, LA, LB, BA, BB
-    uint64_t defs[6], maxs[6];
-    
-    defs[0] = get_v_def("workers", false); maxs[0] = get_v_max("workers", false);
-    defs[1] = defs[0];                     maxs[1] = maxs[0];
-    
-    defs[2] = get_v_def("lines", false);   maxs[2] = get_v_max("lines", false);
-    defs[3] = defs[2];                     maxs[3] = maxs[2];
-    
-    defs[4] = get_v_def("bytes", stdin_mode); maxs[4] = get_v_max("bytes", stdin_mode);
-    defs[5] = defs[4];                        maxs[5] = maxs[4];
+    // Resolve Hardware Limits
+    uint64_t w_def = get_v_def("workers", false); uint64_t w_max = get_v_max("workers", false);
+    uint64_t l_def = get_v_def("lines", false);   uint64_t l_max = get_v_max("lines", false);
+    uint64_t b_def = get_v_def("bytes", stdin_mode); uint64_t b_max = get_v_max("bytes", stdin_mode);
 
-    for (int i=0; i<6; i++) {
-        int shift = i * 3;
-        int code = (cfg_state >> shift) & 7;
-        
-        if (code == S_USER) vals[i] = user_vals[i];
-        else if (code == S_MIN) vals[i] = 1;
-        else if (code == S_DEF) vals[i] = defs[i];
-        else if (code == S_MAX) vals[i] = maxs[i];
-        else vals[i] = 1;
-    }
-
-    // Apply Logic: A vs B clamping
-    if (vals[0] > maxs[0]) vals[0] = maxs[0];
-    if (vals[1] > maxs[1]) vals[1] = maxs[1];
-    if (vals[0] > vals[1]) vals[0] = vals[1]; 
-    
-    if (vals[2] > maxs[2]) vals[2] = maxs[2];
-    if (vals[3] > maxs[3]) vals[3] = maxs[3];
-    if (vals[2] > vals[3]) vals[2] = vals[3];
-
-    if (vals[4] > maxs[4]) vals[4] = maxs[4];
-    if (vals[5] > maxs[5]) vals[5] = maxs[5];
-    if (vals[4] > vals[5]) vals[4] = vals[5];
+    // Resolve Values
+    resolve_config(&cfg_w, w_def, w_max);
+    resolve_config(&cfg_l, l_def, l_max);
+    resolve_config(&cfg_b, b_def, b_max);
 
     // Commit to State
-    state->cfg_w_start = vals[0];
-    state->cfg_w_max   = vals[1];
+    state->cfg_w_start = cfg_w.a;
+    state->cfg_w_max   = cfg_w.b;
     state->mode_byte   = byte_mode ? 1 : 0;
     
     if (byte_mode) {
-        state->cfg_batch_start = vals[4];
-        state->cfg_batch_max   = vals[5];
-        state->cfg_chunk_bytes = vals[5];
-        state->cfg_line_max    = vals[5];
-        if (state->cfg_return_bytes == 0) state->cfg_return_bytes = 1;
+        state->cfg_batch_start = cfg_b.a;
+        state->cfg_batch_max   = cfg_b.b;
+        state->cfg_chunk_bytes = cfg_b.b;
+        state->cfg_line_max    = cfg_b.b;
+        if (state->cfg_return_bytes == 0) state->cfg_return_bytes = 1; // Implicit
     } else {
-        state->cfg_batch_start = vals[2];
-        state->cfg_batch_max   = vals[3];
-        // If user set explicit Byte Max, use it. Else hardware default.
-        int bb_code = (cfg_state >> SH_B_B) & 7;
-        if (bb_code == S_USER) state->cfg_line_max = vals[5];
-        else state->cfg_line_max = maxs[4];
+        state->cfg_batch_start = cfg_l.a;
+        state->cfg_batch_max   = cfg_l.b;
+        state->cfg_line_max    = b_max; // Use max bytes as safeguard for line mode
+    }
+
+    if (state->cfg_timeout_us == 0 && byte_mode && state->cfg_timeout_us == 0) {
+         // Keep greedy if set explicitly, else maybe default timeout for bytes? 
+         // Logic from wrapper implies -1 if bytes mode?
+         // Wrapper passes --timeout if set. If not set, it is 0 here.
+         // Previous logic: if byte mode and no timeout set, set to -1.
+         // We can assume wrapper handles this or default to -1 here?
+         // Let's rely on explicit --timeout passed. If 0, it is 0.
+         // Actually, wrapper defaults timeout to -1 for bytes if not set.
     }
 
     state->fixed_workers = (state->cfg_w_start == state->cfg_w_max);
@@ -737,6 +656,7 @@ static int ring_init_main(int argc, char **argv) {
     bind_variable("RING_PIPE_CAPACITY", var_buf, 0);
 
     // 2. Export Configured Max Bytes (Logic determined earlier in function)
+    // state->cfg_line_max holds the byte limit for both Line Mode (if capped) and Byte Mode.
     snprintf(var_buf, sizeof(var_buf), "%lu", state->cfg_line_max);
     bind_variable("RING_BYTES_MAX", var_buf, 0);
 
@@ -1001,7 +921,6 @@ static int ring_scanner_main(int argc, char **argv) {
             }
 
         } else {
-            // LINE MODE
             uint64_t scan_target = (L > pending_lines) ? (L - pending_lines) : 0;
             if (limit_items > 0) {
                 uint64_t rem = limit_items - total_scanned;
@@ -1018,32 +937,18 @@ static int ring_scanner_main(int argc, char **argv) {
             
             if (pending_lines > 0) {
                 bool starvation = (atomic_load_relaxed(&state->active_waiters) > 0);
-                
-                // 1. Mandatory Flush
                 if (pending_lines >= L || status == 1 || limit_reached) {
                     flush = true;
-                } 
-                // 2. Starvation Logic (Partial Flush)
-                else if (starvation) {
-                    // "Physics" Check: Only flush partials if input is the bottleneck.
-                    uint64_t xLim = W + DAMPING_OFFSET;
-                    bool input_stalled = (status == 2) || (stall_meter >= (xLim - 3));
-
-                    if (input_stalled) {
-                        if (timeout_us == 0) {
-                            flush = true;
-                        } else if (timeout_us > 0) {
-                            if (first_wait_ts == 0) first_wait_ts = get_us_time();
-                            if (get_us_time() - first_wait_ts >= (uint64_t)timeout_us) {
-                                flush = true;
-                            }
-                        }
+                } else if (starvation) {
+                    if (timeout_us == 0) flush = true;
+                    else if (timeout_us > 0 && first_wait_ts > 0 && (get_us_time() - first_wait_ts >= (uint64_t)timeout_us)) {
+                        flush = true;
                     }
                 }
                 
                 if (flush) {
                     uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-                    // Adaptive Flush: Only write fencepost if bytes requested (return_bytes)
+                    // Adaptive Flush: Only write fencepost if bytes requested
                     SCANNER_FLUSH(pending_lines, return_bytes, false);
                     batch_start = current_p_offset;
                     pending_lines = 0;
@@ -1952,7 +1857,10 @@ static int ring_pipe_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
     int pfd[2];
     if (pipe(pfd) < 0) { builtin_error("pipe failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
+    
+    // Best effort maximize, don't check return, fast path only
     fcntl(pfd[1], F_SETPIPE_SZ, 1048576); 
+
     char buf[32];
     if (argc == 2) {
         const char *arr_name = argv[1];
