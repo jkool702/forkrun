@@ -3,7 +3,7 @@
 # source frun 
 shopt -s globstar
 shopt -s extglob
-. ./frun.new.bash
+. ./frun.new.bash || . ./frun.alt.bash || . ./frun.bash
 #printf -v frun_path '%s\n' {.,"${BASH_SOURCE[0]%\/*}"}/**/frun.{new.,}bash
 #. "${frun_path%%$'\n'*}"
 
@@ -44,7 +44,7 @@ sleep 0.1s
 declare -i K=0
 ## RUN BENCHMARK
 for Fk in "${F[@]}"; do
-for GCk in {,-k,-u,-U}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,cat,tee}$'\n'; do
+for GCk in {,-k,-u,-U}\ {,-l\ 1:0}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,cat,tee}$'\n'; do
 
 GCk="${GCk%$'\n'}";
 

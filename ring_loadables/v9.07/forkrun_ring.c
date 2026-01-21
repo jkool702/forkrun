@@ -1,4 +1,4 @@
-// forkrun_ring.c v9.7.1 (Golden Master - Complete)
+// forkrun_ring.c v9.7 (Golden Master - Defaults Tuned)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -649,11 +649,13 @@ static int ring_init_main(int argc, char **argv) {
     if (vals[2] > maxs[2]) vals[2] = maxs[2];
     if (vals[3] > maxs[3]) vals[3] = maxs[3];
     if (vals[2] > vals[3]) vals[2] = vals[3];
+    if (vals[2] == 0) vals[2] = 1; // Safety unless byte mode
 
     // Bytes
     if (vals[4] > maxs[4]) vals[4] = maxs[4];
     if (vals[5] > maxs[5]) vals[5] = maxs[5];
     if (vals[4] > vals[5]) vals[4] = vals[5];
+    // Bytes can be 0 if disabled (S_DIS), handled below
 
     // Commit to State
     state->cfg_w_start = vals[0];
@@ -666,6 +668,9 @@ static int ring_init_main(int argc, char **argv) {
         state->cfg_chunk_bytes = vals[5];
         state->cfg_line_max    = vals[5];
         if (state->cfg_return_bytes == 0) state->cfg_return_bytes = 1;
+        // Safety clamp for byte mode: start/max cannot be 0
+        if (state->cfg_batch_start == 0) state->cfg_batch_start = 1;
+        if (state->cfg_batch_max == 0)   state->cfg_batch_max = 1;
     } else {
         state->cfg_batch_start = vals[2];
         state->cfg_batch_max   = vals[3];
@@ -1528,214 +1533,6 @@ static int ring_ack_main(int argc, char **argv) {
             }
         } else {
             SYS_CHK(write(fd_target, &ip, sizeof(ip)));
-        }
-    }
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_worker_main(int argc, char **argv) {
-    if (argc < 2) return EXECUTION_FAILURE;
-    if (!strcmp(argv[1],"inc")) {
-        atomic_fetch_add(&state->active_workers,1);
-        if (argc >= 3 && isdigit(argv[2][0])) worker_cached_fd = atoi(argv[2]);
-    }
-    else if (!strcmp(argv[1],"dec")) { 
-        cleanup_waiter_state(); 
-        atomic_fetch_sub(&state->active_workers, 1); 
-        worker_cached_fd = -1;
-    }
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_cleanup_waiter_main(int argc, char **argv) { (void)argc; (void)argv; cleanup_waiter_state(); return EXECUTION_SUCCESS; }
-static int ring_ingest_main(int argc, char **argv) { (void)argc; (void)argv; if (state) atomic_store_release(&state->ingest_complete, 1); return EXECUTION_SUCCESS; }
-static int lseek_main(int argc, char ** argv) { if (argc < 3 || argc > 5) return EXECUTION_FAILURE; int fd = atoi(argv[1]); off_t off = atoll(argv[2]); int whence = SEEK_CUR; if (argc > 3) { if (!strcmp(argv[3], "SEEK_SET")) whence = SEEK_SET; else if (!strcmp(argv[3], "SEEK_END")) whence = SEEK_END; } off_t no = lseek(fd, off, whence); if (no == -1) return EXECUTION_FAILURE; if (argc >= 4 && argv[argc-1][0]) { char buf[32]; snprintf(buf,32,"%lld",(long long)no); bind_var_or_array(argv[argc-1], buf, 0); } else printf("%lld\n", (long long)no); return EXECUTION_SUCCESS; }
-
-static int ring_memfd_create_main(int argc, char **argv) {
-    if (argc < 2) return EXECUTION_FAILURE;
-    const char *var_name = argv[1];
-    int fd = xcreate_anon_file("forkrun_input");
-    if (fd < 0) { builtin_error("memfd_create failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
-    char val[32]; snprintf(val, sizeof(val), "%d", fd); bind_var_or_array(var_name, val, 0);
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_seal_main(int argc, char **argv) {
-    if (argc < 2) return EXECUTION_FAILURE;
-    int fd = atoi(argv[1]);
-    int seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
-    if (fcntl(fd, F_ADD_SEALS, seals) == -1) { if (g_debug) fprintf(stderr, "forkrun [DEBUG] ring_seal failed: %s\n", strerror(errno)); return EXECUTION_FAILURE; }
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_fcntl_main(int argc, char **argv) {
-    if (argc < 3) return EXECUTION_FAILURE;
-    int fd = atoi(argv[1]);
-    const char *cmd = argv[2];
-    if (strcmp(cmd, "shutdown_w") == 0) shutdown(fd, SHUT_WR);
-    else if (strcmp(cmd, "shutdown_r") == 0) shutdown(fd, SHUT_RD);
-    else if (strcmp(cmd, "shutdown_rw") == 0) shutdown(fd, SHUT_RDWR);
-    else if (strcmp(cmd, "close") == 0) close(fd);
-    else { builtin_error("unknown command: %s", cmd); return EXECUTION_FAILURE; }
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_pipe_main(int argc, char **argv) {
-    if (argc < 2) return EXECUTION_FAILURE;
-    int pfd[2];
-    if (pipe(pfd) < 0) { builtin_error("pipe failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
-    fcntl(pfd[1], F_SETPIPE_SZ, 1048576); 
-    char buf[32];
-    if (argc == 2) {
-        const char *arr_name = argv[1];
-        SHELL_VAR *v = find_variable(arr_name);
-        if (v && !array_p(v)) { unbind_variable(arr_name); v = NULL; }
-        if (!v) v = make_new_array_variable(arr_name);
-        if (!v) { close(pfd[0]); close(pfd[1]); return EXECUTION_FAILURE; }
-        snprintf(buf, sizeof(buf), "%d", pfd[0]); bind_array_element(v, 0, buf, 0);
-        snprintf(buf, sizeof(buf), "%d", pfd[1]); bind_array_element(v, 1, buf, 0);
-    } else {
-        snprintf(buf, sizeof(buf), "%d", pfd[0]); bind_var_or_array(argv[1], buf, 0);
-        snprintf(buf, sizeof(buf), "%d", pfd[1]); bind_var_or_array(argv[2], buf, 0);
-    }
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_splice_main(int argc, char **argv) {
-    if (argc < 5) return EXECUTION_FAILURE;
-    int fd_in  = atoi(argv[1]); 
-    int fd_out = atoi(argv[2]); 
-    off_t off = 0;
-    off_t *p_off = NULL;
-    if (argv[3][0] != '\0') {
-        off_t parsed = (off_t)atoll(argv[3]);
-        if (parsed != -1) {
-            off = parsed;
-            p_off = &off;
-        }
-    }
-    size_t len = (size_t)atoll(argv[4]);
-    bool close_out = (argc > 5 && strcmp(argv[5], "close") == 0);
-    
-    fcntl(fd_out, F_SETPIPE_SZ, 1048576);
-
-    size_t written = 0;
-    while (written < len) {
-        ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written, SPLICE_F_MOVE|SPLICE_F_MORE);
-        if (s < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN) continue; 
-            if (close_out) close(fd_out);
-            builtin_error("splice failed: %s", strerror(errno));
-            return EXECUTION_FAILURE;
-        }
-        if (s == 0) break; 
-        written += s;
-    }
-    
-    if (close_out) close(fd_out);
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_indexer_main(int argc, char **argv) {
-    if (argc < 4) return EXECUTION_FAILURE;
-    int fd_data = atoi(argv[1]);
-    int fd_pipe = atoi(argv[2]); 
-    int fd_sig  = atoi(argv[3]); 
-    size_t chunk_target = get_optimal_chunk_size() * 2; 
-    uint64_t current_pos = 0;
-    char tail_buf[65536]; 
-    struct pollfd pfds[1] = { { .fd = fd_sig, .events = POLLIN } };
-    while (1) {
-        struct stat st;
-        if (fstat(fd_data, &st) < 0) break;
-        uint64_t available = (uint64_t)st.st_size;
-        while (available >= current_pos + chunk_target) {
-            uint64_t scan_end = current_pos + chunk_target;
-            size_t scan_sz = (sizeof(tail_buf) < chunk_target) ? sizeof(tail_buf) : chunk_target;
-            ssize_t n = pread(fd_data, tail_buf, scan_sz, scan_end - scan_sz);
-            if (n > 0) {
-                char *nl = memrchr(tail_buf, '\n', n);
-                if (nl) {
-                    uint64_t actual_end = (scan_end - scan_sz) + (nl - tail_buf) + 1;
-                    struct PhysPacket pp = { .off = current_pos, .len = actual_end - current_pos };
-                    if (write(fd_pipe, &pp, sizeof(pp)) != sizeof(pp)) return EXECUTION_FAILURE;
-                    current_pos = actual_end;
-                    continue; 
-                }
-            }
-            struct PhysPacket pp = { .off = current_pos, .len = chunk_target };
-            if (write(fd_pipe, &pp, sizeof(pp)) != sizeof(pp)) return EXECUTION_FAILURE;
-            current_pos += chunk_target;
-        }
-        if (poll(pfds, 1, 100) > 0) { uint64_t v; if(read(fd_sig, &v, 8)){}; }
-    }
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_fetcher_main(int argc, char **argv) {
-    if (argc < 6) return EXECUTION_FAILURE;
-    int fd_pipe      = atoi(argv[1]); 
-    int fd_global    = atoi(argv[2]); 
-    int fd_local     = atoi(argv[3]); 
-    int fd_local_sig = atoi(argv[4]); 
-    int fd_global_ack= atoi(argv[5]); 
-    int fd_token_in  = (argc > 6) ? atoi(argv[6]) : -1; 
-    struct PhysPacket pp;
-    while (1) {
-        if (fd_token_in >= 0) { char t; if (read(fd_token_in, &t, 1) <= 0) break; }
-        if (read(fd_pipe, &pp, sizeof(pp)) != sizeof(pp)) break;
-        loff_t off_in = (loff_t)pp.off;
-        loff_t off_out = lseek(fd_local, 0, SEEK_END);
-        ssize_t ret = copy_file_range(fd_global, &off_in, fd_local, &off_out, pp.len, 0);
-        if (ret < 0) {
-            char *buf = xmalloc(65536);
-            uint64_t copied = 0;
-            lseek(fd_global, pp.off, SEEK_SET);
-            lseek(fd_local, 0, SEEK_END);
-            while (copied < pp.len) {
-                size_t to_read = (pp.len - copied > 65536) ? 65536 : (pp.len - copied);
-                read(fd_global, buf, to_read);
-                write(fd_local, buf, to_read);
-                copied += to_read;
-            }
-            xfree(buf);
-        }
-        uint64_t one = 1; SYS_CHK(write(fd_local_sig, &one, 8));
-        SYS_CHK(write(fd_global_ack, &pp, sizeof(pp)));
-    }
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_fallow_phys_main(int argc, char **argv) {
-    if (argc < 3) return EXECUTION_FAILURE;
-    int fd_in = atoi(argv[1]);
-    int fd_file = atoi(argv[2]);
-    struct Interval *head = NULL;
-    uint64_t limit = 0; 
-    struct PhysPacket ops[64];
-    ssize_t n_read;
-    while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
-        int count = n_read / sizeof(struct PhysPacket);
-        for (int i=0; i<count; i++) {
-            struct PhysPacket *pp = &ops[i];
-            if (pp->off == limit) {
-                limit += pp->len;
-                while (head && head->s == limit) {
-                    struct Interval *tmp = head;
-                    limit = tmp->e;
-                    head = tmp->next;
-                    free(tmp);
-                }
-                off_t aligned = (off_t)((limit / 4096) * 4096);
-                if (aligned > 0) fallocate(fd_file, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, 0, aligned);
-            } else if (pp->off > limit) {
-                struct Interval *n = xmalloc(sizeof(struct Interval));
-                n->s = pp->off; n->e = pp->off + pp->len;
-                struct Interval **curr = &head;
-                while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
-                n->next = *curr; *curr = n;
-            }
         }
     }
     return EXECUTION_SUCCESS;
