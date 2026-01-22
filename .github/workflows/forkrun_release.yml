@@ -16,11 +16,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # x86_64: The Triple Build (v2, v3, v4)
+          # x86_64: Triple Build
           - arch: x86_64
             platform: linux/amd64
             docker_image: fedora:latest
-            # We handle flags manually in the script for this one
           
           # AArch64
           - arch: aarch64
@@ -32,19 +31,16 @@ jobs:
           - arch: ppc64le
             platform: linux/ppc64le
             docker_image: fedora:latest
-            extra_flags: ""
             
           # S390X
           - arch: s390x
             platform: linux/s390x
             docker_image: fedora:latest
-            extra_flags: ""
             
           # RISC-V 64
           - arch: riscv64
             platform: linux/riscv64
             docker_image: fedorariscv/base:latest
-            extra_flags: ""
 
     steps:
       - name: Checkout repository
@@ -55,80 +51,97 @@ jobs:
 
       - name: Build in Docker (${{ matrix.arch }})
         run: |
-          set -e
           mkdir -p artifacts
           
-          # We pass variables into the Docker container via environment variables
+          # 1. Define Flags in Host Shell (Clean definition)
+          OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC"
+          WARN_FLAGS="-DNDEBUG -Wall -Wextra"
+          LINK_FLAGS="-Wl,-z,relro"
+          INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins"
+
+          # 2. Run Docker with Env Vars
           docker run --rm \
             -v $PWD:/src \
             -w /src \
             --platform=${{ matrix.platform }} \
             -e TARGET_ARCH="${{ matrix.arch }}" \
             -e EXTRA_FLAGS="${{ matrix.extra_flags }}" \
+            -e OPT_FLAGS="$OPT_FLAGS" \
+            -e WARN_FLAGS="$WARN_FLAGS" \
+            -e LINK_FLAGS="$LINK_FLAGS" \
+            -e INCLUDES="$INCLUDES" \
             ${{ matrix.docker_image }} \
             bash -c '
-              # 1. Install Dependencies (Fedora/RHEL style)
-              dnf install -y @development-tools gcc make bash-devel git grep sed binutils || \
-              (apt-get update && apt-get install -y gcc make libbash-dev git grep sed binutils)
+              set -e
+              
+              # --- SETUP ---
+              # Using @development-tools for full build environment
+              # Using coreutils to provide "truncate" and "od"
+              echo ">>> Installing dependencies..."
+              if command -v dnf &>/dev/null; then
+                  dnf install -y @development-tools bash-devel git grep sed coreutils
+              else
+                  apt-get update && apt-get install -y build-essential libbash-dev git grep sed coreutils
+              fi
 
-              # 2. Extract Version from META
+              # --- VERSION EXTRACTION ---
               FR_VERSION="unknown"
-              if [ -f META ]; then
+              if [ -f "ring_loadables/META" ]; then
+                 FR_VERSION=$(grep -E "^VERSION:" "ring_loadables/META" | sed -E "s/^VERSION:[ \t]*//")
+              elif [ -f META ]; then
                  FR_VERSION=$(grep -E "^VERSION:" META | sed -E "s/^VERSION:[ \t]*//")
               fi
               echo "Compiling Version: $FR_VERSION"
 
-              # 3. Define Common Flags
-              # Note: We escape quotes heavily for the -D flags to survive shell passing
-              OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC"
-              WARN_FLAGS="-DNDEBUG -Wall -Wextra"
-              INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins"
-              
-              DEFS="-DSHELL -DHAVE_CONFIG_H"
-              DEFS+=" -DBUILD_OS=\"\\\"Linux\\\"\""
-              DEFS+=" -DFORKRUN_RING_VERSION=\"\\\"$FR_VERSION\\\"\""
-              DEFS+=" -DCOMPILER_FLAGS=\"\\\"$OPT_FLAGS\\\"\""
-              
-              # Function to build specific variant
-              build_variant() {
-                 local arch_name="$1"
-                 local march_flag="$2"
-                 local out_file="artifacts/forkrun_ring.${arch_name}.so"
-                 
-                 echo ">>> Building $arch_name..."
-                 
-                 # Dynamic Arch Definition
-                 local ARCH_DEF="-DBUILD_ARCH=\"\\\"$arch_name\\\"\""
-                 
-                 gcc forkrun_ring.c \
-                    $OPT_FLAGS $WARN_FLAGS $INCLUDES \
-                    $DEFS $ARCH_DEF \
-                    -shared \
-                    $march_flag \
-                    -o "$out_file"
-                 
-                 strip --strip-unneeded "$out_file"
-                 
-                 # SANITY CHECK: Try to enable and run version check
-                 # We only check if it loads successfully.
-                 echo ">>> Testing loadable..."
-                 enable -f "$out_file" ring_version && \
-                 ring_version -a || exit 1
-                 enable -d ring_version
+              # --- COMPILATION HELPER ---
+              compile_target() {
+                  local arch_name="$1"
+                  local march_arg="$2"
+                  local out_file="artifacts/forkrun_ring.${arch_name}.so"
+                  
+                  echo ">>> Building $arch_name..."
+
+                  # 1. Build Array of Definitions
+                  declare -a DEFS
+                  DEFS+=("-DSHELL")
+                  DEFS+=("-DHAVE_CONFIG_H")
+                  DEFS+=("-DBUILD_OS=\"Linux\"")
+                  DEFS+=("-DBUILD_ARCH=\"$arch_name\"")
+                  DEFS+=("-DFORKRUN_RING_VERSION=\"$FR_VERSION\"")
+                  # Quoting magic for spaces inside flags
+                  DEFS+=("-DCOMPILER_FLAGS=\"$OPT_FLAGS $WARN_FLAGS $LINK_FLAGS\"")
+
+                  # 2. Build Full Command Array
+                  declare -a CMD
+                  CMD+=(gcc forkrun_ring.c)
+                  CMD+=($OPT_FLAGS $WARN_FLAGS $LINK_FLAGS $INCLUDES)
+                  CMD+=("${DEFS[@]}")
+                  CMD+=(-shared)
+                  
+                  if [[ -n "$march_arg" ]]; then
+                      CMD+=($march_arg)
+                  fi
+                  
+                  CMD+=(-o "$out_file")
+
+                  # 3. Execute
+                  "${CMD[@]}"
+
+                  strip --strip-unneeded "$out_file"
+                  
+                  # 4. Verify
+                  enable -f "$out_file" ring_version && ring_version -a || exit 1
+                  enable -d ring_version
               }
 
-              # 4. Logic Branch based on Architecture
+              # --- EXECUTE ---
               if [ "$TARGET_ARCH" == "x86_64" ]; then
-                  # The Triple Build
-                  build_variant "x86-64-v2" "-march=x86-64-v2"
-                  build_variant "x86-64-v3" "-march=x86-64-v3"
-                  build_variant "x86-64-v4" "-march=x86-64-v4"
+                  compile_target "x86-64-v2" "-march=x86-64-v2"
+                  compile_target "x86-64-v3" "-march=x86-64-v3"
+                  compile_target "x86-64-v4" "-march=x86-64-v4"
               else
-                  # Single Build
-                  build_variant "$TARGET_ARCH" "$EXTRA_FLAGS"
+                  compile_target "$TARGET_ARCH" "$EXTRA_FLAGS"
               fi
-              
-              ls -l artifacts/
             '
 
       - name: Upload Artifacts
@@ -161,54 +174,74 @@ jobs:
 
       - name: Extract Encoding Function
         run: |
-          # Pull the _forkrun_file_to_base64 function out of frun into a standalone script
-          sed -n '/^_forkrun_file_to_base64() {/,/^}/p' frun > encoder.sh
+          # Pull the helper function out of frun so we can source it
+          sed -n '/^_forkrun_file_to_base64() {/,/^}/p' frun.bash > encoder.sh
 
       - name: Generate New frun Script
         shell: bash
         run: |
+          # Source the helper
           source encoder.sh
           
-          # 1. Read frun up to the Base64 Start Marker
-          #    We assume the marker is "# <@@@@@< _BASE64_START_ >@@@@@> #"
-          sed '/# <@@@@@< _BASE64_START_ >@@@@@> #/q' frun > frun.new
-          
-          # 2. Append the Array Definition
-          echo "declare -A b64=(" >> frun.new
-          
-          for so in artifacts/*.so; do
-             # Filename: forkrun_ring.x86-64-v3.so
-             fname=$(basename "$so")
-             
-             # Key: x86-64-v3
-             key="${fname#forkrun_ring.}"
-             key="${key%.so}"
-             
-             # Normalize key (ensure underscores if your shell logic prefers them, 
-             # though your previous examples used dashes/mixed. 
-             # Let's match the C-compiler output names exactly).
-             
-             echo "Encoding $key..."
-             encoded_str=$(_forkrun_file_to_base64 -n "$so")
-             
-             echo "    ['$key']=\"$encoded_str\"" >> frun.new
+          # Initialize buffers
+          a0=''
+          a1=''
+
+          # 1. Read frun.bash using your logic (Top Half)
+          {
+            IFS=
+            while true; do
+                read -r -u 3 a
+                if [[ "$a" == '_forkrun_file_to_base64() {'* ]]; then
+                    a1+="${a}"$'\n'
+                    break
+                else
+                    a0+="${a}"$'\n'
+                fi
+            done
+
+            # Read function body (Middle)
+            while true; do
+                read -r -u 3 a
+                a1+="${a}"$'\n'
+                [[ "$a" == '# <@@@@@< _BASE64_START_ >@@@@@> #'* ]] && break
+            done    
+          } 3<./frun.bash
+
+          # 2. Encode Artifacts
+          unset b64
+          declare -A b64
+
+          for f in artifacts/*.so; do
+              fname=$(basename "$f")
+              # Extract key: forkrun_ring.x86-64-v3.so -> x86-64-v3
+              key="${fname#forkrun_ring.}"
+              key="${key%.so}"
+              
+              # Normalize keys to underscores (x86_64_v3) 
+              # to match bash variable safety conventions if desired, 
+              # matching your local script logic.
+              key="${key//-/_}"
+              [[ "$key" == "native" ]] && key="native"
+
+              echo "Encoding $key..."
+              b64[${key}]="$(_forkrun_file_to_base64 "$f")"
           done
-          
-          echo ")" >> frun.new
-          
-          # 3. Append the Bootstrap Call
-          echo "" >> frun.new
-          echo "_forkrun_bootstrap_setup --force" >> frun.new
-          
-          # 4. Replace
-          mv frun.new frun
-          chmod +x frun
+
+          # 3. Reconstruct
+          {
+            printf '%s\n%s' "$a0" "$a1"
+            declare -p b64
+            printf '\n\n_forkrun_bootstrap_setup --force\n\n'
+          } >./frun.new
+
+          mv frun.new frun.bash
+          chmod +x frun.bash
 
       - name: Verify Final Script
         run: |
-          # Sanity check: Does the script run and load?
-          # This relies on the runner being x86_64 and having the x86-64-v2/v3 embedded
-          ./frun ring_version -a
+          # Sanity check
+          ./frun.bash ring_version -a
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
