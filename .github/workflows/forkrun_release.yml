@@ -1,0 +1,227 @@
+name: Build forkrun_ring.so (multiarch) and update frun
+
+on:
+  push:
+    paths:
+      - 'forkrun_ring.c'
+      - 'META'
+      - '.github/workflows/forkrun_release.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64: The Triple Build (v2, v3, v4)
+          - arch: x86_64
+            platform: linux/amd64
+            docker_image: fedora:latest
+            # We handle flags manually in the script for this one
+          
+          # AArch64
+          - arch: aarch64
+            platform: linux/arm64
+            docker_image: fedora:latest
+            extra_flags: "-march=armv8-a+crc"
+          
+          # PPC64LE
+          - arch: ppc64le
+            platform: linux/ppc64le
+            docker_image: fedora:latest
+            extra_flags: ""
+            
+          # S390X
+          - arch: s390x
+            platform: linux/s390x
+            docker_image: fedora:latest
+            extra_flags: ""
+            
+          # RISC-V 64
+          - arch: riscv64
+            platform: linux/riscv64
+            docker_image: fedorariscv/base:latest
+            extra_flags: ""
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build in Docker (${{ matrix.arch }})
+        run: |
+          set -e
+          mkdir -p artifacts
+          
+          # We pass variables into the Docker container via environment variables
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            --platform=${{ matrix.platform }} \
+            -e TARGET_ARCH="${{ matrix.arch }}" \
+            -e EXTRA_FLAGS="${{ matrix.extra_flags }}" \
+            ${{ matrix.docker_image }} \
+            bash -c '
+              # 1. Install Dependencies (Fedora/RHEL style)
+              dnf install -y @development-tools gcc make bash-devel git grep sed binutils || \
+              (apt-get update && apt-get install -y gcc make libbash-dev git grep sed binutils)
+
+              # 2. Extract Version from META
+              FR_VERSION="unknown"
+              if [ -f META ]; then
+                 FR_VERSION=$(grep -E "^VERSION:" META | sed -E "s/^VERSION:[ \t]*//")
+              fi
+              echo "Compiling Version: $FR_VERSION"
+
+              # 3. Define Common Flags
+              # Note: We escape quotes heavily for the -D flags to survive shell passing
+              OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC"
+              WARN_FLAGS="-DNDEBUG -Wall -Wextra"
+              INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins"
+              
+              DEFS="-DSHELL -DHAVE_CONFIG_H"
+              DEFS+=" -DBUILD_OS=\"\\\"Linux\\\"\""
+              DEFS+=" -DFORKRUN_RING_VERSION=\"\\\"$FR_VERSION\\\"\""
+              DEFS+=" -DCOMPILER_FLAGS=\"\\\"$OPT_FLAGS\\\"\""
+              
+              # Function to build specific variant
+              build_variant() {
+                 local arch_name="$1"
+                 local march_flag="$2"
+                 local out_file="artifacts/forkrun_ring.${arch_name}.so"
+                 
+                 echo ">>> Building $arch_name..."
+                 
+                 # Dynamic Arch Definition
+                 local ARCH_DEF="-DBUILD_ARCH=\"\\\"$arch_name\\\"\""
+                 
+                 gcc forkrun_ring.c \
+                    $OPT_FLAGS $WARN_FLAGS $INCLUDES \
+                    $DEFS $ARCH_DEF \
+                    -shared \
+                    $march_flag \
+                    -o "$out_file"
+                 
+                 strip --strip-unneeded "$out_file"
+                 
+                 # SANITY CHECK: Try to enable and run version check
+                 # We only check if it loads successfully.
+                 echo ">>> Testing loadable..."
+                 enable -f "$out_file" ring_version && \
+                 ring_version -a || exit 1
+                 enable -d ring_version
+              }
+
+              # 4. Logic Branch based on Architecture
+              if [ "$TARGET_ARCH" == "x86_64" ]; then
+                  # The Triple Build
+                  build_variant "x86-64-v2" "-march=x86-64-v2"
+                  build_variant "x86-64-v3" "-march=x86-64-v3"
+                  build_variant "x86-64-v4" "-march=x86-64-v4"
+              else
+                  # Single Build
+                  build_variant "$TARGET_ARCH" "$EXTRA_FLAGS"
+              fi
+              
+              ls -l artifacts/
+            '
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: forkrun-libs-${{ matrix.arch }}
+          path: artifacts/*.so
+
+  embed:
+    name: Embed Base64 into frun
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_artifacts
+
+      - name: Flatten Artifacts
+        run: |
+          mkdir -p artifacts
+          find all_artifacts -name "*.so" -exec mv {} artifacts/ \;
+          ls -l artifacts/
+
+      - name: Extract Encoding Function
+        run: |
+          # Pull the _forkrun_file_to_base64 function out of frun into a standalone script
+          sed -n '/^_forkrun_file_to_base64() {/,/^}/p' frun > encoder.sh
+
+      - name: Generate New frun Script
+        shell: bash
+        run: |
+          source encoder.sh
+          
+          # 1. Read frun up to the Base64 Start Marker
+          #    We assume the marker is "# <@@@@@< _BASE64_START_ >@@@@@> #"
+          sed '/# <@@@@@< _BASE64_START_ >@@@@@> #/q' frun > frun.new
+          
+          # 2. Append the Array Definition
+          echo "declare -A b64=(" >> frun.new
+          
+          for so in artifacts/*.so; do
+             # Filename: forkrun_ring.x86-64-v3.so
+             fname=$(basename "$so")
+             
+             # Key: x86-64-v3
+             key="${fname#forkrun_ring.}"
+             key="${key%.so}"
+             
+             # Normalize key (ensure underscores if your shell logic prefers them, 
+             # though your previous examples used dashes/mixed. 
+             # Let's match the C-compiler output names exactly).
+             
+             echo "Encoding $key..."
+             encoded_str=$(_forkrun_file_to_base64 -n "$so")
+             
+             echo "    ['$key']=\"$encoded_str\"" >> frun.new
+          done
+          
+          echo ")" >> frun.new
+          
+          # 3. Append the Bootstrap Call
+          echo "" >> frun.new
+          echo "_forkrun_bootstrap_setup --force" >> frun.new
+          
+          # 4. Replace
+          mv frun.new frun
+          chmod +x frun
+
+      - name: Verify Final Script
+        run: |
+          # Sanity check: Does the script run and load?
+          # This relies on the runner being x86_64 and having the x86-64-v2/v3 embedded
+          ./frun ring_version -a
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "build: update embedded ring loadables"
+          title: "🤖 Auto-Build: Update Ring Loadables"
+          body: |
+            This PR updates the embedded `forkrun_ring` binaries.
+            Generated by GitHub Actions Run: [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            **Architectures:**
+            - x86_64 (v2, v3, v4)
+            - aarch64, ppc64le, s390x, riscv64
+          branch: "auto-build/update-loadables"
+          delete-branch: true
