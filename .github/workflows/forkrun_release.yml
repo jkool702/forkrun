@@ -3,7 +3,8 @@ name: Build forkrun_ring.so (multiarch) and update frun
 on:
   push:
     paths:
-      - 'forkrun_ring.c'
+      - 'ring_loadables/forkrun_ring.c'
+      - 'ring_loadables/frun.bash'
       - 'META'
       - '.github/workflows/forkrun_release.yml'
   workflow_dispatch:
