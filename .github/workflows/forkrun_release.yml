@@ -73,7 +73,7 @@ jobs:
             -e INCLUDES="$INCLUDES" \
             ${{ matrix.docker_image }} \
             bash -c '
-              set -e
+              
               
               # --- SETUP ---
               # Using @development-tools for full build environment
@@ -84,6 +84,17 @@ jobs:
               else
                   apt-get update && apt-get install -y build-essential libbash-dev git grep sed coreutils
               fi
+
+              # --- FIND forkrun_ring.c ---
+              if [[ -f "ring_loadables/forkrun_ring.c" ]]; then
+                  FR_C_PATH="ring_loadables/forkrun_ring.c"
+              elif [[ -f "forkrun_ring.c" ]]; then
+                  FR_C_PATH="forkrun_ring.c"
+              else
+                  FR_C_PATH="$(find ./ -type f -name 'forkrun_ring.c' -print -quit)"
+              fi
+              
+              { [[ ${FR_C_PATH} ]] && [[ -f "${FR_C_PATH}" ]]; } || { echo "ERROR: could not find path to forkrun_ring.c...ABORTING!" >&2 ; exit 1; }
 
               # --- VERSION EXTRACTION ---
               FR_VERSION="unknown"
@@ -114,7 +125,7 @@ jobs:
 
                   # 2. Build Full Command Array
                   declare -a CMD
-                  CMD+=(gcc forkrun_ring.c)
+                  CMD+=(gcc "$FR_C_PATH")
                   CMD+=($OPT_FLAGS $WARN_FLAGS $LINK_FLAGS $INCLUDES)
                   CMD+=("${DEFS[@]}")
                   CMD+=(-shared)
