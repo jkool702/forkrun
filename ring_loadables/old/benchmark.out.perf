@@ -1,0 +1,25 @@
+ Performance counter stats for './run_benchmark.bash':
+
+20,565,865,128,166      task-clock                       #   26.391 CPUs utilized             
+        10,053,171      context-switches                 #  488.828 /sec                      
+         3,184,694      cpu-migrations                   #  154.853 /sec                      
+         8,849,205      page-faults                      #  430.286 /sec                      
+68,788,877,612,539      instructions                     #    0.84  insn per cycle              (38.46%)
+82,273,699,522,065      cycles                           #    4.000 GHz                         (38.46%)
+16,170,002,818,012      branches                         #  786.254 M/sec                       (38.46%)
+    27,768,479,557      branch-misses                    #    0.17% of all branches             (38.46%)
+16,371,033,561,573      L1-dcache-loads                  #  796.029 M/sec                       (38.46%)
+   426,775,619,895      L1-dcache-load-misses            #    2.61% of all L1-dcache accesses   (30.77%)
+    29,205,436,151      LLC-loads                        #    1.420 M/sec                       (30.77%)
+     7,559,406,614      LLC-load-misses                  #   25.88% of all LL-cache accesses    (30.77%)
+    73,748,248,592      L1-icache-load-misses                                                   (30.77%)
+16,373,322,452,512      dTLB-loads                       #  796.141 M/sec                       (30.77%)
+     3,489,593,919      dTLB-load-misses                 #    0.02% of all dTLB cache accesses  (30.77%)
+     2,466,018,416      iTLB-loads                       #  119.908 K/sec                       (30.77%)
+     4,080,169,328      iTLB-load-misses                 #  165.46% of all iTLB cache accesses  (30.77%)
+
+     779.280464118 seconds time elapsed
+
+   11557.543156000 seconds user
+    8783.650579000 seconds sys
+

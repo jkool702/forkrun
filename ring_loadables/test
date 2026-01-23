@@ -1,0 +1,3 @@
+. ./frun.new.bash
+ time frun  : <f1 >/dev/null
+
