@@ -1,4 +1,4 @@
-// forkrun_ring.c v9.8.0 (Golden Master - Complete)
+// forkrun_ring.c v9.7.1 (Golden Master - Complete)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -115,24 +115,6 @@
 #define MAX_CHUNK_SIZE (32 * 1024 * 1024)
 #define DAMPING_OFFSET 6
 
-// --- BUILD METADATA ---
-// Defaults are effectively overridden by -D flags during compile
-#ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "unknown"
-#endif
-#ifndef BUILD_OS
-#define BUILD_OS "unknown"
-#endif
-#ifndef BUILD_ARCH
-#define BUILD_ARCH "unknown"
-#endif
-#ifndef COMPILER_FLAGS
-#define COMPILER_FLAGS "unknown"
-#endif
-#ifndef GIT_HASH
-#define GIT_HASH "unknown"
-#endif
-
 #define atomic_load_acquire(ptr)       __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
 #define atomic_load_relaxed(ptr)       __atomic_load_n(ptr, __ATOMIC_RELAXED)
 #define atomic_store_release(ptr, val) __atomic_store_n(ptr, val, __ATOMIC_RELEASE)
@@ -177,7 +159,7 @@ static int g_debug = 0;
     X(ring_order,           ring_order_main,          "ring_order <FD> <PFX|memfd> [unordered]", "Reorder output") \
     X(ring_copy,            ring_copy_main,           "ring_copy <OUT> <IN>",           "Zero-copy ingest") \
     X(ring_signal,          ring_signal_main,         "ring_signal <FD>",               "Signal eventfd") \
-    X(lseek,                lseek_main,               "lseek <FD> <OFF> [WHENCE] [VAR]", "Seek fd") \
+    X(lseek,                lseek_main,               "lseek <FD> <OFF>...",            "Seek fd") \
     X(ring_indexer,         ring_indexer_main,        "ring_indexer",                   "NUMA Indexer") \
     X(ring_fetcher,         ring_fetcher_main,        "ring_fetcher",                   "NUMA Fetcher") \
     X(ring_fallow_phys,     ring_fallow_phys_main,    "ring_fallow_phys",               "Physical fallow") \
@@ -186,7 +168,6 @@ static int g_debug = 0;
     X(ring_fcntl,           ring_fcntl_main,          "ring_fcntl <FD> <cmd>",          "File control") \
     X(ring_pipe,            ring_pipe_main,           "ring_pipe <ARR|RD> [WR]",        "Create pipe") \
     X(ring_splice,          ring_splice_main,         "ring_splice <IN> <OUT> <OFF> <LEN> [close]", "Splice data") \
-    X(ring_version,         ring_version_main,        "ring_version [-t|-o|-m|-g|-f|-a]", "Show build metadata") \
     X(ring_list,            ring_list_main,           "ring_list [VAR]",                "List loadables")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
@@ -2133,43 +2114,6 @@ static int ring_fallow_main(int argc, char **argv) {
         }
     }
     while(head) { struct Interval *tmp = head; head = head->next; free(tmp); }
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_version_main(int argc, char **argv) {
-    bool show_all = false;
-    
-    // Default: just show version
-    if (argc == 1) {
-        printf("%s\n", FORKRUN_RING_VERSION);
-        return EXECUTION_SUCCESS;
-    }
-
-    for (int i = 1; i < argc; i++) {
-        const char *arg = argv[i];
-        if (strcmp(arg, "-a") == 0 || strcmp(arg, "--all") == 0) {
-            show_all = true;
-            break; 
-        }
-        
-        if (strcmp(arg, "-t") == 0)      printf("%s %s\n", __DATE__, __TIME__);
-        else if (strcmp(arg, "-o") == 0) printf("%s\n", BUILD_OS);
-        else if (strcmp(arg, "-m") == 0) printf("%s\n", BUILD_ARCH);
-        else if (strcmp(arg, "-g") == 0) printf("%s\n", __VERSION__);
-        else if (strcmp(arg, "-f") == 0) printf("%s\n", COMPILER_FLAGS);
-        else if (strcmp(arg, "-h") == 0) printf("%s\n", GIT_HASH);
-    }
-
-    if (show_all) {
-        printf("Version:  %s\n", FORKRUN_RING_VERSION);
-        printf("Built:    %s %s\n", __DATE__, __TIME__);
-        printf("OS:       %s\n", BUILD_OS);
-        printf("Arch:     %s\n", BUILD_ARCH);
-        printf("Compiler: %s\n", __VERSION__);
-        printf("Flags:    %s\n", COMPILER_FLAGS);
-        printf("Git Hash: %s\n", GIT_HASH);
-    }
-
     return EXECUTION_SUCCESS;
 }
 
