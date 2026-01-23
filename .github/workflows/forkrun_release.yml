@@ -186,12 +186,26 @@ jobs:
 
       - name: Extract Encoding Function
         run: |
-          # Pull the helper function out of frun so we can source it
-          sed -n '/^_forkrun_file_to_base64() {/,/^}/p' frun.bash > encoder.sh
 
       - name: Generate New frun Script
         shell: bash
         run: |
+          # find the path to frun.bash
+
+          # --- FIND frun.bash ---
+          if [[ -f "ring_loadables/frun.bash" ]]; then
+              FR_BASH_PATH="ring_loadables/frun.bash"
+          elif [[ -f "frun.bash" ]]; then
+              FR_BASH_PATH="frun.bash"
+          else
+              FR_BASH_PATH="$(find ./ -type f -name 'frun.bash' -print -quit)"
+          fi
+
+          { [[ ${FR_BASH_PATH} ]] && [[ -f "${FR_BASH_PATH}" ]]; } || { echo "ERROR: could not find path to frun.bash...ABORTING!" >&2 ; exit 1; }
+          
+          # Pull the helper function out of frun so we can source it
+          sed -n '/^_forkrun_file_to_base64() {/,/^}/p' "${FR_BASH_PATH}" > encoder.sh
+          
           # Source the helper
           source encoder.sh
           
@@ -218,7 +232,7 @@ jobs:
                 a1+="${a}"$'\n'
                 [[ "$a" == '# <@@@@@< _BASE64_START_ >@@@@@> #'* ]] && break
             done    
-          } 3<./frun.bash
+          } 3<"${FR_BASH_PATH}"
 
           # 2. Encode Artifacts
           unset b64
@@ -226,7 +240,7 @@ jobs:
 
           for f in artifacts/*.so; do
               fname=$(basename "$f")
-              # Extract key: forkrun_ring.x86-64-v3.so -> x86-64-v3
+              # Extract key: forkrun_ring.x86-64-v_.so -> x86-64-v_
               key="${fname#forkrun_ring.}"
               key="${key%.so}"
               
@@ -247,8 +261,10 @@ jobs:
             printf '\n\n_forkrun_bootstrap_setup --force\n\n'
           } >./frun.new
 
-          mv frun.new frun.bash
-          chmod +x frun.bash
+          mv frun.new "${FR_BASH_PATH}"
+          chmod +x "${FR_BASH_PATH}"
+
+          \rm encoder.sh
 
       - name: Verify Final Script
         run: |
