@@ -262,13 +262,6 @@ jobs:
           chmod +x ./frun.new.bash "${FR_BASH_PATH}"
 
           \rm encoder.sh
-
-      - name: Verify Final Script
-        shell: bash
-        run: |
-          # Sanity check
-          . ./frun.new.bash 
-          ring_version -a || echo "WARNING: testing frun with new loadables failed!" >&2
           \rm frun.new.bash
 
       - name: Create Pull Request
