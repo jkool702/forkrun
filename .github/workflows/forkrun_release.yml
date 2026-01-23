@@ -262,7 +262,7 @@ jobs:
           } >./frun.new.bash
 
           cp -f ./frun.new.bash "${FR_BASH_PATH}"
-          chmod +x /frun.new.bash "${FR_BASH_PATH}"
+          chmod +x ./frun.new.bash "${FR_BASH_PATH}"
 
           \rm encoder.sh
 
