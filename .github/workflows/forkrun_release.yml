@@ -259,17 +259,19 @@ jobs:
             printf '%s\n%s' "$a0" "$a1"
             declare -p b64
             printf '\n\n_forkrun_bootstrap_setup --force\n\n'
-          } >./frun.new
+          } >./frun.new.bash
 
-          mv frun.new "${FR_BASH_PATH}"
-          chmod +x "${FR_BASH_PATH}"
+          cp -f ./frun.new.bash "${FR_BASH_PATH}"
+          chmod +x /frun.new.bash "${FR_BASH_PATH}"
 
           \rm encoder.sh
 
       - name: Verify Final Script
         run: |
           # Sanity check
-          ./frun.bash ring_version -a
+          . ./frun.new.bash 
+          ring_version -a || exit 1
+          \rm -f ./frun.new.bash
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
