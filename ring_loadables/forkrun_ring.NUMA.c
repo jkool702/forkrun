@@ -1,5 +1,6 @@
 // ==============================================================================
-// 1. TLS OPTIMIZATIONS, GLOBALS & WAIT STATE
+// 1. INCLUDES, MACROS, TOPOLOGY, AND TLS VARIABLES
+// (Replace your existing SharedState pointer and eventfd variables with this)
 // ==============================================================================
 
 #include <sys/syscall.h>
@@ -15,6 +16,7 @@
 #define MPOL_BIND 2
 #endif
 
+// Architecture-specific syscall numbers for set_mempolicy
 #ifndef __NR_set_mempolicy
 #if defined(__x86_64__)
     #define __NR_set_mempolicy 238
@@ -32,6 +34,14 @@
 #define FLAG_MAJOR_EOF (1U << 31)
 #define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
 
+static inline int auto_detect_numa_node() {
+#ifdef __NR_getcpu
+    unsigned cpu, node;
+    if (syscall(__NR_getcpu, &cpu, &node, NULL) == 0) return (int)node;
+#endif
+    return 0;
+}
+
 // TLS NUMA Thread Affinity Tracking
 static __thread int my_numa_node = -1;
 
@@ -45,25 +55,22 @@ static __thread uint64_t worker_last_cnt = 0;
 static __thread uint32_t worker_last_major = 0; 
 static __thread uint32_t worker_last_minor = 0; 
 
-// Isolated FDs per NUMA node
+// Global Event FDs & Escrows (Isolated per NUMA node)
 static int *evfd_data_arr = NULL;
 static int *fd_escrow_r = NULL;
 static int *fd_escrow_w = NULL;
 
+static int evfd_data = -1; // Legacy for single-node bash scripts
+static int evfd_eof  = -1;
+static int evfd_ingest_data = -1;
+static int evfd_ingest_eof  = -1;
+static int evfd_starve = -1;
+static int fd_escrow[2] = { -1, -1 }; // Legacy array
+
 static uint32_t global_num_nodes = 1;
 
-static inline void cleanup_waiter_state() {
-    if (is_waiting_on_ring) {
-        int node = (my_numa_node == -1) ? 0 : my_numa_node;
-        if (state && atomic_load_relaxed(&state[node].active_waiters) > 0) {
-            atomic_fetch_sub(&state[node].active_waiters, 1);
-        }
-        is_waiting_on_ring = false;
-    }
-}
-
 // ==============================================================================
-// 2. UPDATED STRUCTURES
+// 2. STRUCTURES
 // ==============================================================================
 
 struct IngestPacket {
@@ -103,6 +110,7 @@ struct SharedState {
     uint64_t batch_change_idx;
     uint8_t  ingest_complete;
     
+    // RUNTIME CONFIGURATION
     uint64_t cfg_w_start;
     uint64_t cfg_w_max;
     uint64_t cfg_batch_start;
@@ -115,15 +123,31 @@ struct SharedState {
     uint8_t  fixed_workers;
     uint8_t  fixed_batch;
     uint8_t  cfg_return_bytes;
-    uint8_t  numa_enabled;      // Consolidated to Init
+    uint8_t  numa_enabled;
 
     // FULL RING ARRAYS
-    uint16_t stride_ring[RING_SIZE] ALIGNED(4096);
+    uint32_t stride_ring[RING_SIZE] ALIGNED(4096);
     uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
     uint64_t end_ring[RING_SIZE] ALIGNED(4096);
     uint32_t major_ring[RING_SIZE] ALIGNED(4096);
     uint32_t minor_ring[RING_SIZE] ALIGNED(4096);
 };
+
+static struct SharedState *state = NULL;
+
+static inline void cleanup_waiter_state() {
+    if (is_waiting_on_ring) {
+        int node = (my_numa_node == -1) ? 0 : my_numa_node;
+        if (state && atomic_load_relaxed(&state[node].active_waiters) > 0) {
+            atomic_fetch_sub(&state[node].active_waiters, 1);
+        }
+        is_waiting_on_ring = false;
+    }
+}
+
+// ==============================================================================
+// 3. CORE LIFECYCLE (Init & Destroy)
+// ==============================================================================
 
 static int ring_init_main(int argc, char **argv) {
     const char *dbg_env = get_string_value("FORKRUN_DEBUG");
@@ -279,6 +303,10 @@ static int ring_init_main(int argc, char **argv) {
     evfd_starve = eventfd(0, EFD_CLOEXEC|EFD_NONBLOCK);
     
     // Bind legacy variables for single-node mode bash scripts
+    evfd_data = evfd_data_arr[0];
+    fd_escrow[0] = fd_escrow_r[0];
+    fd_escrow[1] = fd_escrow_w[0];
+
     char buf[32];
     snprintf(buf, sizeof(buf), "%d", evfd_data_arr[0]); bind_variable("EVFD_RING_DATA", buf, 0);
     snprintf(buf, sizeof(buf), "%d", evfd_eof);  bind_variable("EVFD_RING_EOF", buf, 0);
@@ -352,15 +380,195 @@ static int ring_destroy_main(int argc, char **argv) {
     return EXECUTION_SUCCESS;
 }
 
+// ==============================================================================
+// 4. NEW NUMA LOADABLES
+// ==============================================================================
 
-static inline void emit_batch_numa(struct SharedState *local_state, uint64_t start, uint64_t end, uint32_t major, uint32_t minor, bool is_last, uint16_t stride) {
-    uint64_t idx = atomic_fetch_add(&local_state->write_idx, 1);
-    
-    local_state->offset_ring[idx & RING_MASK] = start;
-    local_state->end_ring[idx & RING_MASK]    = end;
-    local_state->stride_ring[idx & RING_MASK] = stride;
-    local_state->major_ring[idx & RING_MASK]  = major;
-    local_state->minor_ring[idx & RING_MASK]  = minor | (is_last ? FLAG_MAJOR_EOF : 0);
+static int ring_numa_ingest_main(int argc, char **argv) {
+    if (argc < 6) {
+        builtin_error("ring_numa_ingest: insufficient arguments");
+        return EXECUTION_FAILURE;
+    }
+
+    int infd        = atoi(argv[1]);
+    int outfd       = atoi(argv[2]);
+    int index_pipe  = atoi(argv[3]);
+    int claim_pipe  = atoi(argv[4]);
+    int num_nodes   = atoi(argv[5]);
+    bool ordered_mode = (argc > 6 && strcmp(argv[6], "1") == 0);
+
+    if (num_nodes < 1) num_nodes = 1;
+    if (num_nodes > 1024) num_nodes = 1024;
+
+    fcntl(claim_pipe, F_SETFL, fcntl(claim_pipe, F_GETFL) | O_NONBLOCK);
+
+    uint64_t chunk_size = 4 * 1024 * 1024ULL;
+    uint64_t max_chunk  = ordered_mode ? (16ULL * 1024 * 1024) : (128ULL * 1024 * 1024);
+
+    uint64_t current_offset = 0;
+    uint32_t current_major  = 0;
+    int consecutive_full    = 0;
+
+    int chunks_emitted = 0;
+    int warmup_cycles  = 3 * num_nodes;
+    int last_target    = -1;
+    int *backlogs      = xmalloc(num_nodes * sizeof(int));
+    if (!backlogs) return EXECUTION_FAILURE;
+    memset(backlogs, 0, num_nodes * sizeof(int));
+
+    unsigned long test_mask = 1UL;
+    bool numa_enabled = (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
+    if (!numa_enabled) num_nodes = 1;
+
+    int mask_words = (num_nodes + 63) / 64;
+    unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
+
+    while (1) {
+        uint32_t claimed_node;
+        while (read(claim_pipe, &claimed_node, sizeof(claimed_node)) == sizeof(claimed_node)) {
+            if (claimed_node < (uint32_t)num_nodes && backlogs[claimed_node] > 0)
+                backlogs[claimed_node]--;
+        }
+
+        int target_node = 0;
+        if (chunks_emitted < warmup_cycles) {
+            target_node = chunks_emitted % num_nodes;
+        } else {
+            int min_backlog = INT_MAX;
+            for (int i = 0; i < num_nodes; i++) {
+                int check = (last_target + 1 + i) % num_nodes;
+                if (backlogs[check] < min_backlog) {
+                    min_backlog = backlogs[check];
+                    target_node = check;
+                }
+            }
+        }
+
+        if (numa_enabled && num_nodes > 1) {
+            memset(nodemask, 0, mask_words * sizeof(unsigned long));
+            nodemask[target_node / 64] |= (1UL << (target_node % 64));
+            syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, num_nodes + 1);
+        }
+
+        chunk_size &= ~4095ULL;
+        if (chunk_size == 0) chunk_size = 4096;
+
+        ssize_t n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+        if (n <= 0) break;
+
+        struct IngestPacket pkt = {
+            .offset   = current_offset,
+            .length   = (uint64_t)n,
+            .node_id  = target_node,
+            .major_id = current_major
+        };
+
+        if (write(index_pipe, &pkt, sizeof(pkt)) != sizeof(pkt)) break;
+
+        backlogs[target_node]++;
+        last_target = target_node;
+        chunks_emitted++;
+        current_offset += n;
+        current_major++;
+
+        if ((uint64_t)n == chunk_size) {
+            consecutive_full++;
+            if (consecutive_full >= 4 && chunk_size < max_chunk) {
+                chunk_size *= 2;
+                consecutive_full = 0;
+            }
+        } else {
+            chunk_size = 4 * 1024 * 1024ULL;
+            consecutive_full = 0;
+        }
+    }
+
+    if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
+    xfree(nodemask);
+    xfree(backlogs);
+
+    struct IngestPacket sentinel = { .offset = current_offset, .length = 0, .node_id = 0, .major_id = UINT32_MAX };
+    write(index_pipe, &sentinel, sizeof(sentinel));
+
+    return EXECUTION_SUCCESS;
+}
+
+static int ring_indexer_numa_main(int argc, char **argv) {
+    if (argc < 4) {
+        builtin_error("ring_indexer_numa: insufficient arguments");
+        return EXECUTION_FAILURE;
+    }
+
+    int memfd       = atoi(argv[1]);
+    int index_pipe  = atoi(argv[2]);
+
+    int num_node_pipes = argc - 3;
+    if (num_node_pipes < 1) return EXECUTION_FAILURE;
+
+    int *node_pipes = xmalloc(num_node_pipes * sizeof(int));
+    for (int i = 0; i < num_node_pipes; i++) {
+        node_pipes[i] = atoi(argv[3 + i]);
+    }
+
+    struct IngestPacket pkt;
+    char tail_buf[65536];
+    uint64_t actual_start = 0;
+    uint32_t last_major_seen = 0;
+
+    while (read(index_pipe, &pkt, sizeof(pkt)) == sizeof(pkt)) {
+        if (pkt.major_id == UINT32_MAX) break;
+
+        uint64_t chunk_end = pkt.offset + pkt.length;
+        uint64_t actual_end = chunk_end;
+        bool found_newline = false;
+
+        uint64_t scan_start = (chunk_end > sizeof(tail_buf)) ? (chunk_end - sizeof(tail_buf)) : actual_start;
+        if (scan_start < actual_start) scan_start = actual_start;
+
+        size_t to_read = chunk_end - scan_start;
+        if (to_read > 0) {
+            ssize_t n = pread(memfd, tail_buf, to_read, scan_start);
+            if (n > 0) {
+                char *nl = memrchr(tail_buf, '\n', n);
+                if (nl) {
+                    actual_end = scan_start + (nl - tail_buf) + 1;
+                    found_newline = true;
+                }
+            } else if (n < 0 && g_debug) {
+                fprintf(stderr, "forkrun [DEBUG] indexer pread failed: %s\n", strerror(errno));
+            }
+        }
+
+        struct ScannerTask task = {
+            .major_id = pkt.major_id,
+            .pad = 0,
+            .start_off = actual_start,
+            .length = 0
+        };
+
+        if (found_newline) {
+            task.length = actual_end - actual_start;
+            actual_start = actual_end;
+        }
+
+        int target = node_pipes[pkt.node_id % num_node_pipes];
+        if (write(target, &task, sizeof(task)) != sizeof(task)) break;
+
+        last_major_seen = pkt.major_id;
+    }
+
+    if (pkt.major_id == UINT32_MAX && actual_start < pkt.offset) {
+        struct ScannerTask final_task = {
+            .major_id = last_major_seen + 1,
+            .pad = 0,
+            .start_off = actual_start,
+            .length = pkt.offset - actual_start
+        };
+        write(node_pipes[0], &final_task, sizeof(final_task));
+    }
+
+    xfree(node_pipes);
+    return EXECUTION_SUCCESS;
 }
 
 static int ring_numa_scanner_main(int argc, char **argv) {
@@ -369,7 +577,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     int memfd      = atoi(argv[1]);
     int my_node_id = atoi(argv[2]);
     int claim_pipe = atoi(argv[3]);
-    int fd_spawn   = atoi(argv[4]); // Restored for auto-scaling
+    int fd_spawn   = atoi(argv[4]); 
     int num_nodes  = atoi(argv[5]);
 
     int *node_pipes = xmalloc(num_nodes * sizeof(int));
@@ -377,7 +585,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 
     struct SharedState *local_state = &state[my_node_id];
 
-    // LOAD CONFIG
     uint64_t L = local_state->cfg_batch_start;
     uint64_t Lmax = local_state->cfg_batch_max;
     uint64_t W = local_state->cfg_w_start;
@@ -414,7 +621,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     atomic_store_relaxed(&local_state->write_idx, 0);
     atomic_store_relaxed(&local_state->read_idx, 0);
     atomic_store_relaxed(&local_state->active_workers, W);
-    local_state->numa_enabled = 1;
 
     if (fd_spawn >= 0 && W > 0) {
         char sbuf[64];
@@ -457,7 +663,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
         } \
     } while(0)
 
-    #define NUMA_SCANNER_FLUSH(cnt_val, stride_val, is_last_in_chunk, maj_id, min_idx, batch_start_off) do { \
+    #define NUMA_SCANNER_FLUSH(cnt_val, stride_val, is_last_in_chunk, maj_id, min_idx, batch_start_off, batch_end_off) do { \
         while(1) { \
             uint64_t limit = atomic_load_acquire(&local_state->read_idx); \
             if ((local_scan_idx - limit) < RING_SIZE) break; \
@@ -469,8 +675,9 @@ static int ring_numa_scanner_main(int argc, char **argv) {
         \
         local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)(stride_val); \
         local_state->offset_ring[local_scan_idx & RING_MASK] = pk; \
-        local_state->major_ring[local_scan_idx & RING_MASK] = (maj_id); \
-        local_state->minor_ring[local_scan_idx & RING_MASK] = (min_idx) | ((is_last_in_chunk) ? FLAG_MAJOR_EOF : 0); \
+        local_state->end_ring[local_scan_idx & RING_MASK]    = (uint64_t)(batch_end_off); \
+        local_state->major_ring[local_scan_idx & RING_MASK]  = (maj_id); \
+        local_state->minor_ring[local_scan_idx & RING_MASK]  = (min_idx) | ((is_last_in_chunk) ? FLAG_MAJOR_EOF : 0); \
         \
         local_scan_idx++; \
         NUMA_ADAPTIVE_COMMIT(false); \
@@ -514,7 +721,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
             write(claim_pipe, &active_pipe_idx, sizeof(active_pipe_idx));
 
             if (task.length == 0) {
-                NUMA_SCANNER_FLUSH(0, 0, true, task.major_id, 0, task.start_off);
+                NUMA_SCANNER_FLUSH(0, 0, true, task.major_id, 0, task.start_off, task.start_off);
                 NUMA_ADAPTIVE_COMMIT(true);
                 continue;
             }
@@ -549,13 +756,14 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                             if (to_read > 0) {
                                 ssize_t n = pread(memfd, buf, to_read, read_start);
                                 if (n > 0) { buf_base_offset = read_start; p = buf; end = buf + n; }
-                                else break;
+                                else if (n < 0 && errno == EINTR) continue;
+                                else break; 
                             } else break;
                         }
                         
                         char *nl = memchr(p, '\n', end - p);
                         if (nl) { lines_found++; p = nl + 1; }
-                        else { lines_found++; p = end; } // Hit end of read buffer
+                        else { lines_found++; p = end; } 
                     }
                     
                     pending_lines += lines_found;
@@ -567,15 +775,13 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 
                 if (flush) {
                     bool is_last = (current_p_offset >= chunk_end);
-                    uint16_t stride = (return_bytes) ? (current_p_offset - batch_start) : pending_lines;
+                    uint32_t stride = (return_bytes) ? (current_p_offset - batch_start) : pending_lines;
                     
-                    // The Physics Magic: FLAG_PARTIAL_BATCH guarantees boundaries
-                    NUMA_SCANNER_FLUSH(pending_lines, stride, is_last, task.major_id, minor_idx, batch_start);
+                    NUMA_SCANNER_FLUSH(pending_lines, stride, is_last, task.major_id, minor_idx, batch_start, current_p_offset);
                     minor_idx++;
                     batch_start = current_p_offset;
                     pending_lines = 0;
 
-                    // --- ORIGINAL PID LOOP LOGIC ---
                     batch_counter++;
                     batches_since_calc++;
                     
@@ -683,6 +889,9 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     return EXECUTION_SUCCESS;
 }
 
+// ==============================================================================
+// 5. UPDATED CONSUMER LOADABLES (Claim, Ack, Order)
+// ==============================================================================
 
 static int ring_claim_main(int argc, char **argv) {
     const char *v_target = "REPLY";
@@ -702,7 +911,7 @@ static int ring_claim_main(int argc, char **argv) {
 
     if (my_numa_node == -1) {
         const char *s_node = get_string_value("RING_NODE_ID");
-        my_numa_node = s_node ? atoi(s_node) : 0;
+        my_numa_node = s_node ? atoi(s_node) : auto_detect_numa_node();
         if (my_numa_node >= (int)global_num_nodes) my_numa_node = 0;
     }
     struct SharedState *local_state = &state[my_numa_node];
@@ -752,13 +961,11 @@ restart_loop:
             
             if (r_curr + claim_count > w_snap) claim_count = w_snap - r_curr;
             
-            // THE PHYSICS CLAMP: Arrest aggregation at FLAG_PARTIAL_BATCH
-            // This guarantees mapfile never reads across interleaved chunks in the memfd
             if (claim_count > 1) {
                 uint64_t safe_count = 1;
                 for (uint64_t i = 0; i < claim_count; i++) {
                     if (local_state->offset_ring[(r_curr + i) & RING_MASK] & FLAG_PARTIAL_BATCH) {
-                        safe_count = i + 1; // Include this slot, then stop
+                        safe_count = i + 1; 
                         break;
                     }
                 }
@@ -849,11 +1056,16 @@ restart_loop:
 
     uint64_t final_val = 0;
 
-    // Use uint32_t stride array for aggregate length, safe up to 4GB batches
-    if (local_state->cfg_return_bytes && !local_state->numa_enabled) {
-        uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-        uint64_t end = local_state->offset_ring[(my_read_idx + claim_count) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-        final_val = end - start;
+    if (local_state->cfg_return_bytes) {
+        if (local_state->numa_enabled) {
+            uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+            uint64_t end   = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
+            final_val = end - start;
+        } else {
+            uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+            uint64_t end = local_state->offset_ring[(my_read_idx + claim_count) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+            final_val = end - start;
+        }
     } else {
         if (claim_count == 1) final_val = local_state->stride_ring[my_read_idx & RING_MASK];
         else for (uint64_t i = 0; i < claim_count; i++) final_val += local_state->stride_ring[(my_read_idx + i) & RING_MASK];
@@ -874,7 +1086,6 @@ restart_loop:
         worker_last_major = local_state->major_ring[my_read_idx & RING_MASK];
         worker_last_minor = local_state->minor_ring[my_read_idx & RING_MASK] & ~FLAG_MAJOR_EOF; 
         
-        // Push EOF to OrderPacket if the clamp stopped exactly at the chunk EOF boundary
         if (local_state->minor_ring[(my_read_idx + claim_count - 1) & RING_MASK] & FLAG_MAJOR_EOF) {
             worker_last_minor |= FLAG_MAJOR_EOF;
         }
@@ -892,4 +1103,188 @@ restart_loop:
         }
     }
     return 0;
+}
+
+static int ring_ack_main(int argc, char **argv) {
+    if (argc < 2) return EXECUTION_FAILURE;
+    int fd_fallow = atoi(argv[1]);
+    int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
+    
+    struct OrderPacket op;
+    op.pad = 0;
+
+    if (worker_last_cnt > 0) {
+        if (state && global_num_nodes > 1) {
+            op.major_idx = worker_last_major;
+            op.minor_idx = worker_last_minor; 
+            op.cnt       = worker_last_cnt;
+        } else {
+            op.major_idx = (uint32_t)worker_last_idx;
+            op.minor_idx = 0;
+            op.cnt       = worker_last_cnt;
+        }
+    } else {
+        op.cnt = (uint32_t)atoi(get_string_value("RING_BATCH_SLOTS"));
+        if (state && global_num_nodes > 1) {
+            op.major_idx = (uint32_t)atoi(get_string_value("RING_MAJOR"));
+            op.minor_idx = (uint32_t)atoi(get_string_value("RING_MINOR")); 
+        } else {
+            op.major_idx = (uint32_t)atoi(get_string_value("RING_BATCH_IDX"));
+            op.minor_idx = 0;
+        }
+    }
+
+    if (fd_fallow > 0) SYS_CHK(write(fd_fallow, &op, sizeof(op)));
+    
+    if (fd_target > 0) {
+        if (fd_target != ack_cached_target_fd) {
+            ack_cached_target_fd = fd_target;
+            struct stat st;
+            ack_cached_mode = (fstat(fd_target, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
+        }
+        
+        if (ack_cached_mode == 1) {
+            const char *s_order_pipe = get_string_value("FD_ORDER_PIPE");
+            if (s_order_pipe) {
+                int fd_pipe = atoi(s_order_pipe);
+                off_t curr = lseek(fd_target, 0, SEEK_CUR);
+                if (curr == (off_t)-1) return EXECUTION_FAILURE;
+                
+                op.fd  = fd_target;
+                op.off = (uint64_t)last_ack_offset;
+                op.len = (uint64_t)(curr - last_ack_offset);
+                SYS_CHK(write(fd_pipe, &op, sizeof(op)));
+                last_ack_offset = curr;
+            }
+        } else {
+            SYS_CHK(write(fd_target, &op, sizeof(op)));
+        }
+    }
+    return EXECUTION_SUCCESS;
+}
+
+struct BufferedPacket { struct OrderPacket pkt; struct BufferedPacket *next; };
+
+static int ring_order_main(int argc, char **argv) {
+    if (argc < 3) return EXECUTION_FAILURE;
+    int fd_in = atoi(argv[1]);
+    bool memfd_mode = (strcmp(argv[2], "memfd") == 0);
+    const char *prefix = argv[2]; 
+    
+    bool unordered_mode = false;
+    bool numa_mode = false;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "unordered") == 0) unordered_mode = true;
+        if (strcmp(argv[i], "numa") == 0) numa_mode = true;
+    }
+
+    bool use_zerocopy = false;
+    struct stat st_out;
+    if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
+
+    struct BufferedPacket *head = NULL;
+    uint32_t expected_major = 0;
+    uint32_t expected_minor = 0;
+    struct OrderPacket ops[64];
+    ssize_t n_read;
+    
+    while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
+        int count = n_read / sizeof(struct OrderPacket);
+        for (int i = 0; i < count; i++) {
+            struct OrderPacket *op = &ops[i];
+            
+            bool is_chunk_eof = (op->minor_idx & FLAG_MAJOR_EOF);
+            uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
+
+            bool is_expected = false;
+            if (numa_mode) {
+                is_expected = (op->major_idx == expected_major && actual_minor == expected_minor);
+            } else {
+                is_expected = (op->major_idx == expected_major);
+            }
+
+            if (unordered_mode || is_expected) {
+                if (memfd_mode) {
+                    off_t offset = (off_t)op->off;
+                    if (use_zerocopy) sendfile(1, op->fd, &offset, op->len);
+                    else ring_copy_chunk(op->fd, 1, offset, op->len);
+                    
+                    off_t aligned_start = (op->off / 4096) * 4096;
+                    fallocate(op->fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, op->len);
+                } else {
+                    char path[256];
+                    if (numa_mode) snprintf(path, sizeof(path), "%s.%u.%u", prefix, op->major_idx, actual_minor); 
+                    else snprintf(path, sizeof(path), "%s.%u", prefix, op->major_idx); 
+                    
+                    int fd_file = open(path, O_RDONLY);
+                    if (fd_file >= 0) {
+                        off_t offset = 0; struct stat st;
+                        if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
+                            sendfile(1, fd_file, &offset, st.st_size);
+                        }
+                        close(fd_file); unlink(path);
+                    }
+                }
+                
+                if (!unordered_mode) {
+                    if (numa_mode) {
+                        expected_minor += op->cnt; 
+                        if (is_chunk_eof) { expected_major++; expected_minor = 0; }
+                    } else {
+                        expected_major += op->cnt; 
+                    }
+                    
+                    while (head) {
+                        bool drain_match = false;
+                        if (numa_mode) {
+                            uint32_t head_minor = head->pkt.minor_idx & ~FLAG_MAJOR_EOF;
+                            drain_match = (head->pkt.major_idx == expected_major && head_minor == expected_minor);
+                        } else {
+                            drain_match = (head->pkt.major_idx == expected_major);
+                        }
+
+                        if (!drain_match) break;
+
+                        struct BufferedPacket *tmp = head;
+                        if (memfd_mode) {
+                            off_t offset = (off_t)tmp->pkt.off;
+                            if (use_zerocopy) sendfile(1, tmp->pkt.fd, &offset, tmp->pkt.len);
+                            else ring_copy_chunk(tmp->pkt.fd, 1, offset, tmp->pkt.len);
+                            
+                            off_t aligned_start = (tmp->pkt.off / 4096) * 4096;
+                            fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, tmp->pkt.len);
+                        }
+                        
+                        if (numa_mode) {
+                            expected_minor += tmp->pkt.cnt; 
+                            if (tmp->pkt.minor_idx & FLAG_MAJOR_EOF) { expected_major++; expected_minor = 0; }
+                        } else {
+                            expected_major += tmp->pkt.cnt;
+                        }
+                        
+                        head = tmp->next;
+                        xfree(tmp); 
+                    }
+                }
+            } else {
+                struct BufferedPacket *n = xmalloc(sizeof(struct BufferedPacket));
+                n->pkt = *op;
+                struct BufferedPacket **curr = &head;
+                
+                uint64_t n_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
+                
+                while (*curr) {
+                    uint32_t c_minor = (*curr)->pkt.minor_idx & ~FLAG_MAJOR_EOF;
+                    uint64_t c_key = numa_mode ? PACK_KEY((*curr)->pkt.major_idx, c_minor) : (*curr)->pkt.major_idx;
+                    if (c_key >= n_key) break;
+                    curr = &((*curr)->next);
+                }
+                n->next = *curr;
+                *curr = n;
+            }
+        }
+    }
+    
+    while (head) { struct BufferedPacket *tmp = head; head = head->next; xfree(tmp); }
+    return EXECUTION_SUCCESS;
 }
