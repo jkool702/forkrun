@@ -1,6 +1,5 @@
 // ==============================================================================
 // 1. INCLUDES, MACROS, TOPOLOGY, AND TLS VARIABLES
-// (Replace your existing SharedState pointer and eventfd variables with this)
 // ==============================================================================
 
 #include <sys/syscall.h>
@@ -381,7 +380,7 @@ static int ring_destroy_main(int argc, char **argv) {
 }
 
 // ==============================================================================
-// 4. NEW NUMA LOADABLES
+// 4. NUMA INGEST & SCANNERS
 // ==============================================================================
 
 static int ring_numa_ingest_main(int argc, char **argv) {
@@ -418,7 +417,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
     unsigned long test_mask = 1UL;
     bool numa_enabled = (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
-    if (!numa_enabled) num_nodes = 1;
+    if (numa_enabled) {
+        syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0); // Reset after test
+    } else {
+        num_nodes = 1;
+    }
 
     int mask_words = (num_nodes + 63) / 64;
     unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
@@ -447,7 +450,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (numa_enabled && num_nodes > 1) {
             memset(nodemask, 0, mask_words * sizeof(unsigned long));
             nodemask[target_node / 64] |= (1UL << (target_node % 64));
-            syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, num_nodes + 1);
+            // Correct API boundary: maxnode is size of mask in bits
+            syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * 64);
         }
 
         chunk_size &= ~4095ULL;
@@ -534,8 +538,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                     actual_end = scan_start + (nl - tail_buf) + 1;
                     found_newline = true;
                 }
-            } else if (n < 0 && g_debug) {
-                fprintf(stderr, "forkrun [DEBUG] indexer pread failed: %s\n", strerror(errno));
             }
         }
 
@@ -581,7 +583,11 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     int num_nodes  = atoi(argv[5]);
 
     int *node_pipes = xmalloc(num_nodes * sizeof(int));
-    for (int i = 0; i < num_nodes; i++) node_pipes[i] = atoi(argv[6 + i]);
+    for (int i = 0; i < num_nodes; i++) {
+        node_pipes[i] = atoi(argv[6 + i]);
+        // Set Non-Blocking to prevent stalling on duplicate task steal races
+        fcntl(node_pipes[i], F_SETFL, fcntl(node_pipes[i], F_GETFL) | O_NONBLOCK);
+    }
 
     struct SharedState *local_state = &state[my_node_id];
 
@@ -622,12 +628,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     atomic_store_relaxed(&local_state->read_idx, 0);
     atomic_store_relaxed(&local_state->active_workers, W);
 
-    if (fd_spawn >= 0 && W > 0) {
-        char sbuf[64];
-        int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
-        if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
-    }
-
     #define LOCAL_SCANNER_WAKE() do { \
         if(atomic_load_acquire(&local_state->active_waiters) > 0) { \
             uint64_t v=1; SYS_CHK(write(evfd_data_arr[my_node_id], &v, 8)); \
@@ -663,21 +663,21 @@ static int ring_numa_scanner_main(int argc, char **argv) {
         } \
     } while(0)
 
-    #define NUMA_SCANNER_FLUSH(cnt_val, stride_val, is_last_in_chunk, maj_id, min_idx, batch_start_off, batch_end_off) do { \
+    #define NUMA_SCANNER_FLUSH(cnt_val, stride_val, is_last, maj_id, min_idx, batch_start, batch_end) do { \
         while(1) { \
             uint64_t limit = atomic_load_acquire(&local_state->read_idx); \
             if ((local_scan_idx - limit) < RING_SIZE) break; \
             NUMA_ADAPTIVE_COMMIT(true); \
             usleep(100); \
         } \
-        uint64_t pk = (uint64_t)(batch_start_off); \
-        if ((cnt_val) != L || (is_last_in_chunk)) pk |= FLAG_PARTIAL_BATCH; \
+        uint64_t pk = (uint64_t)batch_start; \
+        if ((cnt_val) != L || is_last) pk |= FLAG_PARTIAL_BATCH; \
         \
-        local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)(stride_val); \
+        local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)stride_val; \
         local_state->offset_ring[local_scan_idx & RING_MASK] = pk; \
-        local_state->end_ring[local_scan_idx & RING_MASK]    = (uint64_t)(batch_end_off); \
-        local_state->major_ring[local_scan_idx & RING_MASK]  = (maj_id); \
-        local_state->minor_ring[local_scan_idx & RING_MASK]  = (min_idx) | ((is_last_in_chunk) ? FLAG_MAJOR_EOF : 0); \
+        local_state->end_ring[local_scan_idx & RING_MASK]    = batch_end; \
+        local_state->major_ring[local_scan_idx & RING_MASK]  = maj_id; \
+        local_state->minor_ring[local_scan_idx & RING_MASK]  = min_idx | (is_last ? FLAG_MAJOR_EOF : 0); \
         \
         local_scan_idx++; \
         NUMA_ADAPTIVE_COMMIT(false); \
@@ -775,7 +775,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 
                 if (flush) {
                     bool is_last = (current_p_offset >= chunk_end);
-                    uint32_t stride = (return_bytes) ? (current_p_offset - batch_start) : pending_lines;
+                    uint32_t stride = (return_bytes) ? (uint32_t)(current_p_offset - batch_start) : (uint32_t)pending_lines;
                     
                     NUMA_SCANNER_FLUSH(pending_lines, stride, is_last, task.major_id, minor_idx, batch_start, current_p_offset);
                     minor_idx++;
@@ -890,7 +890,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 }
 
 // ==============================================================================
-// 5. UPDATED CONSUMER LOADABLES (Claim, Ack, Order)
+// 5. CONSUMER LOADABLES (Claim, Ack, Order)
 // ==============================================================================
 
 static int ring_claim_main(int argc, char **argv) {
@@ -1111,7 +1111,6 @@ static int ring_ack_main(int argc, char **argv) {
     int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
     
     struct OrderPacket op;
-    op.pad = 0;
 
     if (worker_last_cnt > 0) {
         if (state && global_num_nodes > 1) {
@@ -1253,6 +1252,19 @@ static int ring_order_main(int argc, char **argv) {
                             
                             off_t aligned_start = (tmp->pkt.off / 4096) * 4096;
                             fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, tmp->pkt.len);
+                        } else {
+                            char path[256];
+                            if (numa_mode) snprintf(path, sizeof(path), "%s.%u.%u", prefix, tmp->pkt.major_idx, (tmp->pkt.minor_idx & ~FLAG_MAJOR_EOF)); 
+                            else snprintf(path, sizeof(path), "%s.%u", prefix, tmp->pkt.major_idx); 
+                            
+                            int fd_file = open(path, O_RDONLY);
+                            if (fd_file >= 0) {
+                                off_t offset = 0; struct stat st;
+                                if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
+                                    sendfile(1, fd_file, &offset, st.st_size);
+                                }
+                                close(fd_file); unlink(path);
+                            }
                         }
                         
                         if (numa_mode) {
