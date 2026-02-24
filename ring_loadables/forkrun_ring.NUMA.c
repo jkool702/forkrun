@@ -79,6 +79,10 @@
 #endif
 #endif
 
+#if !defined(__NR_set_mempolicy) || __NR_set_mempolicy == 0
+#warning "NUMA set_mempolicy syscall unavailable. Multi-ring concurrency will be used without memory pinning."
+#endif
+
 #ifndef FALLOC_FL_KEEP_SIZE
 #define FALLOC_FL_KEEP_SIZE 0x01
 #endif
@@ -424,6 +428,7 @@ struct SharedState {
     uint64_t batch_change_idx;
     uint8_t  ingest_complete;
     
+    // RUNTIME CONFIGURATION
     uint64_t cfg_w_start;
     uint64_t cfg_w_max;
     uint64_t cfg_batch_start;
@@ -438,6 +443,7 @@ struct SharedState {
     uint8_t  cfg_return_bytes;
     uint8_t  numa_enabled;
 
+    // FULL RING ARRAYS
     uint32_t stride_ring[RING_SIZE] ALIGNED(4096);
     uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
     uint64_t end_ring[RING_SIZE] ALIGNED(4096);
@@ -568,7 +574,8 @@ static void apply_config(char type, char sub, const char *arg) {
 static int ring_init_main(int argc, char **argv) {
     const char *dbg_env = get_string_value("FORKRUN_DEBUG");
     if (dbg_env && (strcmp(dbg_env, "1") == 0 || strcmp(dbg_env, "true") == 0)) {
-        g_debug = 1; fprintf(stderr, "forkrun [DEBUG] Enabled\n");
+        g_debug = 1;
+        fprintf(stderr, "forkrun [DEBUG] Enabled\n");
     } else g_debug = 0;
     
     for (int i = 1; i < argc; i++) {
@@ -607,6 +614,11 @@ static int ring_init_main(int argc, char **argv) {
     int stdin_explicit = -1; 
     const char *out_array_name = NULL;
 
+    // MISSING CONFIG PARSERS RESTORED
+    uint64_t parsed_limit = 0;
+    int64_t  parsed_timeout = -1;
+    uint8_t  parsed_return_bytes = 0;
+
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (strncmp(arg, "--workers=", 10) == 0)      apply_config(0, 0, arg+10);
@@ -618,6 +630,10 @@ static int ring_init_main(int argc, char **argv) {
         else if (strncmp(arg, "--bytes=", 8) == 0)     apply_config(2, 0, arg+8);
         else if (strncmp(arg, "--bytes0=", 9) == 0)    apply_config(2, 1, arg+9);
         else if (strncmp(arg, "--bytes-max=", 12) == 0) apply_config(2, 2, arg+12);
+        else if (strncmp(arg, "--limit=", 8) == 0)     parsed_limit = (uint64_t)atoll(arg+8);
+        else if (strncmp(arg, "--timeout=", 10) == 0)  parsed_timeout = atoll(arg+10);
+        else if (strncmp(arg, "--greedy", 8) == 0)     parsed_timeout = 0;
+        else if (strncmp(arg, "--return-bytes", 14) == 0) parsed_return_bytes = 1;
         else if (strncmp(arg, "--out=", 6) == 0)       out_array_name = arg+6;
         else if (strncmp(arg, "--stdin", 7) == 0)      stdin_explicit = 1;
         else if (strncmp(arg, "--no-stdin", 10) == 0)  stdin_explicit = 0;
@@ -672,6 +688,10 @@ static int ring_init_main(int argc, char **argv) {
         state[n].mode_byte   = byte_mode ? 1 : 0;
         state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
         
+        state[n].cfg_limit      = parsed_limit;
+        state[n].cfg_timeout_us = parsed_timeout;
+        state[n].cfg_return_bytes = parsed_return_bytes;
+
         if (byte_mode) {
             state[n].cfg_batch_start = vals[4];
             state[n].cfg_batch_max   = vals[5];
@@ -793,7 +813,7 @@ static int ring_destroy_main(int argc, char **argv) {
 }
 
 // ==============================================================================
-// 4. INGEST & SCANNERS
+// 4. NUMA INGEST & SCANNERS
 // ==============================================================================
 
 static int ring_numa_ingest_main(int argc, char **argv) {
@@ -830,8 +850,12 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
     unsigned long test_mask = 1UL;
     bool numa_enabled = (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
-    if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0); 
-    else num_nodes = 1;
+    if (numa_enabled) {
+        syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0); 
+    } else {
+        if (g_debug && num_nodes > 1) fprintf(stderr, "forkrun [DEBUG] NUMA unavailable, running multi-ring without pinning\n");
+        num_nodes = 1;
+    }
 
     int mask_words = (num_nodes + 63) / 64;
     unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
@@ -860,7 +884,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (numa_enabled && num_nodes > 1) {
             memset(nodemask, 0, mask_words * sizeof(unsigned long));
             nodemask[target_node / 64] |= (1UL << (target_node % 64));
-            syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, num_nodes + 1);
+            // Correct API boundary: maxnode is size of mask in bits
+            syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * sizeof(unsigned long) * 8);
         }
 
         chunk_size &= ~4095ULL;
@@ -907,7 +932,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 }
 
 static int ring_indexer_numa_main(int argc, char **argv) {
-    if (argc < 4) return EXECUTION_FAILURE;
+    if (argc < 4) {
+        builtin_error("ring_indexer_numa: insufficient arguments");
+        return EXECUTION_FAILURE;
+    }
 
     int memfd       = atoi(argv[1]);
     int index_pipe  = atoi(argv[2]);
@@ -919,7 +947,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         node_pipes[i] = atoi(argv[3 + i]);
     }
 
-    struct IngestPacket pkt;
+    struct IngestPacket pkt = {0}; // Initialize to prevent UB if EOF on first read
     char tail_buf[65536];
     uint64_t actual_start = 0;
     uint32_t last_major_seen = 0;
@@ -1021,7 +1049,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     
     int phase = 0;
     uint64_t batch_counter = 0;
-    uint64_t target_count = 0;
     uint64_t last_calc_us = get_us_time();
     uint64_t last_calc_write = 0;
     uint64_t last_calc_read = 0;
@@ -2082,9 +2109,12 @@ static int ring_ack_main(int argc, char **argv) {
     int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
     
     struct OrderPacket op;
+    // op.pad has been safely removed.
+
+    struct SharedState *local_state = (my_numa_node != -1 && my_numa_node < global_num_nodes) ? &state[my_numa_node] : &state[0];
 
     if (worker_last_cnt > 0) {
-        if (state && global_num_nodes > 1) {
+        if (local_state && local_state->numa_enabled) {
             op.major_idx = worker_last_major;
             op.minor_idx = worker_last_minor; 
             op.cnt       = worker_last_cnt;
@@ -2095,7 +2125,7 @@ static int ring_ack_main(int argc, char **argv) {
         }
     } else {
         op.cnt = (uint32_t)atoi(get_string_value("RING_BATCH_SLOTS"));
-        if (state && global_num_nodes > 1) {
+        if (local_state && local_state->numa_enabled) {
             op.major_idx = (uint32_t)atoi(get_string_value("RING_MAJOR"));
             op.minor_idx = (uint32_t)atoi(get_string_value("RING_MINOR")); 
         } else {
@@ -2165,7 +2195,7 @@ static int ring_order_main(int argc, char **argv) {
     const char *prefix = argv[2]; 
     
     bool unordered_mode = false;
-    bool numa_mode = false;
+    bool numa_mode = (global_num_nodes > 1);
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "unordered") == 0) unordered_mode = true;
         if (strcmp(argv[i], "numa") == 0) numa_mode = true;
@@ -2221,7 +2251,7 @@ static int ring_order_main(int argc, char **argv) {
                 
                 if (!unordered_mode) {
                     if (numa_mode) {
-                        expected_minor += op->cnt; 
+                        expected_minor++; // Each NUMA claim is logically 1 unit for sequencer
                         if (is_chunk_eof) { expected_major++; expected_minor = 0; }
                     } else {
                         expected_major += op->cnt; 
@@ -2262,7 +2292,7 @@ static int ring_order_main(int argc, char **argv) {
                         }
                         
                         if (numa_mode) {
-                            expected_minor += tmp->pkt.cnt; 
+                            expected_minor++; 
                             if (tmp->pkt.minor_idx & FLAG_MAJOR_EOF) { expected_major++; expected_minor = 0; }
                         } else {
                             expected_major += tmp->pkt.cnt;
