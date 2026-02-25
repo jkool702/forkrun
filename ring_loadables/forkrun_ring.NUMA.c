@@ -199,7 +199,7 @@ static inline int auto_detect_numa_node() {
     X(ring_indexer_numa,    ring_indexer_numa_main,   "ring_indexer_numa",              "Run NUMA chunk indexer") \
     X(ring_numa_scanner,    ring_numa_scanner_main,   "ring_numa_scanner",              "Run NUMA localized scanner") \
     X(ring_claim,           ring_claim_main,          "ring_claim [VAR] [FD]",          "Claim batch") \
-    X(ring_worker,          ring_worker_main,         "ring_worker [inc|dec][FD]",     "Worker control") \
+    X(ring_worker,          ring_worker_main,         "ring_worker[inc|dec] [FD]",     "Worker control") \
     X(ring_cleanup_waiter,  ring_cleanup_waiter_main, "ring_cleanup_waiter",            "Cleanup waiter") \
     X(ring_ingest,          ring_ingest_main,         "ring_ingest",                    "Signal ingest") \
     X(ring_fallow,          ring_fallow_main,         "ring_fallow <PIPE> <FILE> [dry]","Logical fallow") \
@@ -862,7 +862,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     if (numa_enabled) {
         syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0); 
     } else {
-        if (g_debug && num_nodes > 1) fprintf(stderr, "forkrun [DEBUG] NUMA unavailable, running multi-ring without pinning\n");
+        if (g_debug && num_nodes > 1) fprintf(stderr, "forkrun[DEBUG] NUMA unavailable, running multi-ring without pinning\n");
         num_nodes = 1;
     }
 
@@ -901,7 +901,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (chunk_size == 0) chunk_size = 4096;
 
         ssize_t n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
-        if (n <= 0) break;
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            break;
+        }
+        if (n == 0) break;
 
         struct IngestPacket pkt = {
             .offset   = current_offset,
@@ -998,6 +1002,8 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             actual_start = actual_end;
         }
 
+        // NOTE: Zero-length tasks are intentionally emitted here to maintain the monotonic 
+        // major_id sequence for the ring_order sequencer. 
         int target = node_pipes[pkt.node_id % num_node_pipes];
         if (write(target, &task, sizeof(task)) != sizeof(task)) break;
         last_major_seen = pkt.major_id;
@@ -2152,7 +2158,7 @@ static int ring_ack_main(int argc, char **argv) {
     int fd_fallow = atoi(argv[1]);
     int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
     
-    struct OrderPacket op;
+    struct OrderPacket op = {0};
 
     struct SharedState *local_state = (my_numa_node != -1 && my_numa_node < (int)global_num_nodes) ? &state[my_numa_node] : &state[0];
 
@@ -2177,7 +2183,10 @@ static int ring_ack_main(int argc, char **argv) {
         }
     }
 
-    if (fd_fallow > 0) SYS_CHK(write(fd_fallow, &op, sizeof(op)));
+    if (fd_fallow > 0) {
+        struct IndexPacket ip = { .idx = op.major_idx, .cnt = op.cnt };
+        SYS_CHK(write(fd_fallow, &ip, sizeof(ip)));
+    }
     
     if (fd_target > 0) {
         if (fd_target != ack_cached_target_fd) {
@@ -2548,7 +2557,17 @@ static int ring_fetcher_main(int argc, char **argv) {
                     if (r < 0 && errno == EINTR) continue;
                     break;
                 }
-                write(fd_local, buf, r);
+                char *wptr = buf;
+                ssize_t wleft = r;
+                while (wleft > 0) {
+                    ssize_t w = write(fd_local, wptr, wleft);
+                    if (w <= 0) {
+                        if (w < 0 && errno == EINTR) continue;
+                        break;
+                    }
+                    wptr += w;
+                    wleft -= w;
+                }
                 copied += r;
             }
             xfree(buf);
