@@ -418,6 +418,7 @@ struct SharedState {
     uint64_t read_idx ALIGNED(CACHE_LINE);
     uint64_t active_workers;
     uint64_t total_lines_consumed;
+    uint64_t global_scanned;  
     uint32_t active_waiters;
     uint64_t min_idx;
     uint8_t  fallow_active;
@@ -857,7 +858,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         num_nodes = 1;
     }
 
-    int mask_words = (num_nodes + 63) / 64;
+    // AI FIX: Safe multi-architecture bitwise operations
+    #define BITS_PER_LONG (sizeof(unsigned long) * 8)
+    int mask_words = (num_nodes + BITS_PER_LONG - 1) / BITS_PER_LONG;
     unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
 
     while (1) {
@@ -883,9 +886,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
         if (numa_enabled && num_nodes > 1) {
             memset(nodemask, 0, mask_words * sizeof(unsigned long));
-            nodemask[target_node / 64] |= (1UL << (target_node % 64));
-            // Correct API boundary: maxnode is size of mask in bits
-            syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * sizeof(unsigned long) * 8);
+            // AI FIX: 32-bit / 64-bit safety
+            nodemask[target_node / BITS_PER_LONG] |= (1UL << (target_node % BITS_PER_LONG));
+            syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * BITS_PER_LONG);
         }
 
         chunk_size &= ~4095ULL;
@@ -924,6 +927,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
     xfree(nodemask);
     xfree(backlogs);
+    #undef BITS_PER_LONG
 
     struct IngestPacket sentinel = { .offset = current_offset, .length = 0, .node_id = 0, .major_id = UINT32_MAX };
     write(index_pipe, &sentinel, sizeof(sentinel));
@@ -1056,18 +1060,12 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     uint64_t stall_meter = 0;
     uint64_t batches_since_calc = 0;
 
-    uint64_t total_scanned = 0;
     uint64_t first_wait_ts = 0;
     uint64_t limit_items = local_state->cfg_limit;
 
     atomic_store_relaxed(&local_state->write_idx, 0);
     atomic_store_relaxed(&local_state->read_idx, 0);
     atomic_store_relaxed(&local_state->active_workers, W);
-
-    if (fd_spawn >= 0 && W > 0) {
-        char sbuf[64]; int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
-        if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
-    }
 
     #define LOCAL_SCANNER_WAKE() do { \
         if(atomic_load_acquire(&local_state->active_waiters) > 0) { \
@@ -1125,11 +1123,20 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     } while(0)
 
     int active_pipe_idx = my_node_id; 
-    int pipes_tried = 0;
     int home_poll_count = 0;
     bool pipe_stalled = false;
 
-    while (pipes_tried < num_nodes) {
+    // AI FIX: Bulletproof EOF tracking to prevent starvation exits
+    int active_pipes = num_nodes;
+    bool *pipe_open = xmalloc(num_nodes * sizeof(bool));
+    for (int i = 0; i < num_nodes; i++) pipe_open[i] = true;
+
+    while (active_pipes > 0) {
+        if (!pipe_open[active_pipe_idx]) {
+            active_pipe_idx = (active_pipe_idx + 1) % num_nodes;
+            continue;
+        }
+
         int current_pipe = node_pipes[active_pipe_idx];
         struct ScannerTask task;
         
@@ -1137,7 +1144,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
         if (active_pipe_idx != my_node_id) {
             if (poll(&pfd, 1, 0) <= 0) { 
                 active_pipe_idx = (active_pipe_idx + 1) % num_nodes;
-                pipes_tried++;
                 continue;
             }
             pipe_stalled = false;
@@ -1147,7 +1153,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
             if (poll(&pfd, 1, timeout) <= 0) {
                 home_poll_count++;
                 active_pipe_idx = (active_pipe_idx + 1) % num_nodes;
-                pipes_tried++;
                 pipe_stalled = true;
                 continue;
             }
@@ -1158,7 +1163,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
         ssize_t r = read(current_pipe, &task, sizeof(task));
         
         if (r == sizeof(task)) {
-            pipes_tried = 0; 
             write(claim_pipe, &active_pipe_idx, sizeof(active_pipe_idx));
 
             if (task.length == 0) {
@@ -1180,24 +1184,31 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                 bool flush = false;
                 bool limit_reached = false;
 
-                if (limit_items > 0 && total_scanned >= limit_items) break;
-
                 if (byte_mode) {
                     uint64_t avail = chunk_end - current_p_offset;
                     uint64_t take = (avail >= L) ? L : avail;
+                    
                     if (limit_items > 0) {
-                        uint64_t rem = limit_items - total_scanned;
-                        if (take > rem) take = rem;
+                        uint64_t prev = atomic_fetch_add(&state[0].global_scanned, take);
+                        if (prev >= limit_items) {
+                            break; // Global limit hit, exit chunk immediately
+                        } else if (prev + take > limit_items) {
+                            take = limit_items - prev; // Clamp to exact limit
+                            limit_reached = true;
+                        }
                     }
+                    
                     current_p_offset += take;
                     pending_lines = take;
-                    total_scanned += take;
                     flush = true;
                     first_wait_ts = 0;
                 } else {
                     uint64_t scan_target = (L > pending_lines) ? (L - pending_lines) : 0;
+                    
                     if (limit_items > 0) {
-                        uint64_t rem = limit_items - total_scanned;
+                        uint64_t current_global = atomic_load_relaxed(&state[0].global_scanned);
+                        if (current_global >= limit_items) break; // Strict stop
+                        uint64_t rem = limit_items - current_global;
                         if (scan_target > rem) scan_target = rem;
                     }
                     if (scan_target == 0 && !limit_reached) scan_target = 1;
@@ -1236,9 +1247,19 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                             else { p = end; }
                         } 
                     }
+
+                    if (limit_items > 0 && lines_found > 0) {
+                        uint64_t prev = atomic_fetch_add(&state[0].global_scanned, lines_found);
+                        if (prev >= limit_items) {
+                            lines_found = 0;
+                            limit_reached = true;
+                            break; 
+                        } else if (prev + lines_found >= limit_items) {
+                            limit_reached = true;
+                        }
+                    }
                     
                     pending_lines += lines_found;
-                    total_scanned += lines_found;
                     current_p_offset = buf_base_offset + (p - buf);
                     
                     if (pending_lines >= L || current_p_offset >= chunk_end || limit_reached) {
@@ -1351,11 +1372,20 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                         }
                     }
                 }
+                if (limit_reached) break; // Break out of the chunk if limit hit
             }
             NUMA_ADAPTIVE_COMMIT(true);
-        } else {
+            if (limit_items > 0 && atomic_load_relaxed(&state[0].global_scanned) >= limit_items) break;
+        } else if (r == 0) {
+            // AI FIX: Safe EOF pipe exit condition
+            pipe_open[active_pipe_idx] = false;
+            active_pipes--;
             active_pipe_idx = (active_pipe_idx + 1) % num_nodes;
-            pipes_tried++;
+        } else {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            pipe_open[active_pipe_idx] = false;
+            active_pipes--;
+            active_pipe_idx = (active_pipe_idx + 1) % num_nodes;
         }
     }
 
@@ -1366,6 +1396,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     
     xfree(buf);
     xfree(node_pipes);
+    xfree(pipe_open);
     return EXECUTION_SUCCESS;
 }
 
