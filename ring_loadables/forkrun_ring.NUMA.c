@@ -199,7 +199,7 @@ static inline int auto_detect_numa_node() {
     X(ring_indexer_numa,    ring_indexer_numa_main,   "ring_indexer_numa",              "Run NUMA chunk indexer") \
     X(ring_numa_scanner,    ring_numa_scanner_main,   "ring_numa_scanner",              "Run NUMA localized scanner") \
     X(ring_claim,           ring_claim_main,          "ring_claim [VAR] [FD]",          "Claim batch") \
-    X(ring_worker,          ring_worker_main,         "ring_worker [inc|dec] [FD]",     "Worker control") \
+    X(ring_worker,          ring_worker_main,         "ring_worker [inc|dec][FD]",     "Worker control") \
     X(ring_cleanup_waiter,  ring_cleanup_waiter_main, "ring_cleanup_waiter",            "Cleanup waiter") \
     X(ring_ingest,          ring_ingest_main,         "ring_ingest",                    "Signal ingest") \
     X(ring_fallow,          ring_fallow_main,         "ring_fallow <PIPE> <FILE> [dry]","Logical fallow") \
@@ -418,7 +418,7 @@ struct SharedState {
     uint64_t read_idx ALIGNED(CACHE_LINE);
     uint64_t active_workers;
     uint64_t total_lines_consumed;
-    uint64_t global_scanned;  
+    uint64_t global_scanned;          // Atomic cross-node limit tracker
     uint32_t active_waiters;
     uint64_t min_idx;
     uint8_t  fallow_active;
@@ -592,6 +592,7 @@ static int ring_init_main(int argc, char **argv) {
             atomic_store_relaxed(&state[n].write_idx, 0);
             atomic_store_relaxed(&state[n].ingest_complete, 0);
             atomic_store_relaxed(&state[n].total_lines_consumed, 0);
+            atomic_store_relaxed(&state[n].global_scanned, 0); 
             atomic_store_relaxed(&state[n].min_idx, 0);
             atomic_store_relaxed(&state[n].fallow_active, 0);
             atomic_store_relaxed(&state[n].tail_idx, 0);
@@ -615,7 +616,6 @@ static int ring_init_main(int argc, char **argv) {
     int stdin_explicit = -1; 
     const char *out_array_name = NULL;
 
-    // MISSING CONFIG PARSERS RESTORED
     uint64_t parsed_limit = 0;
     int64_t  parsed_timeout = -1;
     uint8_t  parsed_return_bytes = 0;
@@ -727,6 +727,9 @@ static int ring_init_main(int argc, char **argv) {
             fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
             fd_escrow_r[n] = pfd[0];
             fd_escrow_w[n] = pfd[1];
+        } else {
+            fd_escrow_r[n] = -1;
+            fd_escrow_w[n] = -1;
         }
     }
 
@@ -792,7 +795,12 @@ static int ring_init_main(int argc, char **argv) {
 
 static int ring_destroy_main(int argc, char **argv) {
     (void)argc; (void)argv;
-    if (state) { munmap(state, sizeof(struct SharedState) * global_num_nodes); state = NULL; }
+    if (state) { 
+        size_t total_size = sizeof(struct SharedState) * global_num_nodes;
+        total_size = (total_size + 4095ULL) & ~4095ULL;
+        munmap(state, total_size); 
+        state = NULL; 
+    }
     if (evfd_data_arr) {
         for (uint32_t n = 0; n < global_num_nodes; n++) {
             if (evfd_data_arr[n] >= 0) close(evfd_data_arr[n]);
@@ -858,7 +866,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         num_nodes = 1;
     }
 
-    // AI FIX: Safe multi-architecture bitwise operations
     #define BITS_PER_LONG (sizeof(unsigned long) * 8)
     int mask_words = (num_nodes + BITS_PER_LONG - 1) / BITS_PER_LONG;
     unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
@@ -886,7 +893,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
         if (numa_enabled && num_nodes > 1) {
             memset(nodemask, 0, mask_words * sizeof(unsigned long));
-            // AI FIX: 32-bit / 64-bit safety
             nodemask[target_node / BITS_PER_LONG] |= (1UL << (target_node % BITS_PER_LONG));
             syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * BITS_PER_LONG);
         }
@@ -951,7 +957,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         node_pipes[i] = atoi(argv[3 + i]);
     }
 
-    struct IngestPacket pkt = {0}; // Initialize to prevent UB if EOF on first read
+    struct IngestPacket pkt = {0}; 
     char tail_buf[65536];
     uint64_t actual_start = 0;
     uint32_t last_major_seen = 0;
@@ -1060,12 +1066,18 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     uint64_t stall_meter = 0;
     uint64_t batches_since_calc = 0;
 
+    uint64_t total_scanned = 0;
     uint64_t first_wait_ts = 0;
     uint64_t limit_items = local_state->cfg_limit;
 
     atomic_store_relaxed(&local_state->write_idx, 0);
     atomic_store_relaxed(&local_state->read_idx, 0);
     atomic_store_relaxed(&local_state->active_workers, W);
+
+    if (fd_spawn >= 0 && W > 0) {
+        char sbuf[64]; int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
+        if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
+    }
 
     #define LOCAL_SCANNER_WAKE() do { \
         if(atomic_load_acquire(&local_state->active_waiters) > 0) { \
@@ -1126,7 +1138,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     int home_poll_count = 0;
     bool pipe_stalled = false;
 
-    // AI FIX: Bulletproof EOF tracking to prevent starvation exits
     int active_pipes = num_nodes;
     bool *pipe_open = xmalloc(num_nodes * sizeof(bool));
     for (int i = 0; i < num_nodes; i++) pipe_open[i] = true;
@@ -1191,15 +1202,16 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                     if (limit_items > 0) {
                         uint64_t prev = atomic_fetch_add(&state[0].global_scanned, take);
                         if (prev >= limit_items) {
-                            break; // Global limit hit, exit chunk immediately
+                            break; 
                         } else if (prev + take > limit_items) {
-                            take = limit_items - prev; // Clamp to exact limit
+                            take = limit_items - prev; 
                             limit_reached = true;
                         }
                     }
                     
                     current_p_offset += take;
                     pending_lines = take;
+                    total_scanned += take;
                     flush = true;
                     first_wait_ts = 0;
                 } else {
@@ -1207,7 +1219,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                     
                     if (limit_items > 0) {
                         uint64_t current_global = atomic_load_relaxed(&state[0].global_scanned);
-                        if (current_global >= limit_items) break; // Strict stop
+                        if (current_global >= limit_items) break; 
                         uint64_t rem = limit_items - current_global;
                         if (scan_target > rem) scan_target = rem;
                     }
@@ -1258,8 +1270,9 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                             limit_reached = true;
                         }
                     }
-                    
+
                     pending_lines += lines_found;
+                    total_scanned += lines_found;
                     current_p_offset = buf_base_offset + (p - buf);
                     
                     if (pending_lines >= L || current_p_offset >= chunk_end || limit_reached) {
@@ -1372,12 +1385,11 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                         }
                     }
                 }
-                if (limit_reached) break; // Break out of the chunk if limit hit
+                if (limit_reached) break; 
             }
             NUMA_ADAPTIVE_COMMIT(true);
             if (limit_items > 0 && atomic_load_relaxed(&state[0].global_scanned) >= limit_items) break;
         } else if (r == 0) {
-            // AI FIX: Safe EOF pipe exit condition
             pipe_open[active_pipe_idx] = false;
             active_pipes--;
             active_pipe_idx = (active_pipe_idx + 1) % num_nodes;
@@ -1393,6 +1405,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     atomic_store_release(&local_state->scanner_finished, 1);
     LOCAL_SCANNER_WAKE(); 
     if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
+    uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8)); // Prevent worker deadlock
     
     xfree(buf);
     xfree(node_pipes);
@@ -2140,9 +2153,8 @@ static int ring_ack_main(int argc, char **argv) {
     int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
     
     struct OrderPacket op;
-    // op.pad has been safely removed.
 
-    struct SharedState *local_state = (my_numa_node != -1 && my_numa_node < global_num_nodes) ? &state[my_numa_node] : &state[0];
+    struct SharedState *local_state = (my_numa_node != -1 && my_numa_node < (int)global_num_nodes) ? &state[my_numa_node] : &state[0];
 
     if (worker_last_cnt > 0) {
         if (local_state && local_state->numa_enabled) {
@@ -2264,7 +2276,8 @@ static int ring_order_main(int argc, char **argv) {
                     else ring_copy_chunk(op->fd, 1, offset, op->len);
                     
                     off_t aligned_start = (op->off / 4096) * 4096;
-                    fallocate(op->fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, op->len);
+                    off_t punch_len = (op->off - aligned_start) + op->len;
+                    fallocate(op->fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, punch_len);
                 } else {
                     char path[256];
                     if (numa_mode) snprintf(path, sizeof(path), "%s.%u.%u", prefix, op->major_idx, actual_minor); 
@@ -2282,7 +2295,7 @@ static int ring_order_main(int argc, char **argv) {
                 
                 if (!unordered_mode) {
                     if (numa_mode) {
-                        expected_minor++; // Each NUMA claim is logically 1 unit for sequencer
+                        expected_minor++; 
                         if (is_chunk_eof) { expected_major++; expected_minor = 0; }
                     } else {
                         expected_major += op->cnt; 
@@ -2306,7 +2319,8 @@ static int ring_order_main(int argc, char **argv) {
                             else ring_copy_chunk(tmp->pkt.fd, 1, offset, tmp->pkt.len);
                             
                             off_t aligned_start = (tmp->pkt.off / 4096) * 4096;
-                            fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, tmp->pkt.len);
+                            off_t punch_len = (tmp->pkt.off - aligned_start) + tmp->pkt.len;
+                            fallocate(tmp->pkt.fd, FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE, aligned_start, punch_len);
                         } else {
                             char path[256];
                             if (numa_mode) snprintf(path, sizeof(path), "%s.%u.%u", prefix, tmp->pkt.major_idx, (tmp->pkt.minor_idx & ~FLAG_MAJOR_EOF)); 
@@ -2362,7 +2376,14 @@ static int ring_order_main(int argc, char **argv) {
 
 static int ring_worker_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
-    int node = (my_numa_node == -1) ? 0 : my_numa_node;
+
+    if (my_numa_node == -1) {
+        const char *s_node = get_string_value("RING_NODE_ID");
+        my_numa_node = s_node ? atoi(s_node) : auto_detect_numa_node();
+        if (my_numa_node >= (int)global_num_nodes) my_numa_node = 0;
+    }
+    int node = my_numa_node;
+
     if (!strcmp(argv[1],"inc")) {
         if (state) atomic_fetch_add(&state[node].active_workers, 1);
         if (argc >= 3 && isdigit(argv[2][0])) worker_cached_fd = atoi(argv[2]);
@@ -2492,7 +2513,10 @@ static int ring_indexer_main(int argc, char **argv) {
             if (write(fd_pipe, &pp, sizeof(pp)) != sizeof(pp)) return EXECUTION_FAILURE;
             current_pos += chunk_target;
         }
-        if (poll(pfds, 1, 100) > 0) { uint64_t v; if(read(fd_sig, &v, 8)){}; }
+        if (poll(pfds, 1, 100) > 0) {
+            uint64_t v; 
+            if (read(fd_sig, &v, 8) > 0) break; 
+        }
     }
     return EXECUTION_SUCCESS;
 }
@@ -2519,8 +2543,13 @@ static int ring_fetcher_main(int argc, char **argv) {
             lseek(fd_local, 0, SEEK_END);
             while (copied < pp.len) {
                 size_t to_read = (pp.len - copied > 65536) ? 65536 : (pp.len - copied);
-                read(fd_global, buf, to_read); write(fd_local, buf, to_read);
-                copied += to_read;
+                ssize_t r = read(fd_global, buf, to_read);
+                if (r <= 0) {
+                    if (r < 0 && errno == EINTR) continue;
+                    break;
+                }
+                write(fd_local, buf, r);
+                copied += r;
             }
             xfree(buf);
         }
