@@ -190,7 +190,7 @@ static int g_debug = 0;
     X(ring_indexer_numa,    ring_indexer_numa_main,   "ring_indexer_numa <memfd> <idx_pipe> <node_pipes...>", "Run NUMA chunk indexer") \
     X(ring_numa_scanner,    ring_numa_scanner_main,   "ring_numa_scanner <memfd> <node_id> <claim_pipe> <spawn_fd> <nodes> <node_pipes...>", "Run NUMA localized scanner") \
     X(ring_claim,           ring_claim_main,          "ring_claim [VAR] [FD]",          "Claim batch") \
-    X(ring_worker,          ring_worker_main,         "ring_worker[inc|dec] [FD]",     "Worker control") \
+    X(ring_worker,          ring_worker_main,         "ring_worker [inc|dec] [FD]",     "Worker control") \
     X(ring_cleanup_waiter,  ring_cleanup_waiter_main, "ring_cleanup_waiter",            "Cleanup waiter") \
     X(ring_ingest,          ring_ingest_main,         "ring_ingest",                    "Signal ingest") \
     X(ring_fallow,          ring_fallow_main,         "ring_fallow <PIPE> <FILE> [dry]","Logical fallow") \
