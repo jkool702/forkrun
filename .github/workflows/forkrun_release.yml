@@ -79,15 +79,17 @@ jobs:
               echo "Compiling Version: $FR_VERSION"
 
               # 3. Define Common Flags
-              # Note: We escape quotes heavily for the -D flags to survive shell passing
               OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC "
               WARN_FLAGS="-DNDEBUG -Wall -Wextra "
               INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins "
               
-              DEFS="-DSHELL -DHAVE_CONFIG_H"
-              DEFS+=" -DBUILD_OS=\"\\\"Linux\\\"\""
-              DEFS+=" -DFORKRUN_RING_VERSION=\"\\\"$FR_VERSION\\\"\""
-              DEFS+=" -DCOMPILER_FLAGS=\"\\\"$OPT_FLAGS\\\"\""
+              DEFS=(
+                 "-DSHELL"
+                 "-DHAVE_CONFIG_H"
+                 "-DBUILD_OS=\"Linux\""
+                 "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
+                 "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
+              )
               
               # Function to build specific variant
               build_variant() {
@@ -98,11 +100,11 @@ jobs:
                  echo ">>> Building $arch_name..."
                  
                  # Dynamic Arch Definition
-                 local ARCH_DEF="-DBUILD_ARCH=\"\\\"$arch_name\\\"\""
+                 local ARCH_DEF="-DBUILD_ARCH=\"$arch_name\""
                  
                  gcc forkrun_ring.c \
                     $OPT_FLAGS $WARN_FLAGS $INCLUDES \
-                    $DEFS $ARCH_DEF \
+                    "${DEFS[@]}" "$ARCH_DEF" \
                     -shared \
                     $march_flag \
                     -o "$out_file"
@@ -110,7 +112,6 @@ jobs:
                  strip --strip-unneeded "$out_file"
                  
                  # SANITY CHECK: Try to enable and run version check
-                 # We only check if it loads successfully.
                  echo ">>> Testing loadable..."
                  enable -f "$out_file" ring_version && \
                  ring_version -a || exit 1
