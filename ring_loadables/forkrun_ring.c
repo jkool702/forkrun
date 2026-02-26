@@ -224,8 +224,9 @@ static inline int auto_detect_numa_node() {
     return 0;
 }
 
-// Read Linux sysfs to determine the maximum NUMA node dynamically
-static uint32_t get_max_numa_nodes() {
+// We return max_node + 1 (instead of counting online nodes) to safely handle 
+// sparse topologies without breaking the 1:1 physical sysfs paths.
+static uint32_t get_highest_numa_node_id() {
     int fd = open("/sys/devices/system/node/online", O_RDONLY);
     if (fd < 0) return 1;
     char buf[256] = {0};
@@ -243,10 +244,9 @@ static uint32_t get_max_numa_nodes() {
             p++;
         }
     }
-    return max_node + 1; // Nodes are 0-indexed, so max_node 1 means 2 nodes
+    return max_node + 1; 
 }
 
-// Construct a cpu_set_t from sysfs and bind the current thread/process to it
 static int pin_to_numa_node(int node_id) {
     char path[256];
     snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/cpulist", node_id);
@@ -261,21 +261,23 @@ static int pin_to_numa_node(int node_id) {
     CPU_ZERO(&cpuset);
     char *p = buf;
     while (*p) {
-        while (*p && !isdigit(*p)) p++; // Skip whitespace/commas
+        while (*p && !isdigit(*p)) p++; 
         if (!*p) break;
         int start = strtol(p, &p, 10);
         int end = start;
         if (*p == '-') {
-            p++; // Skip dash
+            p++; 
             end = strtol(p, &p, 10);
         }
         for (int i = start; i <= end; i++) {
-            CPU_SET(i, &cpuset);
+            // Safety guard for systems with >1024 CPUs
+            if (i >= 0 && i < CPU_SETSIZE) {
+                CPU_SET(i, &cpuset);
+            }
         }
-        while (*p && *p != ',' && *p != '\n') p++; // Advance to next token
+        while (*p && *p != ',' && *p != '\n') p++; 
     }
 
-    // Apply the affinity mask to the calling process (0 = self)
     return sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
 }
 
@@ -440,7 +442,8 @@ static int evfd_ingest_eof  = -1;
 static int evfd_starve = -1;
 static int fd_escrow[2] = { -1, -1 }; 
 
-static uint32_t global_num_nodes = 0;  // 0 -> auto discovery
+static uint32_t global_num_nodes = 0;  
+static uint32_t allocated_num_nodes = 0; // Tracks mapped array size
 
 struct EscrowPacket { uint64_t idx; uint64_t cnt; };
 struct IndexPacket  { uint64_t idx; uint64_t cnt; }; 
@@ -635,7 +638,6 @@ static int ring_init_main(int argc, char **argv) {
         fprintf(stderr, "forkrun [DEBUG] Enabled\n");
     } else g_debug = 0;
 
-    // Parse user override for nodes (if any)
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--nodes=", 8) == 0) {
             if (strcmp(argv[i]+8, "auto") == 0) global_num_nodes = 0;
@@ -643,18 +645,20 @@ static int ring_init_main(int argc, char **argv) {
         }
     }
 
-    // Auto-detect if left at 0
     if (global_num_nodes == 0) {
-        global_num_nodes = get_max_numa_nodes();
+        global_num_nodes = get_highest_numa_node_id();
         if (global_num_nodes < 1) global_num_nodes = 1;
     }
 
-    // Tell Bash how many nodes we decided on
     char node_buf[32];
     snprintf(node_buf, sizeof(node_buf), "%u", global_num_nodes);
     bind_variable("FORKRUN_NUM_NODES", node_buf, 0);
 
     if (state != NULL) {
+        if (global_num_nodes != allocated_num_nodes && global_num_nodes != 0) {
+            builtin_error("forkrun: cannot change --nodes without calling ring_destroy first");
+            return EXECUTION_FAILURE;
+        }
         for (uint32_t n = 0; n < global_num_nodes; n++) {
             atomic_store_relaxed(&state[n].read_idx, 0);
             atomic_store_relaxed(&state[n].write_idx, 0);
@@ -673,6 +677,7 @@ static int ring_init_main(int argc, char **argv) {
         return EXECUTION_SUCCESS;
     }
 
+    allocated_num_nodes = global_num_nodes;
     size_t total_size = sizeof(struct SharedState) * global_num_nodes;
     total_size = (total_size + 4095ULL) & ~4095ULL;
     void *p = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -864,13 +869,13 @@ static int ring_init_main(int argc, char **argv) {
 static int ring_destroy_main(int argc, char **argv) {
     (void)argc; (void)argv;
     if (state) { 
-        size_t total_size = sizeof(struct SharedState) * global_num_nodes;
+        size_t total_size = sizeof(struct SharedState) * allocated_num_nodes;
         total_size = (total_size + 4095ULL) & ~4095ULL;
         munmap(state, total_size); 
         state = NULL; 
     }
     if (evfd_data_arr) {
-        for (uint32_t n = 0; n < global_num_nodes; n++) {
+        for (uint32_t n = 0; n < allocated_num_nodes; n++) {
             if (evfd_data_arr[n] >= 0) close(evfd_data_arr[n]);
             if (fd_escrow_r && fd_escrow_r[n] >= 0) close(fd_escrow_r[n]);
             if (fd_escrow_w && fd_escrow_w[n] >= 0) close(fd_escrow_w[n]);
@@ -930,7 +935,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     if (numa_enabled) {
         syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0); 
     } else {
-        if (g_debug && num_nodes > 1) fprintf(stderr, "forkrun[DEBUG] NUMA unavailable, running multi-ring without pinning\n");
+        if (g_debug && num_nodes > 1) fprintf(stderr, "forkrun [DEBUG] NUMA unavailable, running multi-ring without pinning\n");
         num_nodes = 1;
     }
 
@@ -1482,7 +1487,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     atomic_store_release(&local_state->scanner_finished, 1);
     LOCAL_SCANNER_WAKE(); 
     if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
-    uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8)); // Prevent worker deadlock
+    uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8)); 
     
     xfree(buf);
     xfree(node_pipes);
@@ -2030,8 +2035,11 @@ static int ring_claim_main(int argc, char **argv) {
 
     if (my_numa_node == -1) {
         const char *s_node = get_string_value("RING_NODE_ID");
+        if (!s_node && global_num_nodes > 1) {
+            if (g_debug) fprintf(stderr, "forkrun [DEBUG] RING_NODE_ID missing, falling back to getcpu()\n");
+        }
         my_numa_node = s_node ? atoi(s_node) : auto_detect_numa_node();
-        if (my_numa_node >= (int)global_num_nodes) my_numa_node = 0;
+        if (my_numa_node >= (intglobal_num_nodes) my_numa_node = 0;
     }
     struct SharedState *local_state = &state[my_numa_node];
 
@@ -2471,9 +2479,9 @@ static int ring_worker_main(int argc, char **argv) {
         if (state) atomic_fetch_add(&state[node].active_workers, 1);
         if (argc >= 3 && isdigit(argv[2][0])) worker_cached_fd = atoi(argv[2]);
     }
-    else if (!strcmp(argv[1],"dec")) {
-        cleanup_waiter_state();
-        if (state) atomic_fetch_sub(&state[node].active_workers, 1);
+    else if (!strcmp(argv[1],"dec")) { 
+        cleanup_waiter_state(); 
+        if (state) atomic_fetch_sub(&state[node].active_workers, 1); 
         worker_cached_fd = -1;
     }
     return EXECUTION_SUCCESS;
@@ -2910,7 +2918,6 @@ static int ring_version_main(int argc, char **argv) {
     }
     return EXECUTION_SUCCESS;
 }
-
 
 #define DEFINE_DISPATCHER_X(name, func, usage, doc) \
 static int dispatch_##name(WORD_LIST *list) { \
