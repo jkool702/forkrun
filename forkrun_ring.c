@@ -2039,7 +2039,7 @@ static int ring_claim_main(int argc, char **argv) {
             if (g_debug) fprintf(stderr, "forkrun [DEBUG] RING_NODE_ID missing, falling back to getcpu()\n");
         }
         my_numa_node = s_node ? atoi(s_node) : auto_detect_numa_node();
-        if (my_numa_node >= (int global_num_nodes) my_numa_node = 0;
+        if (my_numa_node >= (int)global_num_nodes) my_numa_node = 0;
     }
     struct SharedState *local_state = &state[my_numa_node];
 
