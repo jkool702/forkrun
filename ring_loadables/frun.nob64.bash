@@ -531,16 +531,15 @@ _forkrun_base64_to_file() {
         [[ ${b0} ]] || break
         (( b1 = 64#0${b0}))
 
-        if (( outN < 6 )); then
-            printf -v b '%0.'"${outN}"'X' "${b1}"
-            b="${b:0:${outN}}"
-        else
-            printf -v b '%0.6X' "${b1}"
-        fi
-        (( outN = outN - ${#b} ))
-        printf -v outC '\\x%s' ${b:0:2} ${b:2:2} ${b:4}
+        printf -v b '%06X' "${b1}"          # always generate full 6 hex digits first
+
+        (( outN < 6 )) && b="${b:0:$outN}"  # then slice only if it's the final group
+
+        (( outN = outN - ${#b} ))           # subtract actual hex digits used
+        printf -v outC '\\x%s' ${b:0:2} ${b:2:2} ${b:4:2}
         printf -v outC '%s' "${outC%%*(\\x)}"
         outF+="${outC}"
+
         ((outN <= 0 )) && break
     done <<<"${out}"
 
@@ -844,9 +843,9 @@ _forkrun_file_to_base64() {
 
         # 2 final compression runs where we re-generate the list of possible replacements and expand it to also look for simple repeated chars (with a limit of a maximum of 32 chars)
         for kk0 in 1 2; do
-            ((kk++))
             compressV[$kk]="$({ { sed -E 's/(00+)(([^0]+0?[^0]+)*)/\1\n\2/g; s/([^0]+)/\1\n/g' <<<"${out}"; sed -E 's/^((....)*).*$/\1/; s/^(.)(.)(.)(.*)$/\1\2\3\4 \2\3\4  \3\4   \4   /; s/(....)/\1\n/g' <<<"${out}" | sed -zE 's/^(....)\n/\1\n\1\n/; s/\n(....)\n(....)\n(....)/\1\n\1\n\1\2\n\2\n\2\3\n\3\n\3/g'; X="${out:0:1}"; while read -r -N 1 x; do if [[ "$x" == "${X: -1}" ]] && (( ${#X} < 32 )); then X+="$x"; else (( ${#X} > 1 )) && echo "$X"; X="$x"; fi; done <<<"$out"; } | grep -E '..' | sort | uniq -c | sed -E 's/^[ \t]+//'; { read -r -N 1 y; while read -r -N 1 x; do if [[ "$x" == "${y: -1}" ]]; then y+="$x"; else echo "$y"; read -r -N 1 y; fi; done; } <<<"${out}" | grep -E '..' | sort | uniq -c| sed -E 's/^[ \t]+//' | while read -r v1 v2; do if ((${#v2} > 32 )); then (( v1 = v1 * ( ${#v2} / 32 ) )); v2="${v2:0:32}"; fi; printf '%s %s\n' "$v1" "$v2"; done } | grep -vE '^1 '   | sort -nr -k1,1 | while read -r v1 v2; do (( v0 = v1 * ${#v2} - v1 - ${#v2} )); printf '%s %s %s %s\n' "$v0" "${#v2}" "$v1" "$v2"; done | grep -vE '^-' | sort -nr -k 1,1 | head -n 1 | sed -E 's/^([0-9]+ ){3}//')"
             out="${out//"${compressV[$kk]}"/"${compressI[$kk]}"}"
+            ((kk++))
         done
 
         printf -v out0 '%s\n' "${outN} ${outB}" "${nnSumA[@]}" "${compressV[@]}"
@@ -870,6 +869,7 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
+declare -A b64=() # removed embedded base64 
 
 _forkrun_bootstrap_setup --force
 
