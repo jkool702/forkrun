@@ -1649,14 +1649,27 @@ static int ring_scanner_main(int argc, char **argv) {
     while (status != 1 || p < end) {
         if ((p >= end || force_refill) && status != 1) {
             force_refill = false;
+            
+            // Track exactly how many bytes we already have before we rewind
+            uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
             uint64_t current_p_offset = buf_base_offset + (p - buf);
+            
             if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {} 
             ssize_t n = read(fd, buf, chunk_sz);
-            if (n > 0) {
+            
+            // Only consider it a successful read if we actually gained NEW data
+            if (n > 0 && (uint64_t)n > prev_avail) {
                 buf_base_offset = current_p_offset;
                 p = buf; end = buf + n;
                 status = 0;
             } else {
+                // If we got bytes, but it was just the exact same partial chunk we already had,
+                // set up the pointers but treat it as a STARVATION event (fall into poll/wait).
+                if (n > 0) {
+                    buf_base_offset = current_p_offset;
+                    p = buf; end = buf + n;
+                }
+                
                 struct pollfd pfds[2] = { { .fd = evfd_ingest_data, .events = POLLIN }, { .fd = evfd_ingest_eof,  .events = POLLIN } };
                 if (poll(pfds, 2, 0) > 0) {
                     if (pfds[1].revents & POLLIN) atomic_store_release(&state[0].ingest_complete, 1);
