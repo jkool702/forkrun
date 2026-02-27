@@ -1563,7 +1563,7 @@ static int ring_scanner_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
     int fd = atoi(argv[1]);
     int fd_spawn = (argc >= 3) ? atoi(argv[2]) : -1;
-
+    
     uint64_t L = state[0].cfg_batch_start;
     uint64_t Lmax = state[0].cfg_batch_max;
     uint64_t W = state[0].cfg_w_start;
@@ -1574,30 +1574,30 @@ static int ring_scanner_main(int argc, char **argv) {
     bool     byte_mode = state[0].mode_byte;
     bool     fixed_batch = state[0].fixed_batch;
     bool     fixed_workers = state[0].fixed_workers;
-    bool     return_bytes = state[0].cfg_return_bytes;
+    bool     return_bytes = state[0].cfg_return_bytes; 
 
     uint64_t W2 = fast_log2(W_max_val);
     uint64_t L2 = fast_log2(Lmax);
     uint64_t X_const = fast_log2(W2 + L2) * W2;
     if (X_const == 0) X_const = 1;
-
+    
     local_scan_idx = 0;
     local_write_idx = 0;
     size_t chunk_sz = get_optimal_chunk_size();
     char *buf = xmalloc_aligned(chunk_sz);
     char *p = buf, *end = buf;
-
+    
     uint64_t buf_base_offset = lseek(fd, 0, SEEK_CUR);
     uint64_t batch_start = buf_base_offset;
-    int status = 0;
-
+    int status = 0; 
+    
     int phase = 0;
     uint64_t batch_counter = 0;
     uint64_t target_count = 0;
     uint64_t last_calc_us = get_us_time();
     uint64_t last_calc_write = 0;
     uint64_t last_calc_read = 0;
-    uint64_t starve_meter = 0;
+    uint64_t starve_meter = 0; 
     uint64_t stall_meter = 0;
     uint64_t batches_since_calc = 0;
     uint64_t total_scanned = 0;
@@ -1648,80 +1648,67 @@ static int ring_scanner_main(int argc, char **argv) {
 
     while (status != 1 || p < end) {
         if ((p >= end || force_refill) && status != 1) {
-
-            // FIX START: Check for EOF gracefully before we attempt to rewind and re-read partial bytes
-            if (!atomic_load_acquire(&state[0].ingest_complete)) {
-                struct pollfd pfd_eof = { .fd = evfd_ingest_eof, .events = POLLIN };
-                if (poll(&pfd_eof, 1, 0) > 0) {
-                    atomic_store_release(&state[0].ingest_complete, 1);
-                    status = 1;
+            force_refill = false;
+            uint64_t current_p_offset = buf_base_offset + (p - buf);
+            if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {} 
+            ssize_t n = read(fd, buf, chunk_sz);
+            if (n > 0) {
+                buf_base_offset = current_p_offset;
+                p = buf; end = buf + n;
+                status = 0;
+            } else {
+                struct pollfd pfds[2] = { { .fd = evfd_ingest_data, .events = POLLIN }, { .fd = evfd_ingest_eof,  .events = POLLIN } };
+                if (poll(pfds, 2, 0) > 0) {
+                    if (pfds[1].revents & POLLIN) atomic_store_release(&state[0].ingest_complete, 1);
                 }
-            }
-            // FIX END
-
-            if (status != 1) {
-                force_refill = false;
-                uint64_t current_p_offset = buf_base_offset + (p - buf);
-                if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {}
-                ssize_t n = read(fd, buf, chunk_sz);
-                if (n > 0) {
-                    buf_base_offset = current_p_offset;
-                    p = buf; end = buf + n;
-                    status = 0;
-                } else {
-                    struct pollfd pfds[2] = { { .fd = evfd_ingest_data, .events = POLLIN }, { .fd = evfd_ingest_eof,  .events = POLLIN } };
-                    if (poll(pfds, 2, 0) > 0) {
-                        if (pfds[1].revents & POLLIN) atomic_store_release(&state[0].ingest_complete, 1);
-                    }
-                    if (atomic_load_acquire(&state[0].ingest_complete)) status = 1;
-
-                    if (status != 1) {
-                        bool starving = (atomic_load_relaxed(&state[0].active_waiters) > 0);
-                        scanner_adaptive_commit(starving);
-                        SCANNER_WAKE();
-
-                        int poll_timeout = 100;
-                        if (starving && timeout_us >= 0) {
-                            if (first_wait_ts == 0) first_wait_ts = get_us_time();
-                            uint64_t now = get_us_time();
-                            if (timeout_us == 0 || (now - first_wait_ts >= (uint64_t)timeout_us)) {
-                                poll_timeout = 0;
-                            } else {
-                                uint64_t rem = (timeout_us - (now - first_wait_ts)) / 1000;
-                                poll_timeout = (rem > 100) ? 100 : (int)rem;
-                            }
+                if (atomic_load_acquire(&state[0].ingest_complete)) status = 1;
+                
+                if (status != 1) {
+                    bool starving = (atomic_load_relaxed(&state[0].active_waiters) > 0);
+                    scanner_adaptive_commit(starving);
+                    SCANNER_WAKE();
+                    
+                    int poll_timeout = 100;
+                    if (starving && timeout_us >= 0) {
+                        if (first_wait_ts == 0) first_wait_ts = get_us_time();
+                        uint64_t now = get_us_time();
+                        if (timeout_us == 0 || (now - first_wait_ts >= (uint64_t)timeout_us)) {
+                            poll_timeout = 0;
                         } else {
-                            first_wait_ts = 0;
+                            uint64_t rem = (timeout_us - (now - first_wait_ts)) / 1000;
+                            poll_timeout = (rem > 100) ? 100 : (int)rem;
                         }
+                    } else {
+                        first_wait_ts = 0;
+                    }
 
-                        int ret = poll(pfds, 2, poll_timeout);
-                        if (ret > 0) {
-                            if (pfds[0].revents & POLLIN) {
-                                uint64_t v; if(read(evfd_ingest_data, &v, 8)){};
-                                status = 2;
-                            }
-                            if (pfds[1].revents & POLLIN) {
-                                atomic_store_release(&state[0].ingest_complete, 1);
-                                status = 1;
-                            }
+                    int ret = poll(pfds, 2, poll_timeout);
+                    if (ret > 0) {
+                        if (pfds[0].revents & POLLIN) {
+                            uint64_t v; if(read(evfd_ingest_data, &v, 8)){};
+                            status = 2; 
+                        }
+                        if (pfds[1].revents & POLLIN) {
+                            atomic_store_release(&state[0].ingest_complete, 1);
+                            status = 1;
                         }
                     }
                 }
                 if (status == 2) {
                     uint64_t xLim = W + DAMPING_OFFSET;
-                    stall_meter = (stall_meter + xLim) >> 1;
+                    stall_meter = (stall_meter + xLim) >> 1; 
                     if (p < end) force_refill = true;
-                    continue;
+                    continue; 
                 }
-            } // END if (status != 1) wrapper
+            }
         }
 
         bool flush = false;
-
+        
         if (byte_mode) {
             uint64_t avail = (uint64_t)(end - p);
             uint64_t take = 0;
-
+            
             if (limit_items > 0 && total_scanned >= limit_items) { status=1; break; }
 
             if (avail >= L) {
@@ -1741,10 +1728,10 @@ static int ring_scanner_main(int argc, char **argv) {
                     }
                 }
             }
-
+            
             if (flush) {
                 uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf) + take;
-                SCANNER_FLUSH(1, true, false);
+                SCANNER_FLUSH(1, true, false); 
                 p += take;
                 batch_start += take;
                 total_scanned++;
@@ -1761,16 +1748,16 @@ static int ring_scanner_main(int argc, char **argv) {
                 if (rem == 0) { status = 1; scan_target = 0; }
             }
             if (scan_target == 0 && !limit_reached && status != 1) scan_target = 1;
-
+            
             uint64_t found = SCAN_BATCH(scan_target);
             pending_lines += found;
             total_scanned += found;
-
+            
             if (limit_items > 0 && total_scanned >= limit_items) status = 1;
-
+            
             if (pending_lines > 0) {
                 bool starvation = (atomic_load_relaxed(&state[0].active_waiters) > 0);
-
+                
                 if (pending_lines >= L || status == 1 || limit_reached) {
                     flush = true;
                 } else if (starvation) {
@@ -1785,7 +1772,7 @@ static int ring_scanner_main(int argc, char **argv) {
                         }
                     }
                 }
-
+                
                 if (flush) {
                     uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
                     SCANNER_FLUSH(pending_lines, return_bytes, false);
@@ -1799,24 +1786,24 @@ static int ring_scanner_main(int argc, char **argv) {
         if (flush) {
             batch_counter++;
             batches_since_calc++;
-
+            
             bool starvation = (atomic_load_relaxed(&state[0].active_waiters) > 0);
             uint64_t xLim = W + DAMPING_OFFSET;
             if (starvation) starve_meter = (starve_meter + xLim) >> 1;
             else starve_meter >>= 1;
-            stall_meter >>= 1;
-
+            stall_meter >>= 1; 
+            
             target_count = W * 4; if (target_count < 4) target_count = 4;
 
             if (!fixed_batch && !byte_mode) {
                 if (phase == 0) {
                     if (batch_counter >= target_count) { phase = 1; batch_counter = 0; }
                 } else if (phase == 1) {
-                    if (status == 2) phase = 2;
+                    if (status == 2) phase = 2; 
                     else if (batch_counter >= target_count) {
                         L *= 2;
                         if (L >= Lmax) { L = Lmax; phase = 2; }
-
+                        
                         if (W < W_max_val && !fixed_workers) {
                             uint64_t l_log = fast_log2(L);
                             uint64_t num = 6 * (W_max_val - W) * L2;
@@ -1833,7 +1820,7 @@ static int ring_scanner_main(int argc, char **argv) {
                                 atomic_store_relaxed(&state[0].active_workers, W);
                             }
                         }
-
+                        
                         atomic_store_release(&state[0].batch_change_idx, local_scan_idx);
                         atomic_store_release(&state[0].signed_batch_size, -(int64_t)L);
                         batch_counter = 0;
@@ -1850,7 +1837,7 @@ static int ring_scanner_main(int argc, char **argv) {
                 last_calc_read  = r_con;
                 last_calc_us    = now_us;
                 batches_since_calc = 0;
-
+                
                 if (!fixed_workers && W < W_max_val) {
                     uint64_t r_idx = atomic_load_relaxed(&state[0].read_idx);
                     uint64_t backlog = local_scan_idx - r_idx;
@@ -1858,7 +1845,7 @@ static int ring_scanner_main(int argc, char **argv) {
                     uint64_t grow = 0;
 
                     if (fixed_batch) {
-                        if (backlog > W && starvation == 0) spawn = true;
+                        if (backlog > W && starvation == 0) spawn = true; 
                     } else {
                         if (d_out > 0) {
                             uint64_t rate = d_out / W; if(rate==0) rate=1;
@@ -1868,12 +1855,12 @@ static int ring_scanner_main(int argc, char **argv) {
                              spawn = true;
                         }
                     }
-
+                    
                     if (spawn && phase != 1) {
-                        grow = 1;
+                        grow = 1; 
                         if (!fixed_batch) grow = (W + 1) / 2;
                         if (W + grow > W_max_val) grow = W_max_val - W;
-
+                        
                         if (grow > 0 && fd_spawn >= 0) {
                             char sbuf[64];
                             int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", grow);
@@ -1891,7 +1878,7 @@ static int ring_scanner_main(int argc, char **argv) {
                     uint64_t l_target = (backlog / W);
                     if (l_target > Lmax) l_target = Lmax;
                     if (l_target < 1) l_target = 1;
-
+                    
                     if (l_target > L) {
                         L = l_target;
                         atomic_store_release(&state[0].batch_change_idx, local_scan_idx);
@@ -1901,7 +1888,7 @@ static int ring_scanner_main(int argc, char **argv) {
                         if (L < 1) L = 1;
                         atomic_store_release(&state[0].batch_change_idx, local_scan_idx);
                         atomic_store_release(&state[0].signed_batch_size, -(int64_t)L);
-                        starve_meter = 0;
+                        starve_meter = 0; 
                         stall_meter = 0;
                     }
                 }
@@ -1963,14 +1950,14 @@ static int ring_scanner_main(int argc, char **argv) {
         if (R < 1) R = 1;
         uint64_t L_tail_done = 0;
         atomic_store_release(&state[0].tail_idx, local_write_idx);
-
+        
         while (L_tail_done < L_tail) {
             uint64_t target = 0;
             if (L_tail > 0) target = (L * (L_tail - L_tail_done)) / L_tail;
-            uint64_t min_batch = L / R;
+            uint64_t min_batch = L / R; 
             if (min_batch < 1) min_batch = 1;
             if (target < min_batch) target = min_batch;
-
+            
             uint64_t lines_found = 0;
             while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
                 if (p >= end) {
@@ -1978,7 +1965,7 @@ static int ring_scanner_main(int argc, char **argv) {
                     lseek(fd, (off_t)current_p_offset, SEEK_SET);
                     ssize_t n = read(fd, buf, chunk_sz);
                     if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
-                    else break;
+                    else break; 
                 }
                 char *nl = memchr(p, '\n', end - p);
                 if (nl) { lines_found++; p = nl + 1; }
@@ -2001,8 +1988,8 @@ static int ring_scanner_main(int argc, char **argv) {
                 if (lines_found != L) pk |= FLAG_PARTIAL_BATCH;
                 while(1) {
                      uint64_t limit;
-                     if (atomic_load_relaxed(&state[0].fallow_active)) limit = atomic_load_acquire(&state[0].min_idx);
-                     else limit = atomic_load_acquire(&state[0].read_idx);
+                     if (atomic_load_relaxed(&state[0].fallow_active)) limit = atomic_load_acquire(&state[0].min_idx); 
+                     else limit = atomic_load_acquire(&state[0].read_idx); 
                      if ((local_scan_idx - limit) < RING_SIZE) break;
                      SCANNER_WAKE(); usleep(100);
                 }
@@ -2010,7 +1997,7 @@ static int ring_scanner_main(int argc, char **argv) {
                 SCANNER_FLUSH(lines_found, true, true);
                 batch_start = current_p_offset;
                 L_tail_done += lines_found;
-            } else break;
+            } else break; 
         }
     }
 
