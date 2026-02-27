@@ -1648,22 +1648,32 @@ static int ring_scanner_main(int argc, char **argv) {
 
     while (status != 1 || p < end) {
         if ((p >= end || force_refill) && status != 1) {
-            force_refill = false;
-            uint64_t current_p_offset = buf_base_offset + (p - buf);
-            if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {} 
-            ssize_t n = read(fd, buf, chunk_sz);
-            if (n > 0) {
-                buf_base_offset = current_p_offset;
-                p = buf; end = buf + n;
-                status = 0;
-            } else {
-                struct pollfd pfds[2] = { { .fd = evfd_ingest_data, .events = POLLIN }, { .fd = evfd_ingest_eof,  .events = POLLIN } };
-                if (poll(pfds, 2, 0) > 0) {
-                    if (pfds[1].revents & POLLIN) atomic_store_release(&state[0].ingest_complete, 1);
+            // FIX: Check for EOF gracefully before we attempt to rewind and re-read partial bytes
+            if (!atomic_load_acquire(&state[0].ingest_complete)) {
+                struct pollfd pfd_eof = { .fd = evfd_ingest_eof, .events = POLLIN };
+                if (poll(&pfd_eof, 1, 0) > 0) {
+                    atomic_store_release(&state[0].ingest_complete, 1);
+                    status = 1;
                 }
-                if (atomic_load_acquire(&state[0].ingest_complete)) status = 1;
-                
-                if (status != 1) {
+            }
+
+            if (status != 1) {
+                force_refill = false;
+                uint64_t current_p_offset = buf_base_offset + (p - buf);
+                if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {}
+                ssize_t n = read(fd, buf, chunk_sz);
+                if (n > 0) {
+                    buf_base_offset = current_p_offset;
+                    p = buf; end = buf + n;
+                    status = 0;
+                } else {
+                    struct pollfd pfds[2] = { { .fd = evfd_ingest_data, .events = POLLIN }, { .fd = evfd_ingest_eof,  .events = POLLIN } };
+                    if (poll(pfds, 2, 0) > 0) {
+                        if (pfds[1].revents & POLLIN) atomic_store_release(&state[0].ingest_complete, 1);
+                    }
+                    if (atomic_load_acquire(&state[0].ingest_complete)) status = 1;
+
+                    if (status != 1) {
                     bool starving = (atomic_load_relaxed(&state[0].active_waiters) > 0);
                     scanner_adaptive_commit(starving);
                     SCANNER_WAKE();
