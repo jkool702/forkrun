@@ -53,15 +53,15 @@ This allows:
 
 ### 3.2 Ring Entry Encoding
 
-Each ring slot is a signed 64-bit value:
+Each ring slot (`offset_ring`) is an **unsigned** 64-bit value:
 
 * **Low 63 bits**: byte offset in the backing file
-* **High bit (sign bit)**:
+* **High bit (bit 63, `FLAG_PARTIAL_BATCH = 1ULL << 63`)**:
 
   * 0 → complete batch
   * 1 → partial batch (scanner hit EOF or boundary)
 
-This encoding avoids extra metadata, keeps entries atomic, and supports offsets up to 2⁶³ bytes.
+This encoding avoids extra metadata, keeps entries atomic, and supports offsets up to 2⁶³ bytes. The high bit is a flag, not an arithmetic sign — readers must mask it before using the offset as an address (`offset & ~FLAG_PARTIAL_BATCH`).
 
 ### 3.3 Atomic Invariants
 
@@ -203,6 +203,25 @@ Batch size is adjusted conservatively toward a target. Adjustments are slow to a
 * In full NUMA mode the protocol is simplified but the negative-advisory rule remains
 
 **Tail ramp-down** is a distinct phase: once `tail_idx` is published the scanner stops changing batch size and all remaining batches become self-describing (sign bit + stride metadata).
+
+### Phase 2b: Early Partial Flush (Low-Latency Trickle Mode)
+
+Under normal load the scanner accumulates a full batch of `L` lines before publishing. However, when stdin is arriving slowly *and* workers are sitting idle, holding a partial batch in the scanner adds latency without benefit. The scanner detects this condition and flushes early.
+
+**The two signals:**
+
+* `stall_meter` — exponential moving average of input-stall events. It grows each time a read attempt on the backing file returns no new data (stdin is not delivering), and decays each time a read succeeds. It reflects the *sustained* rate of input stalls.
+* `starve_meter` — exponential moving average of worker-starvation events. It grows each time `active_waiters > 0` is observed at the natural meter-update point, and decays otherwise. It reflects whether workers have been *sustainedly* idle.
+
+**Why both are required:**
+
+* Stall only (no starve): workers are keeping up with or ahead of stdin — there is no idle worker waiting for the partial batch. No benefit to flushing early.
+* Starve only (no stall): data is available in the backing file but workers are consuming faster than the scanner can scan. Flushing smaller partial batches increases the scanner's per-line overhead and makes this situation worse, not better.
+* Both saturated: stdin is arriving slowly AND workers are idle. Flushing the partial batch reduces latency at no throughput cost.
+
+**Implementation detail:**
+
+Both meters use the same EWMA kernel (`meter = (meter + xLim) >> 1` to grow, `meter >>= 1` to decay) with threshold `xLim - 3 = W + DAMPING_OFFSET - 3`. Meters update at their natural observation points on every loop iteration — not at flush time — so they track ongoing system state independently of flush frequency. The stall signal is captured into an `experienced_stall` flag at detection time and passed to the control macro at flush time, ensuring the signal is correctly scoped to the interval between flushes.
 
 ---
 

@@ -116,7 +116,7 @@ Every “weird” feature has a direct physical justification:
 | Monotonic indices             | Causality / arrow of time                 | Time travel → data corruption              |
 | Per-node rings + pinning      | Conservation of momentum / locality       | Turbulence → cache-line storms             |
 | Escrow pipe                   | Inertial correction / diffusion           | Blocking or retries on every claim         |
-| Signed batch size + CAS       | Control system with sensor finalization   | Oscillation or stale policy commits        |
+| Signed batch size + CAS       | Control system with sensor finalization   | Races: two workers act on same advisory size        |
 | Sign bit on offset            | Phase boundary (pre-tail vs tail)         | Partial-line leaks at EOF                  |
 | Fallow punch-hole             | Second law + event horizon                | Unbounded memory growth                    |
 

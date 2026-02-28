@@ -166,13 +166,54 @@ Per-batch logical index + reorder buffer + emit only contiguous prefix.
 
 ---
 
-## 11. Checklist Summary
+## 12. Meter-Based Early Flush Protocol
+
+**Purpose**
+When stdin is arriving slowly and workers are idle, the scanner may flush a partial batch early to reduce latency. This must not trigger spuriously or degrade throughput under normal load.
+
+**The Two Meters**
+
+| Meter | Signal | Grows when | Decays when |
+|---|---|---|---|
+| `stall_meter` | Input stall | Read returns no new data | Read returns new data |
+| `starve_meter` | Worker starvation | `active_waiters > 0` | No workers waiting |
+
+Both use the same EWMA kernel and threshold (`W + DAMPING_OFFSET - 3`).
+
+**Invariant: Both meters must be saturated to trigger early flush.**
+
+Neither meter alone is sufficient:
+
+* `stall_meter` saturated, `starve_meter` not → no idle workers; no point flushing early
+* `starve_meter` saturated, `stall_meter` not → data is available; flushing smaller batches increases scanner overhead and makes starvation worse
+* Both saturated → sustained stall AND sustained starvation; early flush reduces latency at no throughput cost
+
+**Invariant: Meters update at observation time, not flush time.**
+
+`stall_meter` is updated when the stall is detected (read returns no new data). `starve_meter` is updated at the natural per-iteration or per-task observation point. Updating only at flush time would make the meters track flush frequency rather than system state, creating a circular dependency.
+
+**Invariant: The stall signal is captured before flush, not re-evaluated at flush.**
+
+The `experienced_stall` flag is set at stall detection, and cleared after it is consumed by `ADAPTIVE_FLOW_CONTROL`. This ensures the signal is correctly scoped to the interval between flushes, even if `status` has changed by the time the flush occurs.
+
+**Invariant: `ADAPTIVE_FLOW_CONTROL` resets both meters to zero when it shrinks L.**
+
+When sustained stall+starve causes a batch-size reduction, the meters are zeroed so the next growth cycle starts from a clean baseline. The meters are owned by the scanner; nothing else resets them.
+
+**Audit Rule**
+❌ Never trigger an early partial flush based on either meter alone, or on raw (unsmoothed) live reads of `active_waiters` or `status`.
+❌ Never update meters inside `ADAPTIVE_FLOW_CONTROL` — they must be updated at their observation points so they reflect ongoing system state independently of flush frequency.
+
+---
+
+## 13. Checklist Summary
 
 If all sections above remain true, **v9.8.0-NUMA is correct** — regardless of:
 * batching heuristics
 * wake frequency
 * NUMA placement
 * worker churn
+* input arrival rate (trickle or burst)
 
 **Mental model reminder**  
 Progress is irreversible. Locality is structural. Contention was designed away.
