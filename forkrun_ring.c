@@ -1107,6 +1107,134 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     return EXECUTION_SUCCESS;
 }
 
+// ==============================================================================
+// UNIFIED ADAPTIVE FLOW CONTROL
+//
+// Both the NUMA and flat scanners use identical physics for batch sizing and
+// worker spawning. This macro owns all of it so changes are never applied to
+// one path and forgotten on the other.
+//
+// Parameters:
+//   state_ptr  - pointer to the relevant SharedState (local_state or &state[0])
+//   is_stalled - true when input is currently starving the scanner:
+//                  NUMA:  pipe_stalled  (no task was available on the home pipe)
+//                  Flat:  (status == 2) (read() returned only old data, not new)
+//
+// Assumes these variables exist in the enclosing scope (all scanners declare them):
+//   W, W_max_val, L, Lmax, L2, X_const, phase, batch_counter, batches_since_calc,
+//   starve_meter, stall_meter, last_calc_us, last_calc_write, last_calc_read,
+//   local_scan_idx, local_write_idx, fixed_batch, fixed_workers, byte_mode,
+//   fd_spawn, DAMPING_OFFSET (constant)
+// ==============================================================================
+#define ADAPTIVE_FLOW_CONTROL(state_ptr, is_stalled) do { \
+    batch_counter++; \
+    batches_since_calc++; \
+    \
+    /* --- Phase-0/1: ramp-up ---------------------------------------------- */ \
+    /* Phase 0: warmup -- accumulate batches before doing anything.          */ \
+    /* Phase 1: doubling -- double L each tc batches and spawn workers.      */ \
+    /* Phase 2: steady state -- L is tuned per-interval by the second block. */ \
+    uint64_t _tc = W * 4; if (_tc < 4) _tc = 4; \
+    if (!fixed_batch && !byte_mode) { \
+        if (phase == 0) { \
+            if (batch_counter >= _tc) { phase = 1; batch_counter = 0; } \
+        } else if (phase == 1) { \
+            if (is_stalled) { \
+                /* Input dried up before L converged -- skip to steady state */ \
+                phase = 2; \
+            } else if (batch_counter >= _tc) { \
+                L *= 2; \
+                if (L >= Lmax) { L = Lmax; phase = 2; } \
+                if (W < W_max_val && !fixed_workers) { \
+                    uint64_t _l_log = fast_log2(L); \
+                    uint64_t _den   = X_const * (L2 + _l_log); \
+                    if (_den == 0) _den = 1; \
+                    uint64_t _n_spawn = (6 * (W_max_val - W) * L2) / _den; \
+                    if (_n_spawn < 1) _n_spawn = 1; \
+                    if (_n_spawn > (W_max_val - W)) _n_spawn = W_max_val - W; \
+                    if (fd_spawn >= 0) { \
+                        char _sbuf[64]; \
+                        int _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _n_spawn); \
+                        if (_slen > 0) SYS_CHK(write(fd_spawn, _sbuf, _slen)); \
+                        W += _n_spawn; \
+                        atomic_store_relaxed(&(state_ptr)->active_workers, W); \
+                    } \
+                } \
+                atomic_store_release(&(state_ptr)->batch_change_idx, local_scan_idx); \
+                atomic_store_release(&(state_ptr)->signed_batch_size, -(int64_t)L); \
+                batch_counter = 0; \
+            } \
+        } \
+    } \
+    \
+    /* --- Periodic throughput sample -------------------------------------- */ \
+    /* Every 5ms or every W batches, sample d_in/d_out to decide whether    */ \
+    /* to spawn more workers or adjust L.                                   */ \
+    uint64_t _now_us = get_us_time(); \
+    if (_now_us - last_calc_us > 5000 || batches_since_calc >= W) { \
+        uint64_t _d_in  = local_write_idx - last_calc_write; \
+        uint64_t _r_con = atomic_load_relaxed(&(state_ptr)->total_lines_consumed); \
+        uint64_t _d_out = _r_con - last_calc_read; \
+        last_calc_write    = local_write_idx; \
+        last_calc_read     = _r_con; \
+        last_calc_us       = _now_us; \
+        batches_since_calc = 0; \
+        \
+        if (!fixed_workers && W < W_max_val) { \
+            uint64_t _backlog = local_scan_idx - atomic_load_relaxed(&(state_ptr)->read_idx); \
+            bool _no_starve = (atomic_load_relaxed(&(state_ptr)->active_waiters) == 0); \
+            bool _spawn = false; \
+            if (fixed_batch) { \
+                if (_backlog > W && _no_starve) _spawn = true; \
+            } else { \
+                if (_d_out > 0) { \
+                    uint64_t _rate = _d_out / W; if (_rate == 0) _rate = 1; \
+                    if ((_d_in / _rate) > W) _spawn = true; \
+                } else if (_backlog > (W * 4) && _no_starve) { \
+                    _spawn = true; \
+                } \
+            } \
+            if (_spawn && phase != 1) { \
+                uint64_t _grow = fixed_batch ? 1 : ((W + 1) / 2); \
+                if (W + _grow > W_max_val) _grow = W_max_val - W; \
+                if (_grow > 0 && fd_spawn >= 0) { \
+                    char _sbuf[64]; \
+                    int _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _grow); \
+                    if (_slen > 0) SYS_CHK(write(fd_spawn, _sbuf, _slen)); \
+                    W += _grow; \
+                    atomic_store_relaxed(&(state_ptr)->active_workers, W); \
+                } \
+            } \
+        } \
+        \
+        /* --- Steady-state L tuning --------------------------------------- */ \
+        /* Target L = backlog / W (one batch per worker).                   */ \
+        /* Grow L immediately; shrink only when BOTH meters are saturated   */ \
+        /* to avoid reacting to transient bursts or brief input pauses.     */ \
+        if (!fixed_batch && !byte_mode && phase == 2) { \
+            int64_t _bl = (int64_t)local_write_idx \
+                        - (int64_t)atomic_load_relaxed(&(state_ptr)->read_idx); \
+            if (_bl < 0) _bl = 0; \
+            uint64_t _l_target = (uint64_t)_bl / W; \
+            if (_l_target > Lmax) _l_target = Lmax; \
+            if (_l_target < 1)    _l_target = 1; \
+            if (_l_target > L) { \
+                L = _l_target; \
+                atomic_store_release(&(state_ptr)->batch_change_idx, local_scan_idx); \
+                atomic_store_release(&(state_ptr)->signed_batch_size, -(int64_t)L); \
+            } else if (_l_target < L \
+                    && starve_meter >= (W + DAMPING_OFFSET - 3) \
+                    && stall_meter  >= (W + DAMPING_OFFSET - 3)) { \
+                L = (L + _l_target) / 2; if (L < 1) L = 1; \
+                atomic_store_release(&(state_ptr)->batch_change_idx, local_scan_idx); \
+                atomic_store_release(&(state_ptr)->signed_batch_size, -(int64_t)L); \
+                starve_meter = 0; \
+                stall_meter  = 0; \
+            } \
+        } \
+    } \
+} while(0)
+
 static int ring_numa_scanner_main(int argc, char **argv) {
     if (argc < 7) return EXECUTION_FAILURE;
 
@@ -1269,6 +1397,21 @@ static int ring_numa_scanner_main(int argc, char **argv) {
         if (r == sizeof(task)) {
             write(claim_pipe, &active_pipe_idx, sizeof(active_pipe_idx));
 
+            // Per-task meter updates: both signals are known at this point.
+            // pipe_stalled reflects whether we had to wait for this task;
+            // active_waiters reflects whether workers are currently idle.
+            // Updating here (once per task received) gives the meters their
+            // intended meaning -- they track the ongoing rate of stall/starve
+            // events across tasks, not just across flushes within a task.
+            {
+                uint64_t _xLim = W + DAMPING_OFFSET;
+                if (pipe_stalled) stall_meter  = (stall_meter  + _xLim) >> 1;
+                else              stall_meter  >>= 1;
+                if (atomic_load_relaxed(&local_state->active_waiters) > 0)
+                                  starve_meter = (starve_meter + _xLim) >> 1;
+                else              starve_meter >>= 1;
+            }
+
             if (task.length == 0) {
                 NUMA_SCANNER_FLUSH(0, 0, true, task.major_id, 0, task.start_off, task.start_off);
                 NUMA_ADAPTIVE_COMMIT(true);
@@ -1370,7 +1513,10 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                     
                     if (pending_lines >= L || current_p_offset >= chunk_end || limit_reached) {
                         flush = true;
-                    } else if (pipe_stalled && atomic_load_relaxed(&local_state->active_waiters) > 0) {
+                    } else if (stall_meter  >= (W + DAMPING_OFFSET - 3) &&
+                               starve_meter >= (W + DAMPING_OFFSET - 3)) {
+                        // Early flush: both stall and starve meters saturated --
+                        // input has been arriving slowly AND workers have been idle.
                         if (timeout_us == 0) flush = true;
                         else if (timeout_us > 0) {
                             if (first_wait_ts == 0) first_wait_ts = get_us_time();
@@ -1389,94 +1535,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                     batch_start = current_p_offset;
                     pending_lines = 0;
 
-                    batch_counter++;
-                    batches_since_calc++;
-                    
-                    bool starvation = (atomic_load_relaxed(&local_state->active_waiters) > 0);
-                    uint64_t xLim = W + DAMPING_OFFSET;
-                    if (starvation) starve_meter = (starve_meter + xLim) >> 1;
-                    else starve_meter >>= 1;
-                    stall_meter >>= 1; 
-
-                    uint64_t tc = W * 4; if (tc < 4) tc = 4;
-
-                    if (!fixed_batch && !byte_mode) {
-                        if (phase == 0) {
-                            if (batch_counter >= tc) { phase = 1; batch_counter = 0; }
-                        } else if (phase == 1) {
-                            if (pipe_stalled) phase = 2; 
-                            else if (batch_counter >= tc) {
-                                L *= 2;
-                                if (L >= Lmax) { L = Lmax; phase = 2; }
-                                
-                                if (W < W_max_val && !fixed_workers) {
-                                    uint64_t l_log = fast_log2(L);
-                                    uint64_t n_spawn = (6 * (W_max_val - W) * L2) / (X_const * (L2 + l_log));
-                                    if (n_spawn < 1) n_spawn = 1;
-                                    if (n_spawn > (W_max_val - W)) n_spawn = W_max_val - W;
-                                    if (fd_spawn >= 0) {
-                                        char sbuf[64]; int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", n_spawn);
-                                        if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
-                                        W += n_spawn;
-                                        atomic_store_relaxed(&local_state->active_workers, W);
-                                    }
-                                }
-                                atomic_store_release(&local_state->batch_change_idx, local_scan_idx);
-                                atomic_store_release(&local_state->signed_batch_size, -(int64_t)L);
-                                batch_counter = 0;
-                            }
-                        }
-                    }
-
-                    uint64_t now_us = get_us_time();
-                    if (now_us - last_calc_us > 5000 || batches_since_calc >= W) {
-                        uint64_t d_in  = local_write_idx - last_calc_write;
-                        uint64_t r_con = atomic_load_relaxed(&local_state->total_lines_consumed);
-                        uint64_t d_out = r_con - last_calc_read;
-                        last_calc_write = local_write_idx; last_calc_read  = r_con; last_calc_us = now_us;
-                        batches_since_calc = 0;
-                        
-                        if (!fixed_workers && W < W_max_val) {
-                            uint64_t backlog = local_scan_idx - atomic_load_relaxed(&local_state->read_idx);
-                            bool spawn = false;
-                            if (fixed_batch) { if (backlog > W && !starvation) spawn = true; } 
-                            else {
-                                if (d_out > 0) {
-                                    uint64_t rate = d_out / W; if(rate==0) rate=1;
-                                    if ((d_in / rate) > W) spawn = true;
-                                } else if (backlog > (W * 4) && !starvation) spawn = true;
-                            }
-                            if (spawn && phase != 1) {
-                                uint64_t grow = fixed_batch ? 1 : ((W + 1) / 2);
-                                if (W + grow > W_max_val) grow = W_max_val - W;
-                                if (grow > 0 && fd_spawn >= 0) {
-                                    char sbuf[64]; int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", grow);
-                                    if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
-                                    W += grow;
-                                    atomic_store_relaxed(&local_state->active_workers, W);
-                                }
-                            }
-                        }
-
-                        if (!fixed_batch && !byte_mode && phase == 2) {
-                            int64_t backlog = (int64_t)local_write_idx - (int64_t)atomic_load_relaxed(&local_state->read_idx);
-                            if (backlog < 0) backlog = 0;
-                            uint64_t l_target = (backlog / W);
-                            if (l_target > Lmax) l_target = Lmax;
-                            if (l_target < 1) l_target = 1;
-                            
-                            if (l_target > L) {
-                                L = l_target;
-                                atomic_store_release(&local_state->batch_change_idx, local_scan_idx);
-                                atomic_store_release(&local_state->signed_batch_size, -(int64_t)L);
-                            } else if (l_target < L && starve_meter >= (xLim - 3)) {
-                                L = (L + l_target) / 2; if (L < 1) L = 1;
-                                atomic_store_release(&local_state->batch_change_idx, local_scan_idx);
-                                atomic_store_release(&local_state->signed_batch_size, -(int64_t)L);
-                                starve_meter = 0; stall_meter = 0;
-                            }
-                        }
-                    }
+                    ADAPTIVE_FLOW_CONTROL(local_state, pipe_stalled);
                 }
                 if (limit_reached) break; 
             }
@@ -1604,7 +1663,6 @@ static int ring_scanner_main(int argc, char **argv) {
     
     int phase = 0;
     uint64_t batch_counter = 0;
-    uint64_t target_count = 0;
     uint64_t last_calc_us = get_us_time();
     uint64_t last_calc_write = 0;
     uint64_t last_calc_read = 0;
@@ -1658,6 +1716,17 @@ static int ring_scanner_main(int argc, char **argv) {
     })
 
     while (status != 1 || p < end) {
+        // Per-iteration starve_meter update: track whether workers are currently
+        // waiting for data. This runs every loop iteration so the meter reflects
+        // the ongoing system state, not just the state at flush time.
+        {
+            uint64_t _xLim = W + DAMPING_OFFSET;
+            if (atomic_load_relaxed(&state[0].active_waiters) > 0)
+                starve_meter = (starve_meter + _xLim) >> 1;
+            else
+                starve_meter >>= 1;
+        }
+
         if ((p >= end || force_refill) && status != 1) {
             force_refill = false;
             
@@ -1669,10 +1738,12 @@ static int ring_scanner_main(int argc, char **argv) {
             ssize_t n = read(fd, buf, chunk_sz);
             
             // Only consider it a successful read if we actually gained NEW data
+            // Got genuinely new data -- input is flowing, decay the stall meter.
             if (n > 0 && (uint64_t)n > prev_avail) {
                 buf_base_offset = current_p_offset;
                 p = buf; end = buf + n;
                 status = 0;
+                stall_meter >>= 1;
             } else {
                 // If we got bytes, but it was just the exact same partial chunk we already had,
                 // set up the pointers but treat it as a STARVATION event (fall into poll/wait).
@@ -1719,8 +1790,11 @@ static int ring_scanner_main(int argc, char **argv) {
                     }
                 }
                 if (status == 2) {
-                    uint64_t xLim = W + DAMPING_OFFSET;
-                    stall_meter = (stall_meter + xLim) >> 1; 
+                    // stall_meter: input arrived but not more than we already had.
+                    // This is the natural stall observation point -- update here so
+                    // the meter tracks ongoing stall frequency, not flush frequency.
+                    uint64_t _xLim = W + DAMPING_OFFSET;
+                    stall_meter = (stall_meter + _xLim) >> 1;
                     if (p < end) force_refill = true;
                     continue; 
                 }
@@ -1780,13 +1854,16 @@ static int ring_scanner_main(int argc, char **argv) {
             if (limit_items > 0 && total_scanned >= limit_items) status = 1;
             
             if (pending_lines > 0) {
-                bool starvation = (atomic_load_relaxed(&state[0].active_waiters) > 0);
+                uint64_t xLim = W + DAMPING_OFFSET;
                 
                 if (pending_lines >= L || status == 1 || limit_reached) {
                     flush = true;
-                } else if (starvation) {
-                    uint64_t xLim = W + DAMPING_OFFSET;
-                    bool input_stalled = (status == 2) || (stall_meter >= (xLim - 3));
+                } else if (starve_meter >= (xLim - 3)) {
+                    // Early flush: both starve and stall meters must be saturated.
+                    // Using smoothed meters for both (not live reads) means a single
+                    // worker briefly going idle won't trigger a partial flush --
+                    // the same jitter protection that applies to the NUMA path.
+                    bool input_stalled = (stall_meter >= (xLim - 3));
 
                     if (input_stalled) {
                         if (timeout_us == 0) flush = true;
@@ -1808,115 +1885,7 @@ static int ring_scanner_main(int argc, char **argv) {
         }
 
         if (flush) {
-            batch_counter++;
-            batches_since_calc++;
-            
-            bool starvation = (atomic_load_relaxed(&state[0].active_waiters) > 0);
-            uint64_t xLim = W + DAMPING_OFFSET;
-            if (starvation) starve_meter = (starve_meter + xLim) >> 1;
-            else starve_meter >>= 1;
-            stall_meter >>= 1; 
-            
-            target_count = W * 4; if (target_count < 4) target_count = 4;
-
-            if (!fixed_batch && !byte_mode) {
-                if (phase == 0) {
-                    if (batch_counter >= target_count) { phase = 1; batch_counter = 0; }
-                } else if (phase == 1) {
-                    if (status == 2) phase = 2; 
-                    else if (batch_counter >= target_count) {
-                        L *= 2;
-                        if (L >= Lmax) { L = Lmax; phase = 2; }
-                        
-                        if (W < W_max_val && !fixed_workers) {
-                            uint64_t l_log = fast_log2(L);
-                            uint64_t num = 6 * (W_max_val - W) * L2;
-                            uint64_t den = X_const * (L2 + l_log);
-                            if (den == 0) den = 1;
-                            uint64_t n_spawn = num / den;
-                            if (n_spawn < 1) n_spawn = 1;
-                            if (n_spawn > (W_max_val - W)) n_spawn = W_max_val - W;
-                            if (fd_spawn >= 0) {
-                                char sbuf[64];
-                                int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", n_spawn);
-                                if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
-                                W += n_spawn;
-                                atomic_store_relaxed(&state[0].active_workers, W);
-                            }
-                        }
-                        
-                        atomic_store_release(&state[0].batch_change_idx, local_scan_idx);
-                        atomic_store_release(&state[0].signed_batch_size, -(int64_t)L);
-                        batch_counter = 0;
-                    }
-                }
-            }
-
-            uint64_t now_us = get_us_time();
-            if (now_us - last_calc_us > 5000 || batches_since_calc >= W) {
-                uint64_t d_in  = local_write_idx - last_calc_write;
-                uint64_t r_con = atomic_load_relaxed(&state[0].total_lines_consumed);
-                uint64_t d_out = r_con - last_calc_read;
-                last_calc_write = local_write_idx;
-                last_calc_read  = r_con;
-                last_calc_us    = now_us;
-                batches_since_calc = 0;
-                
-                if (!fixed_workers && W < W_max_val) {
-                    uint64_t r_idx = atomic_load_relaxed(&state[0].read_idx);
-                    uint64_t backlog = local_scan_idx - r_idx;
-                    bool spawn = false;
-                    uint64_t grow = 0;
-
-                    if (fixed_batch) {
-                        if (backlog > W && starvation == 0) spawn = true; 
-                    } else {
-                        if (d_out > 0) {
-                            uint64_t rate = d_out / W; if(rate==0) rate=1;
-                            uint64_t w_ideal = d_in / rate;
-                            if (w_ideal > W) spawn = true;
-                        } else if (backlog > (W * 4) && starvation == 0) {
-                             spawn = true;
-                        }
-                    }
-                    
-                    if (spawn && phase != 1) {
-                        grow = 1; 
-                        if (!fixed_batch) grow = (W + 1) / 2;
-                        if (W + grow > W_max_val) grow = W_max_val - W;
-                        
-                        if (grow > 0 && fd_spawn >= 0) {
-                            char sbuf[64];
-                            int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", grow);
-                            if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
-                            W += grow;
-                            atomic_store_relaxed(&state[0].active_workers, W);
-                        }
-                    }
-                }
-
-                if (!fixed_batch && !byte_mode && phase == 2) {
-                    uint64_t r_idx = atomic_load_relaxed(&state[0].read_idx);
-                    int64_t backlog = (int64_t)local_write_idx - (int64_t)r_idx;
-                    if (backlog < 0) backlog = 0;
-                    uint64_t l_target = (backlog / W);
-                    if (l_target > Lmax) l_target = Lmax;
-                    if (l_target < 1) l_target = 1;
-                    
-                    if (l_target > L) {
-                        L = l_target;
-                        atomic_store_release(&state[0].batch_change_idx, local_scan_idx);
-                        atomic_store_release(&state[0].signed_batch_size, -(int64_t)L);
-                    } else if (l_target < L && starve_meter >= (xLim - 3) && stall_meter >= (xLim - 3)) {
-                        L = (L + l_target) / 2;
-                        if (L < 1) L = 1;
-                        atomic_store_release(&state[0].batch_change_idx, local_scan_idx);
-                        atomic_store_release(&state[0].signed_batch_size, -(int64_t)L);
-                        starve_meter = 0; 
-                        stall_meter = 0;
-                    }
-                }
-            }
+            ADAPTIVE_FLOW_CONTROL(&state[0], (status == 2));
         }
     }
 
