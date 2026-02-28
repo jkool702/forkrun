@@ -474,19 +474,30 @@ struct OrderPacket {
 };
 
 struct SharedState {
+    // HOT CONSUMER PATH: read_idx is fetch_add'd by every ring_claim call.
+    // Fields co-located here are either read-mostly (scanner_finished, tail_idx)
+    // or written by the same agent that writes read_idx (total_lines_consumed),
+    // so they don't generate cross-core invalidation traffic on read_idx's line.
     uint64_t read_idx ALIGNED(CACHE_LINE);
     uint64_t active_workers;
     uint64_t total_lines_consumed;
     uint64_t global_scanned;          // Atomic cross-node limit tracker
-    uint32_t active_waiters;
-    uint64_t min_idx;
-    uint8_t  fallow_active;
-    uint8_t  scanner_finished;
     uint64_t tail_idx;
+    uint8_t  scanner_finished;
+    uint8_t  fallow_active;
+    uint8_t  ingest_complete;
+
+    // WAITER SIGNAL: isolated on its own cache line.
+    // Workers write this when entering/exiting the wait path. If co-located
+    // with read_idx, every sleep entry/exit would bounce read_idx's line to
+    // Invalid on all actively-claiming workers, forcing a cross-socket refetch.
+    uint32_t active_waiters ALIGNED(CACHE_LINE);
+    uint64_t min_idx;
+
+    // SCANNER WRITE PATH
     uint64_t write_idx ALIGNED(CACHE_LINE);
     int64_t  signed_batch_size;
     uint64_t batch_change_idx;
-    uint8_t  ingest_complete;
     
     // RUNTIME CONFIGURATION
     uint64_t cfg_w_start;
@@ -2309,6 +2320,25 @@ static int ring_ack_main(int argc, char **argv) {
 
 struct BufferedPacket { struct OrderPacket pkt; struct BufferedPacket *next; };
 
+// sendfile() may return fewer bytes than requested (EINTR, EAGAIN, or the kernel
+// simply transferring a partial page batch). Loop until complete or genuine EOF.
+// Note: s==0 means genuine EOF on the source fd -- the file is shorter than the
+// ack claimed. We do NOT retry on EOF since the worker already completed its write
+// before sending the ack; retrying would spin forever on a real truncation bug.
+static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
+    size_t total = 0;
+    while (total < count) {
+        ssize_t s = sendfile(out_fd, in_fd, offset, count - total);
+        if (s < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            return total > 0 ? (ssize_t)total : -1;
+        }
+        if (s == 0) break; // genuine EOF: file shorter than ack claimed
+        total += s;
+    }
+    return (ssize_t)total;
+};
+
 static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
     const size_t BUF_SIZE = 65536;
     char *buf = xmalloc(BUF_SIZE); 
@@ -2373,7 +2403,7 @@ static int ring_order_main(int argc, char **argv) {
             if (unordered_mode || is_expected) {
                 if (memfd_mode) {
                     off_t offset = (off_t)op->off;
-                    if (use_zerocopy) sendfile(1, op->fd, &offset, op->len);
+                    if (use_zerocopy) robust_sendfile(1, op->fd, &offset, op->len);
                     else ring_copy_chunk(op->fd, 1, offset, op->len);
                     
                     off_t aligned_start = (op->off / 4096) * 4096;
@@ -2388,7 +2418,7 @@ static int ring_order_main(int argc, char **argv) {
                     if (fd_file >= 0) {
                         off_t offset = 0; struct stat st;
                         if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-                            sendfile(1, fd_file, &offset, st.st_size);
+                            robust_sendfile(1, fd_file, &offset, st.st_size);
                         }
                         close(fd_file); unlink(path);
                     }
@@ -2416,7 +2446,7 @@ static int ring_order_main(int argc, char **argv) {
                         struct BufferedPacket *tmp = head;
                         if (memfd_mode) {
                             off_t offset = (off_t)tmp->pkt.off;
-                            if (use_zerocopy) sendfile(1, tmp->pkt.fd, &offset, tmp->pkt.len);
+                            if (use_zerocopy) robust_sendfile(1, tmp->pkt.fd, &offset, tmp->pkt.len);
                             else ring_copy_chunk(tmp->pkt.fd, 1, offset, tmp->pkt.len);
                             
                             off_t aligned_start = (tmp->pkt.off / 4096) * 4096;
@@ -2431,7 +2461,7 @@ static int ring_order_main(int argc, char **argv) {
                             if (fd_file >= 0) {
                                 off_t offset = 0; struct stat st;
                                 if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-                                    sendfile(1, fd_file, &offset, st.st_size);
+                                    robust_sendfile(1, fd_file, &offset, st.st_size);
                                 }
                                 close(fd_file); unlink(path);
                             }
@@ -2707,6 +2737,24 @@ static int ring_fallow_phys_main(int argc, char **argv) {
     return EXECUTION_SUCCESS;
 }
 
+// OOM back-pressure helper: exponential backoff waiting for workers to consume
+// and free memory via the fallow mechanism. Starts at 1ms, grows x1.5 per
+// iteration (1ms→1.5→2.25→...→100ms cap), max total wait 30 seconds.
+// This replaces the old fixed usleep(100)*10000 scheme which capped at 1 second
+// -- far too short on large NUMA machines under real memory pressure.
+#define OOM_WAIT_FOR_MEMORY(free_b_var, threshold, si_var, mu_var) do { \
+    int _oom_sleep_us = 1000; \
+    int _oom_waited_us = 0; \
+    while ((free_b_var) < (threshold) && _oom_waited_us < 30000000) { \
+        usleep(_oom_sleep_us); \
+        _oom_waited_us += _oom_sleep_us; \
+        sysinfo(&(si_var)); \
+        (free_b_var) = (uint64_t)(si_var).freeram * (mu_var); \
+        _oom_sleep_us += _oom_sleep_us >> 1; \
+        if (_oom_sleep_us > 100000) _oom_sleep_us = 100000; \
+    } \
+} while(0)
+
 static int ring_copy_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
     int outfd = atoi(argv[1]);
@@ -2736,8 +2784,7 @@ static int ring_copy_main(int argc, char **argv) {
                     uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
                     uint64_t free_b = (uint64_t)si.freeram * mu;
                     if (free_b < oom_threshold && state) {
-                        int r = 0;
-                        while (free_b < oom_threshold && r < 10000) { usleep(100); sysinfo(&si); free_b = (uint64_t)si.freeram * mu; r++; }
+                        OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
                     }
                 }
                 next_check += 16 * 1024 * 1024;
@@ -2768,8 +2815,7 @@ static int ring_copy_main(int argc, char **argv) {
                     uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
                     uint64_t free_b = (uint64_t)si.freeram * mu;
                     if (free_b < oom_threshold && state) {
-                        int r = 0;
-                        while (free_b < oom_threshold && r < 10000) { usleep(100); sysinfo(&si); free_b = (uint64_t)si.freeram * mu; r++; }
+                        OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
                     }
                 }
                 next_check += 16 * 1024 * 1024;
@@ -2791,8 +2837,7 @@ static int ring_copy_main(int argc, char **argv) {
                             uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
                             uint64_t free_b = (uint64_t)si.freeram * mu;
                             if (free_b < oom_threshold && state) {
-                                int r = 0;
-                                while (free_b < oom_threshold && r < 10000) { usleep(100); sysinfo(&si); free_b = (uint64_t)si.freeram * mu; r++; }
+                                OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
                             }
                         }
                         next_check += 16 * 1024 * 1024;
@@ -2823,8 +2868,7 @@ static int ring_copy_main(int argc, char **argv) {
                         uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
                         uint64_t free_b = (uint64_t)si.freeram * mu;
                         if (free_b < oom_threshold && state) {
-                            int r = 0;
-                            while (free_b < oom_threshold && r < 10000) { usleep(100); sysinfo(&si); free_b = (uint64_t)si.freeram * mu; r++; }
+                            OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
                         }
                     }
                     next_check += 16 * 1024 * 1024;
@@ -2848,8 +2892,7 @@ static int ring_copy_main(int argc, char **argv) {
                         uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
                         uint64_t free_b = (uint64_t)si.freeram * mu;
                         if (free_b < oom_threshold && state) { 
-                            int r = 0;
-                            while (free_b < oom_threshold && r < 10000) { usleep(100); sysinfo(&si); free_b = (uint64_t)si.freeram * mu; r++; }
+                            OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
                         }
                     }
                     next_check += 16 * 1024 * 1024;
