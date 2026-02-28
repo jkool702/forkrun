@@ -288,4 +288,3 @@ Key properties of the architecture:
 Once that model clicks, the rest of the design follows naturally.
 
 **See also:** `INVARIANTS.md` (the formal never-break list) and `PHYSICS.md` (the geophysics perspective).
-
