@@ -6,106 +6,177 @@ These are the rules that **must never be broken**. If they hold, the system is c
 
 ---
 
-## 1. Slot Ownership & Monotonic Indices (Global)
+## 1. Slot Ownership & Monotonic Indices
 
 **Invariant**  
-Each ring slot (per node) is claimed **exactly once**.
+Each ring slot is claimed exactly once, by at most one worker.
 
 **Enforced by**  
-`atomic_fetch_add` on the node-local `read_idx`. No CAS retries, no rollbacks.
+`read_idx` advanced **only** via atomic `fetch_add`. No CAS retry loops on the fast path. No decrement or rollback logic anywhere.
 
-**NUMA note**  
-Each `SharedState` has its own `read_idx` / `write_idx`.
+**v9 NUMA note**  
+Each `SharedState` (one per node) maintains its own `read_idx` / `write_idx`.
 
-**Audit rule**  
-Never introduce per-slot claiming or conditional rollback.
+**Audit Rule**  
+✅ Any change introducing CAS retries, conditional claim rollback, or speculative reads of ring slots violates this invariant.
 
 ---
 
-## 2. Publish-Before-Claim (Per Node)
+## 2. Publish-Before-Claim
 
 **Invariant**  
-Workers never observe uninitialized slots.
+Workers must never observe uninitialized slots.
 
 **Enforced by**  
-Scanner writes ring data **then** `atomic_store_release(write_idx)`.  
-Workers use `atomic_load_acquire`.
+Scanner writes ring slot data **before** advancing `write_idx`. `write_idx` publish uses **release** semantics. Workers load with **acquire** semantics.
+
+**Audit Rule**  
+✅ Any reordering of slot writes, batch metadata writes, or `write_idx` publication must preserve release ordering.
 
 ---
 
 ## 3. Batch Atomicity
 
 **Invariant**  
-A batch is claimed whole or not at all (overshoot handled after claim).
+A batch is claimed whole or not at all.
+
+**Enforced by**  
+Workers claim ranges, never individual slots. Overshoot handled *after* claim, not during.
+
+**Audit Rule**  
+❌ Never introduce logic that conditionally claims per-slot or splits batch claim across multiple atomics.
 
 ---
 
-## 4. Signed Batch Size Protocol (Legacy Mode Only)
+## 4. Signed Batch Size Protocol
 
-In non-NUMA (`--nodes=1`) mode the original signed-batch-size + CAS finalization protocol still applies exactly as described in earlier versions.
+**Meaning of Sign**  
+* `batch_size < 0` → **Provisional policy** (scanner may still change its mind)  
+* `batch_size > 0` → **Finalized contract** (matches stream reality)
 
-In full NUMA mode (`global_num_nodes > 1`) the protocol is **simplified**:
-- Scanner still publishes negative advisory sizes.
-- Workers no longer perform the CAS sign-flip (each node’s scanner is authoritative).
-- `signed_batch_size` is still used for adaptive control but finalization is implicit.
+**Scanner Responsibilities**  
+* May update batch size at any time.  
+* Must **always** publish negative values (`-abs(N)`).  
+* Must never publish a positive batch size.
+
+**Worker Responsibilities**  
+* Observe the published (negative) batch size.  
+* May finalize **only** when stream count equals `abs(published_batch_size)`.  
+* Must use **CAS** to flip `-N → +N`.  
+* If CAS fails (scanner changed policy), re-evaluate under new policy.
+
+**Forbidden Transitions**  
+* Scanner publishing positive batch size  
+* Worker changing magnitude  
+* Any positive → negative transition  
+* Non-CAS sign flip
+
+**Correctness Guarantee**  
+Batch size reflects scanner intent until finalized. Finalization occurs exactly once. Scanner policy changes cannot resurrect stale batch sizes.
+
+---
+
+## 5. Tail-Aware Batch Size Rules
+
+**Definition**  
+The tail ramp-down begins at `tail_idx`. Remaining data may not satisfy the current batch size.
+
+**Scanner Responsibilities**  
+* Must not publish batch sizes that correspond to tail batches.  
+* Once `tail_idx` is established, scanner must not modify batch size.
+
+**Worker Responsibilities at Tail**  
+When `read_idx ≥ tail_idx` and `batch_size < 0`:  
+1. Finalize immediately (`-N → +N` via CAS).  
+2. Bypass all slow paths (no waiting, no escrow).  
+3. Process exactly one claim using stride metadata.
+
+**Why This Rule Exists**  
+Guarantees exactly one claim per tail batch, no policy leakage, no duplicate claims.
 
 **Forbidden**  
-Never publish a positive batch size from the scanner in any mode.
+* Scanner publishing after entering tail  
+* Workers applying ramp-down logic based on batch size  
+* Slow path in tail
+
+**Key Insight**  
+Batch size is a *policy*, not a property of the tail. Once the tail begins, policy ends and structure takes over.
 
 ---
 
-## 5. Tail-Aware Rules (Applies to All Modes)
-
-- Once `tail_idx` is published, the scanner **must not** change batch size.
-- All tail batches are self-describing (sign bit + stride metadata).
-- Workers at or past `tail_idx` finalize immediately and take exactly one claim (no escrow, no slow path).
-
----
-
-## 6. NUMA-Specific Invariants (New in v9)
-
-| Invariant                              | Enforced By                              | Why It Matters                     |
-|----------------------------------------|------------------------------------------|------------------------------------|
-| Data born-local to target node         | `set_mempolicy(MPOL_BIND)` at ingest     | Zero cross-socket traffic          |
-| Scanner pinned to its node             | `pin_to_numa_node()` + `getcpu()`        | Locality guarantee                 |
-| Per-node escrow                        | `fd_escrow_r/w[N]` array                 | No cross-node contention on steal  |
-| Major/minor ordering keys              | `major_ring[]`, `minor_ring[]`           | Correct global reorder in NUMA     |
-| Claim pipe back-pressure               | `claim_pipe` + `ring_numa_ingest`        | Prevents unbounded memory growth   |
-
----
-
-## 7. Escrow Correctness
+## 6. Escrow Correctness
 
 **Invariant**  
-Escrow is advisory. Forward progress never depends on it.
+Escrow is advisory and never required for forward progress.
+
+**Enforced by**  
+Escrow stealing is optional. Original worker may always reclaim remainder. Escrow full → self-complete.
+
+**Audit Rule**  
+✅ It must always be possible to ignore escrow entirely and still complete all work.
 
 ---
 
-## 8. Waiter & Eventfd Accounting
+## 7. Waiter Accounting
 
-Over-counting waiters is safe. Under-counting is forbidden.  
-Eventfds are advisory only — correctness is carried by monotonic indices.
+**Invariant**  
+Over-counting waiters is safe. Under-counting is forbidden.
+
+**Enforced by**  
+Increment before blocking + guaranteed decrement on *all* exits (including traps).
+
+**Audit Rule**  
+❌ Never add a wait path without paired increment and guaranteed decrement.
+
+---
+
+## 8. Eventfd Non-Reliance
+
+**Invariant**  
+Eventfds are advisory only.
+
+**Enforced by**  
+All correctness checks based on indices. Wakeups only gate sleeping, never claiming.
+
+**Audit Rule**  
+🚫 Never assume exact wake counts, wake ordering, or wake delivery.
 
 ---
 
 ## 9. Ordering & Emission
 
-Logical (major/minor) indices define output order in buffered mode.  
-Never emit based on completion time.
+**Invariant**  
+Logical indices define output order.
+
+**Enforced by**  
+Per-batch logical index + reorder buffer + emit only contiguous prefix.
+
+**Audit Rule**  
+❌ Never emit based on completion time.
 
 ---
 
-## 10. Checklist Summary (v9.8.0-NUMA)
+## 10. NUMA-Specific Invariants (v9.8+)
 
-If every rule above holds, **the system is correct** no matter what you change in:
-- adaptive controller
-- NUMA topology
-- worker spawn policy
-- fallow aggressiveness
+* Data is born-local to its target node (`set_mempolicy` at ingest).  
+* Scanner pinned to its node.  
+* Per-node escrow pipes.  
+* Major/minor ordering keys for correct global reorder.  
+* Claim-pipe back-pressure prevents unbounded growth.
 
 ---
+
+## 11. Checklist Summary
+
+If all sections above remain true, **v9.8.0-NUMA is correct** — regardless of:
+* batching heuristics
+* wake frequency
+* NUMA placement
+* worker churn
 
 **Mental model reminder**  
-> Progress is irreversible. Locality is structural. Contention was designed away.
+Progress is irreversible. Locality is structural. Contention was designed away.
 
-These invariants are what let forkrun scale to tens of millions of lines per second while staying debuggable and deterministic.
+---
+
+**See also:** `DESIGN.md` and `PHYSICS.md`
