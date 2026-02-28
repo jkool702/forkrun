@@ -147,4 +147,5 @@ Welcome to the physics department. The CS department is across the hall — they
 **See also**  
 - [DESIGN.md](DESIGN.md) – the engineering blueprint  
 - [INVARIANTS.md](INVARIANTS.md) – the conservation laws written in code  
+
 - The C source – the actual riverbed geometry
