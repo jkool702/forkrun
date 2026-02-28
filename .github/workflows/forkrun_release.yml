@@ -1,4 +1,4 @@
-name: Build forkrun_ring.so (multiarch) and update frun
+name: Build forkrun_ring.so (multiarch) and update frun.bash
 
 on:
   push:
@@ -79,15 +79,17 @@ jobs:
               echo "Compiling Version: $FR_VERSION"
 
               # 3. Define Common Flags
-              # Note: We escape quotes heavily for the -D flags to survive shell passing
               OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC "
               WARN_FLAGS="-DNDEBUG -Wall -Wextra "
               INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins "
               
-              DEFS="-DSHELL -DHAVE_CONFIG_H"
-              DEFS+=" -DBUILD_OS=\"\\\"Linux\\\"\""
-              DEFS+=" -DFORKRUN_RING_VERSION=\"\\\"$FR_VERSION\\\"\""
-              DEFS+=" -DCOMPILER_FLAGS=\"\\\"$OPT_FLAGS\\\"\""
+              DEFS=(
+                 "-DSHELL"
+                 "-DHAVE_CONFIG_H"
+                 "-DBUILD_OS=\"Linux\""
+                 "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
+                 "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
+              )
               
               # Function to build specific variant
               build_variant() {
@@ -98,11 +100,11 @@ jobs:
                  echo ">>> Building $arch_name..."
                  
                  # Dynamic Arch Definition
-                 local ARCH_DEF="-DBUILD_ARCH=\"\\\"$arch_name\\\"\""
+                 local ARCH_DEF="-DBUILD_ARCH=\"$arch_name\""
                  
                  gcc forkrun_ring.c \
                     $OPT_FLAGS $WARN_FLAGS $INCLUDES \
-                    $DEFS $ARCH_DEF \
+                    "${DEFS[@]}" "$ARCH_DEF" \
                     -shared \
                     $march_flag \
                     -o "$out_file"
@@ -110,7 +112,6 @@ jobs:
                  strip --strip-unneeded "$out_file"
                  
                  # SANITY CHECK: Try to enable and run version check
-                 # We only check if it loads successfully.
                  echo ">>> Testing loadable..."
                  enable -f "$out_file" ring_version && \
                  ring_version -a || exit 1
@@ -138,7 +139,7 @@ jobs:
           path: artifacts/*.so
 
   embed:
-    name: Embed Base64 into frun
+    name: Embed Base64 into frun.bash
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -161,20 +162,20 @@ jobs:
 
       - name: Extract Encoding Function
         run: |
-          # Pull the _forkrun_file_to_base64 function out of frun into a standalone script
-          sed -n '/^_forkrun_file_to_base64() {/,/^}/p' frun > encoder.sh
+          # Pull the _forkrun_file_to_base64 function out of frun.bash into a standalone script
+          sed -n '/^_forkrun_file_to_base64() {/,/^}/p' frun.bash > encoder.sh
 
-      - name: Generate New frun Script
+      - name: Generate New frun.bash Script
         shell: bash
         run: |
           source encoder.sh
           
-          # 1. Read frun up to the Base64 Start Marker
+          # 1. Read frun.bash up to the Base64 Start Marker
           #    We assume the marker is "# <@@@@@< _BASE64_START_ >@@@@@> #"
-          sed '/# <@@@@@< _BASE64_START_ >@@@@@> #/q' frun > frun.new
+          sed '/# <@@@@@< _BASE64_START_ >@@@@@> #/q' frun.bash > frun.bash.new
           
           # 2. Append the Array Definition
-          echo "declare -A b64=(" >> frun.new
+          echo "declare -A b64=(" >> frun.bash.new
           
           for so in artifacts/*.so; do
              # Filename: forkrun_ring.x86-64-v3.so
@@ -191,24 +192,24 @@ jobs:
              echo "Encoding $key..."
              encoded_str=$(_forkrun_file_to_base64 -n "$so")
              
-             echo "    ['$key']=\"$encoded_str\"" >> frun.new
+             echo "    ['$key']=\"$encoded_str\"" >> frun.bash.new
           done
           
-          echo ")" >> frun.new
+          echo ")" >> frun.bash.new
           
           # 3. Append the Bootstrap Call
-          echo "" >> frun.new
-          echo "_forkrun_bootstrap_setup --force" >> frun.new
+          echo "" >> frun.bash.new
+          echo "_forkrun_bootstrap_setup --force" >> frun.bash.new
           
           # 4. Replace
-          mv frun.new frun
-          chmod +x frun
+          mv frun.bash.new frun.bash
+          chmod +x frun.bash
 
       - name: Verify Final Script
         run: |
           # Sanity check: Does the script run and load?
           # This relies on the runner being x86_64 and having the x86-64-v2/v3 embedded
-          ./frun ring_version -a
+          . ./frun.bash && ring_version -a
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6

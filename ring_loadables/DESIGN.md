@@ -1,9 +1,10 @@
+### `DESIGN.md`
 
-# forkrun Ring Architecture – Design Overview
+# forkrun Ring Architecture – Design Overview (v9.8.0-NUMA Golden Master)
 
 ## 1. Purpose
 
-This document explains the internal architecture of **forkrun**’s ring-based execution engine. It focuses on *why* each mechanism exists, the invariants it maintains, and how the pieces interact under load. It is intended for readers who want to understand or extend the system, not merely use it.
+This document explains the internal architecture of **forkrun**’s ring-based execution engine. It focuses on *why* each mechanism exists, the invariants it maintains, and how the pieces interact under load. It is intended for readers who want to understand or extend the system.
 
 The core goals are:
 
@@ -20,13 +21,16 @@ The guiding philosophy is:
 
 ## 2. High-Level Model
 
-forkrun consists of three cooperating roles:
+forkrun consists of four cooperating roles (three in legacy flat mode, four when NUMA is active):
 
-1. **Scanner** – Reads input and publishes availability
-2. **Workers** – Claim batches and execute user commands
-3. **Coordinator State** – A shared-memory ring and counters
+1. **NUMA Ingest** – Zero-copy splice from stdin into the shared memfd, routing data to the correct socket via `set_mempolicy`.
+2. **Indexers / Scanners** – Identify line boundaries and publish availability into per-node rings.
+3. **Workers** – Claim batches and execute user commands.
+4. **Coordinator State** – Per-node shared-memory rings + global coordination primitives.
 
 All coordination is done through shared memory, atomic operations, and kernel primitives (eventfd + pipes). No locks are taken on the fast path.
+
+When `--nodes=1` (or auto-detected as single node) the system falls back to the classic flat pipeline while preserving every invariant.
 
 ---
 
@@ -49,15 +53,15 @@ This allows:
 
 ### 3.2 Ring Entry Encoding
 
-Each ring slot is a signed 64-bit value:
+Each ring slot (`offset_ring`) is an **unsigned** 64-bit value:
 
 * **Low 63 bits**: byte offset in the backing file
-* **High bit (sign bit)**:
+* **High bit (bit 63, `FLAG_PARTIAL_BATCH = 1ULL << 63`)**:
 
   * 0 → complete batch
   * 1 → partial batch (scanner hit EOF or boundary)
 
-This encoding avoids extra metadata, keeps entries atomic, and supports offsets up to 2⁶³ bytes.
+This encoding avoids extra metadata, keeps entries atomic, and supports offsets up to 2⁶³ bytes. The high bit is a flag, not an arithmetic sign — readers must mask it before using the offset as an address (`offset & ~FLAG_PARTIAL_BATCH`).
 
 ### 3.3 Atomic Invariants
 
@@ -70,6 +74,8 @@ Memory ordering:
 
 * Scanner publishes ring entries with **release** semantics
 * Workers consume them with **acquire** semantics
+
+In NUMA mode each socket has its own independent `SharedState` ring; the invariants hold per node.
 
 ---
 
@@ -115,11 +121,8 @@ Rather than force all workers to stall, forkrun allows:
 
 To handle deferred remainders, forkrun introduces **escrow**:
 
-* A non-blocking anonymous pipe
-* Entries contain:
-
-  * starting offset
-  * remaining line count
+* A non-blocking anonymous pipe (per-node in NUMA mode)
+* Entries contain: starting offset + remaining line count
 
 When a worker overshoots:
 
@@ -152,9 +155,10 @@ Eventfds are used strictly as **wake signals**, never as state.
 
 There are multiple eventfds:
 
-* Data availability
+* Data availability (per-node)
 * Worker spawning
 * Overshoot notifications
+* EOF signaling
 
 Properties:
 
@@ -166,38 +170,82 @@ This keeps the design robust and simple.
 
 ---
 
-## 7. Scanner Control Logic
+## 7. Scanner Control Logic (Three-Phase Model)
 
-### 7.1 Two-Phase Model
+The scanner operates in a three-phase control loop (restored and formalized in v6.63 and still present in v9.8):
 
-The scanner operates in two distinct phases:
+### Phase 0: Warmup (Fairness & Producer Startup)
 
-#### Phase 1: Geometric Ramp-Up
+* Batch size `L = 1`
+* Exactly ~N batches are emitted (N ≈ number of workers)
+* Intent: Ensure every worker receives work early. Prevent large initial batches from being monopolized by the first worker.
 
-* Batch size grows exponentially
-* Workers spawn aggressively
-* Stops automatically on stall
+### Phase 1: Geometric Ramp-Up (Fast Discovery)
 
-This ensures fast convergence without tuning.
+* Batch size doubles geometrically (`L *= 2`)
+* Each size is held for a fixed number of batches
+* Ramp halts immediately on input stall
+* O(log L) convergence, no oscillation, scanner-only logic
 
-#### Phase 2: Steady-State Control
+### Phase 2: PID-like Steady State (Adaptive Equilibrium)
 
-A PID-inspired controller adjusts:
-
-* Batch size
-* Spawn rate
-
-Based on:
-
-* Input rate
-* Output rate
+Scanner periodically measures:
+* Input publish rate
+* Consumption rate
 * Backlog depth
+* Active worker count
 
-Shrinking is conservative by design to avoid oscillation.
+Batch size is adjusted conservatively toward a target. Adjustments are slow to avoid oscillation.
+
+**Signed batch size protocol** (see INVARIANTS.md for full formal rules):
+* Scanner always publishes negative values (`-abs(N)`)
+* Only workers may flip to positive via CAS (finalization)
+* In full NUMA mode the protocol is simplified but the negative-advisory rule remains
+
+**Tail ramp-down** is a distinct phase: once `tail_idx` is published the scanner stops changing batch size and all remaining batches become self-describing (sign bit + stride metadata).
+
+### Phase 2b: Early Partial Flush (Low-Latency Trickle Mode)
+
+Under normal load the scanner accumulates a full batch of `L` lines before publishing. However, when stdin is arriving slowly *and* workers are sitting idle, holding a partial batch in the scanner adds latency without benefit. The scanner detects this condition and flushes early.
+
+**The two signals:**
+
+* `stall_meter` — exponential moving average of input-stall events. It grows each time a read attempt on the backing file returns no new data (stdin is not delivering), and decays each time a read succeeds. It reflects the *sustained* rate of input stalls.
+* `starve_meter` — exponential moving average of worker-starvation events. It grows each time `active_waiters > 0` is observed at the natural meter-update point, and decays otherwise. It reflects whether workers have been *sustainedly* idle.
+
+**Why both are required:**
+
+* Stall only (no starve): workers are keeping up with or ahead of stdin — there is no idle worker waiting for the partial batch. No benefit to flushing early.
+* Starve only (no stall): data is available in the backing file but workers are consuming faster than the scanner can scan. Flushing smaller partial batches increases the scanner's per-line overhead and makes this situation worse, not better.
+* Both saturated: stdin is arriving slowly AND workers are idle. Flushing the partial batch reduces latency at no throughput cost.
+
+**Implementation detail:**
+
+Both meters use the same EWMA kernel (`meter = (meter + xLim) >> 1` to grow, `meter >>= 1` to decay) with threshold `xLim - 3 = W + DAMPING_OFFSET - 3`. Meters update at their natural observation points on every loop iteration — not at flush time — so they track ongoing system state independently of flush frequency. The stall signal is captured into an `experienced_stall` flag at detection time and passed to the control macro at flush time, ensuring the signal is correctly scoped to the interval between flushes.
 
 ---
 
-## 8. Memory Reclamation (Fallowing)
+## 8. NUMA Topology Pipeline (v9.8+)
+
+When multiple NUMA nodes are present:
+
+```
+stdin
+  ↓ ring_numa_ingest (splice + set_mempolicy)
+shared memfd
+  ↓ index_pipe
+ring_indexer_numa (boundary alignment + node routing)
+  ↓ per-node pipes
+ring_numa_scanner[N] (pinned to node)
+  ↓ publish to per-node ring
+Workers (claim from local ring or escrow)
+```
+
+Data is **born-local** at ingest time. Scanners are pinned. Workers inherit locality via `RING_NODE_ID`. Cross-socket traffic is minimized to the claim-pipe back-pressure and occasional escrow steals.
+
+---
+
+## 9. Memory Reclamation (Fallowing)
 
 The backing file grows monotonically.
 
@@ -207,30 +255,22 @@ A background GC process:
 * Punches holes behind it using `fallocate(PUNCH_HOLE)`
 
 This:
-
 * Preserves offsets
 * Avoids fragmentation
 * Requires no coordination with workers
 
 ---
 
-## 9. Failure and Edge Cases
+## 10. Output Ordering
 
-The system is designed so that:
+* `--realtime` / `--unbuffered`: direct to stdout
+* `--ordered` / `--buffered`: per-worker memfd + `ring_order` (NUMA-aware major/minor merging using the ordering keys published by scanners)
 
-* Every optimization has a safe fallback
-* Resource exhaustion degrades performance, not correctness
-* All waits are bounded
-
-Examples:
-
-* Escrow pipe full → self-complete batch
-* Eventfd saturation → spurious wakeups only
-* Slow input → workers sleep without spinning
+The reorder path is the only place that may block.
 
 ---
 
-## 10. Design Summary
+## 11. Design Summary & Mental Model
 
 Key properties of the architecture:
 
@@ -239,286 +279,12 @@ Key properties of the architecture:
 * Monotonic indices instead of condition variables
 * Advisory wakeups
 * Opportunistic load balancing
+* Born-local NUMA data flow
 
-The result is a system that scales to tens of millions of lines per second while remaining debuggable and deterministic.
+**Mental model** (from PHYSICS.md):
 
----
-
-## 11. Mental Model
-
-Think of forkrun as:
-
-> *A speculative, cooperative work-stealing engine where correctness is enforced by monotonic progress, not locks.*
+> A speculative, cooperative work-stealing engine where correctness is enforced by monotonic progress, not locks — and where data is physically born on the correct socket.
 
 Once that model clicks, the rest of the design follows naturally.
 
-
-# MISC UPDATED INFO
-
-## forkrun_ring v6.63 — Design Overview
-
----
-
-## High-level goals
-
----
-
-forkrun_ring is designed to efficiently distribute streamed input to a dynamic pool of Bash workers while preserving the following invariants:
-
-Fast path is boring
-
-Claiming available work must be O(1), wait-free, and uncontended.
-
-No polling, no locks, no global coordination on the common path.
-
-Fairness before throughput
-
-Small or slow workloads must not be penalized by batching heuristics.
-
-Every worker should receive work early, even if batching later increases.
-
-Producer/consumer decoupling
-
-Scanner (producer) adapts to both input rate and worker behavior.
-
-Workers never influence scanner correctness, only tuning.
-
-Graceful scaling across extremes
-
-Works equally well for:
-
-Billions of near-zero-cost tasks
-
-Tens of very expensive tasks
-
-No configuration changes required.
-
-Version v6.63 restores and formalizes the ramp-up phase, which is critical to achieving these goals across vastly different workload shapes.
-
-## Architecture summary
-
----
-
-The system consists of four cooperating components:
-
-Scanner
-Reads input, identifies batch boundaries, and publishes work descriptors into a lock-free ring buffer.
-
-Workers
-Atomically claim batches from the ring and process the corresponding input.
-
-Ring buffer
-Zero-copy structure holding offsets and per-batch metadata.
-
-Coordination primitives
-
-eventfds for wakeups and EOF signaling
-
-An escrow pipe for redistributing overclaimed work
-
-Correctness is entirely derived from monotonic indices (read_idx, write_idx).
-All adaptive logic is advisory and never affects correctness.
-
-Batch size control: three-phase model (v6.63)
-
-Batch sizing in v6.63 is governed by a three-phase control loop implemented entirely in the scanner:
-
-Warmup phase
-
-Geometric ramp-up
-
-PID-like steady state
-
-Each phase has a distinct purpose and exit condition.
-
-Phase 0: Warmup (fairness & producer startup)
-
-Behavior
-
-Batch size L = 1
-
-Exactly N batches are emitted, where N ≈ number of workers
-
-Intent
-
-Ensure the producer has time to start delivering data
-
-Ensure every worker receives work early
-
-Prevent large initial batches from being monopolized by the first worker
-
-Why this exists
-
-Without warmup, a fast scanner combined with slow workers could produce large early batches that:
-
-Starve other workers
-
-Increase latency for expensive tasks
-
-Over-optimize for throughput before fairness is established
-
-### Warmup guarantees:
-
-Fair initial work distribution
-
-Predictable latency for small or slow workloads
-
-No assumptions about input speed
-
-This phase is intentionally short and bounded.
-
-Phase 1: Geometric ramp-up (fast discovery of good batch size)
-
-Behavior
-
-Batch size doubles geometrically (L *= 2)
-
-Each size is held for N batches
-
-Ramp halts immediately on input stall
-
-Intent
-
-Quickly discover a reasonable batch size
-
-Avoid linear probing or overfitting
-
-Maintain fairness while increasing throughput
-
-Key properties
-
-O(log L) convergence
-
-No oscillation
-
-No worker coordination required
-
-Scanner-only logic
-
-Early exit on stall
-
-If input stalls during ramp-up, the scanner assumes:
-
-The producer is slow or bursty
-
-Larger batches would increase latency
-
-In that case, ramp-up is aborted and the system transitions directly to steady state.
-
-Phase 2: PID-like steady state (adaptive equilibrium)
-
-Behavior
-
-Scanner periodically measures:
-
-Input publish rate
-
-Consumption rate
-
-Backlog depth
-
-Active worker count
-
-Batch size is adjusted conservatively toward a target
-
-Intent
-
-Maintain equilibrium between producer and consumers
-
-Adapt to dynamic workloads
-
-Avoid oscillation and thrashing
-
-Design principles
-
-Adjustments are slow and conservative
-
-Batch size changes are transactional
-
-Temporary overshoot is allowed and resolved by escrow
-
-Batch size updates are published using:
-
-batch_change_idx as a cutover marker
-
-signed_batch_size as advisory policy
-
-Workers may briefly observe stale batch sizes; this only affects efficiency, never correctness.
-
-Overshoot handling and escrow
-
-Workers are allowed to overclaim batches optimistically.
-
-If a worker claims more work than is currently available:
-
-The available portion is processed immediately
-
-The remainder is published to the escrow pipe
-
-Other idle workers may steal the remainder
-
-If not stolen, the original worker reclaims it later
-
-This mechanism:
-
-Preserves fast-path simplicity
-
-Avoids blocking on partial availability
-
-Prevents latency spikes from large overclaims
-
-Overshoot is expected and explicitly supported.
-
-Why ramp-down is conservative
-
-In steady state, batch size reductions are intentionally slow.
-
-Reasons:
-
-Prevent oscillation under bursty input
-
-Avoid excessive batch fragmentation
-
-Preserve throughput under transient stalls
-
-Any temporary inefficiency is resolved by:
-
-Escrow redistribution
-
-Natural convergence of the PID loop
-
-Correctness is never impacted.
-
-Key invariants (unchanged in v6.63)
-
-write_idx is monotonically increasing
-
-read_idx is monotonically increasing
-
-Ring slots are immutable once published
-
-Workers never block on the fast path
-
-Scanner never depends on worker timing for correctness
-
-All coordination is best-effort and advisory.
-
-## Summary
-
----
-
-The restored ramp-up phase in v6.63 is not an optimization — it is a correctness-preserving fairness mechanism that enables:
-
-Low latency for small workloads
-
-High throughput for massive workloads
-
-Stable behavior under bursty or slow producers
-
-By cleanly separating:
-
-Fairness (warmup)
-
-Discovery (geometric ramp)
-
-Adaptation (PID steady state)
+**See also:** `INVARIANTS.md` (the formal never-break list) and `PHYSICS.md` (the geophysics perspective).

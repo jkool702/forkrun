@@ -12,10 +12,10 @@ frun() {
 
         # Check if already setup (and FD is valid), otherwise bootstrap
         { ${FORKRUN_RING_ENABLED:-false} && (( ${FORKRUN_MEMFD_LOADABLES:-0} > 0 )); } || _forkrun_bootstrap_setup --fast
-        
+
         # Generate list of loadables to enable in the new shell
         (( ${#ring_funcs[@]} > 0 )) || ring_list 'ring_funcs'
-        printf -v ring_enable '%s ' "${ring_funcs[@]}" 
+        printf -v ring_enable '%s ' "${ring_funcs[@]}"
 
         [[ ${FORKRUN_FRUN_SRC} ]] || FORKRUN_FRUN_SRC="$(declare -f frun)"
 
@@ -28,7 +28,7 @@ shopt -s extglob
 '"${FORKRUN_FRUN_SRC}"'
 frun __exec__ "$@"
 ' -- "${@}" 0<&${fd00} 1>&${fd11} 2>&${fd22}
-        
+
         # (Exec replaces process, so we never reach here)
     }
     # 2. WORKER LOGIC (Clean Shell)
@@ -77,13 +77,13 @@ frun __exec__ "$@"
         val="$2"
         if [[ "$val" == *:* ]]; then
             v1="${val%:*}"; v2="${val#*:}"
-            
+
             _expand_unit "$v1"; ring_init_opts+=("--${type}0=${REPLY}");
             [[ $REPLY ]] && case "${type}" in
                 lines)    byte_mode_flag=false   ;;
                 bytes)    byte_mode_flag=true    ;;
             esac
-            
+
             _expand_unit "$v2"; ring_init_opts+=("--${type}-max=${REPLY}")
             [[ $REPLY ]] && case "${type}" in
                 workers)  nWorkersMax="${REPLY}" ;;
@@ -154,7 +154,13 @@ frun __exec__ "$@"
             @(-t|--timeout)?(?([= $'\t'])+([0-9.+-])))
                 arg="${1#@(-t|--timeout)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9.+-])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && _expand_unit "${arg}" &&  ring_init_opts+=('--timeout='"${REPLY}") ;;
+                [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--timeout='"${REPLY}") ;;
+
+            # --- NUMA NODES (--nodes auto) ---
+            @(--nodes)?(?([= $'\t'])*))
+                arg="${1#@(--nodes)?([= $'\t'])}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && ring_init_opts+=("--nodes=${arg}") ;;
 
             # --- ORDER (-o buffered) ---
             @(-o|--order)?(?([= $'\t'])@(realtime|unbuffered|buffered|atomic|order?(ed))))
@@ -215,27 +221,58 @@ toc() { :; }
     ${byte_mode_flag:-false} && ring_init_opts+=('--lines=x')
 
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
-    
-# declare -p  cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart order_mode unsafe_flag stdin_flag byte_mode_flag order_mode unsafe_flag LC_ALL fd_out P order_args ring_init_opts
 
-    # Initialize Ring
+    # Initialize Ring (this exports FORKRUN_NUM_NODES)
     ring_init "${ring_init_opts[@]}"
+    : "${FORKRUN_NUM_NODES:=1}" # Fallback safety
 
     # Create Data Memfd
     ring_memfd_create ingress_memfd
 
     # # # # # MAIN # # # # #
     {
-        # --- 1. RING COPY ---
-        ( ring_copy ${fd_write} ${fd0}; ring_signal ) &
-        
-        # --- 2. RING SCANNER ---
         ring_pipe fd_spawn_r fd_spawn_w
-        (
-            exec {fd_spawn_r}<&-
-            ring_scanner ${fd_scan} ${fd_spawn_w}
-        ) &
-        exec {fd_spawn_w}>&- 
+
+        # --- 1 & 2. THE PRODUCER PLUMBING ---
+        if (( FORKRUN_NUM_NODES > 1 )); then
+            # NUMA TOPOLOGICAL PIPELINE
+            ring_pipe index_pipe_r index_pipe_w
+            ring_pipe claim_pipe_r claim_pipe_w
+
+            node_pipes_r=()
+            node_pipes_w=()
+            for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
+                ring_pipe nr nw
+                node_pipes_r[i]=$nr
+                node_pipes_w[i]=$nw
+            done
+
+            ordered_flag=0
+            [[ "${order_mode}" == "ordered" ]] && ordered_flag=1
+
+            ( ring_numa_ingest ${fd0} ${fd_write} $index_pipe_w $claim_pipe_r $FORKRUN_NUM_NODES $ordered_flag ) &
+            ( ring_indexer_numa ${fd_scan} $index_pipe_r "${node_pipes_w[@]}" ) &
+
+            for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
+                ( ring_numa_scanner ${fd_scan} $i $claim_pipe_w $fd_spawn_w $FORKRUN_NUM_NODES "${node_pipes_r[@]}" ) &
+            done
+
+            # Close Bash's copies of the pipes to allow background EOFs to cascade
+            exec {index_pipe_r}<&- {index_pipe_w}>&- {claim_pipe_r}<&- {claim_pipe_w}>&-
+            for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
+                exec {node_pipes_w[i]}>&- {node_pipes_r[i]}<&-
+            done
+
+        else
+            # LEGACY FLAT PIPELINE
+            ( ring_copy ${fd_write} ${fd0}; ring_signal ) &
+            (
+                exec {fd_spawn_r}<&-
+                ring_scanner ${fd_scan} ${fd_spawn_w}
+            ) &
+        fi
+
+        exec {fd_spawn_w}>&-
 
         # --- 3. RING FALLOW ---
         ring_pipe fd_fallow_r fd_fallow_w
@@ -243,7 +280,7 @@ toc() { :; }
             exec {fd_fallow_w}>&-
             ring_fallow ${fd_fallow_r} ${fd_write}
         ) &
-        exec {fd_fallow_r}<&- 
+        exec {fd_fallow_r}<&-
 
         # --- 4. RING ORDER ---
         [[ "${order_mode}" == "realtime" ]] || {
@@ -253,10 +290,11 @@ toc() { :; }
 
                 order_args=( "${fd_order_r}" 'memfd' )
                 [[ "${order_mode}" == "buffered" ]] && order_args+=( "unordered" )
+                (( FORKRUN_NUM_NODES > 1 )) && order_args+=( "numa" )
 
                 ring_order "${order_args[@]}" >&${fd1}
             ) &
-            exec {fd_order_r}<&- 
+            exec {fd_order_r}<&-
             export FD_ORDER_PIPE=$fd_order_w
         }
 
@@ -286,13 +324,13 @@ toc() { :; }
                 ( ring_splice $fd_read 1 '"''"' $REPLY "close" ) | '"$cmdline_str"'
             fi'
             fi
-            
+
         elif ${byte_mode_flag}; then
             # BYTE ARGS PAYLOAD
             pCode='
             read -r -u $fd_read -N $REPLY A
             '"$cmdline_str"' "${A}"'
-            
+
         else
             # LINE ARGS PAYLOAD (Default)
             if ${unsafe_flag}; then
@@ -300,13 +338,13 @@ toc() { :; }
             else
                 cmdline_str+=' "${A[@]}"'
             fi
-            
+
             if [[ ${delimiter_val} ]]; then
                 printf -v delimiter_str '%q' "${delimiter_val}"
             else
                 delimiter_str="''"
             fi
-            
+
             pCode='
             mapfile -t -u $fd_read -n $REPLY -d '"${delimiter_str}"' A
             '"$cmdline_str"
@@ -321,9 +359,10 @@ toc() { :; }
 (
   LC_ALL=C
   set +m
+  export RING_NODE_ID="$2"
   {
     ID="$1"
-    shift 1
+    shift 2
     ring_worker inc $fd_read
     while ring_claim; do
         [[ "$REPLY" == "0" ]] && break
@@ -340,27 +379,28 @@ P+=($!)
 
         # --- SPAWN LOOP ---
         nWorkers=0
+        node_idx=0
         while true; do
             read -r -u $fd_spawn_r N
             [[ "$N" == 'x' ]] && break
-            
+
             target=$(( nWorkers + N ))
             (( target > nWorkersMax )) && target=$nWorkersMax
-            
+
             for (( ; nWorkers < target; nWorkers++ )); do
-                spawn_worker "$nWorkers"
+                spawn_worker "$nWorkers" "$node_idx"
+                node_idx=$(( (node_idx + 1) % FORKRUN_NUM_NODES ))
             done
         done
 
         ${verbose_flag} && printf '\nSPAWNED %s workers (%s)\n' "${nWorkers}" "${nWorkersA[*]}" >&2
 
         # --- SHUTDOWN ---
-# declare -p  cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart order_mode unsafe_flag stdin_flag byte_mode_flag order_mode unsafe_flag LC_ALL fd_out P order_args ring_init_opts
         exec {fd_spawn_r}<&- {fd_fallow_w}>&-
         [[ "${order_mode}" == "realtime" ]] || exec {fd_order_w}>&-
-        
+
         wait
-        
+
         ring_destroy
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
 
@@ -688,10 +728,10 @@ _forkrun_base64_to_file() {
 
 _forkrun_file_to_base64() {
 
-    local nn kk kk0 k1 k2 out out0 outF outN v1 v2 nnSum hexProg quoteFlag noCompressFlag IFS IFS0
+   # local nn kk kk0 k1 k2 out out0 outF outN v1 v2 nnSum hexProg quoteFlag noCompressFlag IFS IFS0
     local -I extglobState
 
-    local -a charmap compressI compressV outA nnSumA
+ #   local -a charmap compressI compressV outA nnSumA
     local LC_ALL=C
 
     [[ "${extglobState}" == '-'[su] ]] || {
@@ -790,15 +830,22 @@ _forkrun_file_to_base64() {
         printf -v out0 '%s\n' "${outN} ${outB}" "${nnSumA[@]}"
     else
         # initial compression run
+        : "${testFlag:=true}"
         compressI=('~' '`' '!' '#' '$' '%' '^' '&' '*' '(' ')' '-' '+' '=' '{' '[' '}' ']' ':' ';' '<' ',' '>' '.' '?' '/' '|')
-        mapfile -t compressV < <(sed -E 's/(00+)(([^0]+0?[^0]+)*)/\1\n\2/g; s/([^0]+)/\1\n/g' <<<"${out}" | grep -E '..' | sort | uniq -c | sed -E 's/^[ \t]+//' | grep -vE '^1 ' | sort -nr -k1,1 | while read -r v1 v2; do (( v0 = v1 * ${#v2} - v1 - ${#v2} )); printf '%s %s %s %s\n' "$v0" "${#v2}" "$v1" "$v2"; done | grep -vE '^-' | sort -nr -k 1,1 | head -n 25 | sort -nr -k2,2 | sed -E 's/^([0-9]+ ){3}//')
-        for kk in "${!compressV[@]}"; do
+        compressV=()
+        kk=0
+        for kk0 in 7 6 5 4 3; do
+        mapfile -t compressV0 < <({ sed -E 's/(00+)(([^0]+0?[^0]+)*)/\1\n\2/g; s/([^0]+)/\1\n/g' <<<"${out}"; sed -E 's/^((....)*).*$/\1/; s/^(.)(.)(.)(.*)$/\1\2\3\4 \2\3\4  \3\4   \4   /; s/(....)/\1\n/g' <<<"${out}" | sed -zE 's/^(....)\n/\1\n\1\n/; s/\n(....)\n(....)\n(....)/\1\n\1\n\1\2\n\2\n\2\3\n\3\n\3/g'; X="${out:0:1}"; while read -r -N 1 x; do if [[ "$x" == "${X: -1}" ]] && (( ${#X} < 32 )); then X+="$x"; else (( ${#X} > 1 )) && echo "$X"; X="$x"; fi; done <<<"$out"; } | grep -E '..' | sort | uniq -c | sed -E 's/^[ \t]+//' | grep -vE '^1 ' | sort -nr -k1,1 | while read -r v1 v2; do (( v0 = v1 * ${#v2} - v1 - ${#v2} )); printf '%s %s %s %s\n' "$v0" "${#v2}" "$v1" "$v2"; done | grep -vE '^-' | sort -nr -k 1,1 | head -n $kk0 | sort -nr -k2,2 | sed -E 's/^([0-9]+ ){3}//')
+        compressV+=("${compressV0[@]}")
+        for (( ; kk<${#compressV[@]}; kk++)); do
             out="${out//"${compressV[$kk]}"/"${compressI[$kk]}"}"
         done
+        done
+
         # 2 final compression runs where we re-generate the list of possible replacements and expand it to also look for simple repeated chars (with a limit of a maximum of 32 chars)
         for kk0 in 1 2; do
             ((kk++))
-            compressV[$kk]="$({ sed -E 's/(00+)(([^0]+0?[^0]+)*)/\1\n\2/g; s/([^0]+)/\1\n/g' <<<"${out}" | grep -E '..' | sort | uniq -c | sed -E 's/^[ \t]+//'; { read -r -N 1 y; while read -r -N 1 x; do if [[ "$x" == "${y: -1}" ]]; then y+="$x"; else echo "$y"; read -r -N 1 y; fi; done; } <<<"${out}" | grep -E '..' | sort | uniq -c| sed -E 's/^[ \t]+//' | while read -r v1 v2; do if ((${#v2} > 32 )); then (( v1 = v1 * ( ${#v2} / 32 ) )); v2="${v2:0:32}"; fi; printf '%s %s\n' "$v1" "$v2"; done } | grep -vE '^1 '   | sort -nr -k1,1 | while read -r v1 v2; do (( v0 = v1 * ${#v2} - v1 - ${#v2} )); printf '%s %s %s %s\n' "$v0" "${#v2}" "$v1" "$v2"; done | grep -vE '^-' | sort -nr -k 1,1 | head -n 1 | sed -E 's/^([0-9]+ ){3}//')"
+            compressV[$kk]="$({ { sed -E 's/(00+)(([^0]+0?[^0]+)*)/\1\n\2/g; s/([^0]+)/\1\n/g' <<<"${out}"; sed -E 's/^((....)*).*$/\1/; s/^(.)(.)(.)(.*)$/\1\2\3\4 \2\3\4  \3\4   \4   /; s/(....)/\1\n/g' <<<"${out}" | sed -zE 's/^(....)\n/\1\n\1\n/; s/\n(....)\n(....)\n(....)/\1\n\1\n\1\2\n\2\n\2\3\n\3\n\3/g'; X="${out:0:1}"; while read -r -N 1 x; do if [[ "$x" == "${X: -1}" ]] && (( ${#X} < 32 )); then X+="$x"; else (( ${#X} > 1 )) && echo "$X"; X="$x"; fi; done <<<"$out"; } | grep -E '..' | sort | uniq -c | sed -E 's/^[ \t]+//'; { read -r -N 1 y; while read -r -N 1 x; do if [[ "$x" == "${y: -1}" ]]; then y+="$x"; else echo "$y"; read -r -N 1 y; fi; done; } <<<"${out}" | grep -E '..' | sort | uniq -c| sed -E 's/^[ \t]+//' | while read -r v1 v2; do if ((${#v2} > 32 )); then (( v1 = v1 * ( ${#v2} / 32 ) )); v2="${v2:0:32}"; fi; printf '%s %s\n' "$v1" "$v2"; done } | grep -vE '^1 '   | sort -nr -k1,1 | while read -r v1 v2; do (( v0 = v1 * ${#v2} - v1 - ${#v2} )); printf '%s %s %s %s\n' "$v0" "${#v2}" "$v1" "$v2"; done | grep -vE '^-' | sort -nr -k 1,1 | head -n 1 | sed -E 's/^([0-9]+ ){3}//')"
             out="${out//"${compressV[$kk]}"/"${compressI[$kk]}"}"
         done
 
