@@ -11,9 +11,10 @@ shopt -s extglob
 [[ -f ./f1 ]] || yes $'\n'|head -n 10000000 >f1
 [[ -f ./f2 ]] || seq 10000000 >f2
 [[ -f ./f3 ]] ||  find /usr /etc /opt /var /home -type f >f3
+[[ -f ./f4 ]] ||  find / -type f >f4
 
 # setup tests
-F=(f1 f2 f3)
+F=(f1 f2 f3 f4)
 
 N=$(( ${#F[@]} * ${#G[@]} * ${#C[@]} * 4 ))
 K=0
