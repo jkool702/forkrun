@@ -37,8 +37,7 @@ t_user=${t_user//[.s:]/}
 t_sys=${t_sys//[.s:]/}
 
 cpu=$(( 1000 * ( 60000 * ( 10#0${t_user%m*} + 10#0${t_sys%m*} ) + 10#0${t_user#*m} + 10#0${t_sys#*m} ) /  ( 60000 * 10#0${t_real%m*} + 10#0${t_real#*m} ) ))
-
-printf '\nCPU UTILIZATION: %0.1d.%0.3d / %d\n' "${cpu:0:$((${#cpu}-3))}" "${cpu:$((${#cpu}-3))}" "$(nproc)"
+printf '\nCPU UTILIZATION: %d.%03d / %d\n' "$(( cpu / 1000 ))" "$(( cpu % 1000 ))" "$(nproc)"
 printf '\n-----------------------------------------\n'
 
 exec {fd_time}<&-
@@ -104,7 +103,7 @@ for f in "${!outA[@]}"; do
 done
 
 cpu=$(( 1000 * ( 10#0${outA[user]} + 10#0${outA[sys]} ) / 10#0${outA[real]} ))
-printf '\n\nOVERALL CPU UTILIZATION: %d.%0.3d / %s\n\n' "${cpu:0:$((${#cpu}-3))}" "${cpu:$((${#cpu}-3))}" "$(nproc)" |  tee -a benchmark.out >&$fd2
+printf '\n\nOVERALL CPU UTILIZATION: %d.%03d / %d\n\n' "$(( cpu / 1000 ))" "$(( cpu % 1000 ))" "$(nproc)" | tee -a benchmark.out >&$fd2
 
-\rm "${$F[@]}"
+\rm "${F[@]}"
 ) {fd1}>&1 {fd2}>&2
