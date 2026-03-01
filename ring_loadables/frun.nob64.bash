@@ -869,7 +869,7 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # removed embedded base64 
+declare -A b64=() # removed base64 embeddings to reduce size from 500kb -> 30kb
 
 _forkrun_bootstrap_setup --force
 
