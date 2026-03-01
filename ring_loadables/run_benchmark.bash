@@ -8,13 +8,17 @@ shopt -s extglob
 #. "${frun_path%%$'\n'*}"
 
 # setup test files
-[[ -f ./f1 ]] || yes $'\n'|head -n 10000000 >f1
-[[ -f ./f2 ]] || seq 10000000 >f2
+[[ -f ./f1 ]] || yes $'\n'|head -n 100000000 >f1
+[[ -f ./f2 ]] || seq 100000000 >f2
 [[ -f ./f3 ]] ||  find /usr /etc /opt /var /home -type f >f3
-[[ -f ./f4 ]] ||  find / -type f >f4
+#[[ -f ./f4 ]] ||  find / -type f >f4
 
 # setup tests
-F=(f1 f2 f3 f4)
+if [[ -f ./f4 ]]; then
+    F=(f1 f2 f3 f4)
+else
+    F=(f1 f2 f3)
+fi
 
 N=$(( ${#F[@]} * ${#G[@]} * ${#C[@]} * 4 ))
 K=0
@@ -70,7 +74,7 @@ done
 
 # stats on input files
 printf '\n\n-----------------------------\nINPUT DATA STATS\n\n';
-for f in f1 f2 f3; do
+for f in "${F[@]}"; do
 printf '\n\nNAME: %s\nSIZE: %s bytes\nLINE COUNT: %s lines\n' "$f" "$(du -d 0 -b "$f" | sed -E s/'[ \t].*$//')" "$(wc -l <"$f")"
 done
 
