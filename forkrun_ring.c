@@ -206,7 +206,7 @@ static int g_debug = 0;
     X(ring_seal,            ring_seal_main,           "ring_seal <FD>",                 "Seal memfd") \
     X(ring_fcntl,           ring_fcntl_main,          "ring_fcntl <FD> <cmd>",          "File control") \
     X(ring_pipe,            ring_pipe_main,           "ring_pipe <ARR|RD> [WR]",        "Create pipe") \
-    X(ring_splice,          ring_splice_main,         "ring_splice <IN> <OUT> <OFF> <LEN> [close]", "Splice data") \
+    X(ring_splice,          ring_splice_main,         "ring_splice <IN> <OUT> <OFF> <LEN>[close]", "Splice data") \
     X(ring_version,         ring_version_main,        "ring_version[-t|-o|-m|-g|-f|-a]", "Show build metadata") \
     X(ring_list,            ring_list_main,           "ring_list [VAR]",                "List loadables")
 
@@ -1049,15 +1049,23 @@ static int ring_indexer_numa_main(int argc, char **argv) {
 
         size_t to_read = chunk_end - scan_start;
         if (to_read > 0) {
-            ssize_t n = pread(memfd, tail_buf, to_read, scan_start);
-            if (n > 0) {
-                char *nl = memrchr(tail_buf, '\n', n);
+            size_t total_n = 0;
+            while (total_n < to_read) {
+                ssize_t n = pread(memfd, tail_buf + total_n, to_read - total_n, scan_start + total_n);
+                if (n > 0) {
+                    total_n += n;
+                } else if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            if (total_n > 0) {
+                char *nl = memrchr(tail_buf, '\n', total_n);
                 if (nl) {
                     actual_end = scan_start + (nl - tail_buf) + 1;
                     found_newline = true;
                 }
-            } else if (n < 0 && g_debug) {
-                fprintf(stderr, "forkrun [DEBUG] indexer pread failed: %s\n", strerror(errno));
             }
         }
 
@@ -1674,76 +1682,75 @@ static int ring_scanner_main(int argc, char **argv) {
         if ((p >= end || force_refill) && status != 1) {
             force_refill = false;
             
-            if (!atomic_load_acquire(&state[0].ingest_complete)) {
-                struct pollfd pfd_eof = { .fd = evfd_ingest_eof, .events = POLLIN };
-                if (poll(&pfd_eof, 1, 0) > 0) {
-                    atomic_store_release(&state[0].ingest_complete, 1);
-                    status = 1;
-                }
-            }
+            // Track exactly what data we already have to prevent cavitating loops
+            uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
+            uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
             
-            if (status != 1) {
-                uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
-                uint64_t current_p_offset = buf_base_offset + (p - buf);
-                
-                if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {} 
-                ssize_t n = read(fd, buf, chunk_sz);
-                
-                if (n > 0 && (uint64_t)n > prev_avail) {
+            if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {} 
+            ssize_t n = read(fd, buf, chunk_sz);
+            
+            if (n > 0 && (uint64_t)n > prev_avail) {
+                // We fetched genuinely new data from the memfd
+                buf_base_offset = current_p_offset;
+                p = buf; 
+                end = buf + n;
+                status = 0;
+                stall_meter >>= 1; 
+            } else {
+                // We did not gain any new data. Restore pointers and verify EOF status
+                if (n > 0) {
                     buf_base_offset = current_p_offset;
-                    p = buf; end = buf + n;
-                    status = 0;
-                    stall_meter >>= 1;
-                } else {
-                    if (n > 0) {
-                        buf_base_offset = current_p_offset;
-                        p = buf; end = buf + n;
-                    }
-                    
-                    struct pollfd pfds[2] = { { .fd = evfd_ingest_data, .events = POLLIN }, { .fd = evfd_ingest_eof,  .events = POLLIN } };
+                    p = buf; 
+                    end = buf + n;
+                }
+                
+                if (!atomic_load_acquire(&state[0].ingest_complete)) {
+                    struct pollfd pfds[2] = { { .fd = evfd_ingest_data, .events = POLLIN }, { .fd = evfd_ingest_eof, .events = POLLIN } };
                     if (poll(pfds, 2, 0) > 0) {
                         if (pfds[1].revents & POLLIN) atomic_store_release(&state[0].ingest_complete, 1);
                     }
-                    if (atomic_load_acquire(&state[0].ingest_complete)) status = 1;
+                }
+                
+                if (atomic_load_acquire(&state[0].ingest_complete)) {
+                    // We proved there is no new data mathematically AND the ingester is done.
+                    // This is the ONLY time it is safe to declare true EOF.
+                    status = 1;
+                } else {
+                    // Ingester is working, but data is slow. Wait for it.
+                    bool starving = (atomic_load_relaxed(&state[0].active_waiters) > 0);
+                    scanner_adaptive_commit(starving);
+                    SCANNER_WAKE();
                     
-                    if (status != 1) {
-                        bool starving = (atomic_load_relaxed(&state[0].active_waiters) > 0);
-                        scanner_adaptive_commit(starving);
-                        SCANNER_WAKE();
-                        
-                        int poll_timeout = 100;
-                        if (starving && timeout_us >= 0) {
-                            if (first_wait_ts == 0) first_wait_ts = get_us_time();
-                            uint64_t now = get_us_time();
-                            if (timeout_us == 0 || (now - first_wait_ts >= (uint64_t)timeout_us)) {
-                                poll_timeout = 0;
-                            } else {
-                                uint64_t rem = (timeout_us - (now - first_wait_ts)) / 1000;
-                                poll_timeout = (rem > 100) ? 100 : (int)rem;
-                            }
+                    int poll_timeout = 100;
+                    if (starving && timeout_us >= 0) {
+                        if (first_wait_ts == 0) first_wait_ts = get_us_time();
+                        uint64_t now = get_us_time();
+                        if (timeout_us == 0 || (now - first_wait_ts >= (uint64_t)timeout_us)) {
+                            poll_timeout = 0;
                         } else {
-                            first_wait_ts = 0;
+                            uint64_t rem = (timeout_us - (now - first_wait_ts)) / 1000;
+                            poll_timeout = (rem > 100) ? 100 : (int)rem;
                         }
+                    } else {
+                        first_wait_ts = 0;
+                    }
 
-                        int ret = poll(pfds, 2, poll_timeout);
-                        if (ret > 0) {
-                            if (pfds[0].revents & POLLIN) {
-                                uint64_t v; if(read(evfd_ingest_data, &v, 8)){};
-                                status = 2; 
-                            }
-                            if (pfds[1].revents & POLLIN) {
-                                atomic_store_release(&state[0].ingest_complete, 1);
-                                status = 1;
-                            }
+                    struct pollfd pfds[2] = { { .fd = evfd_ingest_data, .events = POLLIN }, { .fd = evfd_ingest_eof, .events = POLLIN } };
+                    int ret = poll(pfds, 2, poll_timeout);
+                    if (ret > 0) {
+                        if (pfds[0].revents & POLLIN) {
+                            uint64_t v; if(read(evfd_ingest_data, &v, 8)){};
+                        }
+                        if (pfds[1].revents & POLLIN) {
+                            atomic_store_release(&state[0].ingest_complete, 1);
                         }
                     }
-                    if (status == 2) {
-                        experienced_stall = true;
-                        uint64_t _xLim = W + DAMPING_OFFSET;
-                        stall_meter = (stall_meter + _xLim) >> 1;
-                        if (p < end) force_refill = true;
-                        continue; 
-                    }
+                    
+                    experienced_stall = true;
+                    uint64_t _xLim = W + DAMPING_OFFSET;
+                    stall_meter = (stall_meter + _xLim) >> 1;
+                    if (p < end) force_refill = true;
+                    continue; 
                 }
             }
         }
@@ -2239,12 +2246,11 @@ static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset, size_t coun
     while (total < count) {
         ssize_t s = sendfile(out_fd, in_fd, offset, count - total);
         if (s < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN) { usleep(100); continue; }
+            if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; }
             return total > 0 ? (ssize_t)total : -1;
         }
         if (s == 0) {
-            if (retries++ < 100) { usleep(100); continue; }
+            if (retries++ < 1000) { usleep(100); continue; }
             break;
         }
         retries = 0;
@@ -2261,9 +2267,12 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
     while (total_read < len) {
         size_t to_read = (len - total_read > BUF_SIZE) ? BUF_SIZE : (len - total_read);
         ssize_t r = pread(fd_in, buf, to_read, off + total_read);
-        if (r < 0) { if (errno == EINTR) continue; free(buf); return -1; }
+        if (r < 0) { 
+            if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; }
+            free(buf); return -1; 
+        }
         if (r == 0) {
-            if (retries++ < 100) { usleep(100); continue; }
+            if (retries++ < 1000) { usleep(100); continue; }
             break; 
         }
         retries = 0;
@@ -2271,7 +2280,10 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
         size_t to_write = r;
         while (to_write > 0) {
             ssize_t w = write(fd_out, write_ptr, to_write);
-            if (w < 0) { if (errno == EINTR) continue; free(buf); return -1; }
+            if (w < 0) { 
+                if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; }
+                free(buf); return -1; 
+            }
             write_ptr += w;
             to_write -= w;
         }
@@ -2758,12 +2770,19 @@ static int ring_copy_main(int argc, char **argv) {
                     }
                     ssize_t s1 = splice(infd, &off, pfd[1], NULL, chunk, SPLICE_F_MOVE|SPLICE_F_MORE);
                     if (s1 <= 0) break; 
+                    
+                    // FIXED: Robust inner drain loop to prevent stranded pipe bytes
                     size_t written = 0;
                     while (written < (size_t)s1) {
                         ssize_t s2 = splice(pfd[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE|SPLICE_F_MORE);
-                        if (s2 <= 0) break;
+                        if (s2 <= 0) {
+                            if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
+                            break;
+                        }
                         written += s2;
                     }
+                    if (written < (size_t)s1) break; // Fatal error on output
+                    
                     if (evfd_ingest_data >= 0) { uint64_t v=1; SYS_CHK(write(evfd_ingest_data, &v, 8)); }
                     total_moved += written;
                 }
@@ -2796,10 +2815,22 @@ static int ring_copy_main(int argc, char **argv) {
             while(1) {
                 ssize_t n = splice(infd, NULL, pipefd[1], NULL, chunk, SPLICE_F_MOVE|SPLICE_F_MORE);
                 if (n <= 0) break;
-                ssize_t m = splice(pipefd[0], NULL, outfd, NULL, n, SPLICE_F_MOVE|SPLICE_F_MORE);
-                if (m <= 0) break;
+                
+                // FIXED: Robust inner drain loop for the non-regular file fallback
+                size_t written = 0;
+                while (written < (size_t)n) {
+                    ssize_t m = splice(pipefd[0], NULL, outfd, NULL, n - written, SPLICE_F_MOVE|SPLICE_F_MORE);
+                    if (m <= 0) {
+                        if (m < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
+                        break;
+                    }
+                    written += m;
+                }
+                if (written < (size_t)n) break; // Fatal error on output
+                
                 if (evfd_ingest_data >= 0) { uint64_t v=1; SYS_CHK(write(evfd_ingest_data, &v, 8)); }
-                total_moved += n;
+                total_moved += written;
+                
                 if (total_moved > next_check) {
                     struct sysinfo si;
                     if (sysinfo(&si) == 0) {
