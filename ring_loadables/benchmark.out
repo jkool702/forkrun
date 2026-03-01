@@ -1,4753 +1,3565 @@
 
 (1): time { frun   : <f1 >/dev/null; }
-real	0m0.477s
-user	0m11.411s
-sys	0m0.158s
+real	0m4.124s
+user	1m50.671s
+sys	0m0.798s
 
-CPU UTILIZATION: 24.253 / 28
+CPU UTILIZATION: 27.029 / 28
 
 -----------------------------------------
 
 (2): time { frun   : <f1 | wc -l; }
-real	0m0.450s
-user	0m11.209s
-sys	0m0.110s
+real	0m4.176s
+user	1m50.682s
+sys	0m0.779s
 
-CPU UTILIZATION: 25.153 / 28
+CPU UTILIZATION: 26.690 / 28
 
 -----------------------------------------
 
 (3): time { cat f1 | frun   : >/dev/null; }
-real	0m0.454s
-user	0m11.298s
-sys	0m0.120s
+real	0m4.175s
+user	1m50.669s
+sys	0m0.724s
 
-CPU UTILIZATION: 25.149 / 28
+CPU UTILIZATION: 26.680 / 28
 
 -----------------------------------------
 
 (4): time { cat f1 | frun   : | wc -l; }
-real	0m0.454s
-user	0m11.289s
-sys	0m0.146s
+real	0m4.171s
+user	1m50.408s
+sys	0m0.749s
 
-CPU UTILIZATION: 25.187 / 28
+CPU UTILIZATION: 26.649 / 28
 
 -----------------------------------------
 
 (5): time { frun   echo <f1 >/dev/null; }
-real	0m0.484s
-user	0m12.116s
-sys	0m0.163s
+real	0m4.492s
+user	1m59.154s
+sys	0m0.957s
 
-CPU UTILIZATION: 25.369 / 28
+CPU UTILIZATION: 26.738 / 28
 
 -----------------------------------------
 
 (6): time { frun   echo <f1 | wc -l; }
-real	0m0.485s
-user	0m12.101s
-sys	0m0.177s
+real	0m4.504s
+user	1m59.295s
+sys	0m1.095s
 
-CPU UTILIZATION: 25.315 / 28
+CPU UTILIZATION: 26.729 / 28
 
 -----------------------------------------
 
 (7): time { cat f1 | frun   echo >/dev/null; }
-real	0m0.484s
-user	0m12.128s
-sys	0m0.152s
+real	0m4.497s
+user	1m58.926s
+sys	0m1.002s
 
-CPU UTILIZATION: 25.371 / 28
+CPU UTILIZATION: 26.668 / 28
 
 -----------------------------------------
 
 (8): time { cat f1 | frun   echo | wc -l; }
-real	0m0.483s
-user	0m12.058s
-sys	0m0.158s
+real	0m4.506s
+user	1m59.511s
+sys	0m1.117s
 
-CPU UTILIZATION: 25.291 / 28
+CPU UTILIZATION: 26.770 / 28
 
 -----------------------------------------
 
 (9): time { frun   printf %s\n <f1 >/dev/null; }
-real	0m0.821s
-user	0m16.125s
-sys	0m5.192s
+real	0m7.811s
+user	2m40.139s
+sys	0m49.605s
 
-CPU UTILIZATION: 25.964 / 28
+CPU UTILIZATION: 26.852 / 28
 
 -----------------------------------------
 
 (10): time { frun   printf %s\n <f1 | wc -l; }
-real	0m0.836s
-user	0m16.374s
-sys	0m5.157s
+real	0m7.877s
+user	2m40.520s
+sys	0m50.523s
 
-CPU UTILIZATION: 25.754 / 28
+CPU UTILIZATION: 26.792 / 28
 
 -----------------------------------------
 
 (11): time { cat f1 | frun   printf %s\n >/dev/null; }
-real	0m0.833s
-user	0m16.236s
-sys	0m5.112s
+real	0m8.042s
+user	2m43.929s
+sys	0m51.649s
 
-CPU UTILIZATION: 25.627 / 28
+CPU UTILIZATION: 26.806 / 28
 
 -----------------------------------------
 
 (12): time { cat f1 | frun   printf %s\n | wc -l; }
-real	0m0.826s
-user	0m16.161s
-sys	0m5.226s
+real	0m7.848s
+user	2m39.790s
+sys	0m49.798s
 
-CPU UTILIZATION: 25.892 / 28
+CPU UTILIZATION: 26.705 / 28
 
 -----------------------------------------
 
 (13): time { frun  -l 1:0 : <f1 >/dev/null; }
-real	0m0.453s
-user	0m11.283s
-sys	0m0.129s
+real	0m4.159s
+user	1m50.588s
+sys	0m0.720s
 
-CPU UTILIZATION: 25.192 / 28
+CPU UTILIZATION: 26.763 / 28
 
 -----------------------------------------
 
 (14): time { frun  -l 1:0 : <f1 | wc -l; }
-real	0m0.451s
-user	0m11.240s
-sys	0m0.125s
+real	0m4.160s
+user	1m50.904s
+sys	0m0.725s
 
-CPU UTILIZATION: 25.199 / 28
+CPU UTILIZATION: 26.833 / 28
 
 -----------------------------------------
 
 (15): time { cat f1 | frun  -l 1:0 : >/dev/null; }
-real	0m0.455s
-user	0m11.244s
-sys	0m0.137s
+real	0m4.169s
+user	1m50.587s
+sys	0m0.749s
 
-CPU UTILIZATION: 25.011 / 28
+CPU UTILIZATION: 26.705 / 28
 
 -----------------------------------------
 
 (16): time { cat f1 | frun  -l 1:0 : | wc -l; }
-real	0m0.453s
-user	0m11.250s
-sys	0m0.139s
+real	0m4.162s
+user	1m50.641s
+sys	0m0.738s
 
-CPU UTILIZATION: 25.141 / 28
+CPU UTILIZATION: 26.760 / 28
 
 -----------------------------------------
 
 (17): time { frun  -l 1:0 echo <f1 >/dev/null; }
-real	0m0.499s
-user	0m12.280s
-sys	0m0.180s
+real	0m4.510s
+user	1m59.616s
+sys	0m0.971s
 
-CPU UTILIZATION: 24.969 / 28
+CPU UTILIZATION: 26.737 / 28
 
 -----------------------------------------
 
 (18): time { frun  -l 1:0 echo <f1 | wc -l; }
-real	0m0.492s
-user	0m12.258s
-sys	0m0.169s
+real	0m4.511s
+user	1m59.302s
+sys	0m1.053s
 
-CPU UTILIZATION: 25.258 / 28
+CPU UTILIZATION: 26.680 / 28
 
 -----------------------------------------
 
 (19): time { cat f1 | frun  -l 1:0 echo >/dev/null; }
-real	0m0.493s
-user	0m12.282s
-sys	0m0.172s
+real	0m4.526s
+user	1m59.730s
+sys	0m1.001s
 
-CPU UTILIZATION: 25.261 / 28
+CPU UTILIZATION: 26.674 / 28
 
 -----------------------------------------
 
 (20): time { cat f1 | frun  -l 1:0 echo | wc -l; }
-real	0m0.514s
-user	0m12.295s
-sys	0m0.155s
+real	0m4.497s
+user	1m59.248s
+sys	0m1.070s
+
+CPU UTILIZATION: 26.755 / 28
+
+-----------------------------------------
+
+(21): time { frun  -l 1:0 printf %s\n <f1 >/dev/null; }
+real	0m7.903s
+user	2m41.214s
+sys	0m50.391s
+
+CPU UTILIZATION: 26.775 / 28
+
+-----------------------------------------
+
+(22): time { frun  -l 1:0 printf %s\n <f1 | wc -l; }
+real	0m8.013s
+user	2m44.230s
+sys	0m50.502s
+
+CPU UTILIZATION: 26.797 / 28
+
+-----------------------------------------
+
+(23): time { cat f1 | frun  -l 1:0 printf %s\n >/dev/null; }
+real	0m7.851s
+user	2m40.222s
+sys	0m49.643s
+
+CPU UTILIZATION: 26.730 / 28
+
+-----------------------------------------
+
+(24): time { cat f1 | frun  -l 1:0 printf %s\n | wc -l; }
+real	0m7.927s
+user	2m41.041s
+sys	0m51.408s
+
+CPU UTILIZATION: 26.800 / 28
+
+-----------------------------------------
+
+(25): time { frun -k  : <f1 >/dev/null; }
+real	0m4.119s
+user	1m48.833s
+sys	0m0.697s
+
+CPU UTILIZATION: 26.591 / 28
+
+-----------------------------------------
+
+(26): time { frun -k  : <f1 | wc -l; }
+real	0m4.186s
+user	1m50.852s
+sys	0m0.815s
+
+CPU UTILIZATION: 26.676 / 28
+
+-----------------------------------------
+
+(27): time { cat f1 | frun -k  : >/dev/null; }
+real	0m4.159s
+user	1m50.247s
+sys	0m0.732s
+
+CPU UTILIZATION: 26.684 / 28
+
+-----------------------------------------
+
+(28): time { cat f1 | frun -k  : | wc -l; }
+real	0m4.180s
+user	1m51.183s
+sys	0m0.710s
+
+CPU UTILIZATION: 26.768 / 28
+
+-----------------------------------------
+
+(29): time { frun -k  echo <f1 >/dev/null; }
+real	0m4.478s
+user	1m59.295s
+sys	0m0.928s
+
+CPU UTILIZATION: 26.847 / 28
+
+-----------------------------------------
+
+(30): time { frun -k  echo <f1 | wc -l; }
+real	0m4.596s
+user	1m59.586s
+sys	0m0.998s
+
+CPU UTILIZATION: 26.236 / 28
+
+-----------------------------------------
+
+(31): time { cat f1 | frun -k  echo >/dev/null; }
+real	0m4.612s
+user	2m0.594s
+sys	0m0.968s
+
+CPU UTILIZATION: 26.357 / 28
+
+-----------------------------------------
+
+(32): time { cat f1 | frun -k  echo | wc -l; }
+real	0m4.558s
+user	1m59.253s
+sys	0m1.037s
+
+CPU UTILIZATION: 26.390 / 28
+
+-----------------------------------------
+
+(33): time { frun -k  printf %s\n <f1 >/dev/null; }
+real	0m8.071s
+user	2m39.843s
+sys	0m50.389s
+
+CPU UTILIZATION: 26.047 / 28
+
+-----------------------------------------
+
+(34): time { frun -k  printf %s\n <f1 | wc -l; }
+real	0m7.899s
+user	2m40.772s
+sys	0m50.682s
+
+CPU UTILIZATION: 26.769 / 28
+
+-----------------------------------------
+
+(35): time { cat f1 | frun -k  printf %s\n >/dev/null; }
+real	0m7.844s
+user	2m39.857s
+sys	0m50.590s
+
+CPU UTILIZATION: 26.829 / 28
+
+-----------------------------------------
+
+(36): time { cat f1 | frun -k  printf %s\n | wc -l; }
+real	0m7.853s
+user	2m39.969s
+sys	0m49.678s
+
+CPU UTILIZATION: 26.696 / 28
+
+-----------------------------------------
+
+(37): time { frun -k -l 1:0 : <f1 >/dev/null; }
+real	0m4.165s
+user	1m50.777s
+sys	0m0.709s
+
+CPU UTILIZATION: 26.767 / 28
+
+-----------------------------------------
+
+(38): time { frun -k -l 1:0 : <f1 | wc -l; }
+real	0m4.205s
+user	1m51.383s
+sys	0m0.742s
+
+CPU UTILIZATION: 26.664 / 28
+
+-----------------------------------------
+
+(39): time { cat f1 | frun -k -l 1:0 : >/dev/null; }
+real	0m4.188s
+user	1m51.058s
+sys	0m0.748s
+
+CPU UTILIZATION: 26.696 / 28
+
+-----------------------------------------
+
+(40): time { cat f1 | frun -k -l 1:0 : | wc -l; }
+real	0m4.164s
+user	1m50.391s
+sys	0m0.724s
+
+CPU UTILIZATION: 26.684 / 28
+
+-----------------------------------------
+
+(41): time { frun -k -l 1:0 echo <f1 >/dev/null; }
+real	0m4.509s
+user	1m59.507s
+sys	0m0.957s
+
+CPU UTILIZATION: 26.716 / 28
+
+-----------------------------------------
+
+(42): time { frun -k -l 1:0 echo <f1 | wc -l; }
+real	0m4.479s
+user	1m59.501s
+sys	0m0.946s
+
+CPU UTILIZATION: 26.891 / 28
+
+-----------------------------------------
+
+(43): time { cat f1 | frun -k -l 1:0 echo >/dev/null; }
+real	0m4.461s
+user	1m58.650s
+sys	0m0.933s
+
+CPU UTILIZATION: 26.806 / 28
+
+-----------------------------------------
+
+(44): time { cat f1 | frun -k -l 1:0 echo | wc -l; }
+real	0m4.496s
+user	1m58.882s
+sys	0m0.966s
+
+CPU UTILIZATION: 26.656 / 28
+
+-----------------------------------------
+
+(45): time { frun -k -l 1:0 printf %s\n <f1 >/dev/null; }
+real	0m7.989s
+user	2m42.444s
+sys	0m51.604s
+
+CPU UTILIZATION: 26.792 / 28
+
+-----------------------------------------
+
+(46): time { frun -k -l 1:0 printf %s\n <f1 | wc -l; }
+real	0m7.826s
+user	2m39.290s
+sys	0m50.982s
+
+CPU UTILIZATION: 26.868 / 28
+
+-----------------------------------------
+
+(47): time { cat f1 | frun -k -l 1:0 printf %s\n >/dev/null; }
+real	0m7.860s
+user	2m39.396s
+sys	0m50.823s
+
+CPU UTILIZATION: 26.745 / 28
+
+-----------------------------------------
+
+(48): time { cat f1 | frun -k -l 1:0 printf %s\n | wc -l; }
+real	0m7.839s
+user	2m39.059s
+sys	0m50.641s
+
+CPU UTILIZATION: 26.750 / 28
+
+-----------------------------------------
+
+(49): time { frun -u  : <f1 >/dev/null; }
+real	0m4.186s
+user	1m51.242s
+sys	0m0.502s
+
+CPU UTILIZATION: 26.694 / 28
+
+-----------------------------------------
+
+(50): time { frun -u  : <f1 | wc -l; }
+real	0m4.115s
+user	1m49.638s
+sys	0m0.487s
+
+CPU UTILIZATION: 26.761 / 28
+
+-----------------------------------------
+
+(51): time { cat f1 | frun -u  : >/dev/null; }
+real	0m4.114s
+user	1m50.002s
+sys	0m0.528s
+
+CPU UTILIZATION: 26.866 / 28
+
+-----------------------------------------
+
+(52): time { cat f1 | frun -u  : | wc -l; }
+real	0m4.114s
+user	1m49.321s
+sys	0m0.521s
+
+CPU UTILIZATION: 26.699 / 28
+
+-----------------------------------------
+
+(53): time { frun -u  echo <f1 >/dev/null; }
+real	0m4.440s
+user	1m58.340s
+sys	0m0.486s
+
+CPU UTILIZATION: 26.762 / 28
+
+-----------------------------------------
+
+(54): time { frun -u  echo <f1 | wc -l; }
+real	0m4.476s
+user	1m59.333s
+sys	0m0.697s
+
+CPU UTILIZATION: 26.816 / 28
+
+-----------------------------------------
+
+(55): time { cat f1 | frun -u  echo >/dev/null; }
+real	0m4.460s
+user	1m58.842s
+sys	0m0.551s
+
+CPU UTILIZATION: 26.769 / 28
+
+-----------------------------------------
+
+(56): time { cat f1 | frun -u  echo | wc -l; }
+real	0m4.511s
+user	2m0.097s
+sys	0m0.678s
+
+CPU UTILIZATION: 26.773 / 28
+
+-----------------------------------------
+
+(57): time { frun -u  printf %s\n <f1 >/dev/null; }
+real	0m7.191s
+user	2m41.500s
+sys	0m31.113s
+
+CPU UTILIZATION: 26.785 / 28
+
+-----------------------------------------
+
+(58): time { frun -u  printf %s\n <f1 | wc -l; }
+real	0m24.145s
+user	2m3.631s
+sys	8m32.583s
+
+CPU UTILIZATION: 26.349 / 28
+
+-----------------------------------------
+
+(59): time { cat f1 | frun -u  printf %s\n >/dev/null; }
+real	0m7.130s
+user	2m42.338s
+sys	0m28.574s
+
+CPU UTILIZATION: 26.775 / 28
+
+-----------------------------------------
+
+(60): time { cat f1 | frun -u  printf %s\n | wc -l; }
+real	0m24.755s
+user	2m3.444s
+sys	8m49.344s
+
+CPU UTILIZATION: 26.369 / 28
+
+-----------------------------------------
+
+(61): time { frun -u -l 1:0 : <f1 >/dev/null; }
+real	0m4.149s
+user	1m50.240s
+sys	0m0.478s
+
+CPU UTILIZATION: 26.685 / 28
+
+-----------------------------------------
+
+(62): time { frun -u -l 1:0 : <f1 | wc -l; }
+real	0m4.110s
+user	1m49.973s
+sys	0m0.481s
+
+CPU UTILIZATION: 26.874 / 28
+
+-----------------------------------------
+
+(63): time { cat f1 | frun -u -l 1:0 : >/dev/null; }
+real	0m4.158s
+user	1m50.777s
+sys	0m0.520s
+
+CPU UTILIZATION: 26.766 / 28
+
+-----------------------------------------
+
+(64): time { cat f1 | frun -u -l 1:0 : | wc -l; }
+real	0m4.152s
+user	1m50.960s
+sys	0m0.527s
+
+CPU UTILIZATION: 26.851 / 28
+
+-----------------------------------------
+
+(65): time { frun -u -l 1:0 echo <f1 >/dev/null; }
+real	0m4.436s
+user	1m58.652s
+sys	0m0.529s
+
+CPU UTILIZATION: 26.866 / 28
+
+-----------------------------------------
+
+(66): time { frun -u -l 1:0 echo <f1 | wc -l; }
+real	0m4.469s
+user	1m58.703s
+sys	0m0.685s
+
+CPU UTILIZATION: 26.714 / 28
+
+-----------------------------------------
+
+(67): time { cat f1 | frun -u -l 1:0 echo >/dev/null; }
+real	0m4.447s
+user	1m58.206s
+sys	0m0.539s
+
+CPU UTILIZATION: 26.702 / 28
+
+-----------------------------------------
+
+(68): time { cat f1 | frun -u -l 1:0 echo | wc -l; }
+real	0m4.509s
+user	1m59.688s
+sys	0m0.706s
+
+CPU UTILIZATION: 26.700 / 28
+
+-----------------------------------------
+
+(69): time { frun -u -l 1:0 printf %s\n <f1 >/dev/null; }
+real	0m7.132s
+user	2m43.506s
+sys	0m27.224s
+
+CPU UTILIZATION: 26.742 / 28
+
+-----------------------------------------
+
+(70): time { frun -u -l 1:0 printf %s\n <f1 | wc -l; }
+real	0m27.441s
+user	2m3.185s
+sys	9m59.590s
+
+CPU UTILIZATION: 26.339 / 28
+
+-----------------------------------------
+
+(71): time { cat f1 | frun -u -l 1:0 printf %s\n >/dev/null; }
+real	0m7.638s
+user	2m43.542s
+sys	0m40.238s
+
+CPU UTILIZATION: 26.679 / 28
+
+-----------------------------------------
+
+(72): time { cat f1 | frun -u -l 1:0 printf %s\n | wc -l; }
+real	0m26.017s
+user	2m0.151s
+sys	9m25.166s
+
+CPU UTILIZATION: 26.341 / 28
+
+-----------------------------------------
+
+(73): time { frun -U  : <f1 >/dev/null; }
+real	0m1.399s
+user	0m36.350s
+sys	0m0.555s
+
+CPU UTILIZATION: 26.379 / 28
+
+-----------------------------------------
+
+(74): time { frun -U  : <f1 | wc -l; }
+real	0m1.372s
+user	0m35.913s
+sys	0m0.547s
+
+CPU UTILIZATION: 26.574 / 28
+
+-----------------------------------------
+
+(75): time { cat f1 | frun -U  : >/dev/null; }
+real	0m1.379s
+user	0m36.433s
+sys	0m0.617s
+
+CPU UTILIZATION: 26.867 / 28
+
+-----------------------------------------
+
+(76): time { cat f1 | frun -U  : | wc -l; }
+real	0m1.392s
+user	0m36.210s
+sys	0m0.514s
+
+CPU UTILIZATION: 26.382 / 28
+
+-----------------------------------------
+
+(77): time { frun -U  echo <f1 >/dev/null; }
+real	0m1.405s
+user	0m36.499s
+sys	0m0.580s
+
+CPU UTILIZATION: 26.390 / 28
+
+-----------------------------------------
+
+(78): time { frun -U  echo <f1 | wc -l; }
+real	0m1.403s
+user	0m36.633s
+sys	0m0.661s
+
+CPU UTILIZATION: 26.581 / 28
+
+-----------------------------------------
+
+(79): time { cat f1 | frun -U  echo >/dev/null; }
+real	0m1.387s
+user	0m36.499s
+sys	0m0.642s
+
+CPU UTILIZATION: 26.777 / 28
+
+-----------------------------------------
+
+(80): time { cat f1 | frun -U  echo | wc -l; }
+real	0m1.392s
+user	0m36.357s
+sys	0m0.720s
+
+CPU UTILIZATION: 26.635 / 28
+
+-----------------------------------------
+
+(81): time { frun -U  printf %s\n <f1 >/dev/null; }
+real	0m1.421s
+user	0m36.850s
+sys	0m0.648s
+
+CPU UTILIZATION: 26.388 / 28
+
+-----------------------------------------
+
+(82): time { frun -U  printf %s\n <f1 | wc -l; }
+real	0m1.383s
+user	0m36.421s
+sys	0m0.630s
+
+CPU UTILIZATION: 26.790 / 28
+
+-----------------------------------------
+
+(83): time { cat f1 | frun -U  printf %s\n >/dev/null; }
+real	0m1.390s
+user	0m36.073s
+sys	0m0.612s
+
+CPU UTILIZATION: 26.392 / 28
+
+-----------------------------------------
+
+(84): time { cat f1 | frun -U  printf %s\n | wc -l; }
+real	0m1.396s
+user	0m36.606s
+sys	0m0.751s
+
+CPU UTILIZATION: 26.760 / 28
+
+-----------------------------------------
+
+(85): time { frun -U -l 1:0 : <f1 >/dev/null; }
+real	0m1.418s
+user	0m36.769s
+sys	0m0.636s
+
+CPU UTILIZATION: 26.378 / 28
+
+-----------------------------------------
+
+(86): time { frun -U -l 1:0 : <f1 | wc -l; }
+real	0m1.385s
+user	0m36.589s
+sys	0m0.582s
+
+CPU UTILIZATION: 26.838 / 28
+
+-----------------------------------------
+
+(87): time { cat f1 | frun -U -l 1:0 : >/dev/null; }
+real	0m1.385s
+user	0m36.441s
+sys	0m0.629s
+
+CPU UTILIZATION: 26.765 / 28
+
+-----------------------------------------
+
+(88): time { cat f1 | frun -U -l 1:0 : | wc -l; }
+real	0m1.384s
+user	0m36.482s
+sys	0m0.656s
+
+CPU UTILIZATION: 26.833 / 28
+
+-----------------------------------------
+
+(89): time { frun -U -l 1:0 echo <f1 >/dev/null; }
+real	0m1.388s
+user	0m36.934s
+sys	0m0.685s
+
+CPU UTILIZATION: 27.103 / 28
+
+-----------------------------------------
+
+(90): time { frun -U -l 1:0 echo <f1 | wc -l; }
+real	0m1.399s
+user	0m36.518s
+sys	0m0.707s
+
+CPU UTILIZATION: 26.608 / 28
+
+-----------------------------------------
+
+(91): time { cat f1 | frun -U -l 1:0 echo >/dev/null; }
+real	0m1.368s
+user	0m36.543s
+sys	0m0.723s
+
+CPU UTILIZATION: 27.241 / 28
+
+-----------------------------------------
+
+(92): time { cat f1 | frun -U -l 1:0 echo | wc -l; }
+real	0m1.408s
+user	0m36.438s
+sys	0m0.661s
+
+CPU UTILIZATION: 26.348 / 28
+
+-----------------------------------------
+
+(93): time { frun -U -l 1:0 printf %s\n <f1 >/dev/null; }
+real	0m1.378s
+user	0m36.352s
+sys	0m0.653s
+
+CPU UTILIZATION: 26.854 / 28
+
+-----------------------------------------
+
+(94): time { frun -U -l 1:0 printf %s\n <f1 | wc -l; }
+real	0m1.424s
+user	0m36.841s
+sys	0m0.698s
+
+CPU UTILIZATION: 26.361 / 28
+
+-----------------------------------------
+
+(95): time { cat f1 | frun -U -l 1:0 printf %s\n >/dev/null; }
+real	0m1.428s
+user	0m36.911s
+sys	0m0.736s
+
+CPU UTILIZATION: 26.363 / 28
+
+-----------------------------------------
+
+(96): time { cat f1 | frun -U -l 1:0 printf %s\n | wc -l; }
+real	0m1.395s
+user	0m36.685s
+sys	0m0.721s
+
+CPU UTILIZATION: 26.814 / 28
+
+-----------------------------------------
+
+(97): time { frun -s : <f1 >/dev/null; }
+real	0m0.701s
+user	0m2.939s
+sys	0m14.143s
+
+CPU UTILIZATION: 24.368 / 28
+
+-----------------------------------------
+
+(98): time { frun -s : <f1 | wc -l; }
+real	0m0.662s
+user	0m2.880s
+sys	0m13.358s
+
+CPU UTILIZATION: 24.528 / 28
+
+-----------------------------------------
+
+(99): time { cat f1 | frun -s : >/dev/null; }
+real	0m0.706s
+user	0m3.056s
+sys	0m14.176s
+
+CPU UTILIZATION: 24.407 / 28
+
+-----------------------------------------
+
+(100): time { cat f1 | frun -s : | wc -l; }
+real	0m0.662s
+user	0m2.717s
+sys	0m13.643s
+
+CPU UTILIZATION: 24.712 / 28
+
+-----------------------------------------
+
+(101): time { frun -s cat <f1 >/dev/null; }
+real	0m1.091s
+user	0m10.520s
+sys	0m16.107s
+
+CPU UTILIZATION: 24.406 / 28
+
+-----------------------------------------
+
+(102): time { frun -s cat <f1 | wc -l; }
+real	0m1.089s
+user	0m10.354s
+sys	0m16.167s
+
+CPU UTILIZATION: 24.353 / 28
+
+-----------------------------------------
+
+(103): time { cat f1 | frun -s cat >/dev/null; }
+real	0m1.086s
+user	0m10.213s
+sys	0m16.323s
+
+CPU UTILIZATION: 24.434 / 28
+
+-----------------------------------------
+
+(104): time { cat f1 | frun -s cat | wc -l; }
+real	0m1.088s
+user	0m10.573s
+sys	0m15.975s
+
+CPU UTILIZATION: 24.400 / 28
+
+-----------------------------------------
+
+(105): time { frun -s tee <f1 >/dev/null; }
+real	0m1.082s
+user	0m10.342s
+sys	0m15.969s
+
+CPU UTILIZATION: 24.317 / 28
+
+-----------------------------------------
+
+(106): time { frun -s tee <f1 | wc -l; }
+real	0m1.084s
+user	0m10.537s
+sys	0m15.852s
+
+CPU UTILIZATION: 24.344 / 28
+
+-----------------------------------------
+
+(107): time { cat f1 | frun -s tee >/dev/null; }
+real	0m1.065s
+user	0m10.509s
+sys	0m15.432s
+
+CPU UTILIZATION: 24.357 / 28
+
+-----------------------------------------
+
+(108): time { cat f1 | frun -s tee | wc -l; }
+real	0m1.083s
+user	0m10.452s
+sys	0m15.953s
+
+CPU UTILIZATION: 24.381 / 28
+
+-----------------------------------------
+
+(109): time { frun -b 524288 : <f1 >/dev/null; }
+real	0m0.067s
+user	0m0.027s
+sys	0m0.094s
+
+CPU UTILIZATION: 1.805 / 28
+
+-----------------------------------------
+
+(110): time { frun -b 524288 : <f1 | wc -l; }
+real	0m0.071s
+user	0m0.030s
+sys	0m0.100s
+
+CPU UTILIZATION: 1.830 / 28
+
+-----------------------------------------
+
+(111): time { cat f1 | frun -b 524288 : >/dev/null; }
+real	0m0.090s
+user	0m0.032s
+sys	0m0.159s
+
+CPU UTILIZATION: 2.122 / 28
+
+-----------------------------------------
+
+(112): time { cat f1 | frun -b 524288 : | wc -l; }
+real	0m0.089s
+user	0m0.032s
+sys	0m0.167s
+
+CPU UTILIZATION: 2.235 / 28
+
+-----------------------------------------
+
+(113): time { frun -b 524288 cat <f1 >/dev/null; }
+real	0m0.074s
+user	0m0.081s
+sys	0m0.265s
+
+CPU UTILIZATION: 4.675 / 28
+
+-----------------------------------------
+
+(114): time { frun -b 524288 cat <f1 | wc -l; }
+real	0m0.067s
+user	0m0.073s
+sys	0m0.298s
+
+CPU UTILIZATION: 5.537 / 28
+
+-----------------------------------------
+
+(115): time { cat f1 | frun -b 524288 cat >/dev/null; }
+real	0m0.079s
+user	0m0.086s
+sys	0m0.280s
+
+CPU UTILIZATION: 4.632 / 28
+
+-----------------------------------------
+
+(116): time { cat f1 | frun -b 524288 cat | wc -l; }
+real	0m0.080s
+user	0m0.092s
+sys	0m0.307s
+
+CPU UTILIZATION: 4.987 / 28
+
+-----------------------------------------
+
+(117): time { frun -b 524288 tee <f1 >/dev/null; }
+real	0m0.065s
+user	0m0.087s
+sys	0m0.239s
+
+CPU UTILIZATION: 5.015 / 28
+
+-----------------------------------------
+
+(118): time { frun -b 524288 tee <f1 | wc -l; }
+real	0m0.067s
+user	0m0.078s
+sys	0m0.276s
+
+CPU UTILIZATION: 5.283 / 28
+
+-----------------------------------------
+
+(119): time { cat f1 | frun -b 524288 tee >/dev/null; }
+real	0m0.085s
+user	0m0.102s
+sys	0m0.291s
+
+CPU UTILIZATION: 4.623 / 28
+
+-----------------------------------------
+
+(120): time { cat f1 | frun -b 524288 tee | wc -l; }
+real	0m0.084s
+user	0m0.110s
+sys	0m0.310s
+
+CPU UTILIZATION: 5.000 / 28
+
+-----------------------------------------
+
+(121): time { frun -b4096 -s : <f1 >/dev/null; }
+real	0m0.102s
+user	0m1.161s
+sys	0m0.845s
+
+CPU UTILIZATION: 19.666 / 28
+
+-----------------------------------------
+
+(122): time { frun -b4096 -s : <f1 | wc -l; }
+real	0m0.138s
+user	0m1.143s
+sys	0m0.627s
+
+CPU UTILIZATION: 12.826 / 28
+
+-----------------------------------------
+
+(123): time { cat f1 | frun -b4096 -s : >/dev/null; }
+real	0m0.159s
+user	0m1.288s
+sys	0m0.764s
+
+CPU UTILIZATION: 12.905 / 28
+
+-----------------------------------------
+
+(124): time { cat f1 | frun -b4096 -s : | wc -l; }
+real	0m0.155s
+user	0m1.328s
+sys	0m1.747s
+
+CPU UTILIZATION: 19.838 / 28
+
+-----------------------------------------
+
+(125): time { frun -b4096 -s cat <f1 >/dev/null; }
+real	0m1.028s
+user	0m9.246s
+sys	0m15.654s
 
 CPU UTILIZATION: 24.221 / 28
 
 -----------------------------------------
 
-(21): time { frun  -l 1:0 printf %s\n <f1 >/dev/null; }
-real	0m0.865s
-user	0m16.323s
-sys	0m5.139s
+(126): time { frun -b4096 -s cat <f1 | wc -l; }
+real	0m1.025s
+user	0m9.323s
+sys	0m15.414s
 
-CPU UTILIZATION: 24.811 / 28
-
------------------------------------------
-
-(22): time { frun  -l 1:0 printf %s\n <f1 | wc -l; }
-real	0m0.843s
-user	0m16.362s
-sys	0m4.947s
-
-CPU UTILIZATION: 25.277 / 28
+CPU UTILIZATION: 24.133 / 28
 
 -----------------------------------------
 
-(23): time { cat f1 | frun  -l 1:0 printf %s\n >/dev/null; }
-real	0m0.878s
-user	0m16.566s
-sys	0m5.130s
+(127): time { cat f1 | frun -b4096 -s cat >/dev/null; }
+real	0m1.033s
+user	0m9.479s
+sys	0m15.528s
 
-CPU UTILIZATION: 24.710 / 28
-
------------------------------------------
-
-(24): time { cat f1 | frun  -l 1:0 printf %s\n | wc -l; }
-real	0m0.832s
-user	0m16.203s
-sys	0m5.083s
-
-CPU UTILIZATION: 25.584 / 28
+CPU UTILIZATION: 24.208 / 28
 
 -----------------------------------------
 
-(25): time { frun -k  : <f1 >/dev/null; }
-real	0m0.462s
-user	0m11.318s
-sys	0m0.148s
+(128): time { cat f1 | frun -b4096 -s cat | wc -l; }
+real	0m1.036s
+user	0m9.329s
+sys	0m15.683s
 
-CPU UTILIZATION: 24.818 / 28
-
------------------------------------------
-
-(26): time { frun -k  : <f1 | wc -l; }
-real	0m0.476s
-user	0m11.232s
-sys	0m0.125s
-
-CPU UTILIZATION: 23.859 / 28
+CPU UTILIZATION: 24.142 / 28
 
 -----------------------------------------
 
-(27): time { cat f1 | frun -k  : >/dev/null; }
-real	0m0.473s
-user	0m11.197s
-sys	0m0.130s
+(129): time { frun -b4096 -s tee <f1 >/dev/null; }
+real	0m1.018s
+user	0m9.435s
+sys	0m15.165s
 
-CPU UTILIZATION: 23.947 / 28
-
------------------------------------------
-
-(28): time { cat f1 | frun -k  : | wc -l; }
-real	0m0.469s
-user	0m11.232s
-sys	0m0.131s
-
-CPU UTILIZATION: 24.228 / 28
+CPU UTILIZATION: 24.165 / 28
 
 -----------------------------------------
 
-(29): time { frun -k  echo <f1 >/dev/null; }
-real	0m0.509s
-user	0m12.198s
-sys	0m0.145s
+(130): time { frun -b4096 -s tee <f1 | wc -l; }
+real	0m1.024s
+user	0m9.319s
+sys	0m15.378s
 
-CPU UTILIZATION: 24.249 / 28
-
------------------------------------------
-
-(30): time { frun -k  echo <f1 | wc -l; }
-real	0m0.490s
-user	0m12.076s
-sys	0m0.173s
-
-CPU UTILIZATION: 24.997 / 28
+CPU UTILIZATION: 24.118 / 28
 
 -----------------------------------------
 
-(31): time { cat f1 | frun -k  echo >/dev/null; }
-real	0m0.488s
-user	0m12.165s
-sys	0m0.156s
+(131): time { cat f1 | frun -b4096 -s tee >/dev/null; }
+real	0m1.034s
+user	0m9.464s
+sys	0m15.501s
 
-CPU UTILIZATION: 25.247 / 28
-
------------------------------------------
-
-(32): time { cat f1 | frun -k  echo | wc -l; }
-real	0m0.504s
-user	0m12.294s
-sys	0m0.154s
-
-CPU UTILIZATION: 24.698 / 28
+CPU UTILIZATION: 24.144 / 28
 
 -----------------------------------------
 
-(33): time { frun -k  printf %s\n <f1 >/dev/null; }
-real	0m0.824s
-user	0m16.289s
-sys	0m5.124s
+(132): time { cat f1 | frun -b4096 -s tee | wc -l; }
+real	0m1.030s
+user	0m9.442s
+sys	0m15.471s
 
-CPU UTILIZATION: 25.986 / 28
-
------------------------------------------
-
-(34): time { frun -k  printf %s\n <f1 | wc -l; }
-real	0m0.829s
-user	0m16.315s
-sys	0m5.186s
-
-CPU UTILIZATION: 25.936 / 28
+CPU UTILIZATION: 24.187 / 28
 
 -----------------------------------------
 
-(35): time { cat f1 | frun -k  printf %s\n >/dev/null; }
-real	0m0.833s
-user	0m16.583s
-sys	0m5.049s
+(133): time { frun   : <f2 >/dev/null; }
+real	0m5.164s
+user	2m16.239s
+sys	0m1.852s
 
-CPU UTILIZATION: 25.968 / 28
-
------------------------------------------
-
-(36): time { cat f1 | frun -k  printf %s\n | wc -l; }
-real	0m0.828s
-user	0m16.175s
-sys	0m5.292s
-
-CPU UTILIZATION: 25.926 / 28
+CPU UTILIZATION: 26.741 / 28
 
 -----------------------------------------
 
-(37): time { frun -k -l 1:0 : <f1 >/dev/null; }
-real	0m0.455s
-user	0m11.230s
-sys	0m0.140s
+(134): time { frun   : <f2 | wc -l; }
+real	0m5.041s
+user	2m13.009s
+sys	0m1.927s
 
-CPU UTILIZATION: 24.989 / 28
-
------------------------------------------
-
-(38): time { frun -k -l 1:0 : <f1 | wc -l; }
-real	0m0.455s
-user	0m11.263s
-sys	0m0.135s
-
-CPU UTILIZATION: 25.040 / 28
+CPU UTILIZATION: 26.767 / 28
 
 -----------------------------------------
 
-(39): time { cat f1 | frun -k -l 1:0 : >/dev/null; }
-real	0m0.450s
-user	0m11.206s
-sys	0m0.132s
+(135): time { cat f2 | frun   : >/dev/null; }
+real	0m5.039s
+user	2m13.097s
+sys	0m2.036s
 
-CPU UTILIZATION: 25.195 / 28
-
------------------------------------------
-
-(40): time { cat f1 | frun -k -l 1:0 : | wc -l; }
-real	0m0.449s
-user	0m10.904s
-sys	0m0.131s
-
-CPU UTILIZATION: 24.576 / 28
+CPU UTILIZATION: 26.817 / 28
 
 -----------------------------------------
 
-(41): time { frun -k -l 1:0 echo <f1 >/dev/null; }
-real	0m0.486s
-user	0m12.117s
-sys	0m0.182s
+(136): time { cat f2 | frun   : | wc -l; }
+real	0m5.096s
+user	2m14.442s
+sys	0m2.140s
 
-CPU UTILIZATION: 25.306 / 28
-
------------------------------------------
-
-(42): time { frun -k -l 1:0 echo <f1 | wc -l; }
-real	0m0.486s
-user	0m12.135s
-sys	0m0.160s
-
-CPU UTILIZATION: 25.298 / 28
+CPU UTILIZATION: 26.801 / 28
 
 -----------------------------------------
 
-(43): time { cat f1 | frun -k -l 1:0 echo >/dev/null; }
-real	0m0.486s
-user	0m12.186s
-sys	0m0.129s
+(137): time { frun   echo <f2 >/dev/null; }
+real	0m5.472s
+user	2m23.865s
+sys	0m2.567s
 
-CPU UTILIZATION: 25.339 / 28
-
------------------------------------------
-
-(44): time { cat f1 | frun -k -l 1:0 echo | wc -l; }
-real	0m0.483s
-user	0m12.097s
-sys	0m0.149s
-
-CPU UTILIZATION: 25.354 / 28
+CPU UTILIZATION: 26.760 / 28
 
 -----------------------------------------
 
-(45): time { frun -k -l 1:0 printf %s\n <f1 >/dev/null; }
-real	0m0.836s
-user	0m16.553s
-sys	0m5.125s
+(138): time { frun   echo <f2 | wc -l; }
+real	0m5.471s
+user	2m23.893s
+sys	0m2.811s
 
-CPU UTILIZATION: 25.930 / 28
-
------------------------------------------
-
-(46): time { frun -k -l 1:0 printf %s\n <f1 | wc -l; }
-real	0m0.823s
-user	0m16.293s
-sys	0m5.094s
-
-CPU UTILIZATION: 25.986 / 28
+CPU UTILIZATION: 26.814 / 28
 
 -----------------------------------------
 
-(47): time { cat f1 | frun -k -l 1:0 printf %s\n >/dev/null; }
-real	0m0.823s
-user	0m16.317s
-sys	0m5.079s
+(139): time { cat f2 | frun   echo >/dev/null; }
+real	0m5.512s
+user	2m24.458s
+sys	0m2.776s
 
-CPU UTILIZATION: 25.997 / 28
-
------------------------------------------
-
-(48): time { cat f1 | frun -k -l 1:0 printf %s\n | wc -l; }
-real	0m0.830s
-user	0m16.274s
-sys	0m5.247s
-
-CPU UTILIZATION: 25.928 / 28
+CPU UTILIZATION: 26.711 / 28
 
 -----------------------------------------
 
-(49): time { frun -u  : <f1 >/dev/null; }
-real	0m0.447s
-user	0m11.159s
-sys	0m0.103s
+(140): time { cat f2 | frun   echo | wc -l; }
+real	0m5.472s
+user	2m23.935s
+sys	0m3.000s
 
-CPU UTILIZATION: 25.194 / 28
-
------------------------------------------
-
-(50): time { frun -u  : <f1 | wc -l; }
-real	0m0.446s
-user	0m11.131s
-sys	0m0.108s
-
-CPU UTILIZATION: 25.199 / 28
+CPU UTILIZATION: 26.852 / 28
 
 -----------------------------------------
 
-(51): time { cat f1 | frun -u  : >/dev/null; }
-real	0m0.446s
-user	0m11.130s
-sys	0m0.087s
+(141): time { frun   printf %s\n <f2 >/dev/null; }
+real	0m8.855s
+user	3m4.315s
+sys	0m53.209s
 
-CPU UTILIZATION: 25.150 / 28
-
------------------------------------------
-
-(52): time { cat f1 | frun -u  : | wc -l; }
-real	0m0.444s
-user	0m11.122s
-sys	0m0.103s
-
-CPU UTILIZATION: 25.281 / 28
+CPU UTILIZATION: 26.823 / 28
 
 -----------------------------------------
 
-(53): time { frun -u  echo <f1 >/dev/null; }
-real	0m0.480s
-user	0m12.078s
-sys	0m0.099s
+(142): time { frun   printf %s\n <f2 | wc -l; }
+real	0m8.899s
+user	3m4.575s
+sys	0m53.582s
 
-CPU UTILIZATION: 25.368 / 28
-
------------------------------------------
-
-(54): time { frun -u  echo <f1 | wc -l; }
-real	0m0.481s
-user	0m12.051s
-sys	0m0.115s
-
-CPU UTILIZATION: 25.293 / 28
+CPU UTILIZATION: 26.762 / 28
 
 -----------------------------------------
 
-(55): time { cat f1 | frun -u  echo >/dev/null; }
-real	0m0.482s
-user	0m12.107s
-sys	0m0.108s
+(143): time { cat f2 | frun   printf %s\n >/dev/null; }
+real	0m8.860s
+user	3m3.638s
+sys	0m53.575s
 
-CPU UTILIZATION: 25.342 / 28
-
------------------------------------------
-
-(56): time { cat f1 | frun -u  echo | wc -l; }
-real	0m0.482s
-user	0m12.092s
-sys	0m0.119s
-
-CPU UTILIZATION: 25.334 / 28
+CPU UTILIZATION: 26.773 / 28
 
 -----------------------------------------
 
-(57): time { frun -u  printf %s\n <f1 >/dev/null; }
-real	0m0.757s
-user	0m16.899s
-sys	0m2.603s
+(144): time { cat f2 | frun   printf %s\n | wc -l; }
+real	0m8.879s
+user	3m4.782s
+sys	0m52.761s
 
-CPU UTILIZATION: 25.762 / 28
-
------------------------------------------
-
-(58): time { frun -u  printf %s\n <f1 | wc -l; }
-real	0m2.767s
-user	0m12.113s
-sys	0m59.508s
-
-CPU UTILIZATION: 25.883 / 28
+CPU UTILIZATION: 26.753 / 28
 
 -----------------------------------------
 
-(59): time { cat f1 | frun -u  printf %s\n >/dev/null; }
-real	0m0.768s
-user	0m16.574s
-sys	0m3.226s
+(145): time { frun  -l 1:0 : <f2 >/dev/null; }
+real	0m5.035s
+user	2m12.416s
+sys	0m1.904s
 
-CPU UTILIZATION: 25.781 / 28
-
------------------------------------------
-
-(60): time { cat f1 | frun -u  printf %s\n | wc -l; }
-real	0m2.471s
-user	0m12.267s
-sys	0m52.005s
-
-CPU UTILIZATION: 26.008 / 28
+CPU UTILIZATION: 26.677 / 28
 
 -----------------------------------------
 
-(61): time { frun -u -l 1:0 : <f1 >/dev/null; }
-real	0m0.446s
-user	0m11.174s
-sys	0m0.106s
+(146): time { frun  -l 1:0 : <f2 | wc -l; }
+real	0m5.121s
+user	2m15.093s
+sys	0m1.867s
 
-CPU UTILIZATION: 25.291 / 28
-
------------------------------------------
-
-(62): time { frun -u -l 1:0 : <f1 | wc -l; }
-real	0m0.445s
-user	0m11.117s
-sys	0m0.109s
-
-CPU UTILIZATION: 25.226 / 28
+CPU UTILIZATION: 26.744 / 28
 
 -----------------------------------------
 
-(63): time { cat f1 | frun -u -l 1:0 : >/dev/null; }
-real	0m0.451s
-user	0m11.301s
-sys	0m0.093s
+(147): time { cat f2 | frun  -l 1:0 : >/dev/null; }
+real	0m5.050s
+user	2m13.061s
+sys	0m2.116s
 
-CPU UTILIZATION: 25.263 / 28
-
------------------------------------------
-
-(64): time { cat f1 | frun -u -l 1:0 : | wc -l; }
-real	0m0.449s
-user	0m11.224s
-sys	0m0.105s
-
-CPU UTILIZATION: 25.231 / 28
+CPU UTILIZATION: 26.767 / 28
 
 -----------------------------------------
 
-(65): time { frun -u -l 1:0 echo <f1 >/dev/null; }
-real	0m0.481s
-user	0m12.110s
-sys	0m0.097s
+(148): time { cat f2 | frun  -l 1:0 : | wc -l; }
+real	0m5.114s
+user	2m14.839s
+sys	0m2.027s
 
-CPU UTILIZATION: 25.378 / 28
-
------------------------------------------
-
-(66): time { frun -u -l 1:0 echo <f1 | wc -l; }
-real	0m0.484s
-user	0m12.115s
-sys	0m0.119s
-
-CPU UTILIZATION: 25.276 / 28
+CPU UTILIZATION: 26.763 / 28
 
 -----------------------------------------
 
-(67): time { cat f1 | frun -u -l 1:0 echo >/dev/null; }
-real	0m0.480s
-user	0m12.024s
-sys	0m0.120s
+(149): time { frun  -l 1:0 echo <f2 >/dev/null; }
+real	0m5.479s
+user	2m23.935s
+sys	0m2.554s
 
-CPU UTILIZATION: 25.300 / 28
-
------------------------------------------
-
-(68): time { cat f1 | frun -u -l 1:0 echo | wc -l; }
-real	0m0.484s
-user	0m12.033s
-sys	0m0.129s
-
-CPU UTILIZATION: 25.128 / 28
+CPU UTILIZATION: 26.736 / 28
 
 -----------------------------------------
 
-(69): time { frun -u -l 1:0 printf %s\n <f1 >/dev/null; }
-real	0m0.797s
-user	0m16.508s
-sys	0m4.168s
+(150): time { frun  -l 1:0 echo <f2 | wc -l; }
+real	0m5.555s
+user	2m25.762s
+sys	0m2.834s
 
-CPU UTILIZATION: 25.942 / 28
-
------------------------------------------
-
-(70): time { frun -u -l 1:0 printf %s\n <f1 | wc -l; }
-real	0m2.751s
-user	0m12.311s
-sys	0m59.481s
-
-CPU UTILIZATION: 26.000 / 28
+CPU UTILIZATION: 26.749 / 28
 
 -----------------------------------------
 
-(71): time { cat f1 | frun -u -l 1:0 printf %s\n >/dev/null; }
-real	0m0.763s
-user	0m16.466s
-sys	0m3.258s
+(151): time { cat f2 | frun  -l 1:0 echo >/dev/null; }
+real	0m5.565s
+user	2m26.326s
+sys	0m2.894s
+
+CPU UTILIZATION: 26.814 / 28
+
+-----------------------------------------
+
+(152): time { cat f2 | frun  -l 1:0 echo | wc -l; }
+real	0m5.507s
+user	2m24.236s
+sys	0m3.084s
+
+CPU UTILIZATION: 26.751 / 28
+
+-----------------------------------------
+
+(153): time { frun  -l 1:0 printf %s\n <f2 >/dev/null; }
+real	0m8.951s
+user	3m6.359s
+sys	0m53.368s
+
+CPU UTILIZATION: 26.782 / 28
+
+-----------------------------------------
+
+(154): time { frun  -l 1:0 printf %s\n <f2 | wc -l; }
+real	0m8.870s
+user	3m3.739s
+sys	0m54.532s
+
+CPU UTILIZATION: 26.862 / 28
+
+-----------------------------------------
+
+(155): time { cat f2 | frun  -l 1:0 printf %s\n >/dev/null; }
+real	0m8.906s
+user	3m3.956s
+sys	0m54.436s
+
+CPU UTILIZATION: 26.767 / 28
+
+-----------------------------------------
+
+(156): time { cat f2 | frun  -l 1:0 printf %s\n | wc -l; }
+real	0m8.947s
+user	3m5.646s
+sys	0m54.201s
+
+CPU UTILIZATION: 26.807 / 28
+
+-----------------------------------------
+
+(157): time { frun -k  : <f2 >/dev/null; }
+real	0m5.029s
+user	2m13.124s
+sys	0m1.860s
+
+CPU UTILIZATION: 26.841 / 28
+
+-----------------------------------------
+
+(158): time { frun -k  : <f2 | wc -l; }
+real	0m5.070s
+user	2m13.556s
+sys	0m1.816s
+
+CPU UTILIZATION: 26.700 / 28
+
+-----------------------------------------
+
+(159): time { cat f2 | frun -k  : >/dev/null; }
+real	0m5.045s
+user	2m13.452s
+sys	0m2.074s
+
+CPU UTILIZATION: 26.863 / 28
+
+-----------------------------------------
+
+(160): time { cat f2 | frun -k  : | wc -l; }
+real	0m5.158s
+user	2m16.544s
+sys	0m2.042s
+
+CPU UTILIZATION: 26.868 / 28
+
+-----------------------------------------
+
+(161): time { frun -k  echo <f2 >/dev/null; }
+real	0m5.557s
+user	2m26.105s
+sys	0m2.465s
+
+CPU UTILIZATION: 26.735 / 28
+
+-----------------------------------------
+
+(162): time { frun -k  echo <f2 | wc -l; }
+real	0m5.507s
+user	2m24.424s
+sys	0m2.814s
+
+CPU UTILIZATION: 26.736 / 28
+
+-----------------------------------------
+
+(163): time { cat f2 | frun -k  echo >/dev/null; }
+real	0m5.562s
+user	2m26.178s
+sys	0m2.897s
+
+CPU UTILIZATION: 26.802 / 28
+
+-----------------------------------------
+
+(164): time { cat f2 | frun -k  echo | wc -l; }
+real	0m5.468s
+user	2m23.691s
+sys	0m3.006s
+
+CPU UTILIZATION: 26.828 / 28
+
+-----------------------------------------
+
+(165): time { frun -k  printf %s\n <f2 >/dev/null; }
+real	0m9.028s
+user	3m7.930s
+sys	0m53.717s
+
+CPU UTILIZATION: 26.766 / 28
+
+-----------------------------------------
+
+(166): time { frun -k  printf %s\n <f2 | wc -l; }
+real	0m8.870s
+user	3m4.289s
+sys	0m53.299s
+
+CPU UTILIZATION: 26.785 / 28
+
+-----------------------------------------
+
+(167): time { cat f2 | frun -k  printf %s\n >/dev/null; }
+real	0m8.895s
+user	3m4.948s
+sys	0m53.080s
+
+CPU UTILIZATION: 26.759 / 28
+
+-----------------------------------------
+
+(168): time { cat f2 | frun -k  printf %s\n | wc -l; }
+real	0m8.977s
+user	3m6.861s
+sys	0m53.744s
+
+CPU UTILIZATION: 26.802 / 28
+
+-----------------------------------------
+
+(169): time { frun -k -l 1:0 : <f2 >/dev/null; }
+real	0m5.070s
+user	2m13.878s
+sys	0m1.877s
+
+CPU UTILIZATION: 26.776 / 28
+
+-----------------------------------------
+
+(170): time { frun -k -l 1:0 : <f2 | wc -l; }
+real	0m5.043s
+user	2m12.721s
+sys	0m1.845s
+
+CPU UTILIZATION: 26.683 / 28
+
+-----------------------------------------
+
+(171): time { cat f2 | frun -k -l 1:0 : >/dev/null; }
+real	0m5.096s
+user	2m14.128s
+sys	0m2.089s
+
+CPU UTILIZATION: 26.730 / 28
+
+-----------------------------------------
+
+(172): time { cat f2 | frun -k -l 1:0 : | wc -l; }
+real	0m5.087s
+user	2m14.388s
+sys	0m2.047s
+
+CPU UTILIZATION: 26.820 / 28
+
+-----------------------------------------
+
+(173): time { frun -k -l 1:0 echo <f2 >/dev/null; }
+real	0m5.491s
+user	2m24.420s
+sys	0m2.617s
+
+CPU UTILIZATION: 26.777 / 28
+
+-----------------------------------------
+
+(174): time { frun -k -l 1:0 echo <f2 | wc -l; }
+real	0m5.491s
+user	2m24.021s
+sys	0m2.780s
+
+CPU UTILIZATION: 26.734 / 28
+
+-----------------------------------------
+
+(175): time { cat f2 | frun -k -l 1:0 echo >/dev/null; }
+real	0m5.483s
+user	2m23.960s
+sys	0m2.825s
+
+CPU UTILIZATION: 26.770 / 28
+
+-----------------------------------------
+
+(176): time { cat f2 | frun -k -l 1:0 echo | wc -l; }
+real	0m5.603s
+user	2m27.159s
+sys	0m3.162s
+
+CPU UTILIZATION: 26.828 / 28
+
+-----------------------------------------
+
+(177): time { frun -k -l 1:0 printf %s\n <f2 >/dev/null; }
+real	0m9.051s
+user	3m9.446s
+sys	0m52.790s
+
+CPU UTILIZATION: 26.763 / 28
+
+-----------------------------------------
+
+(178): time { frun -k -l 1:0 printf %s\n <f2 | wc -l; }
+real	0m8.956s
+user	3m5.465s
+sys	0m54.568s
+
+CPU UTILIZATION: 26.801 / 28
+
+-----------------------------------------
+
+(179): time { cat f2 | frun -k -l 1:0 printf %s\n >/dev/null; }
+real	0m9.025s
+user	3m7.440s
+sys	0m54.093s
+
+CPU UTILIZATION: 26.762 / 28
+
+-----------------------------------------
+
+(180): time { cat f2 | frun -k -l 1:0 printf %s\n | wc -l; }
+real	0m8.868s
+user	3m3.913s
+sys	0m54.134s
+
+CPU UTILIZATION: 26.843 / 28
+
+-----------------------------------------
+
+(181): time { frun -u  : <f2 >/dev/null; }
+real	0m5.011s
+user	2m12.602s
+sys	0m1.696s
+
+CPU UTILIZATION: 26.800 / 28
+
+-----------------------------------------
+
+(182): time { frun -u  : <f2 | wc -l; }
+real	0m5.053s
+user	2m13.628s
+sys	0m1.669s
+
+CPU UTILIZATION: 26.775 / 28
+
+-----------------------------------------
+
+(183): time { cat f2 | frun -u  : >/dev/null; }
+real	0m5.083s
+user	2m14.030s
+sys	0m1.914s
+
+CPU UTILIZATION: 26.744 / 28
+
+-----------------------------------------
+
+(184): time { cat f2 | frun -u  : | wc -l; }
+real	0m5.084s
+user	2m14.327s
+sys	0m1.883s
+
+CPU UTILIZATION: 26.791 / 28
+
+-----------------------------------------
+
+(185): time { frun -u  echo <f2 >/dev/null; }
+real	0m5.425s
+user	2m23.978s
+sys	0m1.682s
+
+CPU UTILIZATION: 26.849 / 28
+
+-----------------------------------------
+
+(186): time { frun -u  echo <f2 | wc -l; }
+real	0m5.475s
+user	2m21.869s
+sys	0m2.696s
+
+CPU UTILIZATION: 26.404 / 28
+
+-----------------------------------------
+
+(187): time { cat f2 | frun -u  echo >/dev/null; }
+real	0m5.506s
+user	2m25.619s
+sys	0m2.007s
+
+CPU UTILIZATION: 26.811 / 28
+
+-----------------------------------------
+
+(188): time { cat f2 | frun -u  echo | wc -l; }
+real	0m5.438s
+user	2m18.811s
+sys	0m2.497s
+
+CPU UTILIZATION: 25.985 / 28
+
+-----------------------------------------
+
+(189): time { frun -u  printf %s\n <f2 >/dev/null; }
+real	0m8.367s
+user	3m8.734s
+sys	0m35.562s
+
+CPU UTILIZATION: 26.807 / 28
+
+-----------------------------------------
+
+(190): time { frun -u  printf %s\n <f2 | wc -l; }
+real	0m24.822s
+user	2m23.615s
+sys	8m27.913s
+
+CPU UTILIZATION: 26.248 / 28
+
+-----------------------------------------
+
+(191): time { cat f2 | frun -u  printf %s\n >/dev/null; }
+real	0m8.361s
+user	3m7.582s
+sys	0m36.452s
+
+CPU UTILIZATION: 26.795 / 28
+
+-----------------------------------------
+
+(192): time { cat f2 | frun -u  printf %s\n | wc -l; }
+real	0m24.999s
+user	2m26.596s
+sys	8m31.335s
+
+CPU UTILIZATION: 26.318 / 28
+
+-----------------------------------------
+
+(193): time { frun -u -l 1:0 : <f2 >/dev/null; }
+real	0m5.079s
+user	2m14.378s
+sys	0m1.647s
+
+CPU UTILIZATION: 26.781 / 28
+
+-----------------------------------------
+
+(194): time { frun -u -l 1:0 : <f2 | wc -l; }
+real	0m5.000s
+user	2m12.084s
+sys	0m1.647s
+
+CPU UTILIZATION: 26.746 / 28
+
+-----------------------------------------
+
+(195): time { cat f2 | frun -u -l 1:0 : >/dev/null; }
+real	0m5.010s
+user	2m12.362s
+sys	0m1.840s
+
+CPU UTILIZATION: 26.786 / 28
+
+-----------------------------------------
+
+(196): time { cat f2 | frun -u -l 1:0 : | wc -l; }
+real	0m5.006s
+user	2m12.375s
+sys	0m1.923s
+
+CPU UTILIZATION: 26.827 / 28
+
+-----------------------------------------
+
+(197): time { frun -u -l 1:0 echo <f2 >/dev/null; }
+real	0m5.424s
+user	2m24.094s
+sys	0m1.648s
+
+CPU UTILIZATION: 26.869 / 28
+
+-----------------------------------------
+
+(198): time { frun -u -l 1:0 echo <f2 | wc -l; }
+real	0m5.571s
+user	2m24.124s
+sys	0m2.765s
+
+CPU UTILIZATION: 26.366 / 28
+
+-----------------------------------------
+
+(199): time { cat f2 | frun -u -l 1:0 echo >/dev/null; }
+real	0m5.521s
+user	2m25.532s
+sys	0m1.923s
+
+CPU UTILIZATION: 26.708 / 28
+
+-----------------------------------------
+
+(200): time { cat f2 | frun -u -l 1:0 echo | wc -l; }
+real	0m5.480s
+user	2m21.459s
+sys	0m2.:00s
 
 CPU UTILIZATION: 25.850 / 28
 
 -----------------------------------------
 
-(72): time { cat f1 | frun -u -l 1:0 printf %s\n | wc -l; }
-real	0m2.767s
-user	0m12.067s
-sys	0m59.466s
-
-CPU UTILIZATION: 25.852 / 28
-
------------------------------------------
-
-(73): time { frun -U  : <f1 >/dev/null; }
-real	0m0.170s
-user	0m3.732s
-sys	0m0.106s
-
-CPU UTILIZATION: 22.576 / 28
-
------------------------------------------
-
-(74): time { frun -U  : <f1 | wc -l; }
-real	0m0.170s
-user	0m3.749s
-sys	0m0.103s
-
-CPU UTILIZATION: 22.658 / 28
-
------------------------------------------
-
-(75): time { cat f1 | frun -U  : >/dev/null; }
-real	0m0.169s
-user	0m3.665s
-sys	0m0.114s
-
-CPU UTILIZATION: 22.360 / 28
-
------------------------------------------
-
-(76): time { cat f1 | frun -U  : | wc -l; }
-real	0m0.169s
-user	0m3.713s
-sys	0m0.104s
-
-CPU UTILIZATION: 22.585 / 28
-
------------------------------------------
-
-(77): time { frun -U  echo <f1 >/dev/null; }
-real	0m0.171s
-user	0m3.760s
-sys	0m0.115s
-
-CPU UTILIZATION: 22.660 / 28
-
------------------------------------------
-
-(78): time { frun -U  echo <f1 | wc -l; }
-real	0m0.171s
-user	0m3.728s
-sys	0m0.140s
-
-CPU UTILIZATION: 22.619 / 28
-
------------------------------------------
-
-(79): time { cat f1 | frun -U  echo >/dev/null; }
-real	0m0.169s
-user	0m3.753s
-sys	0m0.111s
-
-CPU UTILIZATION: 22.863 / 28
-
------------------------------------------
-
-(80): time { cat f1 | frun -U  echo | wc -l; }
-real	0m0.171s
-user	0m3.750s
-sys	0m0.149s
-
-CPU UTILIZATION: 22.801 / 28
-
------------------------------------------
-
-(81): time { frun -U  printf %s\n <f1 >/dev/null; }
-real	0m0.169s
-user	0m3.736s
-sys	0m0.111s
-
-CPU UTILIZATION: 22.763 / 28
-
------------------------------------------
-
-(82): time { frun -U  printf %s\n <f1 | wc -l; }
-real	0m0.171s
-user	0m3.745s
-sys	0m0.113s
-
-CPU UTILIZATION: 22.561 / 28
-
------------------------------------------
-
-(83): time { cat f1 | frun -U  printf %s\n >/dev/null; }
-real	0m0.170s
-user	0m3.719s
-sys	0m0.142s
-
-CPU UTILIZATION: 22.711 / 28
-
------------------------------------------
-
-(84): time { cat f1 | frun -U  printf %s\n | wc -l; }
-real	0m0.170s
-user	0m3.739s
-sys	0m0.119s
-
-CPU UTILIZATION: 22.694 / 28
-
------------------------------------------
-
-(85): time { frun -U -l 1:0 : <f1 >/dev/null; }
-real	0m0.169s
-user	0m3.730s
-sys	0m0.097s
-
-CPU UTILIZATION: 22.644 / 28
-
------------------------------------------
-
-(86): time { frun -U -l 1:0 : <f1 | wc -l; }
-real	0m0.170s
-user	0m3.742s
-sys	0m0.122s
-
-CPU UTILIZATION: 22.729 / 28
-
------------------------------------------
-
-(87): time { cat f1 | frun -U -l 1:0 : >/dev/null; }
-real	0m0.170s
-user	0m3.743s
-sys	0m0.127s
-
-CPU UTILIZATION: 22.764 / 28
-
------------------------------------------
-
-(88): time { cat f1 | frun -U -l 1:0 : | wc -l; }
-real	0m0.172s
-user	0m3.699s
-sys	0m0.106s
-
-CPU UTILIZATION: 22.122 / 28
-
------------------------------------------
-
-(89): time { frun -U -l 1:0 echo <f1 >/dev/null; }
-real	0m0.170s
-user	0m3.755s
-sys	0m0.107s
-
-CPU UTILIZATION: 22.717 / 28
-
------------------------------------------
-
-(90): time { frun -U -l 1:0 echo <f1 | wc -l; }
-real	0m0.170s
-user	0m3.710s
-sys	0m0.131s
-
-CPU UTILIZATION: 22.594 / 28
-
------------------------------------------
-
-(91): time { cat f1 | frun -U -l 1:0 echo >/dev/null; }
-real	0m0.169s
-user	0m3.739s
-sys	0m0.112s
-
-CPU UTILIZATION: 22.786 / 28
-
------------------------------------------
-
-(92): time { cat f1 | frun -U -l 1:0 echo | wc -l; }
-real	0m0.170s
-user	0m3.747s
-sys	0m0.129s
-
-CPU UTILIZATION: 22.800 / 28
-
------------------------------------------
-
-(93): time { frun -U -l 1:0 printf %s\n <f1 >/dev/null; }
-real	0m0.170s
-user	0m3.747s
-sys	0m0.126s
-
-CPU UTILIZATION: 22.782 / 28
-
------------------------------------------
-
-(94): time { frun -U -l 1:0 printf %s\n <f1 | wc -l; }
-real	0m0.172s
-user	0m3.766s
-sys	0m0.138s
-
-CPU UTILIZATION: 22.697 / 28
-
------------------------------------------
-
-(95): time { cat f1 | frun -U -l 1:0 printf %s\n >/dev/null; }
-real	0m0.169s
-user	0m3.737s
-sys	0m0.113s
-
-CPU UTILIZATION: 22.781 / 28
-
------------------------------------------
-
-(96): time { cat f1 | frun -U -l 1:0 printf %s\n | wc -l; }
-real	0m0.170s
-user	0m3.667s
-sys	0m0.115s
-
-CPU UTILIZATION: 22.247 / 28
-
------------------------------------------
-
-(97): time { frun -s : <f1 >/dev/null; }
-real	0m0.098s
-user	0m0.362s
-sys	0m1.436s
-
-CPU UTILIZATION: 18.346 / 28
-
------------------------------------------
-
-(98): time { frun -s : <f1 | wc -l; }
-real	0m0.099s
-user	0m0.322s
-sys	0m1.522s
-
-CPU UTILIZATION: 18.626 / 28
-
------------------------------------------
-
-(99): time { cat f1 | frun -s : >/dev/null; }
-real	0m0.093s
-user	0m0.328s
-sys	0m1.347s
-
-CPU UTILIZATION: 18.008 / 28
-
------------------------------------------
-
-(100): time { cat f1 | frun -s : | wc -l; }
-real	0m0.099s
-user	0m0.368s
-sys	0m1.474s
-
-CPU UTILIZATION: 18.606 / 28
-
------------------------------------------
-
-(101): time { frun -s cat <f1 >/dev/null; }
-real	0m0.177s
-user	0m1.438s
-sys	0m2.306s
-
-CPU UTILIZATION: 21.152 / 28
-
------------------------------------------
-
-(102): time { frun -s cat <f1 | wc -l; }
-real	0m0.181s
-user	0m1.415s
-sys	0m2.324s
-
-CPU UTILIZATION: 20.657 / 28
-
------------------------------------------
-
-(103): time { cat f1 | frun -s cat >/dev/null; }
-real	0m0.177s
-user	0m1.437s
-sys	0m2.312s
-
-CPU UTILIZATION: 21.180 / 28
-
------------------------------------------
-
-(104): time { cat f1 | frun -s cat | wc -l; }
-real	0m0.178s
-user	0m1.426s
-sys	0m2.328s
-
-CPU UTILIZATION: 21.000 / 28
-
------------------------------------------
-
-(105): time { frun -s tee <f1 >/dev/null; }
-real	0m0.174s
-user	0m1.440s
-sys	0m2.222s
-
-CPU UTILIZATION: 21.037 / 28
-
------------------------------------------
-
-(106): time { frun -s tee <f1 | wc -l; }
-real	0m0.176s
-user	0m1.443s
-sys	0m2.253s
-
-CPU UTILIZATION: 21.000 / 28
-
------------------------------------------
-
-(107): time { cat f1 | frun -s tee >/dev/null; }
-real	0m0.174s
-user	0m1.428s
-sys	0m2.278s
-
-CPU UTILIZATION: 21.298 / 28
-
------------------------------------------
-
-(108): time { cat f1 | frun -s tee | wc -l; }
-real	0m0.174s
-user	0m1.438s
-sys	0m2.233s
-
-CPU UTILIZATION: 21.000 / 28
-
------------------------------------------
-
-(109): time { frun -b 524288 : <f1 >/dev/null; }
-real	0m0.026s
-user	0m0.011s
-sys	0m0.025s
-
-CPU UTILIZATION: 1.384 / 28
-
------------------------------------------
-
-(110): time { frun -b 524288 : <f1 | wc -l; }
-real	0m0.032s
-user	0m0.015s
-sys	0m0.032s
-
-CPU UTILIZATION: 1.468 / 28
-
------------------------------------------
-
-(111): time { cat f1 | frun -b 524288 : >/dev/null; }
-real	0m0.045s
-user	0m0.018s
-sys	0m0.055s
-
-CPU UTILIZATION: 1.622 / 28
-
------------------------------------------
-
-(112): time { cat f1 | frun -b 524288 : | wc -l; }
-real	0m0.034s
-user	0m0.012s
-sys	0m0.044s
-
-CPU UTILIZATION: 1.647 / 28
-
------------------------------------------
-
-(113): time { frun -b 524288 cat <f1 >/dev/null; }
-real	0m0.036s
-user	0m0.014s
-sys	0m0.056s
-
-CPU UTILIZATION: 1.944 / 28
-
------------------------------------------
-
-(114): time { frun -b 524288 cat <f1 | wc -l; }
-real	0m0.032s
-user	0m0.019s
-sys	0m0.047s
-
-CPU UTILIZATION: 2.050 / 28
-
------------------------------------------
-
-(115): time { cat f1 | frun -b 524288 cat >/dev/null; }
-real	0m0.031s
-user	0m0.011s
-sys	0m0.061s
-
-CPU UTILIZATION: 2.322 / 28
-
------------------------------------------
-
-(116): time { cat f1 | frun -b 524288 cat | wc -l; }
-real	0m0.034s
-user	0m0.023s
-sys	0m0.052s
-
-CPU UTILIZATION: 2.205 / 28
-
------------------------------------------
-
-(117): time { frun -b 524288 tee <f1 >/dev/null; }
-real	0m0.032s
-user	0m0.018s
-sys	0m0.048s
-
-CPU UTILIZATION: 2.050 / 28
-
------------------------------------------
-
-(118): time { frun -b 524288 tee <f1 | wc -l; }
-real	0m0.036s
-user	0m0.018s
-sys	0m0.055s
-
-CPU UTILIZATION: 2.023 / 28
-
------------------------------------------
-
-(119): time { cat f1 | frun -b 524288 tee >/dev/null; }
-real	0m0.032s
-user	0m0.019s
-sys	0m0.049s
-
-CPU UTILIZATION: 2.125 / 28
-
------------------------------------------
-
-(120): time { cat f1 | frun -b 524288 tee | wc -l; }
-real	0m0.033s
-user	0m0.022s
-sys	0m0.050s
-
-CPU UTILIZATION: 2.181 / 28
-
------------------------------------------
-
-(121): time { frun -b4096 -s : <f1 >/dev/null; }
-real	0m0.036s
-user	0m0.119s
-sys	0m0.111s
-
-CPU UTILIZATION: 6.388 / 28
-
------------------------------------------
-
-(122): time { frun -b4096 -s : <f1 | wc -l; }
-real	0m0.035s
-user	0m0.136s
-sys	0m0.117s
-
-CPU UTILIZATION: 7.228 / 28
-
------------------------------------------
-
-(123): time { cat f1 | frun -b4096 -s : >/dev/null; }
-real	0m0.033s
-user	0m0.115s
-sys	0m0.099s
-
-CPU UTILIZATION: 6.484 / 28
-
------------------------------------------
-
-(124): time { cat f1 | frun -b4096 -s : | wc -l; }
-real	0m0.034s
-user	0m0.145s
-sys	0m0.095s
-
-CPU UTILIZATION: 7.005 / 28
-
------------------------------------------
-
-(125): time { frun -b4096 -s cat <f1 >/dev/null; }
-real	0m0.132s
-user	0m0.927s
-sys	0m1.704s
-
-CPU UTILIZATION: 19.931 / 28
-
------------------------------------------
-
-(126): time { frun -b4096 -s cat <f1 | wc -l; }
-real	0m0.132s
-user	0m0.937s
-sys	0m1.650s
-
-CPU UTILIZATION: 19.598 / 28
-
------------------------------------------
-
-(127): time { cat f1 | frun -b4096 -s cat >/dev/null; }
-real	0m0.130s
-user	0m0.955s
-sys	0m1.630s
-
-CPU UTILIZATION: 19.884 / 28
-
------------------------------------------
-
-(128): time { cat f1 | frun -b4096 -s cat | wc -l; }
-real	0m0.131s
-user	0m0.975s
-sys	0m1.614s
-
-CPU UTILIZATION: 19.763 / 28
-
------------------------------------------
-
-(129): time { frun -b4096 -s tee <f1 >/dev/null; }
-real	0m0.132s
-user	0m0.947s
-sys	0m1.632s
-
-CPU UTILIZATION: 19.537 / 28
-
------------------------------------------
-
-(130): time { frun -b4096 -s tee <f1 | wc -l; }
-real	0m0.137s
-user	0m0.962s
-sys	0m1.615s
-
-CPU UTILIZATION: 18.810 / 28
-
------------------------------------------
-
-(131): time { cat f1 | frun -b4096 -s tee >/dev/null; }
-real	0m0.130s
-user	0m0.938s
-sys	0m1.646s
-
-CPU UTILIZATION: 19.876 / 28
-
------------------------------------------
-
-(132): time { cat f1 | frun -b4096 -s tee | wc -l; }
-real	0m0.135s
-user	0m0.965s
-sys	0m1.623s
-
-CPU UTILIZATION: 19.170 / 28
-
------------------------------------------
-
-(133): time { frun   : <f2 >/dev/null; }
-real	0m0.547s
-user	0m13.228s
-sys	0m0.190s
-
-CPU UTILIZATION: 24.530 / 28
-
------------------------------------------
-
-(134): time { frun   : <f2 | wc -l; }
-real	0m0.541s
-user	0m13.337s
-sys	0m0.207s
-
-CPU UTILIZATION: 25.029 / 28
-
------------------------------------------
-
-(135): time { cat f2 | frun   : >/dev/null; }
-real	0m0.547s
-user	0m13.409s
-sys	0m0.213s
-
-CPU UTILIZATION: 24.903 / 28
-
------------------------------------------
-
-(136): time { cat f2 | frun   : | wc -l; }
-real	0m0.544s
-user	0m13.315s
-sys	0m0.232s
-
-CPU UTILIZATION: 24.902 / 28
-
------------------------------------------
-
-(137): time { frun   echo <f2 >/dev/null; }
-real	0m0.582s
-user	0m14.372s
-sys	0m0.266s
-
-CPU UTILIZATION: 25.151 / 28
-
------------------------------------------
-
-(138): time { frun   echo <f2 | wc -l; }
-real	0m0.604s
-user	0m14.560s
-sys	0m0.283s
-
-CPU UTILIZATION: 24.574 / 28
-
------------------------------------------
-
-(139): time { cat f2 | frun   echo >/dev/null; }
-real	0m0.573s
-user	0m14.327s
-sys	0m0.292s
-
-CPU UTILIZATION: 25.513 / 28
-
------------------------------------------
-
-(140): time { cat f2 | frun   echo | wc -l; }
-real	0m0.581s
-user	0m14.356s
-sys	0m0.332s
-
-CPU UTILIZATION: 25.280 / 28
-
------------------------------------------
-
-(141): time { frun   printf %s\n <f2 >/dev/null; }
-real	0m0.933s
-user	0m18.773s
-sys	0m5.248s
-
-CPU UTILIZATION: 25.745 / 28
-
------------------------------------------
-
-(142): time { frun   printf %s\n <f2 | wc -l; }
-real	0m0.922s
-user	0m18.580s
-sys	0m5.505s
-
-CPU UTILIZATION: 26.122 / 28
-
------------------------------------------
-
-(143): time { cat f2 | frun   printf %s\n >/dev/null; }
-real	0m0.959s
-user	0m18.752s
-sys	0m5.356s
-
-CPU UTILIZATION: 25.138 / 28
-
------------------------------------------
-
-(144): time { cat f2 | frun   printf %s\n | wc -l; }
-real	0m0.931s
-user	0m18.717s
-sys	0m5.506s
-
-CPU UTILIZATION: 26.001 / 28
-
------------------------------------------
-
-(145): time { frun  -l 1:0 : <f2 >/dev/null; }
-real	0m0.536s
-user	0m13.412s
-sys	0m0.220s
-
-CPU UTILIZATION: 25.432 / 28
-
------------------------------------------
-
-(146): time { frun  -l 1:0 : <f2 | wc -l; }
-real	0m0.526s
-user	0m13.230s
-sys	0m0.191s
-
-CPU UTILIZATION: 25.515 / 28
-
------------------------------------------
-
-(147): time { cat f2 | frun  -l 1:0 : >/dev/null; }
-real	0m0.529s
-user	0m13.228s
-sys	0m0.226s
-
-CPU UTILIZATION: 25.432 / 28
-
------------------------------------------
-
-(148): time { cat f2 | frun  -l 1:0 : | wc -l; }
-real	0m0.536s
-user	0m13.371s
-sys	0m0.226s
-
-CPU UTILIZATION: 25.367 / 28
-
------------------------------------------
-
-(149): time { frun  -l 1:0 echo <f2 >/dev/null; }
-real	0m0.570s
-user	0m14.206s
-sys	0m0.278s
-
-CPU UTILIZATION: 25.410 / 28
-
------------------------------------------
-
-(150): time { frun  -l 1:0 echo <f2 | wc -l; }
-real	0m0.575s
-user	0m14.349s
-sys	0m0.293s
-
-CPU UTILIZATION: 25.464 / 28
-
------------------------------------------
-
-(151): time { cat f2 | frun  -l 1:0 echo >/dev/null; }
-real	0m0.580s
-user	0m14.549s
-sys	0m0.308s
-
-CPU UTILIZATION: 25.615 / 28
-
------------------------------------------
-
-(152): time { cat f2 | frun  -l 1:0 echo | wc -l; }
-real	0m0.583s
-user	0m14.559s
-sys	0m0.318s
-
-CPU UTILIZATION: 25.518 / 28
-
------------------------------------------
-
-(153): time { frun  -l 1:0 printf %s\n <f2 >/dev/null; }
-real	0m0.923s
-user	0m18.622s
-sys	0m5.374s
-
-CPU UTILIZATION: 25.997 / 28
-
------------------------------------------
-
-(154): time { frun  -l 1:0 printf %s\n <f2 | wc -l; }
-real	0m0.919s
-user	0m18.619s
-sys	0m5.333s
-
-CPU UTILIZATION: 26.051 / 28
-
------------------------------------------
-
-(155): time { cat f2 | frun  -l 1:0 printf %s\n >/dev/null; }
-real	0m0.924s
-user	0m18.689s
-sys	0m5.390s
-
-CPU UTILIZATION: 26.005 / 28
-
------------------------------------------
-
-(156): time { cat f2 | frun  -l 1:0 printf %s\n | wc -l; }
-real	0m0.913s
-user	0m18.264s
-sys	0m5.448s
-
-CPU UTILIZATION: 25.971 / 28
-
------------------------------------------
-
-(157): time { frun -k  : <f2 >/dev/null; }
-real	0m0.528s
-user	0m13.189s
-sys	0m0.239s
-
-CPU UTILIZATION: 25.431 / 28
-
------------------------------------------
-
-(158): time { frun -k  : <f2 | wc -l; }
-real	0m0.527s
-user	0m13.226s
-sys	0m0.208s
-
-CPU UTILIZATION: 25.491 / 28
-
------------------------------------------
-
-(159): time { cat f2 | frun -k  : >/dev/null; }
-real	0m0.527s
-user	0m13.121s
-sys	0m0.226s
-
-CPU UTILIZATION: 25.326 / 28
-
------------------------------------------
-
-(160): time { cat f2 | frun -k  : | wc -l; }
-real	0m0.530s
-user	0m13.287s
-sys	0m0.217s
-
-CPU UTILIZATION: 25.479 / 28
-
------------------------------------------
-
-(161): time { frun -k  echo <f2 >/dev/null; }
-real	0m0.577s
-user	0m14.484s
-sys	0m0.259s
-
-CPU UTILIZATION: 25.551 / 28
-
------------------------------------------
-
-(162): time { frun -k  echo <f2 | wc -l; }
-real	0m0.572s
-user	0m14.350s
-sys	0m0.287s
-
-CPU UTILIZATION: 25.589 / 28
-
------------------------------------------
-
-(163): time { cat f2 | frun -k  echo >/dev/null; }
-real	0m0.572s
-user	0m14.340s
-sys	0m0.312s
-
-CPU UTILIZATION: 25.615 / 28
-
------------------------------------------
-
-(164): time { cat f2 | frun -k  echo | wc -l; }
-real	0m0.573s
-user	0m14.337s
-sys	0m0.308s
-
-CPU UTILIZATION: 25.558 / 28
-
------------------------------------------
-
-(165): time { frun -k  printf %s\n <f2 >/dev/null; }
-real	0m0.925s
-user	0m18.282s
-sys	0m5.342s
-
-CPU UTILIZATION: 25.539 / 28
-
------------------------------------------
-
-(166): time { frun -k  printf %s\n <f2 | wc -l; }
-real	0m0.918s
-user	0m18.318s
-sys	0m5.395s
-
-CPU UTILIZATION: 25.831 / 28
-
------------------------------------------
-
-(167): time { cat f2 | frun -k  printf %s\n >/dev/null; }
-real	0m0.910s
-user	0m18.215s
-sys	0m5.529s
-
-CPU UTILIZATION: 26.000 / 28
-
------------------------------------------
-
-(168): time { cat f2 | frun -k  printf %s\n | wc -l; }
-real	0m0.926s
-user	0m18.678s
-sys	0m5.472s
-
-CPU UTILIZATION: 26.007 / 28
-
------------------------------------------
-
-(169): time { frun -k -l 1:0 : <f2 >/dev/null; }
-real	0m0.532s
-user	0m13.332s
-sys	0m0.197s
-
-CPU UTILIZATION: 25.430 / 28
-
------------------------------------------
-
-(170): time { frun -k -l 1:0 : <f2 | wc -l; }
-real	0m0.537s
-user	0m13.510s
-sys	0m0.187s
-
-CPU UTILIZATION: 25.506 / 28
-
------------------------------------------
-
-(171): time { cat f2 | frun -k -l 1:0 : >/dev/null; }
-real	0m0.532s
-user	0m13.313s
-sys	0m0.204s
-
-CPU UTILIZATION: 25.407 / 28
-
------------------------------------------
-
-(172): time { cat f2 | frun -k -l 1:0 : | wc -l; }
-real	0m0.539s
-user	0m13.574s
-sys	0m0.209s
-
-CPU UTILIZATION: 25.571 / 28
-
------------------------------------------
-
-(173): time { frun -k -l 1:0 echo <f2 >/dev/null; }
-real	0m0.570s
-user	0m14.371s
-sys	0m0.255s
-
-CPU UTILIZATION: 25.659 / 28
-
------------------------------------------
-
-(174): time { frun -k -l 1:0 echo <f2 | wc -l; }
-real	0m0.578s
-user	0m14.482s
-sys	0m0.312s
-
-CPU UTILIZATION: 25.595 / 28
-
------------------------------------------
-
-(175): time { cat f2 | frun -k -l 1:0 echo >/dev/null; }
-real	0m0.576s
-user	0m14.474s
-sys	0m0.298s
-
-CPU UTILIZATION: 25.645 / 28
-
------------------------------------------
-
-(176): time { cat f2 | frun -k -l 1:0 echo | wc -l; }
-real	0m0.581s
-user	0m14.583s
-sys	0m0.301s
-
-CPU UTILIZATION: 25.617 / 28
-
------------------------------------------
-
-(177): time { frun -k -l 1:0 printf %s\n <f2 >/dev/null; }
-real	0m0.910s
-user	0m18.235s
-sys	0m5.468s
-
-CPU UTILIZATION: 26.039 / 28
-
------------------------------------------
-
-(178): time { frun -k -l 1:0 printf %s\n <f2 | wc -l; }
-real	0m0.913s
-user	0m18.390s
-sys	0m5.372s
-
-CPU UTILIZATION: 26.022 / 28
-
------------------------------------------
-
-(179): time { cat f2 | frun -k -l 1:0 printf %s\n >/dev/null; }
-real	0m0.934s
-user	0m18.335s
-sys	0m5.402s
-
-CPU UTILIZATION: 25.414 / 28
-
------------------------------------------
-
-(180): time { cat f2 | frun -k -l 1:0 printf %s\n | wc -l; }
-real	0m0.927s
-user	0m18.630s
-sys	0m5.462s
-
-CPU UTILIZATION: 25.989 / 28
-
------------------------------------------
-
-(181): time { frun -u  : <f2 >/dev/null; }
-real	0m0.526s
-user	0m13.154s
-sys	0m0.165s
-
-CPU UTILIZATION: 25.321 / 28
-
------------------------------------------
-
-(182): time { frun -u  : <f2 | wc -l; }
-real	0m0.529s
-user	0m13.302s
-sys	0m0.165s
-
-CPU UTILIZATION: 25.457 / 28
-
------------------------------------------
-
-(183): time { cat f2 | frun -u  : >/dev/null; }
-real	0m0.524s
-user	0m13.182s
-sys	0m0.180s
-
-CPU UTILIZATION: 25.500 / 28
-
------------------------------------------
-
-(184): time { cat f2 | frun -u  : | wc -l; }
-real	0m0.523s
-user	0m13.130s
-sys	0m0.183s
-
-CPU UTILIZATION: 25.455 / 28
-
------------------------------------------
-
-(185): time { frun -u  echo <f2 >/dev/null; }
-real	0m0.568s
-user	0m14.323s
-sys	0m0.182s
-
-CPU UTILIZATION: 25.536 / 28
-
------------------------------------------
-
-(186): time { frun -u  echo <f2 | wc -l; }
-real	0m0.578s
-user	0m14.374s
-sys	0m0.257s
-
-CPU UTILIZATION: 25.313 / 28
-
------------------------------------------
-
-(187): time { cat f2 | frun -u  echo >/dev/null; }
-real	0m0.565s
-user	0m14.246s
-sys	0m0.214s
-
-CPU UTILIZATION: 25.592 / 28
-
------------------------------------------
-
-(188): time { cat f2 | frun -u  echo | wc -l; }
-real	0m0.569s
-user	0m14.020s
-sys	0m0.274s
-
-CPU UTILIZATION: 25.121 / 28
-
------------------------------------------
-
-(189): time { frun -u  printf %s\n <f2 >/dev/null; }
-real	0m0.857s
-user	0m18.946s
-sys	0m3.325s
-
-CPU UTILIZATION: 25.987 / 28
-
------------------------------------------
-
-(190): time { frun -u  printf %s\n <f2 | wc -l; }
-real	0m2.767s
-user	0m14.088s
-sys	0m58.747s
-
-CPU UTILIZATION: 26.322 / 28
-
------------------------------------------
-
-(191): time { cat f2 | frun -u  printf %s\n >/dev/null; }
-real	0m0.844s
-user	0m18.600s
-sys	0m3.297s
-
-CPU UTILIZATION: 25.944 / 28
-
------------------------------------------
-
-(192): time { cat f2 | frun -u  printf %s\n | wc -l; }
-real	0m2.721s
-user	0m14.155s
-sys	0m57.716s
-
-CPU UTILIZATION: 26.413 / 28
-
------------------------------------------
-
-(193): time { frun -u -l 1:0 : <f2 >/dev/null; }
-real	0m0.528s
-user	0m13.267s
-sys	0m0.160s
-
-CPU UTILIZATION: 25.429 / 28
-
------------------------------------------
-
-(194): time { frun -u -l 1:0 : <f2 | wc -l; }
-real	0m0.531s
-user	0m13.360s
-sys	0m0.188s
-
-CPU UTILIZATION: 25.514 / 28
-
------------------------------------------
-
-(195): time { cat f2 | frun -u -l 1:0 : >/dev/null; }
-real	0m0.525s
-user	0m13.118s
-sys	0m0.189s
-
-CPU UTILIZATION: 25.346 / 28
-
------------------------------------------
-
-(196): time { cat f2 | frun -u -l 1:0 : | wc -l; }
-real	0m0.527s
-user	0m13.180s
-sys	0m0.201s
-
-CPU UTILIZATION: 25.390 / 28
-
------------------------------------------
-
-(197): time { frun -u -l 1:0 echo <f2 >/dev/null; }
-real	0m0.566s
-user	0m14.257s
-sys	0m0.178s
-
-CPU UTILIZATION: 25.503 / 28
-
------------------------------------------
-
-(198): time { frun -u -l 1:0 echo <f2 | wc -l; }
-real	0m0.574s
-user	0m14.157s
-sys	0m0.276s
-
-CPU UTILIZATION: 25.144 / 28
-
------------------------------------------
-
-(199): time { cat f2 | frun -u -l 1:0 echo >/dev/null; }
-real	0m0.564s
-user	0m14.165s
-sys	0m0.194s
-
-CPU UTILIZATION: 25.459 / 28
-
------------------------------------------
-
-(200): time { cat f2 | frun -u -l 1:0 echo | wc -l; }
-real	0m0.576s
-user	0m14.078s
-sys	0m0.257s
-
-CPU UTILIZATION: 24.887 / 28
-
------------------------------------------
-
 (201): time { frun -u -l 1:0 printf %s\n <f2 >/dev/null; }
-real	0m0.835s
-user	0m19.045s
-sys	0m2.644s
+real	0m8.349s
+user	3m9.538s
+sys	0m34.150s
 
-CPU UTILIZATION: 25.974 / 28
+CPU UTILIZATION: 26.792 / 28
 
 -----------------------------------------
 
 (202): time { frun -u -l 1:0 printf %s\n <f2 | wc -l; }
-real	0m2.522s
-user	0m14.262s
-sys	0m51.792s
+real	0m24.733s
+user	2m25.041s
+sys	8m29.733s
 
-CPU UTILIZATION: 26.191 / 28
+CPU UTILIZATION: 26.473 / 28
 
 -----------------------------------------
 
 (203): time { cat f2 | frun -u -l 1:0 printf %s\n >/dev/null; }
-real	0m0.850s
-user	0m18.889s
-sys	0m3.202s
+real	0m8.331s
+user	3m6.538s
+sys	0m36.543s
 
-CPU UTILIZATION: 25.989 / 28
+CPU UTILIZATION: 26.777 / 28
 
 -----------------------------------------
 
 (204): time { cat f2 | frun -u -l 1:0 printf %s\n | wc -l; }
-real	0m2.457s
-user	0m14.071s
-sys	0m50.598s
+real	0m27.289s
+user	2m22.647s
+sys	9m32.630s
 
-CPU UTILIZATION: 26.320 / 28
+CPU UTILIZATION: 26.211 / 28
 
 -----------------------------------------
 
 (205): time { frun -U  : <f2 >/dev/null; }
-real	0m0.449s
-user	0m11.085s
-sys	0m0.200s
+real	0m4.280s
+user	1m53.075s
+sys	0m1.432s
 
-CPU UTILIZATION: 25.133 / 28
+CPU UTILIZATION: 26.753 / 28
 
 -----------------------------------------
 
 (206): time { frun -U  : <f2 | wc -l; }
-real	0m0.452s
-user	0m11.159s
-sys	0m0.205s
+real	0m4.281s
+user	1m53.068s
+sys	0m1.439s
 
-CPU UTILIZATION: 25.141 / 28
+CPU UTILIZATION: 26.747 / 28
 
 -----------------------------------------
 
 (207): time { cat f2 | frun -U  : >/dev/null; }
-real	0m0.450s
-user	0m11.100s
-sys	0m0.222s
+real	0m4.296s
+user	1m53.363s
+sys	0m1.649s
 
-CPU UTILIZATION: 25.160 / 28
+CPU UTILIZATION: 26.771 / 28
 
 -----------------------------------------
 
 (208): time { cat f2 | frun -U  : | wc -l; }
-real	0m0.450s
-user	0m11.147s
-sys	0m0.213s
+real	0m4.285s
+user	1m52.713s
+sys	0m1.615s
 
-CPU UTILIZATION: 25.244 / 28
+CPU UTILIZATION: 26.680 / 28
 
 -----------------------------------------
 
 (209): time { frun -U  echo <f2 >/dev/null; }
-real	0m0.498s
-user	0m12.374s
-sys	0m0.268s
+real	0m4.786s
+user	2m6.069s
+sys	0m2.286s
 
-CPU UTILIZATION: 25.385 / 28
+CPU UTILIZATION: 26.818 / 28
 
 -----------------------------------------
 
 (210): time { frun -U  echo <f2 | wc -l; }
-real	0m0.492s
-user	0m12.185s
-sys	0m0.309s
+real	0m4.732s
+user	2m3.972s
+sys	0m2.411s
 
-CPU UTILIZATION: 25.394 / 28
+CPU UTILIZATION: 26.708 / 28
 
 -----------------------------------------
 
 (211): time { cat f2 | frun -U  echo >/dev/null; }
-real	0m0.500s
-user	0m12.343s
-sys	0m0.308s
+real	0m4.720s
+user	2m3.903s
+sys	0m2.512s
 
-CPU UTILIZATION: 25.302 / 28
+CPU UTILIZATION: 26.782 / 28
 
 -----------------------------------------
 
 (212): time { cat f2 | frun -U  echo | wc -l; }
-real	0m0.492s
-user	0m12.130s
-sys	0m0.336s
+real	0m4.800s
+user	2m5.975s
+sys	0m2.680s
 
-CPU UTILIZATION: 25.337 / 28
+CPU UTILIZATION: 26.803 / 28
 
 -----------------------------------------
 
 (213): time { frun -U  printf %s\n <f2 >/dev/null; }
-real	0m0.837s
-user	0m16.288s
-sys	0m5.452s
+real	0m8.200s
+user	2m45.213s
+sys	0m54.147s
 
-CPU UTILIZATION: 25.973 / 28
+CPU UTILIZATION: 26.751 / 28
 
 -----------------------------------------
 
 (214): time { frun -U  printf %s\n <f2 | wc -l; }
-real	0m0.848s
-user	0m16.584s
-sys	0m5.445s
+real	0m8.512s
+user	2m51.673s
+sys	0m55.905s
 
-CPU UTILIZATION: 25.977 / 28
+CPU UTILIZATION: 26.736 / 28
 
 -----------------------------------------
 
 (215): time { cat f2 | frun -U  printf %s\n >/dev/null; }
-real	0m0.833s
-user	0m16.182s
-sys	0m5.466s
+real	0m8.123s
+user	2m42.732s
+sys	0m54.811s
 
-CPU UTILIZATION: 25.987 / 28
+CPU UTILIZATION: 26.781 / 28
 
 -----------------------------------------
 
 (216): time { cat f2 | frun -U  printf %s\n | wc -l; }
-real	0m0.849s
-user	0m16.476s
-sys	0m5.613s
+real	0m8.192s
+user	2m45.968s
+sys	0m53.347s
 
-CPU UTILIZATION: 26.015 / 28
+CPU UTILIZATION: 26.771 / 28
 
 -----------------------------------------
 
 (217): time { frun -U -l 1:0 : <f2 >/dev/null; }
-real	0m0.449s
-user	0m11.117s
-sys	0m0.198s
+real	0m4.278s
+user	1m52.704s
+sys	0m1.397s
 
-CPU UTILIZATION: 25.200 / 28
+CPU UTILIZATION: 26.671 / 28
 
 -----------------------------------------
 
 (218): time { frun -U -l 1:0 : <f2 | wc -l; }
-real	0m0.448s
-user	0m11.094s
-sys	0m0.202s
+real	0m4.275s
+user	1m52.778s
+sys	0m1.481s
 
-CPU UTILIZATION: 25.214 / 28
+CPU UTILIZATION: 26.727 / 28
 
 -----------------------------------------
 
 (219): time { cat f2 | frun -U -l 1:0 : >/dev/null; }
-real	0m0.455s
-user	0m11.247s
-sys	0m0.245s
+real	0m4.297s
+user	1m53.429s
+sys	0m1.641s
 
-CPU UTILIZATION: 25.257 / 28
+CPU UTILIZATION: 26.779 / 28
 
 -----------------------------------------
 
 (220): time { cat f2 | frun -U -l 1:0 : | wc -l; }
-real	0m0.449s
-user	0m11.045s
-sys	0m0.245s
+real	0m4.268s
+user	1m52.508s
+sys	0m1.576s
 
-CPU UTILIZATION: 25.144 / 28
+CPU UTILIZATION: 26.730 / 28
 
 -----------------------------------------
 
 (221): time { frun -U -l 1:0 echo <f2 >/dev/null; }
-real	0m0.491s
-user	0m12.185s
-sys	0m0.289s
+real	0m4.705s
+user	2m4.087s
+sys	0m2.159s
 
-CPU UTILIZATION: 25.405 / 28
+CPU UTILIZATION: 26.832 / 28
 
 -----------------------------------------
 
 (222): time { frun -U -l 1:0 echo <f2 | wc -l; }
-real	0m0.492s
-user	0m12.150s
-sys	0m0.318s
+real	0m4.714s
+user	2m3.361s
+sys	0m2.381s
 
-CPU UTILIZATION: 25.341 / 28
+CPU UTILIZATION: 26.674 / 28
 
 -----------------------------------------
 
 (223): time { cat f2 | frun -U -l 1:0 echo >/dev/null; }
-real	0m0.491s
-user	0m12.160s
-sys	0m0.288s
+real	0m4.751s
+user	2m5.296s
+sys	0m2.415s
 
-CPU UTILIZATION: 25.352 / 28
+CPU UTILIZATION: 26.880 / 28
 
 -----------------------------------------
 
 (224): time { cat f2 | frun -U -l 1:0 echo | wc -l; }
-real	0m0.499s
-user	0m12.365s
-sys	0m0.308s
+real	0m4.701s
+user	2m3.343s
+sys	0m2.692s
 
-CPU UTILIZATION: 25.396 / 28
+CPU UTILIZATION: 26.810 / 28
 
 -----------------------------------------
 
 (225): time { frun -U -l 1:0 printf %s\n <f2 >/dev/null; }
-real	0m0.842s
-user	0m16.492s
-sys	0m5.366s
+real	0m8.194s
+user	2m44.899s
+sys	0m54.578s
 
-CPU UTILIZATION: 25.959 / 28
+CPU UTILIZATION: 26.785 / 28
 
 -----------------------------------------
 
 (226): time { frun -U -l 1:0 printf %s\n <f2 | wc -l; }
-real	0m0.852s
-user	0m16.563s
-sys	0m5.572s
+real	0m8.126s
+user	2m42.740s
+sys	0m54.492s
 
-CPU UTILIZATION: 25.980 / 28
+CPU UTILIZATION: 26.732 / 28
 
 -----------------------------------------
 
 (227): time { cat f2 | frun -U -l 1:0 printf %s\n >/dev/null; }
-real	0m0.844s
-user	0m16.348s
-sys	0m5.560s
+real	0m8.225s
+user	2m45.050s
+sys	0m55.656s
 
-CPU UTILIZATION: 25.957 / 28
+CPU UTILIZATION: 26.833 / 28
 
 -----------------------------------------
 
 (228): time { cat f2 | frun -U -l 1:0 printf %s\n | wc -l; }
-real	0m0.842s
-user	0m16.076s
-sys	0m5.492s
+real	0m8.193s
+user	2m44.069s
+sys	0m54.847s
 
-CPU UTILIZATION: 25.615 / 28
+CPU UTILIZATION: 26.719 / 28
 
 -----------------------------------------
 
 (229): time { frun -s : <f2 >/dev/null; }
-real	0m0.113s
-user	0m0.371s
-sys	0m1.690s
+real	0m0.770s
+user	0m3.006s
+sys	0m14.791s
 
-CPU UTILIZATION: 18.238 / 28
+CPU UTILIZATION: 23.112 / 28
 
 -----------------------------------------
 
 (230): time { frun -s : <f2 | wc -l; }
-real	0m0.110s
-user	0m0.339s
-sys	0m1.654s
+real	0m0.800s
+user	0m2.983s
+sys	0m15.649s
 
-CPU UTILIZATION: 18.118 / 28
+CPU UTILIZATION: 23.290 / 28
 
 -----------------------------------------
 
 (231): time { cat f2 | frun -s : >/dev/null; }
-real	0m0.106s
-user	0m0.420s
-sys	0m1.608s
+real	0m0.820s
+user	0m3.272s
+sys	0m16.107s
 
-CPU UTILIZATION: 19.132 / 28
+CPU UTILIZATION: 23.632 / 28
 
 -----------------------------------------
 
 (232): time { cat f2 | frun -s : | wc -l; }
-real	0m0.115s
-user	0m0.372s
-sys	0m1.701s
+real	0m0.812s
+user	0m3.220s
+sys	0m15.793s
 
-CPU UTILIZATION: 18.022 / 28
+CPU UTILIZATION: 23.415 / 28
 
 -----------------------------------------
 
 (233): time { frun -s cat <f2 >/dev/null; }
-real	0m0.178s
-user	0m1.371s
-sys	0m2.406s
-
-CPU UTILIZATION: 21.219 / 28
-
------------------------------------------
-
-(234): time { frun -s cat <f2 | wc -l; }
-real	0m0.181s
-user	0m1.454s
-sys	0m2.366s
-
-CPU UTILIZATION: 21.104 / 28
-
------------------------------------------
-
-(235): time { cat f2 | frun -s cat >/dev/null; }
-real	0m0.181s
-user	0m1.427s
-sys	0m2.417s
-
-CPU UTILIZATION: 21.237 / 28
-
------------------------------------------
-
-(236): time { cat f2 | frun -s cat | wc -l; }
-real	0m0.181s
-user	0m1.501s
-sys	0m2.338s
-
-CPU UTILIZATION: 21.209 / 28
-
------------------------------------------
-
-(237): time { frun -s tee <f2 >/dev/null; }
-real	0m0.178s
-user	0m1.396s
-sys	0m2.358s
-
-CPU UTILIZATION: 21.000 / 28
-
------------------------------------------
-
-(238): time { frun -s tee <f2 | wc -l; }
-real	0m0.178s
-user	0m1.446s
-sys	0m2.302s
-
-CPU UTILIZATION: 21.046 / 28
-
------------------------------------------
-
-(239): time { cat f2 | frun -s tee >/dev/null; }
-real	0m0.179s
-user	0m1.431s
-sys	0m2.372s
-
-CPU UTILIZATION: 21.245 / 28
-
------------------------------------------
-
-(240): time { cat f2 | frun -s tee | wc -l; }
-real	0m0.181s
-user	0m1.463s
-sys	0m2.370s
-
-CPU UTILIZATION: 21.176 / 28
-
------------------------------------------
-
-(241): time { frun -b 524288 : <f2 >/dev/null; }
-real	0m0.054s
-user	0m0.014s
-sys	0m0.084s
-
-CPU UTILIZATION: 1.814 / 28
-
------------------------------------------
-
-(242): time { frun -b 524288 : <f2 | wc -l; }
-real	0m0.062s
-user	0m0.023s
-sys	0m0.087s
-
-CPU UTILIZATION: 1.774 / 28
-
------------------------------------------
-
-(243): time { cat f2 | frun -b 524288 : >/dev/null; }
-real	0m0.078s
-user	0m0.037s
-sys	0m0.144s
-
-CPU UTILIZATION: 2.320 / 28
-
------------------------------------------
-
-(244): time { cat f2 | frun -b 524288 : | wc -l; }
-real	0m0.079s
-user	0m0.029s
-sys	0m0.137s
-
-CPU UTILIZATION: 2.101 / 28
-
------------------------------------------
-
-(245): time { frun -b 524288 cat <f2 >/dev/null; }
-real	0m0.068s
-user	0m0.055s
-sys	0m0.233s
-
-CPU UTILIZATION: 4.235 / 28
-
------------------------------------------
-
-(246): time { frun -b 524288 cat <f2 | wc -l; }
-real	0m0.057s
-user	0m0.072s
-sys	0m0.240s
-
-CPU UTILIZATION: 5.473 / 28
-
------------------------------------------
-
-(247): time { cat f2 | frun -b 524288 cat >/dev/null; }
-real	0m0.073s
-user	0m0.078s
-sys	0m0.230s
-
-CPU UTILIZATION: 4.219 / 28
-
------------------------------------------
-
-(248): time { cat f2 | frun -b 524288 cat | wc -l; }
-real	0m0.077s
-user	0m0.081s
-sys	0m0.286s
-
-CPU UTILIZATION: 4.766 / 28
-
------------------------------------------
-
-(249): time { frun -b 524288 tee <f2 >/dev/null; }
-real	0m0.059s
-user	0m0.082s
-sys	0m0.192s
-
-CPU UTILIZATION: 4.644 / 28
-
------------------------------------------
-
-(250): time { frun -b 524288 tee <f2 | wc -l; }
-real	0m0.058s
-user	0m0.068s
-sys	0m0.244s
-
-CPU UTILIZATION: 5.379 / 28
-
------------------------------------------
-
-(251): time { cat f2 | frun -b 524288 tee >/dev/null; }
-real	0m0.071s
-user	0m0.072s
-sys	0m0.241s
-
-CPU UTILIZATION: 4.408 / 28
-
------------------------------------------
-
-(252): time { cat f2 | frun -b 524288 tee | wc -l; }
-real	0m0.073s
-user	0m0.085s
-sys	0m0.264s
-
-CPU UTILIZATION: 4.780 / 28
-
------------------------------------------
-
-(253): time { frun -b4096 -s : <f2 >/dev/null; }
-real	0m0.094s
-user	0m0.932s
-sys	0m0.744s
-
-CPU UTILIZATION: 17.829 / 28
-
------------------------------------------
-
-(254): time { frun -b4096 -s : <f2 | wc -l; }
-real	0m0.107s
-user	0m0.994s
-sys	0m0.758s
-
-CPU UTILIZATION: 16.373 / 28
-
------------------------------------------
-
-(255): time { cat f2 | frun -b4096 -s : >/dev/null; }
-real	0m0.116s
-user	0m0.994s
-sys	0m1.356s
-
-CPU UTILIZATION: 20.258 / 28
-
------------------------------------------
-
-(256): time { cat f2 | frun -b4096 -s : | wc -l; }
-real	0m0.113s
-user	0m1.058s
-sys	0m1.232s
-
-CPU UTILIZATION: 20.265 / 28
-
------------------------------------------
-
-(257): time { frun -b4096 -s cat <f2 >/dev/null; }
-real	0m0.847s
-user	0m7.226s
-sys	0m12.922s
-
-CPU UTILIZATION: 23.787 / 28
-
------------------------------------------
-
-(258): time { frun -b4096 -s cat <f2 | wc -l; }
-real	0m0.843s
-user	0m7.343s
-sys	0m12.746s
-
-CPU UTILIZATION: 23.830 / 28
-
------------------------------------------
-
-(259): time { cat f2 | frun -b4096 -s cat >/dev/null; }
-real	0m0.846s
-user	0m7.352s
-sys	0m12.769s
-
-CPU UTILIZATION: 23.783 / 28
-
------------------------------------------
-
-(260): time { cat f2 | frun -b4096 -s cat | wc -l; }
-real	0m0.849s
-user	0m7.376s
-sys	0m12.783s
-
-CPU UTILIZATION: 23.744 / 28
-
------------------------------------------
-
-(261): time { frun -b4096 -s tee <f2 >/dev/null; }
-real	0m0.830s
-user	0m7.221s
-sys	0m12.507s
-
-CPU UTILIZATION: 23.768 / 28
-
------------------------------------------
-
-(262): time { frun -b4096 -s tee <f2 | wc -l; }
-real	0m0.841s
-user	0m7.290s
-sys	0m12.727s
-
-CPU UTILIZATION: 23.801 / 28
-
------------------------------------------
-
-(263): time { cat f2 | frun -b4096 -s tee >/dev/null; }
-real	0m0.833s
-user	0m7.223s
-sys	0m12.646s
-
-CPU UTILIZATION: 23.852 / 28
-
------------------------------------------
-
-(264): time { cat f2 | frun -b4096 -s tee | wc -l; }
-real	0m0.844s
-user	0m7.298s
-sys	0m12.736s
-
-CPU UTILIZATION: 23.736 / 28
-
------------------------------------------
-
-(265): time { frun   : <f3 >/dev/null; }
-real	0m0.341s
-user	0m7.892s
-sys	0m0.462s
-
-CPU UTILIZATION: 24.498 / 28
-
------------------------------------------
-
-(266): time { frun   : <f3 | wc -l; }
-real	0m0.325s
-user	0m7.588s
-sys	0m0.404s
-
-CPU UTILIZATION: 24.590 / 28
-
------------------------------------------
-
-(267): time { cat f3 | frun   : >/dev/null; }
-real	0m0.327s
-user	0m7.517s
-sys	0m0.458s
-
-CPU UTILIZATION: 24.388 / 28
-
------------------------------------------
-
-(268): time { cat f3 | frun   : | wc -l; }
-real	0m0.326s
-user	0m7.057s
-sys	0m0.442s
-
-CPU UTILIZATION: 23.003 / 28
-
------------------------------------------
-
-(269): time { frun   echo <f3 >/dev/null; }
-real	0m0.366s
-user	0m8.483s
-sys	0m0.614s
-
-CPU UTILIZATION: 24.855 / 28
-
------------------------------------------
-
-(270): time { frun   echo <f3 | wc -l; }
-real	0m0.368s
-user	0m8.438s
-sys	0m0.675s
-
-CPU UTILIZATION: 24.763 / 28
-
------------------------------------------
-
-(271): time { cat f3 | frun   echo >/dev/null; }
-real	0m0.346s
-user	0m7.967s
-sys	0m0.616s
-
-CPU UTILIZATION: 24.806 / 28
-
------------------------------------------
-
-(272): time { cat f3 | frun   echo | wc -l; }
-real	0m0.347s
-user	0m7.958s
-sys	0m0.651s
-
-CPU UTILIZATION: 24.809 / 28
-
------------------------------------------
-
-(273): time { frun   printf %s\n <f3 >/dev/null; }
-real	0m0.413s
-user	0m8.773s
-sys	0m1.599s
-
-CPU UTILIZATION: 25.113 / 28
-
------------------------------------------
-
-(274): time { frun   printf %s\n <f3 | wc -l; }
-real	0m0.452s
-user	0m9.553s
-sys	0m1.741s
-
-CPU UTILIZATION: 24.986 / 28
-
------------------------------------------
-
-(275): time { cat f3 | frun   printf %s\n >/dev/null; }
-real	0m0.413s
-user	0m8.748s
-sys	0m1.646s
-
-CPU UTILIZATION: 25.167 / 28
-
------------------------------------------
-
-(276): time { cat f3 | frun   printf %s\n | wc -l; }
-real	0m0.420s
-user	0m8.770s
-sys	0m1.767s
-
-CPU UTILIZATION: 25.000 / 28
-
------------------------------------------
-
-(277): time { frun  -l 1:0 : <f3 >/dev/null; }
-real	0m0.343s
-user	0m7.951s
-sys	0m0.481s
-
-CPU UTILIZATION: 24.583 / 28
-
------------------------------------------
-
-(278): time { frun  -l 1:0 : <f3 | wc -l; }
-real	0m0.340s
-user	0m7.956s
-sys	0m0.410s
-
-CPU UTILIZATION: 24.605 / 28
-
------------------------------------------
-
-(279): time { cat f3 | frun  -l 1:0 : >/dev/null; }
-real	0m0.327s
-user	0m7.558s
-sys	0m0.552s
-
-CPU UTILIZATION: 24.801 / 28
-
------------------------------------------
-
-(280): time { cat f3 | frun  -l 1:0 : | wc -l; }
-real	0m0.329s
-user	0m7.623s
-sys	0m0.448s
-
-CPU UTILIZATION: 24.531 / 28
-
------------------------------------------
-
-(281): time { frun  -l 1:0 echo <f3 >/dev/null; }
-real	0m0.368s
-user	0m8.403s
-sys	0m0.622s
-
-CPU UTILIZATION: 24.524 / 28
-
------------------------------------------
-
-(282): time { frun  -l 1:0 echo <f3 | wc -l; }
-real	0m0.364s
-user	0m8.295s
-sys	0m0.688s
-
-CPU UTILIZATION: 24.678 / 28
-
------------------------------------------
-
-(283): time { cat f3 | frun  -l 1:0 echo >/dev/null; }
-real	0m0.337s
-user	0m7.617s
-sys	0m0.572s
-
-CPU UTILIZATION: 24.299 / 28
-
------------------------------------------
-
-(284): time { cat f3 | frun  -l 1:0 echo | wc -l; }
-real	0m0.350s
-user	0m8.013s
-sys	0m0.641s
-
-CPU UTILIZATION: 24.725 / 28
-
------------------------------------------
-
-(285): time { frun  -l 1:0 printf %s\n <f3 >/dev/null; }
-real	0m0.418s
-user	0m8.857s
-sys	0m1.582s
-
-CPU UTILIZATION: 24.973 / 28
-
------------------------------------------
-
-(286): time { frun  -l 1:0 printf %s\n <f3 | wc -l; }
-real	0m0.470s
-user	0m9.851s
-sys	0m1.724s
-
-CPU UTILIZATION: 24.627 / 28
-
------------------------------------------
-
-(287): time { cat f3 | frun  -l 1:0 printf %s\n >/dev/null; }
-real	0m0.423s
-user	0m8.887s
-sys	0m1.800s
-
-CPU UTILIZATION: 25.264 / 28
-
------------------------------------------
-
-(288): time { cat f3 | frun  -l 1:0 printf %s\n | wc -l; }
-real	0m0.422s
-user	0m8.802s
-sys	0m1.770s
-
-CPU UTILIZATION: 25.042 / 28
-
------------------------------------------
-
-(289): time { frun -k  : <f3 >/dev/null; }
-real	0m0.324s
-user	0m7.625s
-sys	0m0.397s
-
-CPU UTILIZATION: 24.759 / 28
-
------------------------------------------
-
-(290): time { frun -k  : <f3 | wc -l; }
-real	0m0.339s
-user	0m7.878s
-sys	0m0.452s
-
-CPU UTILIZATION: 24.572 / 28
-
------------------------------------------
-
-(291): time { cat f3 | frun -k  : >/dev/null; }
-real	0m0.334s
-user	0m7.713s
-sys	0m0.520s
-
-CPU UTILIZATION: 24.649 / 28
-
------------------------------------------
-
-(292): time { cat f3 | frun -k  : | wc -l; }
-real	0m0.329s
-user	0m7.597s
-sys	0m0.584s
-
-CPU UTILIZATION: 24.866 / 28
-
------------------------------------------
-
-(293): time { frun -k  echo <f3 >/dev/null; }
-real	0m0.361s
-user	0m8.324s
-sys	0m0.628s
-
-CPU UTILIZATION: 24.797 / 28
-
------------------------------------------
-
-(294): time { frun -k  echo <f3 | wc -l; }
-real	0m0.360s
-user	0m8.234s
-sys	0m0.658s
-
-CPU UTILIZATION: 24.700 / 28
-
------------------------------------------
-
-(295): time { cat f3 | frun -k  echo >/dev/null; }
-real	0m0.346s
-user	0m7.934s
-sys	0m0.652s
-
-CPU UTILIZATION: 24.815 / 28
-
------------------------------------------
-
-(296): time { cat f3 | frun -k  echo | wc -l; }
-real	0m0.349s
-user	0m8.032s
-sys	0m0.618s
-
-CPU UTILIZATION: 24.785 / 28
-
------------------------------------------
-
-(297): time { frun -k  printf %s\n <f3 >/dev/null; }
-real	0m0.423s
-user	0m9.057s
-sys	0m1.574s
-
-CPU UTILIZATION: 25.132 / 28
-
------------------------------------------
-
-(298): time { frun -k  printf %s\n <f3 | wc -l; }
-real	0m0.418s
-user	0m8.846s
-sys	0m1.695s
-
-CPU UTILIZATION: 25.217 / 28
-
------------------------------------------
-
-(299): time { cat f3 | frun -k  printf %s\n >/dev/null; }
-real	0m0.421s
-user	0m8.787s
-sys	0m1.711s
-
-CPU UTILIZATION: 24.935 / 28
-
------------------------------------------
-
-(300): time { cat f3 | frun -k  printf %s\n | wc -l; }
-real	0m0.424s
-user	0m8.851s
-sys	0m1.790s
-
-CPU UTILIZATION: 25.000 / 28
-
------------------------------------------
-
-(301): time { frun -k -l 1:0 : <f3 >/dev/null; }
-real	0m0.345s
-user	0m8.033s
-sys	0m0.478s
-
-CPU UTILIZATION: 24.669 / 28
-
------------------------------------------
-
-(302): time { frun -k -l 1:0 : <f3 | wc -l; }
-real	0m0.341s
-user	0m7.905s
-sys	0m0.482s
-
-CPU UTILIZATION: 24.595 / 28
-
------------------------------------------
-
-(303): time { cat f3 | frun -k -l 1:0 : >/dev/null; }
-real	0m0.327s
-user	0m7.467s
-sys	0m0.556s
-
-CPU UTILIZATION: 24.535 / 28
-
------------------------------------------
-
-(304): time { cat f3 | frun -k -l 1:0 : | wc -l; }
-real	0m0.325s
-user	0m7.467s
-sys	0m0.560s
-
-CPU UTILIZATION: 24.698 / 28
-
------------------------------------------
-
-(305): time { frun -k -l 1:0 echo <f3 >/dev/null; }
-real	0m0.365s
-user	0m8.425s
-sys	0m0.629s
-
-CPU UTILIZATION: 24.805 / 28
-
------------------------------------------
-
-(306): time { frun -k -l 1:0 echo <f3 | wc -l; }
-real	0m0.349s
-user	0m7.924s
-sys	0m0.622s
-
-CPU UTILIZATION: 24.487 / 28
-
------------------------------------------
-
-(307): time { cat f3 | frun -k -l 1:0 echo >/dev/null; }
-real	0m0.350s
-user	0m7.694s
-sys	0m0.572s
-
-CPU UTILIZATION: 23.617 / 28
-
------------------------------------------
-
-(308): time { cat f3 | frun -k -l 1:0 echo | wc -l; }
-real	0m0.351s
-user	0m7.921s
-sys	0m0.696s
-
-CPU UTILIZATION: 24.549 / 28
-
------------------------------------------
-
-(309): time { frun -k -l 1:0 printf %s\n <f3 >/dev/null; }
-real	0m0.426s
-user	0m9.061s
-sys	0m1.613s
-
-CPU UTILIZATION: 25.046 / 28
-
------------------------------------------
-
-(310): time { frun -k -l 1:0 printf %s\n <f3 | wc -l; }
-real	0m0.420s
-user	0m8.920s
-sys	0m1.646s
-
-CPU UTILIZATION: 25.157 / 28
-
------------------------------------------
-
-(311): time { cat f3 | frun -k -l 1:0 printf %s\n >/dev/null; }
-real	0m0.419s
-user	0m8.801s
-sys	0m1.769s
-
-CPU UTILIZATION: 25.226 / 28
-
------------------------------------------
-
-(312): time { cat f3 | frun -k -l 1:0 printf %s\n | wc -l; }
-real	0m0.427s
-user	0m8.822s
-sys	0m1.900s
-
-CPU UTILIZATION: 25.110 / 28
-
------------------------------------------
-
-(313): time { frun -u  : <f3 >/dev/null; }
-real	0m0.333s
-user	0m7.778s
-sys	0m0.440s
-
-CPU UTILIZATION: 24.678 / 28
-
------------------------------------------
-
-(314): time { frun -u  : <f3 | wc -l; }
-real	0m0.313s
-user	0m7.424s
-sys	0m0.319s
-
-CPU UTILIZATION: 24.738 / 28
-
------------------------------------------
-
-(315): time { cat f3 | frun -u  : >/dev/null; }
-real	0m0.316s
-user	0m7.359s
-sys	0m0.416s
-
-CPU UTILIZATION: 24.604 / 28
-
------------------------------------------
-
-(316): time { cat f3 | frun -u  : | wc -l; }
-real	0m0.321s
-user	0m6.964s
-sys	0m0.382s
-
-CPU UTILIZATION: 22.884 / 28
-
------------------------------------------
-
-(317): time { frun -u  echo <f3 >/dev/null; }
-real	0m0.350s
-user	0m8.190s
-sys	0m0.464s
-
-CPU UTILIZATION: 24.725 / 28
-
------------------------------------------
-
-(318): time { frun -u  echo <f3 | wc -l; }
-real	0m0.363s
-user	0m8.049s
-sys	0m0.573s
-
-CPU UTILIZATION: 23.752 / 28
-
------------------------------------------
-
-(319): time { cat f3 | frun -u  echo >/dev/null; }
-real	0m0.332s
-user	0m7.283s
-sys	0m0.428s
-
-CPU UTILIZATION: 23.225 / 28
-
------------------------------------------
-
-(320): time { cat f3 | frun -u  echo | wc -l; }
-real	0m0.348s
-user	0m7.468s
-sys	0m0.516s
-
-CPU UTILIZATION: 22.942 / 28
-
------------------------------------------
-
-(321): time { frun -u  printf %s\n <f3 >/dev/null; }
-real	0m0.401s
-user	0m9.048s
-sys	0m0.964s
-
-CPU UTILIZATION: 24.967 / 28
-
------------------------------------------
-
-(322): time { frun -u  printf %s\n <f3 | wc -l; }
-real	0m0.689s
-user	0m8.410s
-sys	0m9.281s
-
-CPU UTILIZATION: 25.676 / 28
-
------------------------------------------
-
-(323): time { cat f3 | frun -u  printf %s\n >/dev/null; }
-real	0m0.389s
-user	0m8.597s
-sys	0m1.146s
-
-CPU UTILIZATION: 25.038 / 28
-
------------------------------------------
-
-(324): time { cat f3 | frun -u  printf %s\n | wc -l; }
-real	0m0.685s
-user	0m8.040s
-sys	0m9.420s
-
-CPU UTILIZATION: 25.489 / 28
-
------------------------------------------
-
-(325): time { frun -u -l 1:0 : <f3 >/dev/null; }
-real	0m0.313s
-user	0m7.417s
-sys	0m0.303s
-
-CPU UTILIZATION: 24.664 / 28
-
------------------------------------------
-
-(326): time { frun -u -l 1:0 : <f3 | wc -l; }
-real	0m0.319s
-user	0m7.475s
-sys	0m0.405s
-
-CPU UTILIZATION: 24.702 / 28
-
------------------------------------------
-
-(327): time { cat f3 | frun -u -l 1:0 : >/dev/null; }
-real	0m0.317s
-user	0m7.122s
-sys	0m0.384s
-
-CPU UTILIZATION: 23.678 / 28
-
------------------------------------------
-
-(328): time { cat f3 | frun -u -l 1:0 : | wc -l; }
-real	0m0.317s
-user	0m7.414s
-sys	0m0.387s
-
-CPU UTILIZATION: 24.608 / 28
-
------------------------------------------
-
-(329): time { frun -u -l 1:0 echo <f3 >/dev/null; }
-real	0m0.353s
-user	0m8.307s
-sys	0m0.442s
-
-CPU UTILIZATION: 24.784 / 28
-
------------------------------------------
-
-(330): time { frun -u -l 1:0 echo <f3 | wc -l; }
-real	0m0.359s
-user	0m7.921s
-sys	0m0.579s
-
-CPU UTILIZATION: 23.676 / 28
-
------------------------------------------
-
-(331): time { cat f3 | frun -u -l 1:0 echo >/dev/null; }
-real	0m0.331s
-user	0m7.800s
-sys	0m0.407s
-
-CPU UTILIZATION: 24.794 / 28
-
------------------------------------------
-
-(332): time { cat f3 | frun -u -l 1:0 echo | wc -l; }
-real	0m0.347s
-user	0m7.269s
-sys	0m0.518s
-
-CPU UTILIZATION: 22.440 / 28
-
------------------------------------------
-
-(333): time { frun -u -l 1:0 printf %s\n <f3 >/dev/null; }
-real	0m0.386s
-user	0m8.786s
-sys	0m0.878s
-
-CPU UTILIZATION: 25.030 / 28
-
------------------------------------------
-
-(334): time { frun -u -l 1:0 printf %s\n <f3 | wc -l; }
-real	0m0.635s
-user	0m7.872s
-sys	0m8.373s
-
-CPU UTILIZATION: 25.582 / 28
-
------------------------------------------
-
-(335): time { cat f3 | frun -u -l 1:0 printf %s\n >/dev/null; }
-real	0m0.389s
-user	0m8.724s
-sys	0m0.969s
-
-CPU UTILIZATION: 24.917 / 28
-
------------------------------------------
-
-(336): time { cat f3 | frun -u -l 1:0 printf %s\n | wc -l; }
-real	0m0.680s
-user	0m7.415s
-sys	0m10.152s
-
-CPU UTILIZATION: 25.833 / 28
-
------------------------------------------
-
-(337): time { frun -U  : <f3 >/dev/null; }
-real	0m0.345s
-user	0m8.193s
-sys	0m0.341s
-
-CPU UTILIZATION: 24.736 / 28
-
------------------------------------------
-
-(338): time { frun -U  : <f3 | wc -l; }
-real	0m0.348s
-user	0m8.272s
-sys	0m0.336s
-
-CPU UTILIZATION: 24.735 / 28
-
------------------------------------------
-
-(339): time { cat f3 | frun -U  : >/dev/null; }
-real	0m0.360s
-user	0m8.355s
-sys	0m0.455s
-
-CPU UTILIZATION: 24.472 / 28
-
------------------------------------------
-
-(340): time { cat f3 | frun -U  : | wc -l; }
-real	0m0.362s
-user	0m8.498s
-sys	0m0.478s
-
-CPU UTILIZATION: 24.795 / 28
-
------------------------------------------
-
-(341): time { frun -U  echo <f3 >/dev/null; }
-real	0m0.373s
-user	0m8.792s
-sys	0m0.461s
-
-CPU UTILIZATION: 24.806 / 28
-
------------------------------------------
-
-(342): time { frun -U  echo <f3 | wc -l; }
-real	0m0.368s
-user	0m8.634s
-sys	0m0.480s
-
-CPU UTILIZATION: 24.766 / 28
-
------------------------------------------
-
-(343): time { cat f3 | frun -U  echo >/dev/null; }
-real	0m0.385s
-user	0m8.898s
-sys	0m0.607s
-
-CPU UTILIZATION: 24.688 / 28
-
------------------------------------------
-
-(344): time { cat f3 | frun -U  echo | wc -l; }
-real	0m0.397s
-user	0m9.099s
-sys	0m0.807s
-
-CPU UTILIZATION: 24.952 / 28
-
------------------------------------------
-
-(345): time { frun -U  printf %s\n <f3 >/dev/null; }
-real	0m0.450s
-user	0m9.705s
-sys	0m1.523s
-
-CPU UTILIZATION: 24.951 / 28
-
------------------------------------------
-
-(346): time { frun -U  printf %s\n <f3 | wc -l; }
-real	0m0.446s
-user	0m9.597s
-sys	0m1.544s
-
-CPU UTILIZATION: 24.979 / 28
-
------------------------------------------
-
-(347): time { cat f3 | frun -U  printf %s\n >/dev/null; }
-real	0m0.455s
-user	0m9.622s
-sys	0m1.703s
-
-CPU UTILIZATION: 24.890 / 28
-
------------------------------------------
-
-(348): time { cat f3 | frun -U  printf %s\n | wc -l; }
-real	0m0.465s
-user	0m9.904s
-sys	0m1.888s
-
-CPU UTILIZATION: 25.359 / 28
-
------------------------------------------
-
-(349): time { frun -U -l 1:0 : <f3 >/dev/null; }
-real	0m0.345s
-user	0m8.206s
-sys	0m0.323s
-
-CPU UTILIZATION: 24.721 / 28
-
------------------------------------------
-
-(350): time { frun -U -l 1:0 : <f3 | wc -l; }
-real	0m0.346s
-user	0m8.180s
-sys	0m0.341s
-
-CPU UTILIZATION: 24.627 / 28
-
------------------------------------------
-
-(351): time { cat f3 | frun -U -l 1:0 : >/dev/null; }
-real	0m0.356s
-user	0m7.773s
-sys	0m0.425s
-
-CPU UTILIZATION: 23.002 / 28
-
------------------------------------------
-
-(352): time { cat f3 | frun -U -l 1:0 : | wc -l; }
-real	0m0.349s
-user	0m8.197s
-sys	0m0.404s
-
-CPU UTILIZATION: 24.644 / 28
-
------------------------------------------
-
-(353): time { frun -U -l 1:0 echo <f3 >/dev/null; }
-real	0m0.385s
-user	0m8.845s
-sys	0m0.495s
-
-CPU UTILIZATION: 24.259 / 28
-
------------------------------------------
-
-(354): time { frun -U -l 1:0 echo <f3 | wc -l; }
-real	0m0.377s
-user	0m8.605s
-sys	0m0.541s
-
-CPU UTILIZATION: 24.259 / 28
-
------------------------------------------
-
-(355): time { cat f3 | frun -U -l 1:0 echo >/dev/null; }
-real	0m0.379s
-user	0m8.788s
-sys	0m0.630s
-
-CPU UTILIZATION: 24.849 / 28
-
------------------------------------------
-
-(356): time { cat f3 | frun -U -l 1:0 echo | wc -l; }
-real	0m0.392s
-user	0m9.065s
-sys	0m0.712s
-
-CPU UTILIZATION: 24.941 / 28
-
------------------------------------------
-
-(357): time { frun -U -l 1:0 printf %s\n <f3 >/dev/null; }
-real	0m0.442s
-user	0m9.542s
-sys	0m1.502s
-
-CPU UTILIZATION: 24.986 / 28
-
------------------------------------------
-
-(358): time { frun -U -l 1:0 printf %s\n <f3 | wc -l; }
-real	0m0.432s
-user	0m9.338s
-sys	0m1.552s
-
-CPU UTILIZATION: 25.208 / 28
-
------------------------------------------
-
-(359): time { cat f3 | frun -U -l 1:0 printf %s\n >/dev/null; }
-real	0m0.465s
-user	0m9.882s
-sys	0m1.803s
-
-CPU UTILIZATION: 25.129 / 28
-
------------------------------------------
-
-(360): time { cat f3 | frun -U -l 1:0 printf %s\n | wc -l; }
-real	0m0.464s
-user	0m9.928s
-sys	0m1.834s
-
-CPU UTILIZATION: 25.349 / 28
-
------------------------------------------
-
-(361): time { frun -s : <f3 >/dev/null; }
-real	0m0.100s
-user	0m0.211s
-sys	0m1.095s
-
-CPU UTILIZATION: 13.048 / 28
-
------------------------------------------
-
-(362): time { frun -s : <f3 | wc -l; }
-real	0m0.098s
-user	0m0.188s
-sys	0m1.004s
-
-CPU UTILIZATION: 12.163 / 28
-
------------------------------------------
-
-(363): time { cat f3 | frun -s : >/dev/null; }
-real	0m0.151s
-user	0m0.963s
-sys	0m2.156s
-
-CPU UTILIZATION: 20.655 / 28
-
------------------------------------------
-
-(364): time { cat f3 | frun -s : | wc -l; }
-real	0m0.151s
-user	0m0.825s
-sys	0m2.246s
-
-CPU UTILIZATION: 20.337 / 28
-
------------------------------------------
-
-(365): time { frun -s cat <f3 >/dev/null; }
-real	0m0.114s
-user	0m0.658s
-sys	0m1.246s
-
-CPU UTILIZATION: 16.701 / 28
-
------------------------------------------
-
-(366): time { frun -s cat <f3 | wc -l; }
-real	0m0.231s
-user	0m1.870s
-sys	0m3.197s
-
-CPU UTILIZATION: 21.935 / 28
-
------------------------------------------
-
-(367): time { cat f3 | frun -s cat >/dev/null; }
-real	0m0.569s
-user	0m4.807s
-sys	0m8.557s
-
-CPU UTILIZATION: 23.486 / 28
-
------------------------------------------
-
-(368): time { cat f3 | frun -s cat | wc -l; }
-real	0m0.561s
-user	0m4.947s
-sys	0m8.209s
-
-CPU UTILIZATION: 23.450 / 28
-
------------------------------------------
-
-(369): time { frun -s tee <f3 >/dev/null; }
-real	0m0.123s
-user	0m0.714s
-sys	0m1.493s
-
-CPU UTILIZATION: 17.943 / 28
-
------------------------------------------
-
-(370): time { frun -s tee <f3 | wc -l; }
-real	0m0.144s
-user	0m1.075s
-sys	0m1.850s
-
-CPU UTILIZATION: 20.312 / 28
-
------------------------------------------
-
-(371): time { cat f3 | frun -s tee >/dev/null; }
-real	0m0.562s
-user	0m4.811s
-sys	0m8.420s
-
-CPU UTILIZATION: 23.542 / 28
-
------------------------------------------
-
-(372): time { cat f3 | frun -s tee | wc -l; }
-real	0m0.567s
-user	0m4.788s
-sys	0m8.514s
-
-CPU UTILIZATION: 23.460 / 28
-
------------------------------------------
-
-(373): time { frun -b 524288 : <f3 >/dev/null; }
-real	0m0.092s
-user	0m0.027s
-sys	0m0.155s
-
-CPU UTILIZATION: 1.978 / 28
-
------------------------------------------
-
-(374): time { frun -b 524288 : <f3 | wc -l; }
-real	0m0.104s
-user	0m0.026s
-sys	0m0.174s
-
-CPU UTILIZATION: 1.923 / 28
-
------------------------------------------
-
-(375): time { cat f3 | frun -b 524288 : >/dev/null; }
-real	0m0.121s
-user	0m0.043s
-sys	0m0.248s
-
-CPU UTILIZATION: 2.404 / 28
-
------------------------------------------
-
-(376): time { cat f3 | frun -b 524288 : | wc -l; }
-real	0m0.138s
-user	0m0.057s
-sys	0m0.264s
-
-CPU UTILIZATION: 2.326 / 28
-
------------------------------------------
-
-(377): time { frun -b 524288 cat <f3 >/dev/null; }
-real	0m0.112s
-user	0m0.132s
-sys	0m0.461s
-
-CPU UTILIZATION: 5.294 / 28
-
------------------------------------------
-
-(378): time { frun -b 524288 cat <f3 | wc -l; }
-real	0m0.096s
-user	0m0.110s
-sys	0m0.529s
-
-CPU UTILIZATION: 6.656 / 28
-
------------------------------------------
-
-(379): time { cat f3 | frun -b 524288 cat >/dev/null; }
-real	0m0.129s
-user	0m0.136s
-sys	0m0.469s
-
-CPU UTILIZATION: 4.689 / 28
-
------------------------------------------
-
-(380): time { cat f3 | frun -b 524288 cat | wc -l; }
-real	0m0.135s
-user	0m0.172s
-sys	0m0.565s
-
-CPU UTILIZATION: 5.459 / 28
-
------------------------------------------
-
-(381): time { frun -b 524288 tee <f3 >/dev/null; }
-real	0m0.093s
-user	0m0.146s
-sys	0m0.384s
-
-CPU UTILIZATION: 5.698 / 28
-
------------------------------------------
-
-(382): time { frun -b 524288 tee <f3 | wc -l; }
-real	0m0.093s
-user	0m0.154s
-sys	0m0.424s
-
-CPU UTILIZATION: 6.215 / 28
-
------------------------------------------
-
-(383): time { cat f3 | frun -b 524288 tee >/dev/null; }
-real	0m0.127s
-user	0m0.168s
-sys	0m0.473s
-
-CPU UTILIZATION: 5.039 / 28
-
------------------------------------------
-
-(384): time { cat f3 | frun -b 524288 tee | wc -l; }
-real	0m0.130s
-user	0m0.172s
-sys	0m0.540s
-
-CPU UTILIZATION: 5.476 / 28
-
------------------------------------------
-
-(385): time { frun -b4096 -s : <f3 >/dev/null; }
-real	0m0.236s
-user	0m2.035s
-sys	0m1.013s
-
-CPU UTILIZATION: 12.915 / 28
-
------------------------------------------
-
-(386): time { frun -b4096 -s : <f3 | wc -l; }
-real	0m0.227s
-user	0m2.010s
-sys	0m1.280s
-
-CPU UTILIZATION: 14.493 / 28
-
------------------------------------------
-
-(387): time { cat f3 | frun -b4096 -s : >/dev/null; }
-real	0m0.221s
-user	0m2.229s
-sys	0m2.503s
-
-CPU UTILIZATION: 21.411 / 28
-
------------------------------------------
-
-(388): time { cat f3 | frun -b4096 -s : | wc -l; }
-real	0m0.199s
-user	0m1.976s
-sys	0m2.571s
-
-CPU UTILIZATION: 22.849 / 28
-
------------------------------------------
-
-(389): time { frun -b4096 -s cat <f3 >/dev/null; }
-real	0m1.779s
-user	0m15.726s
-sys	0m27.380s
-
-CPU UTILIZATION: 24.230 / 28
-
------------------------------------------
-
-(390): time { frun -b4096 -s cat <f3 | wc -l; }
-real	0m1.801s
-user	0m15.804s
-sys	0m27.777s
-
-CPU UTILIZATION: 24.198 / 28
-
------------------------------------------
-
-(391): time { cat f3 | frun -b4096 -s cat >/dev/null; }
-real	0m1.811s
-user	0m15.997s
-sys	0m27.885s
-
-CPU UTILIZATION: 24.230 / 28
-
------------------------------------------
-
-(392): time { cat f3 | frun -b4096 -s cat | wc -l; }
-real	0m1.795s
-user	0m15.824s
-sys	0m27.666s
-
-CPU UTILIZATION: 24.228 / 28
-
------------------------------------------
-
-(393): time { frun -b4096 -s tee <f3 >/dev/null; }
-real	0m1.765s
-user	0m15.763s
-sys	0m26.875s
-
-CPU UTILIZATION: 24.157 / 28
-
------------------------------------------
-
-(394): time { frun -b4096 -s tee <f3 | wc -l; }
-real	0m1.792s
-user	0m15.996s
-sys	0m27.279s
-
-CPU UTILIZATION: 24.148 / 28
-
------------------------------------------
-
-(395): time { cat f3 | frun -b4096 -s tee >/dev/null; }
-real	0m1.785s
-user	0m15.975s
-sys	0m27.283s
-
-CPU UTILIZATION: 24.234 / 28
-
------------------------------------------
-
-(396): time { cat f3 | frun -b4096 -s tee | wc -l; }
-real	0m1.789s
-user	0m15.884s
-sys	0m27.396s
-
-CPU UTILIZATION: 24.192 / 28
-
------------------------------------------
-
-(397): time { frun   : <f4 >/dev/null; }
-real	0m0.404s
-user	0m9.628s
-sys	0m0.476s
-
-CPU UTILIZATION: 25.000 / 28
-
------------------------------------------
-
-(398): time { frun   : <f4 | wc -l; }
-real	0m0.422s
-user	0m10.009s
-sys	0m0.508s
-
-CPU UTILIZATION: 24.921 / 28
-
------------------------------------------
-
-(399): time { cat f4 | frun   : >/dev/null; }
-real	0m0.399s
-user	0m9.155s
-sys	0m0.578s
-
-CPU UTILIZATION: 24.393 / 28
-
------------------------------------------
-
-(400): time { cat f4 | frun   : | wc -l; }
-real	0m0.401s
-user	0m9.532s
-sys	0m0.527s
-
-CPU UTILIZATION: 25.000 / 28
-
------------------------------------------
-
-(401): time { frun   echo <f4 >/dev/null; }
-real	0m0.443s
-user	0m10.431s
-sys	0m0.653s
-
-CPU UTILIZATION: 25.016 / 28
-
------------------------------------------
-
-(402): time { frun   echo <f4 | wc -l; }
-real	0m0.427s
-user	0m10.012s
-sys	0m0.707s
-
-CPU UTILIZATION: 25.103 / 28
-
------------------------------------------
-
-(403): time { cat f4 | frun   echo >/dev/null; }
-real	0m0.433s
-user	0m10.030s
-sys	0m0.870s
-
-CPU UTILIZATION: 25.173 / 28
-
------------------------------------------
-
-(404): time { cat f4 | frun   echo | wc -l; }
-real	0m0.441s
-user	0m10.135s
-sys	0m0.974s
-
-CPU UTILIZATION: 25.190 / 28
-
------------------------------------------
-
-(405): time { frun   printf %s\n <f4 >/dev/null; }
-real	0m0.536s
-user	0m11.503s
-sys	0m2.119s
-
-CPU UTILIZATION: 25.414 / 28
-
------------------------------------------
-
-(406): time { frun   printf %s\n <f4 | wc -l; }
-real	0m0.552s
-user	0m11.818s
-sys	0m2.170s
-
-CPU UTILIZATION: 25.340 / 28
-
------------------------------------------
-
-(407): time { cat f4 | frun   printf %s\n >/dev/null; }
-real	0m0.525s
-user	0m11.184s
-sys	0m2.242s
-
-CPU UTILIZATION: 25.573 / 28
-
------------------------------------------
-
-(408): time { cat f4 | frun   printf %s\n | wc -l; }
-real	0m0.532s
-user	0m11.080s
-sys	0m2.316s
-
-CPU UTILIZATION: 25.180 / 28
-
------------------------------------------
-
-(409): time { frun  -l 1:0 : <f4 >/dev/null; }
-real	0m0.417s
-user	0m9.942s
-sys	0m0.475s
-
-CPU UTILIZATION: 24.980 / 28
-
------------------------------------------
-
-(410): time { frun  -l 1:0 : <f4 | wc -l; }
-real	0m0.421s
-user	0m9.994s
-sys	0m0.524s
-
-CPU UTILIZATION: 24.983 / 28
-
------------------------------------------
-
-(411): time { cat f4 | frun  -l 1:0 : >/dev/null; }
-real	0m0.401s
-user	0m8.831s
-sys	0m0.535s
-
-CPU UTILIZATION: 23.356 / 28
-
------------------------------------------
-
-(412): time { cat f4 | frun  -l 1:0 : | wc -l; }
-real	0m0.403s
-user	0m8.899s
-sys	0m0.575s
-
-CPU UTILIZATION: 23.508 / 28
-
------------------------------------------
-
-(413): time { frun  -l 1:0 echo <f4 >/dev/null; }
-real	0m0.444s
-user	0m10.472s
-sys	0m0.670s
-
-CPU UTILIZATION: 25.000 / 28
-
------------------------------------------
-
-(414): time { frun  -l 1:0 echo <f4 | wc -l; }
-real	0m0.450s
-user	0m10.433s
-sys	0m0.688s
+real	0m3.410s
+user	0m31.950s
+sys	0m52.322s
 
 CPU UTILIZATION: 24.713 / 28
 
 -----------------------------------------
 
-(415): time { cat f4 | frun  -l 1:0 echo >/dev/null; }
-real	0m0.428s
-user	0m9.738s
-sys	0m0.768s
+(234): time { frun -s cat <f2 | wc -l; }
+real	0m1.115s
+user	0m10.356s
+sys	0m16.951s
 
-CPU UTILIZATION: 24.546 / 28
-
------------------------------------------
-
-(416): time { cat f4 | frun  -l 1:0 echo | wc -l; }
-real	0m0.431s
-user	0m9.950s
-sys	0m0.838s
-
-CPU UTILIZATION: 25.024 / 28
+CPU UTILIZATION: 24.490 / 28
 
 -----------------------------------------
 
-(417): time { frun  -l 1:0 printf %s\n <f4 >/dev/null; }
-real	0m0.543s
-user	0m11.712s
-sys	0m2.056s
+(235): time { cat f2 | frun -s cat >/dev/null; }
+real	0m1.149s
+user	0m10.578s
+sys	0m17.445s
 
-CPU UTILIZATION: 25.355 / 28
-
------------------------------------------
-
-(418): time { frun  -l 1:0 printf %s\n <f4 | wc -l; }
-real	0m0.528s
-user	0m11.284s
-sys	0m2.179s
-
-CPU UTILIZATION: 25.498 / 28
+CPU UTILIZATION: 24.389 / 28
 
 -----------------------------------------
 
-(419): time { cat f4 | frun  -l 1:0 printf %s\n >/dev/null; }
-real	0m0.529s
-user	0m11.251s
-sys	0m2.253s
+(236): time { cat f2 | frun -s cat | wc -l; }
+real	0m1.150s
+user	0m10.654s
+sys	0m17.438s
 
-CPU UTILIZATION: 25.527 / 28
-
------------------------------------------
-
-(420): time { cat f4 | frun  -l 1:0 printf %s\n | wc -l; }
-real	0m0.530s
-user	0m11.107s
-sys	0m2.430s
-
-CPU UTILIZATION: 25.541 / 28
+CPU UTILIZATION: 24.427 / 28
 
 -----------------------------------------
 
-(421): time { frun -k  : <f4 >/dev/null; }
-real	0m0.394s
-user	0m9.367s
-sys	0m0.490s
+(237): time { frun -s tee <f2 >/dev/null; }
+real	0m1.094s
+user	0m10.402s
+sys	0m16.404s
 
-CPU UTILIZATION: 25.015 / 28
-
------------------------------------------
-
-(422): time { frun -k  : <f4 | wc -l; }
-real	0m0.401s
-user	0m9.548s
-sys	0m0.468s
-
-CPU UTILIZATION: 24.977 / 28
+CPU UTILIZATION: 24.502 / 28
 
 -----------------------------------------
 
-(423): time { cat f4 | frun -k  : >/dev/null; }
-real	0m0.407s
-user	0m9.584s
-sys	0m0.616s
+(238): time { frun -s tee <f2 | wc -l; }
+real	0m1.111s
+user	0m10.386s
+sys	0m16.746s
 
-CPU UTILIZATION: 25.049 / 28
-
------------------------------------------
-
-(424): time { cat f4 | frun -k  : | wc -l; }
-real	0m0.399s
-user	0m9.405s
-sys	0m0.610s
-
-CPU UTILIZATION: 25.100 / 28
+CPU UTILIZATION: 24.421 / 28
 
 -----------------------------------------
 
-(425): time { frun -k  echo <f4 >/dev/null; }
-real	0m0.420s
-user	0m9.933s
-sys	0m0.613s
+(239): time { cat f2 | frun -s tee >/dev/null; }
+real	0m1.156s
+user	0m10.831s
+sys	0m17.280s
 
-CPU UTILIZATION: 25.109 / 28
-
------------------------------------------
-
-(426): time { frun -k  echo <f4 | wc -l; }
-real	0m0.421s
-user	0m9.852s
-sys	0m0.731s
-
-CPU UTILIZATION: 25.137 / 28
+CPU UTILIZATION: 24.317 / 28
 
 -----------------------------------------
 
-(427): time { cat f4 | frun -k  echo >/dev/null; }
-real	0m0.426s
-user	0m9.804s
-sys	0m0.829s
+(240): time { cat f2 | frun -s tee | wc -l; }
+real	0m1.170s
+user	0m10.729s
+sys	0m17.706s
 
-CPU UTILIZATION: 24.960 / 28
-
------------------------------------------
-
-(428): time { cat f4 | frun -k  echo | wc -l; }
-real	0m0.430s
-user	0m9.877s
-sys	0m0.848s
-
-CPU UTILIZATION: 24.941 / 28
+CPU UTILIZATION: 24.303 / 28
 
 -----------------------------------------
 
-(429): time { frun -k  printf %s\n <f4 >/dev/null; }
-real	0m0.516s
-user	0m11.085s
-sys	0m2.001s
-
-CPU UTILIZATION: 25.360 / 28
-
------------------------------------------
-
-(430): time { frun -k  printf %s\n <f4 | wc -l; }
-real	0m0.529s
-user	0m11.238s
-sys	0m2.277s
-
-CPU UTILIZATION: 25.548 / 28
-
------------------------------------------
-
-(431): time { cat f4 | frun -k  printf %s\n >/dev/null; }
-real	0m0.527s
-user	0m11.305s
-sys	0m2.160s
-
-CPU UTILIZATION: 25.550 / 28
-
------------------------------------------
-
-(432): time { cat f4 | frun -k  printf %s\n | wc -l; }
-real	0m0.527s
-user	0m11.213s
-sys	0m2.220s
-
-CPU UTILIZATION: 25.489 / 28
-
------------------------------------------
-
-(433): time { frun -k -l 1:0 : <f4 >/dev/null; }
-real	0m0.417s
-user	0m9.888s
-sys	0m0.510s
-
-CPU UTILIZATION: 24.935 / 28
-
------------------------------------------
-
-(434): time { frun -k -l 1:0 : <f4 | wc -l; }
+(241): time { frun -b 524288 : <f2 >/dev/null; }
 real	0m0.395s
-user	0m9.371s
-sys	0m0.483s
+user	0m0.111s
+sys	0m0.748s
 
-CPU UTILIZATION: 24.946 / 28
-
------------------------------------------
-
-(435): time { cat f4 | frun -k -l 1:0 : >/dev/null; }
-real	0m0.398s
-user	0m9.367s
-sys	0m0.547s
-
-CPU UTILIZATION: 24.909 / 28
+CPU UTILIZATION: 2.174 / 28
 
 -----------------------------------------
 
-(436): time { cat f4 | frun -k -l 1:0 : | wc -l; }
-real	0m0.413s
-user	0m8.990s
-sys	0m0.560s
+(242): time { frun -b 524288 : <f2 | wc -l; }
+real	0m0.356s
+user	0m0.107s
+sys	0m0.681s
 
-CPU UTILIZATION: 23.123 / 28
-
------------------------------------------
-
-(437): time { frun -k -l 1:0 echo <f4 >/dev/null; }
-real	0m0.444s
-user	0m10.440s
-sys	0m0.663s
-
-CPU UTILIZATION: 25.006 / 28
+CPU UTILIZATION: 2.213 / 28
 
 -----------------------------------------
 
-(438): time { frun -k -l 1:0 echo <f4 | wc -l; }
-real	0m0.448s
-user	0m10.524s
-sys	0m0.705s
+(243): time { cat f2 | frun -b 524288 : >/dev/null; }
+real	0m0.524s
+user	0m0.189s
+sys	0m1.311s
 
-CPU UTILIZATION: 25.052 / 28
-
------------------------------------------
-
-(439): time { cat f4 | frun -k -l 1:0 echo >/dev/null; }
-real	0m0.426s
-user	0m9.615s
-sys	0m0.691s
-
-CPU UTILIZATION: 24.192 / 28
+CPU UTILIZATION: 2.862 / 28
 
 -----------------------------------------
 
-(440): time { cat f4 | frun -k -l 1:0 echo | wc -l; }
-real	0m0.457s
-user	0m10.082s
-sys	0m0.914s
+(244): time { cat f2 | frun -b 524288 : | wc -l; }
+real	0m0.515s
+user	0m0.205s
+sys	0m1.202s
 
-CPU UTILIZATION: 24.049 / 28
-
------------------------------------------
-
-(441): time { frun -k -l 1:0 printf %s\n <f4 >/dev/null; }
-real	0m0.540s
-user	0m11.507s
-sys	0m1.997s
-
-CPU UTILIZATION: 25.007 / 28
+CPU UTILIZATION: 2.732 / 28
 
 -----------------------------------------
 
-(442): time { frun -k -l 1:0 printf %s\n <f4 | wc -l; }
-real	0m0.513s
-user	0m10.952s
-sys	0m2.075s
+(245): time { frun -b 524288 cat <f2 >/dev/null; }
+real	0m0.377s
+user	0m0.628s
+sys	0m2.107s
 
-CPU UTILIZATION: 25.393 / 28
-
------------------------------------------
-
-(443): time { cat f4 | frun -k -l 1:0 printf %s\n >/dev/null; }
-real	0m0.530s
-user	0m11.325s
-sys	0m2.202s
-
-CPU UTILIZATION: 25.522 / 28
+CPU UTILIZATION: 7.254 / 28
 
 -----------------------------------------
 
-(444): time { cat f4 | frun -k -l 1:0 printf %s\n | wc -l; }
-real	0m0.529s
-user	0m11.092s
-sys	0m2.296s
+(246): time { frun -b 524288 cat <f2 | wc -l; }
+real	0m0.397s
+user	0m0.687s
+sys	0m2.448s
 
-CPU UTILIZATION: 25.308 / 28
+CPU UTILIZATION: 7.896 / 28
 
 -----------------------------------------
 
-(445): time { frun -u  : <f4 >/dev/null; }
+(247): time { cat f2 | frun -b 524288 cat >/dev/null; }
+real	0m0.573s
+user	0m0.810s
+sys	0m2.461s
+
+CPU UTILIZATION: 5.708 / 28
+
+-----------------------------------------
+
+(248): time { cat f2 | frun -b 524288 cat | wc -l; }
+real	0m0.560s
+user	0m0.959s
+sys	0m2.771s
+
+CPU UTILIZATION: 6.660 / 28
+
+-----------------------------------------
+
+(249): time { frun -b 524288 tee <f2 >/dev/null; }
+real	0m0.423s
+user	0m0.733s
+sys	0m1.963s
+
+CPU UTILIZATION: 6.373 / 28
+
+-----------------------------------------
+
+(250): time { frun -b 524288 tee <f2 | wc -l; }
+real	0m0.408s
+user	0m0.763s
+sys	0m2.210s
+
+CPU UTILIZATION: 7.286 / 28
+
+-----------------------------------------
+
+(251): time { cat f2 | frun -b 524288 tee >/dev/null; }
+real	0m0.558s
+user	0m0.839s
+sys	0m2.366s
+
+CPU UTILIZATION: 5.743 / 28
+
+-----------------------------------------
+
+(252): time { cat f2 | frun -b 524288 tee | wc -l; }
+real	0m0.581s
+user	0m0.902s
+sys	0m2.670s
+
+CPU UTILIZATION: 6.148 / 28
+
+-----------------------------------------
+
+(253): time { frun -b4096 -s : <f2 >/dev/null; }
+real	0m1.060s
+user	0m9.930s
+sys	0m6.586s
+
+CPU UTILIZATION: 15.581 / 28
+
+-----------------------------------------
+
+(254): time { frun -b4096 -s : <f2 | wc -l; }
+real	0m1.153s
+user	0m9.797s
+sys	0m5.512s
+
+CPU UTILIZATION: 13.277 / 28
+
+-----------------------------------------
+
+(255): time { cat f2 | frun -b4096 -s : >/dev/null; }
+real	0m0.944s
+user	0m10.887s
+sys	0m12.813s
+
+CPU UTILIZATION: 25.105 / 28
+
+-----------------------------------------
+
+(256): time { cat f2 | frun -b4096 -s : | wc -l; }
+real	0m1.004s
+user	0m10.626s
+sys	0m8.276s
+
+CPU UTILIZATION: 18.826 / 28
+
+-----------------------------------------
+
+(257): time { frun -b4096 -s cat <f2 >/dev/null; }
+real	0m8.941s
+user	1m22.366s
+sys	2m17.998s
+
+CPU UTILIZATION: 24.646 / 28
+
+-----------------------------------------
+
+(258): time { frun -b4096 -s cat <f2 | wc -l; }
+real	0m8.953s
+user	1m23.195s
+sys	2m17.585s
+
+CPU UTILIZATION: 24.659 / 28
+
+-----------------------------------------
+
+(259): time { cat f2 | frun -b4096 -s cat >/dev/null; }
+real	0m9.042s
+user	1m22.315s
+sys	2m21.432s
+
+CPU UTILIZATION: 24.745 / 28
+
+-----------------------------------------
+
+(260): time { cat f2 | frun -b4096 -s cat | wc -l; }
+real	0m9.084s
+user	1m22.528s
+sys	2m22.010s
+
+CPU UTILIZATION: 24.717 / 28
+
+-----------------------------------------
+
+(261): time { frun -b4096 -s tee <f2 >/dev/null; }
+real	0m8.849s
+user	1m23.033s
+sys	2m15.779s
+
+CPU UTILIZATION: 24.727 / 28
+
+-----------------------------------------
+
+(262): time { frun -b4096 -s tee <f2 | wc -l; }
+real	0m8.885s
+user	1m24.010s
+sys	2m15.183s
+
+CPU UTILIZATION: 24.670 / 28
+
+-----------------------------------------
+
+(263): time { cat f2 | frun -b4096 -s tee >/dev/null; }
+real	0m8.916s
+user	1m23.730s
+sys	2m16.754s
+
+CPU UTILIZATION: 24.729 / 28
+
+-----------------------------------------
+
+(264): time { cat f2 | frun -b4096 -s tee | wc -l; }
+real	0m8.907s
+user	1m23.121s
+sys	2m16.874s
+
+CPU UTILIZATION: 24.699 / 28
+
+-----------------------------------------
+
+(265): time { frun   : <f3 >/dev/null; }
+real	0m0.312s
+user	0m7.383s
+sys	0m0.335s
+
+CPU UTILIZATION: 24.737 / 28
+
+-----------------------------------------
+
+(266): time { frun   : <f3 | wc -l; }
+real	0m0.313s
+user	0m7.280s
+sys	0m0.392s
+
+CPU UTILIZATION: 24.511 / 28
+
+-----------------------------------------
+
+(267): time { cat f3 | frun   : >/dev/null; }
+real	0m0.325s
+user	0m7.041s
+sys	0m0.411s
+
+CPU UTILIZATION: 22.929 / 28
+
+-----------------------------------------
+
+(268): time { cat f3 | frun   : | wc -l; }
+real	0m0.313s
+user	0m7.407s
+sys	0m0.442s
+
+CPU UTILIZATION: 25.076 / 28
+
+-----------------------------------------
+
+(269): time { frun   echo <f3 >/dev/null; }
+real	0m0.336s
+user	0m7.768s
+sys	0m0.532s
+
+CPU UTILIZATION: 24.702 / 28
+
+-----------------------------------------
+
+(270): time { frun   echo <f3 | wc -l; }
+real	0m0.386s
+user	0m8.842s
+sys	0m0.712s
+
+CPU UTILIZATION: 24.751 / 28
+
+-----------------------------------------
+
+(271): time { cat f3 | frun   echo >/dev/null; }
+real	0m0.345s
+user	0m7.812s
+sys	0m0.583s
+
+CPU UTILIZATION: 24.333 / 28
+
+-----------------------------------------
+
+(272): time { cat f3 | frun   echo | wc -l; }
+real	0m0.341s
+user	0m7.784s
+sys	0m0.587s
+
+CPU UTILIZATION: 24.548 / 28
+
+-----------------------------------------
+
+(273): time { frun   printf %s\n <f3 >/dev/null; }
+real	0m0.406s
+user	0m8.549s
+sys	0m1.645s
+
+CPU UTILIZATION: 25.108 / 28
+
+-----------------------------------------
+
+(274): time { frun   printf %s\n <f3 | wc -l; }
+real	0m0.410s
+user	0m8.613s
+sys	0m1.728s
+
+CPU UTILIZATION: 25.221 / 28
+
+-----------------------------------------
+
+(275): time { cat f3 | frun   printf %s\n >/dev/null; }
+real	0m0.415s
+user	0m8.573s
+sys	0m1.632s
+
+CPU UTILIZATION: 24.590 / 28
+
+-----------------------------------------
+
+(276): time { cat f3 | frun   printf %s\n | wc -l; }
 real	0m0.417s
-user	0m9.834s
-sys	0m0.444s
+user	0m8.678s
+sys	0m1.702s
 
-CPU UTILIZATION: 24.647 / 28
+CPU UTILIZATION: 24.892 / 28
 
 -----------------------------------------
 
-(446): time { frun -u  : <f4 | wc -l; }
-real	0m0.380s
-user	0m9.164s
-sys	0m0.394s
+(277): time { frun  -l 1:0 : <f3 >/dev/null; }
+real	0m0.322s
+user	0m7.575s
+sys	0m0.438s
+
+CPU UTILIZATION: 24.885 / 28
+
+-----------------------------------------
+
+(278): time { frun  -l 1:0 : <f3 | wc -l; }
+real	0m0.331s
+user	0m7.796s
+sys	0m0.426s
+
+CPU UTILIZATION: 24.839 / 28
+
+-----------------------------------------
+
+(279): time { cat f3 | frun  -l 1:0 : >/dev/null; }
+real	0m0.317s
+user	0m7.439s
+sys	0m0.458s
+
+CPU UTILIZATION: 24.911 / 28
+
+-----------------------------------------
+
+(280): time { cat f3 | frun  -l 1:0 : | wc -l; }
+real	0m0.313s
+user	0m7.211s
+sys	0m0.467s
+
+CPU UTILIZATION: 24.530 / 28
+
+-----------------------------------------
+
+(281): time { frun  -l 1:0 echo <f3 >/dev/null; }
+real	0m0.346s
+user	0m8.013s
+sys	0m0.545s
+
+CPU UTILIZATION: 24.734 / 28
+
+-----------------------------------------
+
+(282): time { frun  -l 1:0 echo <f3 | wc -l; }
+real	0m0.360s
+user	0m8.188s
+sys	0m0.630s
+
+CPU UTILIZATION: 24.494 / 28
+
+-----------------------------------------
+
+(283): time { cat f3 | frun  -l 1:0 echo >/dev/null; }
+real	0m0.347s
+user	0m7.657s
+sys	0m0.543s
+
+CPU UTILIZATION: 23.631 / 28
+
+-----------------------------------------
+
+(284): time { cat f3 | frun  -l 1:0 echo | wc -l; }
+real	0m0.343s
+user	0m7.715s
+sys	0m0.639s
+
+CPU UTILIZATION: 24.355 / 28
+
+-----------------------------------------
+
+(285): time { frun  -l 1:0 printf %s\n <f3 >/dev/null; }
+real	0m0.411s
+user	0m8.821s
+sys	0m1.601s
+
+CPU UTILIZATION: 25.357 / 28
+
+-----------------------------------------
+
+(286): time { frun  -l 1:0 printf %s\n <f3 | wc -l; }
+real	0m0.420s
+user	0m8.980s
+sys	0m1.643s
+
+CPU UTILIZATION: 25.292 / 28
+
+-----------------------------------------
+
+(287): time { cat f3 | frun  -l 1:0 printf %s\n >/dev/null; }
+real	0m0.413s
+user	0m8.729s
+sys	0m1.659s
 
 CPU UTILIZATION: 25.152 / 28
 
 -----------------------------------------
 
-(447): time { cat f4 | frun -u  : >/dev/null; }
-real	0m0.387s
-user	0m9.226s
-sys	0m0.416s
+(288): time { cat f3 | frun  -l 1:0 printf %s\n | wc -l; }
+real	0m0.421s
+user	0m8.795s
+sys	0m1.727s
 
-CPU UTILIZATION: 24.914 / 28
-
------------------------------------------
-
-(448): time { cat f4 | frun -u  : | wc -l; }
-real	0m0.388s
-user	0m8.616s
-sys	0m0.418s
-
-CPU UTILIZATION: 23.283 / 28
+CPU UTILIZATION: 24.992 / 28
 
 -----------------------------------------
 
-(449): time { frun -u  echo <f4 >/dev/null; }
-real	0m0.437s
-user	0m10.472s
-sys	0m0.496s
+(289): time { frun -k  : <f3 >/dev/null; }
+real	0m0.319s
+user	0m7.335s
+sys	0m0.429s
 
-CPU UTILIZATION: 25.000 / 28
-
------------------------------------------
-
-(450): time { frun -u  echo <f4 | wc -l; }
-real	0m0.448s
-user	0m10.074s
-sys	0m0.655s
-
-CPU UTILIZATION: 23.948 / 28
+CPU UTILIZATION: 24.338 / 28
 
 -----------------------------------------
 
-(451): time { cat f4 | frun -u  echo >/dev/null; }
-real	0m0.400s
-user	0m9.628s
+(290): time { frun -k  : <f3 | wc -l; }
+real	0m0.335s
+user	0m7.815s
+sys	0m0.490s
+
+CPU UTILIZATION: 24.791 / 28
+
+-----------------------------------------
+
+(291): time { cat f3 | frun -k  : >/dev/null; }
+real	0m0.324s
+user	0m7.009s
+sys	0m0.428s
+
+CPU UTILIZATION: 22.953 / 28
+
+-----------------------------------------
+
+(292): time { cat f3 | frun -k  : | wc -l; }
+real	0m0.312s
+user	0m7.358s
+sys	0m0.447s
+
+CPU UTILIZATION: 25.016 / 28
+
+-----------------------------------------
+
+(293): time { frun -k  echo <f3 >/dev/null; }
+real	0m0.357s
+user	0m8.362s
+sys	0m0.582s
+
+CPU UTILIZATION: 25.053 / 28
+
+-----------------------------------------
+
+(294): time { frun -k  echo <f3 | wc -l; }
+real	0m0.357s
+user	0m8.083s
+sys	0m0.650s
+
+CPU UTILIZATION: 24.462 / 28
+
+-----------------------------------------
+
+(295): time { cat f3 | frun -k  echo >/dev/null; }
+real	0m0.335s
+user	0m7.726s
+sys	0m0.574s
+
+CPU UTILIZATION: 24.776 / 28
+
+-----------------------------------------
+
+(296): time { cat f3 | frun -k  echo | wc -l; }
+real	0m0.347s
+user	0m7.455s
+sys	0m0.647s
+
+CPU UTILIZATION: 23.348 / 28
+
+-----------------------------------------
+
+(297): time { frun -k  printf %s\n <f3 >/dev/null; }
+real	0m0.423s
+user	0m9.129s
+sys	0m1.583s
+
+CPU UTILIZATION: 25.323 / 28
+
+-----------------------------------------
+
+(298): time { frun -k  printf %s\n <f3 | wc -l; }
+real	0m0.433s
+user	0m9.263s
+sys	0m1.681s
+
+CPU UTILIZATION: 25.274 / 28
+
+-----------------------------------------
+
+(299): time { cat f3 | frun -k  printf %s\n >/dev/null; }
+real	0m0.420s
+user	0m8.483s
+sys	0m1.594s
+
+CPU UTILIZATION: 23.992 / 28
+
+-----------------------------------------
+
+(300): time { cat f3 | frun -k  printf %s\n | wc -l; }
+real	0m0.426s
+user	0m8.341s
+sys	0m1.720s
+
+CPU UTILIZATION: 23.617 / 28
+
+-----------------------------------------
+
+(301): time { frun -k -l 1:0 : <f3 >/dev/null; }
+real	0m0.335s
+user	0m7.831s
+sys	0m0.465s
+
+CPU UTILIZATION: 24.764 / 28
+
+-----------------------------------------
+
+(302): time { frun -k -l 1:0 : <f3 | wc -l; }
+real	0m0.340s
+user	0m7.930s
+sys	0m0.458s
+
+CPU UTILIZATION: 24.670 / 28
+
+-----------------------------------------
+
+(303): time { cat f3 | frun -k -l 1:0 : >/dev/null; }
+real	0m0.316s
+user	0m7.417s
 sys	0m0.461s
 
-CPU UTILIZATION: 25.222 / 28
+CPU UTILIZATION: 24.930 / 28
 
 -----------------------------------------
 
-(452): time { cat f4 | frun -u  echo | wc -l; }
-real	0m0.434s
-user	0m9.310s
-sys	0m0.628s
+(304): time { cat f3 | frun -k -l 1:0 : | wc -l; }
+real	0m0.314s
+user	0m7.238s
+sys	0m0.453s
 
-CPU UTILIZATION: 22.898 / 28
-
------------------------------------------
-
-(453): time { frun -u  printf %s\n <f4 >/dev/null; }
-real	0m0.504s
-user	0m11.602s
-sys	0m1.176s
-
-CPU UTILIZATION: 25.353 / 28
+CPU UTILIZATION: 24.493 / 28
 
 -----------------------------------------
 
-(454): time { frun -u  printf %s\n <f4 | wc -l; }
-real	0m0.837s
-user	0m10.077s
-sys	0m11.596s
+(305): time { frun -k -l 1:0 echo <f3 >/dev/null; }
+real	0m0.333s
+user	0m7.675s
+sys	0m0.527s
 
-CPU UTILIZATION: 25.893 / 28
-
------------------------------------------
-
-(455): time { cat f4 | frun -u  printf %s\n >/dev/null; }
-real	0m0.482s
-user	0m11.066s
-sys	0m1.194s
-
-CPU UTILIZATION: 25.435 / 28
+CPU UTILIZATION: 24.630 / 28
 
 -----------------------------------------
 
-(456): time { cat f4 | frun -u  printf %s\n | wc -l; }
-real	0m0.881s
-user	0m9.421s
-sys	0m13.366s
+(306): time { frun -k -l 1:0 echo <f3 | wc -l; }
+real	0m0.357s
+user	0m8.214s
+sys	0m0.643s
 
-CPU UTILIZATION: 25.864 / 28
-
------------------------------------------
-
-(457): time { frun -u -l 1:0 : <f4 >/dev/null; }
-real	0m0.415s
-user	0m9.801s
-sys	0m0.496s
-
-CPU UTILIZATION: 24.812 / 28
+CPU UTILIZATION: 24.809 / 28
 
 -----------------------------------------
 
-(458): time { frun -u -l 1:0 : <f4 | wc -l; }
-real	0m0.383s
-user	0m9.226s
-sys	0m0.363s
+(307): time { cat f3 | frun -k -l 1:0 echo >/dev/null; }
+real	0m0.345s
+user	0m7.651s
+sys	0m0.525s
+
+CPU UTILIZATION: 23.698 / 28
+
+-----------------------------------------
+
+(308): time { cat f3 | frun -k -l 1:0 echo | wc -l; }
+real	0m0.352s
+user	0m7.870s
+sys	0m0.643s
+
+CPU UTILIZATION: 24.184 / 28
+
+-----------------------------------------
+
+(309): time { frun -k -l 1:0 printf %s\n <f3 >/dev/null; }
+real	0m0.426s
+user	0m9.173s
+sys	0m1.615s
+
+CPU UTILIZATION: 25.323 / 28
+
+-----------------------------------------
+
+(310): time { frun -k -l 1:0 printf %s\n <f3 | wc -l; }
+real	0m0.431s
+user	0m9.141s
+sys	0m1.647s
 
 CPU UTILIZATION: 25.030 / 28
 
 -----------------------------------------
 
-(459): time { cat f4 | frun -u -l 1:0 : >/dev/null; }
-real	0m0.378s
-user	0m8.942s
-sys	0m0.521s
+(311): time { cat f3 | frun -k -l 1:0 printf %s\n >/dev/null; }
+real	0m0.413s
+user	0m8.619s
+sys	0m1.787s
 
-CPU UTILIZATION: 25.028 / 28
-
------------------------------------------
-
-(460): time { cat f4 | frun -u -l 1:0 : | wc -l; }
-real	0m0.391s
-user	0m9.241s
-sys	0m0.435s
-
-CPU UTILIZATION: 24.746 / 28
+CPU UTILIZATION: 25.196 / 28
 
 -----------------------------------------
 
-(461): time { frun -u -l 1:0 echo <f4 >/dev/null; }
-real	0m0.466s
-user	0m11.094s
-sys	0m0.575s
+(312): time { cat f3 | frun -k -l 1:0 printf %s\n | wc -l; }
+real	0m0.422s
+user	0m8.616s
+sys	0m1.716s
 
-CPU UTILIZATION: 25.032 / 28
-
------------------------------------------
-
-(462): time { frun -u -l 1:0 echo <f4 | wc -l; }
-real	0m0.443s
-user	0m10.060s
-sys	0m0.604s
-
-CPU UTILIZATION: 24.058 / 28
+CPU UTILIZATION: 24.483 / 28
 
 -----------------------------------------
 
-(463): time { cat f4 | frun -u -l 1:0 echo >/dev/null; }
-real	0m0.405s
-user	0m9.680s
-sys	0m0.522s
+(313): time { frun -u  : <f3 >/dev/null; }
+real	0m0.334s
+user	0m7.760s
+sys	0m0.465s
 
-CPU UTILIZATION: 25.190 / 28
-
------------------------------------------
-
-(464): time { cat f4 | frun -u -l 1:0 echo | wc -l; }
-real	0m0.432s
-user	0m9.269s
-sys	0m0.606s
-
-CPU UTILIZATION: 22.858 / 28
+CPU UTILIZATION: 24.625 / 28
 
 -----------------------------------------
 
-(465): time { frun -u -l 1:0 printf %s\n <f4 >/dev/null; }
-real	0m0.499s
-user	0m11.452s
-sys	0m1.175s
+(314): time { frun -u  : <f3 | wc -l; }
+real	0m0.331s
+user	0m7.775s
+sys	0m0.447s
 
-CPU UTILIZATION: 25.304 / 28
-
------------------------------------------
-
-(466): time { frun -u -l 1:0 printf %s\n <f4 | wc -l; }
-real	0m0.877s
-user	0m9.458s
-sys	0m13.231s
-
-CPU UTILIZATION: 25.871 / 28
+CPU UTILIZATION: 24.839 / 28
 
 -----------------------------------------
 
-(467): time { cat f4 | frun -u -l 1:0 printf %s\n >/dev/null; }
-real	0m0.487s
-user	0m10.930s
-sys	0m1.242s
+(315): time { cat f3 | frun -u  : >/dev/null; }
+real	0m0.325s
+user	0m7.458s
+sys	0m0.479s
 
-CPU UTILIZATION: 24.993 / 28
-
------------------------------------------
-
-(468): time { cat f4 | frun -u -l 1:0 printf %s\n | wc -l; }
-real	0m0.870s
-user	0m9.331s
-sys	0m13.055s
-
-CPU UTILIZATION: 25.731 / 28
+CPU UTILIZATION: 24.421 / 28
 
 -----------------------------------------
 
-(469): time { frun -U  : <f4 >/dev/null; }
-real	0m0.414s
-user	0m10.003s
-sys	0m0.359s
+(316): time { cat f3 | frun -u  : | wc -l; }
+real	0m0.299s
+user	0m7.101s
+sys	0m0.351s
 
-CPU UTILIZATION: 25.002 / 28
-
------------------------------------------
-
-(470): time { frun -U  : <f4 | wc -l; }
-real	0m0.431s
-user	0m10.378s
-sys	0m0.382s
-
-CPU UTILIZATION: 24.965 / 28
+CPU UTILIZATION: 24.923 / 28
 
 -----------------------------------------
 
-(471): time { cat f4 | frun -U  : >/dev/null; }
-real	0m0.441s
-user	0m9.714s
-sys	0m0.512s
+(317): time { frun -u  echo <f3 >/dev/null; }
+real	0m0.349s
+user	0m8.126s
+sys	0m0.455s
 
-CPU UTILIZATION: 23.188 / 28
-
------------------------------------------
-
-(472): time { cat f4 | frun -U  : | wc -l; }
-real	0m0.458s
-user	0m10.848s
-sys	0m0.786s
-
-CPU UTILIZATION: 25.401 / 28
+CPU UTILIZATION: 24.587 / 28
 
 -----------------------------------------
 
-(473): time { frun -U  echo <f4 >/dev/null; }
-real	0m0.441s
-user	0m10.552s
-sys	0m0.504s
+(318): time { frun -u  echo <f3 | wc -l; }
+real	0m0.350s
+user	0m7.788s
+sys	0m0.539s
+
+CPU UTILIZATION: 23.791 / 28
+
+-----------------------------------------
+
+(319): time { cat f3 | frun -u  echo >/dev/null; }
+real	0m0.318s
+user	0m7.616s
+sys	0m0.373s
+
+CPU UTILIZATION: 25.122 / 28
+
+-----------------------------------------
+
+(320): time { cat f3 | frun -u  echo | wc -l; }
+real	0m0.345s
+user	0m7.184s
+sys	0m0.493s
+
+CPU UTILIZATION: 22.252 / 28
+
+-----------------------------------------
+
+(321): time { frun -u  printf %s\n <f3 >/dev/null; }
+real	0m0.399s
+user	0m8.882s
+sys	0m0.974s
+
+CPU UTILIZATION: 24.701 / 28
+
+-----------------------------------------
+
+(322): time { frun -u  printf %s\n <f3 | wc -l; }
+real	0m0.633s
+user	0m8.096s
+sys	0m8.095s
+
+CPU UTILIZATION: 25.578 / 28
+
+-----------------------------------------
+
+(323): time { cat f3 | frun -u  printf %s\n >/dev/null; }
+real	0m0.377s
+user	0m8.710s
+sys	0m0.907s
+
+CPU UTILIZATION: 25.509 / 28
+
+-----------------------------------------
+
+(324): time { cat f3 | frun -u  printf %s\n | wc -l; }
+real	0m0.675s
+user	0m7.785s
+sys	0m9.338s
+
+CPU UTILIZATION: 25.367 / 28
+
+-----------------------------------------
+
+(325): time { frun -u -l 1:0 : <f3 >/dev/null; }
+real	0m0.334s
+user	0m7.:00s
+sys	0m0.450s
+
+CPU UTILIZATION: 3.443 / 28
+
+-----------------------------------------
+
+(326): time { frun -u -l 1:0 : <f3 | wc -l; }
+real	0m0.339s
+user	0m7.978s
+sys	0m0.466s
+
+CPU UTILIZATION: 24.908 / 28
+
+-----------------------------------------
+
+(327): time { cat f3 | frun -u -l 1:0 : >/dev/null; }
+real	0m0.313s
+user	0m7.054s
+sys	0m0.364s
+
+CPU UTILIZATION: 23.699 / 28
+
+-----------------------------------------
+
+(328): time { cat f3 | frun -u -l 1:0 : | wc -l; }
+real	0m0.310s
+user	0m7.077s
+sys	0m0.456s
+
+CPU UTILIZATION: 24.300 / 28
+
+-----------------------------------------
+
+(329): time { frun -u -l 1:0 echo <f3 >/dev/null; }
+real	0m0.370s
+user	0m8.682s
+sys	0m0.496s
+
+CPU UTILIZATION: 24.805 / 28
+
+-----------------------------------------
+
+(330): time { frun -u -l 1:0 echo <f3 | wc -l; }
+real	0m0.364s
+user	0m7.868s
+sys	0m0.547s
+
+CPU UTILIZATION: 23.118 / 28
+
+-----------------------------------------
+
+(331): time { cat f3 | frun -u -l 1:0 echo >/dev/null; }
+real	0m0.319s
+user	0m7.651s
+sys	0m0.342s
 
 CPU UTILIZATION: 25.056 / 28
 
 -----------------------------------------
 
-(474): time { frun -U  echo <f4 | wc -l; }
-real	0m0.458s
-user	0m10.880s
-sys	0m0.601s
+(332): time { cat f3 | frun -u -l 1:0 echo | wc -l; }
+real	0m0.350s
+user	0m7.227s
+sys	0m0.475s
 
-CPU UTILIZATION: 25.055 / 28
-
------------------------------------------
-
-(475): time { cat f4 | frun -U  echo >/dev/null; }
-real	0m0.464s
-user	0m10.968s
-sys	0m0.818s
-
-CPU UTILIZATION: 25.400 / 28
+CPU UTILIZATION: 22.005 / 28
 
 -----------------------------------------
 
-(476): time { cat f4 | frun -U  echo | wc -l; }
-real	0m0.451s
-user	0m10.601s
-sys	0m0.685s
+(333): time { frun -u -l 1:0 printf %s\n <f3 >/dev/null; }
+real	0m0.400s
+user	0m8.932s
+sys	0m1.033s
+
+CPU UTILIZATION: 24.912 / 28
+
+-----------------------------------------
+
+(334): time { frun -u -l 1:0 printf %s\n <f3 | wc -l; }
+real	0m0.680s
+user	0m7.902s
+sys	0m9.297s
+
+CPU UTILIZATION: 25.292 / 28
+
+-----------------------------------------
+
+(335): time { cat f3 | frun -u -l 1:0 printf %s\n >/dev/null; }
+real	0m0.373s
+user	0m8.512s
+sys	0m0.938s
+
+CPU UTILIZATION: 25.335 / 28
+
+-----------------------------------------
+
+(336): time { cat f3 | frun -u -l 1:0 printf %s\n | wc -l; }
+real	0m0.679s
+user	0m7.221s
+sys	0m9.845s
+
+CPU UTILIZATION: 25.134 / 28
+
+-----------------------------------------
+
+(337): time { frun -U  : <f3 >/dev/null; }
+real	0m0.345s
+user	0m8.277s
+sys	0m0.349s
+
+CPU UTILIZATION: 25.002 / 28
+
+-----------------------------------------
+
+(338): time { frun -U  : <f3 | wc -l; }
+real	0m0.344s
+user	0m8.163s
+sys	0m0.318s
+
+CPU UTILIZATION: 24.654 / 28
+
+-----------------------------------------
+
+(339): time { cat f3 | frun -U  : >/dev/null; }
+real	0m0.339s
+user	0m8.123s
+sys	0m0.410s
+
+CPU UTILIZATION: 25.171 / 28
+
+-----------------------------------------
+
+(340): time { cat f3 | frun -U  : | wc -l; }
+real	0m0.340s
+user	0m8.048s
+sys	0m0.399s
+
+CPU UTILIZATION: 24.844 / 28
+
+-----------------------------------------
+
+(341): time { frun -U  echo <f3 >/dev/null; }
+real	0m0.360s
+user	0m8.559s
+sys	0m0.468s
+
+CPU UTILIZATION: 25.075 / 28
+
+-----------------------------------------
+
+(342): time { frun -U  echo <f3 | wc -l; }
+real	0m0.365s
+user	0m8.549s
+sys	0m0.533s
+
+CPU UTILIZATION: 24.882 / 28
+
+-----------------------------------------
+
+(343): time { cat f3 | frun -U  echo >/dev/null; }
+real	0m0.372s
+user	0m8.826s
+sys	0m0.587s
+
+CPU UTILIZATION: 25.303 / 28
+
+-----------------------------------------
+
+(344): time { cat f3 | frun -U  echo | wc -l; }
+real	0m0.360s
+user	0m8.492s
+sys	0m0.552s
+
+CPU UTILIZATION: 25.122 / 28
+
+-----------------------------------------
+
+(345): time { frun -U  printf %s\n <f3 >/dev/null; }
+real	0m0.435s
+user	0m9.445s
+sys	0m1.452s
+
+CPU UTILIZATION: 25.050 / 28
+
+-----------------------------------------
+
+(346): time { frun -U  printf %s\n <f3 | wc -l; }
+real	0m0.443s
+user	0m9.539s
+sys	0m1.624s
+
+CPU UTILIZATION: 25.198 / 28
+
+-----------------------------------------
+
+(347): time { cat f3 | frun -U  printf %s\n >/dev/null; }
+real	0m0.433s
+user	0m9.351s
+sys	0m1.637s
+
+CPU UTILIZATION: 25.376 / 28
+
+-----------------------------------------
+
+(348): time { cat f3 | frun -U  printf %s\n | wc -l; }
+real	0m0.466s
+user	0m9.901s
+sys	0m1.796s
+
+CPU UTILIZATION: 25.100 / 28
+
+-----------------------------------------
+
+(349): time { frun -U -l 1:0 : <f3 >/dev/null; }
+real	0m0.345s
+user	0m8.288s
+sys	0m0.344s
 
 CPU UTILIZATION: 25.020 / 28
 
 -----------------------------------------
 
-(477): time { frun -U  printf %s\n <f4 >/dev/null; }
-real	0m0.545s
-user	0m11.984s
-sys	0m1.913s
+(350): time { frun -U -l 1:0 : <f3 | wc -l; }
+real	0m0.339s
+user	0m8.241s
+sys	0m0.320s
 
-CPU UTILIZATION: 25.499 / 28
-
------------------------------------------
-
-(478): time { frun -U  printf %s\n <f4 | wc -l; }
-real	0m0.554s
-user	0m12.031s
-sys	0m2.073s
-
-CPU UTILIZATION: 25.458 / 28
+CPU UTILIZATION: 25.253 / 28
 
 -----------------------------------------
 
-(479): time { cat f4 | frun -U  printf %s\n >/dev/null; }
-real	0m0.551s
-user	0m11.829s
-sys	0m2.162s
+(351): time { cat f3 | frun -U -l 1:0 : >/dev/null; }
+real	0m0.352s
+user	0m8.242s
+sys	0m0.432s
 
-CPU UTILIZATION: 25.392 / 28
-
------------------------------------------
-
-(480): time { cat f4 | frun -U  printf %s\n | wc -l; }
-real	0m0.578s
-user	0m12.272s
-sys	0m2.536s
-
-CPU UTILIZATION: 25.619 / 28
+CPU UTILIZATION: 24.642 / 28
 
 -----------------------------------------
 
-(481): time { frun -U -l 1:0 : <f4 >/dev/null; }
-real	0m0.426s
-user	0m10.282s
-sys	0m0.378s
+(352): time { cat f3 | frun -U -l 1:0 : | wc -l; }
+real	0m0.351s
+user	0m8.192s
+sys	0m0.387s
 
-CPU UTILIZATION: 25.019 / 28
-
------------------------------------------
-
-(482): time { frun -U -l 1:0 : <f4 | wc -l; }
-real	0m0.429s
-user	0m10.291s
-sys	0m0.421s
-
-CPU UTILIZATION: 24.969 / 28
+CPU UTILIZATION: 24.441 / 28
 
 -----------------------------------------
 
-(483): time { cat f4 | frun -U -l 1:0 : >/dev/null; }
-real	0m0.456s
-user	0m10.930s
-sys	0m0.652s
+(353): time { frun -U -l 1:0 echo <f3 >/dev/null; }
+real	0m0.366s
+user	0m8.651s
+sys	0m0.468s
 
-CPU UTILIZATION: 25.399 / 28
-
------------------------------------------
-
-(484): time { cat f4 | frun -U -l 1:0 : | wc -l; }
-real	0m0.450s
-user	0m10.685s
-sys	0m0.649s
-
-CPU UTILIZATION: 25.186 / 28
+CPU UTILIZATION: 24.915 / 28
 
 -----------------------------------------
 
-(485): time { frun -U -l 1:0 echo <f4 >/dev/null; }
-real	0m0.450s
-user	0m10.827s
-sys	0m0.510s
+(354): time { frun -U -l 1:0 echo <f3 | wc -l; }
+real	0m0.360s
+user	0m8.432s
+sys	0m0.486s
 
-CPU UTILIZATION: 25.193 / 28
-
------------------------------------------
-
-(486): time { frun -U -l 1:0 echo <f4 | wc -l; }
-real	0m0.461s
-user	0m10.837s
-sys	0m0.632s
-
-CPU UTILIZATION: 24.878 / 28
+CPU UTILIZATION: 24.772 / 28
 
 -----------------------------------------
 
-(487): time { cat f4 | frun -U -l 1:0 echo >/dev/null; }
-real	0m0.481s
-user	0m11.294s
-sys	0m0.886s
+(355): time { cat f3 | frun -U -l 1:0 echo >/dev/null; }
+real	0m0.386s
+user	0m9.036s
+sys	0m0.630s
 
-CPU UTILIZATION: 25.322 / 28
-
------------------------------------------
-
-(488): time { cat f4 | frun -U -l 1:0 echo | wc -l; }
-real	0m0.465s
-user	0m10.809s
-sys	0m0.748s
-
-CPU UTILIZATION: 24.853 / 28
+CPU UTILIZATION: 25.041 / 28
 
 -----------------------------------------
 
-(489): time { frun -U -l 1:0 printf %s\n <f4 >/dev/null; }
-real	0m0.550s
-user	0m12.047s
-sys	0m2.047s
+(356): time { cat f3 | frun -U -l 1:0 echo | wc -l; }
+real	0m0.368s
+user	0m8.414s
+sys	0m0.618s
 
-CPU UTILIZATION: 25.625 / 28
-
------------------------------------------
-
-(490): time { frun -U -l 1:0 printf %s\n <f4 | wc -l; }
-real	0m0.558s
-user	0m12.193s
-sys	0m1.978s
-
-CPU UTILIZATION: 25.396 / 28
+CPU UTILIZATION: 24.543 / 28
 
 -----------------------------------------
 
-(491): time { cat f4 | frun -U -l 1:0 printf %s\n >/dev/null; }
-real	0m0.557s
-user	0m12.017s
-sys	0m2.119s
+(357): time { frun -U -l 1:0 printf %s\n <f3 >/dev/null; }
+real	0m0.434s
+user	0m9.270s
+sys	0m1.552s
 
-CPU UTILIZATION: 25.378 / 28
-
------------------------------------------
-
-(492): time { cat f4 | frun -U -l 1:0 printf %s\n | wc -l; }
-real	0m0.574s
-user	0m12.420s
-sys	0m2.279s
-
-CPU UTILIZATION: 25.608 / 28
+CPU UTILIZATION: 24.935 / 28
 
 -----------------------------------------
 
-(493): time { frun -s : <f4 >/dev/null; }
-real	0m0.123s
-user	0m0.416s
-sys	0m1.389s
+(358): time { frun -U -l 1:0 printf %s\n <f3 | wc -l; }
+real	0m0.435s
+user	0m9.439s
+sys	0m1.567s
 
-CPU UTILIZATION: 14.674 / 28
+CPU UTILIZATION: 25.301 / 28
 
 -----------------------------------------
 
-(494): time { frun -s : <f4 | wc -l; }
+(359): time { cat f3 | frun -U -l 1:0 printf %s\n >/dev/null; }
+real	0m0.443s
+user	0m9.470s
+sys	0m1.732s
+
+CPU UTILIZATION: 25.286 / 28
+
+-----------------------------------------
+
+(360): time { cat f3 | frun -U -l 1:0 printf %s\n | wc -l; }
+real	0m0.441s
+user	0m9.401s
+sys	0m1.672s
+
+CPU UTILIZATION: 25.108 / 28
+
+-----------------------------------------
+
+(361): time { frun -s : <f3 >/dev/null; }
+real	0m0.098s
+user	0m0.223s
+sys	0m1.124s
+
+CPU UTILIZATION: 13.744 / 28
+
+-----------------------------------------
+
+(362): time { frun -s : <f3 | wc -l; }
+real	0m0.103s
+user	0m0.202s
+sys	0m1.137s
+
+CPU UTILIZATION: 13.000 / 28
+
+-----------------------------------------
+
+(363): time { cat f3 | frun -s : >/dev/null; }
+real	0m0.188s
+user	0m1.637s
+sys	0m2.572s
+
+CPU UTILIZATION: 22.388 / 28
+
+-----------------------------------------
+
+(364): time { cat f3 | frun -s : | wc -l; }
+real	0m0.208s
+user	0m2.133s
+sys	0m2.660s
+
+CPU UTILIZATION: 23.043 / 28
+
+-----------------------------------------
+
+(365): time { frun -s cat <f3 >/dev/null; }
 real	0m0.117s
-user	0m0.239s
-sys	0m1.300s
+user	0m0.708s
+sys	0m1.433s
 
-CPU UTILIZATION: 13.153 / 28
-
------------------------------------------
-
-(495): time { cat f4 | frun -s : >/dev/null; }
-real	0m0.179s
-user	0m0.857s
-sys	0m2.798s
-
-CPU UTILIZATION: 20.418 / 28
+CPU UTILIZATION: 18.299 / 28
 
 -----------------------------------------
 
-(496): time { cat f4 | frun -s : | wc -l; }
-real	0m0.225s
-user	0m2.211s
-sys	0m3.005s
-
-CPU UTILIZATION: 23.182 / 28
-
------------------------------------------
-
-(497): time { frun -s cat <f4 >/dev/null; }
-real	0m0.143s
-user	0m0.906s
-sys	0m1.747s
-
-CPU UTILIZATION: 18.552 / 28
-
------------------------------------------
-
-(498): time { frun -s cat <f4 | wc -l; }
-real	0m0.139s
-user	0m0.924s
-sys	0m1.738s
-
-CPU UTILIZATION: 19.151 / 28
-
------------------------------------------
-
-(499): time { cat f4 | frun -s cat >/dev/null; }
-real	0m0.518s
-user	0m4.378s
-sys	0m7.731s
-
-CPU UTILIZATION: 23.376 / 28
-
------------------------------------------
-
-(500): time { cat f4 | frun -s cat | wc -l; }
-real	0m0.680s
-user	0m5.850s
-sys	0m10.237s
-
-CPU UTILIZATION: 23.657 / 28
-
------------------------------------------
-
-(501): time { frun -s tee <f4 >/dev/null; }
-real	0m0.140s
-user	0m0.872s
-sys	0m1.731s
-
-CPU UTILIZATION: 18.592 / 28
-
------------------------------------------
-
-(502): time { frun -s tee <f4 | wc -l; }
-real	0m0.142s
-user	0m0.922s
-sys	0m1.668s
-
-CPU UTILIZATION: 18.239 / 28
-
------------------------------------------
-
-(503): time { cat f4 | frun -s tee >/dev/null; }
-real	0m0.516s
-user	0m4.447s
-sys	0m7.618s
-
-CPU UTILIZATION: 23.381 / 28
-
------------------------------------------
-
-(504): time { cat f4 | frun -s tee | wc -l; }
-real	0m0.654s
-user	0m5.763s
-sys	0m9.696s
-
-CPU UTILIZATION: 23.637 / 28
-
------------------------------------------
-
-(505): time { frun -b 524288 : <f4 >/dev/null; }
-real	0m0.107s
-user	0m0.033s
-sys	0m0.179s
-
-CPU UTILIZATION: 1.981 / 28
-
------------------------------------------
-
-(506): time { frun -b 524288 : <f4 | wc -l; }
+(366): time { frun -s cat <f3 | wc -l; }
 real	0m0.117s
-user	0m0.029s
-sys	0m0.193s
+user	0m0.609s
+sys	0m1.299s
 
-CPU UTILIZATION: 1.897 / 28
-
------------------------------------------
-
-(507): time { cat f4 | frun -b 524288 : >/dev/null; }
-real	0m0.156s
-user	0m0.064s
-sys	0m0.303s
-
-CPU UTILIZATION: 2.352 / 28
+CPU UTILIZATION: 16.307 / 28
 
 -----------------------------------------
 
-(508): time { cat f4 | frun -b 524288 : | wc -l; }
-real	0m0.154s
-user	0m0.086s
-sys	0m0.324s
+(367): time { cat f3 | frun -s cat >/dev/null; }
+real	0m0.552s
+user	0m4.877s
+sys	0m8.176s
 
-CPU UTILIZATION: 2.662 / 28
-
------------------------------------------
-
-(509): time { frun -b 524288 cat <f4 >/dev/null; }
-real	0m0.117s
-user	0m0.134s
-sys	0m0.524s
-
-CPU UTILIZATION: 5.623 / 28
+CPU UTILIZATION: 23.646 / 28
 
 -----------------------------------------
 
-(510): time { frun -b 524288 cat <f4 | wc -l; }
+(368): time { cat f3 | frun -s cat | wc -l; }
+real	0m0.540s
+user	0m4.963s
+sys	0m7.790s
+
+CPU UTILIZATION: 23.616 / 28
+
+-----------------------------------------
+
+(369): time { frun -s tee <f3 >/dev/null; }
+real	0m0.149s
+user	0m1.106s
+sys	0m1.964s
+
+CPU UTILIZATION: 20.604 / 28
+
+-----------------------------------------
+
+(370): time { frun -s tee <f3 | wc -l; }
+real	0m0.122s
+user	0m0.733s
+sys	0m1.455s
+
+CPU UTILIZATION: 17.934 / 28
+
+-----------------------------------------
+
+(371): time { cat f3 | frun -s tee >/dev/null; }
+real	0m0.540s
+user	0m4.807s
+sys	0m7.967s
+
+CPU UTILIZATION: 23.655 / 28
+
+-----------------------------------------
+
+(372): time { cat f3 | frun -s tee | wc -l; }
+real	0m0.539s
+user	0m4.930s
+sys	0m7.820s
+
+CPU UTILIZATION: 23.654 / 28
+
+-----------------------------------------
+
+(373): time { frun -b 524288 : <f3 >/dev/null; }
+real	0m0.085s
+user	0m0.030s
+sys	0m0.138s
+
+CPU UTILIZATION: 1.976 / 28
+
+-----------------------------------------
+
+(374): time { frun -b 524288 : <f3 | wc -l; }
+real	0m0.087s
+user	0m0.026s
+sys	0m0.156s
+
+CPU UTILIZATION: 2.091 / 28
+
+-----------------------------------------
+
+(375): time { cat f3 | frun -b 524288 : >/dev/null; }
 real	0m0.115s
-user	0m0.146s
-sys	0m0.599s
+user	0m0.064s
+sys	0m0.254s
 
-CPU UTILIZATION: 6.478 / 28
-
------------------------------------------
-
-(511): time { cat f4 | frun -b 524288 cat >/dev/null; }
-real	0m0.152s
-user	0m0.225s
-sys	0m0.614s
-
-CPU UTILIZATION: 5.519 / 28
+CPU UTILIZATION: 2.765 / 28
 
 -----------------------------------------
 
-(512): time { cat f4 | frun -b 524288 cat | wc -l; }
-real	0m0.152s
-user	0m0.235s
-sys	0m0.727s
+(376): time { cat f3 | frun -b 524288 : | wc -l; }
+real	0m0.127s
+user	0m0.070s
+sys	0m0.283s
 
-CPU UTILIZATION: 6.328 / 28
-
------------------------------------------
-
-(513): time { frun -b 524288 tee <f4 >/dev/null; }
-real	0m0.107s
-user	0m0.168s
-sys	0m0.481s
-
-CPU UTILIZATION: 6.053 / 28
+CPU UTILIZATION: 2.779 / 28
 
 -----------------------------------------
 
-(514): time { frun -b 524288 tee <f4 | wc -l; }
-real	0m0.112s
-user	0m0.159s
-sys	0m0.584s
+(377): time { frun -b 524288 cat <f3 >/dev/null; }
+real	0m0.101s
+user	0m0.122s
+sys	0m0.440s
 
-CPU UTILIZATION: 6.633 / 28
-
------------------------------------------
-
-(515): time { cat f4 | frun -b 524288 tee >/dev/null; }
-real	0m0.147s
-user	0m0.207s
-sys	0m0.563s
-
-CPU UTILIZATION: 5.238 / 28
+CPU UTILIZATION: 5.564 / 28
 
 -----------------------------------------
 
-(516): time { cat f4 | frun -b 524288 tee | wc -l; }
-real	0m0.142s
-user	0m0.184s
-sys	0m0.620s
+(378): time { frun -b 524288 cat <f3 | wc -l; }
+real	0m0.096s
+user	0m0.134s
+sys	0m0.473s
 
-CPU UTILIZATION: 5.661 / 28
-
------------------------------------------
-
-(517): time { frun -b4096 -s : <f4 >/dev/null; }
-real	0m0.225s
-user	0m2.419s
-sys	0m1.589s
-
-CPU UTILIZATION: 17.813 / 28
+CPU UTILIZATION: 6.322 / 28
 
 -----------------------------------------
 
-(518): time { frun -b4096 -s : <f4 | wc -l; }
-real	0m0.291s
-user	0m2.518s
-sys	0m1.247s
+(379): time { cat f3 | frun -b 524288 cat >/dev/null; }
+real	0m0.134s
+user	0m0.139s
+sys	0m0.480s
 
-CPU UTILIZATION: 12.938 / 28
-
------------------------------------------
-
-(519): time { cat f4 | frun -b4096 -s : >/dev/null; }
-real	0m0.263s
-user	0m2.590s
-sys	0m3.315s
-
-CPU UTILIZATION: 22.452 / 28
+CPU UTILIZATION: 4.619 / 28
 
 -----------------------------------------
 
-(520): time { cat f4 | frun -b4096 -s : | wc -l; }
-real	0m0.232s
-user	0m2.571s
-sys	0m2.657s
+(380): time { cat f3 | frun -b 524288 cat | wc -l; }
+real	0m0.132s
+user	0m0.174s
+sys	0m0.544s
 
-CPU UTILIZATION: 22.534 / 28
-
------------------------------------------
-
-(521): time { frun -b4096 -s cat <f4 >/dev/null; }
-real	0m2.182s
-user	0m19.043s
-sys	0m33.946s
-
-CPU UTILIZATION: 24.284 / 28
+CPU UTILIZATION: 5.439 / 28
 
 -----------------------------------------
 
-(522): time { frun -b4096 -s cat <f4 | wc -l; }
-real	0m2.185s
-user	0m19.224s
-sys	0m33.791s
+(381): time { frun -b 524288 tee <f3 >/dev/null; }
+real	0m0.088s
+user	0m0.117s
+sys	0m0.414s
 
-CPU UTILIZATION: 24.263 / 28
-
------------------------------------------
-
-(523): time { cat f4 | frun -b4096 -s cat >/dev/null; }
-real	0m2.165s
-user	0m19.512s
-sys	0m33.097s
-
-CPU UTILIZATION: 24.299 / 28
+CPU UTILIZATION: 6.034 / 28
 
 -----------------------------------------
 
-(524): time { cat f4 | frun -b4096 -s cat | wc -l; }
-real	0m2.194s
-user	0m19.180s
-sys	0m33.968s
+(382): time { frun -b 524288 tee <f3 | wc -l; }
+real	0m0.091s
+user	0m0.158s
+sys	0m0.437s
 
-CPU UTILIZATION: 24.224 / 28
-
------------------------------------------
-
-(525): time { frun -b4096 -s tee <f4 >/dev/null; }
-real	0m2.144s
-user	0m19.425s
-sys	0m32.491s
-
-CPU UTILIZATION: 24.214 / 28
+CPU UTILIZATION: 6.538 / 28
 
 -----------------------------------------
 
-(526): time { frun -b4096 -s tee <f4 | wc -l; }
-real	0m2.173s
-user	0m19.528s
-sys	0m32.993s
+(383): time { cat f3 | frun -b 524288 tee >/dev/null; }
+real	0m0.124s
+user	0m0.163s
+sys	0m0.467s
 
-CPU UTILIZATION: 24.169 / 28
-
------------------------------------------
-
-(527): time { cat f4 | frun -b4096 -s tee >/dev/null; }
-real	0m2.167s
-user	0m19.171s
-sys	0m33.408s
-
-CPU UTILIZATION: 24.263 / 28
+CPU UTILIZATION: 5.080 / 28
 
 -----------------------------------------
 
-(528): time { cat f4 | frun -b4096 -s tee | wc -l; }
-real	0m2.184s
-user	0m19.460s
-sys	0m33.456s
+(384): time { cat f3 | frun -b 524288 tee | wc -l; }
+real	0m0.137s
+user	0m0.183s
+sys	0m0.552s
 
-CPU UTILIZATION: 24.228 / 28
+CPU UTILIZATION: 5.364 / 28
+
+-----------------------------------------
+
+(385): time { frun -b4096 -s : <f3 >/dev/null; }
+real	0m0.210s
+user	0m2.009s
+sys	0m1.127s
+
+CPU UTILIZATION: 14.933 / 28
+
+-----------------------------------------
+
+(386): time { frun -b4096 -s : <f3 | wc -l; }
+real	0m0.165s
+user	0m1.978s
+sys	0m1.094s
+
+CPU UTILIZATION: 18.618 / 28
+
+-----------------------------------------
+
+(387): time { cat f3 | frun -b4096 -s : >/dev/null; }
+real	0m0.206s
+user	0m2.154s
+sys	0m2.487s
+
+CPU UTILIZATION: 22.529 / 28
+
+-----------------------------------------
+
+(388): time { cat f3 | frun -b4096 -s : | wc -l; }
+real	0m0.202s
+user	0m2.150s
+sys	0m2.415s
+
+CPU UTILIZATION: 22.599 / 28
+
+-----------------------------------------
+
+(389): time { frun -b4096 -s cat <f3 >/dev/null; }
+real	0m1.754s
+user	0m15.589s
+sys	0m27.278s
+
+CPU UTILIZATION: 24.439 / 28
+
+-----------------------------------------
+
+(390): time { frun -b4096 -s cat <f3 | wc -l; }
+real	0m1.745s
+user	0m15.918s
+sys	0m26.626s
+
+CPU UTILIZATION: 24.380 / 28
+
+-----------------------------------------
+
+(391): time { cat f3 | frun -b4096 -s cat >/dev/null; }
+real	0m1.752s
+user	0m16.027s
+sys	0m26.855s
+
+CPU UTILIZATION: 24.476 / 28
+
+-----------------------------------------
+
+(392): time { cat f3 | frun -b4096 -s cat | wc -l; }
+real	0m1.771s
+user	0m16.121s
+sys	0m27.144s
+
+CPU UTILIZATION: 24.429 / 28
+
+-----------------------------------------
+
+(393): time { frun -b4096 -s tee <f3 >/dev/null; }
+real	0m1.736s
+user	0m16.059s
+sys	0m26.253s
+
+CPU UTILIZATION: 24.373 / 28
+
+-----------------------------------------
+
+(394): time { frun -b4096 -s tee <f3 | wc -l; }
+real	0m1.732s
+user	0m16.129s
+sys	0m26.168s
+
+CPU UTILIZATION: 24.420 / 28
+
+-----------------------------------------
+
+(395): time { cat f3 | frun -b4096 -s tee >/dev/null; }
+real	0m1.735s
+user	0m15.924s
+sys	0m26.445s
+
+CPU UTILIZATION: 24.420 / 28
+
+-----------------------------------------
+
+(396): time { cat f3 | frun -b4096 -s tee | wc -l; }
+real	0m1.740s
+user	0m16.141s
+sys	0m26.270s
+
+CPU UTILIZATION: 24.374 / 28
 
 -----------------------------------------
 
@@ -4758,25 +3570,25 @@ INPUT DATA STATS
 
 
 NAME: f1
-SIZE: 10000000 bytes
-LINE COUNT: 10000000 lines
+SIZE: 100000000 bytes
+LINE COUNT: 100000000 lines
 
 
 NAME: f2
-SIZE: 78888897 bytes
-LINE COUNT: 10000000 lines
+SIZE: 888888898 bytes
+LINE COUNT: 100000000 lines
 
 
 NAME: f3
-SIZE: 171222492 bytes
-LINE COUNT: 2086128 lines
+SIZE: 171229885 bytes
+LINE COUNT: 2086228 lines
 
-total sys = 1757354 us
+total sys = 8963705 us
 
-total user = 4684389 us
+total user = 26243546 us
 
-total real = 262698 us
+total real = 1341384 us
 
 
-OVERALL CPU UTILIZATION: 24.521 / 28
+OVERALL CPU UTILIZATION: 26.246 / 28
 
