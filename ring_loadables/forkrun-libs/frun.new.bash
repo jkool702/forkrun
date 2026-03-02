@@ -35,7 +35,7 @@ frun __exec__ "$@"
     shift 1 # Remove __exec__
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx order_mode unsafe_flag stdin_flag byte_mode_flag order_mode unsafe_flag LC_ALL
     local -ga fd_out P order_args ring_init_opts
@@ -160,7 +160,7 @@ frun __exec__ "$@"
             @(--nodes)?(?([= $'\t'])*))
                 arg="${1#@(--nodes)?([= $'\t'])}";
                 [[ ${arg} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && parsed_numa_nodes_arg="${arg}" ;;
+                [[ ${arg} ]] && ring_init_opts+=("--nodes=${arg}") ;;
 
             # --- ORDER (-o buffered) ---
             @(-o|--order)?(?([= $'\t'])@(realtime|unbuffered|buffered|atomic|order?(ed))))
@@ -222,73 +222,7 @@ toc() { :; }
 
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
 
-# --- NUMA Node Discovery and Topology Mapping ---
-    : "${parsed_numa_nodes_arg:=auto}"
-
-    _forkrun_build_numa_map() {
-        local req c
-        local -a online map parts req_list
-        req="$1"
-
-        if [[ -r /sys/devices/system/node/online ]]; then
-            local raw; read -r raw < /sys/devices/system/node/online
-            if [[ -n "$raw" ]]; then
-                IFS=',' read -ra parts <<< "$raw"
-                for p in "${parts[@]}"; do
-                    if [[ "$p" == *-* ]]; then
-                        for (( i=${p%%-*}; i<=${p##*-}; i++ )); do online+=("$i"); done
-                    else
-                        online+=("$p")
-                    fi
-                done
-            fi
-        fi
-        (( ${#online[@]} == 0 )) && online=(0)
-
-        map=()
-        if [[ "$req" == "auto" ]]; then
-            map=("${online[@]}")
-        elif [[ "$req" == =* ]]; then
-            # Oversubscribe / Forced Count mode: ==N
-            c="${req#=}"
-            for (( i=0; i<c; i++ )); do map+=("${online[ i % ${#online[@]} ]}"); done
-        elif [[ "$req" == *[,:\-]* ]]; then
-            # Explicit list mode
-            IFS=',' read -ra parts <<< "${req//:/,}"
-            for p in "${parts[@]}"; do
-                if [[ "$p" == *-* ]]; then
-                    for (( i=${p%%-*}; i<=${p##*-}; i++ )); do req_list+=("$i"); done
-                else
-                    req_list+=("$p")
-                fi
-            done
-            # Intersect against genuinely online physical nodes
-            for r in "${req_list[@]}"; do
-                for o in "${online[@]}"; do
-                    if (( r == o )); then map+=("$r"); break; fi
-                done
-            done
-            (( ${#map[@]} == 0 )) && map=("${online[0]}")
-        else
-            # Standard Count mode
-            c="$req"
-            for (( i=0; i<c && i<${#online[@]}; i++ )); do map+=("${online[i]}"); done
-            (( ${#map[@]} == 0 )) && map=("${online[0]}")
-        fi
-
-        # Fast native array join
-        local IFS=','
-        numa_map_str="${map[*]}"
-
-        # Export the node count directly while we still have the array
-        export FORKRUN_NUM_NODES="${#map[@]}"
-    }
-
-    local numa_map_str
-    _forkrun_build_numa_map "$parsed_numa_nodes_arg"
-    ring_init_opts+=("--numa-map=$numa_map_str")
-
-    # Initialize Ring
+    # Initialize Ring (this exports FORKRUN_NUM_NODES)
     ring_init "${ring_init_opts[@]}"
     : "${FORKRUN_NUM_NODES:=1}" # Fallback safety
 
