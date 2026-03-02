@@ -210,10 +210,10 @@ toc() { :; }
 
     if ${stdin_flag:-false}; then
         unsafe_flag=false
-        ring_init_opts+=('--stdin')
+        ring_init_opts+=('--stdin' '--return-bytes')
     elif ${byte_mode_flag:-false}; then
         : "${stdin_flag:=true}"
-        ring_init_opts+=('--stdin')
+        ring_init_opts+=('--stdin' '--return-bytes')
     elif ${unsafe_flag:-false}; then
         stdin_flag=false
     fi
