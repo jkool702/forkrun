@@ -1034,9 +1034,11 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     char tail_buf[65536];
     uint64_t actual_start = 0;
     uint32_t last_major_seen = 0;
+    uint32_t last_node_id = 0;
 
     while (read(index_pipe, &pkt, sizeof(pkt)) == sizeof(pkt)) {
         if (pkt.major_id == UINT32_MAX) break;
+        last_node_id = pkt.node_id;
 
         uint64_t chunk_end = pkt.offset + pkt.length;
         uint64_t actual_end = chunk_end;
@@ -1085,13 +1087,17 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }
 
     if (pkt.major_id == UINT32_MAX && actual_start < pkt.offset) {
+        // Guard against UINT32_MAX wrap-around sentinel confusion
+        uint32_t final_major = (last_major_seen < UINT32_MAX - 1) ? last_major_seen + 1 : last_major_seen;
         struct ScannerTask final_task = {
-            .major_id = last_major_seen + 1,
+            .major_id = final_major,
             .pad = 0,
             .start_off = actual_start,
             .length = pkt.offset - actual_start
         };
-        write(node_pipes[0], &final_task, sizeof(final_task));
+        // Route exactly to the last node instead of defaulting to 0
+        int target = node_pipes[last_node_id % num_node_pipes];
+        write(target, &final_task, sizeof(final_task));
     }
 
     xfree(node_pipes);
@@ -2173,7 +2179,9 @@ static int ring_ack_main(int argc, char **argv) {
 
     struct SharedState *local_state = (my_numa_node != -1 && my_numa_node < (int)global_num_nodes) ? &state[my_numa_node] : &state[0];
 
+    uint64_t my_idx;
     if (worker_last_cnt > 0) {
+        my_idx = worker_last_idx;
         if (local_state && local_state->numa_enabled) {
             op.major_idx = worker_last_major;
             op.minor_idx = worker_last_minor;
@@ -2188,15 +2196,26 @@ static int ring_ack_main(int argc, char **argv) {
         if (local_state && local_state->numa_enabled) {
             op.major_idx = (uint32_t)atoi(get_string_value("RING_MAJOR"));
             op.minor_idx = (uint32_t)atoi(get_string_value("RING_MINOR"));
+            my_idx       = (uint64_t)atoll(get_string_value("RING_BATCH_IDX"));
         } else {
             op.major_idx = (uint32_t)atoi(get_string_value("RING_BATCH_IDX"));
             op.minor_idx = 0;
+            my_idx       = op.major_idx;
         }
     }
 
     if (fd_fallow > 0) {
-        struct IndexPacket ip = { .idx = op.major_idx, .cnt = op.cnt };
-        SYS_CHK(write(fd_fallow, &ip, sizeof(ip)));
+        if (local_state && local_state->numa_enabled) {
+            // NUMA MODE: Push exact physical byte coordinates to fallow_phys
+            uint64_t start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+            uint64_t end   = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
+            struct PhysPacket pp = { .off = start, .len = end - start };
+            SYS_CHK(write(fd_fallow, &pp, sizeof(pp)));
+        } else {
+            // FLAT MODE: Legacy behavior
+            struct IndexPacket ip = { .idx = op.major_idx, .cnt = op.cnt };
+            SYS_CHK(write(fd_fallow, &ip, sizeof(ip)));
+        }
     }
 
     if (fd_target > 0) {

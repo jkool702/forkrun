@@ -278,7 +278,11 @@ toc() { :; }
         ring_pipe fd_fallow_r fd_fallow_w
         (
             exec {fd_fallow_w}>&-
-            ring_fallow ${fd_fallow_r} ${fd_write}
+            if (( FORKRUN_NUM_NODES > 1 )); then
+                ring_fallow_phys ${fd_fallow_r} ${fd_write}
+            else
+                ring_fallow ${fd_fallow_r} ${fd_write}
+            fi
         ) &
         exec {fd_fallow_r}<&-
 
@@ -365,8 +369,9 @@ toc() { :; }
     shift 2
     ring_worker inc $fd_read
     while ring_claim; do
-        [[ "$REPLY" == "0" ]] && break
-        '"$pCode"'
+        if [[ "$REPLY" != "0" ]]; then
+            '"$pCode"'
+        fi
         '"${ring_ack_str}"'
     done
     ring_worker dec
@@ -869,6 +874,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # removed base64 embeddings to drastically reduce file size
+declare -A b64=() # removed base64 embeddings
 
 _forkrun_bootstrap_setup --force
