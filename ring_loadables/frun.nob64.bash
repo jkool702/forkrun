@@ -210,10 +210,10 @@ toc() { :; }
 
     if ${stdin_flag:-false}; then
         unsafe_flag=false
-        ring_init_opts+=('--stdin')
+        ring_init_opts+=('--stdin' '--return-bytes')
     elif ${byte_mode_flag:-false}; then
         : "${stdin_flag:=true}"
-        ring_init_opts+=('--stdin')
+        ring_init_opts+=('--stdin' '--return-bytes')
     elif ${unsafe_flag:-false}; then
         stdin_flag=false
     fi
@@ -869,7 +869,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # removed base64 embeddings to reduce size from 500kb -> 30kb
+declare -A b64=() # removed base64 embeddings to drastically reduce file size
 
 _forkrun_bootstrap_setup --force
-
