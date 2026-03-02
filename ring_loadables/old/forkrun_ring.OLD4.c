@@ -1,9 +1,9 @@
-// forkrun_ring.c v10.0.0-NUMA (Golden Master - NUMA Edition)
+// forkrun_ring.c v9.8.0-NUMA (Golden Master - NUMA Edition)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
 // 1. Zero-Copy Ingest: Data moved from stdin to memfd via splice/copy_file_range.
-// 2. The Ring: Shared memory ring storing offsets.
+// 2. The Ring: Shared memory ring storing offsets. 
 // 3. NUMA "Born-Local" Topology:
 //    - Data is forced to allocate on specific physical CPU sockets via set_mempolicy.
 //    - The state is partitioned into an array of isolated SharedState rings (one per node).
@@ -37,7 +37,7 @@
 #include <sched.h>
 #include <sys/sendfile.h>
 #include <sys/sysinfo.h>
-#include <time.h>
+#include <time.h> 
 #include <sys/syscall.h>
 #include <ctype.h>
 #include <sys/socket.h>
@@ -75,7 +75,7 @@
 #elif defined(__s390x__)
     #define __NR_set_mempolicy 276
 #else
-    #define __NR_set_mempolicy 0
+    #define __NR_set_mempolicy 0 
 #endif
 #endif
 
@@ -185,20 +185,20 @@ static int g_debug = 0;
 #define FORKRUN_LOADABLES(X) \
     X(ring_init,            ring_init_main,           "ring_init [FLAGS]",              "Initialize ring with config") \
     X(ring_destroy,         ring_destroy_main,        "ring_destroy",                   "Destroy ring") \
-    X(ring_scanner,         ring_scanner_main,        "ring_scanner <fd>[spawn_fd]",   "Run legacy scanner") \
+    X(ring_scanner,         ring_scanner_main,        "ring_scanner <fd> [spawn_fd]",   "Run legacy scanner") \
     X(ring_numa_ingest,     ring_numa_ingest_main,    "ring_numa_ingest <infd> <outfd> <idx_pipe> <claim_pipe> <nodes> [ordered]", "Run NUMA topological ingest") \
     X(ring_indexer_numa,    ring_indexer_numa_main,   "ring_indexer_numa <memfd> <idx_pipe> <node_pipes...>", "Run NUMA chunk indexer") \
     X(ring_numa_scanner,    ring_numa_scanner_main,   "ring_numa_scanner <memfd> <node_id> <claim_pipe> <spawn_fd> <nodes> <node_pipes...>", "Run NUMA localized scanner") \
-    X(ring_claim,           ring_claim_main,          "ring_claim[VAR] [FD]",          "Claim batch") \
+    X(ring_claim,           ring_claim_main,          "ring_claim [VAR] [FD]",          "Claim batch") \
     X(ring_worker,          ring_worker_main,         "ring_worker [inc|dec] [FD]",     "Worker control") \
     X(ring_cleanup_waiter,  ring_cleanup_waiter_main, "ring_cleanup_waiter",            "Cleanup waiter") \
     X(ring_ingest,          ring_ingest_main,         "ring_ingest",                    "Signal ingest") \
-    X(ring_fallow,          ring_fallow_main,         "ring_fallow <PIPE> <FILE>[dry]","Logical fallow") \
+    X(ring_fallow,          ring_fallow_main,         "ring_fallow <PIPE> <FILE> [dry]","Logical fallow") \
     X(ring_ack,             ring_ack_main,            "ring_ack <FD> <FD_OUT>",         "Ack batch") \
-    X(ring_order,           ring_order_main,          "ring_order <FD> <PFX|memfd>[unordered]", "Reorder output") \
+    X(ring_order,           ring_order_main,          "ring_order <FD> <PFX|memfd> [unordered]", "Reorder output") \
     X(ring_copy,            ring_copy_main,           "ring_copy <OUT> <IN>",           "Zero-copy ingest") \
     X(ring_signal,          ring_signal_main,         "ring_signal <FD>",               "Signal eventfd") \
-    X(lseek,                lseek_main,               "lseek <FD> <OFF>[WHENCE] [VAR]", "Seek fd") \
+    X(lseek,                lseek_main,               "lseek <FD> <OFF> [WHENCE] [VAR]", "Seek fd") \
     X(ring_indexer,         ring_indexer_main,        "ring_indexer",                   "NUMA Indexer") \
     X(ring_fetcher,         ring_fetcher_main,        "ring_fetcher",                   "NUMA Fetcher") \
     X(ring_fallow_phys,     ring_fallow_phys_main,    "ring_fallow_phys",               "Physical fallow") \
@@ -206,8 +206,8 @@ static int g_debug = 0;
     X(ring_seal,            ring_seal_main,           "ring_seal <FD>",                 "Seal memfd") \
     X(ring_fcntl,           ring_fcntl_main,          "ring_fcntl <FD> <cmd>",          "File control") \
     X(ring_pipe,            ring_pipe_main,           "ring_pipe <ARR|RD> [WR]",        "Create pipe") \
-    X(ring_splice,          ring_splice_main,         "ring_splice <IN> <OUT> <OFF> <LEN>[close]", "Splice data") \
-    X(ring_version,         ring_version_main,        "ring_version[-t|-o|-m|-g|-f|-a]", "Show build metadata") \
+    X(ring_splice,          ring_splice_main,         "ring_splice <IN> <OUT> <OFF> <LEN> [close]", "Splice data") \
+    X(ring_version,         ring_version_main,        "ring_version [-t|-o|-m|-g|-f|-a]", "Show build metadata") \
     X(ring_list,            ring_list_main,           "ring_list [VAR]",                "List loadables")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
@@ -224,6 +224,8 @@ static inline int auto_detect_numa_node() {
     return 0;
 }
 
+// We return max_node + 1 (instead of counting online nodes) to safely handle 
+// sparse topologies without breaking the 1:1 physical sysfs paths.
 static uint32_t get_highest_numa_node_id() {
     int fd = open("/sys/devices/system/node/online", O_RDONLY);
     if (fd < 0) return 1;
@@ -313,7 +315,7 @@ static SHELL_VAR *bind_var_or_array(const char *name, char *value, int flags) {
         char *endp = NULL; errno = 0; long n = strtol(idx_s, &endp, 10);
         if (endp == idx_s || *endp != '\0' || errno == ERANGE) { }
         else ret = bind_array_variable(base_s, (arrayind_t)n, val_s, flags);
-    }
+    } 
     xfree(base_s); xfree(idx_s); xfree(val_s);
     return ret;
 }
@@ -551,7 +553,7 @@ static inline void cleanup_waiter_state() {
 static uint64_t get_v_def(const char* type, bool stdin_mode) {
     if (!strcmp(type, "workers")) return sysconf(_SC_NPROCESSORS_ONLN);
     if (!strcmp(type, "lines"))   return 4096;
-    if (!strcmp(type, "bytes"))   {
+    if (!strcmp(type, "bytes"))   { 
         uint64_t l2 = get_cache_bytes();
         if (stdin_mode) return (l2 < (1ULL<<19)) ? l2 : (1ULL<<19);
         uint64_t arg = get_arg_max_bytes();
@@ -582,7 +584,7 @@ static void apply_config(char type, char sub, const char *arg) {
     uint64_t u_val = 0;
 
     if (strcmp(arg, "x") == 0) {
-        if (type == 1) { clear_mask |= M_L_ALL; set_mask |= M_BMODE; }
+        if (type == 1) { clear_mask |= M_L_ALL; set_mask |= M_BMODE; } 
         else if (type == 2) { clear_mask |= (M_B_ALL | M_BMODE); }
     } else {
         if (arg[0] == '\0')          val_code = S_DEF;
@@ -864,7 +866,7 @@ static int ring_init_main(int argc, char **argv) {
 
 static int ring_destroy_main(int argc, char **argv) {
     (void)argc; (void)argv;
-    if (state) {
+    if (state) { 
         size_t total_size = sizeof(struct SharedState) * allocated_num_nodes;
         total_size = (total_size + 4095ULL) & ~4095ULL;
         munmap(state, total_size);
@@ -1109,7 +1111,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         if (phase == 0) { \
             if (batch_counter >= _tc) { phase = 1; batch_counter = 0; } \
         } else if (phase == 1) { \
-            if (batch_counter >= _tc) { \
+            if (is_stalled) { \
+                phase = 2; \
+            } else if (batch_counter >= _tc) { \
                 L *= 2; \
                 if (L >= Lmax) { L = Lmax; phase = 2; } \
                 if (W < W_max_val && !fixed_workers) { \
@@ -1330,7 +1334,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 
         struct pollfd pfd = { .fd = current_pipe, .events = POLLIN };
         if (active_pipe_idx != my_node_id) {
-            if (poll(&pfd, 1, 0) <= 0) {
+            if (poll(&pfd, 1, 0) <= 0) { 
                 active_pipe_idx = (active_pipe_idx + 1) % num_nodes;
                 continue;
             }
@@ -1429,7 +1433,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                         }
 
                         char *nl = memchr(p, '\n', end - p);
-                        if (nl) {
+                        if (nl) { 
                             if (BytesMax > 0 && lines_found > 0) {
                                 uint64_t line_end_offset = buf_base_offset + (uint64_t)((nl + 1) - buf);
                                 uint64_t payload = line_end_offset - batch_start;
@@ -1441,11 +1445,11 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                             }
                             lines_found++;
                             p = nl + 1;
-                        } else {
+                        } else { 
                             uint64_t curr_pos = buf_base_offset + (end - buf);
                             if (curr_pos >= chunk_end) { lines_found++; p = end; break; }
                             else { p = end; }
-                        }
+                        } 
                     }
 
                     if (limit_items > 0 && lines_found > 0) {
@@ -1544,7 +1548,7 @@ static inline void scanner_adaptive_commit(bool force) {
             uint64_t intermediate = (linear < current_buffer) ? linear : current_buffer;
             if (intermediate > W) target_buffer = intermediate - W;
             else target_buffer = 0;
-        }
+        } 
         uint64_t target = local_scan_idx - target_buffer;
         if (target > local_write_idx) {
             atomic_store_release(&state[0].write_idx, target);
@@ -1681,7 +1685,7 @@ static int ring_scanner_main(int argc, char **argv) {
             uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
             uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
 
-            if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {}
+            if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {} 
             ssize_t n = read(fd, buf, chunk_sz);
 
             if (n > 0 && (uint64_t)n > prev_avail) {
@@ -1984,7 +1988,7 @@ static int ring_claim_main(int argc, char **argv) {
 restart_loop:
     while (1) {
         struct EscrowPacket ep;
-        if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0 &&
+        if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0 && 
             read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
             my_read_idx = ep.idx;
             claim_count = ep.cnt;
@@ -2057,10 +2061,10 @@ restart_loop:
         atomic_fetch_add(&local_state->active_waiters, 1);
         is_waiting_on_ring = true;
 
-        struct pollfd pfds[3] = {
-            { .fd = evfd_data_arr[my_numa_node], .events = POLLIN },
-            { .fd = evfd_eof,  .events = POLLIN },
-            { .fd = fd_escrow_r[my_numa_node], .events = POLLIN }
+        struct pollfd pfds[3] = { 
+            { .fd = evfd_data_arr[my_numa_node], .events = POLLIN }, 
+            { .fd = evfd_eof,  .events = POLLIN }, 
+            { .fd = fd_escrow_r[my_numa_node], .events = POLLIN } 
         };
 
         while(1) {
@@ -2238,7 +2242,7 @@ static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset, size_t coun
             return total > 0 ? (ssize_t)total : -1;
         }
         if (s == 0) {
-            if (retries++ < 100) { usleep(10); continue; }
+            if (retries++ < 1000) { usleep(100); continue; }
             break;
         }
         retries = 0;
@@ -2255,12 +2259,12 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
     while (total_read < len) {
         size_t to_read = (len - total_read > BUF_SIZE) ? BUF_SIZE : (len - total_read);
         ssize_t r = pread(fd_in, buf, to_read, off + total_read);
-        if (r < 0) {
+        if (r < 0) { 
             if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; }
             free(buf); return -1;
         }
         if (r == 0) {
-            if (retries++ < 100) { usleep(10); continue; }
+            if (retries++ < 1000) { usleep(100); continue; }
             break;
         }
         retries = 0;
@@ -2268,7 +2272,7 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
         size_t to_write = r;
         while (to_write > 0) {
             ssize_t w = write(fd_out, write_ptr, to_write);
-            if (w < 0) {
+            if (w < 0) { 
                 if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; }
                 free(buf); return -1;
             }
@@ -2439,7 +2443,7 @@ static int ring_worker_main(int argc, char **argv) {
         if (state) atomic_fetch_add(&state[node].active_workers, 1);
         if (argc >= 3 && isdigit(argv[2][0])) worker_cached_fd = atoi(argv[2]);
     }
-    else if (!strcmp(argv[1],"dec")) {
+    else if (!strcmp(argv[1],"dec")) { 
         cleanup_waiter_state();
         if (state) atomic_fetch_sub(&state[node].active_workers, 1);
         worker_cached_fd = -1;
@@ -2707,7 +2711,7 @@ static int ring_copy_main(int argc, char **argv) {
              size_t copied_in_chunk = 0;
              while (copied_in_chunk < to_copy) {
                  ssize_t n = copy_file_range(infd, &current_off, outfd, NULL, to_copy - copied_in_chunk, 0);
-                 if (n < 0) {
+                 if (n < 0) { 
                      if (errno == EINTR) continue;
                      if (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP) break;
                      goto err_out;
@@ -2820,7 +2824,7 @@ static int ring_copy_main(int argc, char **argv) {
                     if (sysinfo(&si) == 0) {
                         uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
                         uint64_t free_b = (uint64_t)si.freeram * mu;
-                        if (free_b < oom_threshold && state) {
+                        if (free_b < oom_threshold && state) { 
                             OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
                         }
                     }
