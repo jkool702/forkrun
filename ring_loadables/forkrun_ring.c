@@ -224,27 +224,6 @@ static inline int auto_detect_numa_node() {
     return 0;
 }
 
-static uint32_t get_highest_numa_node_id() {
-    int fd = open("/sys/devices/system/node/online", O_RDONLY);
-    if (fd < 0) return 1;
-    char buf[256] = {0};
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0) return 1;
-
-    uint32_t max_node = 0;
-    char *p = buf;
-    while (*p) {
-        if (isdigit(*p)) {
-            uint32_t val = strtoul(p, &p, 10);
-            if (val > max_node) max_node = val;
-        } else {
-            p++;
-        }
-    }
-    return max_node + 1;
-}
-
 static int pin_to_numa_node(int node_id) {
     char path[256];
     snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/cpulist", node_id);
@@ -950,7 +929,15 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     }
 
     #define BITS_PER_LONG (sizeof(unsigned long) * 8)
-    int mask_words = (num_nodes + BITS_PER_LONG - 1) / BITS_PER_LONG;
+    uint32_t max_phys_id = 0;
+    if (g_logical_to_phys_map) {
+        for (int i = 0; i < num_nodes; i++) {
+            if (g_logical_to_phys_map[i] > max_phys_id) {
+                max_phys_id = g_logical_to_phys_map[i];
+            }
+        }
+    }
+    int mask_words = (max_phys_id / BITS_PER_LONG) + 1;
     unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
 
     while (1) {
@@ -975,10 +962,12 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         }
 
         if (numa_enabled && num_nodes > 1) {
-            int target_phys = g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
-            memset(nodemask, 0, mask_words * sizeof(unsigned long));
-            nodemask[target_phys / BITS_PER_LONG] |= (1UL << (target_phys % BITS_PER_LONG));
-            syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * BITS_PER_LONG);
+            uint32_t target_phys = g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
+            if (target_phys < mask_words * BITS_PER_LONG) {
+                memset(nodemask, 0, mask_words * sizeof(unsigned long));
+                nodemask[target_phys / BITS_PER_LONG] |= (1UL << (target_phys % BITS_PER_LONG));
+                syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * BITS_PER_LONG);
+            }
         }
 
         chunk_size &= ~4095ULL;
@@ -1223,7 +1212,9 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     int num_nodes  = atoi(argv[5]);
 
     int phys_node = g_logical_to_phys_map ? g_logical_to_phys_map[my_node_id] : 0;
-    pin_to_numa_node(phys_node);
+    if (pin_to_numa_node(phys_node) != 0 && g_debug) {
+        fprintf(stderr, "forkrun [DEBUG] Failed to pin scanner %d to phys node %d\n", my_node_id, phys_node);
+    }
 
     int *node_pipes = xmalloc(num_nodes * sizeof(int));
     for (int i = 0; i < num_nodes; i++) {
@@ -1992,15 +1983,16 @@ static int ring_claim_main(int argc, char **argv) {
         if (s_node) {
             my_numa_node = atoi(s_node);
         } else {
-            if (g_debug && global_num_nodes > 1) {
-                fprintf(stderr, "forkrun [DEBUG] RING_NODE_ID missing, falling back to physical getcpu()\n");
-            }
             int phys = auto_detect_numa_node();
             my_numa_node = 0;
+            bool found = false;
             if (g_logical_to_phys_map) {
                 for (uint32_t i = 0; i < global_num_nodes; i++) {
-                    if (g_logical_to_phys_map[i] == phys) { my_numa_node = i; break; }
+                    if (g_logical_to_phys_map[i] == phys) { my_numa_node = i; found = true; break; }
                 }
+            }
+            if (!found && g_debug && global_num_nodes > 1) {
+                fprintf(stderr, "forkrun [DEBUG] Worker on unmapped physical node %d, defaulting to logical 0\n", phys);
             }
         }
         if (my_numa_node >= (int)global_num_nodes) my_numa_node = 0;
@@ -2491,7 +2483,9 @@ static int ring_worker_main(int argc, char **argv) {
 
     if (!strcmp(argv[1],"inc")) {
         if (global_num_nodes > 1 && g_logical_to_phys_map) {
-            pin_to_numa_node(g_logical_to_phys_map[node]);
+            if (pin_to_numa_node(g_logical_to_phys_map[node]) != 0 && g_debug) {
+                fprintf(stderr, "forkrun [DEBUG] Failed to pin worker to phys node %d\n", g_logical_to_phys_map[node]);
+            }
         }
         if (state) atomic_fetch_add(&state[node].active_workers, 1);
         if (argc >= 3 && isdigit(argv[2][0])) worker_cached_fd = atoi(argv[2]);

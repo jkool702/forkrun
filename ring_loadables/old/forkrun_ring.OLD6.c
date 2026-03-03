@@ -441,7 +441,6 @@ static int fd_escrow[2] = { -1, -1 };
 
 static uint32_t global_num_nodes = 0;
 static uint32_t allocated_num_nodes = 0;
-static uint32_t *g_logical_to_phys_map = NULL;
 
 struct EscrowPacket { uint64_t idx; uint64_t cnt; };
 struct IndexPacket  { uint64_t idx; uint64_t cnt; };
@@ -635,27 +634,16 @@ static int ring_init_main(int argc, char **argv) {
         fprintf(stderr, "forkrun [DEBUG] Enabled\n");
     } else g_debug = 0;
 
-    global_num_nodes = 0;
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--numa-map=", 11) == 0) {
-            global_num_nodes = 1;
-            for (const char *c = argv[i]+11; *c; c++) if (*c == ',') global_num_nodes++;
-
-            if (g_logical_to_phys_map) xfree(g_logical_to_phys_map);
-            g_logical_to_phys_map = xmalloc(global_num_nodes * sizeof(uint32_t));
-            const char *p = argv[i]+11;
-            for (uint32_t j = 0; j < global_num_nodes; j++) {
-                g_logical_to_phys_map[j] = (uint32_t)strtoul(p, (char**)&p, 10);
-                if (*p == ',') p++;
-            }
+        if (strncmp(argv[i], "--nodes=", 8) == 0) {
+            if (strcmp(argv[i]+8, "auto") == 0) global_num_nodes = 0;
+            else global_num_nodes = (uint32_t)atoi(argv[i] + 8);
         }
     }
 
-    if (global_num_nodes == 0 || g_logical_to_phys_map == NULL) {
-        global_num_nodes = 1;
-        if (g_logical_to_phys_map) xfree(g_logical_to_phys_map);
-        g_logical_to_phys_map = xmalloc(sizeof(uint32_t));
-        g_logical_to_phys_map[0] = 0;
+    if (global_num_nodes == 0) {
+        global_num_nodes = get_highest_numa_node_id();
+        if (global_num_nodes < 1) global_num_nodes = 1;
     }
 
     char node_buf[32];
@@ -719,7 +707,7 @@ static int ring_init_main(int argc, char **argv) {
         else if (strncmp(arg, "--out=", 6) == 0)       out_array_name = arg+6;
         else if (strncmp(arg, "--stdin", 7) == 0)      stdin_explicit = 1;
         else if (strncmp(arg, "--no-stdin", 10) == 0)  stdin_explicit = 0;
-        else if (strncmp(arg, "--nodes=", 8) != 0 && strncmp(arg, "--numa-map=", 11) != 0 && arg[0] != '-') out_array_name = arg;
+        else if (strncmp(arg, "--nodes=", 8) != 0 && arg[0] != '-') out_array_name = arg;
     }
 
     if (stdin_explicit != -1) {
@@ -819,6 +807,7 @@ static int ring_init_main(int argc, char **argv) {
     evfd_ingest_eof = eventfd(0, EFD_CLOEXEC|EFD_NONBLOCK|EFD_SEMAPHORE);
     evfd_starve = eventfd(0, EFD_CLOEXEC|EFD_NONBLOCK);
 
+    // Bind legacy variables for flat scripts
     evfd_data = evfd_data_arr[0];
     fd_escrow[0] = fd_escrow_r[0];
     fd_escrow[1] = fd_escrow_w[0];
@@ -891,10 +880,6 @@ static int ring_destroy_main(int argc, char **argv) {
         xfree(fd_escrow_r); fd_escrow_r = NULL;
         xfree(fd_escrow_w); fd_escrow_w = NULL;
     }
-    if (g_logical_to_phys_map) {
-        xfree(g_logical_to_phys_map);
-        g_logical_to_phys_map = NULL;
-    }
     if (evfd_eof >= 0) { close(evfd_eof); evfd_eof = -1; }
     if (evfd_ingest_data >= 0) { close(evfd_ingest_data); evfd_ingest_data = -1; }
     if (evfd_ingest_eof >= 0) { close(evfd_ingest_eof); evfd_ingest_eof = -1; }
@@ -946,7 +931,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     if (numa_enabled) {
         syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
     } else {
-        if (g_debug && num_nodes > 1) fprintf(stderr, "forkrun [DEBUG] NUMA unavailable, running multi-ring software partition over UMA\n");
+        if (g_debug && num_nodes > 1) fprintf(stderr, "forkrun [DEBUG] NUMA unavailable, running multi-ring without pinning\n");
+        num_nodes = 1;
     }
 
     #define BITS_PER_LONG (sizeof(unsigned long) * 8)
@@ -975,9 +961,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         }
 
         if (numa_enabled && num_nodes > 1) {
-            int target_phys = g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
             memset(nodemask, 0, mask_words * sizeof(unsigned long));
-            nodemask[target_phys / BITS_PER_LONG] |= (1UL << (target_phys % BITS_PER_LONG));
+            nodemask[target_node / BITS_PER_LONG] |= (1UL << (target_node % BITS_PER_LONG));
             syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * BITS_PER_LONG);
         }
 
@@ -1049,11 +1034,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     char tail_buf[65536];
     uint64_t actual_start = 0;
     uint32_t last_major_seen = 0;
-    uint32_t last_node_id = 0;
 
     while (read(index_pipe, &pkt, sizeof(pkt)) == sizeof(pkt)) {
         if (pkt.major_id == UINT32_MAX) break;
-        last_node_id = pkt.node_id;
 
         uint64_t chunk_end = pkt.offset + pkt.length;
         uint64_t actual_end = chunk_end;
@@ -1102,17 +1085,13 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }
 
     if (pkt.major_id == UINT32_MAX && actual_start < pkt.offset) {
-        // Guard against UINT32_MAX wrap-around sentinel confusion
-        uint32_t final_major = (last_major_seen < UINT32_MAX - 1) ? last_major_seen + 1 : last_major_seen;
         struct ScannerTask final_task = {
-            .major_id = final_major,
+            .major_id = last_major_seen + 1,
             .pad = 0,
             .start_off = actual_start,
             .length = pkt.offset - actual_start
         };
-        // Route exactly to the last node instead of defaulting to 0
-        int target = node_pipes[last_node_id % num_node_pipes];
-        write(target, &final_task, sizeof(final_task));
+        write(node_pipes[0], &final_task, sizeof(final_task));
     }
 
     xfree(node_pipes);
@@ -1222,8 +1201,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     int fd_spawn   = atoi(argv[4]);
     int num_nodes  = atoi(argv[5]);
 
-    int phys_node = g_logical_to_phys_map ? g_logical_to_phys_map[my_node_id] : 0;
-    pin_to_numa_node(phys_node);
+    pin_to_numa_node(my_node_id);
 
     int *node_pipes = xmalloc(num_nodes * sizeof(int));
     for (int i = 0; i < num_nodes; i++) {
@@ -1989,20 +1967,10 @@ static int ring_claim_main(int argc, char **argv) {
 
     if (my_numa_node == -1) {
         const char *s_node = get_string_value("RING_NODE_ID");
-        if (s_node) {
-            my_numa_node = atoi(s_node);
-        } else {
-            if (g_debug && global_num_nodes > 1) {
-                fprintf(stderr, "forkrun [DEBUG] RING_NODE_ID missing, falling back to physical getcpu()\n");
-            }
-            int phys = auto_detect_numa_node();
-            my_numa_node = 0;
-            if (g_logical_to_phys_map) {
-                for (uint32_t i = 0; i < global_num_nodes; i++) {
-                    if (g_logical_to_phys_map[i] == phys) { my_numa_node = i; break; }
-                }
-            }
+        if (!s_node && global_num_nodes > 1) {
+            if (g_debug) fprintf(stderr, "forkrun [DEBUG] RING_NODE_ID missing, falling back to getcpu()\n");
         }
+        my_numa_node = s_node ? atoi(s_node) : auto_detect_numa_node();
         if (my_numa_node >= (int)global_num_nodes) my_numa_node = 0;
     }
     struct SharedState *local_state = &state[my_numa_node];
@@ -2205,9 +2173,7 @@ static int ring_ack_main(int argc, char **argv) {
 
     struct SharedState *local_state = (my_numa_node != -1 && my_numa_node < (int)global_num_nodes) ? &state[my_numa_node] : &state[0];
 
-    uint64_t my_idx;
     if (worker_last_cnt > 0) {
-        my_idx = worker_last_idx;
         if (local_state && local_state->numa_enabled) {
             op.major_idx = worker_last_major;
             op.minor_idx = worker_last_minor;
@@ -2222,26 +2188,15 @@ static int ring_ack_main(int argc, char **argv) {
         if (local_state && local_state->numa_enabled) {
             op.major_idx = (uint32_t)atoi(get_string_value("RING_MAJOR"));
             op.minor_idx = (uint32_t)atoi(get_string_value("RING_MINOR"));
-            my_idx       = (uint64_t)atoll(get_string_value("RING_BATCH_IDX"));
         } else {
             op.major_idx = (uint32_t)atoi(get_string_value("RING_BATCH_IDX"));
             op.minor_idx = 0;
-            my_idx       = op.major_idx;
         }
     }
 
     if (fd_fallow > 0) {
-        if (local_state && local_state->numa_enabled) {
-            // NUMA MODE: Push exact physical byte coordinates to fallow_phys
-            uint64_t start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-            uint64_t end   = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
-            struct PhysPacket pp = { .off = start, .len = end - start };
-            SYS_CHK(write(fd_fallow, &pp, sizeof(pp)));
-        } else {
-            // FLAT MODE: Legacy behavior
-            struct IndexPacket ip = { .idx = op.major_idx, .cnt = op.cnt };
-            SYS_CHK(write(fd_fallow, &ip, sizeof(ip)));
-        }
+        struct IndexPacket ip = { .idx = op.major_idx, .cnt = op.cnt };
+        SYS_CHK(write(fd_fallow, &ip, sizeof(ip)));
     }
 
     if (fd_target > 0) {
@@ -2474,25 +2429,13 @@ static int ring_worker_main(int argc, char **argv) {
 
     if (my_numa_node == -1) {
         const char *s_node = get_string_value("RING_NODE_ID");
-        if (s_node) {
-            my_numa_node = atoi(s_node);
-        } else {
-            int phys = auto_detect_numa_node();
-            my_numa_node = 0;
-            if (g_logical_to_phys_map) {
-                for (uint32_t i = 0; i < global_num_nodes; i++) {
-                    if (g_logical_to_phys_map[i] == phys) { my_numa_node = i; break; }
-                }
-            }
-        }
+        my_numa_node = s_node ? atoi(s_node) : auto_detect_numa_node();
         if (my_numa_node >= (int)global_num_nodes) my_numa_node = 0;
     }
     int node = my_numa_node;
 
     if (!strcmp(argv[1],"inc")) {
-        if (global_num_nodes > 1 && g_logical_to_phys_map) {
-            pin_to_numa_node(g_logical_to_phys_map[node]);
-        }
+        if (global_num_nodes > 1) pin_to_numa_node(node);
         if (state) atomic_fetch_add(&state[node].active_workers, 1);
         if (argc >= 3 && isdigit(argv[2][0])) worker_cached_fd = atoi(argv[2]);
     }

@@ -940,6 +940,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()  # removes base64 embeddings
+declare -A b64=() # removed base64
 
 _forkrun_bootstrap_setup --force
