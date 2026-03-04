@@ -820,10 +820,11 @@ static int ring_init_main(int argc, char **argv) {
         if (!v) v = make_new_array_variable(out_array_name);
         if (!v) return EXECUTION_FAILURE;
 
-        int *created_fds = xmalloc(sizeof(int) * state[0].cfg_w_max);
+        // FIX: Allocate FDs for the GLOBAL max workers (vals[1]), not the per-node max
+        int *created_fds = xmalloc(sizeof(int) * vals[1]);
         int created_cnt = 0;
         int failure = 0;
-        for (uint64_t i = 0; i < state[0].cfg_w_max; i++) {
+        for (uint64_t i = 0; i < vals[1]; i++) {
              int fd = xcreate_anon_file("forkrun_out");
              if (fd >= 0) {
                  created_fds[created_cnt++] = fd;
