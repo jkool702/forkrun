@@ -472,7 +472,11 @@ P+=($!)
         (( node_worker_max < 1 )) && node_worker_max=1
 
         while (( finished_scanners < FORKRUN_NUM_NODES )); do
-            read -r -u $fd_spawn_r msg
+            # FIX: If the pipe hits EOF (all scanners dead/exited), break out safely
+            if ! read -r -u $fd_spawn_r msg; then
+                break
+            fi
+
             if [[ "$msg" == *'x'* ]]; then
                 ((finished_scanners++))
                 continue
