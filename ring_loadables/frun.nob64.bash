@@ -316,11 +316,25 @@ toc() { :; }
             ordered_flag=0
             [[ "${order_mode}" == "ordered" ]] && ordered_flag=1
 
-            ( ring_numa_ingest ${fd0} ${fd_write} $index_pipe_w $claim_pipe_r $FORKRUN_NUM_NODES $ordered_flag ) &
-            ( ring_indexer_numa ${fd_scan} $index_pipe_r "${node_pipes_w[@]}" ) &
+            (
+                exec {index_pipe_r}<&- {claim_pipe_w}>&-
+                for nr in "${node_pipes_r[@]}"; do exec {nr}<&-; done
+                for nw in "${node_pipes_w[@]}"; do exec {nw}>&-; done
+                ring_numa_ingest ${fd0} ${fd_write} $index_pipe_w $claim_pipe_r $FORKRUN_NUM_NODES $ordered_flag
+            ) &
+
+            (
+                exec {index_pipe_w}>&- {claim_pipe_r}<&- {claim_pipe_w}>&-
+                for nr in "${node_pipes_r[@]}"; do exec {nr}<&-; done
+                ring_indexer_numa ${fd_scan} $index_pipe_r "${node_pipes_w[@]}"
+            ) &
 
             for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                ( ring_numa_scanner ${fd_scan} $i $claim_pipe_w $fd_spawn_w $FORKRUN_NUM_NODES "${node_pipes_r[@]}" ) &
+                (
+                    exec {index_pipe_r}<&- {index_pipe_w}>&- {claim_pipe_r}<&-
+                    for nw in "${node_pipes_w[@]}"; do exec {nw}>&-; done
+                    ring_numa_scanner ${fd_scan} $i $claim_pipe_w $fd_spawn_w $FORKRUN_NUM_NODES "${node_pipes_r[@]}"
+                ) &
             done
 
             # Close Bash's copies of the pipes to allow background EOFs to cascade
@@ -450,17 +464,28 @@ P+=($!)
 
         # --- SPAWN LOOP ---
         nWorkers=0
-        node_idx=0
-        while true; do
-            read -r -u $fd_spawn_r N
-            [[ "$N" == 'x' ]] && break
+        finished_scanners=0
+        while (( finished_scanners < FORKRUN_NUM_NODES )); do
+            read -r -u $fd_spawn_r msg
+            if [[ "$msg" == *'x'* ]]; then
+                ((finished_scanners++))
+                continue
+            fi
+
+            # Parse directed spawn "node:count" or legacy "count"
+            if [[ "$msg" == *:* ]]; then
+                node_idx="${msg%%:*}"
+                N="${msg#*:}"
+            else
+                node_idx=0
+                N="$msg"
+            fi
 
             target=$(( nWorkers + N ))
             (( target > nWorkersMax )) && target=$nWorkersMax
 
             for (( ; nWorkers < target; nWorkers++ )); do
                 spawn_worker "$nWorkers" "$node_idx"
-                node_idx=$(( (node_idx + 1) % FORKRUN_NUM_NODES ))
             done
         done
 
