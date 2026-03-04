@@ -1589,7 +1589,11 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
-    LOCAL_SCANNER_WAKE();
+
+    // Blast the local semaphore so ALL sleeping workers wake up and exit
+    uint64_t blast = 999999;
+    SYS_CHK(write(evfd_data_arr[my_node_id], &blast, 8));
+
     if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
 
     xfree(buf);
@@ -2079,27 +2083,12 @@ static int ring_claim_main(int argc, char **argv) {
 restart_loop:
     while (1) {
         struct EscrowPacket ep;
-        // 1. Try local node escrow first
+        // Strictly Local Escrow Only
         if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0 &&
             read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
             my_read_idx = ep.idx;
             claim_count = ep.cnt;
             break;
-        }
-
-        // 2. Try cross-node escrow diffusion (steal from heavily loaded nodes)
-        if (local_state->numa_enabled) {
-            bool stole = false;
-            for (uint32_t i = 1; i < global_num_nodes; i++) {
-                uint32_t steal_node = (my_numa_node + i) % global_num_nodes;
-                if (fd_escrow_r[steal_node] >= 0 && read(fd_escrow_r[steal_node], &ep, sizeof(ep)) == sizeof(ep)) {
-                    my_read_idx = ep.idx;
-                    claim_count = ep.cnt;
-                    stole = true;
-                    break;
-                }
-            }
-            if (stole) break;
         }
 
         uint64_t w_snap = atomic_load_acquire(&local_state->write_idx);

@@ -472,7 +472,11 @@ P+=($!)
         (( node_worker_max < 1 )) && node_worker_max=1
 
         while (( finished_scanners < FORKRUN_NUM_NODES )); do
-            read -r -u $fd_spawn_r msg
+            # FIX: If the pipe hits EOF (all scanners dead/exited), break out safely
+            if ! read -r -u $fd_spawn_r msg; then
+                break
+            fi
+
             if [[ "$msg" == *'x'* ]]; then
                 ((finished_scanners++))
                 continue
@@ -972,6 +976,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # removed base64
+declare -A b64=() # remove base64
 
 _forkrun_bootstrap_setup --force

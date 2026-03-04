@@ -1591,7 +1591,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     atomic_store_release(&local_state->scanner_finished, 1);
     LOCAL_SCANNER_WAKE();
     if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
-    uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8));
 
     xfree(buf);
     xfree(node_pipes);
