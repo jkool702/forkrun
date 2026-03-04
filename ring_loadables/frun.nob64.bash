@@ -248,9 +248,9 @@ toc() { :; }
         map=()
         if [[ "$req" == "auto" ]]; then
             map=("${online[@]}")
-        elif [[ "$req" == =* ]]; then
-            # Oversubscribe / Forced Count mode: ==N
-            c="${req#=}"
+        elif [[ "$req" == @* ]]; then
+            # Oversubscribe / Forced Count mode: --nodes=@N
+            c="${req#@}"
             for (( i=0; i<c; i++ )); do map+=("${online[ i % ${#online[@]} ]}"); done
         elif [[ "$req" == *[,:\-]* ]]; then
             # Explicit list mode
@@ -972,6 +972,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # removed base64 embeddings for reduced file size
+declare -A b64=() # removed base64
 
 _forkrun_bootstrap_setup --force
