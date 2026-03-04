@@ -465,6 +465,12 @@ P+=($!)
         # --- SPAWN LOOP ---
         nWorkers=0
         finished_scanners=0
+
+        declare -a node_workers
+        for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
+        node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
+        (( node_worker_max < 1 )) && node_worker_max=1
+
         while (( finished_scanners < FORKRUN_NUM_NODES )); do
             read -r -u $fd_spawn_r msg
             if [[ "$msg" == *'x'* ]]; then
@@ -475,17 +481,18 @@ P+=($!)
             # Parse directed spawn "node:count" or legacy "count"
             if [[ "$msg" == *:* ]]; then
                 node_idx="${msg%%:*}"
-                N="${msg#*:}"
+                spawn_count="${msg#*:}"
             else
                 node_idx=0
-                N="$msg"
+                spawn_count="$msg"
             fi
 
-            target=$(( nWorkers + N ))
-            (( target > nWorkersMax )) && target=$nWorkersMax
+            target=$(( node_workers[node_idx] + spawn_count ))
+            (( target > node_worker_max )) && target=$node_worker_max
 
-            for (( ; nWorkers < target; nWorkers++ )); do
+            for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
                 spawn_worker "$nWorkers" "$node_idx"
+                ((nWorkers++))
             done
         done
 
@@ -965,6 +972,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # removed base64
+declare -A b64=() # removed base64 embeddings for reduced file size
 
 _forkrun_bootstrap_setup --force
