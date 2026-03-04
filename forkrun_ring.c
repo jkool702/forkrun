@@ -1086,12 +1086,22 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         }
 
         int target = node_pipes[pkt.node_id % num_node_pipes];
-        if (write(target, &task, sizeof(task)) != sizeof(task)) break;
+        bool write_ok = false;
+        while(1) {
+            ssize_t w = write(target, &task, sizeof(task));
+            if (w == sizeof(task)) { write_ok = true; break; }
+            if (w < 0 && (errno == EINTR || errno == EAGAIN)) {
+                usleep(10);
+                continue;
+            }
+            break;
+        }
+        if (!write_ok) break;
+
         last_major_seen = pkt.major_id;
     }
 
     if (pkt.major_id == UINT32_MAX && actual_start < pkt.offset) {
-        // Guard against UINT32_MAX wrap-around sentinel confusion
         uint32_t final_major = (last_major_seen < UINT32_MAX - 1) ? last_major_seen + 1 : last_major_seen;
         struct ScannerTask final_task = {
             .major_id = final_major,
@@ -1099,9 +1109,16 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             .start_off = actual_start,
             .length = pkt.offset - actual_start
         };
-        // Route exactly to the last node instead of defaulting to 0
         int target = node_pipes[last_node_id % num_node_pipes];
-        write(target, &final_task, sizeof(final_task));
+        while(1) {
+            ssize_t w = write(target, &final_task, sizeof(final_task));
+            if (w == sizeof(final_task)) break;
+            if (w < 0 && (errno == EINTR || errno == EAGAIN)) {
+                usleep(10);
+                continue;
+            }
+            break;
+        }
     }
 
     xfree(node_pipes);
@@ -1131,7 +1148,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                     if (_n_spawn > (W_max_val - W)) _n_spawn = W_max_val - W; \
                     if (fd_spawn >= 0) { \
                         char _sbuf[64]; \
-                        int _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _n_spawn); \
+                        int _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n", my_node_id, _n_spawn); \
                         if (_slen > 0) SYS_CHK(write(fd_spawn, _sbuf, _slen)); \
                         W += _n_spawn; \
                         atomic_store_relaxed(&(state_ptr)->active_workers, W); \
@@ -1171,7 +1188,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                 if (W + _grow > W_max_val) _grow = W_max_val - W; \
                 if (_grow > 0 && fd_spawn >= 0) { \
                     char _sbuf[64]; \
-                    int _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _grow); \
+                    int _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n", my_node_id, _grow); \
                     if (_slen > 0) SYS_CHK(write(fd_spawn, _sbuf, _slen)); \
                     W += _grow; \
                     atomic_store_relaxed(&(state_ptr)->active_workers, W); \
@@ -1265,7 +1282,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     atomic_store_relaxed(&local_state->active_workers, W);
 
     if (fd_spawn >= 0 && W > 0) {
-        char sbuf[64]; int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
+        char sbuf[64]; int slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, W);
         if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
     }
 
@@ -1596,6 +1613,7 @@ static int ring_scanner_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
     int fd = atoi(argv[1]);
     int fd_spawn = (argc >= 3) ? atoi(argv[2]) : -1;
+    int my_node_id = 0; // Ensure macro compatibility
 
     uint64_t L = state[0].cfg_batch_start;
     uint64_t Lmax = state[0].cfg_batch_max;
@@ -1647,7 +1665,7 @@ static int ring_scanner_main(int argc, char **argv) {
 
     if (fd_spawn >= 0 && W > 0) {
         char sbuf[64];
-        int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
+        int slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, W);
         if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
     }
 
@@ -1863,7 +1881,7 @@ static int ring_scanner_main(int argc, char **argv) {
                     uint64_t needed = W_target - W_curr;
                     if (needed > 0) {
                         char sbuf[64];
-                        int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
+                        int slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed);
                         if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
                         W += needed;
                         atomic_store_relaxed(&state[0].active_workers, W);
@@ -2092,7 +2110,7 @@ restart_loop:
              poll(pfds, 3, -1);
              if (pfds[2].revents & POLLIN) break;
              if (pfds[0].revents) { uint64_t v; if(read(evfd_data_arr[my_numa_node], &v, 8)){}; break; }
-             if (pfds[1].revents) break;
+             if (pfds[1].revents) { uint64_t v; if(read(evfd_eof, &v, 8)){}; break; }
         }
         cleanup_waiter_state();
         spin = 0;
@@ -2130,7 +2148,7 @@ restart_loop:
                  struct pollfd pfds[2] = { { .fd = evfd_data_arr[my_numa_node], .events = POLLIN }, { .fd = evfd_eof, .events = POLLIN } };
                  poll(pfds, 2, -1);
                  if (pfds[0].revents) { uint64_t v; if(read(evfd_data_arr[my_numa_node], &v, 8)){}; }
-                 if (pfds[1].revents) break;
+                 if (pfds[1].revents) { uint64_t v; if(read(evfd_eof, &v, 8)){}; break; }
              }
              cleanup_waiter_state();
              if (claim_count == 0) { spin = 0; goto restart_loop; }
