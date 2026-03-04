@@ -611,7 +611,7 @@ static int ring_init_main(int argc, char **argv) {
     const char *dbg_env = get_string_value("FORKRUN_DEBUG");
     if (dbg_env && (strcmp(dbg_env, "1") == 0 || strcmp(dbg_env, "true") == 0)) {
         g_debug = 1;
-        fprintf(stderr, "forkrun [DEBUG] Enabled\n");
+        fprintf(stderr, "forkrun[DEBUG] Enabled\n");
     } else g_debug = 0;
 
     global_num_nodes = 0;
@@ -744,8 +744,13 @@ static int ring_init_main(int argc, char **argv) {
     if (vals[4] > vals[5]) vals[4] = vals[5];
 
     for (uint32_t n = 0; n < global_num_nodes; n++) {
-        state[n].cfg_w_start = vals[0];
-        state[n].cfg_w_max   = vals[1];
+        uint64_t w_start_balanced = vals[0] / global_num_nodes;
+        if (w_start_balanced < 1) w_start_balanced = 1;
+        uint64_t w_max_balanced = vals[1] / global_num_nodes;
+        if (w_max_balanced < 1) w_max_balanced = 1;
+
+        state[n].cfg_w_start = w_start_balanced;
+        state[n].cfg_w_max   = w_max_balanced;
         state[n].mode_byte   = byte_mode ? 1 : 0;
         state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
 
@@ -940,6 +945,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     int mask_words = (max_phys_id / BITS_PER_LONG) + 1;
     unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
 
+    // Persistent pipe for the zero-copy splice fallback
+    int fallback_pipe[2] = {-1, -1};
+
     while (1) {
         uint32_t claimed_node;
         while (read(claim_pipe, &claimed_node, sizeof(claimed_node)) == sizeof(claimed_node)) {
@@ -973,7 +981,46 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         chunk_size &= ~4095ULL;
         if (chunk_size == 0) chunk_size = 4096;
 
-        ssize_t n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+        ssize_t n = -1;
+        loff_t in_off = lseek(infd, 0, SEEK_CUR);
+
+        // 1. Try copy_file_range / sendfile
+        if (in_off != (loff_t)-1) {
+            n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
+            if (n < 0 && (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP)) {
+                n = sendfile(outfd, infd, NULL, chunk_size);
+            }
+        }
+
+        // 2. Try direct splice
+        if (n < 0) {
+            n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+        }
+
+        // 3. Zero-copy intermediate pipe fallback (identically matches flat mode)
+        if (n < 0 && errno == EINVAL) {
+            if (fallback_pipe[0] == -1) {
+                if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
+            }
+            if (fallback_pipe[0] != -1) {
+                ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE|SPLICE_F_MORE);
+                if (s1 > 0) {
+                    size_t written = 0;
+                    while (written < (size_t)s1) {
+                        ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE|SPLICE_F_MORE);
+                        if (s2 <= 0) {
+                            if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
+                            break;
+                        }
+                        written += s2;
+                    }
+                    n = written;
+                } else {
+                    n = s1;
+                }
+            }
+        }
+
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN) continue;
             break;
@@ -1005,6 +1052,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             chunk_size = 4 * 1024 * 1024ULL;
             consecutive_full = 0;
         }
+    }
+
+    if (fallback_pipe[0] != -1) {
+        close(fallback_pipe[0]);
+        close(fallback_pipe[1]);
     }
 
     if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
@@ -2026,11 +2078,27 @@ static int ring_claim_main(int argc, char **argv) {
 restart_loop:
     while (1) {
         struct EscrowPacket ep;
+        // 1. Try local node escrow first
         if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0 &&
             read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
             my_read_idx = ep.idx;
             claim_count = ep.cnt;
             break;
+        }
+
+        // 2. Try cross-node escrow diffusion (steal from heavily loaded nodes)
+        if (local_state->numa_enabled) {
+            bool stole = false;
+            for (uint32_t i = 1; i < global_num_nodes; i++) {
+                uint32_t steal_node = (my_numa_node + i) % global_num_nodes;
+                if (fd_escrow_r[steal_node] >= 0 && read(fd_escrow_r[steal_node], &ep, sizeof(ep)) == sizeof(ep)) {
+                    my_read_idx = ep.idx;
+                    claim_count = ep.cnt;
+                    stole = true;
+                    break;
+                }
+            }
+            if (stole) break;
         }
 
         uint64_t w_snap = atomic_load_acquire(&local_state->write_idx);
