@@ -1181,6 +1181,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
 // UNIFIED ADAPTIVE FLOW CONTROL
 // ==============================================================================
 #define ADAPTIVE_FLOW_CONTROL(state_ptr, is_stalled) do { \
+    (void)(is_stalled); \
     batch_counter++; \
     batches_since_calc++; \
     uint64_t _tc = W * 4; if (_tc < 4) _tc = 4; \
@@ -2058,7 +2059,7 @@ static int ring_claim_main(int argc, char **argv) {
             bool found = false;
             if (g_logical_to_phys_map) {
                 for (uint32_t i = 0; i < global_num_nodes; i++) {
-                    if (g_logical_to_phys_map[i] == phys) { my_numa_node = i; found = true; break; }
+                    if (g_logical_to_phys_map[i] == (uint32_t)phys) { my_numa_node = i; found = true; break; }
                 }
             }
             if (!found && g_debug && global_num_nodes > 1) {
@@ -2559,7 +2560,7 @@ static int ring_worker_main(int argc, char **argv) {
             my_numa_node = 0;
             if (g_logical_to_phys_map) {
                 for (uint32_t i = 0; i < global_num_nodes; i++) {
-                    if (g_logical_to_phys_map[i] == phys) { my_numa_node = i; break; }
+                    if (g_logical_to_phys_map[i] == (uint32_t)phys) { my_numa_node = i; break; }
                 }
             }
         }
