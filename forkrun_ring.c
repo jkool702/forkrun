@@ -1590,7 +1590,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
 
-    // Blast the local semaphore so ALL sleeping workers wake up and exit
+    // FIX: Blast the local semaphore to ensure ALL sleeping workers wake up and see EOF
     uint64_t blast = 999999;
     SYS_CHK(write(evfd_data_arr[my_node_id], &blast, 8));
 
@@ -2083,7 +2083,7 @@ static int ring_claim_main(int argc, char **argv) {
 restart_loop:
     while (1) {
         struct EscrowPacket ep;
-        // Strictly Local Escrow Only
+        // Strictly Born-Local Escrow Only
         if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0 &&
             read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
             my_read_idx = ep.idx;
@@ -2175,7 +2175,9 @@ restart_loop:
     }
 
     uint64_t w_curr = atomic_load_acquire(&local_state->write_idx);
-    if (!local_state->numa_enabled && my_read_idx + claim_count > w_curr) {
+
+    // FIX: Overshoot handler re-enabled for NUMA workers!
+    if (my_read_idx + claim_count > w_curr) {
          if (atomic_load_acquire(&local_state->scanner_finished)) {
              int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
              if (diff < 0) diff = 0;
