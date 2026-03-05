@@ -1,4 +1,15 @@
-. <( { echoFlag=false; while true; do IFS= read -r line; [[ "$line" == *'_forkrun_file_to_base64() {'* ]] && echoFlag=true; $echoFlag && echo "$line"; $echoFlag && [[ "$line" == '}'* ]] && break; done; } <frun.bash )
+
+update_frun_base64() (
+
+if [[ "$1" ]] && [[ -f "$1" ]]; then
+    frun_path="$1"
+else
+    frun_path="./frun.bash"
+fi
+
+[[ -f "$frun_path" ]] || return 1
+
+. <( { echoFlag=false; while true; do IFS= read -r line; [[ "$line" == *'_forkrun_file_to_base64() {'* ]] && echoFlag=true; $echoFlag && echo "$line"; $echoFlag && [[ "$line" == '}'* ]] && break; done; } <"${frun_path}" )
 
 ( 
 unset b64
@@ -17,6 +28,10 @@ done
 echo 
 declare -p b64
 printf '\n%s\n' '_forkrun_bootstrap_setup --force'
-} <frun.bash >frun.new.bash 
+} <"${frun_path}" >"${frun_path%.bash}.new.bash"
+
+[[ -s "${frun_path%.bash}.new.bash" ]] && command mv -f "${frun_path%.bash}.new.bash" "${frun_path}"
+
 )
 
+)
