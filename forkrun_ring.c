@@ -146,16 +146,31 @@
   __atomic_compare_exchange_n(ptr, exp, des, 0, __ATOMIC_ACQ_REL,              \
                               __ATOMIC_RELAXED)
 
+#ifndef GIT_HASH
+#define GIT_HASH "unknown"
+#endif
+#ifndef BUILD_OS
+#define BUILD_OS "unknown"
+#endif
+#ifndef BUILD_ARCH
+#define BUILD_ARCH "unknown"
+#endif
+#ifndef COMPILER_FLAGS
+#define COMPILER_FLAGS "unknown"
+#endif
+
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
 
-#include "builtins.h"
+// clang-format off
 #include "command.h"
-#include "common.h"
 #include "shell.h"
 #include "variables.h"
+#include "builtins.h"
+#include "common.h"
 #include "xmalloc.h"
+// clang-format on
 
 extern void dispose_command(COMMAND *);
 extern int execute_command(COMMAND *);
@@ -2105,7 +2120,6 @@ static int ring_scanner_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
   int fd = atoi(argv[1]);
   int fd_spawn = (argc >= 3) ? atoi(argv[2]) : -1;
-  int my_node_id = 0;
 
   uint64_t L = state[0].cfg_batch_start;
   uint64_t Lmax = state[0].cfg_batch_max;
@@ -3068,7 +3082,6 @@ static int ring_order_main(int argc, char **argv) {
     for (int i = 0; i < count; i++) {
       struct OrderPacket *op = &ops[i];
 
-      bool is_chunk_eof = (op->minor_idx & FLAG_MAJOR_EOF);
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
       uint64_t op_key =
           numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
