@@ -103,17 +103,31 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim)
 #endif
 
 // Safe wrapper that falls back cleanly on non-x86 architectures
+//
+// STRUCTURAL NOTE: This SIMD path is strictly a within-buffer fast path.
+// If the target number of delimiters is not found before 'safe_end' (e.g.,
+// because we hit the end of the loaded buffer, or approached the BytesMax
+// limit), this function returns NULL. This intentionally hands control back
+// to the scalar loop, allowing it to gracefully handle buffer refills and
+// boundary arithmetic without duplicating that complex logic here.
 static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char delim) {
     if (target == 0 || p >= safe_end) return NULL;
+
 #if defined(__x86_64__) || defined(__i386__)
-    __builtin_cpu_init(); // Safe to call repeatedly on modern GCC
-    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("popcnt")) {
+    // Cache CPU features to avoid function call overhead on the hot path
+    static int avx2_supported = -1;
+    if (__builtin_expect(avx2_supported == -1, 0)) {
+        __builtin_cpu_init();
+        avx2_supported = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("popcnt");
+    }
+
+    if (avx2_supported) {
         return scan_batch_avx2(p, safe_end, target, delim);
     }
 #endif
+
     return NULL;
 }
-
 
 // --- Architecture Specific Pause Logic ---
 #if defined(__x86_64__) || defined(__i386__)
