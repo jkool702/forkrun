@@ -1836,9 +1836,18 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     uint64_t my_head = atomic_load_acquire(&t_state->chunk_queue_head);
 
     if (my_tail >= my_head) {
+      // Is the river drying up? (Ingest has finished)
+      bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
+
+      // The Activation Energy: Require back-pressure of 2 to steal during main run,
+      // but drop threshold to 1 to drain the final chunks at EOF.
+      int required_bl = is_eof ? 1 : 2;
+
       int max_bl = 0;
       int best_ready_bl = 0;
       int ready_target = -1;
+      int fallback_target = -1;
+
       for (int i = 0; i < num_nodes; i++) {
         uint64_t h = atomic_load_acquire(&state[i].chunk_queue_head);
         uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
@@ -1846,7 +1855,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
           int bl = (int)(h - t);
           if (bl > max_bl) {
             max_bl = bl;
-            steal_target = i;
+            fallback_target = i;
           }
 
           uint32_t c_maj = state[i].chunk_queue[t & META_RING_MASK];
@@ -1863,13 +1872,20 @@ static int ring_numa_scanner_main(int argc, char **argv) {
           }
         }
       }
-      if (ready_target != -1)
-        steal_target = ready_target;
 
       if (max_bl == 0) {
-        if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0)
+        if (is_eof)
           goto scanner_eof;
+      } else {
+        // Only steal if the target has enough back-pressure to meet our threshold
+        if (ready_target != -1 && best_ready_bl >= required_bl) {
+          steal_target = ready_target;
+        } else if (fallback_target != -1 && max_bl >= required_bl) {
+          steal_target = fallback_target;
+        }
+        // Otherwise, steal_target remains my_node_id. We will safely wait for our own data.
       }
+
       t_state = &state[steal_target];
     }
 
