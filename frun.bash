@@ -299,7 +299,10 @@ toc() { :; }
     {
         ring_pipe fd_spawn_r fd_spawn_w
 
-        # --- 1 & 2. THE PRODUCER PLUMBING ---
+        # --- 1. RING FALLOW ---
+        ring_pipe fd_fallow_r fd_fallow_w
+
+        # --- 2 & 3. THE PRODUCER PLUMBING ---
         if (( FORKRUN_NUM_NODES > 1 )); then
             # NUMA TOPOLOGICAL PIPELINE (No Pipes, Lock-Free Meta Ring)
             ordered_flag=0
@@ -329,8 +332,6 @@ toc() { :; }
 
         exec {fd_spawn_w}>&-
 
-        # --- 3. RING FALLOW ---
-        ring_pipe fd_fallow_r fd_fallow_w
         (
             exec {fd_fallow_w}>&-
             if (( FORKRUN_NUM_NODES > 1 )); then
