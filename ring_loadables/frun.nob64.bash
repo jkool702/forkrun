@@ -301,46 +301,21 @@ toc() { :; }
 
         # --- 1 & 2. THE PRODUCER PLUMBING ---
         if (( FORKRUN_NUM_NODES > 1 )); then
-            # NUMA TOPOLOGICAL PIPELINE
-            ring_pipe index_pipe_r index_pipe_w
-            ring_pipe claim_pipe_r claim_pipe_w
-
-            node_pipes_r=()
-            node_pipes_w=()
-            for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                ring_pipe nr nw
-                node_pipes_r[i]=$nr
-                node_pipes_w[i]=$nw
-            done
-
+            # NUMA TOPOLOGICAL PIPELINE (No Pipes, Lock-Free Meta Ring)
             ordered_flag=0
             [[ "${order_mode}" == "ordered" ]] && ordered_flag=1
 
-            (
-                exec {index_pipe_r}<&- {claim_pipe_w}>&-
-                for nr in "${node_pipes_r[@]}"; do exec {nr}<&-; done
-                for nw in "${node_pipes_w[@]}"; do exec {nw}>&-; done
-                ring_numa_ingest ${fd0} ${fd_write} $index_pipe_w $claim_pipe_r $FORKRUN_NUM_NODES $ordered_flag
-            ) &
-
-            (
-                exec {index_pipe_w}>&- {claim_pipe_r}<&- {claim_pipe_w}>&-
-                for nr in "${node_pipes_r[@]}"; do exec {nr}<&-; done
-                ring_indexer_numa ${fd_scan} $index_pipe_r "${node_pipes_w[@]}"
-            ) &
+            ( ring_numa_ingest ${fd0} ${fd_write} $FORKRUN_NUM_NODES $ordered_flag ) &
 
             for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                (
-                    exec {index_pipe_r}<&- {index_pipe_w}>&- {claim_pipe_r}<&-
-                    for nw in "${node_pipes_w[@]}"; do exec {nw}>&-; done
-                    ring_numa_scanner ${fd_scan} $i $claim_pipe_w $fd_spawn_w $FORKRUN_NUM_NODES "${node_pipes_r[@]}"
-                ) &
+                ( ring_indexer_numa ${fd_scan} $i ) &
             done
 
-            # Close Bash's copies of the pipes to allow background EOFs to cascade
-            exec {index_pipe_r}<&- {index_pipe_w}>&- {claim_pipe_r}<&- {claim_pipe_w}>&-
             for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                exec {node_pipes_w[i]}>&- {node_pipes_r[i]}<&-
+                ( 
+                    exec {fd_fallow_w}>&-
+                    ring_numa_scanner ${fd_scan} $i $fd_spawn_w $FORKRUN_NUM_NODES 
+                ) &
             done
 
         else
@@ -976,6 +951,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # remove base64
+declare -A b64=() # no base64
 
 _forkrun_bootstrap_setup --force
