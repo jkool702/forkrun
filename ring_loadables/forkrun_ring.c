@@ -1,4 +1,4 @@
-// forkrun_ring.c v11.0.0-NUMA (Meta Ring Edition)
+// forkrun_ring.c v12.0.0-NUMA (Meta Ring + SIMD Scanner Edition)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -39,6 +39,95 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+
+// ==============================================================================
+// AVX2 FAST DELIMITER SCANNER
+// ==============================================================================
+
+#if defined(__x86_64__) || defined(__i386__)
+#pragma GCC push_options
+#pragma GCC target("avx2,popcnt")
+#include <immintrin.h>
+
+__attribute__((target("avx2,popcnt")))
+static inline char *
+scan_batch_avx2(char *p, char *end, uint64_t target, char delim)
+{
+    uint64_t remaining = target;
+    const __m256i d_vec = _mm256_set1_epi8(delim);
+
+    while (p + 32 <= end) {
+        // Load 32 bytes and compare against delimiter
+        __m256i v = _mm256_loadu_si256((const __m256i*)p);
+        __m256i cmp = _mm256_cmpeq_epi8(v, d_vec);
+        uint32_t mask = (uint32_t)_mm256_movemask_epi8(cmp);
+
+        if (!mask) {
+            p += 32;
+            continue;
+        }
+
+        uint32_t hits = (uint32_t)__builtin_popcount(mask);
+
+        // If we haven't found enough yet, subtract and keep blasting
+        if (hits < remaining) {
+            remaining -= hits;
+            p += 32;
+            continue;
+        }
+
+        // The target delimiter is in this 32-byte chunk.
+        // Drop the lowest bit (remaining - 1) times.
+        uint32_t to_drop = (uint32_t)(remaining - 1);
+        for (uint32_t i = 0; i < to_drop; i++) {
+            mask &= mask - 1; // blsr: clears the lowest set bit
+        }
+
+        // The lowest set bit is now our exact target index.
+        int exact_idx = __builtin_ctz(mask);
+        return p + exact_idx + 1; // +1 to point AFTER the delimiter
+    }
+
+    // Scalar tail for the remaining <32 bytes of the safe region
+    while (p < end) {
+        if (*p == delim) {
+            remaining--;
+            if (remaining == 0) return p + 1;
+        }
+        p++;
+    }
+
+    return NULL;
+}
+#pragma GCC pop_options
+#endif
+
+// Safe wrapper that falls back cleanly on non-x86 architectures
+//
+// STRUCTURAL NOTE: This SIMD path is strictly a within-buffer fast path.
+// If the target number of delimiters is not found before 'safe_end' (e.g.,
+// because we hit the end of the loaded buffer, or approached the BytesMax
+// limit), this function returns NULL. This intentionally hands control back
+// to the scalar loop, allowing it to gracefully handle buffer refills and
+// boundary arithmetic without duplicating that complex logic here.
+static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char delim) {
+    if (target == 0 || p >= safe_end) return NULL;
+
+#if defined(__x86_64__) || defined(__i386__)
+    // Cache CPU features to avoid function call overhead on the hot path
+    static int avx2_supported = -1;
+    if (__builtin_expect(avx2_supported == -1, 0)) {
+        __builtin_cpu_init();
+        avx2_supported = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("popcnt");
+    }
+
+    if (avx2_supported) {
+        return scan_batch_avx2(p, safe_end, target, delim);
+    }
+#endif
+
+    return NULL;
+}
 
 // --- Architecture Specific Pause Logic ---
 #if defined(__x86_64__) || defined(__i386__)
@@ -194,7 +283,7 @@ static int g_debug = 0;
   X(ring_scanner, ring_scanner_main, "ring_scanner <fd>[spawn_fd]",            \
     "Run legacy scanner")                                                      \
   X(ring_numa_ingest, ring_numa_ingest_main,                                   \
-    "ring_numa_ingest <infd> <outfd> <nodes> [ordered]",                       \
+    "ring_numa_ingest <infd> <outfd> <nodes>[ordered]",                       \
     "Run NUMA topological ingest")                                             \
   X(ring_indexer_numa, ring_indexer_numa_main,                                 \
     "ring_indexer_numa <memfd> <node_id>", "Run NUMA chunk indexer")           \
@@ -1747,9 +1836,18 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     uint64_t my_head = atomic_load_acquire(&t_state->chunk_queue_head);
 
     if (my_tail >= my_head) {
+      // Is the river drying up? (Ingest has finished)
+      bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
+
+      // The Activation Energy: Require back-pressure of 2 to steal during main run,
+      // but drop threshold to 1 to drain the final chunks at EOF.
+      int required_bl = is_eof ? 1 : 2;
+
       int max_bl = 0;
       int best_ready_bl = 0;
       int ready_target = -1;
+      int fallback_target = -1;
+
       for (int i = 0; i < num_nodes; i++) {
         uint64_t h = atomic_load_acquire(&state[i].chunk_queue_head);
         uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
@@ -1757,7 +1855,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
           int bl = (int)(h - t);
           if (bl > max_bl) {
             max_bl = bl;
-            steal_target = i;
+            fallback_target = i;
           }
 
           uint32_t c_maj = state[i].chunk_queue[t & META_RING_MASK];
@@ -1774,13 +1872,20 @@ static int ring_numa_scanner_main(int argc, char **argv) {
           }
         }
       }
-      if (ready_target != -1)
-        steal_target = ready_target;
 
       if (max_bl == 0) {
-        if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0)
+        if (is_eof)
           goto scanner_eof;
+      } else {
+        // Only steal if the target has enough back-pressure to meet our threshold
+        if (ready_target != -1 && best_ready_bl >= required_bl) {
+          steal_target = ready_target;
+        } else if (fallback_target != -1 && max_bl >= required_bl) {
+          steal_target = fallback_target;
+        }
+        // Otherwise, steal_target remains my_node_id. We will safely wait for our own data.
       }
+
       t_state = &state[steal_target];
     }
 
@@ -1829,9 +1934,15 @@ static int ring_numa_scanner_main(int argc, char **argv) {
         &g_state->meta_ring[current_major & META_RING_MASK];
 
     uint64_t act_end_flag;
+    int _ae_spin = 0;
     while (!((act_end_flag = atomic_load_acquire(&meta->actual_end)) &
              FLAG_META_READY)) {
-      cpu_relax();
+      if (_ae_spin < 200) {
+          cpu_relax();
+          _ae_spin++;
+      } else {
+          sched_yield();
+      }
     }
     uint64_t actual_end = act_end_flag & ~FLAG_META_READY;
 
@@ -1840,9 +1951,15 @@ static int ring_numa_scanner_main(int argc, char **argv) {
       struct ChunkMeta *prev_meta =
           &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
       uint64_t prev_act_end;
+      int _pe_spin = 0;
       while (!((prev_act_end = atomic_load_acquire(&prev_meta->actual_end)) &
                FLAG_META_READY)) {
-        cpu_relax();
+        if (_pe_spin < 200) {
+            cpu_relax();
+            _pe_spin++;
+        } else {
+            sched_yield();
+        }
       }
       actual_start = prev_act_end & ~FLAG_META_READY;
     }
@@ -1918,51 +2035,76 @@ static int ring_numa_scanner_main(int argc, char **argv) {
           scan_target = 1;
 
         uint64_t lines_found = 0;
+        char delim = '\n'; // Default delimiter (can be updated from SharedState)
 
-        while (lines_found < scan_target) {
-          if (p >= end) {
-            uint64_t read_start = buf_base_offset + (p - buf);
-            size_t to_read = chunk_sz;
-            if (read_start + to_read > chunk_end)
-              to_read = chunk_end - read_start;
-            if (to_read > 0) {
-              ssize_t n = pread(memfd, buf, to_read, read_start);
-              if (n > 0) {
-                buf_base_offset = read_start;
-                p = buf;
-                end = buf + n;
-              } else if (n < 0 && errno == EINTR)
-                continue;
-              else
-                break;
-            } else
-              break;
-          }
+        // Clamp 'end' to safe_end to prevent SIMD from blowing past BytesMax
+        char *safe_end = end;
+        if (BytesMax > 0) {
+            uint64_t max_overhead = (scan_target + 1) * 8;
+            if (BytesMax <= max_overhead) {
+                safe_end = p; // Too little space left, force scalar fallback
+            } else {
+                uint64_t max_payload = BytesMax - max_overhead;
+                uint64_t current_payload = (buf_base_offset + (p - buf)) - batch_start;
+                if (current_payload >= max_payload) safe_end = p;
+                else if (max_payload - current_payload < (uint64_t)(end - p)) {
+                    safe_end = p + (max_payload - current_payload);
+                }
+            }
+        }
 
-          char *nl = memchr(p, '\n', end - p);
-          if (nl) {
-            if (BytesMax > 0 && lines_found > 0) {
-              uint64_t line_end_offset =
-                  buf_base_offset + (uint64_t)((nl + 1) - buf);
-              uint64_t payload = line_end_offset - batch_start;
-              uint64_t overhead = (lines_found + 1) * 8;
-              if ((payload + overhead) > BytesMax) {
-                limit_reached = true;
-                break;
+        // FAST PATH: AVX2 SIMD Scan
+        char *simd_res = try_simd_scan(p, safe_end, scan_target, delim);
+        if (simd_res) {
+            lines_found = scan_target;
+            p = simd_res;
+        } else {
+            // SLOW PATH: Scalar loop handles buffer refills, BytesMax limits, and non-x86 arches
+            while (lines_found < scan_target) {
+              if (p >= end) {
+                uint64_t read_start = buf_base_offset + (p - buf);
+                size_t to_read = chunk_sz;
+                if (read_start + to_read > chunk_end)
+                  to_read = chunk_end - read_start;
+                if (to_read > 0) {
+                  ssize_t n = pread(memfd, buf, to_read, read_start);
+                  if (n > 0) {
+                    buf_base_offset = read_start;
+                    p = buf;
+                    end = buf + n;
+                  } else if (n < 0 && errno == EINTR)
+                    continue;
+                  else
+                    break;
+                } else
+                  break;
+              }
+
+              char *nl = memchr(p, delim, end - p);
+              if (nl) {
+                if (BytesMax > 0 && lines_found > 0) {
+                  uint64_t line_end_offset =
+                      buf_base_offset + (uint64_t)((nl + 1) - buf);
+                  uint64_t payload = line_end_offset - batch_start;
+                  uint64_t overhead = (lines_found + 1) * 8;
+                  if ((payload + overhead) > BytesMax) {
+                    limit_reached = true;
+                    break;
+                  }
+                }
+                lines_found++;
+                p = nl + 1;
+              } else {
+                uint64_t curr_pos = buf_base_offset + (end - buf);
+                if (curr_pos >= chunk_end) {
+                  lines_found++;
+                  p = end;
+                  break;
+                } else {
+                  p = end;
+                }
               }
             }
-            lines_found++;
-            p = nl + 1;
-          } else {
-            uint64_t curr_pos = buf_base_offset + (end - buf);
-            if (curr_pos >= chunk_end) {
-              lines_found++;
-              p = end;
-              break;
-            } else {
-              p = end;
-            }
-          }
         }
 
         if (limit_items > 0 && lines_found > 0) {
@@ -2179,36 +2321,54 @@ static int ring_scanner_main(int argc, char **argv) {
 
 #define SCAN_BATCH(target_L)                                                   \
   ({                                                                           \
-    uint64_t lines_found = 0;                                                  \
+    uint64_t _lines_found = 0;                                                 \
     limit_reached = false;                                                     \
-    while (lines_found < (target_L)) {                                         \
-      if (p >= end)                                                            \
-        break;                                                                 \
-      char *nl = memchr(p, '\n', end - p);                                     \
-      if (nl) {                                                                \
-        if (BytesMax > 0 && lines_found > 0) {                                 \
-          uint64_t line_end_offset =                                           \
-              buf_base_offset + (uint64_t)((nl + 1) - buf);                    \
-          uint64_t payload = line_end_offset - batch_start;                    \
-          uint64_t overhead = (lines_found + 1) * 8;                           \
-          if ((payload + overhead) > BytesMax) {                               \
-            limit_reached = true;                                              \
+    char delim = '\n';                                                         \
+    char *safe_end = end;                                                      \
+    if (BytesMax > 0) {                                                        \
+        uint64_t max_overhead = ((target_L) + 1) * 8;                          \
+        if (BytesMax <= max_overhead) safe_end = p;                            \
+        else {                                                                 \
+            uint64_t max_payload = BytesMax - max_overhead;                    \
+            uint64_t current_payload = (buf_base_offset + (p - buf)) - batch_start; \
+            if (current_payload >= max_payload) safe_end = p;                  \
+            else if (max_payload - current_payload < (uint64_t)(end - p))      \
+                safe_end = p + (max_payload - current_payload);                \
+        }                                                                      \
+    }                                                                          \
+    char *simd_res = try_simd_scan(p, safe_end, (target_L), delim);            \
+    if (simd_res) {                                                            \
+        _lines_found = (target_L);                                             \
+        p = simd_res;                                                          \
+    } else {                                                                   \
+        while (_lines_found < (target_L)) {                                    \
+          if (p >= end) break;                                                 \
+          char *nl = memchr(p, delim, end - p);                                \
+          if (nl) {                                                            \
+            if (BytesMax > 0 && _lines_found > 0) {                            \
+              uint64_t line_end_offset =                                       \
+                  buf_base_offset + (uint64_t)((nl + 1) - buf);                \
+              uint64_t payload = line_end_offset - batch_start;                \
+              uint64_t overhead = (_lines_found + 1) * 8;                      \
+              if ((payload + overhead) > BytesMax) {                           \
+                limit_reached = true;                                          \
+                break;                                                         \
+              }                                                                \
+            }                                                                  \
+            _lines_found++;                                                    \
+            p = nl + 1;                                                        \
+          } else {                                                             \
+            if (status == 1) {                                                 \
+              if (p < end) {                                                   \
+                _lines_found++;                                                \
+                p = end;                                                       \
+              }                                                                \
+            }                                                                  \
             break;                                                             \
           }                                                                    \
         }                                                                      \
-        lines_found++;                                                         \
-        p = nl + 1;                                                            \
-      } else {                                                                 \
-        if (status == 1) {                                                     \
-          if (p < end) {                                                       \
-            lines_found++;                                                     \
-            p = end;                                                           \
-          }                                                                    \
-        }                                                                      \
-        break;                                                                 \
-      }                                                                        \
     }                                                                          \
-    lines_found;                                                               \
+    _lines_found;                                                              \
   })
 
   while (status != 1 || p < end) {
@@ -2399,8 +2559,9 @@ static int ring_scanner_main(int argc, char **argv) {
   if (!byte_mode) {
     uint64_t L_tail = pending_lines;
     char *p_scan = p;
+    char delim = '\n';
     while (p_scan < end) {
-      char *nl = memchr(p_scan, '\n', end - p_scan);
+      char *nl = memchr(p_scan, delim, end - p_scan);
       if (nl) {
         L_tail++;
         p_scan = nl + 1;
@@ -2487,7 +2648,7 @@ static int ring_scanner_main(int argc, char **argv) {
           } else
             break;
         }
-        char *nl = memchr(p, '\n', end - p);
+        char *nl = memchr(p, delim, end - p);
         if (nl) {
           lines_found++;
           p = nl + 1;
