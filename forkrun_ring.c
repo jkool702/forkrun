@@ -218,7 +218,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v11.0.0"
+#define FORKRUN_RING_VERSION "NUMA-v12.0.0"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -303,7 +303,7 @@ static int g_debug = 0;
     "Reorder output")                                                          \
   X(ring_copy, ring_copy_main, "ring_copy <OUT> <IN>", "Zero-copy ingest")     \
   X(ring_signal, ring_signal_main, "ring_signal <FD>", "Signal eventfd")       \
-  X(lseek, lseek_main, "lseek <FD> <OFF>[WHENCE] [VAR]", "Seek fd")            \
+  X(lseek, lseek_main, "lseek <FD> <OFF>[WHENCE][VAR]", "Seek fd")            \
   X(ring_indexer, ring_indexer_main, "ring_indexer", "NUMA Indexer")           \
   X(ring_fetcher, ring_fetcher_main, "ring_fetcher", "NUMA Fetcher")           \
   X(ring_fallow_phys, ring_fallow_phys_main, "ring_fallow_phys",               \
@@ -576,6 +576,7 @@ static int evfd_eof = -1;
 static int evfd_ingest_data = -1;
 static int evfd_ingest_eof = -1;
 static int evfd_starve = -1;
+static int evfd_chunk_done = -1; // Shallow Queue backpressure semaphore
 static int fd_escrow[2] = {-1, -1};
 
 static uint32_t global_num_nodes = 0;
@@ -1139,10 +1140,12 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
+  evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
   evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
   evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
 
   evfd_data = evfd_data_arr[0];
   fd_escrow[0] = fd_escrow_r[0];
@@ -1266,6 +1269,10 @@ static int ring_destroy_main(int argc, char **argv) {
     close(evfd_starve);
     evfd_starve = -1;
   }
+  if (evfd_chunk_done >= 0) {
+    close(evfd_chunk_done);
+    evfd_chunk_done = -1;
+  }
   unbind_variable("EVFD_RING_DATA");
   unbind_variable("EVFD_RING_EOF");
   unbind_variable("EVFD_RING_INGEST_DATA");
@@ -1323,7 +1330,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   int fallback_pipe[2] = {-1, -1};
 
   while (1) {
-    // Backpressure via Meta Ring
+    // Event-Driven Shallow Queue Backpressure
     if (current_major > 0) {
       uint64_t min_consumed = ~(uint64_t)0;
       for (int i = 0; i < num_nodes; i++) {
@@ -1331,8 +1338,17 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (t < min_consumed)
           min_consumed = t;
       }
-      while (current_major - min_consumed >= META_RING_SIZE - 4) {
-        cpu_relax();
+      
+      uint64_t max_ahead = num_nodes * 3;
+      if (max_ahead < 4) max_ahead = 4;
+      
+      while (current_major - min_consumed >= max_ahead) {
+        struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
+        if (poll(&pfd, 1, 100) > 0) {
+            uint64_t v;
+            if (read(evfd_chunk_done, &v, 8)) {}; // Consume the ticket
+        }
+        
         min_consumed = ~(uint64_t)0;
         for (int i = 0; i < num_nodes; i++) {
           uint64_t t = atomic_load_acquire(&state[i].chunk_queue_tail);
@@ -1839,9 +1855,10 @@ static int ring_numa_scanner_main(int argc, char **argv) {
       // Is the river drying up? (Ingest has finished)
       bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
 
-      // The Activation Energy: Require back-pressure of 2 to steal during main run,
-      // but drop threshold to 1 to drain the final chunks at EOF.
-      int required_bl = is_eof ? 1 : 2;
+      // The Activation Energy: Require back-pressure of 1 to steal.
+      // This leaves eager stealing enabled but avoids stealing the final chunk 
+      // from a peer unless necessary.
+      int required_bl = 1;
 
       int max_bl = 0;
       int best_ready_bl = 0;
@@ -1877,19 +1894,21 @@ static int ring_numa_scanner_main(int argc, char **argv) {
         if (is_eof)
           goto scanner_eof;
       } else {
-        // Only steal if the target has enough back-pressure to meet our threshold
         if (ready_target != -1 && best_ready_bl >= required_bl) {
           steal_target = ready_target;
         } else if (fallback_target != -1 && max_bl >= required_bl) {
           steal_target = fallback_target;
         }
-        // Otherwise, steal_target remains my_node_id. We will safely wait for our own data.
       }
 
       t_state = &state[steal_target];
     }
 
     uint64_t claim_idx = atomic_fetch_add(&t_state->chunk_queue_tail, 1);
+    
+    // Notify Ingest that a chunk has been claimed (advances min_consumed shallow queue limit)
+    uint64_t _one = 1;
+    SYS_CHK(write(evfd_chunk_done, &_one, 8));
 
     int ingest_spin = 0;
     while (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
@@ -1937,7 +1956,8 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     int _ae_spin = 0;
     while (!((act_end_flag = atomic_load_acquire(&meta->actual_end)) &
              FLAG_META_READY)) {
-      if (_ae_spin < 200) {
+      // 5000 limit prevents heavy OS context switch penalty on fast SIMD claiming
+      if (_ae_spin < 5000) {
           cpu_relax();
           _ae_spin++;
       } else {
@@ -1954,7 +1974,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
       int _pe_spin = 0;
       while (!((prev_act_end = atomic_load_acquire(&prev_meta->actual_end)) &
                FLAG_META_READY)) {
-        if (_pe_spin < 200) {
+        if (_pe_spin < 5000) {
             cpu_relax();
             _pe_spin++;
         } else {
@@ -2072,12 +2092,17 @@ static int ring_numa_scanner_main(int argc, char **argv) {
                     buf_base_offset = read_start;
                     p = buf;
                     end = buf + n;
-                  } else if (n < 0 && errno == EINTR)
+                  } else if (n < 0 && errno == EINTR) {
                     continue;
-                  else
+                  } else {
+                    // Physical EOF hit before chunk_end! Clamp chunk_end to reality
+                    // to gracefully break the loop and prevent infinite spinning.
+                    chunk_end = buf_base_offset + (end - buf);
                     break;
-                } else
+                  }
+                } else {
                   break;
+                }
               }
 
               char *nl = memchr(p, delim, end - p);
@@ -2400,6 +2425,9 @@ static int ring_scanner_main(int argc, char **argv) {
           buf_base_offset = current_p_offset;
           p = buf;
           end = buf + n;
+        } else if (n == 0) {
+          // Ensure EOF triggers graceful exit without spinning
+          status = 1;
         }
         if (!atomic_load_acquire(&state[0].ingest_complete)) {
           struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
