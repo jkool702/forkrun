@@ -1,0 +1,13 @@
+Building v2 (x86-64-v2)...
+Building v3 (x86-64-v3)...
+Building v4 (x86-64-v4)...
+Building native...
+Build complete.
+-rwxr-xr-x. 1 anthony anthony 83176 Mar  5 16:41 forkrun_ring.native.so
+-rwxr-xr-x. 1 anthony anthony 83176 Mar  5 16:41 forkrun_ring.x86_64-v2.so
+-rwxr-xr-x. 1 anthony anthony 87272 Mar  5 16:41 forkrun_ring.x86_64-v3.so
+-rwxr-xr-x. 1 anthony anthony 87272 Mar  5 16:41 forkrun_ring.x86_64-v4.so
+./ring_loadables/compile.sh: line 80: od -x: command not found
+./ring_loadables/compile.sh: line 80: od -x: command not found
+./ring_loadables/compile.sh: line 80: od -x: command not found
+./ring_loadables/compile.sh: line 80: od -x: command not found

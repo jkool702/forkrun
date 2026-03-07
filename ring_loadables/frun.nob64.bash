@@ -35,7 +35,7 @@ frun __exec__ "$@"
     shift 1 # Remove __exec__
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx order_mode unsafe_flag stdin_flag byte_mode_flag order_mode unsafe_flag LC_ALL
     local -ga fd_out P order_args ring_init_opts
@@ -160,7 +160,7 @@ frun __exec__ "$@"
             @(--nodes)?(?([= $'\t'])*))
                 arg="${1#@(--nodes)?([= $'\t'])}";
                 [[ ${arg} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && ring_init_opts+=("--nodes=${arg}") ;;
+                [[ ${arg} ]] && parsed_numa_nodes_arg="${arg}" ;;
 
             # --- ORDER (-o buffered) ---
             @(-o|--order)?(?([= $'\t'])@(realtime|unbuffered|buffered|atomic|order?(ed))))
@@ -210,10 +210,10 @@ toc() { :; }
 
     if ${stdin_flag:-false}; then
         unsafe_flag=false
-        ring_init_opts+=('--stdin')
+        ring_init_opts+=('--stdin' '--return-bytes')
     elif ${byte_mode_flag:-false}; then
         : "${stdin_flag:=true}"
-        ring_init_opts+=('--stdin')
+        ring_init_opts+=('--stdin' '--return-bytes')
     elif ${unsafe_flag:-false}; then
         stdin_flag=false
     fi
@@ -222,7 +222,73 @@ toc() { :; }
 
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
 
-    # Initialize Ring (this exports FORKRUN_NUM_NODES)
+# --- NUMA Node Discovery and Topology Mapping ---
+    : "${parsed_numa_nodes_arg:=auto}"
+
+    _forkrun_build_numa_map() {
+        local req c
+        local -a online map parts req_list
+        req="$1"
+
+        if [[ -r /sys/devices/system/node/online ]]; then
+            local raw; read -r raw < /sys/devices/system/node/online
+            if [[ -n "$raw" ]]; then
+                IFS=',' read -ra parts <<< "$raw"
+                for p in "${parts[@]}"; do
+                    if [[ "$p" == *-* ]]; then
+                        for (( i=${p%%-*}; i<=${p##*-}; i++ )); do online+=("$i"); done
+                    else
+                        online+=("$p")
+                    fi
+                done
+            fi
+        fi
+        (( ${#online[@]} == 0 )) && online=(0)
+
+        map=()
+        if [[ "$req" == "auto" ]]; then
+            map=("${online[@]}")
+        elif [[ "$req" == @* ]]; then
+            # Oversubscribe / Forced Count mode: --nodes=@N
+            c="${req#@}"
+            for (( i=0; i<c; i++ )); do map+=("${online[ i % ${#online[@]} ]}"); done
+        elif [[ "$req" == *[,:\-]* ]]; then
+            # Explicit list mode
+            IFS=',' read -ra parts <<< "${req//:/,}"
+            for p in "${parts[@]}"; do
+                if [[ "$p" == *-* ]]; then
+                    for (( i=${p%%-*}; i<=${p##*-}; i++ )); do req_list+=("$i"); done
+                else
+                    req_list+=("$p")
+                fi
+            done
+            # Intersect against genuinely online physical nodes
+            for r in "${req_list[@]}"; do
+                for o in "${online[@]}"; do
+                    if (( r == o )); then map+=("$r"); break; fi
+                done
+            done
+            (( ${#map[@]} == 0 )) && map=("${online[0]}")
+        else
+            # Standard Count mode
+            c="$req"
+            for (( i=0; i<c && i<${#online[@]}; i++ )); do map+=("${online[i]}"); done
+            (( ${#map[@]} == 0 )) && map=("${online[0]}")
+        fi
+
+        # Fast native array join
+        local IFS=','
+        numa_map_str="${map[*]}"
+
+        # Export the node count directly while we still have the array
+        export FORKRUN_NUM_NODES="${#map[@]}"
+    }
+
+    local numa_map_str
+    _forkrun_build_numa_map "$parsed_numa_nodes_arg"
+    ring_init_opts+=("--numa-map=$numa_map_str")
+
+    # Initialize Ring
     ring_init "${ring_init_opts[@]}"
     : "${FORKRUN_NUM_NODES:=1}" # Fallback safety
 
@@ -233,34 +299,26 @@ toc() { :; }
     {
         ring_pipe fd_spawn_r fd_spawn_w
 
-        # --- 1 & 2. THE PRODUCER PLUMBING ---
+        # --- 1. RING FALLOW ---
+        ring_pipe fd_fallow_r fd_fallow_w
+
+        # --- 2 & 3. THE PRODUCER PLUMBING ---
         if (( FORKRUN_NUM_NODES > 1 )); then
-            # NUMA TOPOLOGICAL PIPELINE
-            ring_pipe index_pipe_r index_pipe_w
-            ring_pipe claim_pipe_r claim_pipe_w
-
-            node_pipes_r=()
-            node_pipes_w=()
-            for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                ring_pipe nr nw
-                node_pipes_r[i]=$nr
-                node_pipes_w[i]=$nw
-            done
-
+            # NUMA TOPOLOGICAL PIPELINE (No Pipes, Lock-Free Meta Ring)
             ordered_flag=0
             [[ "${order_mode}" == "ordered" ]] && ordered_flag=1
 
-            ( ring_numa_ingest ${fd0} ${fd_write} $index_pipe_w $claim_pipe_r $FORKRUN_NUM_NODES $ordered_flag ) &
-            ( ring_indexer_numa ${fd_scan} $index_pipe_r "${node_pipes_w[@]}" ) &
+            ( ring_numa_ingest ${fd0} ${fd_write} $FORKRUN_NUM_NODES $ordered_flag ) &
 
             for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                ( ring_numa_scanner ${fd_scan} $i $claim_pipe_w $fd_spawn_w $FORKRUN_NUM_NODES "${node_pipes_r[@]}" ) &
+                ( ring_indexer_numa ${fd_scan} $i ) &
             done
 
-            # Close Bash's copies of the pipes to allow background EOFs to cascade
-            exec {index_pipe_r}<&- {index_pipe_w}>&- {claim_pipe_r}<&- {claim_pipe_w}>&-
             for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                exec {node_pipes_w[i]}>&- {node_pipes_r[i]}<&-
+                ( 
+                    exec {fd_fallow_w}>&-
+                    ring_numa_scanner ${fd_scan} $i $fd_spawn_w $FORKRUN_NUM_NODES 
+                ) &
             done
 
         else
@@ -274,11 +332,13 @@ toc() { :; }
 
         exec {fd_spawn_w}>&-
 
-        # --- 3. RING FALLOW ---
-        ring_pipe fd_fallow_r fd_fallow_w
         (
             exec {fd_fallow_w}>&-
-            ring_fallow ${fd_fallow_r} ${fd_write}
+            if (( FORKRUN_NUM_NODES > 1 )); then
+                ring_fallow_phys ${fd_fallow_r} ${fd_write}
+            else
+                ring_fallow ${fd_fallow_r} ${fd_write}
+            fi
         ) &
         exec {fd_fallow_r}<&-
 
@@ -365,8 +425,9 @@ toc() { :; }
     shift 2
     ring_worker inc $fd_read
     while ring_claim; do
-        [[ "$REPLY" == "0" ]] && break
-        '"$pCode"'
+        if [[ "$REPLY" != "0" ]]; then
+            '"$pCode"'
+        fi
         '"${ring_ack_str}"'
     done
     ring_worker dec
@@ -379,17 +440,39 @@ P+=($!)
 
         # --- SPAWN LOOP ---
         nWorkers=0
-        node_idx=0
-        while true; do
-            read -r -u $fd_spawn_r N
-            [[ "$N" == 'x' ]] && break
+        finished_scanners=0
 
-            target=$(( nWorkers + N ))
-            (( target > nWorkersMax )) && target=$nWorkersMax
+        declare -a node_workers
+        for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
+        node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
+        (( node_worker_max < 1 )) && node_worker_max=1
 
-            for (( ; nWorkers < target; nWorkers++ )); do
+        while (( finished_scanners < FORKRUN_NUM_NODES )); do
+            # FIX: If the pipe hits EOF (all scanners dead/exited), break out safely
+            if ! read -r -u $fd_spawn_r msg; then
+                break
+            fi
+
+            if [[ "$msg" == *'x'* ]]; then
+                ((finished_scanners++))
+                continue
+            fi
+
+            # Parse directed spawn "node:count" or legacy "count"
+            if [[ "$msg" == *:* ]]; then
+                node_idx="${msg%%:*}"
+                spawn_count="${msg#*:}"
+            else
+                node_idx=0
+                spawn_count="$msg"
+            fi
+
+            target=$(( node_workers[node_idx] + spawn_count ))
+            (( target > node_worker_max )) && target=$node_worker_max
+
+            for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
                 spawn_worker "$nWorkers" "$node_idx"
-                node_idx=$(( (node_idx + 1) % FORKRUN_NUM_NODES ))
+                ((nWorkers++))
             done
         done
 
@@ -869,7 +952,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # removed embedded base64 
+declare -A b64=() # no base64
 
 _forkrun_bootstrap_setup --force
-

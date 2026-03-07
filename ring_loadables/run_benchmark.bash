@@ -8,12 +8,18 @@ shopt -s extglob
 #. "${frun_path%%$'\n'*}"
 
 # setup test files
-[[ -f ./f1 ]] || yes $'\n'|head -n 100000000 >f1
-[[ -f ./f2 ]] || seq 100000000 >f2
-[[ -f ./f3 ]] || find / -type f >f3
+fLines=100000000
+[[ -f ./f1 ]] || yes $'\n'|head -n $fLines >f1
+[[ -f ./f2 ]] || seq $fLines >f2
+[[ -f ./f3 ]] ||  find /usr /etc /opt /var /home -type f >f3
+#[[ -f ./f4 ]] ||  find / -type f >f4
 
 # setup tests
-F=(f1 f2 f3)
+if [[ -f ./f4 ]]; then
+    F=(f1 f2 f3 f4)
+else
+    F=(f1 f2 f3)
+fi
 
 N=$(( ${#F[@]} * ${#G[@]} * ${#C[@]} * 4 ))
 K=0
@@ -32,8 +38,7 @@ t_user=${t_user//[.s:]/}
 t_sys=${t_sys//[.s:]/}
 
 cpu=$(( 1000 * ( 60000 * ( 10#0${t_user%m*} + 10#0${t_sys%m*} ) + 10#0${t_user#*m} + 10#0${t_sys#*m} ) /  ( 60000 * 10#0${t_real%m*} + 10#0${t_real#*m} ) ))
-
-printf '\nCPU UTILIZATION: %0.1d.%0.3d / %d\n' "${cpu:0:$((${#cpu}-3))}" "${cpu:$((${#cpu}-3))}" "$(nproc)"
+printf '\nCPU UTILIZATION: %d.%03d / %d\n' "$(( cpu / 1000 ))" "$(( cpu % 1000 ))" "$(nproc)"
 printf '\n-----------------------------------------\n'
 
 exec {fd_time}<&-
@@ -69,7 +74,7 @@ done
 
 # stats on input files
 printf '\n\n-----------------------------\nINPUT DATA STATS\n\n';
-for f in f1 f2 f3; do
+for f in "${F[@]}"; do
 printf '\n\nNAME: %s\nSIZE: %s bytes\nLINE COUNT: %s lines\n' "$f" "$(du -d 0 -b "$f" | sed -E s/'[ \t].*$//')" "$(wc -l <"$f")"
 done
 
@@ -99,7 +104,7 @@ for f in "${!outA[@]}"; do
 done
 
 cpu=$(( 1000 * ( 10#0${outA[user]} + 10#0${outA[sys]} ) / 10#0${outA[real]} ))
-printf '\n\nOVERALL CPU UTILIZATION: %d.%0.3d / %s\n\n' "${cpu:0:$((${#cpu}-3))}" "${cpu:$((${#cpu}-3))}" "$(nproc)" |  tee -a benchmark.out >&$fd2
+printf '\n\nOVERALL CPU UTILIZATION: %d.%03d / %d\n\n' "$(( cpu / 1000 ))" "$(( cpu % 1000 ))" "$(nproc)" | tee -a benchmark.out >&$fd2
 
-\rm f1 f2 f3
+\rm "${F[@]}"
 ) {fd1}>&1 {fd2}>&2

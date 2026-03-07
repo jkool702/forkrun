@@ -611,7 +611,7 @@ static int ring_init_main(int argc, char **argv) {
     const char *dbg_env = get_string_value("FORKRUN_DEBUG");
     if (dbg_env && (strcmp(dbg_env, "1") == 0 || strcmp(dbg_env, "true") == 0)) {
         g_debug = 1;
-        fprintf(stderr, "forkrun [DEBUG] Enabled\n");
+        fprintf(stderr, "forkrun[DEBUG] Enabled\n");
     } else g_debug = 0;
 
     global_num_nodes = 0;
@@ -744,8 +744,13 @@ static int ring_init_main(int argc, char **argv) {
     if (vals[4] > vals[5]) vals[4] = vals[5];
 
     for (uint32_t n = 0; n < global_num_nodes; n++) {
-        state[n].cfg_w_start = vals[0];
-        state[n].cfg_w_max   = vals[1];
+        uint64_t w_start_balanced = vals[0] / global_num_nodes;
+        if (w_start_balanced < 1) w_start_balanced = 1;
+        uint64_t w_max_balanced = vals[1] / global_num_nodes;
+        if (w_max_balanced < 1) w_max_balanced = 1;
+
+        state[n].cfg_w_start = w_start_balanced;
+        state[n].cfg_w_max   = w_max_balanced;
         state[n].mode_byte   = byte_mode ? 1 : 0;
         state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
 
@@ -815,10 +820,11 @@ static int ring_init_main(int argc, char **argv) {
         if (!v) v = make_new_array_variable(out_array_name);
         if (!v) return EXECUTION_FAILURE;
 
-        int *created_fds = xmalloc(sizeof(int) * state[0].cfg_w_max);
+        // FIX: Allocate FDs for the GLOBAL max workers (vals[1]), not the per-node max
+        int *created_fds = xmalloc(sizeof(int) * vals[1]);
         int created_cnt = 0;
         int failure = 0;
-        for (uint64_t i = 0; i < state[0].cfg_w_max; i++) {
+        for (uint64_t i = 0; i < vals[1]; i++) {
              int fd = xcreate_anon_file("forkrun_out");
              if (fd >= 0) {
                  created_fds[created_cnt++] = fd;
@@ -940,6 +946,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     int mask_words = (max_phys_id / BITS_PER_LONG) + 1;
     unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
 
+    // Persistent pipe for the zero-copy splice fallback
+    int fallback_pipe[2] = {-1, -1};
+
     while (1) {
         uint32_t claimed_node;
         while (read(claim_pipe, &claimed_node, sizeof(claimed_node)) == sizeof(claimed_node)) {
@@ -973,7 +982,46 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         chunk_size &= ~4095ULL;
         if (chunk_size == 0) chunk_size = 4096;
 
-        ssize_t n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+        ssize_t n = -1;
+        loff_t in_off = lseek(infd, 0, SEEK_CUR);
+
+        // 1. Try copy_file_range / sendfile
+        if (in_off != (loff_t)-1) {
+            n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
+            if (n < 0 && (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP)) {
+                n = sendfile(outfd, infd, NULL, chunk_size);
+            }
+        }
+
+        // 2. Try direct splice
+        if (n < 0) {
+            n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+        }
+
+        // 3. Zero-copy intermediate pipe fallback (identically matches flat mode)
+        if (n < 0 && errno == EINVAL) {
+            if (fallback_pipe[0] == -1) {
+                if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
+            }
+            if (fallback_pipe[0] != -1) {
+                ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE|SPLICE_F_MORE);
+                if (s1 > 0) {
+                    size_t written = 0;
+                    while (written < (size_t)s1) {
+                        ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE|SPLICE_F_MORE);
+                        if (s2 <= 0) {
+                            if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
+                            break;
+                        }
+                        written += s2;
+                    }
+                    n = written;
+                } else {
+                    n = s1;
+                }
+            }
+        }
+
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN) continue;
             break;
@@ -1005,6 +1053,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             chunk_size = 4 * 1024 * 1024ULL;
             consecutive_full = 0;
         }
+    }
+
+    if (fallback_pipe[0] != -1) {
+        close(fallback_pipe[0]);
+        close(fallback_pipe[1]);
     }
 
     if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
@@ -1086,12 +1139,22 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         }
 
         int target = node_pipes[pkt.node_id % num_node_pipes];
-        if (write(target, &task, sizeof(task)) != sizeof(task)) break;
+        bool write_ok = false;
+        while(1) {
+            ssize_t w = write(target, &task, sizeof(task));
+            if (w == sizeof(task)) { write_ok = true; break; }
+            if (w < 0 && (errno == EINTR || errno == EAGAIN)) {
+                usleep(10);
+                continue;
+            }
+            break;
+        }
+        if (!write_ok) break;
+
         last_major_seen = pkt.major_id;
     }
 
     if (pkt.major_id == UINT32_MAX && actual_start < pkt.offset) {
-        // Guard against UINT32_MAX wrap-around sentinel confusion
         uint32_t final_major = (last_major_seen < UINT32_MAX - 1) ? last_major_seen + 1 : last_major_seen;
         struct ScannerTask final_task = {
             .major_id = final_major,
@@ -1099,9 +1162,16 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             .start_off = actual_start,
             .length = pkt.offset - actual_start
         };
-        // Route exactly to the last node instead of defaulting to 0
         int target = node_pipes[last_node_id % num_node_pipes];
-        write(target, &final_task, sizeof(final_task));
+        while(1) {
+            ssize_t w = write(target, &final_task, sizeof(final_task));
+            if (w == sizeof(final_task)) break;
+            if (w < 0 && (errno == EINTR || errno == EAGAIN)) {
+                usleep(10);
+                continue;
+            }
+            break;
+        }
     }
 
     xfree(node_pipes);
@@ -1112,6 +1182,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
 // UNIFIED ADAPTIVE FLOW CONTROL
 // ==============================================================================
 #define ADAPTIVE_FLOW_CONTROL(state_ptr, is_stalled) do { \
+    (void)(is_stalled); \
     batch_counter++; \
     batches_since_calc++; \
     uint64_t _tc = W * 4; if (_tc < 4) _tc = 4; \
@@ -1131,7 +1202,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                     if (_n_spawn > (W_max_val - W)) _n_spawn = W_max_val - W; \
                     if (fd_spawn >= 0) { \
                         char _sbuf[64]; \
-                        int _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _n_spawn); \
+                        int _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n", my_node_id, _n_spawn); \
                         if (_slen > 0) SYS_CHK(write(fd_spawn, _sbuf, _slen)); \
                         W += _n_spawn; \
                         atomic_store_relaxed(&(state_ptr)->active_workers, W); \
@@ -1171,7 +1242,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                 if (W + _grow > W_max_val) _grow = W_max_val - W; \
                 if (_grow > 0 && fd_spawn >= 0) { \
                     char _sbuf[64]; \
-                    int _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _grow); \
+                    int _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n", my_node_id, _grow); \
                     if (_slen > 0) SYS_CHK(write(fd_spawn, _sbuf, _slen)); \
                     W += _grow; \
                     atomic_store_relaxed(&(state_ptr)->active_workers, W); \
@@ -1265,7 +1336,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     atomic_store_relaxed(&local_state->active_workers, W);
 
     if (fd_spawn >= 0 && W > 0) {
-        char sbuf[64]; int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
+        char sbuf[64]; int slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, W);
         if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
     }
 
@@ -1518,9 +1589,12 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
-    LOCAL_SCANNER_WAKE();
+
+    // FIX: Blast the local semaphore to ensure ALL sleeping workers wake up and see EOF
+    uint64_t blast = 999999;
+    SYS_CHK(write(evfd_data_arr[my_node_id], &blast, 8));
+
     if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
-    uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8));
 
     xfree(buf);
     xfree(node_pipes);
@@ -1596,6 +1670,7 @@ static int ring_scanner_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
     int fd = atoi(argv[1]);
     int fd_spawn = (argc >= 3) ? atoi(argv[2]) : -1;
+    int my_node_id = 0; // Ensure macro compatibility
 
     uint64_t L = state[0].cfg_batch_start;
     uint64_t Lmax = state[0].cfg_batch_max;
@@ -1647,7 +1722,7 @@ static int ring_scanner_main(int argc, char **argv) {
 
     if (fd_spawn >= 0 && W > 0) {
         char sbuf[64];
-        int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
+        int slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, W);
         if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
     }
 
@@ -1863,7 +1938,7 @@ static int ring_scanner_main(int argc, char **argv) {
                     uint64_t needed = W_target - W_curr;
                     if (needed > 0) {
                         char sbuf[64];
-                        int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
+                        int slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed);
                         if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
                         W += needed;
                         atomic_store_relaxed(&state[0].active_workers, W);
@@ -1988,7 +2063,7 @@ static int ring_claim_main(int argc, char **argv) {
             bool found = false;
             if (g_logical_to_phys_map) {
                 for (uint32_t i = 0; i < global_num_nodes; i++) {
-                    if (g_logical_to_phys_map[i] == phys) { my_numa_node = i; found = true; break; }
+                    if (g_logical_to_phys_map[i] == (uint32_t)phys) { my_numa_node = i; found = true; break; }
                 }
             }
             if (!found && g_debug && global_num_nodes > 1) {
@@ -2008,6 +2083,7 @@ static int ring_claim_main(int argc, char **argv) {
 restart_loop:
     while (1) {
         struct EscrowPacket ep;
+        // Strictly Born-Local Escrow Only
         if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0 &&
             read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
             my_read_idx = ep.idx;
@@ -2092,14 +2168,16 @@ restart_loop:
              poll(pfds, 3, -1);
              if (pfds[2].revents & POLLIN) break;
              if (pfds[0].revents) { uint64_t v; if(read(evfd_data_arr[my_numa_node], &v, 8)){}; break; }
-             if (pfds[1].revents) break;
+             if (pfds[1].revents) { uint64_t v; if(read(evfd_eof, &v, 8)){}; break; }
         }
         cleanup_waiter_state();
         spin = 0;
     }
 
     uint64_t w_curr = atomic_load_acquire(&local_state->write_idx);
-    if (!local_state->numa_enabled && my_read_idx + claim_count > w_curr) {
+
+    // FIX: Overshoot handler re-enabled for NUMA workers!
+    if (my_read_idx + claim_count > w_curr) {
          if (atomic_load_acquire(&local_state->scanner_finished)) {
              int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
              if (diff < 0) diff = 0;
@@ -2130,7 +2208,7 @@ restart_loop:
                  struct pollfd pfds[2] = { { .fd = evfd_data_arr[my_numa_node], .events = POLLIN }, { .fd = evfd_eof, .events = POLLIN } };
                  poll(pfds, 2, -1);
                  if (pfds[0].revents) { uint64_t v; if(read(evfd_data_arr[my_numa_node], &v, 8)){}; }
-                 if (pfds[1].revents) break;
+                 if (pfds[1].revents) { uint64_t v; if(read(evfd_eof, &v, 8)){}; break; }
              }
              cleanup_waiter_state();
              if (claim_count == 0) { spin = 0; goto restart_loop; }
@@ -2473,7 +2551,7 @@ static int ring_worker_main(int argc, char **argv) {
             my_numa_node = 0;
             if (g_logical_to_phys_map) {
                 for (uint32_t i = 0; i < global_num_nodes; i++) {
-                    if (g_logical_to_phys_map[i] == phys) { my_numa_node = i; break; }
+                    if (g_logical_to_phys_map[i] == (uint32_t)phys) { my_numa_node = i; break; }
                 }
             }
         }
