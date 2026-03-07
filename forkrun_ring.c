@@ -1140,7 +1140,7 @@ static int ring_init_main(int argc, char **argv) {
   }
 
   evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
   evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 
@@ -1434,9 +1434,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     atomic_store_release(&t_state->chunk_queue_head, q_idx + 1);
 
     atomic_store_release(&g_state->ingest_publish_idx, current_major + 1);
-    uint64_t _w = atomic_load_relaxed(&g_state->ingest_waiters);
-    if (_w > 0) {
-      SYS_CHK(write(evfd_ingest_data, &_w, 8)); // Write the number of waiters!
+    if (atomic_load_relaxed(&g_state->ingest_waiters) > 0) {
+      uint64_t v = 1;
+      SYS_CHK(write(evfd_ingest_data, &v, 8));
     }
 
     last_target = target_node;
@@ -1463,11 +1463,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   xfree(nodemask);
 
-  atomic_store_release(&g_state->ingest_publish_idx, current_major + 1);
-  uint64_t _w = atomic_load_relaxed(&g_state->ingest_waiters);
-  if (_w > 0) {
-    SYS_CHK(write(evfd_ingest_data, &_w, 8)); // Write the number of waiters!
-  }
+  atomic_store_release(&g_state->ingest_eof_idx, current_major);
+  uint64_t v = 999999;
+  SYS_CHK(write(evfd_ingest_eof, &v, 8));
   return EXECUTION_SUCCESS;
 }
 
@@ -3755,7 +3753,7 @@ static int ring_copy_main(int argc, char **argv) {
         break;
       off += copied_in_chunk;
       if (evfd_ingest_data >= 0) {
-        uint64_t v = 999999;
+        uint64_t v = 1;
         SYS_CHK(write(evfd_ingest_data, &v, 8));
       }
       total_moved += copied_in_chunk;
@@ -3771,7 +3769,7 @@ static int ring_copy_main(int argc, char **argv) {
       if (n == 0)
         break;
       if (evfd_ingest_data >= 0) {
-        uint64_t v = 999999;
+        uint64_t v = 1;
         SYS_CHK(write(evfd_ingest_data, &v, 8));
       }
       total_moved += n;
@@ -3867,14 +3865,14 @@ static int ring_copy_main(int argc, char **argv) {
   }
 
   if (evfd_ingest_eof >= 0) {
-    uint64_t val = 1;
+    uint64_t val = 999999;
     write(evfd_ingest_eof, &val, 8);
   }
   return EXECUTION_SUCCESS;
 
 err_out:
   if (evfd_ingest_eof >= 0) {
-    uint64_t val = 1;
+    uint64_t val = 999999;
     write(evfd_ingest_eof, &val, 8);
   }
   return EXECUTION_FAILURE;
