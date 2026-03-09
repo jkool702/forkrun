@@ -1302,9 +1302,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       if (force || atomic_load_relaxed(&local_state->active_waiters) > 0) { \
         atomic_store_release(&local_state->write_idx, local_scan_idx); \
         local_write_idx = local_scan_idx; \
-        if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
-          uint64_t v = 1; \
-          SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8)); \
+        uint64_t _aw = atomic_load_acquire(&local_state->active_waiters); \
+        if (_aw > 0) { \
+          SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &_aw, 8)); \
         } \
       } else { \
         uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx); \
@@ -1321,9 +1321,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         if (target_w > local_write_idx) { \
           atomic_store_release(&local_state->write_idx, target_w); \
           local_write_idx = target_w; \
-          if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
-            uint64_t v = 1; \
-            SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8)); \
+          uint64_t _aw = atomic_load_acquire(&local_state->active_waiters); \
+          if (_aw > 0) { \
+            SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &_aw, 8)); \
           } \
         } \
       } \
