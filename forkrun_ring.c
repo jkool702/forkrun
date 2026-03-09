@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.0-UNIFIED (Meta Ring + SIMD + Unified Scanner)
+// forkrun_ring.c v13.0.1-UNIFIED (Meta Ring + SIMD + Unified Scanner)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -204,7 +204,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v13.0.0-UNIFIED"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.1-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -1105,7 +1105,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   if (argc < 4) return EXECUTION_FAILURE;
   int infd = atoi(argv[1]); int outfd = atoi(argv[2]); int num_nodes = atoi(argv[3]);
   bool ordered_mode = (argc > 4 && strcmp(argv[4], "1") == 0);
-  if (num_nodes < 1) num_nodes = 1; if (num_nodes > 1024) num_nodes = 1024;
+  if (num_nodes < 1) num_nodes = 1; 
+  if (num_nodes > 1024) num_nodes = 1024;
 
   uint64_t chunk_size = 4 * 1024 * 1024ULL;
   uint64_t max_chunk = ordered_mode ? (16ULL * 1024 * 1024) : (128ULL * 1024 * 1024);
@@ -1329,7 +1330,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     } \
   } while (0)
 
-#define UNIFIED_SCANNER_FLUSH(cnt_val, stride_val, is_last, maj_id, min_idx, batch_end_offset, do_fencepost, overwrite) \
+#define UNIFIED_SCANNER_FLUSH(_cnt_val, _stride_val, _is_last, _maj_id, _minor_val, _batch_end_offset, _do_fencepost, _overwrite) \
   do { \
     while (1) { \
       uint64_t limit; \
@@ -1346,18 +1347,18 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       usleep(100); \
     } \
     uint64_t pk = (uint64_t)batch_start; \
-    if ((cnt_val) != L || (is_numa && is_last)) pk |= FLAG_PARTIAL_BATCH; \
+    if ((_cnt_val) != L || (is_numa && (_is_last))) pk |= FLAG_PARTIAL_BATCH; \
     if (is_numa) { \
-        local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)stride_val; \
+        local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)(_stride_val); \
         local_state->offset_ring[local_scan_idx & RING_MASK] = pk; \
-        local_state->end_ring[local_scan_idx & RING_MASK] = batch_end_offset; \
-        local_state->major_ring[local_scan_idx & RING_MASK] = maj_id; \
-        local_state->minor_ring[local_scan_idx & RING_MASK] = min_idx | (is_last ? FLAG_MAJOR_EOF : 0); \
+        local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
+        local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id); \
+        local_state->minor_ring[local_scan_idx & RING_MASK] = (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0); \
     } else { \
-        if (!byte_mode) local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)cnt_val; \
-        if (do_fencepost) { \
-            local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] = batch_end_offset; \
-            if ((pk & FLAG_PARTIAL_BATCH) || (overwrite)) { \
+        if (!byte_mode) local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)(_cnt_val); \
+        if (_do_fencepost) { \
+            local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] = (_batch_end_offset); \
+            if ((pk & FLAG_PARTIAL_BATCH) || (_overwrite)) { \
                 local_state->offset_ring[local_scan_idx & RING_MASK] = pk; \
             } \
         } else { \
@@ -1429,7 +1430,8 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         int64_t _bl = (int64_t)local_write_idx - (int64_t)atomic_load_relaxed(&(state_ptr)->read_idx); \
         if (_bl < 0) _bl = 0;                                                  \
         uint64_t _l_target = (uint64_t)_bl / W;                                \
-        if (_l_target > Lmax) _l_target = Lmax; if (_l_target < 1) _l_target = 1; \
+        if (_l_target > Lmax) _l_target = Lmax;                                \
+        if (_l_target < 1) _l_target = 1;                                      \
         if (_l_target > L) {                                                   \
           L = _l_target;                                                       \
           atomic_store_release(&(state_ptr)->batch_change_idx, local_scan_idx); \
@@ -1507,6 +1509,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     bool experienced_stall = false;
+    uint64_t pending_lines = 0;
     
     // UMA-specific loop state
     int status = 0;
@@ -1639,8 +1642,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 starve_meter = (starve_meter + _xLim) >> 1;
             else starve_meter >>= 1;
         }
-
-        uint64_t pending_lines = 0;
 
         // =========================================================
         // 2. INNER SCAN LOOP (Shared Hot Path)
@@ -1794,7 +1795,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                                     else { chunk_end = buf_base_offset + (end - buf); break; }
                                 } else break;
                             } else {
-                                break; // UMA hits end of in-memory buffer, breaks to outer loop
+                                break; 
                             }
                         }
 
@@ -2605,9 +2606,11 @@ static int ring_splice_main(int argc, char **argv) {
   while (written < len) {
     ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written, SPLICE_F_MOVE | SPLICE_F_MORE);
     if (s < 0) { if (errno == EINTR || errno == EAGAIN) continue; if (close_out) close(fd_out); builtin_error("splice failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
-    if (s == 0) break; written += s;
+    if (s == 0) break;
+    written += s;
   }
-  if (close_out) close(fd_out); return EXECUTION_SUCCESS;
+  if (close_out) close(fd_out);
+  return EXECUTION_SUCCESS;
 }
 
 static int ring_indexer_main(int argc, char **argv) {
@@ -2716,7 +2719,8 @@ static int ring_copy_main(int argc, char **argv) {
       while (copied_in_chunk < to_copy) {
         ssize_t n = copy_file_range(infd, &current_off, outfd, NULL, to_copy - copied_in_chunk, 0);
         if (n < 0) { if (errno == EINTR) continue; if (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP) break; goto err_out; }
-        if (n == 0) break; copied_in_chunk += n;
+        if (n == 0) break;
+        copied_in_chunk += n;
       }
       if (copied_in_chunk == 0 && (st.st_size - off > 0)) break;
       off += copied_in_chunk;
@@ -2764,7 +2768,8 @@ static int ring_copy_main(int argc, char **argv) {
       int pipefd[2]; if (pipe(pipefd) < 0) goto err_out; fcntl(pipefd[1], F_SETPIPE_SZ, 1048576);
       while (1) {
         ssize_t n = splice(infd, NULL, pipefd[1], NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
-        if (n <= 0) break; size_t written = 0;
+        if (n <= 0) break;
+        size_t written = 0;
         while (written < (size_t)n) {
           ssize_t m = splice(pipefd[0], NULL, outfd, NULL, n - written, SPLICE_F_MOVE | SPLICE_F_MORE);
           if (m <= 0) { if (m < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; } break; }
@@ -2845,7 +2850,8 @@ static int ring_version_main(int argc, char **argv) {
 #define DEFINE_DISPATCHER_X(name, func, usage, doc)                            \
   static int dispatch_##name(WORD_LIST *list) {                                \
     int argc; char **argv = make_builtin_argv(list, &argc); int ret = EXECUTION_FAILURE; \
-    if (argv[0]) ret = func(argc, argv); xfree(argv); return ret;              \
+    if (argv[0]) ret = func(argc, argv);                                       \
+    xfree(argv); return ret;                                                   \
   }
 FORKRUN_LOADABLES(DEFINE_DISPATCHER_X)
 #undef DEFINE_DISPATCHER_X
@@ -2861,7 +2867,8 @@ static int ring_list_main(int argc, char **argv) {
     const char *var_name = argv[1]; SHELL_VAR *v = find_variable(var_name);
     if (v && !array_p(v)) { unbind_variable(var_name); v = NULL; }
     if (!v) v = make_new_array_variable(var_name);
-    if (!v) return EXECUTION_FAILURE; int i = 0;
+    if (!v) return EXECUTION_FAILURE;
+    int i = 0;
 #define ADD_TO_ARR(name, ...) if (strcmp(#name, "ring_list") != 0) bind_array_element(v, i++, #name, 0);
     FORKRUN_LOADABLES(ADD_TO_ARR)
 #undef ADD_TO_ARR
