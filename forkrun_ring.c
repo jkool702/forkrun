@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.1-UNIFIED (Meta Ring + SIMD + Unified Scanner)
+// forkrun_ring.c v13.0.2-UNIFIED (Bugfix: UMA Premature EOF)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -204,7 +204,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v13.0.1-UNIFIED"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.2-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -277,7 +277,7 @@ static int g_debug = 0;
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
   X(ring_claim, ring_claim_main, "ring_claim[VAR] [FD]", "Claim batch")        \
-  X(ring_worker, ring_worker_main, "ring_worker [inc|dec][FD]",               \
+  X(ring_worker, ring_worker_main, "ring_worker[inc|dec][FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
@@ -1476,7 +1476,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     char *buf = xmalloc_aligned(chunk_sz);
     char *p = buf, *end = buf;
 
-    uint64_t buf_base_offset = 0;
+    uint64_t buf_base_offset = is_numa ? 0 : lseek(fd_or_memfd, 0, SEEK_CUR);
     uint64_t batch_start = buf_base_offset;
 
     int phase = 0;
@@ -1660,7 +1660,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                     buf_base_offset = current_p_offset; p = buf; end = buf + n; status = 0; stall_meter >>= 1;
                 } else {
                     if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
-                    else if (n == 0) { status = 1; }
                     
                     if (!atomic_load_acquire(&local_state->ingest_complete)) {
                         struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
@@ -1668,8 +1667,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                             if (pfds[1].revents & POLLIN) atomic_store_release(&local_state->ingest_complete, 1);
                         }
                     }
-                    if (atomic_load_acquire(&local_state->ingest_complete)) status = 1;
-                    else {
+                    if (atomic_load_acquire(&local_state->ingest_complete)) {
+                        if (n == 0) status = 1; // Only set EOF if ingest is truly done
+                    } else {
+                        status = 0; // Prevent premature EOF
                         bool starving = (atomic_load_relaxed(&local_state->active_waiters) > 0);
                         UNIFIED_ADAPTIVE_COMMIT(starving);
 
