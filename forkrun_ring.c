@@ -1476,7 +1476,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     char *buf = xmalloc_aligned(chunk_sz);
     char *p = buf, *end = buf;
 
-    uint64_t buf_base_offset = is_numa ? 0 : lseek(fd_or_memfd, 0, SEEK_CUR);
+    uint64_t buf_base_offset = 0;
     uint64_t batch_start = buf_base_offset;
 
     int phase = 0;
@@ -1654,8 +1654,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
                 current_p_offset = buf_base_offset + (uint64_t)(p - buf);
 
-                if (lseek(fd_or_memfd, (off_t)current_p_offset, SEEK_SET) < 0) {}
-                ssize_t n = read(fd_or_memfd, buf, chunk_sz);
+                ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
 
                 if (n > 0 && (uint64_t)n > prev_avail) {
                     buf_base_offset = current_p_offset; p = buf; end = buf + n; status = 0; stall_meter >>= 1;
@@ -1921,9 +1920,8 @@ unified_scanner_eof:
             int64_t buf_rel = (int64_t)tail_start_offset - (int64_t)buf_base_offset;
             if (buf_rel >= 0 && buf_rel < (int64_t)chunk_sz) { p = buf + buf_rel; batch_start = tail_start_offset; }
             else {
-                lseek(fd_or_memfd, (off_t)tail_start_offset, SEEK_SET);
                 buf_base_offset = tail_start_offset; batch_start = tail_start_offset;
-                ssize_t n = read(fd_or_memfd, buf, chunk_sz);
+                ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)tail_start_offset);
                 p = buf; end = buf + (n > 0 ? n : 0);
             }
             uint64_t R = 1;
@@ -1941,8 +1939,7 @@ unified_scanner_eof:
                 while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
                     if (p >= end) {
                         uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-                        lseek(fd_or_memfd, (off_t)current_p_offset, SEEK_SET);
-                        ssize_t n = read(fd_or_memfd, buf, chunk_sz);
+                        ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
                         if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
                         else break;
                     }
@@ -1950,8 +1947,7 @@ unified_scanner_eof:
                     if (nl) { lines_found++; p = nl + 1; }
                     else {
                         uint64_t current_p_offset = buf_base_offset + (uint64_t)(end - buf);
-                        lseek(fd_or_memfd, (off_t)current_p_offset, SEEK_SET);
-                        ssize_t n = read(fd_or_memfd, buf, chunk_sz);
+                        ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
                         if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
                         else { p = end; break; }
                     }
