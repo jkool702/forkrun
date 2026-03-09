@@ -1337,7 +1337,11 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         limit = atomic_load_acquire(&local_state->min_idx); \
       else \
         limit = atomic_load_acquire(&local_state->read_idx); \
-      if ((local_scan_idx - limit) < RING_SIZE) break; \
+      \
+      bool limit_lines = ((local_scan_idx - limit) >= RING_SIZE); \
+      bool limit_chunks = is_numa && (cb_head >= 3) && (limit < chunk_bounds[(cb_head - 3) & 3]); \
+      if (!limit_lines && !limit_chunks) break; \
+      \
       UNIFIED_ADAPTIVE_COMMIT(true); \
       usleep(100); \
     } \
@@ -1486,6 +1490,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t first_wait_ts = 0;
     uint64_t limit_items = local_state->cfg_limit;
 
+    // NUMA Chunk Lookahead Backpressure
+    uint64_t chunk_bounds[4] = {0};
+    uint32_t cb_head = 0;
+
     atomic_store_relaxed(&local_state->write_idx, 0);
     atomic_store_relaxed(&local_state->read_idx, 0);
     if (!is_numa) atomic_store_relaxed(&local_state->tail_idx, 0);
@@ -1598,6 +1606,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
             if (actual_start >= actual_end) {
                 UNIFIED_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start, false, false);
+                if (is_numa) {
+                    chunk_bounds[cb_head & 3] = local_scan_idx;
+                    cb_head++;
+                }
                 UNIFIED_ADAPTIVE_COMMIT(true);
                 continue;
             }
@@ -1722,7 +1734,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                     uint32_t cv = is_numa ? take : 1;
                     
                     UNIFIED_SCANNER_FLUSH(cv, stride, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, true, false);
-                    if (is_numa) minor_idx++;
+                    if (is_numa) {
+                        minor_idx++;
+                        if (is_last) {
+                            chunk_bounds[cb_head & 3] = local_scan_idx;
+                            cb_head++;
+                        }
+                    }
                     
                     p += take; batch_start += is_numa ? take : current_p_offset - batch_start;
                     total_scanned += is_numa ? take : 1;
@@ -1836,7 +1854,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                     uint32_t stride = is_numa ? (return_bytes ? (uint32_t)(current_p_offset - batch_start) : (uint32_t)pending_lines) : 0;
                     
                     UNIFIED_SCANNER_FLUSH(pending_lines, stride, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, return_bytes, false);
-                    if (is_numa) minor_idx++;
+                    if (is_numa) {
+                        minor_idx++;
+                        if (is_last) {
+                            chunk_bounds[cb_head & 3] = local_scan_idx;
+                            cb_head++;
+                        }
+                    }
                     batch_start = current_p_offset;
                     pending_lines = 0;
 
@@ -1856,7 +1880,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 unified_scanner_eof:
     // =========================================================
     // 3. FINALIZATION (NUMA Finish vs UMA Tail Re-batching)
-    // ==========================================
+    // =========================================================
     if (is_numa) {
         atomic_store_release(&local_state->write_idx, local_scan_idx);
         atomic_store_release(&local_state->scanner_finished, 1);
