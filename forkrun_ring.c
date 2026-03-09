@@ -2376,8 +2376,12 @@ struct HeapNode {
   struct OrderPacket pkt;
 };
 
-static void heap_push(struct HeapNode *heap, int *sz, uint64_t key, struct OrderPacket pkt) {
-  if (*sz >= HEAP_MAX) return;
+static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap, uint64_t key, struct OrderPacket pkt) {
+  if (*sz >= *cap) {
+    *cap = (*cap) * 2;
+    *heap_ptr = xrealloc(*heap_ptr, (size_t)(*cap) * sizeof(struct HeapNode));
+  }
+  struct HeapNode *heap = *heap_ptr;
   int i = (*sz)++;
   while (i > 0) {
     int p = (i - 1) / 2;
@@ -2438,7 +2442,7 @@ static int ring_order_main(int argc, char **argv) {
 
   bool use_zerocopy = false; struct stat st_out;
   if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
-  struct HeapNode *heap = xmalloc(HEAP_MAX * sizeof(struct HeapNode)); int heap_sz = 0;
+  int heap_cap = HEAP_MAX; struct HeapNode *heap = xmalloc((size_t)heap_cap * sizeof(struct HeapNode)); int heap_sz = 0;
   uint32_t expected_major = 0; uint32_t expected_minor = 0; struct OrderPacket ops[64]; ssize_t n_read;
 
   while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
@@ -2448,7 +2452,7 @@ static int ring_order_main(int argc, char **argv) {
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
       uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
-      if (!unordered_mode) heap_push(heap, &heap_sz, op_key, *op);
+      if (!unordered_mode) heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
       else {
         if (memfd_mode) {
           off_t offset = (off_t)op->off;
