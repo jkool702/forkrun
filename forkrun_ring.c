@@ -1527,7 +1527,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       if (!fixed_workers && W < W_max_val) {                                   \
         uint64_t _backlog = local_scan_idx - atomic_load_relaxed(&(state_ptr)->read_idx); \
         bool _no_starve = (atomic_load_relaxed(&(state_ptr)->active_waiters) == 0); \
-        bool _spawn = false;                              scanner              \
+        bool _spawn = false;                                                   \
         if (fixed_batch) { if (_backlog > W && _no_starve) _spawn = true; }    \
         else {                                                                 \
           if (_d_out > 0) { uint64_t _rate = _d_out / W; if (_rate == 0) _rate = 1; if ((_d_in / _rate) > W) _spawn = true; } \
