@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.2-UNIFIED (Bugfix: UMA Premature EOF)
+// forkrun_ring.c v13.0.3-UNIFIED (Bugfix: UMA EOF Loop & NUMA Steal Deadlock)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -204,7 +204,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v13.0.2-UNIFIED"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.3-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -277,7 +277,7 @@ static int g_debug = 0;
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
   X(ring_claim, ring_claim_main, "ring_claim[VAR] [FD]", "Claim batch")        \
-  X(ring_worker, ring_worker_main, "ring_worker[inc|dec][FD]",               \
+  X(ring_worker, ring_worker_main, "ring_worker [inc|dec][FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
@@ -1334,15 +1334,14 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   do { \
     while (1) { \
       uint64_t limit; \
-      if (!is_numa && atomic_load_relaxed(&local_state->fallow_active)) \
+      if (!is_numa && atomic_load_relaxed(&local_state->fallow_active)) { \
         limit = atomic_load_acquire(&local_state->min_idx); \
-      else \
+      } else { \
         limit = atomic_load_acquire(&local_state->read_idx); \
-      \
+      } \
       bool limit_lines = ((local_scan_idx - limit) >= RING_SIZE); \
       bool limit_chunks = is_numa && (cb_head >= 3) && (limit < chunk_bounds[(cb_head - 3) & 3]); \
       if (!limit_lines && !limit_chunks) break; \
-      \
       UNIFIED_ADAPTIVE_COMMIT(true); \
       usleep(100); \
     } \
@@ -1446,7 +1445,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }                                                                          \
   } while (0)
 
-
 // The Core Unified Scanner Function
 static inline __attribute__((always_inline)) int
 core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, const bool is_numa)
@@ -1544,10 +1542,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         if (bl > max_bl) { max_bl = bl; fallback_target = i; }
                         uint32_t c_maj = state[i].chunk_queue[t & META_RING_MASK];
                         bool ready = true;
-                        if (c_maj > 0) {
+                        
+                        if (atomic_load_acquire(&state[i].write_idx) == 0) {
+                            ready = false; // Never steal from a node that hasn't published work yet
+                        } else if (c_maj > 0) {
                             struct ChunkMeta *pm = &g_state->meta_ring[(c_maj - 1) & META_RING_MASK];
                             if (!(atomic_load_acquire(&pm->actual_end) & FLAG_META_READY)) ready = false;
                         }
+                        
                         if (ready && bl > best_ready_bl) { best_ready_bl = bl; ready_target = i; }
                     }
                 }
@@ -1668,7 +1670,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         }
                     }
                     if (atomic_load_acquire(&local_state->ingest_complete)) {
-                        if (n == 0) status = 1; // Only set EOF if ingest is truly done
+                        // If Ingest is completely finished, and we did not read strictly MORE
+                        // bytes than we already had (which is why we are in this 'else' block),
+                        // it means the file will never grow and we have reached physical EOF.
+                        status = 1; 
                     } else {
                         status = 0; // Prevent premature EOF
                         bool starving = (atomic_load_relaxed(&local_state->active_waiters) > 0);
@@ -2370,7 +2375,6 @@ static int ring_ack_main(int argc, char **argv) {
 }
 
 // --- MIN-HEAP ORDERING ---
-#define HEAP_MAX 262144
 struct HeapNode {
   uint64_t key;
   struct OrderPacket pkt;
@@ -2379,7 +2383,7 @@ struct HeapNode {
 static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap, uint64_t key, struct OrderPacket pkt) {
   if (*sz >= *cap) {
     *cap = (*cap) * 2;
-    *heap_ptr = xrealloc(*heap_ptr, (size_t)(*cap) * sizeof(struct HeapNode));
+    *heap_ptr = xrealloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
   }
   struct HeapNode *heap = *heap_ptr;
   int i = (*sz)++;
@@ -2442,7 +2446,11 @@ static int ring_order_main(int argc, char **argv) {
 
   bool use_zerocopy = false; struct stat st_out;
   if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
-  int heap_cap = HEAP_MAX; struct HeapNode *heap = xmalloc((size_t)heap_cap * sizeof(struct HeapNode)); int heap_sz = 0;
+  
+  int heap_cap = 262144;
+  struct HeapNode *heap = xmalloc(heap_cap * sizeof(struct HeapNode)); 
+  int heap_sz = 0;
+  
   uint32_t expected_major = 0; uint32_t expected_minor = 0; struct OrderPacket ops[64]; ssize_t n_read;
 
   while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
@@ -2695,6 +2703,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
       }
     }
   }
+  while (head) { struct Interval *tmp = head; head = head->next; free(tmp); }
   return EXECUTION_SUCCESS;
 }
 
