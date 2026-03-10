@@ -96,7 +96,65 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim)
 #pragma GCC pop_options
 #endif
 
-// STRUCTURAL NOTE: This SIMD path is strictly a within-buffer fast path.
+#if defined(__aarch64__)
+#include <arm_neon.h>
+
+static inline char *scan_batch_neon(char *p, char *end, uint64_t target, char delim) {
+    uint64_t remaining = target;
+    uint8x16_t d_vec = vdupq_n_u8(delim);
+
+    while (p + 16 <= end) {
+        uint8x16_t v = vld1q_u8((const uint8_t*)p);
+        uint8x16_t cmp = vceqq_u8(v, d_vec);
+
+        uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 0);
+        uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 1);
+
+        if (lo == 0 && hi == 0) {
+            p += 16;
+            continue;
+        }
+
+        uint32_t hits_lo = __builtin_popcountll(lo) / 8;
+        if (hits_lo < remaining) {
+            remaining -= hits_lo;
+        } else {
+            uint32_t to_drop = (uint32_t)(remaining - 1);
+            for (uint32_t i = 0; i < to_drop; i++) {
+                int idx = __builtin_ctzll(lo) / 8;
+                lo &= ~(0xFFULL << (idx * 8));
+            }
+            int exact_idx = __builtin_ctzll(lo) / 8;
+            return p + exact_idx + 1;
+        }
+
+        uint32_t hits_hi = __builtin_popcountll(hi) / 8;
+        if (hits_hi < remaining) {
+            remaining -= hits_hi;
+        } else {
+            uint32_t to_drop = (uint32_t)(remaining - 1);
+            for (uint32_t i = 0; i < to_drop; i++) {
+                int idx = __builtin_ctzll(hi) / 8;
+                hi &= ~(0xFFULL << (idx * 8));
+            }
+            int exact_idx = __builtin_ctzll(hi) / 8;
+            return p + 8 + exact_idx + 1;
+        }
+        p += 16;
+    }
+
+    while (p < end) {
+        if (*p == delim) {
+            remaining--;
+            if (remaining == 0) return p + 1;
+        }
+        p++;
+    }
+
+    return NULL;
+}
+#endif
+
 static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char delim) {
     if (target == 0 || p >= safe_end) return NULL;
 
@@ -110,6 +168,8 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
     if (avx2_supported) {
         return scan_batch_avx2(p, safe_end, target, delim);
     }
+#elif defined(__aarch64__)
+    return scan_batch_neon(p, safe_end, target, delim);
 #endif
 
     return NULL;
@@ -686,16 +746,76 @@ static inline void cleanup_waiter_state() {
     }                                                                          \
   } while (0)
 
-static inline void check_memory_pressure(uint64_t *total_moved,
-                                         uint64_t *next_check,
-                                         uint64_t oom_threshold) {
+static int get_cgroup_free_memory(uint64_t *free_mem) {
+    char buf[128];
+    int fd = open("/sys/fs/cgroup/memory.max", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            if (strncmp(buf, "max", 3) == 0) return -1;
+            uint64_t max_val = strtoull(buf, NULL, 10);
+            fd = open("/sys/fs/cgroup/memory.current", O_RDONLY);
+            if (fd >= 0) {
+                n = read(fd, buf, sizeof(buf) - 1);
+                close(fd);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    uint64_t cur_val = strtoull(buf, NULL, 10);
+                    *free_mem = (max_val > cur_val) ? (max_val - cur_val) : 0;
+                    return 0;
+                }
+            }
+        }
+    }
+    fd = open("/sys/fs/cgroup/memory/memory.limit_in_bytes", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            uint64_t max_val = strtoull(buf, NULL, 10);
+            if (max_val > 9000000000000000000ULL) return -1;
+            fd = open("/sys/fs/cgroup/memory/memory.usage_in_bytes", O_RDONLY);
+            if (fd >= 0) {
+                n = read(fd, buf, sizeof(buf) - 1);
+                close(fd);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    uint64_t cur_val = strtoull(buf, NULL, 10);
+                    *free_mem = (max_val > cur_val) ? (max_val - cur_val) : 0;
+                    return 0;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+static inline void check_memory_pressure(uint64_t *total_moved, uint64_t *next_check, uint64_t oom_threshold) {
   if (*total_moved > *next_check) {
-    struct sysinfo si;
-    if (sysinfo(&si) == 0) {
-      uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
-      uint64_t free_b = (uint64_t)si.freeram * mu;
+    uint64_t free_b = 0;
+    if (get_cgroup_free_memory(&free_b) == 0) {
       if (free_b < oom_threshold && state) {
-        OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
+        int _oom_sleep_us = 1000;
+        int _oom_waited_us = 0;
+        while (free_b < oom_threshold && _oom_waited_us < 30000000) {
+          usleep(_oom_sleep_us);
+          _oom_waited_us += _oom_sleep_us;
+          get_cgroup_free_memory(&free_b);
+          _oom_sleep_us += _oom_sleep_us >> 1;
+          if (_oom_sleep_us > 100000) _oom_sleep_us = 100000;
+        }
+      }
+    } else {
+      struct sysinfo si;
+      if (sysinfo(&si) == 0) {
+        uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
+        free_b = (uint64_t)si.freeram * mu;
+        if (free_b < oom_threshold && state) {
+          OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
+        }
       }
     }
     *next_check += 16 * 1024 * 1024;
@@ -1531,7 +1651,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
             if (my_tail >= my_head) {
                 bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
-                int required_bl = 1; // High utilization steal threshold
+                int required_bl = is_eof ? 1 : 2; // Activation energy for cross-socket steal
                 int max_bl = 0, best_ready_bl = 0, ready_target = -1, fallback_target = -1;
 
                 for (int i = 0; i < num_nodes; i++) {
@@ -1884,6 +2004,27 @@ unified_scanner_eof:
     // =========================================================
     // 3. FINALIZATION (NUMA Finish vs UMA Tail Re-batching)
     // =========================================================
+
+    // Universally check backlog at EOF and spawn remaining workers if needed
+    if (fd_spawn >= 0) {
+        uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);
+        if (W_curr < W_max_val) {
+            uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx);
+            uint64_t backlog = (local_scan_idx > r_idx) ? local_scan_idx - r_idx : 0;
+            uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog;
+            if (W_target > W_curr) {
+                uint64_t needed = W_target - W_curr;
+                if (needed > 0) {
+                    char sbuf[64]; int slen;
+                    if (is_numa) slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed);
+                    else slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
+                    if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
+                    W += needed; atomic_store_relaxed(&local_state->active_workers, W);
+                }
+            }
+        }
+    }
+
     if (is_numa) {
         atomic_store_release(&local_state->write_idx, local_scan_idx);
         atomic_store_release(&local_state->scanner_finished, 1);
@@ -1902,22 +2043,7 @@ unified_scanner_eof:
             if (local_scan_idx > local_write_idx) {
                 for (uint64_t i = local_write_idx; i < local_scan_idx; i++) L_tail += state[0].stride_ring[i & RING_MASK];
             }
-            if (fd_spawn >= 0) {
-                uint64_t W_curr = atomic_load_relaxed(&state[0].active_workers);
-                if (W_curr < W_max_val) {
-                    uint64_t r_idx = atomic_load_relaxed(&state[0].read_idx);
-                    uint64_t backlog = (local_scan_idx > r_idx) ? local_scan_idx - r_idx : 0;
-                    uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog;
-                    if (W_target > W_curr) {
-                        uint64_t needed = W_target - W_curr;
-                        if (needed > 0) {
-                            char sbuf[64]; int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
-                            if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
-                            W += needed; atomic_store_relaxed(&state[0].active_workers, W);
-                        }
-                    }
-                }
-            }
+
             uint64_t tail_start_offset = (local_scan_idx > local_write_idx) ? (state[0].offset_ring[local_write_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH) : batch_start;
             local_scan_idx = local_write_idx;
             int64_t buf_rel = (int64_t)tail_start_offset - (int64_t)buf_base_offset;
