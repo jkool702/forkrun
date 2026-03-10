@@ -1527,7 +1527,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       if (!fixed_workers && W < W_max_val) {                                   \
         uint64_t _backlog = local_scan_idx - atomic_load_relaxed(&(state_ptr)->read_idx); \
         bool _no_starve = (atomic_load_relaxed(&(state_ptr)->active_waiters) == 0); \
-        bool _spawn = false;                                                   \
+        bool _spawn = false;                              scanner              \
         if (fixed_batch) { if (_backlog > W && _no_starve) _spawn = true; }    \
         else {                                                                 \
           if (_d_out > 0) { uint64_t _rate = _d_out / W; if (_rate == 0) _rate = 1; if ((_d_in / _rate) > W) _spawn = true; } \
@@ -1790,7 +1790,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         }
                     }
                     if (atomic_load_acquire(&local_state->ingest_complete)) {
-                        if (n == 0) status = 1;
+                        // FIX: Detect EOF if n is 0 OR we re-read the exact same overlap
+                        if (n == 0 || (n > 0 && (uint64_t)n <= prev_avail)) status = 1;
                     } else {
                         status = 0;
                         bool starving = (atomic_load_relaxed(&local_state->active_waiters) > 0);
