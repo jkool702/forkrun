@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.1-UNIFIED (Meta Ring + SIMD + Unified Scanner)
+// forkrun_ring.c v13.0.3-UNIFIED (Bugfix: UMA EOF Loop & NUMA Steal Deadlock)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -204,7 +204,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v13.0.1-UNIFIED"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.3-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -1302,9 +1302,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       if (force || atomic_load_relaxed(&local_state->active_waiters) > 0) { \
         atomic_store_release(&local_state->write_idx, local_scan_idx); \
         local_write_idx = local_scan_idx; \
-        if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
-          uint64_t v = 1; \
-          SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8)); \
+        uint64_t _aw = atomic_load_acquire(&local_state->active_waiters); \
+        if (_aw > 0) { \
+          SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &_aw, 8)); \
         } \
       } else { \
         uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx); \
@@ -1321,9 +1321,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         if (target_w > local_write_idx) { \
           atomic_store_release(&local_state->write_idx, target_w); \
           local_write_idx = target_w; \
-          if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
-            uint64_t v = 1; \
-            SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8)); \
+          uint64_t _aw = atomic_load_acquire(&local_state->active_waiters); \
+          if (_aw > 0) { \
+            SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &_aw, 8)); \
           } \
         } \
       } \
@@ -1334,15 +1334,14 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   do { \
     while (1) { \
       uint64_t limit; \
-      if (!is_numa && atomic_load_relaxed(&local_state->fallow_active)) \
+      if (!is_numa && atomic_load_relaxed(&local_state->fallow_active)) { \
         limit = atomic_load_acquire(&local_state->min_idx); \
-      else \
+      } else { \
         limit = atomic_load_acquire(&local_state->read_idx); \
-      \
+      } \
       bool limit_lines = ((local_scan_idx - limit) >= RING_SIZE); \
       bool limit_chunks = is_numa && (cb_head >= 3) && (limit < chunk_bounds[(cb_head - 3) & 3]); \
       if (!limit_lines && !limit_chunks) break; \
-      \
       UNIFIED_ADAPTIVE_COMMIT(true); \
       usleep(100); \
     } \
@@ -1446,7 +1445,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }                                                                          \
   } while (0)
 
-
 // The Core Unified Scanner Function
 static inline __attribute__((always_inline)) int
 core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, const bool is_numa)
@@ -1544,10 +1542,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         if (bl > max_bl) { max_bl = bl; fallback_target = i; }
                         uint32_t c_maj = state[i].chunk_queue[t & META_RING_MASK];
                         bool ready = true;
-                        if (c_maj > 0) {
+                        
+                        if (atomic_load_acquire(&state[i].write_idx) == 0) {
+                            ready = false; // Never steal from a node that hasn't published work yet
+                        } else if (c_maj > 0) {
                             struct ChunkMeta *pm = &g_state->meta_ring[(c_maj - 1) & META_RING_MASK];
                             if (!(atomic_load_acquire(&pm->actual_end) & FLAG_META_READY)) ready = false;
                         }
+                        
                         if (ready && bl > best_ready_bl) { best_ready_bl = bl; ready_target = i; }
                     }
                 }
@@ -1654,14 +1656,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
                 current_p_offset = buf_base_offset + (uint64_t)(p - buf);
 
-                if (lseek(fd_or_memfd, (off_t)current_p_offset, SEEK_SET) < 0) {}
-                ssize_t n = read(fd_or_memfd, buf, chunk_sz);
+                ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
 
                 if (n > 0 && (uint64_t)n > prev_avail) {
                     buf_base_offset = current_p_offset; p = buf; end = buf + n; status = 0; stall_meter >>= 1;
                 } else {
                     if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
-                    else if (n == 0) { status = 1; }
                     
                     if (!atomic_load_acquire(&local_state->ingest_complete)) {
                         struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
@@ -1669,8 +1669,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                             if (pfds[1].revents & POLLIN) atomic_store_release(&local_state->ingest_complete, 1);
                         }
                     }
-                    if (atomic_load_acquire(&local_state->ingest_complete)) status = 1;
-                    else {
+                    if (atomic_load_acquire(&local_state->ingest_complete)) {
+                        // If Ingest is completely finished, and we did not read strictly MORE
+                        // bytes than we already had (which is why we are in this 'else' block),
+                        // it means the file will never grow and we have reached physical EOF.
+                        status = 1; 
+                    } else {
+                        status = 0; // Prevent premature EOF
                         bool starving = (atomic_load_relaxed(&local_state->active_waiters) > 0);
                         UNIFIED_ADAPTIVE_COMMIT(starving);
 
@@ -1921,9 +1926,8 @@ unified_scanner_eof:
             int64_t buf_rel = (int64_t)tail_start_offset - (int64_t)buf_base_offset;
             if (buf_rel >= 0 && buf_rel < (int64_t)chunk_sz) { p = buf + buf_rel; batch_start = tail_start_offset; }
             else {
-                lseek(fd_or_memfd, (off_t)tail_start_offset, SEEK_SET);
                 buf_base_offset = tail_start_offset; batch_start = tail_start_offset;
-                ssize_t n = read(fd_or_memfd, buf, chunk_sz);
+                ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)tail_start_offset);
                 p = buf; end = buf + (n > 0 ? n : 0);
             }
             uint64_t R = 1;
@@ -1941,8 +1945,7 @@ unified_scanner_eof:
                 while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
                     if (p >= end) {
                         uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-                        lseek(fd_or_memfd, (off_t)current_p_offset, SEEK_SET);
-                        ssize_t n = read(fd_or_memfd, buf, chunk_sz);
+                        ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
                         if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
                         else break;
                     }
@@ -1950,8 +1953,7 @@ unified_scanner_eof:
                     if (nl) { lines_found++; p = nl + 1; }
                     else {
                         uint64_t current_p_offset = buf_base_offset + (uint64_t)(end - buf);
-                        lseek(fd_or_memfd, (off_t)current_p_offset, SEEK_SET);
-                        ssize_t n = read(fd_or_memfd, buf, chunk_sz);
+                        ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
                         if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
                         else { p = end; break; }
                     }
@@ -2373,14 +2375,17 @@ static int ring_ack_main(int argc, char **argv) {
 }
 
 // --- MIN-HEAP ORDERING ---
-#define HEAP_MAX 262144
 struct HeapNode {
   uint64_t key;
   struct OrderPacket pkt;
 };
 
-static void heap_push(struct HeapNode *heap, int *sz, uint64_t key, struct OrderPacket pkt) {
-  if (*sz >= HEAP_MAX) return;
+static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap, uint64_t key, struct OrderPacket pkt) {
+  if (*sz >= *cap) {
+    *cap = (*cap) * 2;
+    *heap_ptr = xrealloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
+  }
+  struct HeapNode *heap = *heap_ptr;
   int i = (*sz)++;
   while (i > 0) {
     int p = (i - 1) / 2;
@@ -2441,7 +2446,11 @@ static int ring_order_main(int argc, char **argv) {
 
   bool use_zerocopy = false; struct stat st_out;
   if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
-  struct HeapNode *heap = xmalloc(HEAP_MAX * sizeof(struct HeapNode)); int heap_sz = 0;
+  
+  int heap_cap = 262144;
+  struct HeapNode *heap = xmalloc(heap_cap * sizeof(struct HeapNode)); 
+  int heap_sz = 0;
+  
   uint32_t expected_major = 0; uint32_t expected_minor = 0; struct OrderPacket ops[64]; ssize_t n_read;
 
   while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
@@ -2451,7 +2460,7 @@ static int ring_order_main(int argc, char **argv) {
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
       uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
-      if (!unordered_mode) heap_push(heap, &heap_sz, op_key, *op);
+      if (!unordered_mode) heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
       else {
         if (memfd_mode) {
           off_t offset = (off_t)op->off;
@@ -2694,6 +2703,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
       }
     }
   }
+  while (head) { struct Interval *tmp = head; head = head->next; free(tmp); }
   return EXECUTION_SUCCESS;
 }
 
