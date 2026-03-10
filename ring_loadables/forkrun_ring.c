@@ -1790,7 +1790,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         }
                     }
                     if (atomic_load_acquire(&local_state->ingest_complete)) {
-                        if (n == 0) status = 1;
+                        // FIX: Detect EOF if n is 0 OR we re-read the exact same overlap
+                        if (n == 0 || (n > 0 && (uint64_t)n <= prev_avail)) status = 1;
                     } else {
                         status = 0;
                         bool starving = (atomic_load_relaxed(&local_state->active_waiters) > 0);
