@@ -1,4 +1,4 @@
-// forkrun_ring.c v12.0.0-NUMA (Meta Ring + SIMD Scanner Edition)
+// forkrun_ring.c v13.0.5-UNIFIED (Bugfix: Fallow Delta Punch & EOF Fencepost)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -6,7 +6,7 @@
 // splice/copy_file_range.
 // 2. Lock-Free Meta Ring: Ingest publishes chunk coordinates to GlobalState.
 // 3. Per-Node Indexers: Find physical boundaries instantly in local memory.
-// 4. Local Scanners: Spin on Meta Ring sequence locks and publish batches.
+// 4. Unified Scanners: A single core hot-loop handles both UMA and NUMA execution.
 // 5. Min-Heap Orderer: Resolves extreme skew with O(log N) sorting.
 // ======================================================================================
 
@@ -57,7 +57,6 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim)
     const __m256i d_vec = _mm256_set1_epi8(delim);
 
     while (p + 32 <= end) {
-        // Load 32 bytes and compare against delimiter
         __m256i v = _mm256_loadu_si256((const __m256i*)p);
         __m256i cmp = _mm256_cmpeq_epi8(v, d_vec);
         uint32_t mask = (uint32_t)_mm256_movemask_epi8(cmp);
@@ -69,26 +68,21 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim)
 
         uint32_t hits = (uint32_t)__builtin_popcount(mask);
 
-        // If we haven't found enough yet, subtract and keep blasting
         if (hits < remaining) {
             remaining -= hits;
             p += 32;
             continue;
         }
 
-        // The target delimiter is in this 32-byte chunk.
-        // Drop the lowest bit (remaining - 1) times.
         uint32_t to_drop = (uint32_t)(remaining - 1);
         for (uint32_t i = 0; i < to_drop; i++) {
-            mask &= mask - 1; // blsr: clears the lowest set bit
+            mask &= mask - 1;
         }
 
-        // The lowest set bit is now our exact target index.
         int exact_idx = __builtin_ctz(mask);
-        return p + exact_idx + 1; // +1 to point AFTER the delimiter
+        return p + exact_idx + 1;
     }
 
-    // Scalar tail for the remaining <32 bytes of the safe region
     while (p < end) {
         if (*p == delim) {
             remaining--;
@@ -102,19 +96,69 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim)
 #pragma GCC pop_options
 #endif
 
-// Safe wrapper that falls back cleanly on non-x86 architectures
-//
-// STRUCTURAL NOTE: This SIMD path is strictly a within-buffer fast path.
-// If the target number of delimiters is not found before 'safe_end' (e.g.,
-// because we hit the end of the loaded buffer, or approached the BytesMax
-// limit), this function returns NULL. This intentionally hands control back
-// to the scalar loop, allowing it to gracefully handle buffer refills and
-// boundary arithmetic without duplicating that complex logic here.
+#if defined(__aarch64__)
+#include <arm_neon.h>
+
+static inline char *scan_batch_neon(char *p, char *end, uint64_t target, char delim) {
+    uint64_t remaining = target;
+    uint8x16_t d_vec = vdupq_n_u8(delim);
+
+    while (p + 16 <= end) {
+        uint8x16_t v = vld1q_u8((const uint8_t*)p);
+        uint8x16_t cmp = vceqq_u8(v, d_vec);
+
+        uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 0);
+        uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 1);
+
+        if (lo == 0 && hi == 0) {
+            p += 16;
+            continue;
+        }
+
+        uint32_t hits_lo = __builtin_popcountll(lo) / 8;
+        if (hits_lo < remaining) {
+            remaining -= hits_lo;
+        } else {
+            uint32_t to_drop = (uint32_t)(remaining - 1);
+            for (uint32_t i = 0; i < to_drop; i++) {
+                int idx = __builtin_ctzll(lo) / 8;
+                lo &= ~(0xFFULL << (idx * 8));
+            }
+            int exact_idx = __builtin_ctzll(lo) / 8;
+            return p + exact_idx + 1;
+        }
+
+        uint32_t hits_hi = __builtin_popcountll(hi) / 8;
+        if (hits_hi < remaining) {
+            remaining -= hits_hi;
+        } else {
+            uint32_t to_drop = (uint32_t)(remaining - 1);
+            for (uint32_t i = 0; i < to_drop; i++) {
+                int idx = __builtin_ctzll(hi) / 8;
+                hi &= ~(0xFFULL << (idx * 8));
+            }
+            int exact_idx = __builtin_ctzll(hi) / 8;
+            return p + 8 + exact_idx + 1;
+        }
+        p += 16;
+    }
+
+    while (p < end) {
+        if (*p == delim) {
+            remaining--;
+            if (remaining == 0) return p + 1;
+        }
+        p++;
+    }
+
+    return NULL;
+}
+#endif
+
 static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char delim) {
     if (target == 0 || p >= safe_end) return NULL;
 
 #if defined(__x86_64__) || defined(__i386__)
-    // Cache CPU features to avoid function call overhead on the hot path
     static int avx2_supported = -1;
     if (__builtin_expect(avx2_supported == -1, 0)) {
         __builtin_cpu_init();
@@ -124,6 +168,8 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
     if (avx2_supported) {
         return scan_batch_avx2(p, safe_end, target, delim);
     }
+#elif defined(__aarch64__)
+    return scan_batch_neon(p, safe_end, target, delim);
 #endif
 
     return NULL;
@@ -218,7 +264,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v12.0.0"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.5-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -228,9 +274,9 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define atomic_store_relaxed(ptr, val)                                         \
   __atomic_store_n(ptr, val, __ATOMIC_RELAXED)
 #define atomic_fetch_add(ptr, val)                                             \
-  __atomic_fetch_add(ptr, val, __ATOMIC_ACQ_REL)
+  __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST)
 #define atomic_fetch_sub(ptr, val)                                             \
-  __atomic_fetch_sub(ptr, val, __ATOMIC_ACQ_REL)
+  __atomic_fetch_sub(ptr, val, __ATOMIC_SEQ_CST)
 #define atomic_compare_exchange(ptr, exp, des)                                 \
   __atomic_compare_exchange_n(ptr, exp, des, 0, __ATOMIC_ACQ_REL,              \
                               __ATOMIC_RELAXED)
@@ -281,17 +327,17 @@ static int g_debug = 0;
     "Initialize ring with config")                                             \
   X(ring_destroy, ring_destroy_main, "ring_destroy", "Destroy ring")           \
   X(ring_scanner, ring_scanner_main, "ring_scanner <fd>[spawn_fd]",            \
-    "Run legacy scanner")                                                      \
+    "Run unified legacy scanner")                                              \
   X(ring_numa_ingest, ring_numa_ingest_main,                                   \
-    "ring_numa_ingest <infd> <outfd> <nodes>[ordered]",                       \
+    "ring_numa_ingest <infd> <outfd> <nodes>[ordered]",                        \
     "Run NUMA topological ingest")                                             \
   X(ring_indexer_numa, ring_indexer_numa_main,                                 \
     "ring_indexer_numa <memfd> <node_id>", "Run NUMA chunk indexer")           \
   X(ring_numa_scanner, ring_numa_scanner_main,                                 \
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
-    "Run NUMA localized scanner")                                              \
+    "Run unified NUMA scanner")                                                \
   X(ring_claim, ring_claim_main, "ring_claim[VAR] [FD]", "Claim batch")        \
-  X(ring_worker, ring_worker_main, "ring_worker [inc|dec] [FD]",               \
+  X(ring_worker, ring_worker_main, "ring_worker [inc|dec][FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
@@ -303,7 +349,7 @@ static int g_debug = 0;
     "Reorder output")                                                          \
   X(ring_copy, ring_copy_main, "ring_copy <OUT> <IN>", "Zero-copy ingest")     \
   X(ring_signal, ring_signal_main, "ring_signal <FD>", "Signal eventfd")       \
-  X(lseek, lseek_main, "lseek <FD> <OFF>[WHENCE][VAR]", "Seek fd")            \
+  X(lseek, lseek_main, "lseek <FD> <OFF>[WHENCE][VAR]", "Seek fd")             \
   X(ring_indexer, ring_indexer_main, "ring_indexer", "NUMA Indexer")           \
   X(ring_fetcher, ring_fetcher_main, "ring_fetcher", "NUMA Fetcher")           \
   X(ring_fallow_phys, ring_fallow_phys_main, "ring_fallow_phys",               \
@@ -568,6 +614,7 @@ static __thread uint32_t worker_last_major = 0;
 static __thread uint32_t worker_last_minor = 0;
 
 static int *evfd_data_arr = NULL;
+static int *evfd_indexer_arr = NULL;
 static int *fd_escrow_r = NULL;
 static int *fd_escrow_w = NULL;
 
@@ -576,7 +623,7 @@ static int evfd_eof = -1;
 static int evfd_ingest_data = -1;
 static int evfd_ingest_eof = -1;
 static int evfd_starve = -1;
-static int evfd_chunk_done = -1; // Shallow Queue backpressure semaphore
+static int evfd_chunk_done = -1;
 static int fd_escrow[2] = {-1, -1};
 
 static uint32_t global_num_nodes = 0;
@@ -610,7 +657,6 @@ struct OrderPacket {
   uint64_t len;
 };
 
-// --- META RING DEFINITION ---
 #define FLAG_META_READY (1ULL << 63)
 #define META_RING_SIZE 4096
 #define META_RING_MASK (META_RING_SIZE - 1)
@@ -646,6 +692,7 @@ struct SharedState {
   uint8_t ingest_complete;
 
   uint32_t active_waiters ALIGNED(CACHE_LINE);
+  uint32_t indexer_waiters ALIGNED(CACHE_LINE);
   uint64_t min_idx;
 
   uint64_t write_idx ALIGNED(CACHE_LINE);
@@ -665,6 +712,10 @@ struct SharedState {
   uint8_t fixed_batch;
   uint8_t cfg_return_bytes;
   uint8_t numa_enabled;
+
+  uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
+  uint64_t stats_chunks_local;
+  uint64_t stats_chunks_stolen;
 
   uint32_t stride_ring[RING_SIZE] ALIGNED(4096);
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
@@ -686,7 +737,6 @@ static inline void cleanup_waiter_state() {
   }
 }
 
-// --- INLINE OOM HANDLER ---
 #define OOM_WAIT_FOR_MEMORY(free_b_var, threshold, si_var, mu_var)             \
   do {                                                                         \
     int _oom_sleep_us = 1000;                                                  \
@@ -702,16 +752,76 @@ static inline void cleanup_waiter_state() {
     }                                                                          \
   } while (0)
 
-static inline void check_memory_pressure(uint64_t *total_moved,
-                                         uint64_t *next_check,
-                                         uint64_t oom_threshold) {
+static int get_cgroup_free_memory(uint64_t *free_mem) {
+    char buf[128];
+    int fd = open("/sys/fs/cgroup/memory.max", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            if (strncmp(buf, "max", 3) == 0) return -1;
+            uint64_t max_val = strtoull(buf, NULL, 10);
+            fd = open("/sys/fs/cgroup/memory.current", O_RDONLY);
+            if (fd >= 0) {
+                n = read(fd, buf, sizeof(buf) - 1);
+                close(fd);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    uint64_t cur_val = strtoull(buf, NULL, 10);
+                    *free_mem = (max_val > cur_val) ? (max_val - cur_val) : 0;
+                    return 0;
+                }
+            }
+        }
+    }
+    fd = open("/sys/fs/cgroup/memory/memory.limit_in_bytes", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            uint64_t max_val = strtoull(buf, NULL, 10);
+            if (max_val > 9000000000000000000ULL) return -1;
+            fd = open("/sys/fs/cgroup/memory/memory.usage_in_bytes", O_RDONLY);
+            if (fd >= 0) {
+                n = read(fd, buf, sizeof(buf) - 1);
+                close(fd);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    uint64_t cur_val = strtoull(buf, NULL, 10);
+                    *free_mem = (max_val > cur_val) ? (max_val - cur_val) : 0;
+                    return 0;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+static inline void check_memory_pressure(uint64_t *total_moved, uint64_t *next_check, uint64_t oom_threshold) {
   if (*total_moved > *next_check) {
-    struct sysinfo si;
-    if (sysinfo(&si) == 0) {
-      uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
-      uint64_t free_b = (uint64_t)si.freeram * mu;
+    uint64_t free_b = 0;
+    if (get_cgroup_free_memory(&free_b) == 0) {
       if (free_b < oom_threshold && state) {
-        OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
+        int _oom_sleep_us = 1000;
+        int _oom_waited_us = 0;
+        while (free_b < oom_threshold && _oom_waited_us < 30000000) {
+          usleep(_oom_sleep_us);
+          _oom_waited_us += _oom_sleep_us;
+          get_cgroup_free_memory(&free_b);
+          _oom_sleep_us += _oom_sleep_us >> 1;
+          if (_oom_sleep_us > 100000) _oom_sleep_us = 100000;
+        }
+      }
+    } else {
+      struct sysinfo si;
+      if (sysinfo(&si) == 0) {
+        uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
+        free_b = (uint64_t)si.freeram * mu;
+        if (free_b < oom_threshold && state) {
+          OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
+        }
       }
     }
     *next_check += 16 * 1024 * 1024;
@@ -747,14 +857,11 @@ static inline void check_memory_pressure(uint64_t *total_moved,
 #define M_B_ALL (M_B_A | M_B_B)
 
 static uint64_t get_v_def(const char *type, bool stdin_mode) {
-  if (!strcmp(type, "workers"))
-    return sysconf(_SC_NPROCESSORS_ONLN);
-  if (!strcmp(type, "lines"))
-    return 4096;
+  if (!strcmp(type, "workers")) return sysconf(_SC_NPROCESSORS_ONLN);
+  if (!strcmp(type, "lines")) return 4096;
   if (!strcmp(type, "bytes")) {
     uint64_t l2 = get_cache_bytes();
-    if (stdin_mode)
-      return (l2 < (1ULL << 19)) ? l2 : (1ULL << 19);
+    if (stdin_mode) return (l2 < (1ULL << 19)) ? l2 : (1ULL << 19);
     uint64_t arg = get_arg_max_bytes();
     return (l2 < arg) ? l2 : arg;
   }
@@ -762,16 +869,13 @@ static uint64_t get_v_def(const char *type, bool stdin_mode) {
 }
 
 static uint64_t get_v_max(const char *type, bool stdin_mode) {
-  if (!strcmp(type, "workers"))
-    return sysconf(_SC_NPROCESSORS_ONLN) * 2;
-  if (!strcmp(type, "lines"))
-    return 65535;
+  if (!strcmp(type, "workers")) return sysconf(_SC_NPROCESSORS_ONLN) * 2;
+  if (!strcmp(type, "lines")) return 65535;
   if (!strcmp(type, "bytes")) {
     if (stdin_mode) {
       uint64_t l2 = get_cache_bytes();
       return (l2 < (1ULL << 20)) ? l2 : (1ULL << 20);
-    } else
-      return get_arg_max_bytes();
+    } else return get_arg_max_bytes();
   }
   return 1;
 }
@@ -786,45 +890,25 @@ static void apply_config(char type, char sub, const char *arg) {
   uint64_t u_val = 0;
 
   if (strcmp(arg, "x") == 0) {
-    if (type == 1) {
-      clear_mask |= M_L_ALL;
-      set_mask |= M_BMODE;
-    } else if (type == 2) {
-      clear_mask |= (M_B_ALL | M_BMODE);
-    }
+    if (type == 1) { clear_mask |= M_L_ALL; set_mask |= M_BMODE; }
+    else if (type == 2) { clear_mask |= (M_B_ALL | M_BMODE); }
   } else {
-    if (arg[0] == '\0')
-      val_code = S_DEF;
-    else if (strcmp(arg, "0") == 0)
-      val_code = S_DEF;
-    else if (strcmp(arg, "-0") == 0)
-      val_code = S_MIN;
-    else if (strcmp(arg, "+0") == 0)
-      val_code = S_MAX;
-    else if (strcmp(arg, "-1") == 0)
-      val_code = S_MAX;
+    if (arg[0] == '\0') val_code = S_DEF;
+    else if (strcmp(arg, "0") == 0) val_code = S_DEF;
+    else if (strcmp(arg, "-0") == 0) val_code = S_MIN;
+    else if (strcmp(arg, "+0") == 0) val_code = S_MAX;
+    else if (strcmp(arg, "-1") == 0) val_code = S_MAX;
     else {
       val_code = S_USER;
       u_val = (uint64_t)atoll(arg);
-      if (u_val < 1)
-        u_val = 1;
+      if (u_val < 1) u_val = 1;
     }
 
-    if (type == 1) {
-      cfg_state &= ~M_BMODE;
-      cfg_state &= ~M_B_ALL;
-    }
-    if (type == 2) {
-      cfg_state |= M_BMODE;
-      cfg_state |= M_STDIN;
-      cfg_state &= ~M_L_ALL;
-    }
-    if (type == 0)
-      clear_mask |= M_W_ALL;
-    if (type == 1)
-      clear_mask |= M_L_ALL;
-    if (type == 2)
-      clear_mask |= M_B_ALL;
+    if (type == 1) { cfg_state &= ~M_BMODE; cfg_state &= ~M_B_ALL; }
+    if (type == 2) { cfg_state |= M_BMODE; cfg_state |= M_STDIN; cfg_state &= ~M_L_ALL; }
+    if (type == 0) clear_mask |= M_W_ALL;
+    if (type == 1) clear_mask |= M_L_ALL;
+    if (type == 2) clear_mask |= M_B_ALL;
 
 #define APPLY_SLOT(idx_u, sh)                                                  \
   do {                                                                         \
@@ -837,34 +921,16 @@ static void apply_config(char type, char sub, const char *arg) {
   } while (0)
 
     if (type == 0) {
-      if (sub == 0 || sub == 1) {
-        cfg_state &= ~M_W_A;
-        APPLY_SLOT(0, SH_W_A);
-      }
-      if (sub == 0 || sub == 2) {
-        cfg_state &= ~M_W_B;
-        APPLY_SLOT(1, SH_W_B);
-      }
+      if (sub == 0 || sub == 1) { cfg_state &= ~M_W_A; APPLY_SLOT(0, SH_W_A); }
+      if (sub == 0 || sub == 2) { cfg_state &= ~M_W_B; APPLY_SLOT(1, SH_W_B); }
     }
     if (type == 1) {
-      if (sub == 0 || sub == 1) {
-        cfg_state &= ~M_L_A;
-        APPLY_SLOT(2, SH_L_A);
-      }
-      if (sub == 0 || sub == 2) {
-        cfg_state &= ~M_L_B;
-        APPLY_SLOT(3, SH_L_B);
-      }
+      if (sub == 0 || sub == 1) { cfg_state &= ~M_L_A; APPLY_SLOT(2, SH_L_A); }
+      if (sub == 0 || sub == 2) { cfg_state &= ~M_L_B; APPLY_SLOT(3, SH_L_B); }
     }
     if (type == 2) {
-      if (sub == 0 || sub == 1) {
-        cfg_state &= ~M_B_A;
-        APPLY_SLOT(4, SH_B_A);
-      }
-      if (sub == 0 || sub == 2) {
-        cfg_state &= ~M_B_B;
-        APPLY_SLOT(5, SH_B_B);
-      }
+      if (sub == 0 || sub == 1) { cfg_state &= ~M_B_A; APPLY_SLOT(4, SH_B_A); }
+      if (sub == 0 || sub == 2) { cfg_state &= ~M_B_B; APPLY_SLOT(5, SH_B_B); }
     }
   }
   cfg_state |= set_mask;
@@ -879,33 +945,28 @@ static int ring_init_main(int argc, char **argv) {
   if (dbg_env && (strcmp(dbg_env, "1") == 0 || strcmp(dbg_env, "true") == 0)) {
     g_debug = 1;
     fprintf(stderr, "forkrun [DEBUG] Enabled\n");
-  } else
-    g_debug = 0;
+  } else g_debug = 0;
 
   global_num_nodes = 0;
   for (int i = 1; i < argc; i++) {
     if (strncmp(argv[i], "--numa-map=", 11) == 0) {
       global_num_nodes = 1;
       for (const char *c = argv[i] + 11; *c; c++)
-        if (*c == ',')
-          global_num_nodes++;
+        if (*c == ',') global_num_nodes++;
 
-      if (g_logical_to_phys_map)
-        xfree(g_logical_to_phys_map);
+      if (g_logical_to_phys_map) xfree(g_logical_to_phys_map);
       g_logical_to_phys_map = xmalloc(global_num_nodes * sizeof(uint32_t));
       const char *p = argv[i] + 11;
       for (uint32_t j = 0; j < global_num_nodes; j++) {
         g_logical_to_phys_map[j] = (uint32_t)strtoul(p, (char **)&p, 10);
-        if (*p == ',')
-          p++;
+        if (*p == ',') p++;
       }
     }
   }
 
   if (global_num_nodes == 0 || g_logical_to_phys_map == NULL) {
     global_num_nodes = 1;
-    if (g_logical_to_phys_map)
-      xfree(g_logical_to_phys_map);
+    if (g_logical_to_phys_map) xfree(g_logical_to_phys_map);
     g_logical_to_phys_map = xmalloc(sizeof(uint32_t));
     g_logical_to_phys_map[0] = 0;
   }
@@ -916,8 +977,7 @@ static int ring_init_main(int argc, char **argv) {
 
   if (g_state != NULL) {
     if (global_num_nodes != allocated_num_nodes && global_num_nodes != 0) {
-      builtin_error(
-          "forkrun: cannot change --nodes without calling ring_destroy first");
+      builtin_error("forkrun: cannot change --nodes without calling ring_destroy first");
       return EXECUTION_FAILURE;
     }
     atomic_store_relaxed(&g_state->ingest_publish_idx, 0);
@@ -934,22 +994,22 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].fallow_active, 0);
       atomic_store_relaxed(&state[n].tail_idx, 0);
       atomic_store_relaxed(&state[n].scanner_finished, 0);
+      atomic_store_relaxed(&state[n].stats_chunks_assigned, 0);
+      atomic_store_relaxed(&state[n].stats_chunks_local, 0);
+      atomic_store_relaxed(&state[n].stats_chunks_stolen, 0);
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
         char dump[1024];
-        while (read(fd_escrow_r[n], dump, sizeof(dump)) > 0) {
-        }
+        while (read(fd_escrow_r[n], dump, sizeof(dump)) > 0) {}
       }
     }
     return EXECUTION_SUCCESS;
   }
 
   allocated_num_nodes = global_num_nodes;
-  size_t total_size = sizeof(struct GlobalState) +
-                      sizeof(struct SharedState) * global_num_nodes;
+  size_t total_size = sizeof(struct GlobalState) + sizeof(struct SharedState) * global_num_nodes;
   total_size = (total_size + 4095ULL) & ~4095ULL;
-  void *p = mmap(NULL, total_size, PROT_READ | PROT_WRITE,
-                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  void *p = mmap(NULL, total_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   if (p == MAP_FAILED) {
     builtin_error("mmap: %s", strerror(errno));
     return EXECUTION_FAILURE;
@@ -963,131 +1023,82 @@ static int ring_init_main(int argc, char **argv) {
   cfg_state = 0x202121;
   int stdin_explicit = -1;
   const char *out_array_name = NULL;
-
   uint64_t parsed_limit = 0;
   int64_t parsed_timeout = -1;
   uint8_t parsed_return_bytes = 0;
 
   for (int i = 1; i < argc; i++) {
     const char *arg = argv[i];
-    if (strncmp(arg, "--workers=", 10) == 0)
-      apply_config(0, 0, arg + 10);
-    else if (strncmp(arg, "--workers0=", 11) == 0)
-      apply_config(0, 1, arg + 11);
-    else if (strncmp(arg, "--workers-max=", 14) == 0)
-      apply_config(0, 2, arg + 14);
-    else if (strncmp(arg, "--lines=", 8) == 0)
-      apply_config(1, 0, arg + 8);
-    else if (strncmp(arg, "--lines0=", 9) == 0)
-      apply_config(1, 1, arg + 9);
-    else if (strncmp(arg, "--lines-max=", 12) == 0)
-      apply_config(1, 2, arg + 12);
-    else if (strncmp(arg, "--bytes=", 8) == 0)
-      apply_config(2, 0, arg + 8);
-    else if (strncmp(arg, "--bytes0=", 9) == 0)
-      apply_config(2, 1, arg + 9);
-    else if (strncmp(arg, "--bytes-max=", 12) == 0)
-      apply_config(2, 2, arg + 12);
-    else if (strncmp(arg, "--limit=", 8) == 0)
-      parsed_limit = (uint64_t)atoll(arg + 8);
-    else if (strncmp(arg, "--timeout=", 10) == 0)
-      parsed_timeout = atoll(arg + 10);
-    else if (strncmp(arg, "--greedy", 8) == 0)
-      parsed_timeout = 0;
-    else if (strncmp(arg, "--return-bytes", 14) == 0)
-      parsed_return_bytes = 1;
-    else if (strncmp(arg, "--out=", 6) == 0)
-      out_array_name = arg + 6;
-    else if (strncmp(arg, "--stdin", 7) == 0)
-      stdin_explicit = 1;
-    else if (strncmp(arg, "--no-stdin", 10) == 0)
-      stdin_explicit = 0;
-    else if (strncmp(arg, "--nodes=", 8) != 0 &&
-             strncmp(arg, "--numa-map=", 11) != 0 && arg[0] != '-')
+    if (strncmp(arg, "--workers=", 10) == 0) apply_config(0, 0, arg + 10);
+    else if (strncmp(arg, "--workers0=", 11) == 0) apply_config(0, 1, arg + 11);
+    else if (strncmp(arg, "--workers-max=", 14) == 0) apply_config(0, 2, arg + 14);
+    else if (strncmp(arg, "--lines=", 8) == 0) apply_config(1, 0, arg + 8);
+    else if (strncmp(arg, "--lines0=", 9) == 0) apply_config(1, 1, arg + 9);
+    else if (strncmp(arg, "--lines-max=", 12) == 0) apply_config(1, 2, arg + 12);
+    else if (strncmp(arg, "--bytes=", 8) == 0) apply_config(2, 0, arg + 8);
+    else if (strncmp(arg, "--bytes0=", 9) == 0) apply_config(2, 1, arg + 9);
+    else if (strncmp(arg, "--bytes-max=", 12) == 0) apply_config(2, 2, arg + 12);
+    else if (strncmp(arg, "--limit=", 8) == 0) parsed_limit = (uint64_t)atoll(arg + 8);
+    else if (strncmp(arg, "--timeout=", 10) == 0) parsed_timeout = atoll(arg + 10);
+    else if (strncmp(arg, "--greedy", 8) == 0) parsed_timeout = 0;
+    else if (strncmp(arg, "--return-bytes", 14) == 0) parsed_return_bytes = 1;
+    else if (strncmp(arg, "--out=", 6) == 0) out_array_name = arg + 6;
+    else if (strncmp(arg, "--stdin", 7) == 0) stdin_explicit = 1;
+    else if (strncmp(arg, "--no-stdin", 10) == 0) stdin_explicit = 0;
+    else if (strncmp(arg, "--nodes=", 8) != 0 && strncmp(arg, "--numa-map=", 11) != 0 && arg[0] != '-')
       out_array_name = arg;
   }
 
   if (stdin_explicit != -1) {
-    if (stdin_explicit)
-      cfg_state |= M_STDIN;
-    else
-      cfg_state &= ~M_STDIN;
+    if (stdin_explicit) cfg_state |= M_STDIN;
+    else cfg_state &= ~M_STDIN;
   } else {
-    if (cfg_state & M_BMODE)
-      cfg_state |= M_STDIN;
-    else
-      cfg_state &= ~M_STDIN;
+    if (cfg_state & M_BMODE) cfg_state |= M_STDIN;
+    else cfg_state &= ~M_STDIN;
   }
 
   bool stdin_mode = (cfg_state & M_STDIN);
   bool byte_mode = (cfg_state & M_BMODE);
 
   uint64_t vals[6], defs[6], maxs[6];
-  defs[0] = get_v_def("workers", false);
-  maxs[0] = get_v_max("workers", false);
-  defs[1] = defs[0];
-  maxs[1] = maxs[0];
-  defs[2] = get_v_def("lines", false);
-  maxs[2] = get_v_max("lines", false);
-  defs[3] = defs[2];
-  maxs[3] = maxs[2];
-  defs[4] = get_v_def("bytes", stdin_mode);
-  maxs[4] = get_v_max("bytes", stdin_mode);
-  defs[5] = defs[4];
-  maxs[5] = maxs[4];
+  defs[0] = get_v_def("workers", false); maxs[0] = get_v_max("workers", false);
+  defs[1] = defs[0]; maxs[1] = maxs[0];
+  defs[2] = get_v_def("lines", false); maxs[2] = get_v_max("lines", false);
+  defs[3] = defs[2]; maxs[3] = maxs[2];
+  defs[4] = get_v_def("bytes", stdin_mode); maxs[4] = get_v_max("bytes", stdin_mode);
+  defs[5] = defs[4]; maxs[5] = maxs[4];
 
   for (int i = 0; i < 6; i++) {
     int code = (cfg_state >> (i * 4)) & 0xF;
-    if (code == S_USER)
-      vals[i] = user_vals[i];
-    else if (code == S_MIN)
-      vals[i] = 1;
-    else if (code == S_DEF)
-      vals[i] = defs[i];
-    else if (code == S_MAX)
-      vals[i] = maxs[i];
-    else if (code == S_DIS)
-      vals[i] = 0;
-    else
-      vals[i] = 1;
+    if (code == S_USER) vals[i] = user_vals[i];
+    else if (code == S_MIN) vals[i] = 1;
+    else if (code == S_DEF) vals[i] = defs[i];
+    else if (code == S_MAX) vals[i] = maxs[i];
+    else if (code == S_DIS) vals[i] = 0;
+    else vals[i] = 1;
   }
 
-  if (vals[0] > maxs[0])
-    vals[0] = maxs[0];
-  if (vals[1] > maxs[1])
-    vals[1] = maxs[1];
-  if (vals[0] > vals[1])
-    vals[0] = vals[1];
-  if (vals[0] == 0)
-    vals[0] = 1;
-
-  if (vals[2] > maxs[2])
-    vals[2] = maxs[2];
-  if (vals[3] > maxs[3])
-    vals[3] = maxs[3];
-  if (vals[2] > vals[3])
-    vals[2] = vals[3];
-
-  if (vals[4] > maxs[4])
-    vals[4] = maxs[4];
-  if (vals[5] > maxs[5])
-    vals[5] = maxs[5];
-  if (vals[4] > vals[5])
-    vals[4] = vals[5];
+  if (vals[0] > maxs[0]) vals[0] = maxs[0];
+  if (vals[1] > maxs[1]) vals[1] = maxs[1];
+  if (vals[0] > vals[1]) vals[0] = vals[1];
+  if (vals[0] == 0) vals[0] = 1;
+  if (vals[2] > maxs[2]) vals[2] = maxs[2];
+  if (vals[3] > maxs[3]) vals[3] = maxs[3];
+  if (vals[2] > vals[3]) vals[2] = vals[3];
+  if (vals[4] > maxs[4]) vals[4] = maxs[4];
+  if (vals[5] > maxs[5]) vals[5] = maxs[5];
+  if (vals[4] > vals[5]) vals[4] = vals[5];
 
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     uint64_t w_start_balanced = vals[0] / global_num_nodes;
-    if (w_start_balanced < 1)
-      w_start_balanced = 1;
+    if (w_start_balanced < 1) w_start_balanced = 1;
     uint64_t w_max_balanced = vals[1] / global_num_nodes;
-    if (w_max_balanced < 1)
-      w_max_balanced = 1;
+    if (w_max_balanced < 1) w_max_balanced = 1;
 
     state[n].cfg_w_start = w_start_balanced;
     state[n].cfg_w_max = w_max_balanced;
     state[n].mode_byte = byte_mode ? 1 : 0;
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
-
     state[n].cfg_limit = parsed_limit;
     state[n].cfg_timeout_us = parsed_timeout;
     state[n].cfg_return_bytes = parsed_return_bytes;
@@ -1097,82 +1108,64 @@ static int ring_init_main(int argc, char **argv) {
       state[n].cfg_batch_max = vals[5];
       state[n].cfg_chunk_bytes = vals[5];
       state[n].cfg_line_max = vals[5];
-      if (state[n].cfg_return_bytes == 0)
-        state[n].cfg_return_bytes = 1;
+      if (state[n].cfg_return_bytes == 0) state[n].cfg_return_bytes = 1;
     } else {
       state[n].cfg_batch_start = vals[2];
       state[n].cfg_batch_max = vals[3];
       int bb_code = (cfg_state >> SH_B_B) & 0xF;
-      if (bb_code != S_DIS)
-        state[n].cfg_line_max = vals[5];
-      else
-        state[n].cfg_line_max = maxs[4];
+      if (bb_code != S_DIS) state[n].cfg_line_max = vals[5];
+      else state[n].cfg_line_max = maxs[4];
     }
 
     state[n].fixed_workers = (state[n].cfg_w_start == state[n].cfg_w_max);
     state[n].fixed_batch = (state[n].cfg_batch_start == state[n].cfg_batch_max);
 
-    if (byte_mode)
-      atomic_store_relaxed(&state[n].signed_batch_size, 1);
-    else
-      atomic_store_relaxed(&state[n].signed_batch_size,
-                           (int64_t)state[n].cfg_batch_start);
+    if (byte_mode) atomic_store_relaxed(&state[n].signed_batch_size, 1);
+    else atomic_store_relaxed(&state[n].signed_batch_size, (int64_t)state[n].cfg_batch_start);
   }
 
   evfd_data_arr = xmalloc(global_num_nodes * sizeof(int));
+  evfd_indexer_arr = xmalloc(global_num_nodes * sizeof(int));
   fd_escrow_r = xmalloc(global_num_nodes * sizeof(int));
   fd_escrow_w = xmalloc(global_num_nodes * sizeof(int));
 
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     evfd_data_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+    evfd_indexer_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     int pfd[2];
     if (pipe(pfd) == 0) {
-      fcntl(pfd[0], F_SETFL, O_NONBLOCK);
-      fcntl(pfd[1], F_SETFL, O_NONBLOCK);
-      fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
-      fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+      fcntl(pfd[0], F_SETFL, O_NONBLOCK); fcntl(pfd[1], F_SETFL, O_NONBLOCK);
+      fcntl(pfd[0], F_SETFD, FD_CLOEXEC); fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
       fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
-      fd_escrow_r[n] = pfd[0];
-      fd_escrow_w[n] = pfd[1];
+      fd_escrow_r[n] = pfd[0]; fd_escrow_w[n] = pfd[1];
     } else {
-      fd_escrow_r[n] = -1;
-      fd_escrow_w[n] = -1;
+      fd_escrow_r[n] = -1; fd_escrow_w[n] = -1;
     }
   }
 
+  // FIX: Restore EFD_SEMAPHORE to EOF flags to prevent EventFD signal stealing.
   evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); // UMA legacy keeps non-semaphore
   evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
   evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
 
   evfd_data = evfd_data_arr[0];
-  fd_escrow[0] = fd_escrow_r[0];
-  fd_escrow[1] = fd_escrow_w[0];
+  fd_escrow[0] = fd_escrow_r[0]; fd_escrow[1] = fd_escrow_w[0];
 
   char buf[32];
-  snprintf(buf, sizeof(buf), "%d", evfd_data_arr[0]);
-  bind_variable("EVFD_RING_DATA", buf, 0);
-  snprintf(buf, sizeof(buf), "%d", evfd_eof);
-  bind_variable("EVFD_RING_EOF", buf, 0);
-  snprintf(buf, sizeof(buf), "%d", evfd_ingest_data);
-  bind_variable("EVFD_RING_INGEST_DATA", buf, 0);
-  snprintf(buf, sizeof(buf), "%d", evfd_ingest_eof);
-  bind_variable("EVFD_RING_INGEST_EOF", buf, 0);
-  snprintf(buf, sizeof(buf), "%d", evfd_starve);
-  bind_variable("EVFD_RING_STARVE", buf, 0);
+  snprintf(buf, sizeof(buf), "%d", evfd_data_arr[0]); bind_variable("EVFD_RING_DATA", buf, 0);
+  snprintf(buf, sizeof(buf), "%d", evfd_eof); bind_variable("EVFD_RING_EOF", buf, 0);
+  snprintf(buf, sizeof(buf), "%d", evfd_ingest_data); bind_variable("EVFD_RING_INGEST_DATA", buf, 0);
+  snprintf(buf, sizeof(buf), "%d", evfd_ingest_eof); bind_variable("EVFD_RING_INGEST_EOF", buf, 0);
+  snprintf(buf, sizeof(buf), "%d", evfd_starve); bind_variable("EVFD_RING_STARVE", buf, 0);
 
   if (out_array_name) {
     SHELL_VAR *v = find_variable(out_array_name);
-    if (v && !array_p(v)) {
-      unbind_variable(out_array_name);
-      v = NULL;
-    }
-    if (!v)
-      v = make_new_array_variable(out_array_name);
-    if (!v)
-      return EXECUTION_FAILURE;
+    if (v && !array_p(v)) { unbind_variable(out_array_name); v = NULL; }
+    if (!v) v = make_new_array_variable(out_array_name);
+    if (!v) return EXECUTION_FAILURE;
 
     int *created_fds = xmalloc(sizeof(int) * vals[1]);
     int created_cnt = 0;
@@ -1181,183 +1174,106 @@ static int ring_init_main(int argc, char **argv) {
       int fd = xcreate_anon_file("forkrun_out");
       if (fd >= 0) {
         created_fds[created_cnt++] = fd;
-        char val[32];
-        snprintf(val, sizeof(val), "%d", fd);
+        char val[32]; snprintf(val, sizeof(val), "%d", fd);
         bind_array_element(v, i, val, 0);
-      } else {
-        failure = 1;
-        break;
-      }
+      } else { failure = 1; break; }
     }
     if (failure) {
-      for (int k = 0; k < created_cnt; k++)
-        close(created_fds[k]);
-      xfree(created_fds);
-      return EXECUTION_FAILURE;
+      for (int k = 0; k < created_cnt; k++) close(created_fds[k]);
+      xfree(created_fds); return EXECUTION_FAILURE;
     }
     xfree(created_fds);
   }
 
-  int probe_fd[2];
-  int pipe_cap = 65536;
+  int probe_fd[2]; int pipe_cap = 65536;
   if (pipe(probe_fd) == 0) {
     int ret = fcntl(probe_fd[1], F_SETPIPE_SZ, 1048576);
-    if (ret >= 0)
-      pipe_cap = ret;
-    else {
-      ret = fcntl(probe_fd[1], F_GETPIPE_SZ);
-      if (ret > 0)
-        pipe_cap = ret;
-    }
-    close(probe_fd[0]);
-    close(probe_fd[1]);
+    if (ret >= 0) pipe_cap = ret;
+    else { ret = fcntl(probe_fd[1], F_GETPIPE_SZ); if (ret > 0) pipe_cap = ret; }
+    close(probe_fd[0]); close(probe_fd[1]);
   }
 
   char var_buf[64];
-  snprintf(var_buf, sizeof(var_buf), "%d", pipe_cap);
-  bind_variable("RING_PIPE_CAPACITY", var_buf, 0);
-  snprintf(var_buf, sizeof(var_buf), "%lu", state[0].cfg_line_max);
-  bind_variable("RING_BYTES_MAX", var_buf, 0);
+  snprintf(var_buf, sizeof(var_buf), "%d", pipe_cap); bind_variable("RING_PIPE_CAPACITY", var_buf, 0);
+  snprintf(var_buf, sizeof(var_buf), "%lu", state[0].cfg_line_max); bind_variable("RING_BYTES_MAX", var_buf, 0);
 
   return EXECUTION_SUCCESS;
 }
 
 static int ring_destroy_main(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
+  (void)argc; (void)argv;
   if (g_state) {
-    size_t total_size = sizeof(struct GlobalState) +
-                        sizeof(struct SharedState) * allocated_num_nodes;
+    size_t total_size = sizeof(struct GlobalState) + sizeof(struct SharedState) * allocated_num_nodes;
     total_size = (total_size + 4095ULL) & ~4095ULL;
-    munmap(g_state, total_size);
-    g_state = NULL;
-    state = NULL;
+    munmap(g_state, total_size); g_state = NULL; state = NULL;
   }
   if (evfd_data_arr) {
     for (uint32_t n = 0; n < allocated_num_nodes; n++) {
-      if (evfd_data_arr[n] >= 0)
-        close(evfd_data_arr[n]);
-      if (fd_escrow_r && fd_escrow_r[n] >= 0)
-        close(fd_escrow_r[n]);
-      if (fd_escrow_w && fd_escrow_w[n] >= 0)
-        close(fd_escrow_w[n]);
+      if (evfd_data_arr[n] >= 0) close(evfd_data_arr[n]);
+      if (evfd_indexer_arr && evfd_indexer_arr[n] >= 0) close(evfd_indexer_arr[n]);
+      if (fd_escrow_r && fd_escrow_r[n] >= 0) close(fd_escrow_r[n]);
+      if (fd_escrow_w && fd_escrow_w[n] >= 0) close(fd_escrow_w[n]);
     }
-    xfree(evfd_data_arr);
-    evfd_data_arr = NULL;
-    xfree(fd_escrow_r);
-    fd_escrow_r = NULL;
-    xfree(fd_escrow_w);
-    fd_escrow_w = NULL;
+    xfree(evfd_data_arr); evfd_data_arr = NULL;
+    if (evfd_indexer_arr) { xfree(evfd_indexer_arr); evfd_indexer_arr = NULL; }
+    xfree(fd_escrow_r); fd_escrow_r = NULL;
+    xfree(fd_escrow_w); fd_escrow_w = NULL;
   }
-  if (g_logical_to_phys_map) {
-    xfree(g_logical_to_phys_map);
-    g_logical_to_phys_map = NULL;
-  }
-  if (evfd_eof >= 0) {
-    close(evfd_eof);
-    evfd_eof = -1;
-  }
-  if (evfd_ingest_data >= 0) {
-    close(evfd_ingest_data);
-    evfd_ingest_data = -1;
-  }
-  if (evfd_ingest_eof >= 0) {
-    close(evfd_ingest_eof);
-    evfd_ingest_eof = -1;
-  }
-  if (evfd_starve >= 0) {
-    close(evfd_starve);
-    evfd_starve = -1;
-  }
-  if (evfd_chunk_done >= 0) {
-    close(evfd_chunk_done);
-    evfd_chunk_done = -1;
-  }
-  unbind_variable("EVFD_RING_DATA");
-  unbind_variable("EVFD_RING_EOF");
-  unbind_variable("EVFD_RING_INGEST_DATA");
-  unbind_variable("EVFD_RING_INGEST_EOF");
+  if (g_logical_to_phys_map) { xfree(g_logical_to_phys_map); g_logical_to_phys_map = NULL; }
+  if (evfd_eof >= 0) { close(evfd_eof); evfd_eof = -1; }
+  if (evfd_ingest_data >= 0) { close(evfd_ingest_data); evfd_ingest_data = -1; }
+  if (evfd_ingest_eof >= 0) { close(evfd_ingest_eof); evfd_ingest_eof = -1; }
+  if (evfd_starve >= 0) { close(evfd_starve); evfd_starve = -1; }
+  if (evfd_chunk_done >= 0) { close(evfd_chunk_done); evfd_chunk_done = -1; }
+  unbind_variable("EVFD_RING_DATA"); unbind_variable("EVFD_RING_EOF");
+  unbind_variable("EVFD_RING_INGEST_DATA"); unbind_variable("EVFD_RING_INGEST_EOF");
   unbind_variable("EVFD_RING_STARVE");
   return EXECUTION_SUCCESS;
 }
 
 // ==============================================================================
-// 4. NUMA INGEST & SCANNERS (META RING ARCHITECTURE)
+// 4. NUMA INGEST
 // ==============================================================================
 
 static int ring_numa_ingest_main(int argc, char **argv) {
-  if (argc < 4)
-    return EXECUTION_FAILURE;
-  int infd = atoi(argv[1]);
-  int outfd = atoi(argv[2]);
-  int num_nodes = atoi(argv[3]);
+  if (argc < 4) return EXECUTION_FAILURE;
+  int infd = atoi(argv[1]); int outfd = atoi(argv[2]); int num_nodes = atoi(argv[3]);
   bool ordered_mode = (argc > 4 && strcmp(argv[4], "1") == 0);
-
-  if (num_nodes < 1)
-    num_nodes = 1;
-  if (num_nodes > 1024)
-    num_nodes = 1024;
+  if (num_nodes < 1) num_nodes = 1;
+  if (num_nodes > 1024) num_nodes = 1024;
 
   uint64_t chunk_size = 4 * 1024 * 1024ULL;
-  uint64_t max_chunk =
-      ordered_mode ? (16ULL * 1024 * 1024) : (128ULL * 1024 * 1024);
-  uint64_t current_offset = 0;
-  uint32_t current_major = 0;
-  int consecutive_full = 0;
-  int last_target = -1;
+  uint64_t max_chunk = ordered_mode ? (16ULL * 1024 * 1024) : (128ULL * 1024 * 1024);
+  uint64_t current_offset = 0; uint32_t current_major = 0;
+  int consecutive_full = 0; int last_target = -1;
 
   unsigned long test_mask = 1UL;
-  bool numa_enabled =
-      (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
-  if (numa_enabled) {
-    syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
-  } else {
-    if (g_debug && num_nodes > 1)
-      fprintf(stderr, "forkrun [DEBUG] NUMA unavailable, running multi-ring "
-                      "software partition over UMA\n");
-  }
+  bool numa_enabled = (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
+  if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
 
 #define BITS_PER_LONG (sizeof(unsigned long) * 8)
   uint32_t max_phys_id = 0;
   if (g_logical_to_phys_map) {
-    for (int i = 0; i < num_nodes; i++) {
-      if (g_logical_to_phys_map[i] > max_phys_id)
-        max_phys_id = g_logical_to_phys_map[i];
-    }
+    for (int i = 0; i < num_nodes; i++)
+      if (g_logical_to_phys_map[i] > max_phys_id) max_phys_id = g_logical_to_phys_map[i];
   }
   int mask_words = (max_phys_id / BITS_PER_LONG) + 1;
   unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
   int fallback_pipe[2] = {-1, -1};
 
-  while (1) {
-    // Event-Driven Shallow Queue Backpressure
-    if (current_major > 0) {
-      uint64_t min_consumed = ~(uint64_t)0;
-      for (int i = 0; i < num_nodes; i++) {
-        uint64_t t = atomic_load_acquire(&state[i].chunk_queue_tail);
-        if (t < min_consumed)
-          min_consumed = t;
-      }
-      
-      uint64_t max_ahead = num_nodes * 3;
-      if (max_ahead < 4) max_ahead = 4;
-      
-      while (current_major - min_consumed >= max_ahead) {
-        struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
-        if (poll(&pfd, 1, 100) > 0) {
-            uint64_t v;
-            if (read(evfd_chunk_done, &v, 8)) {}; // Consume the ticket
-        }
-        
-        min_consumed = ~(uint64_t)0;
-        for (int i = 0; i < num_nodes; i++) {
-          uint64_t t = atomic_load_acquire(&state[i].chunk_queue_tail);
-          if (t < min_consumed)
-            min_consumed = t;
-        }
-      }
-    }
+  // Cache which transfer method works so we don't re-probe every chunk.
+  // For <file inputs, copy_file_range/sendfile/direct-splice all fail against
+  // a memfd, so we fall through to double-splice every time — paying 3 failed
+  // syscalls per chunk.  For pipe inputs, lseek fails so we land directly on
+  // direct-splice.  Caching eliminates the per-chunk probe cost entirely.
+  enum { TM_UNKNOWN=0, TM_COPY_FILE_RANGE, TM_SENDFILE, TM_SPLICE_DIRECT, TM_SPLICE_PIPE } transfer_method = TM_UNKNOWN;
+  uint64_t one = 1;
 
+  for (int i = 0; i < num_nodes * 2; i++) {     // give 2 free credits per node at start
+    SYS_CHK(write(evfd_chunk_done, &one, 8));
+  }
+
+  while (1) {
     int target_node = 0;
     int min_backlog = INT_MAX;
     for (int i = 0; i < num_nodes; i++) {
@@ -1365,264 +1281,302 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       uint64_t h = atomic_load_relaxed(&state[check].chunk_queue_head);
       uint64_t t = atomic_load_relaxed(&state[check].chunk_queue_tail);
       int bl = (int)(h - t);
-      if (bl < min_backlog) {
-        min_backlog = bl;
-        target_node = check;
+      if (bl < min_backlog) { min_backlog = bl; target_node = check; }
+    }
+
+    // Localized Event-Driven Shallow Queue Backpressure
+    while (1) {
+      uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
+      uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
+      if ((int64_t)(h - t) < 4) break;
+
+      struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
+      if (poll(&pfd, 1, 100) > 0) {
+          uint64_t v;
+          if (read(evfd_chunk_done, &v, 8)) {};
       }
     }
 
     if (numa_enabled && num_nodes > 1) {
-      uint32_t target_phys =
-          g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
+      uint32_t target_phys = g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
       if (target_phys < mask_words * BITS_PER_LONG) {
         memset(nodemask, 0, mask_words * sizeof(unsigned long));
-        nodemask[target_phys / BITS_PER_LONG] |=
-            (1UL << (target_phys % BITS_PER_LONG));
-        syscall(__NR_set_mempolicy, MPOL_BIND, nodemask,
-                mask_words * BITS_PER_LONG);
+        nodemask[target_phys / BITS_PER_LONG] |= (1UL << (target_phys % BITS_PER_LONG));
+        syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * BITS_PER_LONG);
       }
     }
 
-    chunk_size &= ~4095ULL;
-    if (chunk_size == 0)
-      chunk_size = 4096;
+    chunk_size &= ~4095ULL; if (chunk_size == 0) chunk_size = 4096;
 
     ssize_t n = -1;
-    loff_t in_off = lseek(infd, 0, SEEK_CUR);
-    if (in_off != (loff_t)-1) {
-      n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
-      if (n < 0 && (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
-                    errno == EOPNOTSUPP)) {
-        n = sendfile(outfd, infd, NULL, chunk_size);
+    if (transfer_method == TM_UNKNOWN) {
+      // First chunk: probe the fallback chain and cache the winner.
+      loff_t in_off = lseek(infd, 0, SEEK_CUR);
+      if (in_off != (loff_t)-1) {
+        n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
+        if (n >= 0) { transfer_method = TM_COPY_FILE_RANGE; }
+        else if (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP) {
+          n = sendfile(outfd, infd, NULL, chunk_size);
+          if (n >= 0) { transfer_method = TM_SENDFILE; }
+        }
       }
-    }
-    if (n < 0)
-      n = splice(infd, NULL, outfd, NULL, chunk_size,
-                 SPLICE_F_MOVE | SPLICE_F_MORE);
-    if (n < 0 && errno == EINVAL) {
-      if (fallback_pipe[0] == -1) {
-        if (pipe(fallback_pipe) == 0)
-          fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
-      }
-      if (fallback_pipe[0] != -1) {
-        ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size,
-                            SPLICE_F_MOVE | SPLICE_F_MORE);
-        if (s1 > 0) {
-          size_t written = 0;
-          while (written < (size_t)s1) {
-            ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL,
-                                s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
-            if (s2 <= 0) {
-              if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) {
-                usleep(10);
-                continue;
-              }
-              break;
-            }
-            written += s2;
+      if (n < 0) {
+        n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+        if (n >= 0) { transfer_method = TM_SPLICE_DIRECT; }
+        else if (errno == EINVAL) {
+          if (fallback_pipe[0] == -1) {
+            if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
           }
-          n = written;
-        } else
-          n = s1;
-      }
-    }
-
-    if (n < 0) {
-      if (errno == EINTR || errno == EAGAIN)
-        continue;
-      break;
-    }
-    if (n == 0)
-      break;
-
-    struct ChunkMeta *meta =
-        &g_state->meta_ring[current_major & META_RING_MASK];
-    meta->raw_offset = current_offset;
-    meta->raw_length = n;
-    meta->target_node = target_node;
-    meta->major_id = current_major;
-    atomic_store_relaxed(&meta->actual_end, 0);
-
-    // Publish to Remapping Queue
-    struct SharedState *t_state = &state[target_node];
-    uint64_t q_idx = t_state->chunk_queue_head;
-    t_state->chunk_queue[q_idx & META_RING_MASK] = current_major;
-    atomic_store_release(&t_state->chunk_queue_head, q_idx + 1);
-
-    atomic_store_release(&g_state->ingest_publish_idx, current_major + 1);
-    if (atomic_load_relaxed(&g_state->ingest_waiters) > 0) {
-      uint64_t v = 1;
-      SYS_CHK(write(evfd_ingest_data, &v, 8));
-    }
-
-    last_target = target_node;
-    current_offset += n;
-    current_major++;
-
-    if ((uint64_t)n == chunk_size) {
-      consecutive_full++;
-      if (consecutive_full >= 4 && chunk_size < max_chunk) {
-        chunk_size *= 2;
-        consecutive_full = 0;
+          if (fallback_pipe[0] != -1) {
+            ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+            if (s1 > 0) {
+              size_t written = 0;
+              while (written < (size_t)s1) {
+                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
+                if (s2 <= 0) {
+                  if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
+                  break;
+                }
+                written += s2;
+              }
+              n = written;
+              if (n > 0) transfer_method = TM_SPLICE_PIPE;
+            } else n = s1;
+          }
+        }
       }
     } else {
-      chunk_size = 4 * 1024 * 1024ULL;
-      consecutive_full = 0;
+      // Subsequent chunks: use the cached method directly, no probing.
+      switch (transfer_method) {
+        case TM_COPY_FILE_RANGE:
+          n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
+          break;
+        case TM_SENDFILE:
+          n = sendfile(outfd, infd, NULL, chunk_size);
+          break;
+        case TM_SPLICE_DIRECT:
+          n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+          break;
+        case TM_SPLICE_PIPE:
+          if (fallback_pipe[0] != -1) {
+            ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+            if (s1 > 0) {
+              size_t written = 0;
+              while (written < (size_t)s1) {
+                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
+                if (s2 <= 0) {
+                  if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
+                  break;
+                }
+                written += s2;
+              }
+              n = written;
+            } else n = s1;
+          }
+          break;
+        default: break;
+      }
     }
+
+    if (n < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
+    if (n == 0) break;
+
+    struct ChunkMeta *meta = &g_state->meta_ring[current_major & META_RING_MASK];
+    meta->raw_offset = current_offset; meta->raw_length = n;
+    meta->target_node = target_node; meta->major_id = current_major;
+    atomic_store_relaxed(&meta->actual_end, 0);
+
+    struct SharedState *t_state = &state[target_node];
+    uint64_t q_idx = atomic_load_relaxed(&t_state->chunk_queue_head);
+    t_state->chunk_queue[q_idx & META_RING_MASK] = current_major;
+
+    __atomic_store_n(&t_state->chunk_queue_head, q_idx + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_state->ingest_publish_idx, current_major + 1, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    // NUMA Telemetry
+    __atomic_fetch_add(&t_state->stats_chunks_assigned, 1, __ATOMIC_RELAXED);
+
+    // Isolate wakeups to the specific node we just pushed data to
+    uint64_t w = atomic_load_relaxed(&t_state->indexer_waiters);
+    if (w > 0) {
+      SYS_CHK(write(evfd_indexer_arr[target_node], &w, 8));
+    }
+
+    last_target = target_node; current_offset += n; current_major++;
+    if ((uint64_t)n == chunk_size) {
+      consecutive_full++;
+      if (consecutive_full >= 4 && chunk_size < max_chunk) { chunk_size *= 2; consecutive_full = 0; }
+    } else { chunk_size = 4 * 1024 * 1024ULL; consecutive_full = 0; }
   }
 
-  if (fallback_pipe[0] != -1) {
-    close(fallback_pipe[0]);
-    close(fallback_pipe[1]);
-  }
-  if (numa_enabled)
-    syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
+  if (fallback_pipe[0] != -1) { close(fallback_pipe[0]); close(fallback_pipe[1]); }
+  if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   xfree(nodemask);
 
-  atomic_store_release(&g_state->ingest_eof_idx, current_major);
+  __atomic_store_n(&g_state->ingest_eof_idx, current_major, __ATOMIC_RELEASE);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   uint64_t v = 999999;
   SYS_CHK(write(evfd_ingest_eof, &v, 8));
   return EXECUTION_SUCCESS;
 }
 
 static int ring_indexer_numa_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
-  int memfd = atoi(argv[1]);
-  int my_node_id = atoi(argv[2]);
+  if (argc < 3) return EXECUTION_FAILURE;
+  int memfd = atoi(argv[1]); int my_node_id = atoi(argv[2]);
 
   int phys_node = g_logical_to_phys_map ? g_logical_to_phys_map[my_node_id] : 0;
   if (pin_to_numa_node(phys_node) != 0 && g_debug) {
-    fprintf(stderr,
-            "forkrun [DEBUG] Failed to pin indexer %d to phys node %d\n",
-            my_node_id, phys_node);
+    fprintf(stderr, "forkrun [DEBUG] Failed to pin indexer %d to phys node %d\n", my_node_id, phys_node);
   }
 
   struct SharedState *t_state = &state[my_node_id];
-  uint64_t my_idx = 0;
-  char tail_buf[65536];
-  int spin = 0;
+  uint64_t my_idx = 0; char tail_buf[65536]; int spin = 0;
 
   while (1) {
     while (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx) {
       if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
-        if (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx)
-          return EXECUTION_SUCCESS;
+        if (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx) return EXECUTION_SUCCESS;
       }
-      if (spin < 100) {
-        cpu_relax();
-        spin++;
-        continue;
-      }
+      if (spin < 100) { cpu_relax(); spin++; continue; }
 
-      atomic_fetch_add(&g_state->ingest_waiters, 1);
+      __atomic_fetch_add(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST);
       if (atomic_load_acquire(&t_state->chunk_queue_head) > my_idx) {
-        atomic_fetch_sub(&g_state->ingest_waiters, 1);
-        break;
+        __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); break;
       }
-      struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
-                               {.fd = evfd_ingest_eof, .events = POLLIN}};
+      struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[my_node_id], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
       poll(pfds, 2, -1);
-      if (pfds[0].revents & POLLIN) {
-        uint64_t v;
-        if (read(evfd_ingest_data, &v, 8)) {
-        };
-      }
-      if (pfds[1].revents & POLLIN) {
-        uint64_t v;
-        if (read(evfd_ingest_eof, &v, 8)) {
-        };
-      }
-      atomic_fetch_sub(&g_state->ingest_waiters, 1);
-      spin = 0;
+      if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[my_node_id], &v, 8)) {}; }
+      if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {}; }
+      __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); spin = 0;
     }
     spin = 0;
 
     uint32_t major_id = t_state->chunk_queue[my_idx & META_RING_MASK];
     struct ChunkMeta *meta = &g_state->meta_ring[major_id & META_RING_MASK];
-
     uint64_t chunk_end = meta->raw_offset + meta->raw_length;
-    uint64_t actual_end = chunk_end;
-    uint64_t search_end = chunk_end;
+    uint64_t actual_end = chunk_end; uint64_t search_end = chunk_end;
 
     while (search_end > meta->raw_offset) {
-      uint64_t window_size = (search_end - meta->raw_offset > sizeof(tail_buf))
-                                 ? sizeof(tail_buf)
-                                 : (search_end - meta->raw_offset);
+      uint64_t window_size = (search_end - meta->raw_offset > sizeof(tail_buf)) ? sizeof(tail_buf) : (search_end - meta->raw_offset);
       uint64_t window_start = search_end - window_size;
-
       ssize_t n = pread(memfd, tail_buf, window_size, window_start);
       if (n > 0) {
         char *nl = memrchr(tail_buf, '\n', n);
-        if (nl) {
-          actual_end = window_start + (nl - tail_buf) + 1;
-          break;
-        }
-      } else if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
-        continue;
-      } else
-        break;
+        if (nl) { actual_end = window_start + (nl - tail_buf) + 1; break; }
+      } else if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+      else break;
       search_end = window_start;
     }
-    if (search_end <= meta->raw_offset)
-      actual_end = meta->raw_offset;
-
+    if (search_end <= meta->raw_offset) actual_end = meta->raw_offset;
     atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
     my_idx++;
   }
 }
 
 // ==============================================================================
-// UNIFIED ADAPTIVE FLOW CONTROL
+// 5. UNIFIED SCANNER LOOP
 // ==============================================================================
+
+#define UNIFIED_ADAPTIVE_COMMIT(force) \
+  do { \
+    if (local_scan_idx > local_write_idx) { \
+      uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers); \
+      if (W_curr < 1) W_curr = 1; \
+      if (force || atomic_load_relaxed(&local_state->active_waiters) > 0) { \
+        atomic_store_release(&local_state->write_idx, local_scan_idx); \
+        local_write_idx = local_scan_idx; \
+        if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
+          uint64_t v = 1; \
+          SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8)); \
+        } \
+      } else { \
+        uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx); \
+        uint64_t pending = local_scan_idx - r_idx; \
+        uint64_t current_buffer = local_scan_idx - local_write_idx; \
+        uint64_t target_buffer = 0; \
+        if (pending >= 10 * W_curr) target_buffer = (W_curr << 2); \
+        else if (pending > (W_curr << 1)) { \
+          uint64_t linear = pending >> 1; \
+          uint64_t intermediate = (linear < current_buffer) ? linear : current_buffer; \
+          if (intermediate > W_curr) target_buffer = intermediate - W_curr; \
+        } \
+        uint64_t target_w = local_scan_idx - target_buffer; \
+        if (target_w > local_write_idx) { \
+          atomic_store_release(&local_state->write_idx, target_w); \
+          local_write_idx = target_w; \
+          if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
+            uint64_t v = 1; \
+            SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8)); \
+          } \
+        } \
+      } \
+    } \
+  } while (0)
+
+#define UNIFIED_SCANNER_FLUSH(_cnt_val, _stride_val, _is_last, _maj_id, _minor_val, _batch_end_offset, _do_fencepost, _overwrite) \
+  do { \
+    while (1) { \
+      uint64_t limit; \
+      if (!is_numa && atomic_load_relaxed(&local_state->fallow_active)) { \
+        limit = atomic_load_acquire(&local_state->min_idx); \
+      } else { \
+        limit = atomic_load_acquire(&local_state->read_idx); \
+      } \
+      bool limit_lines = ((local_scan_idx - limit) >= RING_SIZE); \
+      bool limit_chunks = is_numa && (cb_head >= 3) && (limit < chunk_bounds[(cb_head - 3) & 3]); \
+      if (!limit_lines && !limit_chunks) break; \
+      UNIFIED_ADAPTIVE_COMMIT(true); \
+      usleep(100); \
+    } \
+    uint64_t pk = (uint64_t)batch_start; \
+    if ((_cnt_val) != L || (is_numa && (_is_last))) pk |= FLAG_PARTIAL_BATCH; \
+    if (is_numa) { \
+        local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)(_stride_val); \
+        local_state->offset_ring[local_scan_idx & RING_MASK] = pk; \
+        local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
+        local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id); \
+        local_state->minor_ring[local_scan_idx & RING_MASK] = (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0); \
+    } else { \
+        if (!byte_mode) local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)(_cnt_val); \
+        if (_do_fencepost) { \
+            local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] = (_batch_end_offset); \
+            if ((pk & FLAG_PARTIAL_BATCH) || (_overwrite)) { \
+                local_state->offset_ring[local_scan_idx & RING_MASK] = pk; \
+            } \
+        } else { \
+            local_state->offset_ring[local_scan_idx & RING_MASK] = pk; \
+        } \
+    } \
+    local_scan_idx++; \
+    UNIFIED_ADAPTIVE_COMMIT(false); \
+  } while (0)
+
 #define ADAPTIVE_FLOW_CONTROL(state_ptr, is_stalled, _node_id_arg)             \
   do {                                                                         \
-    batch_counter++;                                                           \
-    batches_since_calc++;                                                      \
-    uint64_t _tc = W * 4;                                                      \
-    if (_tc < 4)                                                               \
-      _tc = 4;                                                                 \
+    batch_counter++; batches_since_calc++; uint64_t _tc = W * 4;               \
+    if (_tc < 4) _tc = 4;                                                      \
     if (!fixed_batch && !byte_mode) {                                          \
-      if (phase == 0) {                                                        \
-        if (batch_counter >= _tc) {                                            \
-          phase = 1;                                                           \
-          batch_counter = 0;                                                   \
-        }                                                                      \
-      } else if (phase == 1) {                                                 \
-        if (is_stalled)                                                        \
-          phase = 2;                                                           \
+      if (phase == 0) { if (batch_counter >= _tc) { phase = 1; batch_counter = 0; } } \
+      else if (phase == 1) {                                                   \
+        if (is_stalled) phase = 2;                                             \
         else if (batch_counter >= _tc) {                                       \
-          L *= 2;                                                              \
-          if (L >= Lmax) {                                                     \
-            L = Lmax;                                                          \
-            phase = 2;                                                         \
-          }                                                                    \
+          L *= 2; if (L >= Lmax) { L = Lmax; phase = 2; }                      \
           if (W < W_max_val && !fixed_workers) {                               \
-            uint64_t _l_log = fast_log2(L);                                    \
-            uint64_t _den = X_const * (L2 + _l_log);                           \
-            if (_den == 0)                                                     \
-              _den = 1;                                                        \
+            uint64_t _l_log = fast_log2(L); uint64_t _den = X_const * (L2 + _l_log); \
+            if (_den == 0) _den = 1;                                           \
             uint64_t _n_spawn = (6 * (W_max_val - W) * L2) / _den;             \
-            if (_n_spawn < 1)                                                  \
-              _n_spawn = 1;                                                    \
-            if (_n_spawn > (W_max_val - W))                                    \
-              _n_spawn = W_max_val - W;                                        \
+            if (_n_spawn < 1) _n_spawn = 1;                                    \
+            if (_n_spawn > (W_max_val - W)) _n_spawn = W_max_val - W;          \
             if (fd_spawn >= 0) {                                               \
-              char _sbuf[64];                                                  \
-              int _slen;                                                       \
-              if ((int)(_node_id_arg) >= 0)                                    \
-                _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n",             \
-                                 (int)(_node_id_arg), _n_spawn);               \
-              else                                                             \
-                _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _n_spawn);     \
-              if (_slen > 0)                                                   \
-                SYS_CHK(write(fd_spawn, _sbuf, _slen));                        \
-              W += _n_spawn;                                                   \
-              atomic_store_relaxed(&(state_ptr)->active_workers, W);           \
+              char _sbuf[64]; int _slen;                                       \
+              if ((int)(_node_id_arg) >= 0) _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n", (int)(_node_id_arg), _n_spawn); \
+              else _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _n_spawn);  \
+              if (_slen > 0) SYS_CHK(write(fd_spawn, _sbuf, _slen));           \
+              W += _n_spawn; atomic_store_relaxed(&(state_ptr)->active_workers, W); \
             }                                                                  \
           }                                                                    \
-          atomic_store_release(&(state_ptr)->batch_change_idx,                 \
-                               local_scan_idx);                                \
+          atomic_store_release(&(state_ptr)->batch_change_idx, local_scan_idx); \
           atomic_store_release(&(state_ptr)->signed_batch_size, -(int64_t)L);  \
           batch_counter = 0;                                                   \
         }                                                                      \
@@ -1631,1116 +1585,632 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     uint64_t _now_us = get_us_time();                                          \
     if (_now_us - last_calc_us > 5000 || batches_since_calc >= W) {            \
       uint64_t _d_in = local_write_idx - last_calc_write;                      \
-      uint64_t _r_con =                                                        \
-          atomic_load_relaxed(&(state_ptr)->total_lines_consumed);             \
+      uint64_t _r_con = atomic_load_relaxed(&(state_ptr)->total_lines_consumed); \
       uint64_t _d_out = _r_con - last_calc_read;                               \
-      last_calc_write = local_write_idx;                                       \
-      last_calc_read = _r_con;                                                 \
-      last_calc_us = _now_us;                                                  \
-      batches_since_calc = 0;                                                  \
+      last_calc_write = local_write_idx; last_calc_read = _r_con; last_calc_us = _now_us; batches_since_calc = 0; \
       if (!fixed_workers && W < W_max_val) {                                   \
-        uint64_t _backlog =                                                    \
-            local_scan_idx - atomic_load_relaxed(&(state_ptr)->read_idx);      \
-        bool _no_starve =                                                      \
-            (atomic_load_relaxed(&(state_ptr)->active_waiters) == 0);          \
+        uint64_t _backlog = local_scan_idx - atomic_load_relaxed(&(state_ptr)->read_idx); \
+        bool _no_starve = (atomic_load_relaxed(&(state_ptr)->active_waiters) == 0); \
         bool _spawn = false;                                                   \
-        if (fixed_batch) {                                                     \
-          if (_backlog > W && _no_starve)                                      \
-            _spawn = true;                                                     \
-        } else {                                                               \
-          if (_d_out > 0) {                                                    \
-            uint64_t _rate = _d_out / W;                                       \
-            if (_rate == 0)                                                    \
-              _rate = 1;                                                       \
-            if ((_d_in / _rate) > W)                                           \
-              _spawn = true;                                                   \
-          } else if (_backlog > (W * 4) && _no_starve) {                       \
-            _spawn = true;                                                     \
-          }                                                                    \
+        if (fixed_batch) { if (_backlog > W && _no_starve) _spawn = true; }    \
+        else {                                                                 \
+          if (_d_out > 0) { uint64_t _rate = _d_out / W; if (_rate == 0) _rate = 1; if ((_d_in / _rate) > W) _spawn = true; } \
+          else if (_backlog > (W * 4) && _no_starve) { _spawn = true; }        \
         }                                                                      \
         if (_spawn && phase != 1) {                                            \
           uint64_t _grow = fixed_batch ? 1 : ((W + 1) / 2);                    \
-          if (W + _grow > W_max_val)                                           \
-            _grow = W_max_val - W;                                             \
+          if (W + _grow > W_max_val) _grow = W_max_val - W;                    \
           if (_grow > 0 && fd_spawn >= 0) {                                    \
-            char _sbuf[64];                                                    \
-            int _slen;                                                         \
-            if ((int)(_node_id_arg) >= 0)                                      \
-              _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n",               \
-                               (int)(_node_id_arg), _grow);                    \
-            else                                                               \
-              _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _grow);          \
-            if (_slen > 0)                                                     \
-              SYS_CHK(write(fd_spawn, _sbuf, _slen));                          \
-            W += _grow;                                                        \
-            atomic_store_relaxed(&(state_ptr)->active_workers, W);             \
+            char _sbuf[64]; int _slen;                                         \
+            if ((int)(_node_id_arg) >= 0) _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n", (int)(_node_id_arg), _grow); \
+            else _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _grow);       \
+            if (_slen > 0) SYS_CHK(write(fd_spawn, _sbuf, _slen));             \
+            W += _grow; atomic_store_relaxed(&(state_ptr)->active_workers, W); \
           }                                                                    \
         }                                                                      \
       }                                                                        \
       if (!fixed_batch && !byte_mode && phase == 2) {                          \
-        int64_t _bl = (int64_t)local_write_idx -                               \
-                      (int64_t)atomic_load_relaxed(&(state_ptr)->read_idx);    \
-        if (_bl < 0)                                                           \
-          _bl = 0;                                                             \
+        int64_t _bl = (int64_t)local_write_idx - (int64_t)atomic_load_relaxed(&(state_ptr)->read_idx); \
+        if (_bl < 0) _bl = 0;                                                  \
         uint64_t _l_target = (uint64_t)_bl / W;                                \
-        if (_l_target > Lmax)                                                  \
-          _l_target = Lmax;                                                    \
-        if (_l_target < 1)                                                     \
-          _l_target = 1;                                                       \
+        if (_l_target > Lmax) _l_target = Lmax;                                \
+        if (_l_target < 1) _l_target = 1;                                      \
         if (_l_target > L) {                                                   \
           L = _l_target;                                                       \
-          atomic_store_release(&(state_ptr)->batch_change_idx,                 \
-                               local_scan_idx);                                \
+          atomic_store_release(&(state_ptr)->batch_change_idx, local_scan_idx); \
           atomic_store_release(&(state_ptr)->signed_batch_size, -(int64_t)L);  \
-        } else if (_l_target < L &&                                            \
-                   starve_meter >= (W + DAMPING_OFFSET - 3) &&                 \
-                   stall_meter >= (W + DAMPING_OFFSET - 3)) {                  \
-          L = (L + _l_target) / 2;                                             \
-          if (L < 1)                                                           \
-            L = 1;                                                             \
-          atomic_store_release(&(state_ptr)->batch_change_idx,                 \
-                               local_scan_idx);                                \
+        } else if (_l_target < L && starve_meter >= (W + DAMPING_OFFSET - 3) && stall_meter >= (W + DAMPING_OFFSET - 3)) { \
+          L = (L + _l_target) / 2; if (L < 1) L = 1;                           \
+          atomic_store_release(&(state_ptr)->batch_change_idx, local_scan_idx); \
           atomic_store_release(&(state_ptr)->signed_batch_size, -(int64_t)L);  \
-          starve_meter = 0;                                                    \
-          stall_meter = 0;                                                     \
+          starve_meter = 0; stall_meter = 0;                                   \
         }                                                                      \
       }                                                                        \
     }                                                                          \
   } while (0)
 
-static int ring_numa_scanner_main(int argc, char **argv) {
-  if (argc < 5)
-    return EXECUTION_FAILURE;
+// The Core Unified Scanner Function
+static inline __attribute__((always_inline)) int
+core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, const bool is_numa)
+{
+    struct SharedState *local_state = is_numa ? &state[my_node_id] : &state[0];
 
-  int memfd = atoi(argv[1]);
-  int my_node_id = atoi(argv[2]);
-  int fd_spawn = atoi(argv[3]);
-  int num_nodes = atoi(argv[4]);
+    uint64_t L = local_state->cfg_batch_start;
+    uint64_t Lmax = local_state->cfg_batch_max;
+    uint64_t W = local_state->cfg_w_start;
+    uint64_t W_max_val = local_state->cfg_w_max;
+    uint64_t BytesMax = local_state->cfg_line_max;
+    int64_t timeout_us = local_state->cfg_timeout_us;
+    bool byte_mode = local_state->mode_byte;
+    bool fixed_batch = local_state->fixed_batch;
+    bool fixed_workers = local_state->fixed_workers;
+    bool return_bytes = local_state->cfg_return_bytes;
 
-  int phys_node = g_logical_to_phys_map ? g_logical_to_phys_map[my_node_id] : 0;
-  if (pin_to_numa_node(phys_node) != 0 && g_debug) {
-    fprintf(stderr,
-            "forkrun [DEBUG] Failed to pin scanner %d to phys node %d\n",
-            my_node_id, phys_node);
-  }
+    uint64_t W2 = fast_log2(W_max_val);
+    uint64_t L2 = fast_log2(Lmax);
+    uint64_t X_const = fast_log2(W2 + L2) * W2;
+    if (X_const == 0) X_const = 1;
 
-  struct SharedState *local_state = &state[my_node_id];
+    uint64_t local_scan_idx = 0;
+    uint64_t local_write_idx = 0;
 
-  uint64_t L = local_state->cfg_batch_start;
-  uint64_t Lmax = local_state->cfg_batch_max;
-  uint64_t W = local_state->cfg_w_start;
-  uint64_t W_max_val = local_state->cfg_w_max;
-  uint64_t BytesMax = local_state->cfg_line_max;
-  int64_t timeout_us = local_state->cfg_timeout_us;
-  bool byte_mode = local_state->mode_byte;
-  bool fixed_batch = local_state->fixed_batch;
-  bool fixed_workers = local_state->fixed_workers;
-  bool return_bytes = local_state->cfg_return_bytes;
+    size_t chunk_sz = get_optimal_chunk_size();
+    char *buf = xmalloc_aligned(chunk_sz);
+    char *p = buf, *end = buf;
 
-  uint64_t W2 = fast_log2(W_max_val);
-  uint64_t L2 = fast_log2(Lmax);
-  uint64_t X_const = fast_log2(W2 + L2) * W2;
-  if (X_const == 0)
-    X_const = 1;
+    uint64_t buf_base_offset = is_numa ? 0 : lseek(fd_or_memfd, 0, SEEK_CUR);
+    uint64_t batch_start = buf_base_offset;
 
-  uint64_t local_scan_idx = 0;
-  uint64_t local_write_idx = 0;
+    int phase = 0;
+    uint64_t batch_counter = 0;
+    uint64_t last_calc_us = get_us_time();
+    uint64_t last_calc_write = 0;
+    uint64_t last_calc_read = 0;
+    uint64_t starve_meter = 0;
+    uint64_t stall_meter = 0;
+    uint64_t batches_since_calc = 0;
 
-  size_t chunk_sz = get_optimal_chunk_size();
-  char *buf = xmalloc_aligned(chunk_sz);
-  char *p = buf, *end = buf;
+    uint64_t total_scanned = 0;
+    uint64_t first_wait_ts = 0;
+    uint64_t limit_items = local_state->cfg_limit;
 
-  int phase = 0;
-  uint64_t batch_counter = 0;
-  uint64_t last_calc_us = get_us_time();
-  uint64_t last_calc_write = 0;
-  uint64_t last_calc_read = 0;
-  uint64_t starve_meter = 0;
-  uint64_t stall_meter = 0;
-  uint64_t batches_since_calc = 0;
+    // NUMA Chunk Lookahead Backpressure
+    uint64_t chunk_bounds[4] = {0};
+    uint32_t cb_head = 0;
 
-  uint64_t total_scanned = 0;
-  uint64_t first_wait_ts = 0;
-  uint64_t limit_items = local_state->cfg_limit;
+    atomic_store_relaxed(&local_state->write_idx, 0);
+    atomic_store_relaxed(&local_state->read_idx, 0);
+    if (!is_numa) atomic_store_relaxed(&local_state->tail_idx, 0);
+    atomic_store_relaxed(&local_state->active_workers, W);
 
-  atomic_store_relaxed(&local_state->write_idx, 0);
-  atomic_store_relaxed(&local_state->read_idx, 0);
-  atomic_store_relaxed(&local_state->active_workers, W);
-
-  if (fd_spawn >= 0 && W > 0) {
-    char sbuf[64];
-    int slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, W);
-    if (slen > 0)
-      SYS_CHK(write(fd_spawn, sbuf, slen));
-  }
-
-#define LOCAL_SCANNER_WAKE()                                                   \
-  do {                                                                         \
-    if (atomic_load_acquire(&local_state->active_waiters) > 0) {               \
-      uint64_t v = 1;                                                          \
-      SYS_CHK(write(evfd_data_arr[my_node_id], &v, 8));                        \
-    }                                                                          \
-  } while (0)
-
-#define NUMA_ADAPTIVE_COMMIT(force)                                            \
-  do {                                                                         \
-    if (local_scan_idx > local_write_idx) {                                    \
-      uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);     \
-      if (W_curr < 1)                                                          \
-        W_curr = 1;                                                            \
-      if (force || atomic_load_relaxed(&local_state->active_waiters) > 0) {    \
-        atomic_store_release(&local_state->write_idx, local_scan_idx);         \
-        local_write_idx = local_scan_idx;                                      \
-        LOCAL_SCANNER_WAKE();                                                  \
-      } else {                                                                 \
-        uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx);          \
-        uint64_t pending = local_scan_idx - r_idx;                             \
-        uint64_t current_buffer = local_scan_idx - local_write_idx;            \
-        uint64_t target_buffer = 0;                                            \
-        if (pending >= 10 * W_curr)                                            \
-          target_buffer = (W_curr << 2);                                       \
-        else if (pending > (W_curr << 1)) {                                    \
-          uint64_t linear = pending >> 1;                                      \
-          uint64_t intermediate =                                              \
-              (linear < current_buffer) ? linear : current_buffer;             \
-          if (intermediate > W_curr)                                           \
-            target_buffer = intermediate - W_curr;                             \
-        }                                                                      \
-        uint64_t target_w = local_scan_idx - target_buffer;                    \
-        if (target_w > local_write_idx) {                                      \
-          atomic_store_release(&local_state->write_idx, target_w);             \
-          local_write_idx = target_w;                                          \
-          LOCAL_SCANNER_WAKE();                                                \
-        }                                                                      \
-      }                                                                        \
-    }                                                                          \
-  } while (0)
-
-#define NUMA_SCANNER_FLUSH(cnt_val, stride_val, is_last, maj_id, min_idx,      \
-                           batch_start, batch_end)                             \
-  do {                                                                         \
-    while (1) {                                                                \
-      uint64_t limit = atomic_load_acquire(&local_state->read_idx);            \
-      if ((local_scan_idx - limit) < RING_SIZE)                                \
-        break;                                                                 \
-      NUMA_ADAPTIVE_COMMIT(true);                                              \
-      usleep(100);                                                             \
-    }                                                                          \
-    uint64_t pk = (uint64_t)batch_start;                                       \
-    if ((cnt_val) != L || is_last)                                             \
-      pk |= FLAG_PARTIAL_BATCH;                                                \
-                                                                               \
-    local_state->stride_ring[local_scan_idx & RING_MASK] =                     \
-        (uint32_t)stride_val;                                                  \
-    local_state->offset_ring[local_scan_idx & RING_MASK] = pk;                 \
-    local_state->end_ring[local_scan_idx & RING_MASK] = batch_end;             \
-    local_state->major_ring[local_scan_idx & RING_MASK] = maj_id;              \
-    local_state->minor_ring[local_scan_idx & RING_MASK] =                      \
-        min_idx | (is_last ? FLAG_MAJOR_EOF : 0);                              \
-                                                                               \
-    local_scan_idx++;                                                          \
-    NUMA_ADAPTIVE_COMMIT(false);                                               \
-  } while (0)
-
-  bool experienced_stall = false;
-
-  while (1) {
-    int steal_target = my_node_id;
-    struct SharedState *t_state = &state[my_node_id];
-
-    uint64_t my_tail = atomic_load_relaxed(&t_state->chunk_queue_tail);
-    uint64_t my_head = atomic_load_acquire(&t_state->chunk_queue_head);
-
-    if (my_tail >= my_head) {
-      // Is the river drying up? (Ingest has finished)
-      bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
-
-      // The Activation Energy: Require back-pressure of 1 to steal.
-      // This leaves eager stealing enabled but avoids stealing the final chunk 
-      // from a peer unless necessary.
-      int required_bl = 1;
-
-      int max_bl = 0;
-      int best_ready_bl = 0;
-      int ready_target = -1;
-      int fallback_target = -1;
-
-      for (int i = 0; i < num_nodes; i++) {
-        uint64_t h = atomic_load_acquire(&state[i].chunk_queue_head);
-        uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
-        if (h > t) {
-          int bl = (int)(h - t);
-          if (bl > max_bl) {
-            max_bl = bl;
-            fallback_target = i;
-          }
-
-          uint32_t c_maj = state[i].chunk_queue[t & META_RING_MASK];
-          bool ready = true;
-          if (c_maj > 0) {
-            struct ChunkMeta *pm =
-                &g_state->meta_ring[(c_maj - 1) & META_RING_MASK];
-            if (!(atomic_load_acquire(&pm->actual_end) & FLAG_META_READY))
-              ready = false;
-          }
-          if (ready && bl > best_ready_bl) {
-            best_ready_bl = bl;
-            ready_target = i;
-          }
-        }
-      }
-
-      if (max_bl == 0) {
-        if (is_eof)
-          goto scanner_eof;
-      } else {
-        if (ready_target != -1 && best_ready_bl >= required_bl) {
-          steal_target = ready_target;
-        } else if (fallback_target != -1 && max_bl >= required_bl) {
-          steal_target = fallback_target;
-        }
-      }
-
-      t_state = &state[steal_target];
+    if (fd_spawn >= 0 && W > 0) {
+        char sbuf[64]; int slen;
+        if (is_numa) slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, W);
+        else slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
+        if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
     }
 
-    uint64_t claim_idx = atomic_fetch_add(&t_state->chunk_queue_tail, 1);
-    
-    // Notify Ingest that a chunk has been claimed (advances min_consumed shallow queue limit)
-    uint64_t _one = 1;
-    SYS_CHK(write(evfd_chunk_done, &_one, 8));
-
-    int ingest_spin = 0;
-    while (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
-      if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
-        if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx)
-          break;
-      }
-      experienced_stall = true;
-      if (ingest_spin < 100) {
-        cpu_relax();
-        ingest_spin++;
-        continue;
-      }
-
-      atomic_fetch_add(&g_state->ingest_waiters, 1);
-      if (atomic_load_acquire(&t_state->chunk_queue_head) > claim_idx) {
-        atomic_fetch_sub(&g_state->ingest_waiters, 1);
-        break;
-      }
-      struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
-                               {.fd = evfd_ingest_eof, .events = POLLIN}};
-      poll(pfds, 2, -1);
-      if (pfds[0].revents & POLLIN) {
-        uint64_t v;
-        if (read(evfd_ingest_data, &v, 8)) {
-        };
-      }
-      if (pfds[1].revents & POLLIN) {
-        uint64_t v;
-        if (read(evfd_ingest_eof, &v, 8)) {
-        };
-      }
-      atomic_fetch_sub(&g_state->ingest_waiters, 1);
-      ingest_spin = 0;
-    }
-
-    if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx)
-      continue;
-
-    uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
-    struct ChunkMeta *meta =
-        &g_state->meta_ring[current_major & META_RING_MASK];
-
-    uint64_t act_end_flag;
-    int _ae_spin = 0;
-    while (!((act_end_flag = atomic_load_acquire(&meta->actual_end)) &
-             FLAG_META_READY)) {
-      // 5000 limit prevents heavy OS context switch penalty on fast SIMD claiming
-      if (_ae_spin < 5000) {
-          cpu_relax();
-          _ae_spin++;
-      } else {
-          sched_yield();
-      }
-    }
-    uint64_t actual_end = act_end_flag & ~FLAG_META_READY;
-
-    uint64_t actual_start = 0;
-    if (current_major > 0) {
-      struct ChunkMeta *prev_meta =
-          &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
-      uint64_t prev_act_end;
-      int _pe_spin = 0;
-      while (!((prev_act_end = atomic_load_acquire(&prev_meta->actual_end)) &
-               FLAG_META_READY)) {
-        if (_pe_spin < 5000) {
-            cpu_relax();
-            _pe_spin++;
-        } else {
-            sched_yield();
-        }
-      }
-      actual_start = prev_act_end & ~FLAG_META_READY;
-    }
-
-    if (actual_start >= actual_end) {
-      NUMA_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start,
-                         actual_start);
-      NUMA_ADAPTIVE_COMMIT(true);
-      continue;
-    }
-
-    uint64_t chunk_end = actual_end;
-    uint64_t current_p_offset = actual_start;
-    uint32_t minor_idx = 0;
+    bool experienced_stall = false;
     uint64_t pending_lines = 0;
-    uint64_t batch_start = current_p_offset;
 
-    uint64_t buf_base_offset = current_p_offset;
-    p = buf;
-    end = buf;
+    // UMA-specific loop state
+    int status = 0;
+    bool force_refill = false;
 
-    bool current_stall = experienced_stall;
-    experienced_stall = false;
+    while (1) {
+        uint64_t chunk_end = ~(uint64_t)0;
+        uint64_t current_p_offset;
+        struct ChunkMeta *meta = NULL;
+        uint32_t minor_idx = 0;
 
-    {
-      uint64_t _xLim = W + DAMPING_OFFSET;
-      if (current_stall)
-        stall_meter = (stall_meter + _xLim) >> 1;
-      else
-        stall_meter >>= 1;
-      if (atomic_load_relaxed(&local_state->active_waiters) > 0)
-        starve_meter = (starve_meter + _xLim) >> 1;
-      else
-        starve_meter >>= 1;
-    }
+        // =========================================================
+        // 1. ACQUISITION PHASE
+        // =========================================================
+        if (is_numa) {
+            int steal_target = my_node_id;
+            struct SharedState *t_state = &state[my_node_id];
 
-    while (current_p_offset < chunk_end) {
-      bool flush = false;
-      bool limit_reached = false;
+            uint64_t my_tail = atomic_load_relaxed(&t_state->chunk_queue_tail);
+            uint64_t my_head = atomic_load_acquire(&t_state->chunk_queue_head);
 
-      if (byte_mode) {
-        uint64_t avail = chunk_end - current_p_offset;
-        uint64_t take = (avail >= L) ? L : avail;
+            if (my_tail >= my_head) {
+                bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
+                bool workers_starved = (atomic_load_relaxed(&local_state->read_idx) == atomic_load_relaxed(&local_state->write_idx));
 
-        if (limit_items > 0) {
-          uint64_t prev = atomic_fetch_add(&state[0].global_scanned, take);
-          if (prev >= limit_items)
-            break;
-          else if (prev + take > limit_items) {
-            take = limit_items - prev;
-            limit_reached = true;
-          }
-        }
+                // Strict activation energy: Need backlog >= 2 to steal, UNLESS we are globally at EOF AND our local workers are completely starved.
+                int required_bl = (is_eof && workers_starved) ? 1 : 2;
+                int max_bl = 0, best_ready_bl = 0, ready_target = -1, fallback_target = -1;
 
-        current_p_offset += take;
-        pending_lines = take;
-        total_scanned += take;
-        flush = true;
-        first_wait_ts = 0;
-      } else {
-        uint64_t scan_target = (L > pending_lines) ? (L - pending_lines) : 0;
+                for (int i = 0; i < num_nodes; i++) {
+                    uint64_t h = atomic_load_acquire(&state[i].chunk_queue_head);
+                    uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
+                    if (h > t) {
+                        int bl = (int)(h - t);
+                        if (bl > max_bl) { max_bl = bl; fallback_target = i; }
+                        uint32_t c_maj = state[i].chunk_queue[t & META_RING_MASK];
+                        bool ready = true;
 
-        if (limit_items > 0) {
-          uint64_t current_global =
-              atomic_load_relaxed(&state[0].global_scanned);
-          if (current_global >= limit_items)
-            break;
-          uint64_t rem = limit_items - current_global;
-          if (scan_target > rem)
-            scan_target = rem;
-        }
-        if (scan_target == 0 && !limit_reached)
-          scan_target = 1;
+                        if (atomic_load_acquire(&state[i].write_idx) == 0) {
+                            ready = false; // Never steal from a node that hasn't published work yet
+                        } else if (c_maj > 0) {
+                            struct ChunkMeta *pm = &g_state->meta_ring[(c_maj - 1) & META_RING_MASK];
+                            if (!(atomic_load_acquire(&pm->actual_end) & FLAG_META_READY)) ready = false;
+                        }
 
-        uint64_t lines_found = 0;
-        char delim = '\n'; // Default delimiter (can be updated from SharedState)
+                        if (ready && bl > best_ready_bl) { best_ready_bl = bl; ready_target = i; }
+                    }
+                }
 
-        // Clamp 'end' to safe_end to prevent SIMD from blowing past BytesMax
-        char *safe_end = end;
-        if (BytesMax > 0) {
-            uint64_t max_overhead = (scan_target + 1) * 8;
-            if (BytesMax <= max_overhead) {
-                safe_end = p; // Too little space left, force scalar fallback
+                if (max_bl == 0) {
+                    if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
+                        goto unified_scanner_eof;
+                    }
+                } else {
+                    if (ready_target != -1 && best_ready_bl >= required_bl) steal_target = ready_target;
+                    else if (fallback_target != -1 && max_bl >= required_bl) steal_target = fallback_target;
+                }
+                t_state = &state[steal_target];
+            }
+
+            uint64_t claim_idx = __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
+
+            // NUMA Telemetry
+            if (steal_target == my_node_id) {
+                __atomic_fetch_add(&t_state->stats_chunks_local, 1, __ATOMIC_RELAXED);
             } else {
-                uint64_t max_payload = BytesMax - max_overhead;
-                uint64_t current_payload = (buf_base_offset + (p - buf)) - batch_start;
-                if (current_payload >= max_payload) safe_end = p;
-                else if (max_payload - current_payload < (uint64_t)(end - p)) {
-                    safe_end = p + (max_payload - current_payload);
-                }
+                __atomic_fetch_add(&t_state->stats_chunks_stolen, 1, __ATOMIC_RELAXED);
             }
-        }
 
-        // FAST PATH: AVX2 SIMD Scan
-        char *simd_res = try_simd_scan(p, safe_end, scan_target, delim);
-        if (simd_res) {
-            lines_found = scan_target;
-            p = simd_res;
+            // Unblock Ingest shallow queue
+            uint64_t _one = 1;
+            SYS_CHK(write(evfd_chunk_done, &_one, 8));
+
+            int ingest_spin = 0;
+            while (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
+                if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
+                    if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) break;
+                }
+                experienced_stall = true;
+                if (ingest_spin < 100) { cpu_relax(); ingest_spin++; continue; }
+
+                __atomic_fetch_add(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST);
+                if (atomic_load_acquire(&t_state->chunk_queue_head) > claim_idx) {
+                    __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); break;
+                }
+                struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[steal_target], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
+                poll(pfds, 2, -1);
+                if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[steal_target], &v, 8)) {} }
+                if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {} }
+                __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); ingest_spin = 0;
+            }
+
+            if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) continue;
+
+            uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
+            meta = &g_state->meta_ring[current_major & META_RING_MASK];
+
+            uint64_t act_end_flag; int _ae_spin = 0;
+            while (!((act_end_flag = atomic_load_acquire(&meta->actual_end)) & FLAG_META_READY)) {
+                if (_ae_spin < 5000) { cpu_relax(); _ae_spin++; } else { sched_yield(); }
+            }
+            uint64_t actual_end = act_end_flag & ~FLAG_META_READY;
+
+            uint64_t actual_start = 0;
+            if (current_major > 0) {
+                struct ChunkMeta *prev_meta = &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
+                uint64_t prev_act_end; int _pe_spin = 0;
+                while (!((prev_act_end = atomic_load_acquire(&prev_meta->actual_end)) & FLAG_META_READY)) {
+                    if (_pe_spin < 5000) { cpu_relax(); _pe_spin++; } else { sched_yield(); }
+                }
+                actual_start = prev_act_end & ~FLAG_META_READY;
+            }
+
+            if (actual_start >= actual_end) {
+                UNIFIED_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start, false, false);
+                if (is_numa) {
+                    chunk_bounds[cb_head & 3] = local_scan_idx;
+                    cb_head++;
+                }
+                UNIFIED_ADAPTIVE_COMMIT(true);
+                continue;
+            }
+
+            chunk_end = actual_end;
+            current_p_offset = actual_start;
+            batch_start = current_p_offset;
+            buf_base_offset = current_p_offset;
+            p = buf; end = buf;
+
         } else {
-            // SLOW PATH: Scalar loop handles buffer refills, BytesMax limits, and non-x86 arches
-            while (lines_found < scan_target) {
-              if (p >= end) {
-                uint64_t read_start = buf_base_offset + (p - buf);
-                size_t to_read = chunk_sz;
-                if (read_start + to_read > chunk_end)
-                  to_read = chunk_end - read_start;
-                if (to_read > 0) {
-                  ssize_t n = pread(memfd, buf, to_read, read_start);
-                  if (n > 0) {
-                    buf_base_offset = read_start;
-                    p = buf;
-                    end = buf + n;
-                  } else if (n < 0 && errno == EINTR) {
-                    continue;
-                  } else {
-                    // Physical EOF hit before chunk_end! Clamp chunk_end to reality
-                    // to gracefully break the loop and prevent infinite spinning.
-                    chunk_end = buf_base_offset + (end - buf);
-                    break;
-                  }
-                } else {
-                  break;
-                }
-              }
+            // UMA Acqusition: Break on complete EOF stream drain
+            if (status == 1 && p >= end) break;
+            current_p_offset = buf_base_offset + (uint64_t)(p - buf);
+        }
 
-              char *nl = memchr(p, delim, end - p);
-              if (nl) {
-                if (BytesMax > 0 && lines_found > 0) {
-                  uint64_t line_end_offset =
-                      buf_base_offset + (uint64_t)((nl + 1) - buf);
-                  uint64_t payload = line_end_offset - batch_start;
-                  uint64_t overhead = (lines_found + 1) * 8;
-                  if ((payload + overhead) > BytesMax) {
-                    limit_reached = true;
-                    break;
-                  }
-                }
-                lines_found++;
-                p = nl + 1;
-              } else {
-                uint64_t curr_pos = buf_base_offset + (end - buf);
-                if (curr_pos >= chunk_end) {
-                  lines_found++;
-                  p = end;
-                  break;
+        bool current_stall = experienced_stall;
+        experienced_stall = false;
+
+        {
+            uint64_t _xLim = W + DAMPING_OFFSET;
+            if (current_stall || (!is_numa && atomic_load_relaxed(&local_state->active_waiters) > 0))
+                stall_meter = (stall_meter + _xLim) >> 1;
+            else stall_meter >>= 1;
+
+            if (atomic_load_relaxed(&local_state->active_waiters) > 0)
+                starve_meter = (starve_meter + _xLim) >> 1;
+            else starve_meter >>= 1;
+        }
+
+        // =========================================================
+        // 2. INNER SCAN LOOP (Shared Hot Path)
+        // =========================================================
+        while ((is_numa && current_p_offset < chunk_end) || (!is_numa && (status != 1 || p < end))) {
+
+            // UMA-specific refill logic
+            if (!is_numa && (p >= end || force_refill) && status != 1) {
+                force_refill = false;
+                uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
+                current_p_offset = buf_base_offset + (uint64_t)(p - buf);
+
+                ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
+
+                if (n > 0 && (uint64_t)n > prev_avail) {
+                    buf_base_offset = current_p_offset; p = buf; end = buf + n; status = 0; stall_meter >>= 1;
                 } else {
-                  p = end;
+                    if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
+
+                    if (!atomic_load_acquire(&local_state->ingest_complete)) {
+                        struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
+                        if (poll(pfds, 2, 0) > 0) {
+                            if (pfds[1].revents & POLLIN) atomic_store_release(&local_state->ingest_complete, 1);
+                        }
+                    }
+                    if (atomic_load_acquire(&local_state->ingest_complete)) {
+                        if (n == 0 || (n > 0 && (uint64_t)n <= prev_avail)) status = 1;
+                    } else {
+                        status = 0;
+                        bool starving = (atomic_load_relaxed(&local_state->active_waiters) > 0);
+                        UNIFIED_ADAPTIVE_COMMIT(starving);
+
+                        int poll_timeout = 100;
+                        if (starving && timeout_us >= 0) {
+                            if (first_wait_ts == 0) first_wait_ts = get_us_time();
+                            uint64_t now = get_us_time();
+                            if (timeout_us == 0 || (now - first_wait_ts >= (uint64_t)timeout_us)) poll_timeout = 0;
+                            else {
+                                uint64_t rem = (timeout_us - (now - first_wait_ts)) / 1000;
+                                poll_timeout = (rem > 100) ? 100 : (int)rem;
+                            }
+                        } else first_wait_ts = 0;
+
+                        struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
+                        if (poll(pfds, 2, poll_timeout) > 0) {
+                            if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_data, &v, 8)) {} }
+                            if (pfds[1].revents & POLLIN) atomic_store_release(&local_state->ingest_complete, 1);
+                        }
+                        current_stall = true;
+                        stall_meter = (stall_meter + (W + DAMPING_OFFSET)) >> 1;
+                        if (p < end) force_refill = true;
+                        continue;
+                    }
                 }
-              }
+            }
+
+            bool flush = false;
+            bool limit_reached = false;
+
+            if (byte_mode) {
+                uint64_t avail = is_numa ? (chunk_end - current_p_offset) : (uint64_t)(end - p);
+                uint64_t take = 0;
+
+                if (limit_items > 0) {
+                    if (!is_numa && total_scanned >= limit_items) { status = 1; break; }
+                    if (is_numa) {
+                        uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, (avail >= L ? L : avail), __ATOMIC_SEQ_CST);
+                        if (prev >= limit_items) break;
+                    }
+                }
+
+                if (avail >= L) {
+                    take = L; flush = true; first_wait_ts = 0;
+                } else if (avail > 0) {
+                    if ((!is_numa && status == 1) || is_numa) {
+                        take = avail; flush = true;
+                    } else if (atomic_load_relaxed(&local_state->active_waiters) > 0) {
+                        if (timeout_us == 0) { take = avail; flush = true; }
+                        else if (timeout_us > 0 && first_wait_ts > 0 && (get_us_time() - first_wait_ts >= (uint64_t)timeout_us)) {
+                            take = avail; flush = true; first_wait_ts = 0;
+                        }
+                    }
+                }
+
+                if (flush) {
+                    current_p_offset = is_numa ? (current_p_offset + take) : (buf_base_offset + (uint64_t)(p - buf) + take);
+                    if (!is_numa) pending_lines = 0;
+
+                    bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
+                    uint32_t stride = is_numa ? (uint32_t)(current_p_offset - batch_start) : 1;
+                    uint32_t cv = is_numa ? take : 1;
+
+                    UNIFIED_SCANNER_FLUSH(cv, stride, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, true, false);
+                    if (is_numa) {
+                        minor_idx++;
+                        if (is_last) {
+                            chunk_bounds[cb_head & 3] = local_scan_idx;
+                            cb_head++;
+                        }
+                    }
+
+                    p += take; batch_start += is_numa ? take : current_p_offset - batch_start;
+                    total_scanned += is_numa ? take : 1;
+                    pending_lines = 0;
+                } else {
+                    if (!is_numa) force_refill = true;
+                }
+            } else {
+                uint64_t scan_target = (L > pending_lines) ? (L - pending_lines) : 0;
+                if (limit_items > 0) {
+                    uint64_t current_global = is_numa ? atomic_load_relaxed(&state[0].global_scanned) : total_scanned;
+                    if (current_global >= limit_items) { if (!is_numa) status = 1; break; }
+                    uint64_t rem = limit_items - current_global;
+                    if (scan_target > rem) scan_target = rem;
+                    if (!is_numa && rem == 0) { status = 1; scan_target = 0; }
+                }
+                if (scan_target == 0 && !limit_reached && (!is_numa ? status != 1 : true)) scan_target = 1;
+
+                uint64_t lines_found = 0;
+                char delim = '\n';
+
+                char *safe_end = end;
+                if (BytesMax > 0) {
+                    uint64_t max_overhead = (scan_target + 1) * 8;
+                    if (BytesMax <= max_overhead) safe_end = p;
+                    else {
+                        uint64_t max_payload = BytesMax - max_overhead;
+                        uint64_t current_payload = (buf_base_offset + (p - buf)) - batch_start;
+                        if (current_payload >= max_payload) safe_end = p;
+                        else if (max_payload - current_payload < (uint64_t)(end - p)) {
+                            safe_end = p + (max_payload - current_payload);
+                        }
+                    }
+                }
+
+                char *simd_res = try_simd_scan(p, safe_end, scan_target, delim);
+                if (simd_res) {
+                    lines_found = scan_target;
+                    p = simd_res;
+                } else {
+                    while (lines_found < scan_target) {
+                        if (p >= end) {
+                            if (is_numa) {
+                                uint64_t read_start = buf_base_offset + (p - buf);
+                                size_t to_read = chunk_sz;
+                                if (read_start + to_read > chunk_end) to_read = chunk_end - read_start;
+                                if (to_read > 0) {
+                                    ssize_t n = pread(fd_or_memfd, buf, to_read, read_start);
+                                    if (n > 0) { buf_base_offset = read_start; p = buf; end = buf + n; }
+                                    else if (n < 0 && errno == EINTR) continue;
+                                    else { chunk_end = buf_base_offset + (end - buf); break; }
+                                } else break;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        char *nl = memchr(p, delim, end - p);
+                        if (nl) {
+                            if (BytesMax > 0 && lines_found > 0) {
+                                uint64_t line_end_offset = buf_base_offset + (uint64_t)((nl + 1) - buf);
+                                uint64_t payload = line_end_offset - batch_start;
+                                uint64_t overhead = (lines_found + 1) * 8;
+                                if ((payload + overhead) > BytesMax) { limit_reached = true; break; }
+                            }
+                            lines_found++;
+                            p = nl + 1;
+                        } else {
+                            if (is_numa) {
+                                uint64_t curr_pos = buf_base_offset + (end - buf);
+                                if (curr_pos >= chunk_end) { lines_found++; p = end; break; }
+                                else p = end;
+                            } else {
+                                if (status == 1 && p < end) { lines_found++; p = end; }
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (is_numa && limit_items > 0 && lines_found > 0) {
+                    uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, lines_found, __ATOMIC_SEQ_CST);
+                    if (prev >= limit_items) { lines_found = 0; limit_reached = true; break; }
+                    else if (prev + lines_found >= limit_items) limit_reached = true;
+                }
+
+                pending_lines += lines_found;
+                total_scanned += lines_found;
+                current_p_offset = buf_base_offset + (p - buf);
+
+                if (!is_numa && limit_items > 0 && total_scanned >= limit_items) status = 1;
+
+                if (pending_lines > 0) {
+                    if (pending_lines >= L || limit_reached || (is_numa && current_p_offset >= chunk_end) || (!is_numa && status == 1)) {
+                        flush = true;
+                    } else if (starve_meter >= (W + DAMPING_OFFSET - 3)) {
+                        bool trigger = is_numa ? true : (stall_meter >= (W + DAMPING_OFFSET - 3));
+                        if (trigger) {
+                            if (timeout_us == 0) flush = true;
+                            else if (timeout_us > 0) {
+                                if (first_wait_ts == 0) first_wait_ts = get_us_time();
+                                if (get_us_time() - first_wait_ts >= (uint64_t)timeout_us) flush = true;
+                            }
+                        }
+                    }
+                    if (flush) first_wait_ts = 0;
+                } else if (!is_numa) force_refill = true;
+
+                if (flush) {
+                    bool is_last = is_numa ? (current_p_offset >= chunk_end || limit_reached) : false;
+                    uint32_t stride = is_numa ? (return_bytes ? (uint32_t)(current_p_offset - batch_start) : (uint32_t)pending_lines) : 0;
+
+                    UNIFIED_SCANNER_FLUSH(pending_lines, stride, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, return_bytes, false);
+                    if (is_numa) {
+                        minor_idx++;
+                        if (is_last) {
+                            chunk_bounds[cb_head & 3] = local_scan_idx;
+                            cb_head++;
+                        }
+                    }
+                    batch_start = current_p_offset;
+                    pending_lines = 0;
+
+                    int node_arg = is_numa ? my_node_id : -1;
+                    ADAPTIVE_FLOW_CONTROL(local_state, current_stall, node_arg);
+                } else if (!is_numa) force_refill = true;
+            }
+            if (limit_reached) break;
+        } // End Inner Loop
+
+        if (is_numa) {
+            UNIFIED_ADAPTIVE_COMMIT(true);
+            if (limit_items > 0 && atomic_load_relaxed(&state[0].global_scanned) >= limit_items) break;
+        }
+    } // End Outer Loop
+
+unified_scanner_eof:
+    // =========================================================
+    // 3. FINALIZATION (NUMA Finish vs UMA Tail Re-batching)
+    // =========================================================
+
+    // Universally check backlog at EOF and spawn remaining workers if needed
+    if (fd_spawn >= 0) {
+        uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);
+        if (W_curr < W_max_val) {
+            uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx);
+            uint64_t backlog = (local_scan_idx > r_idx) ? local_scan_idx - r_idx : 0;
+            uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog;
+            if (W_target > W_curr) {
+                uint64_t needed = W_target - W_curr;
+                if (needed > 0) {
+                    char sbuf[64]; int slen;
+                    if (is_numa) slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed);
+                    else slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
+                    if (slen > 0) SYS_CHK(write(fd_spawn, sbuf, slen));
+                    W += needed; atomic_store_relaxed(&local_state->active_workers, W);
+                }
+            }
+        }
+    }
+
+    if (is_numa) {
+        atomic_store_release(&local_state->write_idx, local_scan_idx);
+        atomic_store_release(&local_state->scanner_finished, 1);
+        uint64_t blast = 999999;
+        SYS_CHK(write(evfd_data_arr[my_node_id], &blast, 8));
+        if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
+    } else {
+        if (!byte_mode) {
+            uint64_t L_tail = pending_lines;
+            char *p_scan = p; char delim = '\n';
+            while (p_scan < end) {
+                char *nl = memchr(p_scan, delim, end - p_scan);
+                if (nl) { L_tail++; p_scan = nl + 1; }
+                else { if (p_scan < end) L_tail++; break; }
+            }
+            if (local_scan_idx > local_write_idx) {
+                for (uint64_t i = local_write_idx; i < local_scan_idx; i++) L_tail += state[0].stride_ring[i & RING_MASK];
+            }
+
+            uint64_t tail_start_offset = (local_scan_idx > local_write_idx) ? (state[0].offset_ring[local_write_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH) : batch_start;
+            local_scan_idx = local_write_idx;
+            int64_t buf_rel = (int64_t)tail_start_offset - (int64_t)buf_base_offset;
+            if (buf_rel >= 0 && buf_rel < (int64_t)chunk_sz) { p = buf + buf_rel; batch_start = tail_start_offset; }
+            else {
+                buf_base_offset = tail_start_offset; batch_start = tail_start_offset;
+                ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)tail_start_offset);
+                p = buf; end = buf + (n > 0 ? n : 0);
+            }
+            uint64_t R = 1;
+            if (L > 0) { uint64_t inner_log = fast_log2(2 + L); R = fast_log2(2 + inner_log); }
+            if (R < 1) R = 1;
+            uint64_t L_tail_done = 0;
+            atomic_store_release(&state[0].tail_idx, local_write_idx);
+
+            while (L_tail_done < L_tail) {
+                uint64_t target = (L_tail > 0) ? (L * (L_tail - L_tail_done)) / L_tail : 0;
+                uint64_t min_batch = L / R; if (min_batch < 1) min_batch = 1;
+                if (target < min_batch) target = min_batch;
+
+                uint64_t lines_found = 0;
+                while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
+                    if (p >= end) {
+                        uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
+                        ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
+                        if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
+                        else break;
+                    }
+                    char *nl = memchr(p, delim, end - p);
+                    if (nl) { lines_found++; p = nl + 1; }
+                    else {
+                        uint64_t current_p_offset = buf_base_offset + (uint64_t)(end - buf);
+                        ssize_t n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
+                        if (n > 0) { buf_base_offset = current_p_offset; p = buf; end = buf + n; }
+                        else { p = end; break; }
+                    }
+                }
+                if (lines_found < target && (lines_found + L_tail_done) < L_tail) {
+                    if (p >= end) { uint64_t remainder = L_tail - L_tail_done - lines_found; lines_found += remainder; }
+                }
+                if (lines_found > 0) {
+                    uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
+                    UNIFIED_SCANNER_FLUSH(lines_found, 0, false, 0, 0, current_p_offset, true, true);
+                    batch_start = current_p_offset; L_tail_done += lines_found;
+                } else break;
             }
         }
 
-        if (limit_items > 0 && lines_found > 0) {
-          uint64_t prev =
-              atomic_fetch_add(&state[0].global_scanned, lines_found);
-          if (prev >= limit_items) {
-            lines_found = 0;
-            limit_reached = true;
-            break;
-          } else if (prev + lines_found >= limit_items)
-            limit_reached = true;
+        uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
+        local_state->offset_ring[local_scan_idx & RING_MASK] = (uint64_t)final_sentinel | FLAG_PARTIAL_BATCH;
+        local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] = (uint64_t)final_sentinel; // THE EOF FENCEPOST FIX
+        local_scan_idx++;
+
+        atomic_store_release(&local_state->write_idx, local_scan_idx);
+        atomic_store_release(&local_state->scanner_finished, 1);
+        if (atomic_load_acquire(&local_state->active_waiters) > 0) {
+            uint64_t v = 1; SYS_CHK(write(evfd_data_arr[0], &v, 8));
         }
-
-        pending_lines += lines_found;
-        total_scanned += lines_found;
-        current_p_offset = buf_base_offset + (p - buf);
-
-        if (pending_lines >= L || current_p_offset >= chunk_end ||
-            limit_reached)
-          flush = true;
-        else if (stall_meter >= (W + DAMPING_OFFSET - 3) &&
-                 starve_meter >= (W + DAMPING_OFFSET - 3)) {
-          if (timeout_us == 0)
-            flush = true;
-          else if (timeout_us > 0) {
-            if (first_wait_ts == 0)
-              first_wait_ts = get_us_time();
-            if (get_us_time() - first_wait_ts >= (uint64_t)timeout_us)
-              flush = true;
-          }
-        }
-        if (flush)
-          first_wait_ts = 0;
-      }
-
-      if (flush) {
-        bool is_last = (current_p_offset >= chunk_end) || limit_reached;
-        uint32_t stride = (return_bytes)
-                              ? (uint32_t)(current_p_offset - batch_start)
-                              : (uint32_t)pending_lines;
-
-        NUMA_SCANNER_FLUSH(pending_lines, stride, is_last, meta->major_id,
-                           minor_idx, batch_start, current_p_offset);
-        minor_idx++;
-        batch_start = current_p_offset;
-        pending_lines = 0;
-
-        ADAPTIVE_FLOW_CONTROL(local_state, current_stall, my_node_id);
-      }
-      if (limit_reached)
-        break;
+        if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
+        uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8));
     }
-    NUMA_ADAPTIVE_COMMIT(true);
-    if (limit_items > 0 &&
-        atomic_load_relaxed(&state[0].global_scanned) >= limit_items)
-      break;
-  }
 
-scanner_eof:
-  atomic_store_release(&local_state->write_idx, local_scan_idx);
-  atomic_store_release(&local_state->scanner_finished, 1);
-
-  uint64_t blast = 999999;
-  SYS_CHK(write(evfd_data_arr[my_node_id], &blast, 8));
-  if (fd_spawn >= 0)
-    SYS_CHK(write(fd_spawn, "x\n", 2));
-
-  xfree(buf);
-  return EXECUTION_SUCCESS;
+    xfree(buf);
+    return EXECUTION_SUCCESS;
 }
 
 // ==============================================================================
-// 5. LEGACY FLAT SCANNER
+// 6. SCANNER WRAPPER ENTRY POINTS
 // ==============================================================================
-
-#define SCANNER_WAKE()                                                         \
-  do {                                                                         \
-    if (atomic_load_acquire(&state[0].active_waiters) > 0) {                   \
-      uint64_t v = 1;                                                          \
-      SYS_CHK(write(evfd_data_arr[0], &v, 8));                                 \
-    }                                                                          \
-  } while (0)
-static uint64_t local_scan_idx = 0;
-static uint64_t local_write_idx = 0;
-
-static inline void scanner_adaptive_commit(bool force) {
-  if (local_scan_idx > local_write_idx) {
-    uint64_t W = atomic_load_relaxed(&state[0].active_workers);
-    if (W < 1)
-      W = 1;
-    if (force || atomic_load_relaxed(&state[0].active_waiters) > 0) {
-      atomic_store_release(&state[0].write_idx, local_scan_idx);
-      local_write_idx = local_scan_idx;
-      SCANNER_WAKE();
-      return;
-    }
-    uint64_t r_idx = atomic_load_relaxed(&state[0].read_idx);
-    uint64_t pending = local_scan_idx - r_idx;
-    uint64_t current_buffer = local_scan_idx - local_write_idx;
-    uint64_t target_buffer = 0;
-    if (pending >= 10 * W) {
-      target_buffer = (W << 2);
-    } else if (pending > (W << 1)) {
-      uint64_t linear = pending >> 1;
-      uint64_t intermediate =
-          (linear < current_buffer) ? linear : current_buffer;
-      if (intermediate > W)
-        target_buffer = intermediate - W;
-      else
-        target_buffer = 0;
-    }
-    uint64_t target = local_scan_idx - target_buffer;
-    if (target > local_write_idx) {
-      atomic_store_release(&state[0].write_idx, target);
-      local_write_idx = target;
-      SCANNER_WAKE();
-    }
-  }
-}
-
-#define SCANNER_FLUSH(cnt, do_fencepost, overwrite)                            \
-  do {                                                                         \
-    while (1) {                                                                \
-      uint64_t limit;                                                          \
-      if (atomic_load_relaxed(&state[0].fallow_active))                        \
-        limit = atomic_load_acquire(&state[0].min_idx);                        \
-      else                                                                     \
-        limit = atomic_load_acquire(&state[0].read_idx);                       \
-      if ((local_scan_idx - limit) < RING_SIZE)                                \
-        break;                                                                 \
-      scanner_adaptive_commit(true);                                           \
-      usleep(100);                                                             \
-    }                                                                          \
-    uint64_t pk = (uint64_t)batch_start;                                       \
-    if (cnt != L)                                                              \
-      pk |= FLAG_PARTIAL_BATCH;                                                \
-    if (!byte_mode)                                                            \
-      state[0].stride_ring[local_scan_idx & RING_MASK] = (uint32_t)cnt;        \
-                                                                               \
-    if (do_fencepost) {                                                        \
-      state[0].offset_ring[(local_scan_idx + 1) & RING_MASK] =                 \
-          current_p_offset;                                                    \
-      if ((pk & FLAG_PARTIAL_BATCH) || (overwrite)) {                          \
-        state[0].offset_ring[local_scan_idx & RING_MASK] = pk;                 \
-      }                                                                        \
-    } else {                                                                   \
-      state[0].offset_ring[local_scan_idx & RING_MASK] = pk;                   \
-    }                                                                          \
-    local_scan_idx++;                                                          \
-    scanner_adaptive_commit(false);                                            \
-  } while (0)
 
 static int ring_scanner_main(int argc, char **argv) {
-  if (argc < 2)
-    return EXECUTION_FAILURE;
-  int fd = atoi(argv[1]);
-  int fd_spawn = (argc >= 3) ? atoi(argv[2]) : -1;
-
-  uint64_t L = state[0].cfg_batch_start;
-  uint64_t Lmax = state[0].cfg_batch_max;
-  uint64_t W = state[0].cfg_w_start;
-  uint64_t W_max_val = state[0].cfg_w_max;
-  uint64_t BytesMax = state[0].cfg_line_max;
-  uint64_t limit_items = state[0].cfg_limit;
-  int64_t timeout_us = state[0].cfg_timeout_us;
-  bool byte_mode = state[0].mode_byte;
-  bool fixed_batch = state[0].fixed_batch;
-  bool fixed_workers = state[0].fixed_workers;
-  bool return_bytes = state[0].cfg_return_bytes;
-
-  uint64_t W2 = fast_log2(W_max_val);
-  uint64_t L2 = fast_log2(Lmax);
-  uint64_t X_const = fast_log2(W2 + L2) * W2;
-  if (X_const == 0)
-    X_const = 1;
-
-  local_scan_idx = 0;
-  local_write_idx = 0;
-  size_t chunk_sz = get_optimal_chunk_size();
-  char *buf = xmalloc_aligned(chunk_sz);
-  char *p = buf, *end = buf;
-
-  uint64_t buf_base_offset = lseek(fd, 0, SEEK_CUR);
-  uint64_t batch_start = buf_base_offset;
-  int status = 0;
-
-  int phase = 0;
-  uint64_t batch_counter = 0;
-  uint64_t last_calc_us = get_us_time();
-  uint64_t last_calc_write = 0;
-  uint64_t last_calc_read = 0;
-  uint64_t starve_meter = 0;
-  uint64_t stall_meter = 0;
-  uint64_t batches_since_calc = 0;
-  uint64_t total_scanned = 0;
-  uint64_t first_wait_ts = 0;
-
-  atomic_store_relaxed(&state[0].write_idx, 0);
-  atomic_store_relaxed(&state[0].read_idx, 0);
-  atomic_store_relaxed(&state[0].tail_idx, 0);
-  atomic_store_relaxed(&state[0].active_workers, W);
-
-  bool limit_reached = false;
-  uint64_t pending_lines = 0;
-  bool force_refill = false;
-  bool experienced_stall = false;
-
-  if (fd_spawn >= 0 && W > 0) {
-    char sbuf[64];
-    int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", W);
-    if (slen > 0)
-      SYS_CHK(write(fd_spawn, sbuf, slen));
-  }
-
-#define SCAN_BATCH(target_L)                                                   \
-  ({                                                                           \
-    uint64_t _lines_found = 0;                                                 \
-    limit_reached = false;                                                     \
-    char delim = '\n';                                                         \
-    char *safe_end = end;                                                      \
-    if (BytesMax > 0) {                                                        \
-        uint64_t max_overhead = ((target_L) + 1) * 8;                          \
-        if (BytesMax <= max_overhead) safe_end = p;                            \
-        else {                                                                 \
-            uint64_t max_payload = BytesMax - max_overhead;                    \
-            uint64_t current_payload = (buf_base_offset + (p - buf)) - batch_start; \
-            if (current_payload >= max_payload) safe_end = p;                  \
-            else if (max_payload - current_payload < (uint64_t)(end - p))      \
-                safe_end = p + (max_payload - current_payload);                \
-        }                                                                      \
-    }                                                                          \
-    char *simd_res = try_simd_scan(p, safe_end, (target_L), delim);            \
-    if (simd_res) {                                                            \
-        _lines_found = (target_L);                                             \
-        p = simd_res;                                                          \
-    } else {                                                                   \
-        while (_lines_found < (target_L)) {                                    \
-          if (p >= end) break;                                                 \
-          char *nl = memchr(p, delim, end - p);                                \
-          if (nl) {                                                            \
-            if (BytesMax > 0 && _lines_found > 0) {                            \
-              uint64_t line_end_offset =                                       \
-                  buf_base_offset + (uint64_t)((nl + 1) - buf);                \
-              uint64_t payload = line_end_offset - batch_start;                \
-              uint64_t overhead = (_lines_found + 1) * 8;                      \
-              if ((payload + overhead) > BytesMax) {                           \
-                limit_reached = true;                                          \
-                break;                                                         \
-              }                                                                \
-            }                                                                  \
-            _lines_found++;                                                    \
-            p = nl + 1;                                                        \
-          } else {                                                             \
-            if (status == 1) {                                                 \
-              if (p < end) {                                                   \
-                _lines_found++;                                                \
-                p = end;                                                       \
-              }                                                                \
-            }                                                                  \
-            break;                                                             \
-          }                                                                    \
-        }                                                                      \
-    }                                                                          \
-    _lines_found;                                                              \
-  })
-
-  while (status != 1 || p < end) {
-    {
-      uint64_t _xLim = W + DAMPING_OFFSET;
-      if (atomic_load_relaxed(&state[0].active_waiters) > 0)
-        starve_meter = (starve_meter + _xLim) >> 1;
-      else
-        starve_meter >>= 1;
-    }
-
-    if ((p >= end || force_refill) && status != 1) {
-      force_refill = false;
-      uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
-      uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-
-      if (lseek(fd, (off_t)current_p_offset, SEEK_SET) < 0) {
-      }
-      ssize_t n = read(fd, buf, chunk_sz);
-
-      if (n > 0 && (uint64_t)n > prev_avail) {
-        buf_base_offset = current_p_offset;
-        p = buf;
-        end = buf + n;
-        status = 0;
-        stall_meter >>= 1;
-      } else {
-        if (n > 0) {
-          buf_base_offset = current_p_offset;
-          p = buf;
-          end = buf + n;
-        } else if (n == 0) {
-          // Ensure EOF triggers graceful exit without spinning
-          status = 1;
-        }
-        if (!atomic_load_acquire(&state[0].ingest_complete)) {
-          struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
-                                   {.fd = evfd_ingest_eof, .events = POLLIN}};
-          if (poll(pfds, 2, 0) > 0) {
-            if (pfds[1].revents & POLLIN)
-              atomic_store_release(&state[0].ingest_complete, 1);
-          }
-        }
-
-        if (atomic_load_acquire(&state[0].ingest_complete)) {
-          status = 1;
-        } else {
-          bool starving = (atomic_load_relaxed(&state[0].active_waiters) > 0);
-          scanner_adaptive_commit(starving);
-          SCANNER_WAKE();
-
-          int poll_timeout = 100;
-          if (starving && timeout_us >= 0) {
-            if (first_wait_ts == 0)
-              first_wait_ts = get_us_time();
-            uint64_t now = get_us_time();
-            if (timeout_us == 0 ||
-                (now - first_wait_ts >= (uint64_t)timeout_us))
-              poll_timeout = 0;
-            else {
-              uint64_t rem = (timeout_us - (now - first_wait_ts)) / 1000;
-              poll_timeout = (rem > 100) ? 100 : (int)rem;
-            }
-          } else
-            first_wait_ts = 0;
-
-          struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
-                                   {.fd = evfd_ingest_eof, .events = POLLIN}};
-          int ret = poll(pfds, 2, poll_timeout);
-          if (ret > 0) {
-            if (pfds[0].revents & POLLIN) {
-              uint64_t v;
-              if (read(evfd_ingest_data, &v, 8)) {
-              };
-            }
-            if (pfds[1].revents & POLLIN)
-              atomic_store_release(&state[0].ingest_complete, 1);
-          }
-
-          experienced_stall = true;
-          uint64_t _xLim = W + DAMPING_OFFSET;
-          stall_meter = (stall_meter + _xLim) >> 1;
-          if (p < end)
-            force_refill = true;
-          continue;
-        }
-      }
-    }
-
-    bool flush = false;
-
-    if (byte_mode) {
-      uint64_t avail = (uint64_t)(end - p);
-      uint64_t take = 0;
-      if (limit_items > 0 && total_scanned >= limit_items) {
-        status = 1;
-        break;
-      }
-
-      if (avail >= L) {
-        take = L;
-        flush = true;
-        first_wait_ts = 0;
-      } else if (avail > 0) {
-        if (status == 1) {
-          take = avail;
-          flush = true;
-        } else if (atomic_load_relaxed(&state[0].active_waiters) > 0) {
-          if (timeout_us == 0) {
-            take = avail;
-            flush = true;
-          } else if (timeout_us > 0) {
-            if (first_wait_ts > 0 &&
-                (get_us_time() - first_wait_ts >= (uint64_t)timeout_us)) {
-              take = avail;
-              flush = true;
-              first_wait_ts = 0;
-            }
-          }
-        }
-      }
-
-      if (flush) {
-        uint64_t current_p_offset =
-            buf_base_offset + (uint64_t)(p - buf) + take;
-        SCANNER_FLUSH(1, true, false);
-        p += take;
-        batch_start += take;
-        total_scanned++;
-        pending_lines = 0;
-      } else
-        force_refill = true;
-
-    } else {
-      uint64_t scan_target = (L > pending_lines) ? (L - pending_lines) : 0;
-      if (limit_items > 0) {
-        uint64_t rem = limit_items - total_scanned;
-        if (scan_target > rem)
-          scan_target = rem;
-        if (rem == 0) {
-          status = 1;
-          scan_target = 0;
-        }
-      }
-      if (scan_target == 0 && !limit_reached && status != 1)
-        scan_target = 1;
-
-      uint64_t found = SCAN_BATCH(scan_target);
-      pending_lines += found;
-      total_scanned += found;
-
-      if (limit_items > 0 && total_scanned >= limit_items)
-        status = 1;
-
-      if (pending_lines > 0) {
-        uint64_t xLim = W + DAMPING_OFFSET;
-        if (pending_lines >= L || status == 1 || limit_reached)
-          flush = true;
-        else if (starve_meter >= (xLim - 3)) {
-          bool input_stalled = (stall_meter >= (xLim - 3));
-          if (input_stalled) {
-            if (timeout_us == 0)
-              flush = true;
-            else if (timeout_us > 0) {
-              if (first_wait_ts == 0)
-                first_wait_ts = get_us_time();
-              if (get_us_time() - first_wait_ts >= (uint64_t)timeout_us)
-                flush = true;
-            }
-          }
-        }
-
-        if (flush) {
-          uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-          SCANNER_FLUSH(pending_lines, return_bytes, false);
-          batch_start = current_p_offset;
-          pending_lines = 0;
-          first_wait_ts = 0;
-        } else
-          force_refill = true;
-      } else
-        force_refill = true;
-    }
-
-    if (flush) {
-      ADAPTIVE_FLOW_CONTROL(&state[0], experienced_stall, -1);
-      experienced_stall = false;
-    }
-  }
-
-  if (!byte_mode) {
-    uint64_t L_tail = pending_lines;
-    char *p_scan = p;
-    char delim = '\n';
-    while (p_scan < end) {
-      char *nl = memchr(p_scan, delim, end - p_scan);
-      if (nl) {
-        L_tail++;
-        p_scan = nl + 1;
-      } else {
-        if (p_scan < end)
-          L_tail++;
-        break;
-      }
-    }
-    if (local_scan_idx > local_write_idx) {
-      for (uint64_t i = local_write_idx; i < local_scan_idx; i++)
-        L_tail += state[0].stride_ring[i & RING_MASK];
-    }
-    if (fd_spawn >= 0) {
-      uint64_t W_curr = atomic_load_relaxed(&state[0].active_workers);
-      if (W_curr < W_max_val) {
-        uint64_t r_idx = atomic_load_relaxed(&state[0].read_idx);
-        uint64_t backlog = 0;
-        if (local_scan_idx > r_idx)
-          backlog = local_scan_idx - r_idx;
-        uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog;
-        if (W_target > W_curr) {
-          uint64_t needed = W_target - W_curr;
-          if (needed > 0) {
-            char sbuf[64];
-            int slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
-            if (slen > 0)
-              SYS_CHK(write(fd_spawn, sbuf, slen));
-            W += needed;
-            atomic_store_relaxed(&state[0].active_workers, W);
-          }
-        }
-      }
-    }
-    uint64_t tail_start_offset;
-    if (local_scan_idx > local_write_idx)
-      tail_start_offset = state[0].offset_ring[local_write_idx & RING_MASK] &
-                          ~FLAG_PARTIAL_BATCH;
-    else
-      tail_start_offset = batch_start;
-    local_scan_idx = local_write_idx;
-    int64_t buf_rel = (int64_t)tail_start_offset - (int64_t)buf_base_offset;
-    if (buf_rel >= 0 && buf_rel < (int64_t)chunk_sz) {
-      p = buf + buf_rel;
-      batch_start = tail_start_offset;
-    } else {
-      lseek(fd, (off_t)tail_start_offset, SEEK_SET);
-      buf_base_offset = tail_start_offset;
-      batch_start = tail_start_offset;
-      ssize_t n = read(fd, buf, chunk_sz);
-      p = buf;
-      end = buf + (n > 0 ? n : 0);
-    }
-    uint64_t R = 1;
-    if (L > 0) {
-      uint64_t inner_log = fast_log2(2 + L);
-      R = fast_log2(2 + inner_log);
-    }
-    if (R < 1)
-      R = 1;
-    uint64_t L_tail_done = 0;
-    atomic_store_release(&state[0].tail_idx, local_write_idx);
-
-    while (L_tail_done < L_tail) {
-      uint64_t target = 0;
-      if (L_tail > 0)
-        target = (L * (L_tail - L_tail_done)) / L_tail;
-      uint64_t min_batch = L / R;
-      if (min_batch < 1)
-        min_batch = 1;
-      if (target < min_batch)
-        target = min_batch;
-
-      uint64_t lines_found = 0;
-      while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
-        if (p >= end) {
-          uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-          lseek(fd, (off_t)current_p_offset, SEEK_SET);
-          ssize_t n = read(fd, buf, chunk_sz);
-          if (n > 0) {
-            buf_base_offset = current_p_offset;
-            p = buf;
-            end = buf + n;
-          } else
-            break;
-        }
-        char *nl = memchr(p, delim, end - p);
-        if (nl) {
-          lines_found++;
-          p = nl + 1;
-        } else {
-          uint64_t current_p_offset = buf_base_offset + (uint64_t)(end - buf);
-          lseek(fd, (off_t)current_p_offset, SEEK_SET);
-          ssize_t n = read(fd, buf, chunk_sz);
-          if (n > 0) {
-            buf_base_offset = current_p_offset;
-            p = buf;
-            end = buf + n;
-          } else {
-            p = end;
-            break;
-          }
-        }
-      }
-      if (lines_found < target && (lines_found + L_tail_done) < L_tail) {
-        if (p >= end) {
-          uint64_t remainder = L_tail - L_tail_done - lines_found;
-          lines_found += remainder;
-        }
-      }
-      if (lines_found > 0) {
-        uint64_t pk = (uint64_t)batch_start;
-        if (lines_found != L)
-          pk |= FLAG_PARTIAL_BATCH;
-        while (1) {
-          uint64_t limit;
-          if (atomic_load_relaxed(&state[0].fallow_active))
-            limit = atomic_load_acquire(&state[0].min_idx);
-          else
-            limit = atomic_load_acquire(&state[0].read_idx);
-          if ((local_scan_idx - limit) < RING_SIZE)
-            break;
-          SCANNER_WAKE();
-          usleep(100);
-        }
-        uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-        SCANNER_FLUSH(lines_found, true, true);
-        batch_start = current_p_offset;
-        L_tail_done += lines_found;
-      } else
-        break;
-    }
-  }
-
-  uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
-  state[0].offset_ring[local_scan_idx & RING_MASK] =
-      (uint64_t)final_sentinel | FLAG_PARTIAL_BATCH;
-  local_scan_idx++;
-  atomic_store_release(&state[0].write_idx, local_scan_idx);
-  atomic_store_release(&state[0].scanner_finished, 1);
-  SCANNER_WAKE();
-  if (fd_spawn >= 0)
-    SYS_CHK(write(fd_spawn, "x\n", 2));
-  uint64_t eof_sig = 999999;
-  SYS_CHK(write(evfd_eof, &eof_sig, 8));
-  free(buf);
-  return EXECUTION_SUCCESS;
+    if (argc < 2) return EXECUTION_FAILURE;
+    int fd = atoi(argv[1]);
+    int fd_spawn = (argc >= 3) ? atoi(argv[2]) : -1;
+    // Call Unified Loop with is_numa = false
+    return core_scanner_loop(fd, 0, fd_spawn, 1, false);
 }
 
+static int ring_numa_scanner_main(int argc, char **argv) {
+    if (argc < 5) return EXECUTION_FAILURE;
+    int memfd = atoi(argv[1]);
+    int my_node_id = atoi(argv[2]);
+    int fd_spawn = atoi(argv[3]);
+    int num_nodes = atoi(argv[4]);
+    // Call Unified Loop with is_numa = true
+    return core_scanner_loop(memfd, my_node_id, fd_spawn, num_nodes, true);
+}
+
+
 // ==============================================================================
-// 6. CONSUMERS (Claim, Ack, Order)
+// 7. CONSUMERS (Claim, Ack, Order)
 // ==============================================================================
 
 static int ring_claim_main(int argc, char **argv) {
@@ -2853,7 +2323,7 @@ restart_loop:
         claim_count = safe_count;
       }
 
-      my_read_idx = atomic_fetch_add(&local_state->read_idx, claim_count);
+      my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count, __ATOMIC_SEQ_CST);
 
       if (!local_state->numa_enabled) {
         int64_t sbatch_check =
@@ -2871,7 +2341,7 @@ restart_loop:
     }
 
     if (atomic_load_acquire(&local_state->scanner_finished)) {
-      if (atomic_fetch_sub(&local_state->active_workers, 1) == 1)
+      if (__atomic_fetch_sub(&local_state->active_workers, 1, __ATOMIC_SEQ_CST) == 1)
         return 2;
       bind_var_or_array(v_target, "0", 0);
       return 1;
@@ -2883,7 +2353,7 @@ restart_loop:
       continue;
     }
 
-    atomic_fetch_add(&local_state->active_waiters, 1);
+    __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
     is_waiting_on_ring = true;
 
     struct pollfd pfds[3] = {
@@ -2927,7 +2397,7 @@ restart_loop:
         goto restart_loop;
       }
     } else {
-      atomic_fetch_add(&local_state->active_waiters, 1);
+      __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
       is_waiting_on_ring = true;
       while (1) {
         w_curr = atomic_load_acquire(&local_state->write_idx);
@@ -2959,15 +2429,10 @@ restart_loop:
             {.fd = evfd_eof, .events = POLLIN}};
         poll(pfds, 2, -1);
         if (pfds[0].revents) {
-          uint64_t v;
-          if (read(evfd_data_arr[my_numa_node], &v, 8)) {
-          };
+            uint64_t v; if (read(evfd_data_arr[my_numa_node], &v, 8)) {}
         }
         if (pfds[1].revents) {
-          uint64_t v;
-          if (read(evfd_eof, &v, 8)) {
-          };
-          break;
+            uint64_t v; if (read(evfd_eof, &v, 8)) {} break;
         }
       }
       cleanup_waiter_state();
@@ -3003,8 +2468,8 @@ restart_loop:
         final_val += local_state->stride_ring[(my_read_idx + i) & RING_MASK];
   }
 
-  atomic_fetch_add(&local_state->total_lines_consumed,
-                   (local_state->cfg_return_bytes) ? claim_count : final_val);
+  __atomic_fetch_add(&local_state->total_lines_consumed,
+                   (local_state->cfg_return_bytes) ? claim_count : final_val, __ATOMIC_SEQ_CST);
 
   worker_last_idx = my_read_idx;
   worker_last_cnt = claim_count;
@@ -3047,8 +2512,7 @@ restart_loop:
 }
 
 static int ring_ack_main(int argc, char **argv) {
-  if (argc < 2)
-    return EXECUTION_FAILURE;
+  if (argc < 2) return EXECUTION_FAILURE;
   int fd_fallow = atoi(argv[1]);
   int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
 
@@ -3063,13 +2527,9 @@ static int ring_ack_main(int argc, char **argv) {
   if (worker_last_cnt > 0) {
     my_idx = worker_last_idx;
     if (local_state && local_state->numa_enabled) {
-      op.major_idx = worker_last_major;
-      op.minor_idx = worker_last_minor;
-      op.cnt = worker_last_cnt;
+      op.major_idx = worker_last_major; op.minor_idx = worker_last_minor; op.cnt = worker_last_cnt;
     } else {
-      op.major_idx = (uint32_t)worker_last_idx;
-      op.minor_idx = 0;
-      op.cnt = worker_last_cnt;
+      op.major_idx = (uint32_t)worker_last_idx; op.minor_idx = 0; op.cnt = worker_last_cnt;
     }
   } else {
     op.cnt = (uint32_t)atoi(get_string_value("RING_BATCH_SLOTS"));
@@ -3079,15 +2539,13 @@ static int ring_ack_main(int argc, char **argv) {
       my_idx = (uint64_t)atoll(get_string_value("RING_BATCH_IDX"));
     } else {
       op.major_idx = (uint32_t)atoi(get_string_value("RING_BATCH_IDX"));
-      op.minor_idx = 0;
-      my_idx = op.major_idx;
+      op.minor_idx = 0; my_idx = op.major_idx;
     }
   }
 
   if (fd_fallow > 0) {
     if (local_state && local_state->numa_enabled) {
-      uint64_t start =
-          local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+      uint64_t start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
       uint64_t end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
       struct PhysPacket pp = {.off = start, .len = end - start};
       SYS_CHK(write(fd_fallow, &pp, sizeof(pp)));
@@ -3099,707 +2557,397 @@ static int ring_ack_main(int argc, char **argv) {
 
   if (fd_target > 0) {
     if (fd_target != ack_cached_target_fd) {
-      ack_cached_target_fd = fd_target;
-      struct stat st;
-      ack_cached_mode =
-          (fstat(fd_target, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
+      ack_cached_target_fd = fd_target; struct stat st;
+      ack_cached_mode = (fstat(fd_target, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
     }
-
     if (ack_cached_mode == 1) {
       const char *s_order_pipe = get_string_value("FD_ORDER_PIPE");
       if (s_order_pipe) {
         int fd_pipe = atoi(s_order_pipe);
         off_t curr = lseek(fd_target, 0, SEEK_CUR);
-        if (curr == (off_t)-1)
-          return EXECUTION_FAILURE;
-
-        op.fd = fd_target;
-        op.off = (uint64_t)last_ack_offset;
-        op.len = (uint64_t)(curr - last_ack_offset);
+        if (curr == (off_t)-1) return EXECUTION_FAILURE;
+        op.fd = fd_target; op.off = (uint64_t)last_ack_offset; op.len = (uint64_t)(curr - last_ack_offset);
         SYS_CHK(write(fd_pipe, &op, sizeof(op)));
         last_ack_offset = curr;
       }
-    } else {
-      SYS_CHK(write(fd_target, &op, sizeof(op)));
-    }
+    } else SYS_CHK(write(fd_target, &op, sizeof(op)));
   }
   return EXECUTION_SUCCESS;
 }
 
 // --- MIN-HEAP ORDERING ---
-#define HEAP_MAX 262144
 struct HeapNode {
   uint64_t key;
   struct OrderPacket pkt;
 };
 
-static void heap_push(struct HeapNode *heap, int *sz, uint64_t key,
-                      struct OrderPacket pkt) {
-  if (*sz >= HEAP_MAX)
-    return;
+static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap, uint64_t key, struct OrderPacket pkt) {
+  if (*sz >= *cap) {
+    *cap = (*cap) * 2;
+    *heap_ptr = xrealloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
+  }
+  struct HeapNode *heap = *heap_ptr;
   int i = (*sz)++;
   while (i > 0) {
     int p = (i - 1) / 2;
-    if (heap[p].key <= key)
-      break;
-    heap[i] = heap[p];
-    i = p;
+    if (heap[p].key <= key) break;
+    heap[i] = heap[p]; i = p;
   }
-  heap[i].key = key;
-  heap[i].pkt = pkt;
+  heap[i].key = key; heap[i].pkt = pkt;
 }
 
 static void heap_pop(struct HeapNode *heap, int *sz, struct HeapNode *out) {
-  *out = heap[0];
-  struct HeapNode tmp = heap[--(*sz)];
-  int i = 0;
+  *out = heap[0]; struct HeapNode tmp = heap[--(*sz)]; int i = 0;
   while (i * 2 + 1 < *sz) {
     int child = i * 2 + 1;
-    if (child + 1 < *sz && heap[child + 1].key < heap[child].key)
-      child++;
-    if (tmp.key <= heap[child].key)
-      break;
-    heap[i] = heap[child];
-    i = child;
+    if (child + 1 < *sz && heap[child + 1].key < heap[child].key) child++;
+    if (tmp.key <= heap[child].key) break;
+    heap[i] = heap[child]; i = child;
   }
   heap[i] = tmp;
 }
 
-static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset,
-                               size_t count) {
-  size_t total = 0;
-  int retries = 0;
+static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
+  size_t total = 0; int retries = 0;
   while (total < count) {
     ssize_t s = sendfile(out_fd, in_fd, offset, count - total);
-    if (s < 0) {
-      if (errno == EINTR || errno == EAGAIN) {
-        usleep(10);
-        continue;
-      }
-      return total > 0 ? (ssize_t)total : -1;
-    }
-    if (s == 0) {
-      if (retries++ < 100) {
-        usleep(10);
-        continue;
-      }
-      break;
-    }
-    retries = 0;
-    total += s;
+    if (s < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } return total > 0 ? (ssize_t)total : -1; }
+    if (s == 0) { if (retries++ < 100) { usleep(10); continue; } break; }
+    retries = 0; total += s;
   }
   return (ssize_t)total;
 }
 
 static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
-  const size_t BUF_SIZE = 65536;
-  char *buf = xmalloc(BUF_SIZE);
-  size_t total_read = 0;
-  int retries = 0;
+  const size_t BUF_SIZE = 65536; char *buf = xmalloc(BUF_SIZE); size_t total_read = 0; int retries = 0;
   while (total_read < len) {
-    size_t to_read =
-        (len - total_read > BUF_SIZE) ? BUF_SIZE : (len - total_read);
+    size_t to_read = (len - total_read > BUF_SIZE) ? BUF_SIZE : (len - total_read);
     ssize_t r = pread(fd_in, buf, to_read, off + total_read);
-    if (r < 0) {
-      if (errno == EINTR || errno == EAGAIN) {
-        usleep(10);
-        continue;
-      }
-      free(buf);
-      return -1;
-    }
-    if (r == 0) {
-      if (retries++ < 100) {
-        usleep(10);
-        continue;
-      }
-      break;
-    }
-    retries = 0;
-    char *write_ptr = buf;
-    size_t to_write = r;
+    if (r < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } free(buf); return -1; }
+    if (r == 0) { if (retries++ < 100) { usleep(10); continue; } break; }
+    retries = 0; char *write_ptr = buf; size_t to_write = r;
     while (to_write > 0) {
       ssize_t w = write(fd_out, write_ptr, to_write);
-      if (w < 0) {
-        if (errno == EINTR || errno == EAGAIN) {
-          usleep(10);
-          continue;
-        }
-        free(buf);
-        return -1;
-      }
-      write_ptr += w;
-      to_write -= w;
+      if (w < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } free(buf); return -1; }
+      write_ptr += w; to_write -= w;
     }
     total_read += r;
   }
-  free(buf);
-  return (total_read == len) ? 0 : -1;
+  free(buf); return (total_read == len) ? 0 : -1;
 }
 
 static int ring_order_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
-  int fd_in = atoi(argv[1]);
-  bool memfd_mode = (strcmp(argv[2], "memfd") == 0);
-  const char *prefix = argv[2];
-
-  bool unordered_mode = false;
-  bool numa_mode = (global_num_nodes > 1);
+  if (argc < 3) return EXECUTION_FAILURE;
+  int fd_in = atoi(argv[1]); bool memfd_mode = (strcmp(argv[2], "memfd") == 0); const char *prefix = argv[2];
+  bool unordered_mode = false; bool numa_mode = (global_num_nodes > 1);
   for (int i = 3; i < argc; i++) {
-    if (strcmp(argv[i], "unordered") == 0)
-      unordered_mode = true;
-    if (strcmp(argv[i], "numa") == 0)
-      numa_mode = true;
+    if (strcmp(argv[i], "unordered") == 0) unordered_mode = true;
+    if (strcmp(argv[i], "numa") == 0) numa_mode = true;
   }
 
-  bool use_zerocopy = false;
-  struct stat st_out;
-  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode))
-    use_zerocopy = true;
+  bool use_zerocopy = false; struct stat st_out;
+  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
 
-  struct HeapNode *heap = xmalloc(HEAP_MAX * sizeof(struct HeapNode));
+  int heap_cap = 262144;
+  struct HeapNode *heap = xmalloc(heap_cap * sizeof(struct HeapNode));
   int heap_sz = 0;
 
-  uint32_t expected_major = 0;
-  uint32_t expected_minor = 0;
-  struct OrderPacket ops[64];
-  ssize_t n_read;
+  uint32_t expected_major = 0; uint32_t expected_minor = 0; struct OrderPacket ops[64]; ssize_t n_read;
 
   while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
     int count = n_read / sizeof(struct OrderPacket);
     for (int i = 0; i < count; i++) {
       struct OrderPacket *op = &ops[i];
-
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
-      uint64_t op_key =
-          numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
+      uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
-      if (!unordered_mode) {
-        heap_push(heap, &heap_sz, op_key, *op);
-      } else {
+      if (!unordered_mode) heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
+      else {
         if (memfd_mode) {
           off_t offset = (off_t)op->off;
-          if (use_zerocopy)
-            robust_sendfile(1, op->fd, &offset, op->len);
-          else
-            ring_copy_chunk(op->fd, 1, offset, op->len);
-
-          off_t aligned_start = (op->off / 4096) * 4096;
-          off_t punch_len = (op->off - aligned_start) + op->len;
-          fallocate(op->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                    aligned_start, punch_len);
+          if (use_zerocopy) robust_sendfile(1, op->fd, &offset, op->len); else ring_copy_chunk(op->fd, 1, offset, op->len);
+          off_t aligned_start = (op->off / 4096) * 4096; off_t punch_len = (op->off - aligned_start) + op->len;
+          fallocate(op->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, aligned_start, punch_len);
         } else {
           char path[256];
-          if (numa_mode)
-            snprintf(path, sizeof(path), "%s.%u.%u", prefix, op->major_idx,
-                     actual_minor);
-          else
-            snprintf(path, sizeof(path), "%s.%u", prefix, op->major_idx);
-
+          if (numa_mode) snprintf(path, sizeof(path), "%s.%u.%u", prefix, op->major_idx, actual_minor);
+          else snprintf(path, sizeof(path), "%s.%u", prefix, op->major_idx);
           int fd_file = open(path, O_RDONLY);
           if (fd_file >= 0) {
-            off_t offset = 0;
-            struct stat st;
-            if (fstat(fd_file, &st) == 0 && st.st_size > 0)
-              robust_sendfile(1, fd_file, &offset, st.st_size);
-            close(fd_file);
-            unlink(path);
+            off_t offset = 0; struct stat st;
+            if (fstat(fd_file, &st) == 0 && st.st_size > 0) robust_sendfile(1, fd_file, &offset, st.st_size);
+            close(fd_file); unlink(path);
           }
         }
       }
 
       if (!unordered_mode) {
         while (heap_sz > 0) {
-          uint64_t expected_key = numa_mode
-                                      ? PACK_KEY(expected_major, expected_minor)
-                                      : expected_major;
-          if (heap[0].key != expected_key)
-            break;
-
-          struct HeapNode top;
-          heap_pop(heap, &heap_sz, &top);
-
+          uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
+          if (heap[0].key != expected_key) break;
+          struct HeapNode top; heap_pop(heap, &heap_sz, &top);
           if (memfd_mode) {
             off_t offset = (off_t)top.pkt.off;
-            if (use_zerocopy)
-              robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len);
-            else
-              ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len);
-
-            off_t aligned_start = (top.pkt.off / 4096) * 4096;
-            off_t punch_len = (top.pkt.off - aligned_start) + top.pkt.len;
-            fallocate(top.pkt.fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                      aligned_start, punch_len);
+            if (use_zerocopy) robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len); else ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len);
+            off_t aligned_start = (top.pkt.off / 4096) * 4096; off_t punch_len = (top.pkt.off - aligned_start) + top.pkt.len;
+            fallocate(top.pkt.fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, aligned_start, punch_len);
           } else {
             char path[256];
-            if (numa_mode)
-              snprintf(path, sizeof(path), "%s.%u.%u", prefix,
-                       top.pkt.major_idx,
-                       (top.pkt.minor_idx & ~FLAG_MAJOR_EOF));
-            else
-              snprintf(path, sizeof(path), "%s.%u", prefix, top.pkt.major_idx);
-
+            if (numa_mode) snprintf(path, sizeof(path), "%s.%u.%u", prefix, top.pkt.major_idx, (top.pkt.minor_idx & ~FLAG_MAJOR_EOF));
+            else snprintf(path, sizeof(path), "%s.%u", prefix, top.pkt.major_idx);
             int fd_file = open(path, O_RDONLY);
             if (fd_file >= 0) {
-              off_t offset = 0;
-              struct stat st;
-              if (fstat(fd_file, &st) == 0 && st.st_size > 0)
-                robust_sendfile(1, fd_file, &offset, st.st_size);
-              close(fd_file);
-              unlink(path);
+              off_t offset = 0; struct stat st;
+              if (fstat(fd_file, &st) == 0 && st.st_size > 0) robust_sendfile(1, fd_file, &offset, st.st_size);
+              close(fd_file); unlink(path);
             }
           }
-
           if (numa_mode) {
             expected_minor += top.pkt.cnt;
-            if (top.pkt.minor_idx & FLAG_MAJOR_EOF) {
-              expected_major++;
-              expected_minor = 0;
-            }
-          } else {
-            expected_major += top.pkt.cnt;
-          }
+            if (top.pkt.minor_idx & FLAG_MAJOR_EOF) { expected_major++; expected_minor = 0; }
+          } else expected_major += top.pkt.cnt;
         }
       }
     }
   }
-
-  xfree(heap);
-  return EXECUTION_SUCCESS;
+  xfree(heap); return EXECUTION_SUCCESS;
 }
 
 // ==============================================================================
-// 7. UTILITY LOADABLES
+// 8. UTILITY LOADABLES
 // ==============================================================================
 
 static int ring_worker_main(int argc, char **argv) {
-  if (argc < 2)
-    return EXECUTION_FAILURE;
-
+  if (argc < 2) return EXECUTION_FAILURE;
   if (my_numa_node == -1) {
     const char *s_node = get_string_value("RING_NODE_ID");
-    if (s_node) {
-      my_numa_node = atoi(s_node);
-    } else {
-      int phys = auto_detect_numa_node();
-      my_numa_node = 0;
+    if (s_node) my_numa_node = atoi(s_node);
+    else {
+      int phys = auto_detect_numa_node(); my_numa_node = 0;
       if (g_logical_to_phys_map) {
-        for (uint32_t i = 0; i < global_num_nodes; i++) {
-          if (g_logical_to_phys_map[i] == (uint32_t)phys) {
-            my_numa_node = i;
-            break;
-          }
-        }
+        for (uint32_t i = 0; i < global_num_nodes; i++) { if (g_logical_to_phys_map[i] == (uint32_t)phys) { my_numa_node = i; break; } }
       }
     }
-    if (my_numa_node >= (int)global_num_nodes)
-      my_numa_node = 0;
+    if (my_numa_node >= (int)global_num_nodes) my_numa_node = 0;
   }
   int node = my_numa_node;
 
   if (!strcmp(argv[1], "inc")) {
     if (global_num_nodes > 1 && g_logical_to_phys_map) {
-      if (pin_to_numa_node(g_logical_to_phys_map[node]) != 0 && g_debug) {
-        fprintf(stderr,
-                "forkrun [DEBUG] Failed to pin worker to phys node %d\n",
-                g_logical_to_phys_map[node]);
-      }
+      if (pin_to_numa_node(g_logical_to_phys_map[node]) != 0 && g_debug) {}
     }
-    if (state)
-      atomic_fetch_add(&state[node].active_workers, 1);
-    if (argc >= 3 && isdigit(argv[2][0]))
-      worker_cached_fd = atoi(argv[2]);
+    __atomic_fetch_add(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);
+    if (argc >= 3 && isdigit(argv[2][0])) worker_cached_fd = atoi(argv[2]);
   } else if (!strcmp(argv[1], "dec")) {
     cleanup_waiter_state();
-    if (state)
-      atomic_fetch_sub(&state[node].active_workers, 1);
+    __atomic_fetch_sub(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);
     worker_cached_fd = -1;
   }
   return EXECUTION_SUCCESS;
 }
 
 static int ring_cleanup_waiter_main(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
-  cleanup_waiter_state();
-  return EXECUTION_SUCCESS;
+  (void)argc; (void)argv; cleanup_waiter_state(); return EXECUTION_SUCCESS;
 }
 static int ring_ingest_main(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
-  if (state)
-    atomic_store_release(&state[0].ingest_complete, 1);
-  return EXECUTION_SUCCESS;
+  (void)argc; (void)argv; if (state) atomic_store_release(&state[0].ingest_complete, 1); return EXECUTION_SUCCESS;
 }
 static int lseek_main(int argc, char **argv) {
-  if (argc < 3 || argc > 5)
-    return EXECUTION_FAILURE;
-  int fd = atoi(argv[1]);
-  off_t off = atoll(argv[2]);
-  int whence = SEEK_CUR;
-  if (argc > 3) {
-    if (!strcmp(argv[3], "SEEK_SET"))
-      whence = SEEK_SET;
-    else if (!strcmp(argv[3], "SEEK_END"))
-      whence = SEEK_END;
-  }
+  if (argc < 3 || argc > 5) return EXECUTION_FAILURE;
+  int fd = atoi(argv[1]); off_t off = atoll(argv[2]); int whence = SEEK_CUR;
+  if (argc > 3) { if (!strcmp(argv[3], "SEEK_SET")) whence = SEEK_SET; else if (!strcmp(argv[3], "SEEK_END")) whence = SEEK_END; }
   off_t no = lseek(fd, off, whence);
-  if (no == -1)
-    return EXECUTION_FAILURE;
+  if (no == -1) return EXECUTION_FAILURE;
   if (argc >= 4 && argv[argc - 1][0]) {
-    char buf[32];
-    snprintf(buf, 32, "%lld", (long long)no);
-    bind_var_or_array(argv[argc - 1], buf, 0);
-  } else
-    printf("%lld\n", (long long)no);
+    char buf[32]; snprintf(buf, 32, "%lld", (long long)no); bind_var_or_array(argv[argc - 1], buf, 0);
+  } else printf("%lld\n", (long long)no);
   return EXECUTION_SUCCESS;
 }
 
 static int ring_memfd_create_main(int argc, char **argv) {
-  if (argc < 2)
-    return EXECUTION_FAILURE;
-  const char *var_name = argv[1];
+  if (argc < 2) return EXECUTION_FAILURE;
   int fd = xcreate_anon_file("forkrun_input");
-  if (fd < 0) {
-    builtin_error("memfd_create failed: %s", strerror(errno));
-    return EXECUTION_FAILURE;
-  }
-  char val[32];
-  snprintf(val, sizeof(val), "%d", fd);
-  bind_var_or_array(var_name, val, 0);
+  if (fd < 0) { builtin_error("memfd_create failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
+  char val[32]; snprintf(val, sizeof(val), "%d", fd); bind_var_or_array(argv[1], val, 0);
   return EXECUTION_SUCCESS;
 }
 
 static int ring_seal_main(int argc, char **argv) {
-  if (argc < 2)
-    return EXECUTION_FAILURE;
-  int fd = atoi(argv[1]);
-  int seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
-  if (fcntl(fd, F_ADD_SEALS, seals) == -1) {
-    if (g_debug)
-      fprintf(stderr, "forkrun [DEBUG] ring_seal failed: %s\n",
-              strerror(errno));
-    return EXECUTION_FAILURE;
-  }
+  if (argc < 2) return EXECUTION_FAILURE;
+  if (fcntl(atoi(argv[1]), F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE) == -1) return EXECUTION_FAILURE;
   return EXECUTION_SUCCESS;
 }
 
 static int ring_fcntl_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
-  int fd = atoi(argv[1]);
-  const char *cmd = argv[2];
-  if (strcmp(cmd, "shutdown_w") == 0)
-    shutdown(fd, SHUT_WR);
-  else if (strcmp(cmd, "shutdown_r") == 0)
-    shutdown(fd, SHUT_RD);
-  else if (strcmp(cmd, "shutdown_rw") == 0)
-    shutdown(fd, SHUT_RDWR);
-  else if (strcmp(cmd, "close") == 0)
-    close(fd);
-  else {
-    builtin_error("unknown command: %s", cmd);
-    return EXECUTION_FAILURE;
-  }
+  if (argc < 3) return EXECUTION_FAILURE;
+  int fd = atoi(argv[1]); const char *cmd = argv[2];
+  if (strcmp(cmd, "shutdown_w") == 0) shutdown(fd, SHUT_WR);
+  else if (strcmp(cmd, "shutdown_r") == 0) shutdown(fd, SHUT_RD);
+  else if (strcmp(cmd, "shutdown_rw") == 0) shutdown(fd, SHUT_RDWR);
+  else if (strcmp(cmd, "close") == 0) close(fd);
+  else { builtin_error("unknown command: %s", cmd); return EXECUTION_FAILURE; }
   return EXECUTION_SUCCESS;
 }
 
 static int ring_pipe_main(int argc, char **argv) {
-  if (argc < 2)
-    return EXECUTION_FAILURE;
-  int pfd[2];
-  if (pipe(pfd) < 0) {
-    builtin_error("pipe failed: %s", strerror(errno));
-    return EXECUTION_FAILURE;
-  }
-  fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
-  char buf[32];
+  if (argc < 2) return EXECUTION_FAILURE;
+  int pfd[2]; if (pipe(pfd) < 0) { builtin_error("pipe failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
+  fcntl(pfd[1], F_SETPIPE_SZ, 1048576); char buf[32];
   if (argc == 2) {
-    const char *arr_name = argv[1];
-    SHELL_VAR *v = find_variable(arr_name);
-    if (v && !array_p(v)) {
-      unbind_variable(arr_name);
-      v = NULL;
-    }
-    if (!v)
-      v = make_new_array_variable(arr_name);
-    if (!v) {
-      close(pfd[0]);
-      close(pfd[1]);
-      return EXECUTION_FAILURE;
-    }
-    snprintf(buf, sizeof(buf), "%d", pfd[0]);
-    bind_array_element(v, 0, buf, 0);
-    snprintf(buf, sizeof(buf), "%d", pfd[1]);
-    bind_array_element(v, 1, buf, 0);
+    const char *arr_name = argv[1]; SHELL_VAR *v = find_variable(arr_name);
+    if (v && !array_p(v)) { unbind_variable(arr_name); v = NULL; }
+    if (!v) v = make_new_array_variable(arr_name);
+    if (!v) { close(pfd[0]); close(pfd[1]); return EXECUTION_FAILURE; }
+    snprintf(buf, sizeof(buf), "%d", pfd[0]); bind_array_element(v, 0, buf, 0);
+    snprintf(buf, sizeof(buf), "%d", pfd[1]); bind_array_element(v, 1, buf, 0);
   } else {
-    snprintf(buf, sizeof(buf), "%d", pfd[0]);
-    bind_var_or_array(argv[1], buf, 0);
-    snprintf(buf, sizeof(buf), "%d", pfd[1]);
-    bind_var_or_array(argv[2], buf, 0);
+    snprintf(buf, sizeof(buf), "%d", pfd[0]); bind_var_or_array(argv[1], buf, 0);
+    snprintf(buf, sizeof(buf), "%d", pfd[1]); bind_var_or_array(argv[2], buf, 0);
   }
   return EXECUTION_SUCCESS;
 }
 
 static int ring_splice_main(int argc, char **argv) {
-  if (argc < 5)
-    return EXECUTION_FAILURE;
-  int fd_in = atoi(argv[1]);
-  int fd_out = atoi(argv[2]);
-  off_t off = 0;
-  off_t *p_off = NULL;
-  if (argv[3][0] != '\0') {
-    off_t parsed = (off_t)atoll(argv[3]);
-    if (parsed != -1) {
-      off = parsed;
-      p_off = &off;
-    }
-  }
-  size_t len = (size_t)atoll(argv[4]);
-  bool close_out = (argc > 5 && strcmp(argv[5], "close") == 0);
-
-  fcntl(fd_out, F_SETPIPE_SZ, 1048576);
-
-  size_t written = 0;
+  if (argc < 5) return EXECUTION_FAILURE;
+  int fd_in = atoi(argv[1]); int fd_out = atoi(argv[2]); off_t off = 0; off_t *p_off = NULL;
+  if (argv[3][0] != '\0') { off_t parsed = (off_t)atoll(argv[3]); if (parsed != -1) { off = parsed; p_off = &off; } }
+  size_t len = (size_t)atoll(argv[4]); bool close_out = (argc > 5 && strcmp(argv[5], "close") == 0);
+  fcntl(fd_out, F_SETPIPE_SZ, 1048576); size_t written = 0;
   while (written < len) {
-    ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written,
-                       SPLICE_F_MOVE | SPLICE_F_MORE);
-    if (s < 0) {
-      if (errno == EINTR || errno == EAGAIN)
-        continue;
-      if (close_out)
-        close(fd_out);
-      builtin_error("splice failed: %s", strerror(errno));
-      return EXECUTION_FAILURE;
-    }
-    if (s == 0)
-      break;
+    ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written, SPLICE_F_MOVE | SPLICE_F_MORE);
+    if (s < 0) { if (errno == EINTR || errno == EAGAIN) continue; if (close_out) close(fd_out); builtin_error("splice failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
+    if (s == 0) break;
     written += s;
   }
-
-  if (close_out)
-    close(fd_out);
+  if (close_out) close(fd_out);
   return EXECUTION_SUCCESS;
 }
 
 static int ring_indexer_main(int argc, char **argv) {
-  if (argc < 4)
-    return EXECUTION_FAILURE;
-  int fd_data = atoi(argv[1]);
-  int fd_pipe = atoi(argv[2]);
-  int fd_sig = atoi(argv[3]);
-  size_t chunk_target = get_optimal_chunk_size() * 2;
-  uint64_t current_pos = 0;
-  char tail_buf[65536];
+  if (argc < 4) return EXECUTION_FAILURE;
+  int fd_data = atoi(argv[1]); int fd_pipe = atoi(argv[2]); int fd_sig = atoi(argv[3]);
+  size_t chunk_target = get_optimal_chunk_size() * 2; uint64_t current_pos = 0; char tail_buf[65536];
   struct pollfd pfds[1] = {{.fd = fd_sig, .events = POLLIN}};
   while (1) {
-    struct stat st;
-    if (fstat(fd_data, &st) < 0)
-      break;
+    struct stat st; if (fstat(fd_data, &st) < 0) break;
     uint64_t available = (uint64_t)st.st_size;
     while (available >= current_pos + chunk_target) {
       uint64_t scan_end = current_pos + chunk_target;
-      size_t scan_sz =
-          (sizeof(tail_buf) < chunk_target) ? sizeof(tail_buf) : chunk_target;
+      size_t scan_sz = (sizeof(tail_buf) < chunk_target) ? sizeof(tail_buf) : chunk_target;
       ssize_t n = pread(fd_data, tail_buf, scan_sz, scan_end - scan_sz);
       if (n > 0) {
         char *nl = memrchr(tail_buf, '\n', n);
         if (nl) {
           uint64_t actual_end = (scan_end - scan_sz) + (nl - tail_buf) + 1;
-          struct PhysPacket pp = {.off = current_pos,
-                                  .len = actual_end - current_pos};
-          if (write(fd_pipe, &pp, sizeof(pp)) != sizeof(pp))
-            return EXECUTION_FAILURE;
-          current_pos = actual_end;
-          continue;
+          struct PhysPacket pp = {.off = current_pos, .len = actual_end - current_pos};
+          if (write(fd_pipe, &pp, sizeof(pp)) != sizeof(pp)) return EXECUTION_FAILURE;
+          current_pos = actual_end; continue;
         }
       }
       struct PhysPacket pp = {.off = current_pos, .len = chunk_target};
-      if (write(fd_pipe, &pp, sizeof(pp)) != sizeof(pp))
-        return EXECUTION_FAILURE;
+      if (write(fd_pipe, &pp, sizeof(pp)) != sizeof(pp)) return EXECUTION_FAILURE;
       current_pos += chunk_target;
     }
-    if (poll(pfds, 1, 100) > 0) {
-      uint64_t v;
-      if (read(fd_sig, &v, 8) > 0)
-        break;
-    }
+    if (poll(pfds, 1, 100) > 0) { uint64_t v; if (read(fd_sig, &v, 8) > 0) break; }
   }
   return EXECUTION_SUCCESS;
 }
 
 static int ring_fetcher_main(int argc, char **argv) {
-  if (argc < 6)
-    return EXECUTION_FAILURE;
-  int fd_pipe = atoi(argv[1]);
-  int fd_global = atoi(argv[2]);
-  int fd_local = atoi(argv[3]);
-  int fd_local_sig = atoi(argv[4]);
-  int fd_global_ack = atoi(argv[5]);
-  int fd_token_in = (argc > 6) ? atoi(argv[6]) : -1;
+  if (argc < 6) return EXECUTION_FAILURE;
+  int fd_pipe = atoi(argv[1]); int fd_global = atoi(argv[2]); int fd_local = atoi(argv[3]);
+  int fd_local_sig = atoi(argv[4]); int fd_global_ack = atoi(argv[5]); int fd_token_in = (argc > 6) ? atoi(argv[6]) : -1;
   struct PhysPacket pp;
   while (1) {
-    if (fd_token_in >= 0) {
-      char t;
-      if (read(fd_token_in, &t, 1) <= 0)
-        break;
-    }
-    if (read(fd_pipe, &pp, sizeof(pp)) != sizeof(pp))
-      break;
-    loff_t off_in = (loff_t)pp.off;
-    loff_t off_out = lseek(fd_local, 0, SEEK_END);
-    ssize_t ret =
-        copy_file_range(fd_global, &off_in, fd_local, &off_out, pp.len, 0);
+    if (fd_token_in >= 0) { char t; if (read(fd_token_in, &t, 1) <= 0) break; }
+    if (read(fd_pipe, &pp, sizeof(pp)) != sizeof(pp)) break;
+    loff_t off_in = (loff_t)pp.off; loff_t off_out = lseek(fd_local, 0, SEEK_END);
+    ssize_t ret = copy_file_range(fd_global, &off_in, fd_local, &off_out, pp.len, 0);
     if (ret < 0) {
-      char *buf = xmalloc(65536);
-      uint64_t copied = 0;
-      lseek(fd_global, pp.off, SEEK_SET);
-      lseek(fd_local, 0, SEEK_END);
+      char *buf = xmalloc(65536); uint64_t copied = 0; lseek(fd_global, pp.off, SEEK_SET); lseek(fd_local, 0, SEEK_END);
       while (copied < pp.len) {
         size_t to_read = (pp.len - copied > 65536) ? 65536 : (pp.len - copied);
         ssize_t r = read(fd_global, buf, to_read);
-        if (r <= 0) {
-          if (r < 0 && errno == EINTR)
-            continue;
-          break;
-        }
-        char *wptr = buf;
-        ssize_t wleft = r;
+        if (r <= 0) { if (r < 0 && errno == EINTR) continue; break; }
+        char *wptr = buf; ssize_t wleft = r;
         while (wleft > 0) {
           ssize_t w = write(fd_local, wptr, wleft);
-          if (w <= 0) {
-            if (w < 0 && errno == EINTR)
-              continue;
-            break;
-          }
-          wptr += w;
-          wleft -= w;
+          if (w <= 0) { if (w < 0 && errno == EINTR) continue; break; }
+          wptr += w; wleft -= w;
         }
         copied += r;
       }
       xfree(buf);
     }
-    uint64_t one = 1;
-    SYS_CHK(write(fd_local_sig, &one, 8));
-    SYS_CHK(write(fd_global_ack, &pp, sizeof(pp)));
+    uint64_t one = 1; SYS_CHK(write(fd_local_sig, &one, 8)); SYS_CHK(write(fd_global_ack, &pp, sizeof(pp)));
   }
   return EXECUTION_SUCCESS;
 }
 
 static int ring_fallow_phys_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
-  int fd_in = atoi(argv[1]);
-  int fd_file = atoi(argv[2]);
-  struct Interval *head = NULL;
-  uint64_t limit = 0;
-  struct PhysPacket ops[64];
-  ssize_t n_read;
+  if (argc < 3) return EXECUTION_FAILURE;
+  int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]);
+  struct Interval *head = NULL; uint64_t limit = 0; struct PhysPacket ops[64]; ssize_t n_read;
+  off_t last_punched = 0;
   while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
     int count = n_read / sizeof(struct PhysPacket);
     for (int i = 0; i < count; i++) {
       struct PhysPacket *pp = &ops[i];
       if (pp->off == limit) {
         limit += pp->len;
-        while (head && head->s == limit) {
-          struct Interval *tmp = head;
-          limit = tmp->e;
-          head = tmp->next;
-          free(tmp);
-        }
+        while (head && head->s == limit) { struct Interval *tmp = head; limit = tmp->e; head = tmp->next; free(tmp); }
         off_t aligned = (off_t)((limit / 4096) * 4096);
-        if (aligned > 0)
-          fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0,
-                    aligned);
+        if (aligned > last_punched) {
+            fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
+            last_punched = aligned;
+        }
       } else if (pp->off > limit) {
-        struct Interval *n = xmalloc(sizeof(struct Interval));
-        n->s = pp->off;
-        n->e = pp->off + pp->len;
-        struct Interval **curr = &head;
-        while (*curr && (*curr)->s < n->s)
-          curr = &((*curr)->next);
-        n->next = *curr;
-        *curr = n;
+        struct Interval *n = xmalloc(sizeof(struct Interval)); n->s = pp->off; n->e = pp->off + pp->len;
+        struct Interval **curr = &head; while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
+        n->next = *curr; *curr = n;
       }
     }
   }
+  while (head) { struct Interval *tmp = head; head = head->next; free(tmp); }
   return EXECUTION_SUCCESS;
 }
 
 static int ring_copy_main(int argc, char **argv) {
-  if (argc < 2)
-    return EXECUTION_FAILURE;
-  int outfd = atoi(argv[1]);
-  int infd = (argc == 3) ? atoi(argv[2]) : 0;
-  size_t chunk = get_optimal_chunk_size();
-  struct stat st;
-  uint64_t oom_threshold = 134217728;
-  long threshold_div = 128;
-  const char *s_div = get_string_value("RING_INGEST_DIVISOR");
-  if (s_div) {
-    long v = atol(s_div);
-    if (v > 0)
-      threshold_div = v;
-  }
+  if (argc < 2) return EXECUTION_FAILURE;
+  int outfd = atoi(argv[1]); int infd = (argc == 3) ? atoi(argv[2]) : 0;
+  size_t chunk = get_optimal_chunk_size(); struct stat st; uint64_t oom_threshold = 134217728;
+  long threshold_div = 128; const char *s_div = get_string_value("RING_INGEST_DIVISOR");
+  if (s_div) { long v = atol(s_div); if (v > 0) threshold_div = v; }
   struct sysinfo si_init;
   if (sysinfo(&si_init) == 0) {
     uint64_t mu = (uint64_t)si_init.mem_unit ? si_init.mem_unit : 1;
-    uint64_t total = (uint64_t)si_init.totalram * mu;
-    uint64_t t = total / (uint64_t)threshold_div;
-    if (t > oom_threshold)
-      oom_threshold = t;
+    oom_threshold = ((uint64_t)si_init.totalram * mu) / (uint64_t)threshold_div;
   }
-  uint64_t total_moved = 0;
-  uint64_t next_check = 16 * 1024 * 1024;
+  uint64_t total_moved = 0; uint64_t next_check = 16 * 1024 * 1024;
 
   if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
     off_t off = 0;
     while (off < st.st_size) {
       check_memory_pressure(&total_moved, &next_check, oom_threshold);
-      loff_t current_off = off;
-      size_t to_copy = (size_t)(st.st_size - off);
-      if (to_copy > chunk)
-        to_copy = chunk;
+      loff_t current_off = off; size_t to_copy = (size_t)(st.st_size - off); if (to_copy > chunk) to_copy = chunk;
       size_t copied_in_chunk = 0;
       while (copied_in_chunk < to_copy) {
-        ssize_t n = copy_file_range(infd, &current_off, outfd, NULL,
-                                    to_copy - copied_in_chunk, 0);
-        if (n < 0) {
-          if (errno == EINTR)
-            continue;
-          if (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
-              errno == EOPNOTSUPP)
-            break;
-          goto err_out;
-        }
-        if (n == 0)
-          break;
+        ssize_t n = copy_file_range(infd, &current_off, outfd, NULL, to_copy - copied_in_chunk, 0);
+        if (n < 0) { if (errno == EINTR) continue; if (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP) break; goto err_out; }
+        if (n == 0) break;
         copied_in_chunk += n;
       }
-      if (copied_in_chunk == 0 && (st.st_size - off > 0))
-        break;
+      if (copied_in_chunk == 0 && (st.st_size - off > 0)) break;
       off += copied_in_chunk;
-      if (evfd_ingest_data >= 0) {
-        uint64_t v = 1;
-        SYS_CHK(write(evfd_ingest_data, &v, 8));
-      }
+      if (evfd_ingest_data >= 0) { uint64_t v = 1; SYS_CHK(write(evfd_ingest_data, &v, 8)); }
       total_moved += copied_in_chunk;
     }
     while (off < st.st_size) {
       check_memory_pressure(&total_moved, &next_check, oom_threshold);
       ssize_t n = sendfile(outfd, infd, &off, chunk);
-      if (n < 0) {
-        if (errno == EINTR)
-          continue;
-        break;
-      }
-      if (n == 0)
-        break;
-      if (evfd_ingest_data >= 0) {
-        uint64_t v = 1;
-        SYS_CHK(write(evfd_ingest_data, &v, 8));
-      }
+      if (n < 0) { if (errno == EINTR) continue; break; }
+      if (n == 0) break;
+      if (evfd_ingest_data >= 0) { uint64_t v = 1; SYS_CHK(write(evfd_ingest_data, &v, 8)); }
       total_moved += n;
     }
     if (off < st.st_size) {
@@ -3808,199 +2956,111 @@ static int ring_copy_main(int argc, char **argv) {
         fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
         while (off < st.st_size) {
           check_memory_pressure(&total_moved, &next_check, oom_threshold);
-          ssize_t s1 = splice(infd, &off, pfd[1], NULL, chunk,
-                              SPLICE_F_MOVE | SPLICE_F_MORE);
-          if (s1 <= 0)
-            break;
-
+          ssize_t s1 = splice(infd, &off, pfd[1], NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
+          if (s1 <= 0) break;
           size_t written = 0;
           while (written < (size_t)s1) {
-            ssize_t s2 = splice(pfd[0], NULL, outfd, NULL, s1 - written,
-                                SPLICE_F_MOVE | SPLICE_F_MORE);
-            if (s2 <= 0) {
-              if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) {
-                usleep(10);
-                continue;
-              }
-              break;
-            }
+            ssize_t s2 = splice(pfd[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
+            if (s2 <= 0) { if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; } break; }
             written += s2;
           }
-          if (written < (size_t)s1)
-            break;
-
-          if (evfd_ingest_data >= 0) {
-            uint64_t v = 1;
-            SYS_CHK(write(evfd_ingest_data, &v, 8));
-          }
+          if (written < (size_t)s1) break;
+          if (evfd_ingest_data >= 0) { uint64_t v = 1; SYS_CHK(write(evfd_ingest_data, &v, 8)); }
           total_moved += written;
         }
-        close(pfd[0]);
-        close(pfd[1]);
+        close(pfd[0]); close(pfd[1]);
       }
     }
   } else {
-    ssize_t n =
-        splice(infd, NULL, outfd, NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
+    ssize_t n = splice(infd, NULL, outfd, NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
     if (n >= 0) {
       do {
-        if (n > 0 && evfd_ingest_data >= 0) {
-          uint64_t v = 1;
-          SYS_CHK(write(evfd_ingest_data, &v, 8));
-        }
-        total_moved += n;
-        check_memory_pressure(&total_moved, &next_check, oom_threshold);
-        n = splice(infd, NULL, outfd, NULL, chunk,
-                   SPLICE_F_MOVE | SPLICE_F_MORE);
+        if (n > 0 && evfd_ingest_data >= 0) { uint64_t v = 1; SYS_CHK(write(evfd_ingest_data, &v, 8)); }
+        total_moved += n; check_memory_pressure(&total_moved, &next_check, oom_threshold);
+        n = splice(infd, NULL, outfd, NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
       } while (n > 0);
     } else if (errno == EINVAL) {
-      int pipefd[2];
-      if (pipe(pipefd) < 0)
-        goto err_out;
-      fcntl(pipefd[1], F_SETPIPE_SZ, 1048576);
+      int pipefd[2]; if (pipe(pipefd) < 0) goto err_out; fcntl(pipefd[1], F_SETPIPE_SZ, 1048576);
       while (1) {
-        ssize_t n = splice(infd, NULL, pipefd[1], NULL, chunk,
-                           SPLICE_F_MOVE | SPLICE_F_MORE);
-        if (n <= 0)
-          break;
-
+        ssize_t n = splice(infd, NULL, pipefd[1], NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
+        if (n <= 0) break;
         size_t written = 0;
         while (written < (size_t)n) {
-          ssize_t m = splice(pipefd[0], NULL, outfd, NULL, n - written,
-                             SPLICE_F_MOVE | SPLICE_F_MORE);
-          if (m <= 0) {
-            if (m < 0 && (errno == EINTR || errno == EAGAIN)) {
-              usleep(10);
-              continue;
-            }
-            break;
-          }
+          ssize_t m = splice(pipefd[0], NULL, outfd, NULL, n - written, SPLICE_F_MOVE | SPLICE_F_MORE);
+          if (m <= 0) { if (m < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; } break; }
           written += m;
         }
-        if (written < (size_t)n)
-          break;
-
-        if (evfd_ingest_data >= 0) {
-          uint64_t v = 1;
-          SYS_CHK(write(evfd_ingest_data, &v, 8));
-        }
-        total_moved += written;
-        check_memory_pressure(&total_moved, &next_check, oom_threshold);
+        if (written < (size_t)n) break;
+        if (evfd_ingest_data >= 0) { uint64_t v = 1; SYS_CHK(write(evfd_ingest_data, &v, 8)); }
+        total_moved += written; check_memory_pressure(&total_moved, &next_check, oom_threshold);
       }
-      close(pipefd[0]);
-      close(pipefd[1]);
+      close(pipefd[0]); close(pipefd[1]);
     }
   }
 
-  if (evfd_ingest_eof >= 0) {
-    uint64_t val = 999999;
-    write(evfd_ingest_eof, &val, 8);
-  }
+  if (evfd_ingest_eof >= 0) { uint64_t val = 999999; write(evfd_ingest_eof, &val, 8); }
   return EXECUTION_SUCCESS;
 
 err_out:
-  if (evfd_ingest_eof >= 0) {
-    uint64_t val = 999999;
-    write(evfd_ingest_eof, &val, 8);
-  }
+  if (evfd_ingest_eof >= 0) { uint64_t val = 999999; write(evfd_ingest_eof, &val, 8); }
   return EXECUTION_FAILURE;
 }
 
 static int ring_signal_main(int argc, char **argv) {
-  int fd = evfd_ingest_eof;
-  if (argc >= 2)
-    fd = atoi(argv[1]);
-  uint64_t val = 1;
-  SYS_CHK(write(fd, &val, 8));
-  return EXECUTION_SUCCESS;
+  int fd = evfd_ingest_eof; if (argc >= 2) fd = atoi(argv[1]);
+  uint64_t val = 1; SYS_CHK(write(fd, &val, 8)); return EXECUTION_SUCCESS;
 }
 
 static int ring_fallow_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
-  int fd_in = atoi(argv[1]);
-  int fd_file = atoi(argv[2]);
-  bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
-  if (state)
-    atomic_store_release(&state[0].fallow_active, 1);
-  struct Interval *head = NULL;
-  uint64_t next_idx = 0;
-  struct IndexPacket ops[64];
-  ssize_t n_read;
+  if (argc < 3) return EXECUTION_FAILURE;
+  int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]); bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
+  if (state) atomic_store_release(&state[0].fallow_active, 1);
+  struct Interval *head = NULL; uint64_t next_idx = 0; struct IndexPacket ops[64]; ssize_t n_read;
+  off_t last_punched = 0;
   while ((n_read = read(fd_in, ops, sizeof(ops))) > 0) {
     int count = n_read / sizeof(struct IndexPacket);
     for (int i = 0; i < count; i++) {
       struct IndexPacket *ip = &ops[i];
       if (ip->idx == next_idx) {
         next_idx += ip->cnt;
-        while (head && head->s == next_idx) {
-          struct Interval *tmp = head;
-          next_idx = tmp->e;
-          head = tmp->next;
-          free(tmp);
-        }
-        if (state)
-          atomic_store_release(&state[0].min_idx, next_idx);
+        while (head && head->s == next_idx) { struct Interval *tmp = head; next_idx = tmp->e; head = tmp->next; free(tmp); }
+        if (state) atomic_store_release(&state[0].min_idx, next_idx);
         if (!dry_run) {
-          uint64_t byte_limit =
-              state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+          uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
           off_t aligned = (off_t)((byte_limit / 4096) * 4096);
-          if (aligned > 0)
-            fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0,
-                      aligned);
+          if (aligned > last_punched) {
+            fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
+            last_punched = aligned;
+          }
         }
       } else if (ip->idx > next_idx) {
-        struct Interval *n = xmalloc(sizeof(struct Interval));
-        n->s = ip->idx;
-        n->e = ip->idx + ip->cnt;
-        struct Interval **curr = &head;
-        while (*curr && (*curr)->s < n->s)
-          curr = &((*curr)->next);
-        n->next = *curr;
-        *curr = n;
+        struct Interval *n = xmalloc(sizeof(struct Interval)); n->s = ip->idx; n->e = ip->idx + ip->cnt;
+        struct Interval **curr = &head; while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
+        n->next = *curr; *curr = n;
       }
     }
   }
-  while (head) {
-    struct Interval *tmp = head;
-    head = head->next;
-    free(tmp);
-  }
+  while (head) { struct Interval *tmp = head; head = head->next; free(tmp); }
   return EXECUTION_SUCCESS;
 }
 
 static int ring_version_main(int argc, char **argv) {
   bool show_all = false;
-  if (argc == 1) {
-    printf("%s\n", FORKRUN_RING_VERSION);
-    return EXECUTION_SUCCESS;
-  }
+  if (argc == 1) { printf("%s\n", FORKRUN_RING_VERSION); return EXECUTION_SUCCESS; }
   for (int i = 1; i < argc; i++) {
     const char *arg = argv[i];
-    if (strcmp(arg, "-a") == 0 || strcmp(arg, "--all") == 0) {
-      show_all = true;
-      break;
-    }
-    if (strcmp(arg, "-t") == 0)
-      printf("%s %s\n", __DATE__, __TIME__);
-    else if (strcmp(arg, "-o") == 0)
-      printf("%s\n", BUILD_OS);
-    else if (strcmp(arg, "-m") == 0)
-      printf("%s\n", BUILD_ARCH);
-    else if (strcmp(arg, "-g") == 0)
-      printf("%s\n", __VERSION__);
-    else if (strcmp(arg, "-f") == 0)
-      printf("%s\n", COMPILER_FLAGS);
-    else if (strcmp(arg, "-h") == 0)
-      printf("%s\n", GIT_HASH);
+    if (strcmp(arg, "-a") == 0 || strcmp(arg, "--all") == 0) { show_all = true; break; }
+    if (strcmp(arg, "-t") == 0) printf("%s %s\n", __DATE__, __TIME__);
+    else if (strcmp(arg, "-o") == 0) printf("%s\n", BUILD_OS);
+    else if (strcmp(arg, "-m") == 0) printf("%s\n", BUILD_ARCH);
+    else if (strcmp(arg, "-g") == 0) printf("%s\n", __VERSION__);
+    else if (strcmp(arg, "-f") == 0) printf("%s\n", COMPILER_FLAGS);
+    else if (strcmp(arg, "-h") == 0) printf("%s\n", GIT_HASH);
   }
   if (show_all) {
-    printf("Version:  %s\n", FORKRUN_RING_VERSION);
-    printf("Built:    %s %s\n", __DATE__, __TIME__);
-    printf("OS:       %s\n", BUILD_OS);
-    printf("Arch:     %s\n", BUILD_ARCH);
-    printf("Compiler: %s\n", __VERSION__);
-    printf("Flags:    %s\n", COMPILER_FLAGS);
+    printf("Version:  %s\n", FORKRUN_RING_VERSION); printf("Built:    %s %s\n", __DATE__, __TIME__);
+    printf("OS:       %s\n", BUILD_OS); printf("Arch:     %s\n", BUILD_ARCH);
+    printf("Compiler: %s\n", __VERSION__); printf("Flags:    %s\n", COMPILER_FLAGS);
     printf("Git Hash: %s\n", GIT_HASH);
   }
   return EXECUTION_SUCCESS;
@@ -4008,46 +3068,31 @@ static int ring_version_main(int argc, char **argv) {
 
 #define DEFINE_DISPATCHER_X(name, func, usage, doc)                            \
   static int dispatch_##name(WORD_LIST *list) {                                \
-    int argc;                                                                  \
-    char **argv = make_builtin_argv(list, &argc);                              \
-    int ret = EXECUTION_FAILURE;                                               \
-    if (argv[0])                                                               \
-      ret = func(argc, argv);                                                  \
-    xfree(argv);                                                               \
-    return ret;                                                                \
+    int argc; char **argv = make_builtin_argv(list, &argc); int ret = EXECUTION_FAILURE; \
+    if (argv[0]) ret = func(argc, argv);                                       \
+    xfree(argv); return ret;                                                   \
   }
 FORKRUN_LOADABLES(DEFINE_DISPATCHER_X)
 #undef DEFINE_DISPATCHER_X
 
 #define DEFINE_STRUCT_X(name, func, usage, doc)                                \
   static char *name##_doc[] = {doc, usage, NULL};                              \
-  struct builtin name##_struct = {                                             \
-      #name, dispatch_##name, BUILTIN_ENABLED, name##_doc, usage, 0};
+  struct builtin name##_struct = { #name, dispatch_##name, BUILTIN_ENABLED, name##_doc, usage, 0 };
 FORKRUN_LOADABLES(DEFINE_STRUCT_X)
 #undef DEFINE_STRUCT_X
 
 static int ring_list_main(int argc, char **argv) {
   if (argc >= 2) {
-    const char *var_name = argv[1];
-    SHELL_VAR *v = find_variable(var_name);
-    if (v && !array_p(v)) {
-      unbind_variable(var_name);
-      v = NULL;
-    }
-    if (!v)
-      v = make_new_array_variable(var_name);
-    if (!v)
-      return EXECUTION_FAILURE;
+    const char *var_name = argv[1]; SHELL_VAR *v = find_variable(var_name);
+    if (v && !array_p(v)) { unbind_variable(var_name); v = NULL; }
+    if (!v) v = make_new_array_variable(var_name);
+    if (!v) return EXECUTION_FAILURE;
     int i = 0;
-#define ADD_TO_ARR(name, ...)                                                  \
-  if (strcmp(#name, "ring_list") != 0)                                         \
-    bind_array_element(v, i++, #name, 0);
+#define ADD_TO_ARR(name, ...) if (strcmp(#name, "ring_list") != 0) bind_array_element(v, i++, #name, 0);
     FORKRUN_LOADABLES(ADD_TO_ARR)
 #undef ADD_TO_ARR
   } else {
-#define PRINT_NAME(name, ...)                                                  \
-  if (strcmp(#name, "ring_list") != 0)                                         \
-    printf("%s\n", #name);
+#define PRINT_NAME(name, ...) if (strcmp(#name, "ring_list") != 0) printf("%s\n", #name);
     FORKRUN_LOADABLES(PRINT_NAME)
 #undef PRINT_NAME
   }
