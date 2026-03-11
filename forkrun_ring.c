@@ -1259,7 +1259,12 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
   int mask_words = (max_phys_id / BITS_PER_LONG) + 1;
   unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
-  int fallback_pipe[2] = {-1, -1};
+  int fallback_pipe[2] = {-1, -1}
+  uint64_t one = 1;
+
+  for (int i = 0; i < num_nodes * 2; i++) {     // give 2 free credits per node at start
+    SYS_CHK(write(evfd_chunk_done, &one, 8));
+  }
 
   while (1) {
     int target_node = 0;
@@ -1333,7 +1338,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     atomic_store_relaxed(&meta->actual_end, 0);
 
     struct SharedState *t_state = &state[target_node];
-    uint64_t q_idx = t_state->chunk_queue_head;
+    uint64_t q_idx = atomic_load_relaxed(&t_state->chunk_queue_head);
     t_state->chunk_queue[q_idx & META_RING_MASK] = current_major;
 
     __atomic_store_n(&t_state->chunk_queue_head, q_idx + 1, __ATOMIC_RELEASE);
