@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.5-UNIFIED (Bugfix: Fallow Delta Punch & EOF Fencepost)
+// forkrun_ring.c v13.0.4-UNIFIED (Bugfix: Fallow Delta Punch & EOF Fencepost)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -264,7 +264,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v13.0.5-UNIFIED"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.4-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -1261,12 +1261,18 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
   int fallback_pipe[2] = {-1, -1};
 
-  // Cache which transfer method works so we don't re-probe every chunk.
-  // For <file inputs, copy_file_range/sendfile/direct-splice all fail against
-  // a memfd, so we fall through to double-splice every time — paying 3 failed
-  // syscalls per chunk.  For pipe inputs, lseek fails so we land directly on
-  // direct-splice.  Caching eliminates the per-chunk probe cost entirely.
-  enum { TM_UNKNOWN=0, TM_COPY_FILE_RANGE, TM_SENDFILE, TM_SPLICE_DIRECT, TM_SPLICE_PIPE } transfer_method = TM_UNKNOWN;
+  // Cache which transfer method succeeds on the first chunk so we don't
+  // re-probe on every chunk.  For <file inputs, copy_file_range and sendfile
+  // both fail against a memfd, and direct splice fails (no pipe fd), so we
+  // always end up in TM_SPLICE_PIPE.  Without caching we pay 3 guaranteed-
+  // failing syscalls per chunk before even starting the actual transfer.
+  enum {
+    TM_UNKNOWN = 0,
+    TM_COPY_FILE_RANGE,
+    TM_SENDFILE,
+    TM_SPLICE_DIRECT,  // pipe-input fast path: one splice call per chunk
+    TM_SPLICE_PIPE     // file-input: double-splice via intermediate pipe
+  } transfer_method = TM_UNKNOWN;
   uint64_t one = 1;
 
   for (int i = 0; i < num_nodes * 2; i++) {     // give 2 free credits per node at start
@@ -1309,44 +1315,57 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     chunk_size &= ~4095ULL; if (chunk_size == 0) chunk_size = 4096;
 
     ssize_t n = -1;
+
     if (transfer_method == TM_UNKNOWN) {
-      // First chunk: probe the fallback chain and cache the winner.
+      // ── First chunk: probe the fallback chain once and cache the winner ──
       loff_t in_off = lseek(infd, 0, SEEK_CUR);
       if (in_off != (loff_t)-1) {
+        // Seekable (regular file): try zero-copy methods first.
         n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
         if (n >= 0) { transfer_method = TM_COPY_FILE_RANGE; }
-        else if (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP) {
+        else {
+          // copy_file_range may fail EXDEV/EINVAL/ENOSYS across fs types.
           n = sendfile(outfd, infd, NULL, chunk_size);
           if (n >= 0) { transfer_method = TM_SENDFILE; }
         }
       }
       if (n < 0) {
+        // Non-seekable (pipe) OR zero-copy methods failed: try direct splice.
         n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
         if (n >= 0) { transfer_method = TM_SPLICE_DIRECT; }
         else if (errno == EINVAL) {
+          // Neither fd is a pipe (file→memfd): must bounce through a pipe.
           if (fallback_pipe[0] == -1) {
             if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
           }
           if (fallback_pipe[0] != -1) {
-            ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
-            if (s1 > 0) {
-              size_t written = 0;
-              while (written < (size_t)s1) {
-                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
-                if (s2 <= 0) {
-                  if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
-                  break;
-                }
-                written += s2;
+            // Loop outer splice so we accumulate a full chunk_size transfer.
+            // Without this loop each "chunk" is capped at the pipe buffer
+            // (1 MB), which prevents chunk_size from ever growing and results
+            // in ~10x more chunks — and ~10x more NUMA overhead — vs pipe
+            // input where direct splice can grow chunks to max_chunk.
+            size_t tm = 0;
+            while (tm < (size_t)chunk_size) {
+              ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL,
+                                  chunk_size - tm, SPLICE_F_MOVE | SPLICE_F_MORE);
+              if (s1 < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
+              if (s1 == 0) break; // EOF
+              size_t drained = 0;
+              while (drained < (size_t)s1) {
+                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL,
+                                    s1 - drained, SPLICE_F_MOVE | SPLICE_F_MORE);
+                if (s2 <= 0) { if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; } break; }
+                drained += s2;
               }
-              n = written;
-              if (n > 0) transfer_method = TM_SPLICE_PIPE;
-            } else n = s1;
+              tm += drained;
+            }
+            n = tm > 0 ? (ssize_t)tm : -1;
+            if (n > 0) transfer_method = TM_SPLICE_PIPE;
           }
         }
       }
     } else {
-      // Subsequent chunks: use the cached method directly, no probing.
+      // ── Subsequent chunks: jump straight to the cached method ────────────
       switch (transfer_method) {
         case TM_COPY_FILE_RANGE:
           n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
@@ -1359,19 +1378,22 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           break;
         case TM_SPLICE_PIPE:
           if (fallback_pipe[0] != -1) {
-            ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
-            if (s1 > 0) {
-              size_t written = 0;
-              while (written < (size_t)s1) {
-                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
-                if (s2 <= 0) {
-                  if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
-                  break;
-                }
-                written += s2;
+            size_t tm = 0;
+            while (tm < (size_t)chunk_size) {
+              ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL,
+                                  chunk_size - tm, SPLICE_F_MOVE | SPLICE_F_MORE);
+              if (s1 < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
+              if (s1 == 0) break; // EOF
+              size_t drained = 0;
+              while (drained < (size_t)s1) {
+                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL,
+                                    s1 - drained, SPLICE_F_MOVE | SPLICE_F_MORE);
+                if (s2 <= 0) { if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; } break; }
+                drained += s2;
               }
-              n = written;
-            } else n = s1;
+              tm += drained;
+            }
+            n = tm > 0 ? (ssize_t)tm : -1;
           }
           break;
         default: break;
