@@ -267,6 +267,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define FORKRUN_RING_VERSION "NUMA-v13.0.4-UNIFIED"
 #endif
 
+// Critical memory barrier fixes: elevated to SEQ_CST for architectural safety
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
 #define atomic_load_relaxed(ptr) __atomic_load_n(ptr, __ATOMIC_RELAXED)
 #define atomic_store_release(ptr, val)                                         \
@@ -274,9 +275,9 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define atomic_store_relaxed(ptr, val)                                         \
   __atomic_store_n(ptr, val, __ATOMIC_RELAXED)
 #define atomic_fetch_add(ptr, val)                                             \
-  __atomic_fetch_add(ptr, val, __ATOMIC_ACQ_REL)
+  __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST)
 #define atomic_fetch_sub(ptr, val)                                             \
-  __atomic_fetch_sub(ptr, val, __ATOMIC_ACQ_REL)
+  __atomic_fetch_sub(ptr, val, __ATOMIC_SEQ_CST)
 #define atomic_compare_exchange(ptr, exp, des)                                 \
   __atomic_compare_exchange_n(ptr, exp, des, 0, __ATOMIC_ACQ_REL,              \
                               __ATOMIC_RELAXED)
@@ -337,7 +338,7 @@ static int g_debug = 0;
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
   X(ring_claim, ring_claim_main, "ring_claim[VAR] [FD]", "Claim batch")        \
-  X(ring_worker, ring_worker_main, "ring_worker [inc|dec][FD]",               \
+  X(ring_worker, ring_worker_main, "ring_worker[inc|dec][FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
@@ -1248,31 +1249,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   int fallback_pipe[2] = {-1, -1};
 
   while (1) {
-    // Event-Driven Shallow Queue Backpressure
-    if (current_major > 0) {
-      uint64_t min_consumed = ~(uint64_t)0;
-      for (int i = 0; i < num_nodes; i++) {
-        uint64_t t = atomic_load_acquire(&state[i].chunk_queue_tail);
-        if (t < min_consumed) min_consumed = t;
-      }
-
-      uint64_t max_ahead = num_nodes * 3;
-      if (max_ahead < 4) max_ahead = 4;
-
-      while (current_major - min_consumed >= max_ahead) {
-        struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
-        if (poll(&pfd, 1, 100) > 0) {
-            uint64_t v;
-            if (read(evfd_chunk_done, &v, 8)) {};
-        }
-        min_consumed = ~(uint64_t)0;
-        for (int i = 0; i < num_nodes; i++) {
-          uint64_t t = atomic_load_acquire(&state[i].chunk_queue_tail);
-          if (t < min_consumed) min_consumed = t;
-        }
-      }
-    }
-
     int target_node = 0;
     int min_backlog = INT_MAX;
     for (int i = 0; i < num_nodes; i++) {
@@ -1281,6 +1257,19 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       uint64_t t = atomic_load_relaxed(&state[check].chunk_queue_tail);
       int bl = (int)(h - t);
       if (bl < min_backlog) { min_backlog = bl; target_node = check; }
+    }
+
+    // Localized Event-Driven Shallow Queue Backpressure (No mathematical deadlock)
+    while (1) {
+      uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
+      uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
+      if (h - t < 4) break; // Strict per-node depth limit ensures no runaways and no deadlocks
+
+      struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
+      if (poll(&pfd, 1, 100) > 0) {
+          uint64_t v;
+          if (read(evfd_chunk_done, &v, 8)) {};
+      }
     }
 
     if (numa_enabled && num_nodes > 1) {
@@ -1333,9 +1322,13 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     struct SharedState *t_state = &state[target_node];
     uint64_t q_idx = t_state->chunk_queue_head;
     t_state->chunk_queue[q_idx & META_RING_MASK] = current_major;
-    atomic_store_release(&t_state->chunk_queue_head, q_idx + 1);
 
-    atomic_store_release(&g_state->ingest_publish_idx, current_major + 1);
+    __atomic_store_n(&t_state->chunk_queue_head, q_idx + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_state->ingest_publish_idx, current_major + 1, __ATOMIC_RELEASE);
+
+    // Hard barrier to prevent Store-Load reordering (fixes Dekker lost-wakeup on x86/ARM)
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
     if (atomic_load_relaxed(&g_state->ingest_waiters) > 0) {
       uint64_t v = 1; SYS_CHK(write(evfd_ingest_data, &v, 8));
     }
@@ -1351,7 +1344,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   xfree(nodemask);
 
-  atomic_store_release(&g_state->ingest_eof_idx, current_major);
+  __atomic_store_n(&g_state->ingest_eof_idx, current_major, __ATOMIC_RELEASE);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   uint64_t v = 999999;
   SYS_CHK(write(evfd_ingest_eof, &v, 8));
   return EXECUTION_SUCCESS;
@@ -1489,6 +1483,16 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   } while (0)
 
 #define ADAPTIVE_FLOW_CONTROL(state_ptr, is_stalled, _node_id_arg)             \
+  do {                                                                         \
+    batch_counter++; batches_since_calc++; uint64_t _tc = W * 4;               \
+    if (_tc < 4) _tc = 4;                                                      \
+    if (!fixed_batch && !byte_mode) {                                          \
+      if (phase == 0) { if (batch_counter >= _tc) { phase = 1; batch_counter = 0; } } \
+      else if (phase == 1) {                                                   \
+        if (is_stalled) phase = 2;                                             \
+        else if (batch_counter >= _tc) {                                       \
+          L *= 2; if (L >= Lmax) { L = Lmax; phase = 2; }                      \
+          if (W < W_max#define ADAPTIVE_FLOW_CONTROL(state_ptr, is_stalled, _node_id_arg)             \
   do {                                                                         \
     batch_counter++; batches_since_calc++; uint64_t _tc = W * 4;               \
     if (_tc < 4) _tc = 4;                                                      \
@@ -2174,7 +2178,7 @@ static int ring_claim_main(int argc, char **argv) {
       }
       if (!found && g_debug && global_num_nodes > 1) {
         fprintf(stderr,
-                "forkrun [DEBUG] Worker on unmapped physical node %d, "
+                "forkrun[DEBUG] Worker on unmapped physical node %d, "
                 "defaulting to logical 0\n",
                 phys);
       }
