@@ -1,9 +1,8 @@
-// forkrun_ring.c v13.0.4-UNIFIED (Bugfix: Fallow Delta Punch & EOF Fencepost)
+// forkrun_ring.c v13.0.5-NUMA (Bugfix: Eternal EOF, Splice Accumulation, Telemetry)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
-// 1. Zero-Copy Ingest: Data moved from stdin to memfd via
-// splice/copy_file_range.
+// 1. Zero-Copy Ingest: Data moved from stdin to memfd via splice/copy_file_range.
 // 2. Lock-Free Meta Ring: Ingest publishes chunk coordinates to GlobalState.
 // 3. Per-Node Indexers: Find physical boundaries instantly in local memory.
 // 4. Unified Scanners: A single core hot-loop handles both UMA and NUMA execution.
@@ -264,7 +263,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v13.0.4-UNIFIED"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.5-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -363,6 +362,7 @@ static int g_debug = 0;
     "ring_splice <IN> <OUT> <OFF> <LEN>[close]", "Splice data")                \
   X(ring_version, ring_version_main, "ring_version[-t|-o|-m|-g|-f|-a]",        \
     "Show build metadata")                                                     \
+  X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats", "Print NUMA telemetry") \
   X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
@@ -1143,11 +1143,12 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
-  // FIX: Restore EFD_SEMAPHORE to EOF flags to prevent EventFD signal stealing.
+  // FIX: EOF eventfds are NONBLOCK (NOT semaphores). No read() is ever called.
+  // Poll returning POLLIN instantly signals eternal EOF across all threads.
   evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); // UMA legacy keeps non-semaphore
-  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); // Legacy broadcast
+  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
 
@@ -1243,7 +1244,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   if (num_nodes > 1024) num_nodes = 1024;
 
   uint64_t chunk_size = 4 * 1024 * 1024ULL;
-  uint64_t max_chunk = ordered_mode ? (16ULL * 1024 * 1024) : (128ULL * 1024 * 1024);
+  // FIX: Cap max_chunk to 16MB to prevent `<f1` sendfile/copy_file_range from monopolizing the Ingest thread
+  uint64_t max_chunk = ordered_mode ? (4ULL * 1024 * 1024) : (16ULL * 1024 * 1024);
   uint64_t current_offset = 0; uint32_t current_major = 0;
   int consecutive_full = 0; int last_target = -1;
 
@@ -1261,21 +1263,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
   int fallback_pipe[2] = {-1, -1};
 
-  // Cache which transfer method succeeds on the first chunk so we don't
-  // re-probe on every chunk.  For <file inputs, copy_file_range and sendfile
-  // both fail against a memfd, and direct splice fails (no pipe fd), so we
-  // always end up in TM_SPLICE_PIPE.  Without caching we pay 3 guaranteed-
-  // failing syscalls per chunk before even starting the actual transfer.
-  enum {
-    TM_UNKNOWN = 0,
-    TM_COPY_FILE_RANGE,
-    TM_SENDFILE,
-    TM_SPLICE_DIRECT,  // pipe-input fast path: one splice call per chunk
-    TM_SPLICE_PIPE     // file-input: double-splice via intermediate pipe
-  } transfer_method = TM_UNKNOWN;
+  enum { TM_UNKNOWN = 0, TM_COPY_FILE_RANGE, TM_SENDFILE, TM_SPLICE_DIRECT, TM_SPLICE_PIPE } transfer_method = TM_UNKNOWN;
   uint64_t one = 1;
 
-  for (int i = 0; i < num_nodes * 2; i++) {     // give 2 free credits per node at start
+  for (int i = 0; i < num_nodes * 2; i++) {
     SYS_CHK(write(evfd_chunk_done, &one, 8));
   }
 
@@ -1290,7 +1281,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       if (bl < min_backlog) { min_backlog = bl; target_node = check; }
     }
 
-    // Localized Event-Driven Shallow Queue Backpressure
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
@@ -1317,39 +1307,29 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     ssize_t n = -1;
 
     if (transfer_method == TM_UNKNOWN) {
-      // ── First chunk: probe the fallback chain once and cache the winner ──
       loff_t in_off = lseek(infd, 0, SEEK_CUR);
       if (in_off != (loff_t)-1) {
-        // Seekable (regular file): try zero-copy methods first.
         n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
         if (n >= 0) { transfer_method = TM_COPY_FILE_RANGE; }
         else {
-          // copy_file_range may fail EXDEV/EINVAL/ENOSYS across fs types.
           n = sendfile(outfd, infd, NULL, chunk_size);
           if (n >= 0) { transfer_method = TM_SENDFILE; }
         }
       }
       if (n < 0) {
-        // Non-seekable (pipe) OR zero-copy methods failed: try direct splice.
         n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
         if (n >= 0) { transfer_method = TM_SPLICE_DIRECT; }
         else if (errno == EINVAL) {
-          // Neither fd is a pipe (file→memfd): must bounce through a pipe.
           if (fallback_pipe[0] == -1) {
             if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
           }
           if (fallback_pipe[0] != -1) {
-            // Loop outer splice so we accumulate a full chunk_size transfer.
-            // Without this loop each "chunk" is capped at the pipe buffer
-            // (1 MB), which prevents chunk_size from ever growing and results
-            // in ~10x more chunks — and ~10x more NUMA overhead — vs pipe
-            // input where direct splice can grow chunks to max_chunk.
             size_t tm = 0;
             while (tm < (size_t)chunk_size) {
               ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL,
                                   chunk_size - tm, SPLICE_F_MOVE | SPLICE_F_MORE);
               if (s1 < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
-              if (s1 == 0) break; // EOF
+              if (s1 == 0) break;
               size_t drained = 0;
               while (drained < (size_t)s1) {
                 ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL,
@@ -1365,7 +1345,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         }
       }
     } else {
-      // ── Subsequent chunks: jump straight to the cached method ────────────
       switch (transfer_method) {
         case TM_COPY_FILE_RANGE:
           n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
@@ -1374,7 +1353,17 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           n = sendfile(outfd, infd, NULL, chunk_size);
           break;
         case TM_SPLICE_DIRECT:
-          n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+          {
+            // FIX: Loop splice for piped inputs to accumulate full 4MB+ chunks
+            size_t tm = 0;
+            while (tm < (size_t)chunk_size) {
+              ssize_t s1 = splice(infd, NULL, outfd, NULL, chunk_size - tm, SPLICE_F_MOVE | SPLICE_F_MORE);
+              if (s1 < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
+              if (s1 == 0) break;
+              tm += s1;
+            }
+            n = tm > 0 ? (ssize_t)tm : -1;
+          }
           break;
         case TM_SPLICE_PIPE:
           if (fallback_pipe[0] != -1) {
@@ -1383,7 +1372,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
               ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL,
                                   chunk_size - tm, SPLICE_F_MOVE | SPLICE_F_MORE);
               if (s1 < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
-              if (s1 == 0) break; // EOF
+              if (s1 == 0) break;
               size_t drained = 0;
               while (drained < (size_t)s1) {
                 ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL,
@@ -1416,10 +1405,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     __atomic_store_n(&g_state->ingest_publish_idx, current_major + 1, __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-    // NUMA Telemetry
     __atomic_fetch_add(&t_state->stats_chunks_assigned, 1, __ATOMIC_RELAXED);
 
-    // Isolate wakeups to the specific node we just pushed data to
     uint64_t w = atomic_load_relaxed(&t_state->indexer_waiters);
     if (w > 0) {
       SYS_CHK(write(evfd_indexer_arr[target_node], &w, 8));
@@ -1469,7 +1456,8 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[my_node_id], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
       poll(pfds, 2, -1);
       if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[my_node_id], &v, 8)) {}; }
-      if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {}; }
+      // FIX: Eternal EOF. No read() on evfd_ingest_eof. Breaks wait instantly.
+      if (pfds[1].revents & POLLIN) { }
       __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); spin = 0;
     }
     spin = 0;
@@ -1802,7 +1790,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[steal_target], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
                 poll(pfds, 2, -1);
                 if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[steal_target], &v, 8)) {} }
-                if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {} }
+                if (pfds[1].revents & POLLIN) { } // Eternal EOF, no read required
                 __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); ingest_spin = 0;
             }
 
@@ -2201,7 +2189,7 @@ unified_scanner_eof:
             uint64_t v = 1; SYS_CHK(write(evfd_data_arr[0], &v, 8));
         }
         if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
-        uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8));
+        // FIX: No read on evfd_eof. It is an eternal broadcast flag.
     }
 
     xfree(buf);
@@ -2397,10 +2385,7 @@ restart_loop:
         break;
       }
       if (pfds[1].revents) {
-        uint64_t v;
-        if (read(evfd_eof, &v, 8)) {
-        };
-        break;
+        break; // FIX: Eternal EOF flag. Breaks the wait loop instantly.
       }
     }
     cleanup_waiter_state();
@@ -2454,7 +2439,7 @@ restart_loop:
             uint64_t v; if (read(evfd_data_arr[my_numa_node], &v, 8)) {}
         }
         if (pfds[1].revents) {
-            uint64_t v; if (read(evfd_eof, &v, 8)) {} break;
+            break; // FIX: Eternal EOF flag. No read() necessary.
         }
       }
       cleanup_waiter_state();
@@ -3085,6 +3070,40 @@ static int ring_version_main(int argc, char **argv) {
     printf("Compiler: %s\n", __VERSION__); printf("Flags:    %s\n", COMPILER_FLAGS);
     printf("Git Hash: %s\n", GIT_HASH);
   }
+  return EXECUTION_SUCCESS;
+}
+
+// --- NEW FUNCTION: NUMA TELEMETRY ---
+static int ring_numa_stats_main(int argc, char **argv) {
+  (void)argc; (void)argv;
+  if (!g_state || !state) return EXECUTION_FAILURE;
+
+  uint64_t total_assigned = 0;
+  uint64_t total_stolen = 0;
+  uint64_t total_local = 0;
+
+  fprintf(stderr, "\n=========================================\n");
+  fprintf(stderr, "NUMA TELEMETRY (CHUNKS)\n");
+  fprintf(stderr, "=========================================\n");
+  for (uint32_t n = 0; n < global_num_nodes; n++) {
+      uint64_t assigned = atomic_load_relaxed(&state[n].stats_chunks_assigned);
+      uint64_t local = atomic_load_relaxed(&state[n].stats_chunks_local);
+      uint64_t stolen = atomic_load_relaxed(&state[n].stats_chunks_stolen);
+      uint32_t phys = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
+
+      total_assigned += assigned;
+      total_local += local;
+      total_stolen += stolen;
+
+      fprintf(stderr, "Node %u (Phys %u): %lu assigned | %lu processed local | %lu stolen\n",
+              n, phys, assigned, local, stolen);
+  }
+  fprintf(stderr, "-----------------------------------------\n");
+  uint64_t total_processed = total_local + total_stolen;
+  double stolen_pct = total_processed > 0 ? (100.0 * (double)total_stolen / (double)total_processed) : 0.0;
+  fprintf(stderr, "Total Cross-Socket Traffic: %lu chunks (%.1f%%)\n", total_stolen, stolen_pct);
+  fprintf(stderr, "=========================================\n\n");
+
   return EXECUTION_SUCCESS;
 }
 
