@@ -1259,7 +1259,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
   int mask_words = (max_phys_id / BITS_PER_LONG) + 1;
   unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
-  int fallback_pipe[2] = {-1, -1}
+  int fallback_pipe[2] = {-1, -1};
   uint64_t one = 1;
 
   for (int i = 0; i < num_nodes * 2; i++) {     // give 2 free credits per node at start
