@@ -1132,11 +1132,11 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
-  // BUGFIX: eventfd made into a semaphore so read() strictly consumes 1 ticket instead of wiping the counter.
+  // FIX: evfd_ingest_data is a NON-semaphore broadcast. One signal wakes everyone; first to read() clears it.
   evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
 
@@ -1263,7 +1263,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
-      if (h - t < 4) break; // Strict per-node depth limit ensures no runaways and no deadlocks
+
+      // FIX: Cast to int64_t to prevent wrap-around underflow when scanner eagerly increments tail
+      if ((int64_t)(h - t) < 4) break;
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
       if (poll(&pfd, 1, 100) > 0) {
@@ -1329,10 +1331,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     // Hard barrier to prevent Store-Load reordering (fixes Dekker lost-wakeup on x86/ARM)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-    // BUGFIX: Write `w` tickets to EFD_SEMAPHORE instead of `1` ticket to non-semaphore.
-    uint64_t w = atomic_load_relaxed(&g_state->ingest_waiters);
-    if (w > 0) {
-      SYS_CHK(write(evfd_ingest_data, &w, 8));
+    if (atomic_load_relaxed(&g_state->ingest_waiters) > 0) {
+      uint64_t v = 1; SYS_CHK(write(evfd_ingest_data, &v, 8));
     }
 
     last_target = target_node; current_offset += n; current_major++;
@@ -1646,8 +1646,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             uint64_t my_head = atomic_load_acquire(&t_state->chunk_queue_head);
 
             if (my_tail >= my_head) {
-                bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
-                int required_bl = 2; // Activation energy for cross-socket steal
+                // FIX: Structurally forbid cross-socket stealing unless node has 2+ chunks.
+                int required_bl = 2;
                 int max_bl = 0, best_ready_bl = 0, ready_target = -1, fallback_target = -1;
 
                 for (int i = 0; i < num_nodes; i++) {
@@ -1671,7 +1671,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 }
 
                 if (max_bl == 0) {
-                    if (is_eof) goto unified_scanner_eof;
+                    if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
+                        goto unified_scanner_eof;
+                    }
                 } else {
                     if (ready_target != -1 && best_ready_bl >= required_bl) steal_target = ready_target;
                     else if (fallback_target != -1 && max_bl >= required_bl) steal_target = fallback_target;

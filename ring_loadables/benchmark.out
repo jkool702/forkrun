@@ -1,11 +1,2 @@
 
 (1): time { frun   : <f1 >/dev/null; }
-real	8m43.168s
-user	0m0.010s
-sys	0m0.005s
-
-CPU UTILIZATION: 0.000 / 28
-
------------------------------------------
-
-(2): time { frun   : <f1 | wc -l; }
