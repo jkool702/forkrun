@@ -317,7 +317,7 @@ static int g_debug = 0;
   do {                                                                         \
     if ((long)(x) == -1) {                                                     \
       if (g_debug)                                                             \
-        fprintf(stderr, "forkrun[DEBUG] %s:%d: %s failed: %s\n", __FILE__,    \
+        fprintf(stderr, "forkrun [DEBUG] %s:%d: %s failed: %s\n", __FILE__,    \
                 __LINE__, #x, strerror(errno));                                \
     }                                                                          \
   } while (0)
@@ -336,7 +336,7 @@ static int g_debug = 0;
   X(ring_numa_scanner, ring_numa_scanner_main,                                 \
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
-  X(ring_claim, ring_claim_main, "ring_claim[VAR][FD]", "Claim batch")        \
+  X(ring_claim, ring_claim_main, "ring_claim[VAR] [FD]", "Claim batch")        \
   X(ring_worker, ring_worker_main, "ring_worker [inc|dec][FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
@@ -363,7 +363,7 @@ static int g_debug = 0;
     "ring_splice <IN> <OUT> <OFF> <LEN>[close]", "Splice data")                \
   X(ring_version, ring_version_main, "ring_version[-t|-o|-m|-g|-f|-a]",        \
     "Show build metadata")                                                     \
-  X(ring_list, ring_list_main, "ring_list[VAR]", "List loadables")
+  X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -713,6 +713,10 @@ struct SharedState {
   uint8_t cfg_return_bytes;
   uint8_t numa_enabled;
 
+  uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
+  uint64_t stats_chunks_local;
+  uint64_t stats_chunks_stolen;
+
   uint32_t stride_ring[RING_SIZE] ALIGNED(4096);
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
@@ -990,6 +994,9 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].fallow_active, 0);
       atomic_store_relaxed(&state[n].tail_idx, 0);
       atomic_store_relaxed(&state[n].scanner_finished, 0);
+      atomic_store_relaxed(&state[n].stats_chunks_assigned, 0);
+      atomic_store_relaxed(&state[n].stats_chunks_local, 0);
+      atomic_store_relaxed(&state[n].stats_chunks_stolen, 0);
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
         char dump[1024];
@@ -1136,11 +1143,11 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
-  // evfd_ingest_data is kept as a standard broadcast eventfd strictly for legacy UMA mode.
+  // FIX: Restore EFD_SEMAPHORE to EOF flags to prevent EventFD signal stealing.
   evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); // UMA legacy keeps non-semaphore
+  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
   evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
 
@@ -1332,6 +1339,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     __atomic_store_n(&t_state->chunk_queue_head, q_idx + 1, __ATOMIC_RELEASE);
     __atomic_store_n(&g_state->ingest_publish_idx, current_major + 1, __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    // NUMA Telemetry
+    __atomic_fetch_add(&t_state->stats_chunks_assigned, 1, __ATOMIC_RELAXED);
 
     // Isolate wakeups to the specific node we just pushed data to
     uint64_t w = atomic_load_relaxed(&t_state->indexer_waiters);
@@ -1678,7 +1688,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 }
 
                 if (max_bl == 0) {
-                    if (is_eof) goto unified_scanner_eof;
+                    if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
+                        goto unified_scanner_eof;
+                    }
                 } else {
                     if (ready_target != -1 && best_ready_bl >= required_bl) steal_target = ready_target;
                     else if (fallback_target != -1 && max_bl >= required_bl) steal_target = fallback_target;
@@ -1687,6 +1699,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             }
 
             uint64_t claim_idx = __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
+
+            // NUMA Telemetry
+            if (steal_target == my_node_id) {
+                __atomic_fetch_add(&t_state->stats_chunks_local, 1, __ATOMIC_RELAXED);
+            } else {
+                __atomic_fetch_add(&t_state->stats_chunks_stolen, 1, __ATOMIC_RELAXED);
+            }
 
             // Unblock Ingest shallow queue
             uint64_t _one = 1;
