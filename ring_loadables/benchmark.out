@@ -1,20 +1,11 @@
 
 (1): time { frun   : <f1 >/dev/null; }
-real	0m4.804s
-user	1m46.055s
-sys	0m1.177s
+real	8m43.168s
+user	0m0.010s
+sys	0m0.005s
 
-CPU UTILIZATION: 22.321 / 28
+CPU UTILIZATION: 0.000 / 28
 
 -----------------------------------------
 
 (2): time { frun   : <f1 | wc -l; }
-real	0m5.136s
-user	1m31.994s
-sys	0m1.099s
-
-CPU UTILIZATION: 18.125 / 28
-
------------------------------------------
-
-(3): time { cat f1 | frun   : >/dev/null; }

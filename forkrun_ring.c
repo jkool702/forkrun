@@ -337,7 +337,7 @@ static int g_debug = 0;
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
   X(ring_claim, ring_claim_main, "ring_claim[VAR] [FD]", "Claim batch")        \
-  X(ring_worker, ring_worker_main, "ring_worker[inc|dec][FD]",               \
+  X(ring_worker, ring_worker_main, "ring_worker [inc|dec][FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
@@ -358,7 +358,7 @@ static int g_debug = 0;
     "Create memfd")                                                            \
   X(ring_seal, ring_seal_main, "ring_seal <FD>", "Seal memfd")                 \
   X(ring_fcntl, ring_fcntl_main, "ring_fcntl <FD> <cmd>", "File control")      \
-  X(ring_pipe, ring_pipe_main, "ring_pipe <ARR|RD>[WR]", "Create pipe")       \
+  X(ring_pipe, ring_pipe_main, "ring_pipe <ARR|RD> [WR]", "Create pipe")       \
   X(ring_splice, ring_splice_main,                                             \
     "ring_splice <IN> <OUT> <OFF> <LEN>[close]", "Splice data")                \
   X(ring_version, ring_version_main, "ring_version[-t|-o|-m|-g|-f|-a]",        \
@@ -1132,9 +1132,10 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
+  // BUGFIX: eventfd made into a semaphore so read() strictly consumes 1 ticket instead of wiping the counter.
   evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
   evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
   evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
@@ -1328,8 +1329,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     // Hard barrier to prevent Store-Load reordering (fixes Dekker lost-wakeup on x86/ARM)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-    if (atomic_load_relaxed(&g_state->ingest_waiters) > 0) {
-      uint64_t v = 1; SYS_CHK(write(evfd_ingest_data, &v, 8));
+    // BUGFIX: Write `w` tickets to EFD_SEMAPHORE instead of `1` ticket to non-semaphore.
+    uint64_t w = atomic_load_relaxed(&g_state->ingest_waiters);
+    if (w > 0) {
+      SYS_CHK(write(evfd_ingest_data, &w, 8));
     }
 
     last_target = target_node; current_offset += n; current_major++;
@@ -1644,7 +1647,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
             if (my_tail >= my_head) {
                 bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
-                int required_bl = is_eof ? 1 : 2; // Activation energy for cross-socket steal
+                int required_bl = 2; // Activation energy for cross-socket steal
                 int max_bl = 0, best_ready_bl = 0, ready_target = -1, fallback_target = -1;
 
                 for (int i = 0; i < num_nodes; i++) {
@@ -1783,7 +1786,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         }
                     }
                     if (atomic_load_acquire(&local_state->ingest_complete)) {
-                        // FIX: Detect EOF if n is 0 OR we re-read the exact same overlap
                         if (n == 0 || (n > 0 && (uint64_t)n <= prev_avail)) status = 1;
                     } else {
                         status = 0;
