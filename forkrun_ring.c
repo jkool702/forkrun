@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.8-NUMA (Bugfix: Sched_Yield Trap, Phantom EOF, Telemetry)
+// forkrun_ring.c v13.0.9-NUMA (Bugfix: Scanner Premature Exit, Zero-Overhead Wait)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -263,7 +263,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v13.0.8-UNIFIED"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.9-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -336,7 +336,7 @@ static int g_debug = 0;
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
   X(ring_claim, ring_claim_main, "ring_claim[VAR] [FD]", "Claim batch")        \
-  X(ring_worker, ring_worker_main, "ring_worker [inc|dec][FD]",               \
+  X(ring_worker, ring_worker_main, "ring_worker[inc|dec][FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
@@ -615,6 +615,7 @@ static __thread uint32_t worker_last_minor = 0;
 
 static int *evfd_data_arr = NULL;
 static int *evfd_indexer_arr = NULL;
+static int *evfd_meta_arr = NULL;
 static int *fd_escrow_r = NULL;
 static int *fd_escrow_w = NULL;
 
@@ -693,6 +694,7 @@ struct SharedState {
 
   uint32_t active_waiters ALIGNED(CACHE_LINE);
   uint32_t indexer_waiters ALIGNED(CACHE_LINE);
+  uint32_t meta_waiters ALIGNED(CACHE_LINE);
   uint64_t min_idx;
 
   uint64_t write_idx ALIGNED(CACHE_LINE);
@@ -1126,12 +1128,14 @@ static int ring_init_main(int argc, char **argv) {
 
   evfd_data_arr = xmalloc(global_num_nodes * sizeof(int));
   evfd_indexer_arr = xmalloc(global_num_nodes * sizeof(int));
+  evfd_meta_arr = xmalloc(global_num_nodes * sizeof(int));
   fd_escrow_r = xmalloc(global_num_nodes * sizeof(int));
   fd_escrow_w = xmalloc(global_num_nodes * sizeof(int));
 
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     evfd_data_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     evfd_indexer_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+    evfd_meta_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     int pfd[2];
     if (pipe(pfd) == 0) {
       fcntl(pfd[0], F_SETFL, O_NONBLOCK); fcntl(pfd[1], F_SETFL, O_NONBLOCK);
@@ -1143,12 +1147,12 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
-  // FIX: ALL eventfds are semaphores to guarantee no signal stealing.
-  evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  // FIX: EOF eventfds are NONBLOCK. No read() is ever called.
+  evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); // Legacy broadcast
+  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
 
   evfd_data = evfd_data_arr[0];
@@ -1211,11 +1215,13 @@ static int ring_destroy_main(int argc, char **argv) {
     for (uint32_t n = 0; n < allocated_num_nodes; n++) {
       if (evfd_data_arr[n] >= 0) close(evfd_data_arr[n]);
       if (evfd_indexer_arr && evfd_indexer_arr[n] >= 0) close(evfd_indexer_arr[n]);
+      if (evfd_meta_arr && evfd_meta_arr[n] >= 0) close(evfd_meta_arr[n]);
       if (fd_escrow_r && fd_escrow_r[n] >= 0) close(fd_escrow_r[n]);
       if (fd_escrow_w && fd_escrow_w[n] >= 0) close(fd_escrow_w[n]);
     }
     xfree(evfd_data_arr); evfd_data_arr = NULL;
     if (evfd_indexer_arr) { xfree(evfd_indexer_arr); evfd_indexer_arr = NULL; }
+    if (evfd_meta_arr) { xfree(evfd_meta_arr); evfd_meta_arr = NULL; }
     xfree(fd_escrow_r); fd_escrow_r = NULL;
     xfree(fd_escrow_w); fd_escrow_w = NULL;
   }
@@ -1241,8 +1247,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   if (num_nodes < 1) num_nodes = 1;
   if (num_nodes > 1024) num_nodes = 1024;
 
-  // FIX: Force max_chunk strictly to 2MB (THP boundary) to eliminate 4-core starvation penalty.
-  uint64_t chunk_size = 2 * 1024 * 1024ULL;
+  uint64_t chunk_size = 2 * 1024 * 1024ULL; // FIX: Lock to 2MB THP slice.
   uint64_t current_offset = 0; uint32_t current_major = 0;
   int last_target = -1;
 
@@ -1278,11 +1283,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       if (bl < min_backlog) { min_backlog = bl; target_node = check; }
     }
 
-    // Localized Event-Driven Shallow Queue Backpressure
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
-      if ((int64_t)(h - t) < 4) break; 
+      if ((int64_t)(h - t) < 4) break;
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
       if (poll(&pfd, 1, 100) > 0) {
@@ -1346,7 +1350,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           n = sendfile(outfd, infd, NULL, chunk_size);
           break;
         case TM_SPLICE_DIRECT:
-          // FIX: No accumulation loop. Stream exactly what the kernel provides immediately to workers.
           n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
           break;
         case TM_SPLICE_PIPE:
@@ -1430,7 +1433,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[my_node_id], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
       poll(pfds, 2, -1);
       if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[my_node_id], &v, 8)) {}; }
-      if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {}; }
+      if (pfds[1].revents & POLLIN) { }
       __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); spin = 0;
     }
     spin = 0;
@@ -1452,7 +1455,16 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       search_end = window_start;
     }
     if (search_end <= meta->raw_offset) actual_end = meta->raw_offset;
+
     atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    // FIX: Zero-Overhead Wait Wakeup
+    uint32_t mw = atomic_load_relaxed(&t_state->meta_waiters);
+    if (mw > 0) {
+        uint64_t v = 1;
+        SYS_CHK(write(evfd_meta_arr[my_node_id], &v, 8));
+    }
     my_idx++;
   }
 }
@@ -1701,7 +1713,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
                 bool workers_starved = (atomic_load_relaxed(&local_state->read_idx) == atomic_load_relaxed(&local_state->write_idx));
 
-                int required_bl = (is_eof && workers_starved) ? 1 : 2; 
+                int required_bl = (is_eof && workers_starved) ? 1 : 2;
                 int max_bl = 0, best_ready_bl = 0, ready_target = -1, fallback_target = -1;
 
                 for (int i = 0; i < num_nodes; i++) {
@@ -1714,7 +1726,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         bool ready = true;
 
                         if (atomic_load_acquire(&state[i].write_idx) == 0) {
-                            ready = false; 
+                            ready = false;
                         } else if (c_maj > 0) {
                             struct ChunkMeta *pm = &g_state->meta_ring[(c_maj - 1) & META_RING_MASK];
                             if (!(atomic_load_acquire(&pm->actual_end) & FLAG_META_READY)) ready = false;
@@ -1737,12 +1749,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
             uint64_t claim_idx = __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
 
-            if (steal_target == my_node_id) {
-                __atomic_fetch_add(&t_state->stats_chunks_local, 1, __ATOMIC_RELAXED);
-            } else {
-                __atomic_fetch_add(&t_state->stats_chunks_stolen, 1, __ATOMIC_RELAXED);
-            }
-
             uint64_t _one = 1;
             SYS_CHK(write(evfd_chunk_done, &_one, 8));
 
@@ -1761,22 +1767,43 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[steal_target], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
                 poll(pfds, 2, -1);
                 if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[steal_target], &v, 8)) {} }
-                if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {} } 
+                if (pfds[1].revents & POLLIN) { }
                 __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); ingest_spin = 0;
             }
 
+            // FIX: Scanner Premature Exit Bug. Must CONTINUE instead of goto so we don't accidentally terminate the thread.
             if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
                 __atomic_fetch_sub(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
-                goto unified_scanner_eof;
+                continue;
+            }
+
+            if (steal_target == my_node_id) {
+                __atomic_fetch_add(&t_state->stats_chunks_local, 1, __ATOMIC_RELAXED);
+            } else {
+                __atomic_fetch_add(&t_state->stats_chunks_stolen, 1, __ATOMIC_RELAXED);
             }
 
             uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
             meta = &g_state->meta_ring[current_major & META_RING_MASK];
 
-            // FIX: Replaced brutal sched_yield trap with gentle spinning and 100us sleep.
+            // FIX: Zero-Overhead Wait
             uint64_t act_end_flag; int _ae_spin = 0;
             while (!((act_end_flag = atomic_load_acquire(&meta->actual_end)) & FLAG_META_READY)) {
-                if (_ae_spin < 500000) { cpu_relax(); _ae_spin++; } else { usleep(100); }
+                if (_ae_spin < 1000) {
+                    cpu_relax(); _ae_spin++;
+                } else {
+                    uint32_t tnode = meta->target_node;
+                    __atomic_fetch_add(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
+                    if (atomic_load_acquire(&meta->actual_end) & FLAG_META_READY) {
+                        __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
+                        break;
+                    }
+                    struct pollfd pfd = {.fd = evfd_meta_arr[tnode], .events = POLLIN};
+                    poll(&pfd, 1, 10);
+                    if (pfd.revents & POLLIN) { uint64_t v; if (read(evfd_meta_arr[tnode], &v, 8)) {} }
+                    __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
+                    _ae_spin = 0;
+                }
             }
             uint64_t actual_end = act_end_flag & ~FLAG_META_READY;
 
@@ -1785,7 +1812,21 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 struct ChunkMeta *prev_meta = &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
                 uint64_t prev_act_end; int _pe_spin = 0;
                 while (!((prev_act_end = atomic_load_acquire(&prev_meta->actual_end)) & FLAG_META_READY)) {
-                    if (_pe_spin < 500000) { cpu_relax(); _pe_spin++; } else { usleep(100); }
+                    if (_pe_spin < 1000) {
+                        cpu_relax(); _pe_spin++;
+                    } else {
+                        uint32_t tnode = prev_meta->target_node;
+                        __atomic_fetch_add(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
+                        if (atomic_load_acquire(&prev_meta->actual_end) & FLAG_META_READY) {
+                            __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
+                            break;
+                        }
+                        struct pollfd pfd = {.fd = evfd_meta_arr[tnode], .events = POLLIN};
+                        poll(&pfd, 1, 10);
+                        if (pfd.revents & POLLIN) { uint64_t v; if (read(evfd_meta_arr[tnode], &v, 8)) {} }
+                        __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
+                        _pe_spin = 0;
+                    }
                 }
                 actual_start = prev_act_end & ~FLAG_META_READY;
             }
@@ -2176,7 +2217,6 @@ unified_scanner_eof:
             uint64_t v = 1; SYS_CHK(write(evfd_data_arr[0], &v, 8));
         }
         if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
-        uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8));
     }
 
     xfree(buf);
@@ -2246,7 +2286,7 @@ static int ring_claim_main(int argc, char **argv) {
       }
       if (!found && g_debug && global_num_nodes > 1) {
         fprintf(stderr,
-                "forkrun [DEBUG] Worker on unmapped physical node %d, "
+                "forkrun[DEBUG] Worker on unmapped physical node %d, "
                 "defaulting to logical 0\n",
                 phys);
       }
@@ -2372,9 +2412,6 @@ restart_loop:
         break;
       }
       if (pfds[1].revents) {
-        uint64_t v;
-        if (read(evfd_eof, &v, 8)) {
-        };
         break;
       }
     }
@@ -2429,7 +2466,7 @@ restart_loop:
             uint64_t v; if (read(evfd_data_arr[my_numa_node], &v, 8)) {}
         }
         if (pfds[1].revents) {
-            uint64_t v; if (read(evfd_eof, &v, 8)) {} break;
+            break;
         }
       }
       cleanup_waiter_state();
