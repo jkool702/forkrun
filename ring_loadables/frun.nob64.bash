@@ -35,7 +35,7 @@ frun __exec__ "$@"
     shift 1 # Remove __exec__
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx order_mode unsafe_flag stdin_flag byte_mode_flag order_mode unsafe_flag LC_ALL
     local -ga fd_out P order_args ring_init_opts
@@ -157,8 +157,8 @@ frun __exec__ "$@"
                 [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--timeout='"${REPLY}") ;;
 
             # --- NUMA NODES (--nodes auto) ---
-            @(--nodes)?(?([= $'\t'])*))
-                arg="${1#@(--nodes)?([= $'\t'])}";
+            @(--nodes|--numa)?(?([= $'\t'])*))
+                arg="${1#@(--nodes|--numa)?([= $'\t'])}";
                 [[ ${arg} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && parsed_numa_nodes_arg="${arg}" ;;
 
@@ -222,7 +222,7 @@ toc() { :; }
 
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
 
-# --- NUMA Node Discovery and Topology Mapping ---
+    # --- NUMA Node Discovery and Topology Mapping ---
     : "${parsed_numa_nodes_arg:=auto}"
 
     _forkrun_build_numa_map() {
@@ -315,9 +315,9 @@ toc() { :; }
             done
 
             for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                ( 
+                (
                     exec {fd_fallow_w}>&-
-                    ring_numa_scanner ${fd_scan} $i $fd_spawn_w $FORKRUN_NUM_NODES 
+                    ring_numa_scanner ${fd_scan} $i $fd_spawn_w $FORKRUN_NUM_NODES
                 ) &
             done
 
@@ -415,11 +415,27 @@ toc() { :; }
             ring_ack_str+=' ${fd_out[$ID]}'
         }
 
+        type -p taskset &>/dev/null && have_taskset_flag=true || have_taskset_flag=false
+
         worker_func_src='spawn_worker() {
 (
   LC_ALL=C
   set +m
   export RING_NODE_ID="$2"
+'
+
+        if (( FORKRUN_NUM_NODES > 1 )) && ${have_taskset_flag}; then
+            worker_func_src+='
+  local -a p_nodes=(${numa_map_str//,/ })
+  local phys=${p_nodes[$2]}
+  if [[ -r /sys/devices/system/node/node${phys}/cpulist ]]; then
+      local cpu_list; read -r cpu_list < /sys/devices/system/node/node${phys}/cpulist
+      [[ $cpu_list ]] && taskset -pc "$cpu_list" $BASHPID >/dev/null 2>&1
+  fi
+'
+        fi
+
+        worker_func_src+='
   {
     ID="$1"
     shift 2
@@ -645,7 +661,7 @@ _forkrun_base64_to_file() {
 
 
     local tmp_so dir rf bootstrap_flag need_memfd_create_flag need_memfd_b64_flag need_b64_flag have_memfd_loadables_flag force_flag fast_flag
-    local -a candidates 
+    local -a candidates
 
     need_memfd_create_flag=false
     need_memfd_b64_flag=false
@@ -668,7 +684,7 @@ _forkrun_base64_to_file() {
 
     # fast "is everything already set up" check for runtime checks
     ${fast_flag} && {
-        enable ring_list || { 
+        enable ring_list || {
             ${have_memfd_loadables_flag} && enable -f /proc/${BASHPID}/fd/${FORKRUN_MEMFD_LOADABLES} ring_list
         }
         if ring_list 'ring_funcs' 2>/dev/null && (( ${#ring_funcs[@]} > 0 )); then
@@ -952,6 +968,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # no base64
+declare -A b64=()  # removed b64
 
 _forkrun_bootstrap_setup --force
