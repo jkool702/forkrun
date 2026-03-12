@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.5-NUMA (Bugfix: Eternal EOF, Splice Accumulation, Telemetry)
+// forkrun_ring.c v13.0.6-NUMA (Bugfix: Phantom Chunk Rollback, Streaming Splice, Telemetry)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -263,7 +263,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v13.0.5-UNIFIED"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.6-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -1143,13 +1143,12 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
-  // FIX: EOF eventfds are NONBLOCK (NOT semaphores). No read() is ever called.
-  // Poll returning POLLIN instantly signals eternal EOF across all threads.
-  evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); // Legacy broadcast
-  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  // FIX: ALL eventfds are semaphores to guarantee no signal stealing.
+  evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
 
   evfd_data = evfd_data_arr[0];
@@ -1281,6 +1280,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       if (bl < min_backlog) { min_backlog = bl; target_node = check; }
     }
 
+    // Localized Event-Driven Shallow Queue Backpressure
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
@@ -1324,22 +1324,19 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
           }
           if (fallback_pipe[0] != -1) {
-            size_t tm = 0;
-            while (tm < (size_t)chunk_size) {
-              ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL,
-                                  chunk_size - tm, SPLICE_F_MOVE | SPLICE_F_MORE);
-              if (s1 < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
-              if (s1 == 0) break;
-              size_t drained = 0;
-              while (drained < (size_t)s1) {
-                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL,
-                                    s1 - drained, SPLICE_F_MOVE | SPLICE_F_MORE);
-                if (s2 <= 0) { if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; } break; }
-                drained += s2;
+            ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+            if (s1 > 0) {
+              size_t written = 0;
+              while (written < (size_t)s1) {
+                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
+                if (s2 <= 0) {
+                  if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
+                  break;
+                }
+                written += s2;
               }
-              tm += drained;
-            }
-            n = tm > 0 ? (ssize_t)tm : -1;
+              n = written;
+            } else n = s1;
             if (n > 0) transfer_method = TM_SPLICE_PIPE;
           }
         }
@@ -1353,36 +1350,21 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           n = sendfile(outfd, infd, NULL, chunk_size);
           break;
         case TM_SPLICE_DIRECT:
-          {
-            // FIX: Loop splice for piped inputs to accumulate full 4MB+ chunks
-            size_t tm = 0;
-            while (tm < (size_t)chunk_size) {
-              ssize_t s1 = splice(infd, NULL, outfd, NULL, chunk_size - tm, SPLICE_F_MOVE | SPLICE_F_MORE);
-              if (s1 < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
-              if (s1 == 0) break;
-              tm += s1;
-            }
-            n = tm > 0 ? (ssize_t)tm : -1;
-          }
+          // FIX: No accumulation loop! Stream exactly what the kernel provides immediately to workers.
+          n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
           break;
         case TM_SPLICE_PIPE:
           if (fallback_pipe[0] != -1) {
-            size_t tm = 0;
-            while (tm < (size_t)chunk_size) {
-              ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL,
-                                  chunk_size - tm, SPLICE_F_MOVE | SPLICE_F_MORE);
-              if (s1 < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
-              if (s1 == 0) break;
+            ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+            if (s1 > 0) {
               size_t drained = 0;
               while (drained < (size_t)s1) {
-                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL,
-                                    s1 - drained, SPLICE_F_MOVE | SPLICE_F_MORE);
+                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - drained, SPLICE_F_MOVE | SPLICE_F_MORE);
                 if (s2 <= 0) { if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; } break; }
                 drained += s2;
               }
-              tm += drained;
-            }
-            n = tm > 0 ? (ssize_t)tm : -1;
+              n = (ssize_t)drained;
+            } else n = s1;
           }
           break;
         default: break;
@@ -1405,6 +1387,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     __atomic_store_n(&g_state->ingest_publish_idx, current_major + 1, __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
+    // NUMA Telemetry
     __atomic_fetch_add(&t_state->stats_chunks_assigned, 1, __ATOMIC_RELAXED);
 
     uint64_t w = atomic_load_relaxed(&t_state->indexer_waiters);
@@ -1456,8 +1439,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[my_node_id], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
       poll(pfds, 2, -1);
       if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[my_node_id], &v, 8)) {}; }
-      // FIX: Eternal EOF. No read() on evfd_ingest_eof. Breaks wait instantly.
-      if (pfds[1].revents & POLLIN) { }
+      if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {}; }
       __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); spin = 0;
     }
     spin = 0;
@@ -1764,13 +1746,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
             uint64_t claim_idx = __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
 
-            // NUMA Telemetry
-            if (steal_target == my_node_id) {
-                __atomic_fetch_add(&t_state->stats_chunks_local, 1, __ATOMIC_RELAXED);
-            } else {
-                __atomic_fetch_add(&t_state->stats_chunks_stolen, 1, __ATOMIC_RELAXED);
-            }
-
             // Unblock Ingest shallow queue
             uint64_t _one = 1;
             SYS_CHK(write(evfd_chunk_done, &_one, 8));
@@ -1790,11 +1765,22 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[steal_target], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
                 poll(pfds, 2, -1);
                 if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[steal_target], &v, 8)) {} }
-                if (pfds[1].revents & POLLIN) { } // Eternal EOF, no read required
+                if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {} }
                 __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); ingest_spin = 0;
             }
 
-            if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) continue;
+            // FIX: Phantom Chunk Rollback
+            if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
+                __atomic_fetch_sub(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
+                goto unified_scanner_eof;
+            }
+
+            // NUMA Telemetry
+            if (steal_target == my_node_id) {
+                __atomic_fetch_add(&t_state->stats_chunks_local, 1, __ATOMIC_RELAXED);
+            } else {
+                __atomic_fetch_add(&t_state->stats_chunks_stolen, 1, __ATOMIC_RELAXED);
+            }
 
             uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
             meta = &g_state->meta_ring[current_major & META_RING_MASK];
@@ -2189,7 +2175,7 @@ unified_scanner_eof:
             uint64_t v = 1; SYS_CHK(write(evfd_data_arr[0], &v, 8));
         }
         if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
-        // FIX: No read on evfd_eof. It is an eternal broadcast flag.
+        uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8));
     }
 
     xfree(buf);
@@ -2259,7 +2245,7 @@ static int ring_claim_main(int argc, char **argv) {
       }
       if (!found && g_debug && global_num_nodes > 1) {
         fprintf(stderr,
-                "forkrun [DEBUG] Worker on unmapped physical node %d, "
+                "forkrun[DEBUG] Worker on unmapped physical node %d, "
                 "defaulting to logical 0\n",
                 phys);
       }
@@ -2385,7 +2371,10 @@ restart_loop:
         break;
       }
       if (pfds[1].revents) {
-        break; // FIX: Eternal EOF flag. Breaks the wait loop instantly.
+        uint64_t v;
+        if (read(evfd_eof, &v, 8)) {
+        };
+        break;
       }
     }
     cleanup_waiter_state();
@@ -2439,7 +2428,7 @@ restart_loop:
             uint64_t v; if (read(evfd_data_arr[my_numa_node], &v, 8)) {}
         }
         if (pfds[1].revents) {
-            break; // FIX: Eternal EOF flag. No read() necessary.
+            uint64_t v; if (read(evfd_eof, &v, 8)) {} break;
         }
       }
       cleanup_waiter_state();
