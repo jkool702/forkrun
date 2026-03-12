@@ -156,12 +156,13 @@ jobs:
 
       - name: Flatten Artifacts
         run: |
-          find all_artifacts -name "*.so" -exec mv -f {} ring_loadables/forkrun-libs/ \;
+          mkdir -p artifacts
+          find all_artifacts -name "*.so" -exec mv {} artifacts/ \;
 
       - name: Generate New frun.bash Script
         shell: bash
         run: |
-          [[ -d all_artifacts ]] && command rm -rf all_artifacts
+          command mv -f artifacts/*.so ring_loadables/forkrun-libs/
           source ring_loadables/update_frun_base64.bash
           
           cd ring_loadables/forkrun-libs
