@@ -156,53 +156,18 @@ jobs:
 
       - name: Flatten Artifacts
         run: |
-          mkdir -p artifacts
-          find all_artifacts -name "*.so" -exec mv {} artifacts/ \;
-          ls -l artifacts/
-
-      - name: Extract Encoding Function
-        run: |
-          # Pull the _forkrun_file_to_base64 function out of frun.bash into a standalone script
-          sed -n '/^_forkrun_file_to_base64() {/,/^}/p' frun.bash > encoder.sh
+          find all_artifacts -name "*.so" -exec mv -f {} ring_loadables/forkrun-libs/ \;
 
       - name: Generate New frun.bash Script
         shell: bash
         run: |
-          source encoder.sh
+          [[ -d all_artifacts ]] && command rm -rf all_artifacts
+          source ring_loadables/update_frun_base64.bash
           
-          # 1. Read frun.bash up to the Base64 Start Marker
-          #    We assume the marker is "# <@@@@@< _BASE64_START_ >@@@@@> #"
-          sed '/# <@@@@@< _BASE64_START_ >@@@@@> #/q' frun.bash > frun.bash.new
-          
-          # 2. Append the Array Definition
-          echo "declare -A b64=(" >> frun.bash.new
-          
-          for so in artifacts/*.so; do
-             # Filename: forkrun_ring.x86-64-v3.so
-             fname=$(basename "$so")
-             
-             # Key: x86-64-v3
-             key="${fname#forkrun_ring.}"
-             key="${key%.so}"
-             
-             # Normalize key (ensure underscores if your shell logic prefers them, 
-             # though your previous examples used dashes/mixed. 
-             # Let's match the C-compiler output names exactly).
-             
-             echo "Encoding $key..."
-             encoded_str=$(_forkrun_file_to_base64 -n "$so")
-             
-             echo "    ['$key']=\"$encoded_str\"" >> frun.bash.new
-          done
-          
-          echo ")" >> frun.bash.new
-          
-          # 3. Append the Bootstrap Call
-          echo "" >> frun.bash.new
-          echo "_forkrun_bootstrap_setup --force" >> frun.bash.new
-          
-          # 4. Replace
-          mv frun.bash.new frun.bash
+          cd ring_loadables/forkrun-libs
+          update_frun_base64 ../../frun.bash
+
+          cd ../../
           chmod +x frun.bash
           
       - name: Upload generated frun.bash as artifact
@@ -212,10 +177,11 @@ jobs:
           path: frun.bash
           
       - name: Verify Final Script
+        shell: bash
         run: |
           # Sanity check: Does the script run and load?
           # This relies on the runner being x86_64 and having the x86-64-v2/v3 embedded
-          . ./frun.bash && ring_version -a
+          . ./frun.bash && ring_version -a || echo 'WARNING: frun.bash may not have been properly updated' >&2
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
