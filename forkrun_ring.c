@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.6-NUMA (Bugfix: Phantom Chunk Rollback, Streaming Splice, Telemetry)
+// forkrun_ring.c v13.0.7-NUMA (Bugfix: Phantom EOF Drop, 2MB THP Lock)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -263,7 +263,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "NUMA-v13.0.6-UNIFIED"
+#define FORKRUN_RING_VERSION "NUMA-v13.0.7-UNIFIED"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -1143,12 +1143,13 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
-  // FIX: ALL eventfds are semaphores to guarantee no signal stealing.
-  evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
-  evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+  // FIX: EOF eventfds are NONBLOCK. No read() is ever called. 
+  // Poll returning POLLIN instantly signals eternal EOF across all threads.
+  evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); // Legacy broadcast
+  evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
 
   evfd_data = evfd_data_arr[0];
@@ -1238,15 +1239,13 @@ static int ring_destroy_main(int argc, char **argv) {
 static int ring_numa_ingest_main(int argc, char **argv) {
   if (argc < 4) return EXECUTION_FAILURE;
   int infd = atoi(argv[1]); int outfd = atoi(argv[2]); int num_nodes = atoi(argv[3]);
-  bool ordered_mode = (argc > 4 && strcmp(argv[4], "1") == 0);
   if (num_nodes < 1) num_nodes = 1;
   if (num_nodes > 1024) num_nodes = 1024;
 
-  uint64_t chunk_size = 4 * 1024 * 1024ULL;
-  // FIX: Cap max_chunk to 16MB to prevent `<f1` sendfile/copy_file_range from monopolizing the Ingest thread
-  uint64_t max_chunk = ordered_mode ? (4ULL * 1024 * 1024) : (16ULL * 1024 * 1024);
+  // FIX: Force max_chunk strictly to 2MB (THP boundary) to eliminate 4-core starvation penalty.
+  uint64_t chunk_size = 2 * 1024 * 1024ULL;
   uint64_t current_offset = 0; uint32_t current_major = 0;
-  int consecutive_full = 0; int last_target = -1;
+  int last_target = -1;
 
   unsigned long test_mask = 1UL;
   bool numa_enabled = (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
@@ -1284,7 +1283,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
-      if ((int64_t)(h - t) < 4) break;
+      if ((int64_t)(h - t) < 4) break; 
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
       if (poll(&pfd, 1, 100) > 0) {
@@ -1301,8 +1300,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * BITS_PER_LONG);
       }
     }
-
-    chunk_size &= ~4095ULL; if (chunk_size == 0) chunk_size = 4096;
 
     ssize_t n = -1;
 
@@ -1324,19 +1321,25 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
           }
           if (fallback_pipe[0] != -1) {
-            ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
-            if (s1 > 0) {
-              size_t written = 0;
-              while (written < (size_t)s1) {
-                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
+            size_t tm = 0;
+            while (tm < (size_t)chunk_size) {
+              ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL,
+                                  chunk_size - tm, SPLICE_F_MOVE | SPLICE_F_MORE);
+              if (s1 < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
+              if (s1 == 0) break;
+              size_t drained = 0;
+              while (drained < (size_t)s1) {
+                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL,
+                                    s1 - drained, SPLICE_F_MOVE | SPLICE_F_MORE);
                 if (s2 <= 0) {
                   if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
                   break;
                 }
-                written += s2;
+                drained += s2;
               }
-              n = written;
-            } else n = s1;
+              tm += drained;
+            }
+            n = tm > 0 ? (ssize_t)tm : -1;
             if (n > 0) transfer_method = TM_SPLICE_PIPE;
           }
         }
@@ -1350,7 +1353,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           n = sendfile(outfd, infd, NULL, chunk_size);
           break;
         case TM_SPLICE_DIRECT:
-          // FIX: No accumulation loop! Stream exactly what the kernel provides immediately to workers.
+          // FIX: No accumulation loop. Stream exactly what the kernel provides immediately to workers.
           n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
           break;
         case TM_SPLICE_PIPE:
@@ -1396,10 +1399,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     }
 
     last_target = target_node; current_offset += n; current_major++;
-    if ((uint64_t)n == chunk_size) {
-      consecutive_full++;
-      if (consecutive_full >= 4 && chunk_size < max_chunk) { chunk_size *= 2; consecutive_full = 0; }
-    } else { chunk_size = 4 * 1024 * 1024ULL; consecutive_full = 0; }
   }
 
   if (fallback_pipe[0] != -1) { close(fallback_pipe[0]); close(fallback_pipe[1]); }
@@ -1439,7 +1438,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[my_node_id], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
       poll(pfds, 2, -1);
       if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[my_node_id], &v, 8)) {}; }
-      if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {}; }
+      if (pfds[1].revents & POLLIN) { } // Eternal EOF, no read required
       __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); spin = 0;
     }
     spin = 0;
@@ -1694,6 +1693,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         uint64_t current_p_offset;
         struct ChunkMeta *meta = NULL;
         uint32_t minor_idx = 0;
+        bool chunk_eof_flushed = false;
 
         // =========================================================
         // 1. ACQUISITION PHASE
@@ -1709,8 +1709,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
                 bool workers_starved = (atomic_load_relaxed(&local_state->read_idx) == atomic_load_relaxed(&local_state->write_idx));
 
-                // Strict activation energy: Need backlog >= 2 to steal, UNLESS we are globally at EOF AND our local workers are completely starved.
-                int required_bl = (is_eof && workers_starved) ? 1 : 2;
+                int required_bl = (is_eof && workers_starved) ? 1 : 2; 
                 int max_bl = 0, best_ready_bl = 0, ready_target = -1, fallback_target = -1;
 
                 for (int i = 0; i < num_nodes; i++) {
@@ -1723,7 +1722,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         bool ready = true;
 
                         if (atomic_load_acquire(&state[i].write_idx) == 0) {
-                            ready = false; // Never steal from a node that hasn't published work yet
+                            ready = false; 
                         } else if (c_maj > 0) {
                             struct ChunkMeta *pm = &g_state->meta_ring[(c_maj - 1) & META_RING_MASK];
                             if (!(atomic_load_acquire(&pm->actual_end) & FLAG_META_READY)) ready = false;
@@ -1746,7 +1745,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
             uint64_t claim_idx = __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
 
-            // Unblock Ingest shallow queue
+            if (steal_target == my_node_id) {
+                __atomic_fetch_add(&t_state->stats_chunks_local, 1, __ATOMIC_RELAXED);
+            } else {
+                __atomic_fetch_add(&t_state->stats_chunks_stolen, 1, __ATOMIC_RELAXED);
+            }
+
             uint64_t _one = 1;
             SYS_CHK(write(evfd_chunk_done, &_one, 8));
 
@@ -1765,7 +1769,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[steal_target], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
                 poll(pfds, 2, -1);
                 if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[steal_target], &v, 8)) {} }
-                if (pfds[1].revents & POLLIN) { uint64_t v; if (read(evfd_ingest_eof, &v, 8)) {} }
+                if (pfds[1].revents & POLLIN) { } 
                 __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); ingest_spin = 0;
             }
 
@@ -1773,13 +1777,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
                 __atomic_fetch_sub(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
                 goto unified_scanner_eof;
-            }
-
-            // NUMA Telemetry
-            if (steal_target == my_node_id) {
-                __atomic_fetch_add(&t_state->stats_chunks_local, 1, __ATOMIC_RELAXED);
-            } else {
-                __atomic_fetch_add(&t_state->stats_chunks_stolen, 1, __ATOMIC_RELAXED);
             }
 
             uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
@@ -1929,6 +1926,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                     uint32_t cv = is_numa ? take : 1;
 
                     UNIFIED_SCANNER_FLUSH(cv, stride, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, true, false);
+                    if (is_last) chunk_eof_flushed = true;
                     if (is_numa) {
                         minor_idx++;
                         if (is_last) {
@@ -2049,6 +2047,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                     uint32_t stride = is_numa ? (return_bytes ? (uint32_t)(current_p_offset - batch_start) : (uint32_t)pending_lines) : 0;
 
                     UNIFIED_SCANNER_FLUSH(pending_lines, stride, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, return_bytes, false);
+                    if (is_last) chunk_eof_flushed = true;
                     if (is_numa) {
                         minor_idx++;
                         if (is_last) {
@@ -2065,6 +2064,18 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             }
             if (limit_reached) break;
         } // End Inner Loop
+
+        // FIX: Phantom EOF Drop. If the chunk ended perfectly on a newline without triggering the flush block above,
+        // we MUST emit a dummy flush to print the FLAG_MAJOR_EOF marker, otherwise ring_order hangs forever.
+        if (is_numa && !chunk_eof_flushed) {
+            uint32_t stride = return_bytes ? (uint32_t)(current_p_offset - batch_start) : (uint32_t)pending_lines;
+            UNIFIED_SCANNER_FLUSH(pending_lines, stride, true, meta->major_id, minor_idx, current_p_offset, return_bytes, false);
+            minor_idx++;
+            chunk_bounds[cb_head & 3] = local_scan_idx;
+            cb_head++;
+            batch_start = current_p_offset;
+            pending_lines = 0;
+        }
 
         if (is_numa) {
             UNIFIED_ADAPTIVE_COMMIT(true);
@@ -2175,7 +2186,6 @@ unified_scanner_eof:
             uint64_t v = 1; SYS_CHK(write(evfd_data_arr[0], &v, 8));
         }
         if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
-        uint64_t eof_sig = 999999; SYS_CHK(write(evfd_eof, &eof_sig, 8));
     }
 
     xfree(buf);
@@ -2245,7 +2255,7 @@ static int ring_claim_main(int argc, char **argv) {
       }
       if (!found && g_debug && global_num_nodes > 1) {
         fprintf(stderr,
-                "forkrun[DEBUG] Worker on unmapped physical node %d, "
+                "forkrun [DEBUG] Worker on unmapped physical node %d, "
                 "defaulting to logical 0\n",
                 phys);
       }
@@ -2371,10 +2381,7 @@ restart_loop:
         break;
       }
       if (pfds[1].revents) {
-        uint64_t v;
-        if (read(evfd_eof, &v, 8)) {
-        };
-        break;
+        break; // FIX: Eternal EOF. No read() required.
       }
     }
     cleanup_waiter_state();
@@ -2428,7 +2435,7 @@ restart_loop:
             uint64_t v; if (read(evfd_data_arr[my_numa_node], &v, 8)) {}
         }
         if (pfds[1].revents) {
-            uint64_t v; if (read(evfd_eof, &v, 8)) {} break;
+            break; // FIX: Eternal EOF flag. No read() necessary.
         }
       }
       cleanup_waiter_state();
