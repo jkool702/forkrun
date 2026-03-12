@@ -158,18 +158,31 @@ jobs:
         run: |
           mkdir -p artifacts
           find all_artifacts -name "*.so" -exec mv {} artifacts/ \;
+          ls -l artifacts
 
       - name: Generate New frun.bash Script
         shell: bash
         run: |
-          command mv -f artifacts/*.so ring_loadables/forkrun-libs/
-          source ring_loadables/update_frun_base64.bash
-          
-          cd ring_loadables/forkrun-libs
+          cd artifacts
+          ls -l
+          for nn in *.so; do
+              command rm ../ring_loadables/forkrun-libs/"$nn"
+              command mv "$nn" ../ring_loadables/forkrun-libs
+          done
+
+          sleep 1
+          cd ../ring_loadables
+          source update_frun_base64.bash
+
+          sleep 1
+          cd forkrun-libs
+          ls -l
           update_frun_base64 ../../frun.bash
 
+          sleep 1
           cd ../../
           chmod +x frun.bash
+          rm -r artifacts
           
       - name: Upload generated frun.bash as artifact
         uses: actions/upload-artifact@v4
