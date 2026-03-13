@@ -1270,7 +1270,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   if (num_nodes < 1) num_nodes = 1;
   if (num_nodes > 1024) num_nodes = 1024;
 
-  uint64_t chunk_size = 2 * 1024 * 1024ULL; // FIX: Lock to 2MB THP slice.
+  uint64_t chunk_size = 2 * 1024 * 1024ULL; // Lock to 2MB THP slice.
   uint64_t current_offset = 0; uint32_t current_major = 0;
   int last_target = -1;
 
@@ -1330,41 +1330,39 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     ssize_t n = -1;
 
     if (transfer_method == TM_UNKNOWN) {
-      loff_t in_off = lseek(infd, 0, SEEK_CUR);
-      if (in_off != (loff_t)-1) {
-        n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
-        if (n >= 0) { transfer_method = TM_COPY_FILE_RANGE; }
-        else {
-          n = sendfile(outfd, infd, NULL, chunk_size);
-          if (n >= 0) { transfer_method = TM_SENDFILE; }
-        }
-      }
-      if (n < 0) {
-        n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
-        if (n >= 0) { transfer_method = TM_SPLICE_DIRECT; }
-        else if (errno == EINVAL) {
+      // PHYSICS FIX: If NUMA is active, forbid zero-copy page linking.
+      // We MUST force the pipe fallback to ensure new pages are allocated
+      // locally under the MPOL_BIND policy!
+      if (numa_enabled && num_nodes > 1) {
           if (fallback_pipe[0] == -1) {
             if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
           }
-          if (fallback_pipe[0] != -1) {
-            ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
-            if (s1 > 0) {
-              size_t written = 0;
-              while (written < (size_t)s1) {
-                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
-                if (s2 <= 0) {
-                  if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; }
-                  break;
-                }
-                written += s2;
-              }
-              n = written;
-            } else n = s1;
-            if (n > 0) transfer_method = TM_SPLICE_PIPE;
+          if (fallback_pipe[0] != -1) transfer_method = TM_SPLICE_PIPE;
+          else transfer_method = TM_SPLICE_DIRECT;
+      } else {
+          loff_t in_off = lseek(infd, 0, SEEK_CUR);
+          if (in_off != (loff_t)-1) {
+            n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
+            if (n >= 0) { transfer_method = TM_COPY_FILE_RANGE; }
+            else {
+              n = sendfile(outfd, infd, NULL, chunk_size);
+              if (n >= 0) { transfer_method = TM_SENDFILE; }
+            }
           }
-        }
+          if (n < 0) {
+            n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
+            if (n >= 0) { transfer_method = TM_SPLICE_DIRECT; }
+            else if (errno == EINVAL) {
+              if (fallback_pipe[0] == -1) {
+                if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
+              }
+              if (fallback_pipe[0] != -1) transfer_method = TM_SPLICE_PIPE;
+            }
+          }
       }
-    } else {
+    }
+
+    if (transfer_method != TM_UNKNOWN) {
       switch (transfer_method) {
         case TM_COPY_FILE_RANGE:
           n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
@@ -1694,7 +1692,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t first_wait_ts = 0;
     uint64_t limit_items = local_state->cfg_limit;
 
-    // NUMA Chunk Lookahead Backpressure
     uint64_t chunk_bounds[4] = {0};
     uint32_t cb_head = 0;
 
@@ -1731,7 +1728,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             struct SharedState *t_state = &state[my_node_id];
 
             uint64_t my_tail = atomic_load_relaxed(&t_state->chunk_queue_tail);
-            // CAUSALITY FIX: Scanner now looks at the Indexer's Ready Shelf
             uint64_t my_head = atomic_load_acquire(&t_state->chunk_ready_head);
 
             if (my_tail >= my_head) {
@@ -1747,7 +1743,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                     if (h > t) {
                         int bl = (int)(h - t);
                         if (bl > max_bl) { max_bl = bl; fallback_target = i; }
-                        
+
                         bool ready = true;
                         if (atomic_load_acquire(&state[i].write_idx) == 0) ready = false;
                         if (ready && bl > best_ready_bl) { best_ready_bl = bl; ready_target = i; }
@@ -1755,8 +1751,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 }
 
                 if (max_bl == 0) {
-                    if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
-                        goto unified_scanner_eof;
+                    // PHYSICS FIX: Absolute Barrier.
+                    // We cannot declare EOF until ALL chunks published by Ingest have been physically claimed by a Scanner.
+                    uint64_t eof_target = atomic_load_acquire(&g_state->ingest_eof_idx);
+                    if (eof_target != ~(uint64_t)0) {
+                        uint64_t total_claimed = 0;
+                        for (int i = 0; i < num_nodes; i++) {
+                            total_claimed += atomic_load_acquire(&state[i].chunk_queue_tail);
+                        }
+                        if (total_claimed >= eof_target) {
+                            goto unified_scanner_eof;
+                        }
                     }
                 } else {
                     if (ready_target != -1 && best_ready_bl >= required_bl) steal_target = ready_target;
@@ -1768,9 +1773,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             uint64_t claim_idx = __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
 
             uint64_t _one = 1;
-            SYS_CHK(write(evfd_chunk_done, &_one, 8)); // Wake Ingest
+            SYS_CHK(write(evfd_chunk_done, &_one, 8));
 
-            // CAUSALITY FIX: Scanner waits correctly on the Indexer's Semaphore
             int meta_spin = 0;
             while (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
                 if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
@@ -1805,7 +1809,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
             meta = &g_state->meta_ring[current_major & META_RING_MASK];
 
-            // CAUSALITY FIX: No wait loop! We only claimed because it was ready.
             uint64_t act_end_flag = atomic_load_acquire(&meta->actual_end);
             uint64_t actual_end = act_end_flag & ~FLAG_META_READY;
 
@@ -2096,7 +2099,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 } else if (!is_numa) force_refill = true;
             }
             if (limit_reached) break;
-        } 
+        }
 
         if (is_numa && !chunk_eof_flushed) {
             uint32_t stride = return_bytes ? (uint32_t)(current_p_offset - batch_start) : (uint32_t)pending_lines;
@@ -2847,7 +2850,17 @@ static int ring_splice_main(int argc, char **argv) {
   fcntl(fd_out, F_SETPIPE_SZ, 1048576); size_t written = 0;
   while (written < len) {
     ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written, SPLICE_F_MOVE | SPLICE_F_MORE);
-    if (s < 0) { if (errno == EINTR || errno == EAGAIN) continue; if (close_out) close(fd_out); builtin_error("splice failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
+    if (s < 0) {
+        if (errno == EINTR || errno == EAGAIN) continue;
+        // PHYSICS FIX: A broken pipe is a graceful exit in stream processing, not an error.
+        if (errno == EPIPE) {
+            if (close_out) close(fd_out);
+            return EXECUTION_SUCCESS;
+        }
+        if (close_out) close(fd_out);
+        builtin_error("splice failed: %s", strerror(errno));
+        return EXECUTION_FAILURE;
+    }
     if (s == 0) break;
     written += s;
   }

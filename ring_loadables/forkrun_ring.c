@@ -679,29 +679,51 @@ struct GlobalState {
 };
 
 struct SharedState {
+  // Written by Ingest, read by Indexer
   uint64_t chunk_queue_head ALIGNED(CACHE_LINE);
+  uint8_t _pad_cq_head[CACHE_LINE - sizeof(uint64_t)];
+
+  // Written by Indexer, read by Scanner (The Ready Shelf)
+  uint64_t chunk_ready_head ALIGNED(CACHE_LINE);
+  uint8_t _pad_cr_head[CACHE_LINE - sizeof(uint64_t)];
+
+  // Written by Scanner (Claiming)
   uint64_t chunk_queue_tail ALIGNED(CACHE_LINE);
+  uint8_t _pad_cq_tail[CACHE_LINE - sizeof(uint64_t)];
+
   uint32_t chunk_queue[META_RING_SIZE];
 
+  // EXCLUSIVE CACHE LINE: read_idx (Hammered by workers)
   uint64_t read_idx ALIGNED(CACHE_LINE);
-  uint64_t active_workers;
-  uint64_t total_lines_consumed;
+  uint8_t _pad_read_idx[CACHE_LINE - sizeof(uint64_t)];
+
+  // EXCLUSIVE CACHE LINE: write_idx (Written by Scanner)
+  uint64_t write_idx ALIGNED(CACHE_LINE);
+  uint8_t _pad_write_idx[CACHE_LINE - sizeof(uint64_t)];
+
+  // EXCLUSIVE CACHE LINE: total_lines_consumed (Hammered by workers)
+  uint64_t total_lines_consumed ALIGNED(CACHE_LINE);
+  uint8_t _pad_lines[CACHE_LINE - sizeof(uint64_t)];
+
+  // EXCLUSIVE CACHE LINE: active_waiters
+  uint32_t active_waiters ALIGNED(CACHE_LINE);
+  uint8_t _pad_waiters[CACHE_LINE - sizeof(uint32_t)];
+
+  uint64_t active_workers ALIGNED(CACHE_LINE);
   uint64_t global_scanned;
   uint64_t tail_idx;
   uint8_t scanner_finished;
   uint8_t fallow_active;
   uint8_t ingest_complete;
 
-  uint32_t active_waiters ALIGNED(CACHE_LINE);
   uint32_t indexer_waiters ALIGNED(CACHE_LINE);
   uint32_t meta_waiters ALIGNED(CACHE_LINE);
   uint64_t min_idx;
 
-  uint64_t write_idx ALIGNED(CACHE_LINE);
   int64_t signed_batch_size;
   uint64_t batch_change_idx;
 
-  uint64_t cfg_w_start;
+  uint64_t cfg_w_start ALIGNED(CACHE_LINE);
   uint64_t cfg_w_max;
   uint64_t cfg_batch_start;
   uint64_t cfg_batch_max;
@@ -986,6 +1008,7 @@ static int ring_init_main(int argc, char **argv) {
     atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
     for (uint32_t n = 0; n < global_num_nodes; n++) {
       atomic_store_relaxed(&state[n].chunk_queue_head, 0);
+      atomic_store_relaxed(&state[n].chunk_ready_head, 0);        
       atomic_store_relaxed(&state[n].chunk_queue_tail, 0);
       atomic_store_relaxed(&state[n].read_idx, 0);
       atomic_store_relaxed(&state[n].write_idx, 0);
@@ -1456,13 +1479,15 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }
     if (search_end <= meta->raw_offset) actual_end = meta->raw_offset;
 
+    // 1. Mark meta ready
     atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    // 2. Put it on the Scanner's Ready Shelf
+    __atomic_store_n(&t_state->chunk_ready_head, my_idx + 1, __ATOMIC_RELEASE);
 
-    // FIX: Zero-Overhead Wait Wakeup
+    // 3. Exact Ticket Dispensing (Wakes all waiting scanners)
     uint32_t mw = atomic_load_relaxed(&t_state->meta_waiters);
     if (mw > 0) {
-        uint64_t v = 1;
+        uint64_t v = mw;
         SYS_CHK(write(evfd_meta_arr[my_node_id], &v, 8));
     }
     my_idx++;
@@ -1688,7 +1713,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     bool experienced_stall = false;
     uint64_t pending_lines = 0;
 
-    // UMA-specific loop state
     int status = 0;
     bool force_refill = false;
 
@@ -1707,7 +1731,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             struct SharedState *t_state = &state[my_node_id];
 
             uint64_t my_tail = atomic_load_relaxed(&t_state->chunk_queue_tail);
-            uint64_t my_head = atomic_load_acquire(&t_state->chunk_queue_head);
+            // CAUSALITY FIX: Scanner now looks at the Indexer's Ready Shelf
+            uint64_t my_head = atomic_load_acquire(&t_state->chunk_ready_head);
 
             if (my_tail >= my_head) {
                 bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
@@ -1717,21 +1742,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 int max_bl = 0, best_ready_bl = 0, ready_target = -1, fallback_target = -1;
 
                 for (int i = 0; i < num_nodes; i++) {
-                    uint64_t h = atomic_load_acquire(&state[i].chunk_queue_head);
+                    uint64_t h = atomic_load_acquire(&state[i].chunk_ready_head);
                     uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
                     if (h > t) {
                         int bl = (int)(h - t);
                         if (bl > max_bl) { max_bl = bl; fallback_target = i; }
-                        uint32_t c_maj = state[i].chunk_queue[t & META_RING_MASK];
+                        
                         bool ready = true;
-
-                        if (atomic_load_acquire(&state[i].write_idx) == 0) {
-                            ready = false;
-                        } else if (c_maj > 0) {
-                            struct ChunkMeta *pm = &g_state->meta_ring[(c_maj - 1) & META_RING_MASK];
-                            if (!(atomic_load_acquire(&pm->actual_end) & FLAG_META_READY)) ready = false;
-                        }
-
+                        if (atomic_load_acquire(&state[i].write_idx) == 0) ready = false;
                         if (ready && bl > best_ready_bl) { best_ready_bl = bl; ready_target = i; }
                     }
                 }
@@ -1750,29 +1768,30 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             uint64_t claim_idx = __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
 
             uint64_t _one = 1;
-            SYS_CHK(write(evfd_chunk_done, &_one, 8));
+            SYS_CHK(write(evfd_chunk_done, &_one, 8)); // Wake Ingest
 
-            int ingest_spin = 0;
-            while (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
+            // CAUSALITY FIX: Scanner waits correctly on the Indexer's Semaphore
+            int meta_spin = 0;
+            while (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
                 if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
                     if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) break;
                 }
                 experienced_stall = true;
-                if (ingest_spin < 100) { cpu_relax(); ingest_spin++; continue; }
-
-                __atomic_fetch_add(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST);
-                if (atomic_load_acquire(&t_state->chunk_queue_head) > claim_idx) {
-                    __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); break;
+                if (meta_spin < 10000) { cpu_relax(); meta_spin++; }
+                else {
+                    __atomic_fetch_add(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
+                    if (atomic_load_acquire(&t_state->chunk_ready_head) > claim_idx) {
+                        __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST); break;
+                    }
+                    struct pollfd pfd = {.fd = evfd_meta_arr[steal_target], .events = POLLIN};
+                    poll(&pfd, 1, 10);
+                    if (pfd.revents & POLLIN) { uint64_t v; if (read(evfd_meta_arr[steal_target], &v, 8)) {} }
+                    __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
+                    meta_spin = 0;
                 }
-                struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[steal_target], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
-                poll(pfds, 2, -1);
-                if (pfds[0].revents & POLLIN) { uint64_t v; if (read(evfd_indexer_arr[steal_target], &v, 8)) {} }
-                if (pfds[1].revents & POLLIN) { }
-                __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); ingest_spin = 0;
             }
 
-            // FIX: Scanner Premature Exit Bug. Must CONTINUE instead of goto so we don't accidentally terminate the thread.
-            if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
+            if (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
                 __atomic_fetch_sub(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
                 continue;
             }
@@ -1786,25 +1805,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
             meta = &g_state->meta_ring[current_major & META_RING_MASK];
 
-            // FIX: Zero-Overhead Wait
-            uint64_t act_end_flag; int _ae_spin = 0;
-            while (!((act_end_flag = atomic_load_acquire(&meta->actual_end)) & FLAG_META_READY)) {
-                if (_ae_spin < 1000) {
-                    cpu_relax(); _ae_spin++;
-                } else {
-                    uint32_t tnode = meta->target_node;
-                    __atomic_fetch_add(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
-                    if (atomic_load_acquire(&meta->actual_end) & FLAG_META_READY) {
-                        __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
-                        break;
-                    }
-                    struct pollfd pfd = {.fd = evfd_meta_arr[tnode], .events = POLLIN};
-                    poll(&pfd, 1, 10);
-                    if (pfd.revents & POLLIN) { uint64_t v; if (read(evfd_meta_arr[tnode], &v, 8)) {} }
-                    __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
-                    _ae_spin = 0;
-                }
-            }
+            // CAUSALITY FIX: No wait loop! We only claimed because it was ready.
+            uint64_t act_end_flag = atomic_load_acquire(&meta->actual_end);
             uint64_t actual_end = act_end_flag & ~FLAG_META_READY;
 
             uint64_t actual_start = 0;
@@ -1812,7 +1814,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 struct ChunkMeta *prev_meta = &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
                 uint64_t prev_act_end; int _pe_spin = 0;
                 while (!((prev_act_end = atomic_load_acquire(&prev_meta->actual_end)) & FLAG_META_READY)) {
-                    if (_pe_spin < 1000) {
+                    if (_pe_spin < 10000) {
                         cpu_relax(); _pe_spin++;
                     } else {
                         uint32_t tnode = prev_meta->target_node;
@@ -1848,7 +1850,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             p = buf; end = buf;
 
         } else {
-            // UMA Acqusition: Break on complete EOF stream drain
             if (status == 1 && p >= end) break;
             current_p_offset = buf_base_offset + (uint64_t)(p - buf);
         }
@@ -1872,7 +1873,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         // =========================================================
         while ((is_numa && current_p_offset < chunk_end) || (!is_numa && (status != 1 || p < end))) {
 
-            // UMA-specific refill logic
             if (!is_numa && (p >= end || force_refill) && status != 1) {
                 force_refill = false;
                 uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
@@ -2096,7 +2096,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 } else if (!is_numa) force_refill = true;
             }
             if (limit_reached) break;
-        } // End Inner Loop
+        } 
 
         if (is_numa && !chunk_eof_flushed) {
             uint32_t stride = return_bytes ? (uint32_t)(current_p_offset - batch_start) : (uint32_t)pending_lines;
@@ -2112,14 +2112,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             UNIFIED_ADAPTIVE_COMMIT(true);
             if (limit_items > 0 && atomic_load_relaxed(&state[0].global_scanned) >= limit_items) break;
         }
-    } // End Outer Loop
+    }
 
 unified_scanner_eof:
     // =========================================================
     // 3. FINALIZATION (NUMA Finish vs UMA Tail Re-batching)
     // =========================================================
 
-    // Universally check backlog at EOF and spawn remaining workers if needed
     if (fd_spawn >= 0) {
         uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);
         if (W_curr < W_max_val) {
@@ -2208,7 +2207,7 @@ unified_scanner_eof:
 
         uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
         local_state->offset_ring[local_scan_idx & RING_MASK] = (uint64_t)final_sentinel | FLAG_PARTIAL_BATCH;
-        local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] = (uint64_t)final_sentinel; // THE EOF FENCEPOST FIX
+        local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] = (uint64_t)final_sentinel;
         local_scan_idx++;
 
         atomic_store_release(&local_state->write_idx, local_scan_idx);
@@ -2244,7 +2243,6 @@ static int ring_numa_scanner_main(int argc, char **argv) {
     // Call Unified Loop with is_numa = true
     return core_scanner_loop(memfd, my_node_id, fd_spawn, num_nodes, true);
 }
-
 
 // ==============================================================================
 // 7. CONSUMERS (Claim, Ack, Order)
