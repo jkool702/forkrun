@@ -1544,6 +1544,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       bool limit_lines = ((local_scan_idx - limit) >= RING_SIZE); \
       bool limit_chunks = is_numa && (cb_head >= 3) && (limit < chunk_bounds[(cb_head - 3) & 3]); \
       if (!limit_lines && !limit_chunks) break; \
+      if (atomic_load_relaxed(&local_state->active_workers) == 0) break; \
       UNIFIED_ADAPTIVE_COMMIT(true); \
       usleep(100); \
     } \
@@ -1751,8 +1752,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 }
 
                 if (max_bl == 0) {
-                    // PHYSICS FIX: Absolute Barrier.
-                    // We cannot declare EOF until ALL chunks published by Ingest have been physically claimed by a Scanner.
                     uint64_t eof_target = atomic_load_acquire(&g_state->ingest_eof_idx);
                     if (eof_target != ~(uint64_t)0) {
                         uint64_t total_claimed = 0;
@@ -1780,7 +1779,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
                     if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) break;
                 }
-                experienced_stall = true;
+
+                // PHYSICS FIX: Waiting for an Indexer is jitter. It is only a stream stall
+                // if Ingest physically hasn't published the chunk yet.
+                if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
+                    experienced_stall = true;
+                }
+
                 if (meta_spin < 10000) { cpu_relax(); meta_spin++; }
                 else {
                     __atomic_fetch_add(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
@@ -2066,7 +2071,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                     if (pending_lines >= L || limit_reached || (is_numa && current_p_offset >= chunk_end) || (!is_numa && status == 1)) {
                         flush = true;
                     } else if (starve_meter >= (W + DAMPING_OFFSET - 3)) {
-                        bool trigger = is_numa ? true : (stall_meter >= (W + DAMPING_OFFSET - 3));
+                        // PHYSICS FIX: Only early-flush if BOTH starvation and true stream stall exist.
+                        bool trigger = (stall_meter >= (W + DAMPING_OFFSET - 3));
                         if (trigger) {
                             if (timeout_us == 0) flush = true;
                             else if (timeout_us > 0) {
