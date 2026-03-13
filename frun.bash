@@ -363,7 +363,7 @@ toc() { :; }
 
         ring_ack_str="ring_ack $fd_fallow_w"
 
-          if ${stdin_flag}; then
+        if ${stdin_flag}; then
              # STDIN PAYLOAD
            : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
 
