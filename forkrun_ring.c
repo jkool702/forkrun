@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.9-NUMA (Bugfix: Scanner Premature Exit, Zero-Overhead Wait)
+// forkrun_ring.c v13.0.9-NUMA (Bugfix: Strict Allocator Alignment)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -336,7 +336,7 @@ static int g_debug = 0;
   X(ring_numa_scanner, ring_numa_scanner_main,                                 \
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
-  X(ring_claim, ring_claim_main, "ring_claim[VAR] [FD]", "Claim batch")        \
+  X(ring_claim, ring_claim_main, "ring_claim[VAR][FD]", "Claim batch")        \
   X(ring_worker, ring_worker_main, "ring_worker[inc|dec][FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
@@ -417,7 +417,9 @@ static int pin_to_numa_node(int node_id) {
   return sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
 }
 
-static void *xmalloc_aligned(size_t size) {
+// PHYSICS FIX: This must use system malloc because it targets posix_memalign.
+// Bash's xfree() cannot be used to free pointers returned by this function!
+static void *sys_malloc_aligned(size_t size) {
   void *ptr;
   if (posix_memalign(&ptr, HUGE_PAGE_SIZE, size) != 0)
     ptr = malloc(size);
@@ -1009,7 +1011,7 @@ static int ring_init_main(int argc, char **argv) {
     atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
     for (uint32_t n = 0; n < global_num_nodes; n++) {
       atomic_store_relaxed(&state[n].chunk_queue_head, 0);
-      atomic_store_relaxed(&state[n].chunk_ready_head, 0);        
+      atomic_store_relaxed(&state[n].chunk_ready_head, 0);
       atomic_store_relaxed(&state[n].chunk_queue_tail, 0);
       atomic_store_relaxed(&state[n].read_idx, 0);
       atomic_store_relaxed(&state[n].write_idx, 0);
@@ -1682,7 +1684,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t local_write_idx = 0;
 
     size_t chunk_sz = get_optimal_chunk_size();
-    char *buf = xmalloc_aligned(chunk_sz);
+    char *buf = sys_malloc_aligned(chunk_sz);
     char *p = buf, *end = buf;
 
     uint64_t buf_base_offset = is_numa ? 0 : lseek(fd_or_memfd, 0, SEEK_CUR);
@@ -2235,7 +2237,7 @@ unified_scanner_eof:
         if (fd_spawn >= 0) SYS_CHK(write(fd_spawn, "x\n", 2));
     }
 
-    xfree(buf);
+    free(buf);
     return EXECUTION_SUCCESS;
 }
 
@@ -2679,17 +2681,17 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
   while (total_read < len) {
     size_t to_read = (len - total_read > BUF_SIZE) ? BUF_SIZE : (len - total_read);
     ssize_t r = pread(fd_in, buf, to_read, off + total_read);
-    if (r < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } free(buf); return -1; }
+    if (r < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } xfree(buf); return -1; }
     if (r == 0) { if (retries++ < 100) { usleep(10); continue; } break; }
     retries = 0; char *write_ptr = buf; size_t to_write = r;
     while (to_write > 0) {
       ssize_t w = write(fd_out, write_ptr, to_write);
-      if (w < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } free(buf); return -1; }
+      if (w < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } xfree(buf); return -1; }
       write_ptr += w; to_write -= w;
     }
     total_read += r;
   }
-  free(buf); return (total_read == len) ? 0 : -1;
+  xfree(buf); return (total_read == len) ? 0 : -1;
 }
 
 static int ring_order_main(int argc, char **argv) {
@@ -2967,7 +2969,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
       struct PhysPacket *pp = &ops[i];
       if (pp->off == limit) {
         limit += pp->len;
-        while (head && head->s == limit) { struct Interval *tmp = head; limit = tmp->e; head = tmp->next; free(tmp); }
+        while (head && head->s == limit) { struct Interval *tmp = head; limit = tmp->e; head = tmp->next; xfree(tmp); }
         off_t aligned = (off_t)((limit / 4096) * 4096);
         if (aligned > last_punched) {
             fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
@@ -2980,7 +2982,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
       }
     }
   }
-  while (head) { struct Interval *tmp = head; head = head->next; free(tmp); }
+  while (head) { struct Interval *tmp = head; head = head->next; xfree(tmp); }
   return EXECUTION_SUCCESS;
 }
 
@@ -3095,7 +3097,7 @@ static int ring_fallow_main(int argc, char **argv) {
       struct IndexPacket *ip = &ops[i];
       if (ip->idx == next_idx) {
         next_idx += ip->cnt;
-        while (head && head->s == next_idx) { struct Interval *tmp = head; next_idx = tmp->e; head = tmp->next; free(tmp); }
+        while (head && head->s == next_idx) { struct Interval *tmp = head; next_idx = tmp->e; head = tmp->next; xfree(tmp); }
         if (state) atomic_store_release(&state[0].min_idx, next_idx);
         if (!dry_run) {
           uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
@@ -3112,7 +3114,7 @@ static int ring_fallow_main(int argc, char **argv) {
       }
     }
   }
-  while (head) { struct Interval *tmp = head; head = head->next; free(tmp); }
+  while (head) { struct Interval *tmp = head; head = head->next; xfree(tmp); }
   return EXECUTION_SUCCESS;
 }
 
