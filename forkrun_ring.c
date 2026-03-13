@@ -1629,8 +1629,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         }                                                                      \
       }                                                                        \
       if (!fixed_batch && !byte_mode && phase == 2) {                          \
-        int64_t _bl = (int64_t)local_write_idx - (int64_t)atomic_load_relaxed(&(state_ptr)->read_idx); \
-        if (_bl < 0) _bl = 0;                                                  \
+        int64_t _pending_slots = (int64_t)local_write_idx - (int64_t)atomic_load_relaxed(&(state_ptr)->read_idx); \
+        if (_pending_slots < 0) _pending_slots = 0;                            \
+        int64_t _bl = _pending_slots * (int64_t)L;                             \
         uint64_t _l_target = (uint64_t)_bl / W;                                \
         if (_l_target > Lmax) _l_target = Lmax;                                \
         if (_l_target < 1) _l_target = 1;                                      \
@@ -1780,8 +1781,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                     if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) break;
                 }
 
-                // PHYSICS FIX: Waiting for an Indexer is jitter. It is only a stream stall
-                // if Ingest physically hasn't published the chunk yet.
                 if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
                     experienced_stall = true;
                 }
@@ -2071,7 +2070,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                     if (pending_lines >= L || limit_reached || (is_numa && current_p_offset >= chunk_end) || (!is_numa && status == 1)) {
                         flush = true;
                     } else if (starve_meter >= (W + DAMPING_OFFSET - 3)) {
-                        // PHYSICS FIX: Only early-flush if BOTH starvation and true stream stall exist.
                         bool trigger = (stall_meter >= (W + DAMPING_OFFSET - 3));
                         if (trigger) {
                             if (timeout_us == 0) flush = true;
@@ -2148,6 +2146,10 @@ unified_scanner_eof:
     }
 
     if (is_numa) {
+        // PHYSICS FIX: Push L to Lmax so workers consume remaining ring slots in massive gulps.
+        if (!byte_mode && !fixed_batch) {
+            atomic_store_release(&local_state->signed_batch_size, -(int64_t)Lmax);
+        }
         atomic_store_release(&local_state->write_idx, local_scan_idx);
         atomic_store_release(&local_state->scanner_finished, 1);
         uint64_t blast = 999999;
