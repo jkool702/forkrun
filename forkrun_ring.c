@@ -680,28 +680,59 @@ struct GlobalState {
 
 struct SharedState {
   uint64_t chunk_queue_head ALIGNED(CACHE_LINE);
+  uint8_t _pad_cq_head[CACHE_LINE - sizeof(uint64_t)];
+
   uint64_t chunk_queue_tail ALIGNED(CACHE_LINE);
+  uint8_t _pad_cq_tail[CACHE_LINE - sizeof(uint64_t)];
+
   uint32_t chunk_queue[META_RING_SIZE];
 
+  // ==========================================
+  // EXCLUSIVE CACHE LINE: read_idx
+  // Written by workers via atomic_fetch_add.
+  // Read by scanner and workers.
+  // ==========================================
   uint64_t read_idx ALIGNED(CACHE_LINE);
-  uint64_t active_workers;
-  uint64_t total_lines_consumed;
+  uint8_t _pad_read_idx[CACHE_LINE - sizeof(uint64_t)];
+
+  // ==========================================
+  // EXCLUSIVE CACHE LINE: write_idx
+  // Written strictly by Scanner.
+  // Read continuously by workers.
+  // ==========================================
+  uint64_t write_idx ALIGNED(CACHE_LINE);
+  uint8_t _pad_write_idx[CACHE_LINE - sizeof(uint64_t)];
+
+  // ==========================================
+  // EXCLUSIVE CACHE LINE: total_lines_consumed
+  // Hammered by workers at the end of every claim.
+  // ==========================================
+  uint64_t total_lines_consumed ALIGNED(CACHE_LINE);
+  uint8_t _pad_lines[CACHE_LINE - sizeof(uint64_t)];
+
+  // ==========================================
+  // EXCLUSIVE CACHE LINE: active_waiters
+  // Modified continuously by sleeping/waking workers.
+  // ==========================================
+  uint32_t active_waiters ALIGNED(CACHE_LINE);
+  uint8_t _pad_waiters[CACHE_LINE - sizeof(uint32_t)];
+
+  // General State (Grouped by Read-Mostly or low contention)
+  uint64_t active_workers ALIGNED(CACHE_LINE);
   uint64_t global_scanned;
   uint64_t tail_idx;
   uint8_t scanner_finished;
   uint8_t fallow_active;
   uint8_t ingest_complete;
+  int64_t signed_batch_size;
+  uint64_t batch_change_idx;
 
-  uint32_t active_waiters ALIGNED(CACHE_LINE);
   uint32_t indexer_waiters ALIGNED(CACHE_LINE);
   uint32_t meta_waiters ALIGNED(CACHE_LINE);
   uint64_t min_idx;
 
-  uint64_t write_idx ALIGNED(CACHE_LINE);
-  int64_t signed_batch_size;
-  uint64_t batch_change_idx;
-
-  uint64_t cfg_w_start;
+  // Config State (Read Only during execution - safe to pack tightly)
+  uint64_t cfg_w_start ALIGNED(CACHE_LINE);
   uint64_t cfg_w_max;
   uint64_t cfg_batch_start;
   uint64_t cfg_batch_max;
@@ -715,10 +746,12 @@ struct SharedState {
   uint8_t cfg_return_bytes;
   uint8_t numa_enabled;
 
+  // Stats (Low priority, updated infrequently)
   uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
   uint64_t stats_chunks_local;
   uint64_t stats_chunks_stolen;
 
+  // Ring Buffers (Page aligned)
   uint32_t stride_ring[RING_SIZE] ALIGNED(4096);
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
