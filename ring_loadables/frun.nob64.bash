@@ -364,10 +364,10 @@ toc() { :; }
         ring_ack_str="ring_ack $fd_fallow_w"
 
           if ${stdin_flag}; then
-            # STDIN PAYLOAD
-            : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+             # STDIN PAYLOAD
+           : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
 
-            if (( RING_BYTES_MAX < RING_PIPE_CAPACITY )); then
+            if (( RING_BYTES_MAX < RING_PIPE_CAPACITY - 4096 )); then
             pCode='
                 ring_pipe pr pw
                 ring_splice $fd_read $pw '"''"' $REPLY "close" 2>/dev/null || break
@@ -375,7 +375,7 @@ toc() { :; }
                 exec {pr}>&-'
             else
             pCode='
-            if (( REPLY <= '"${RING_PIPE_CAPACITY:-65536}"' )); then
+            if (( REPLY <= '"$(( ${RING_PIPE_CAPACITY:-65536} - 4096 ))"' )); then
                 ring_pipe pr pw
                 ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || break
                 '"$cmdline_str"' <&$pr
@@ -968,6 +968,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() #no base64
+declare -A b64=()    # remove base64
 
 _forkrun_bootstrap_setup --force

@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.9-NUMA (Bugfix: Strict Allocator Alignment)
+// forkrun_ring.c v13.0.9-NUMA (Bugfix: Purged bash_malloc, Stack Vars)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -304,7 +304,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 #include "variables.h"
 #include "builtins.h"
 #include "common.h"
-#include "xmalloc.h"
+// No longer including xmalloc.h - strictly using system allocators for internal state!
 // clang-format on
 
 extern void dispose_command(COMMAND *);
@@ -417,8 +417,7 @@ static int pin_to_numa_node(int node_id) {
   return sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
 }
 
-// PHYSICS FIX: This must use system malloc because it targets posix_memalign.
-// Bash's xfree() cannot be used to free pointers returned by this function!
+// PHYSICS FIX: This uses system malloc. Bash's xfree() cannot be used!
 static void *sys_malloc_aligned(size_t size) {
   void *ptr;
   if (posix_memalign(&ptr, HUGE_PAGE_SIZE, size) != 0)
@@ -432,43 +431,36 @@ static SHELL_VAR *bind_var_or_array(const char *name, char *value, int flags) {
   char *lb = strchr(name, '[');
   if (!lb || name[strlen(name) - 1] != ']')
     return bind_variable(name, value, flags);
+
   size_t base_len = (size_t)(lb - name);
-  char *base_tmp = (char *)xmalloc(base_len + 1);
+  char base_tmp[256];
+  if (base_len >= sizeof(base_tmp)) return NULL;
   memcpy(base_tmp, name, base_len);
   base_tmp[base_len] = '\0';
+
   size_t idx_len = strlen(lb + 1) - 1;
-  char *idx_tmp = (char *)xmalloc(idx_len + 1);
+  char idx_tmp[256];
+  if (idx_len >= sizeof(idx_tmp)) return NULL;
   memcpy(idx_tmp, lb + 1, idx_len);
   idx_tmp[idx_len] = '\0';
-  char *base_s = savestring(base_tmp);
-  char *idx_s = savestring(idx_tmp);
-  char *val_s = savestring(value);
-  xfree(base_tmp);
-  xfree(idx_tmp);
-  SHELL_VAR *var = find_variable(base_s);
+
+  SHELL_VAR *var = find_variable(base_tmp);
   if (!var) {
-    var = make_new_array_variable(base_s);
-    if (!var) {
-      xfree(base_s);
-      xfree(idx_s);
-      xfree(val_s);
-      return NULL;
-    }
+    var = make_new_array_variable(base_tmp);
+    if (!var) return NULL;
   }
+
   SHELL_VAR *ret = NULL;
   if (assoc_p(var))
-    ret = bind_assoc_variable(var, base_s, idx_s, val_s, flags);
+    ret = bind_assoc_variable(var, base_tmp, idx_tmp, value, flags);
   else if (array_p(var)) {
     char *endp = NULL;
     errno = 0;
-    long n = strtol(idx_s, &endp, 10);
-    if (endp == idx_s || *endp != '\0' || errno == ERANGE) {
+    long n = strtol(idx_tmp, &endp, 10);
+    if (endp == idx_tmp || *endp != '\0' || errno == ERANGE) {
     } else
-      ret = bind_array_variable(base_s, (arrayind_t)n, val_s, flags);
+      ret = bind_array_variable(base_tmp, (arrayind_t)n, value, flags);
   }
-  xfree(base_s);
-  xfree(idx_s);
-  xfree(val_s);
   return ret;
 }
 
@@ -981,8 +973,8 @@ static int ring_init_main(int argc, char **argv) {
       for (const char *c = argv[i] + 11; *c; c++)
         if (*c == ',') global_num_nodes++;
 
-      if (g_logical_to_phys_map) xfree(g_logical_to_phys_map);
-      g_logical_to_phys_map = xmalloc(global_num_nodes * sizeof(uint32_t));
+      if (g_logical_to_phys_map) free(g_logical_to_phys_map);
+      g_logical_to_phys_map = malloc(global_num_nodes * sizeof(uint32_t));
       const char *p = argv[i] + 11;
       for (uint32_t j = 0; j < global_num_nodes; j++) {
         g_logical_to_phys_map[j] = (uint32_t)strtoul(p, (char **)&p, 10);
@@ -993,8 +985,8 @@ static int ring_init_main(int argc, char **argv) {
 
   if (global_num_nodes == 0 || g_logical_to_phys_map == NULL) {
     global_num_nodes = 1;
-    if (g_logical_to_phys_map) xfree(g_logical_to_phys_map);
-    g_logical_to_phys_map = xmalloc(sizeof(uint32_t));
+    if (g_logical_to_phys_map) free(g_logical_to_phys_map);
+    g_logical_to_phys_map = malloc(sizeof(uint32_t));
     g_logical_to_phys_map[0] = 0;
   }
 
@@ -1152,11 +1144,11 @@ static int ring_init_main(int argc, char **argv) {
     else atomic_store_relaxed(&state[n].signed_batch_size, (int64_t)state[n].cfg_batch_start);
   }
 
-  evfd_data_arr = xmalloc(global_num_nodes * sizeof(int));
-  evfd_indexer_arr = xmalloc(global_num_nodes * sizeof(int));
-  evfd_meta_arr = xmalloc(global_num_nodes * sizeof(int));
-  fd_escrow_r = xmalloc(global_num_nodes * sizeof(int));
-  fd_escrow_w = xmalloc(global_num_nodes * sizeof(int));
+  evfd_data_arr = malloc(global_num_nodes * sizeof(int));
+  evfd_indexer_arr = malloc(global_num_nodes * sizeof(int));
+  evfd_meta_arr = malloc(global_num_nodes * sizeof(int));
+  fd_escrow_r = malloc(global_num_nodes * sizeof(int));
+  fd_escrow_w = malloc(global_num_nodes * sizeof(int));
 
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     evfd_data_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
@@ -1173,10 +1165,9 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
-  // FIX: EOF eventfds are NONBLOCK. No read() is ever called.
   evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); // Legacy broadcast
+  evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_starve = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
@@ -1197,7 +1188,7 @@ static int ring_init_main(int argc, char **argv) {
     if (!v) v = make_new_array_variable(out_array_name);
     if (!v) return EXECUTION_FAILURE;
 
-    int *created_fds = xmalloc(sizeof(int) * vals[1]);
+    int *created_fds = malloc(sizeof(int) * vals[1]);
     int created_cnt = 0;
     int failure = 0;
     for (uint64_t i = 0; i < vals[1]; i++) {
@@ -1210,9 +1201,9 @@ static int ring_init_main(int argc, char **argv) {
     }
     if (failure) {
       for (int k = 0; k < created_cnt; k++) close(created_fds[k]);
-      xfree(created_fds); return EXECUTION_FAILURE;
+      free(created_fds); return EXECUTION_FAILURE;
     }
-    xfree(created_fds);
+    free(created_fds);
   }
 
   int probe_fd[2]; int pipe_cap = 65536;
@@ -1245,13 +1236,13 @@ static int ring_destroy_main(int argc, char **argv) {
       if (fd_escrow_r && fd_escrow_r[n] >= 0) close(fd_escrow_r[n]);
       if (fd_escrow_w && fd_escrow_w[n] >= 0) close(fd_escrow_w[n]);
     }
-    xfree(evfd_data_arr); evfd_data_arr = NULL;
-    if (evfd_indexer_arr) { xfree(evfd_indexer_arr); evfd_indexer_arr = NULL; }
-    if (evfd_meta_arr) { xfree(evfd_meta_arr); evfd_meta_arr = NULL; }
-    xfree(fd_escrow_r); fd_escrow_r = NULL;
-    xfree(fd_escrow_w); fd_escrow_w = NULL;
+    free(evfd_data_arr); evfd_data_arr = NULL;
+    if (evfd_indexer_arr) { free(evfd_indexer_arr); evfd_indexer_arr = NULL; }
+    if (evfd_meta_arr) { free(evfd_meta_arr); evfd_meta_arr = NULL; }
+    free(fd_escrow_r); fd_escrow_r = NULL;
+    free(fd_escrow_w); fd_escrow_w = NULL;
   }
-  if (g_logical_to_phys_map) { xfree(g_logical_to_phys_map); g_logical_to_phys_map = NULL; }
+  if (g_logical_to_phys_map) { free(g_logical_to_phys_map); g_logical_to_phys_map = NULL; }
   if (evfd_eof >= 0) { close(evfd_eof); evfd_eof = -1; }
   if (evfd_ingest_data >= 0) { close(evfd_ingest_data); evfd_ingest_data = -1; }
   if (evfd_ingest_eof >= 0) { close(evfd_ingest_eof); evfd_ingest_eof = -1; }
@@ -1288,7 +1279,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       if (g_logical_to_phys_map[i] > max_phys_id) max_phys_id = g_logical_to_phys_map[i];
   }
   int mask_words = (max_phys_id / BITS_PER_LONG) + 1;
-  unsigned long *nodemask = xmalloc(mask_words * sizeof(unsigned long));
+  unsigned long *nodemask = malloc(mask_words * sizeof(unsigned long));
   int fallback_pipe[2] = {-1, -1};
 
   enum { TM_UNKNOWN = 0, TM_COPY_FILE_RANGE, TM_SENDFILE, TM_SPLICE_DIRECT, TM_SPLICE_PIPE } transfer_method = TM_UNKNOWN;
@@ -1422,7 +1413,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
   if (fallback_pipe[0] != -1) { close(fallback_pipe[0]); close(fallback_pipe[1]); }
   if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
-  xfree(nodemask);
+  free(nodemask);
 
   __atomic_store_n(&g_state->ingest_eof_idx, current_major, __ATOMIC_RELEASE);
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -2642,7 +2633,7 @@ struct HeapNode {
 static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap, uint64_t key, struct OrderPacket pkt) {
   if (*sz >= *cap) {
     *cap = (*cap) * 2;
-    *heap_ptr = xrealloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
+    *heap_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
   }
   struct HeapNode *heap = *heap_ptr;
   int i = (*sz)++;
@@ -2677,21 +2668,21 @@ static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset, size_t coun
 }
 
 static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
-  const size_t BUF_SIZE = 65536; char *buf = xmalloc(BUF_SIZE); size_t total_read = 0; int retries = 0;
+  const size_t BUF_SIZE = 65536; char *buf = malloc(BUF_SIZE); size_t total_read = 0; int retries = 0;
   while (total_read < len) {
     size_t to_read = (len - total_read > BUF_SIZE) ? BUF_SIZE : (len - total_read);
     ssize_t r = pread(fd_in, buf, to_read, off + total_read);
-    if (r < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } xfree(buf); return -1; }
+    if (r < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } free(buf); return -1; }
     if (r == 0) { if (retries++ < 100) { usleep(10); continue; } break; }
     retries = 0; char *write_ptr = buf; size_t to_write = r;
     while (to_write > 0) {
       ssize_t w = write(fd_out, write_ptr, to_write);
-      if (w < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } xfree(buf); return -1; }
+      if (w < 0) { if (errno == EINTR || errno == EAGAIN) { usleep(10); continue; } free(buf); return -1; }
       write_ptr += w; to_write -= w;
     }
     total_read += r;
   }
-  xfree(buf); return (total_read == len) ? 0 : -1;
+  free(buf); return (total_read == len) ? 0 : -1;
 }
 
 static int ring_order_main(int argc, char **argv) {
@@ -2707,7 +2698,7 @@ static int ring_order_main(int argc, char **argv) {
   if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
 
   int heap_cap = 262144;
-  struct HeapNode *heap = xmalloc(heap_cap * sizeof(struct HeapNode));
+  struct HeapNode *heap = malloc(heap_cap * sizeof(struct HeapNode));
   int heap_sz = 0;
 
   uint32_t expected_major = 0; uint32_t expected_minor = 0; struct OrderPacket ops[64]; ssize_t n_read;
@@ -2768,7 +2759,7 @@ static int ring_order_main(int argc, char **argv) {
       }
     }
   }
-  xfree(heap); return EXECUTION_SUCCESS;
+  free(heap); return EXECUTION_SUCCESS;
 }
 
 // ==============================================================================
@@ -2938,7 +2929,7 @@ static int ring_fetcher_main(int argc, char **argv) {
     loff_t off_in = (loff_t)pp.off; loff_t off_out = lseek(fd_local, 0, SEEK_END);
     ssize_t ret = copy_file_range(fd_global, &off_in, fd_local, &off_out, pp.len, 0);
     if (ret < 0) {
-      char *buf = xmalloc(65536); uint64_t copied = 0; lseek(fd_global, pp.off, SEEK_SET); lseek(fd_local, 0, SEEK_END);
+      char *buf = malloc(65536); uint64_t copied = 0; lseek(fd_global, pp.off, SEEK_SET); lseek(fd_local, 0, SEEK_END);
       while (copied < pp.len) {
         size_t to_read = (pp.len - copied > 65536) ? 65536 : (pp.len - copied);
         ssize_t r = read(fd_global, buf, to_read);
@@ -2951,7 +2942,7 @@ static int ring_fetcher_main(int argc, char **argv) {
         }
         copied += r;
       }
-      xfree(buf);
+      free(buf);
     }
     uint64_t one = 1; SYS_CHK(write(fd_local_sig, &one, 8)); SYS_CHK(write(fd_global_ack, &pp, sizeof(pp)));
   }
@@ -2969,20 +2960,20 @@ static int ring_fallow_phys_main(int argc, char **argv) {
       struct PhysPacket *pp = &ops[i];
       if (pp->off == limit) {
         limit += pp->len;
-        while (head && head->s == limit) { struct Interval *tmp = head; limit = tmp->e; head = tmp->next; xfree(tmp); }
+        while (head && head->s == limit) { struct Interval *tmp = head; limit = tmp->e; head = tmp->next; free(tmp); }
         off_t aligned = (off_t)((limit / 4096) * 4096);
         if (aligned > last_punched) {
             fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
             last_punched = aligned;
         }
       } else if (pp->off > limit) {
-        struct Interval *n = xmalloc(sizeof(struct Interval)); n->s = pp->off; n->e = pp->off + pp->len;
+        struct Interval *n = malloc(sizeof(struct Interval)); n->s = pp->off; n->e = pp->off + pp->len;
         struct Interval **curr = &head; while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
         n->next = *curr; *curr = n;
       }
     }
   }
-  while (head) { struct Interval *tmp = head; head = head->next; xfree(tmp); }
+  while (head) { struct Interval *tmp = head; head = head->next; free(tmp); }
   return EXECUTION_SUCCESS;
 }
 
@@ -3097,7 +3088,7 @@ static int ring_fallow_main(int argc, char **argv) {
       struct IndexPacket *ip = &ops[i];
       if (ip->idx == next_idx) {
         next_idx += ip->cnt;
-        while (head && head->s == next_idx) { struct Interval *tmp = head; next_idx = tmp->e; head = tmp->next; xfree(tmp); }
+        while (head && head->s == next_idx) { struct Interval *tmp = head; next_idx = tmp->e; head = tmp->next; free(tmp); }
         if (state) atomic_store_release(&state[0].min_idx, next_idx);
         if (!dry_run) {
           uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
@@ -3108,13 +3099,13 @@ static int ring_fallow_main(int argc, char **argv) {
           }
         }
       } else if (ip->idx > next_idx) {
-        struct Interval *n = xmalloc(sizeof(struct Interval)); n->s = ip->idx; n->e = ip->idx + ip->cnt;
+        struct Interval *n = malloc(sizeof(struct Interval)); n->s = ip->idx; n->e = ip->idx + ip->cnt;
         struct Interval **curr = &head; while (*curr && (*curr)->s < n->s) curr = &((*curr)->next);
         n->next = *curr; *curr = n;
       }
     }
   }
-  while (head) { struct Interval *tmp = head; head = head->next; xfree(tmp); }
+  while (head) { struct Interval *tmp = head; head = head->next; free(tmp); }
   return EXECUTION_SUCCESS;
 }
 
