@@ -1567,61 +1567,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     while (1) { \
       uint64_t limit; \
       if (!is_numa && atomic_load_relaxed(&local_state->fallow_active)) { \
-
-
-This is exactly what I was looking for! You gave me the final puzzle pieces.
-
-The issues you're seeing (`malloc_consolidate(): invalid chunk size` and the `read` hang) are both symptoms of running high-performance C constructs inside a Bash loadable environment. Bash is a hostile environment for long-running C threads because of two major factors:
-
-### 1. The Bash Allocator Hijack (Heap Corruption)
-When you include Bash's headers (like `shell.h` and `config.h`), Bash violently hijacks the standard C memory allocators by doing `#define free xfree` and `#define malloc internal_malloc`.
-This means when you called `posix_memalign()` (which goes to the OS libc) and then called `free()` on it, the preprocessor silently routed your `free()` into Bash's internal syntax-tree allocator. Bash looked at the OS pointer, didn't find its custom internal headers, and detonated with `malloc_consolidate(): invalid chunk size`.
-
-**The Fix:** I have added explicit `#undef malloc`, `#undef free`, etc., immediately *after* the Bash headers. This physically severs the C loadable's heap from the Bash interpreter's AST heap, ensuring they never cross streams.
-
-### 2. The `SIGCHLD` Syscall Interruption (Deadlock & Hangs)
-Bash creates thousands of subshells. Every time a worker process dies, it sends a `SIGCHLD` signal to the parent. In Linux, signals interrupt blocking system calls (like `read()` and `write()` on pipes) returning `-1` with `errno == EINTR`.
-Your `ring_order` and `ring_fallow` threads were doing raw `read()` calls. A `SIGCHLD` would interrupt the `read()`, the loop would see `-1` and exit prematurely. With those threads dead, any worker trying to write to them received a `SIGPIPE` and was instantly killed by the kernel, causing the ring to stall and deadlock.
-
-**The Fix:** I have introduced two bulletproof IPC wrappers: `robust_write()` and a Sliding-Window Read Buffer. These explicitly catch `EINTR`/`EAGAIN` and ensure that packets are never dropped or torn, even in the middle of a `SIGCHLD` storm.
-
-### 3. The Bash Wrapper Synchronous Deadlock
-In the Bash wrapper, your `-s` optimization tried to synchronously cram data into a pipe before starting the reader. If the data is exactly 65536 bytes, it fills the kernel buffer to the absolute brim, `splice` blocks forever, and the reader is never started.
-**The Fix:** We must leave a 4KB "breathing room" margin so it only takes the fast-path when we have a mathematical guarantee it won't hit the ceiling.
-
-***
-
-### Step 1: The Bash Wrapper Fix (`frun.nob64.bash`)
-Find the `pCode` construction block for `-s` mode (around line 235) and replace it with this to enforce the 4096-byte safety margin:
-
-```bash
-        if ${stdin_flag}; then
-             # STDIN PAYLOAD
-           : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
-
-            if (( RING_BYTES_MAX < RING_PIPE_CAPACITY - 4096 )); then
-            pCode='
-                ring_pipe pr pw
-                ring_splice $fd_read $pw '"''"' $REPLY "close" 2>/dev/null || break
-                '"$cmdline_str"' <&$pr
-                exec {pr}>&-'
-            else
-            pCode='
-            if (( REPLY <= '"$(( ${RING_PIPE_CAPACITY:-65536} - 4096 ))"' )); then
-                ring_pipe pr pw
-                ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || break
-                '"$cmdline_str"' <&$pr
-                exec {pr}>&-
-            else
-                ( ring_splice $fd_read 1 '"''"' $REPLY "close" ) | '"$cmdline_str"'
-            fi'
-            fi
-```
-
-### Step 2: The Bulletproof C Source (`forkrun_ring.c`)
-Replace your *entire* C file with this. It includes the macro undefinitions, the `robust_write` loop everywhere, and the sliding-window packet processor.
-
-```c
         limit = atomic_load_acquire(&local_state->min_idx); \
       } else { \
         limit = atomic_load_acquire(&local_state->read_idx); \
