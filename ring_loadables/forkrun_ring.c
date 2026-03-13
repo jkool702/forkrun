@@ -2343,20 +2343,27 @@ restart_loop:
             atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
           }
         } else {
-          uint32_t L0 = local_state->stride_ring[r_curr & RING_MASK];
-          if (L0 == 0)
-            L0 = 1;
-          uint64_t Wmax = atomic_load_relaxed(&local_state->active_workers);
-          if (Wmax == 0)
-            Wmax = 1;
-          uint64_t B = ((uint64_t)(-sbatch)) / L0;
-          if (B > Wmax)
-            B = Wmax;
-          if (B < 1)
-            B = 1;
-          claim_count = B;
-          if (claim_count > 64)
-            claim_count = 64;
+          // PHYSICS FIX: NUMA nodes process non-contiguous chunks globally.
+          // Calculating (end - start) across multiple batches can span non-contiguous
+          // chunk boundaries, resulting in massive final_val errors. Force claim_count = 1.
+          if (local_state->numa_enabled && local_state->cfg_return_bytes) {
+              claim_count = 1;
+          } else {
+              uint32_t L0 = local_state->stride_ring[r_curr & RING_MASK];
+              if (L0 == 0)
+                L0 = 1;
+              uint64_t Wmax = atomic_load_relaxed(&local_state->active_workers);
+              if (Wmax == 0)
+                Wmax = 1;
+              uint64_t B = ((uint64_t)(-sbatch)) / L0;
+              if (B > Wmax)
+                B = Wmax;
+              if (B < 1)
+                B = 1;
+              claim_count = B;
+              if (claim_count > 64)
+                claim_count = 64;
+          }
         }
       }
 
