@@ -23,6 +23,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1546,6 +1547,12 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       if (!limit_lines && !limit_chunks) break; \
       if (atomic_load_relaxed(&local_state->active_workers) == 0) break; \
       UNIFIED_ADAPTIVE_COMMIT(true); \
+      /* PHYSICS FIX: If stuck in backpressure, ensure all sleeping workers are kicked awake */ \
+      uint32_t w_wait = atomic_load_relaxed(&local_state->active_waiters); \
+      if (w_wait > 0) { \
+          uint64_t v = w_wait; \
+          SYS_CHK(write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8)); \
+      } \
       usleep(100); \
     } \
     uint64_t pk = (uint64_t)batch_start; \
@@ -2146,7 +2153,6 @@ unified_scanner_eof:
     }
 
     if (is_numa) {
-        // PHYSICS FIX: Push L to Lmax so workers consume remaining ring slots in massive gulps.
         if (!byte_mode && !fixed_batch) {
             atomic_store_release(&local_state->signed_batch_size, -(int64_t)Lmax);
         }
@@ -2856,23 +2862,29 @@ static int ring_splice_main(int argc, char **argv) {
   if (argv[3][0] != '\0') { off_t parsed = (off_t)atoll(argv[3]); if (parsed != -1) { off = parsed; p_off = &off; } }
   size_t len = (size_t)atoll(argv[4]); bool close_out = (argc > 5 && strcmp(argv[5], "close") == 0);
   fcntl(fd_out, F_SETPIPE_SZ, 1048576); size_t written = 0;
+
+  // PHYSICS FIX: Shield the worker process from kernel assassination if the command exits early.
+  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+
   while (written < len) {
     ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written, SPLICE_F_MOVE | SPLICE_F_MORE);
     if (s < 0) {
         if (errno == EINTR || errno == EAGAIN) continue;
-        // PHYSICS FIX: A broken pipe is a graceful exit in stream processing, not an error.
         if (errno == EPIPE) {
             if (close_out) close(fd_out);
+            signal(SIGPIPE, old_handler);
             return EXECUTION_SUCCESS;
         }
         if (close_out) close(fd_out);
         builtin_error("splice failed: %s", strerror(errno));
+        signal(SIGPIPE, old_handler);
         return EXECUTION_FAILURE;
     }
     if (s == 0) break;
     written += s;
   }
   if (close_out) close(fd_out);
+  signal(SIGPIPE, old_handler);
   return EXECUTION_SUCCESS;
 }
 
