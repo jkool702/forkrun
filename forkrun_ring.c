@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.9-NUMA (Bugfix: Restored Lock-Free Flow & mmap buffers)
+// forkrun_ring.c v13.0.9-NUMA (Golden Master: Lock-Free Flow, mmap, & UMA Overflow Fix)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -1007,7 +1007,7 @@ static int ring_init_main(int argc, char **argv) {
     atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
     for (uint32_t n = 0; n < global_num_nodes; n++) {
       atomic_store_relaxed(&state[n].chunk_queue_head, 0);
-      atomic_store_relaxed(&state[n].chunk_ready_head, 0);
+      atomic_store_relaxed(&state[n].chunk_ready_head, 0);        
       atomic_store_relaxed(&state[n].chunk_queue_tail, 0);
       atomic_store_relaxed(&state[n].read_idx, 0);
       atomic_store_relaxed(&state[n].write_idx, 0);
@@ -2340,7 +2340,12 @@ restart_loop:
             atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
           }
         } else {
-          if (local_state->numa_enabled && local_state->cfg_return_bytes) {
+          // PHYSICS FIX: When return_bytes is active (stdin/byte delivery mode),
+          // claim_count MUST be 1 regardless of UMA/NUMA. The byte count returned
+          // as REPLY must fit in a single pipe buffer. Multi-claim would sum byte
+          // counts across slots, potentially exceeding the 1MB pipe capacity and
+          // deadlocking ring_splice before the command starts reading.
+          if (local_state->cfg_return_bytes) {
               claim_count = 1;
           } else {
               uint32_t L0 = local_state->stride_ring[r_curr & RING_MASK];
@@ -2967,7 +2972,7 @@ static int ring_fetcher_main(int argc, char **argv) {
 static int ring_fallow_phys_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]);
-  struct Interval *head = NULL; uint64_t limit = 0;
+  struct Interval *head = NULL; uint64_t limit = 0; 
   off_t last_punched = 0;
 
   char pkt_buf[4096];
@@ -3112,7 +3117,7 @@ static int ring_fallow_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]); bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
   if (state) atomic_store_release(&state[0].fallow_active, 1);
-  struct Interval *head = NULL; uint64_t next_idx = 0;
+  struct Interval *head = NULL; uint64_t next_idx = 0; 
   off_t last_punched = 0;
 
   char pkt_buf[4096];
