@@ -3135,7 +3135,8 @@ static int ring_signal_main(int argc, char **argv) {
   uint64_t val = 1; SYS_CHK(write(fd, &val, 8)); return EXECUTION_SUCCESS;
 }
 
-static int ring_fallow_main(int argc, char **argv) {
+static int ring_fallow_main(int argc, char **argv)
+{
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]); bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
   if (state) atomic_store_release(&state[0].fallow_active, 1);
