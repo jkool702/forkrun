@@ -3024,11 +3024,7 @@ static int ring_fetcher_main(int argc, char **argv) {
   }
   return EXECUTION_SUCCESS;
 }
-```
 
-### Part 2 (Start): Appending the rest of the C file
-
-```c
 static int ring_fallow_phys_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]);
