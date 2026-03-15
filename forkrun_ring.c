@@ -389,6 +389,54 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
     return w;
 }
 
+#define FORKRUN_LOADABLES(X)                                                   \
+  X(ring_init, ring_init_main, "ring_init[FLAGS]",                             \
+    "Initialize ring with config")                                             \
+  X(ring_destroy, ring_destroy_main, "ring_destroy", "Destroy ring")           \
+  X(ring_scanner, ring_scanner_main, "ring_scanner <fd> [spawn_fd]",           \
+    "Run unified legacy scanner")                                              \
+  X(ring_numa_ingest, ring_numa_ingest_main,                                   \
+    "ring_numa_ingest <infd> <outfd> <nodes> [ordered]",                       \
+    "Run NUMA topological ingest")                                             \
+  X(ring_indexer_numa, ring_indexer_numa_main,                                 \
+    "ring_indexer_numa <memfd> <node_id>", "Run NUMA chunk indexer")           \
+  X(ring_numa_scanner, ring_numa_scanner_main,                                 \
+    "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
+    "Run unified NUMA scanner")                                                \
+  X(ring_claim, ring_claim_main, "ring_claim [VAR] [FD]", "Claim batch")       \
+  X(ring_worker, ring_worker_main, "ring_worker [inc|dec] [FD]",               \
+    "Worker control")                                                          \
+  X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
+    "Cleanup waiter")                                                          \
+  X(ring_ingest, ring_ingest_main, "ring_ingest", "Signal ingest")             \
+  X(ring_fallow, ring_fallow_main, "ring_fallow <PIPE> <FILE> [dry]",          \
+    "Logical fallow")                                                          \
+  X(ring_ack, ring_ack_main, "ring_ack <FD> <FD_OUT>", "Ack batch")            \
+  X(ring_order, ring_order_main, "ring_order <FD> <PFX|memfd> [unordered]",    \
+    "Reorder output")                                                          \
+  X(ring_copy, ring_copy_main, "ring_copy <OUT> <IN>", "Zero-copy ingest")     \
+  X(ring_signal, ring_signal_main, "ring_signal <FD>", "Signal eventfd")       \
+  X(lseek, lseek_main, "lseek <FD> <OFF> [WHENCE] [VAR]", "Seek fd")           \
+  X(ring_indexer, ring_indexer_main, "ring_indexer", "NUMA Indexer")           \
+  X(ring_fetcher, ring_fetcher_main, "ring_fetcher", "NUMA Fetcher")           \
+  X(ring_fallow_phys, ring_fallow_phys_main, "ring_fallow_phys",               \
+    "Physical fallow")                                                         \
+  X(ring_memfd_create, ring_memfd_create_main, "ring_memfd_create <VAR>",      \
+    "Create memfd")                                                            \
+  X(ring_seal, ring_seal_main, "ring_seal <FD>", "Seal memfd")                 \
+  X(ring_fcntl, ring_fcntl_main, "ring_fcntl <FD> <cmd>", "File control")      \
+  X(ring_pipe, ring_pipe_main, "ring_pipe <ARR|RD> [WR]", "Create pipe")       \
+  X(ring_splice, ring_splice_main,                                             \
+    "ring_splice <IN> <OUT> <OFF> <LEN>[close]", "Splice data")                \
+  X(ring_version, ring_version_main, "ring_version [-t|-o|-m|-g|-f|-a]",       \
+    "Show build metadata")                                                     \
+  X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats", "Print NUMA telemetry") \
+  X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")
+
+#define X(name, func, usage, doc) static int func(int argc, char **argv);
+FORKRUN_LOADABLES(X)
+#undef X
+
 static inline int auto_detect_numa_node() {
 #ifdef __NR_getcpu
   unsigned cpu, node;
