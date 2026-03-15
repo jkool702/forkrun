@@ -364,24 +364,38 @@ toc() { :; }
         ring_ack_str="ring_ack $fd_fallow_w"
 
         if ${stdin_flag}; then
-            # STDIN PAYLOAD
-            : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+             # STDIN PAYLOAD
+           : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
 
-            if (( RING_BYTES_MAX < RING_PIPE_CAPACITY - 4096 )); then
+            # If the absolute max limit is safely inside 60KB, hardcode the fast path
+            if (( RING_BYTES_MAX <= RING_PIPE_CAPACITY - 4096 )); then
             pCode='
                 ring_pipe pr pw
                 ring_splice $fd_read $pw '"''"' $REPLY "close" 2>/dev/null || break
                 '"$cmdline_str"' <&$pr
-                exec {pr}>&-'
+                exec {pr}<&-'
             else
+            # Otherwise, opportunistically probe the kernel's granted capacity
             pCode='
-            if (( REPLY <= '"$(( ${RING_PIPE_CAPACITY:-65536} - 4096 ))"' )); then
+            pipe_open_flag=0
+            if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
                 ring_pipe pr pw
+                pipe_open_flag=1
+            else
+                RING_PIPE_CAPACITY_CUR=0
+            fi
+
+            if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
+                # FAST PATH (Synchronous)
+                # Note: ring_splice "close" closes $pw internally. We only close $pr.
                 ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || break
                 '"$cmdline_str"' <&$pr
-                exec {pr}>&-
+                exec {pr}<&-
             else
-                ( ring_splice $fd_read 1 '"''"' $REPLY "close" ) | '"$cmdline_str"'
+                # SLOW PATH (Asynchronous)
+                # Close both FDs so they do not leak into the pipeline
+                (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
+                ( ring_splice $fd_read 1 "" $REPLY "close" ) | '"$cmdline_str"'
             fi'
             fi
 
@@ -970,6 +984,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()    # remove base64
+declare -A b64=() # no base64
 
 _forkrun_bootstrap_setup --force
