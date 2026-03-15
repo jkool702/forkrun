@@ -1,4 +1,4 @@
-// forkrun_ring.c v13.0.9-NUMA (Golden Master: Robust Pipe IO & Perfect Heap Isolation)
+// forkrun_ring.c v13.0.9-NUMA (Golden Master: Fully Stitched & Hardened)
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -308,6 +308,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target, char
 
 // PHYSICS FIX: Bash violently hijacks memory allocators via macros in config.h.
 // We MUST undefine them here to ensure our C structures strictly use glibc libc allocators.
+// Crossing streams causes `invalid chunk size` and `double free` heap detonations.
 #undef malloc
 #undef free
 #undef realloc
@@ -324,7 +325,7 @@ static int g_debug = 0;
   do {                                                                         \
     if ((long)(x) == -1) {                                                     \
       if (g_debug)                                                             \
-        fprintf(stderr, "forkrun[DEBUG] %s:%d: %s failed: %s\n", __FILE__,     \
+        fprintf(stderr, "forkrun[DEBUG] %s:%d: %s failed: %s\n", __FILE__,    \
                 __LINE__, #x, strerror(errno));                                \
     }                                                                          \
   } while (0)
@@ -547,7 +548,7 @@ static uint64_t get_llc_size() {
   int fd = open("/sys/devices/system/cpu/cpu0/cache/index3/size", O_RDONLY);
   if (fd >= 0) {
     char buf[32];
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
     close(fd);
     if (n > 0) {
       buf[n] = '\0';
@@ -1055,7 +1056,7 @@ static int ring_init_main(int argc, char **argv) {
     atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
     for (uint32_t n = 0; n < global_num_nodes; n++) {
       atomic_store_relaxed(&state[n].chunk_queue_head, 0);
-      atomic_store_relaxed(&state[n].chunk_ready_head, 0);
+      atomic_store_relaxed(&state[n].chunk_ready_head, 0);        
       atomic_store_relaxed(&state[n].chunk_queue_tail, 0);
       atomic_store_relaxed(&state[n].read_idx, 0);
       atomic_store_relaxed(&state[n].write_idx, 0);
@@ -1072,7 +1073,7 @@ static int ring_init_main(int argc, char **argv) {
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
         char dump[1024];
-        while (robust_pipe_read(fd_escrow_r[n], dump, sizeof(dump)) > 0) {}
+        while (sys_read(fd_escrow_r[n], dump, sizeof(dump)) > 0) {}
       }
     }
     return EXECUTION_SUCCESS;
@@ -1510,11 +1511,12 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     while (search_end > meta->raw_offset) {
       uint64_t window_size = (search_end - meta->raw_offset > sizeof(tail_buf)) ? sizeof(tail_buf) : (search_end - meta->raw_offset);
       uint64_t window_start = search_end - window_size;
-      ssize_t n = pread(memfd, tail_buf, window_size, window_start);
+      ssize_t n;
+      do { n = pread(memfd, tail_buf, window_size, window_start); } while (n < 0 && errno == EINTR);
       if (n > 0) {
         char *nl = memrchr(tail_buf, '\n', n);
         if (nl) { actual_end = window_start + (nl - tail_buf) + 1; break; }
-      } else if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+      } else if (n < 0 && errno == EAGAIN) continue;
       else break;
       search_end = window_start;
     }
@@ -1938,9 +1940,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 current_p_offset = buf_base_offset + (uint64_t)(p - buf);
 
                 ssize_t n;
-                do {
-                    n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
-                } while (n < 0 && errno == EINTR);
+                do { n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset); } while (n < 0 && errno == EINTR);
 
                 if (n > 0 && (uint64_t)n > prev_avail) {
                     buf_base_offset = current_p_offset; p = buf; end = buf + n; status = 0; stall_meter >>= 1;
@@ -2373,7 +2373,7 @@ restart_loop:
   while (1) {
     struct EscrowPacket ep;
     if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0 &&
-        sys_read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
+        robust_pipe_read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
       my_read_idx = ep.idx;
       claim_count = ep.cnt;
       break;
@@ -2394,8 +2394,8 @@ restart_loop:
             atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
           }
         } else {
-          // PHYSICS FIX: When return_bytes is active (stdin/byte delivery mode),
-          // claim_count MUST be 1 regardless of UMA/NUMA.
+          // PHYSICS FIX: claim_count MUST be 1 regardless of UMA/NUMA
+          // when return_bytes is active, to prevent multi-claim pipe buffer overflow.
           if (local_state->cfg_return_bytes) {
               claim_count = 1;
           } else {
@@ -2511,7 +2511,7 @@ restart_loop:
           if (avail < claim_count) {
             struct EscrowPacket ep = {.idx = my_read_idx + avail,
                                       .cnt = claim_count - avail};
-            if (sys_write(fd_escrow_w[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
+            if (robust_pipe_write(fd_escrow_w[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
               claim_count = avail;
               uint64_t one = 1;
               sys_write(evfd_data_arr[my_numa_node], &one, 8);
@@ -2912,7 +2912,17 @@ static int ring_fcntl_main(int argc, char **argv) {
 static int ring_pipe_main(int argc, char **argv) {
   if (argc < 2) return EXECUTION_FAILURE;
   int pfd[2]; if (pipe(pfd) < 0) { builtin_error("pipe failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
-  fcntl(pfd[1], F_SETPIPE_SZ, 1048576); char buf[32];
+  fcntl(pfd[1], F_SETPIPE_SZ, 1048576); 
+
+  // PHYSICS FIX: Get the ACTUAL size granted by the kernel and export it dynamically
+  int pipe_cap = 65536;
+  int ret = fcntl(pfd[1], F_GETPIPE_SZ); 
+  if (ret > 0) pipe_cap = ret;
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%d", pipe_cap); 
+  bind_variable("RING_PIPE_CAPACITY_CUR", buf, 0);
+
   if (argc == 2) {
     const char *arr_name = argv[1]; SHELL_VAR *v = find_variable(arr_name);
     if (v && !array_p(v)) { unbind_variable(arr_name); v = NULL; }
@@ -3028,7 +3038,7 @@ static int ring_fetcher_main(int argc, char **argv) {
 static int ring_fallow_phys_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]);
-  struct Interval *head = NULL; uint64_t limit = 0;
+  struct Interval *head = NULL; uint64_t limit = 0; 
   off_t last_punched = 0;
 
   char pkt_buf[4096];
@@ -3189,7 +3199,7 @@ static int ring_fallow_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]); bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
   if (state) atomic_store_release(&state[0].fallow_active, 1);
-  struct Interval *head = NULL; uint64_t next_idx = 0;
+  struct Interval *head = NULL; uint64_t next_idx = 0; 
   off_t last_punched = 0;
 
   char pkt_buf[4096];
@@ -3295,6 +3305,7 @@ static int ring_numa_stats_main(int argc, char **argv) {
   static int dispatch_##name(WORD_LIST *list) {                                \
     int argc; char **argv = make_builtin_argv(list, &argc); int ret = EXECUTION_FAILURE; \
     if (argv[0]) ret = func(argc, argv);                                       \
+    /* PHYSICS FIX: argv is allocated by Bash internals, MUST use xfree! */    \
     xfree(argv); return ret;                                                   \
   }
 FORKRUN_LOADABLES(DEFINE_DISPATCHER_X)
