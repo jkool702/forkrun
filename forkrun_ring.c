@@ -329,20 +329,19 @@ static int g_debug = 0;
     }                                                                          \
   } while (0)
 
-
 // ==============================================================================
 // PHYSICS FIX: ROBUST IPC IO WRAPPERS
 // ==============================================================================
 
-// For Pipes (Order/Fallow/Escrow). Uses poll() to wait for EAGAIN without burning CPU.
+// For IPC Pipes (Order/Fallow/Escrow). Uses poll() to wait for EAGAIN without burning CPU.
 static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count) {
-    char *p = buf;
+    char *p = (char *)buf;
     size_t left = count;
     while (left > 0) {
         ssize_t r = read(fd, p, left);
         if (r < 0) {
             if (errno == EINTR) continue;
-            if (errno == EAGAIN) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 struct pollfd pfd = {.fd = fd, .events = POLLIN};
                 poll(&pfd, 1, -1);
                 continue;
@@ -357,13 +356,13 @@ static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count) {
 }
 
 static inline ssize_t robust_pipe_write(int fd, const void *buf, size_t count) {
-    const char *p = buf;
+    const char *p = (const char *)buf;
     size_t left = count;
     while (left > 0) {
         ssize_t w = write(fd, p, left);
         if (w < 0) {
             if (errno == EINTR) continue;
-            if (errno == EAGAIN) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 struct pollfd pfd = {.fd = fd, .events = POLLOUT};
                 poll(&pfd, 1, -1);
                 continue;
@@ -389,8 +388,9 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
     return w;
 }
 
+// RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
-  X(ring_init, ring_init_main, "ring_init[FLAGS]",                             \
+  X(ring_init, ring_init_main, "ring_init [FLAGS]",                            \
     "Initialize ring with config")                                             \
   X(ring_destroy, ring_destroy_main, "ring_destroy", "Destroy ring")           \
   X(ring_scanner, ring_scanner_main, "ring_scanner <fd> [spawn_fd]",           \
@@ -427,7 +427,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_fcntl, ring_fcntl_main, "ring_fcntl <FD> <cmd>", "File control")      \
   X(ring_pipe, ring_pipe_main, "ring_pipe <ARR|RD> [WR]", "Create pipe")       \
   X(ring_splice, ring_splice_main,                                             \
-    "ring_splice <IN> <OUT> <OFF> <LEN>[close]", "Splice data")                \
+    "ring_splice <IN> <OUT> <OFF> <LEN> [close]", "Splice data")               \
   X(ring_version, ring_version_main, "ring_version [-t|-o|-m|-g|-f|-a]",       \
     "Show build metadata")                                                     \
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats", "Print NUMA telemetry") \
@@ -1639,7 +1639,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
               char _sbuf[64]; int _slen;                                       \
               if ((int)(_node_id_arg) >= 0) _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n", (int)(_node_id_arg), _n_spawn); \
               else _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _n_spawn);  \
-              if (_slen > 0) robust_pipe_write(fd_spawn, _sbuf, _slen);             \
+              if (_slen > 0) robust_pipe_write(fd_spawn, _sbuf, _slen);        \
               W += _n_spawn; atomic_store_relaxed(&(state_ptr)->active_workers, W); \
             }                                                                  \
           }                                                                    \
@@ -1671,7 +1671,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             char _sbuf[64]; int _slen;                                         \
             if ((int)(_node_id_arg) >= 0) _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n", (int)(_node_id_arg), _grow); \
             else _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _grow);       \
-            if (_slen > 0) robust_pipe_write(fd_spawn, _sbuf, _slen);               \
+            if (_slen > 0) robust_pipe_write(fd_spawn, _sbuf, _slen);          \
             W += _grow; atomic_store_relaxed(&(state_ptr)->active_workers, W); \
           }                                                                    \
         }                                                                      \
@@ -2394,6 +2394,8 @@ restart_loop:
             atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
           }
         } else {
+          // PHYSICS FIX: When return_bytes is active (stdin/byte delivery mode),
+          // claim_count MUST be 1 regardless of UMA/NUMA.
           if (local_state->cfg_return_bytes) {
               claim_count = 1;
           } else {
@@ -2939,7 +2941,7 @@ static int ring_splice_main(int argc, char **argv) {
     ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written, SPLICE_F_MOVE | SPLICE_F_MORE);
     if (s < 0) {
         if (errno == EINTR) continue;
-        if (errno == EAGAIN) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
             struct pollfd pfd = {.fd = fd_out, .events = POLLOUT};
             poll(&pfd, 1, -1);
             continue;
@@ -3022,7 +3024,11 @@ static int ring_fetcher_main(int argc, char **argv) {
   }
   return EXECUTION_SUCCESS;
 }
+```
 
+### Part 2 (Start): Appending the rest of the C file
+
+```c
 static int ring_fallow_phys_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]);
