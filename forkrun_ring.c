@@ -324,7 +324,7 @@ static int g_debug = 0;
   do {                                                                         \
     if ((long)(x) == -1) {                                                     \
       if (g_debug)                                                             \
-        fprintf(stderr, "forkrun[DEBUG] %s:%d: %s failed: %s\n", __FILE__,    \
+        fprintf(stderr, "forkrun[DEBUG] %s:%d: %s failed: %s\n", __FILE__,     \
                 __LINE__, #x, strerror(errno));                                \
     }                                                                          \
   } while (0)
@@ -3135,8 +3135,7 @@ static int ring_signal_main(int argc, char **argv) {
   uint64_t val = 1; SYS_CHK(write(fd, &val, 8)); return EXECUTION_SUCCESS;
 }
 
-static int ring_fallow_main(int argc, char **argv)
-{
+static int ring_fallow_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]); bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
   if (state) atomic_store_release(&state[0].fallow_active, 1);
@@ -3246,7 +3245,6 @@ static int ring_numa_stats_main(int argc, char **argv) {
   static int dispatch_##name(WORD_LIST *list) {                                \
     int argc; char **argv = make_builtin_argv(list, &argc); int ret = EXECUTION_FAILURE; \
     if (argv[0]) ret = func(argc, argv);                                       \
-    /* PHYSICS FIX: argv is allocated by Bash internals, MUST use xfree! */    \
     xfree(argv); return ret;                                                   \
   }
 FORKRUN_LOADABLES(DEFINE_DISPATCHER_X)
