@@ -363,9 +363,9 @@ toc() { :; }
 
         ring_ack_str="ring_ack $fd_fallow_w"
 
-          if ${stdin_flag}; then
-             # STDIN PAYLOAD
-           : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+        if ${stdin_flag}; then
+            # STDIN PAYLOAD
+            : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
 
             if (( RING_BYTES_MAX < RING_PIPE_CAPACITY - 4096 )); then
             pCode='
@@ -499,6 +499,8 @@ P+=($!)
         [[ "${order_mode}" == "realtime" ]] || exec {fd_order_w}>&-
 
         wait
+
+        (( FORKRUN_NUM_NODES > 1 )) && ring_numa_stats
 
         ring_destroy
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
