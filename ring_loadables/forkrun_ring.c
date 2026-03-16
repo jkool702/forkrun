@@ -1333,7 +1333,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
   int mask_words = (max_phys_id / BITS_PER_LONG) + 1;
   unsigned long *nodemask = malloc(mask_words * sizeof(unsigned long));
+  if (!nodemask) return EXECUTION_FAILURE;
+
   int fallback_pipe[2] = {-1, -1};
+  int fallback_pipe_cap = 65536;
 
   enum { TM_UNKNOWN = 0, TM_COPY_FILE_RANGE, TM_SENDFILE, TM_SPLICE_DIRECT, TM_SPLICE_PIPE } transfer_method = TM_UNKNOWN;
   uint64_t one = 1;
@@ -1379,7 +1382,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     if (transfer_method == TM_UNKNOWN) {
       if (numa_enabled && num_nodes > 1) {
           if (fallback_pipe[0] == -1) {
-            if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
+            if (pipe(fallback_pipe) == 0) {
+                fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
+                int cap = fcntl(fallback_pipe[1], F_GETPIPE_SZ);
+                if (cap > 0) fallback_pipe_cap = cap;
+            }
           }
           if (fallback_pipe[0] != -1) transfer_method = TM_SPLICE_PIPE;
           else transfer_method = TM_SPLICE_DIRECT;
@@ -1398,7 +1405,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             if (n >= 0) { transfer_method = TM_SPLICE_DIRECT; }
             else if (errno == EINVAL) {
               if (fallback_pipe[0] == -1) {
-                if (pipe(fallback_pipe) == 0) fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
+                if (pipe(fallback_pipe) == 0) {
+                    fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
+                    int cap = fcntl(fallback_pipe[1], F_GETPIPE_SZ);
+                    if (cap > 0) fallback_pipe_cap = cap;
+                }
               }
               if (fallback_pipe[0] != -1) transfer_method = TM_SPLICE_PIPE;
             }
@@ -1419,23 +1430,61 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           break;
         case TM_SPLICE_PIPE:
           if (fallback_pipe[0] != -1) {
-            ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
-            if (s1 > 0) {
+            size_t total_transferred = 0;
+            while (total_transferred < chunk_size) {
+              size_t to_splice = chunk_size - total_transferred;
+              if (to_splice > fallback_pipe_cap) to_splice = fallback_pipe_cap;
+
+              ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, to_splice, SPLICE_F_MOVE | SPLICE_F_MORE);
+              if (s1 < 0) {
+                  if (errno == EINTR) continue;
+                  if (errno == EAGAIN) {
+                      struct pollfd pfd = {.fd = infd, .events = POLLIN};
+                      poll(&pfd, 1, -1);
+                      continue;
+                  }
+                  if (total_transferred == 0) n = -1;
+                  break;
+              }
+              if (s1 == 0) {
+                  if (total_transferred == 0) n = 0;
+                  break;
+              }
+
               size_t drained = 0;
               while (drained < (size_t)s1) {
                 ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - drained, SPLICE_F_MOVE | SPLICE_F_MORE);
-                if (s2 <= 0) { if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(10); continue; } break; }
+                if (s2 <= 0) {
+                  if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) {
+                      if (errno == EAGAIN) {
+                          struct pollfd pfd = {.fd = outfd, .events = POLLOUT};
+                          poll(&pfd, 1, -1);
+                      } else usleep(10);
+                      continue;
+                  }
+                  break;
+                }
                 drained += s2;
               }
-              n = (ssize_t)drained;
-            } else n = s1;
+              total_transferred += drained;
+              if (drained < (size_t)s1) break; // Error writing downstream
+            }
+            if (total_transferred > 0) n = total_transferred;
           }
           break;
         default: break;
       }
     }
 
-    if (n < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
+    if (n < 0) {
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN) {
+            struct pollfd pfd = {.fd = infd, .events = POLLIN};
+            poll(&pfd, 1, -1);
+            continue;
+        }
+        break;
+    }
     if (n == 0) break;
 
     struct ChunkMeta *meta = &g_state->meta_ring[current_major & META_RING_MASK];
@@ -1470,74 +1519,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   uint64_t v = 999999;
   sys_write(evfd_ingest_eof, &v, 8);
   return EXECUTION_SUCCESS;
-}
-
-static int ring_indexer_numa_main(int argc, char **argv) {
-  if (argc < 3) return EXECUTION_FAILURE;
-  int memfd = atoi(argv[1]); int my_node_id = atoi(argv[2]);
-
-  int phys_node = g_logical_to_phys_map ? g_logical_to_phys_map[my_node_id] : 0;
-  if (pin_to_numa_node(phys_node) != 0 && g_debug) {
-    fprintf(stderr, "forkrun [DEBUG] Failed to pin indexer %d to phys node %d\n", my_node_id, phys_node);
-  }
-
-  struct SharedState *t_state = &state[my_node_id];
-  uint64_t my_idx = 0; char tail_buf[65536]; int spin = 0;
-
-  while (1) {
-    while (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx) {
-      if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
-        if (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx) return EXECUTION_SUCCESS;
-      }
-      if (spin < 100) { cpu_relax(); spin++; continue; }
-
-      __atomic_fetch_add(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST);
-      if (atomic_load_acquire(&t_state->chunk_queue_head) > my_idx) {
-        __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); break;
-      }
-      struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[my_node_id], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
-      poll(pfds, 2, -1);
-      if (pfds[0].revents & POLLIN) { uint64_t v; sys_read(evfd_indexer_arr[my_node_id], &v, 8); }
-      if (pfds[1].revents & POLLIN) { }
-      __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); spin = 0;
-    }
-    spin = 0;
-
-    uint32_t major_id = t_state->chunk_queue[my_idx & META_RING_MASK];
-    struct ChunkMeta *meta = &g_state->meta_ring[major_id & META_RING_MASK];
-    uint64_t chunk_end = meta->raw_offset + meta->raw_length;
-    uint64_t actual_end = chunk_end; uint64_t search_end = chunk_end;
-
-    while (search_end > meta->raw_offset) {
-      uint64_t window_size = (search_end - meta->raw_offset > sizeof(tail_buf)) ? sizeof(tail_buf) : (search_end - meta->raw_offset);
-      uint64_t window_start = search_end - window_size;
-      ssize_t n;
-      do { n = pread(memfd, tail_buf, window_size, window_start); } while (n < 0 && errno == EINTR);
-      if (n > 0) {
-        char *nl = memrchr(tail_buf, '\n', n);
-        if (nl) { actual_end = window_start + (nl - tail_buf) + 1; break; }
-      } else if (n < 0 && errno == EAGAIN) continue;
-      else break;
-      search_end = window_start;
-    }
-    if (search_end <= meta->raw_offset) actual_end = meta->raw_offset;
-
-    // 1. Mark meta ready
-    atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
-    // 2. Put it on the Scanner's Ready Shelf
-    __atomic_store_n(&t_state->chunk_ready_head, my_idx + 1, __ATOMIC_RELEASE);
-
-    // PHYSICS FIX: Prevent Store-Load reordering on weak memory models
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-
-    // 3. Exact Ticket Dispensing (Wakes all waiting scanners)
-    uint32_t mw = atomic_load_relaxed(&t_state->meta_waiters);
-    if (mw > 0) {
-        uint64_t v = mw;
-        sys_write(evfd_meta_arr[my_node_id], &v, 8);
-    }
-    my_idx++;
-  }
 }
 
 // ==============================================================================
@@ -3135,9 +3116,12 @@ static int ring_copy_main(int argc, char **argv) {
       int pfd[2];
       if (pipe(pfd) == 0) {
         fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
+        int pfd_cap = fcntl(pfd[1], F_GETPIPE_SZ);
+        if (pfd_cap <= 0) pfd_cap = 65536;
         while (off < st.st_size) {
           check_memory_pressure(&total_moved, &next_check, oom_threshold);
-          ssize_t s1 = splice(infd, &off, pfd[1], NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
+          size_t to_splice = (chunk < pfd_cap) ? chunk : pfd_cap;
+          ssize_t s1 = splice(infd, &off, pfd[1], NULL, to_splice, SPLICE_F_MOVE | SPLICE_F_MORE);
           if (s1 <= 0) break;
           size_t written = 0;
           while (written < (size_t)s1) {
@@ -3170,12 +3154,23 @@ static int ring_copy_main(int argc, char **argv) {
       } while (n > 0);
     } else if (errno == EINVAL) {
       int pipefd[2]; if (pipe(pipefd) < 0) goto err_out; fcntl(pipefd[1], F_SETPIPE_SZ, 1048576);
+      int pipefd_cap = fcntl(pipefd[1], F_GETPIPE_SZ);
+      if (pipefd_cap <= 0) pipefd_cap = 65536;
       while (1) {
-        ssize_t n = splice(infd, NULL, pipefd[1], NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
-        if (n <= 0) break;
+        size_t to_splice = (chunk < pipefd_cap) ? chunk : pipefd_cap;
+        ssize_t n_in = splice(infd, NULL, pipefd[1], NULL, to_splice, SPLICE_F_MOVE | SPLICE_F_MORE);
+        if (n_in <= 0) {
+            if (n_in < 0 && (errno == EINTR)) continue;
+            if (n_in < 0 && errno == EAGAIN) {
+                struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
+                poll(&pfd_in, 1, -1);
+                continue;
+            }
+            break;
+        }
         size_t written = 0;
-        while (written < (size_t)n) {
-          ssize_t m = splice(pipefd[0], NULL, outfd, NULL, n - written, SPLICE_F_MOVE | SPLICE_F_MORE);
+        while (written < (size_t)n_in) {
+          ssize_t m = splice(pipefd[0], NULL, outfd, NULL, n_in - written, SPLICE_F_MOVE | SPLICE_F_MORE);
           if (m <= 0) {
               if (m < 0 && (errno == EINTR)) continue;
               if (m < 0 && errno == EAGAIN) {
@@ -3187,7 +3182,7 @@ static int ring_copy_main(int argc, char **argv) {
           }
           written += m;
         }
-        if (written < (size_t)n) break;
+        if (written < (size_t)n_in) break;
         if (evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
         total_moved += written; check_memory_pressure(&total_moved, &next_check, oom_threshold);
       }
