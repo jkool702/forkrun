@@ -1028,6 +1028,7 @@ static int ring_init_main(int argc, char **argv) {
 
       if (g_logical_to_phys_map) free(g_logical_to_phys_map);
       g_logical_to_phys_map = malloc(global_num_nodes * sizeof(uint32_t));
+      if (!g_logical_to_phys_map) return EXECUTION_FAILURE;
       const char *p = argv[i] + 11;
       for (uint32_t j = 0; j < global_num_nodes; j++) {
         g_logical_to_phys_map[j] = (uint32_t)strtoul(p, (char **)&p, 10);
@@ -1040,6 +1041,7 @@ static int ring_init_main(int argc, char **argv) {
     global_num_nodes = 1;
     if (g_logical_to_phys_map) free(g_logical_to_phys_map);
     g_logical_to_phys_map = malloc(sizeof(uint32_t));
+    if (!g_logical_to_phys_map) return EXECUTION_FAILURE;
     g_logical_to_phys_map[0] = 0;
   }
 
@@ -1247,6 +1249,7 @@ static int ring_init_main(int argc, char **argv) {
     if (!v) return EXECUTION_FAILURE;
 
     int *created_fds = malloc(sizeof(int) * vals[1]);
+    if (!created_fds) return EXECUTION_FAILURE;
     int created_cnt = 0;
     int failure = 0;
     for (uint64_t i = 0; i < vals[1]; i++) {
@@ -1591,7 +1594,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           uint64_t intermediate = (linear < current_buffer) ? linear : current_buffer; \
           if (intermediate > W_curr) target_buffer = intermediate - W_curr; \
         } \
-        uint64_t target_w = local_scan_idx - target_buffer; \
+        uint64_t target_w = (local_scan_idx > target_buffer) ? (local_scan_idx - target_buffer) : 0; \
         if (target_w > local_write_idx) { \
           atomic_store_release(&local_state->write_idx, target_w); \
           local_write_idx = target_w; \
