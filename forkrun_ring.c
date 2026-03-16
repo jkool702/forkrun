@@ -1521,6 +1521,74 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   return EXECUTION_SUCCESS;
 }
 
+static int ring_indexer_numa_main(int argc, char **argv) {
+  if (argc < 3) return EXECUTION_FAILURE;
+  int memfd = atoi(argv[1]); int my_node_id = atoi(argv[2]);
+
+  int phys_node = g_logical_to_phys_map ? g_logical_to_phys_map[my_node_id] : 0;
+  if (pin_to_numa_node(phys_node) != 0 && g_debug) {
+    fprintf(stderr, "forkrun [DEBUG] Failed to pin indexer %d to phys node %d\n", my_node_id, phys_node);
+  }
+
+  struct SharedState *t_state = &state[my_node_id];
+  uint64_t my_idx = 0; char tail_buf[65536]; int spin = 0;
+
+  while (1) {
+    while (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx) {
+      if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
+        if (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx) return EXECUTION_SUCCESS;
+      }
+      if (spin < 100) { cpu_relax(); spin++; continue; }
+
+      __atomic_fetch_add(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST);
+      if (atomic_load_acquire(&t_state->chunk_queue_head) > my_idx) {
+        __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); break;
+      }
+      struct pollfd pfds[2] = {{.fd = evfd_indexer_arr[my_node_id], .events = POLLIN}, {.fd = evfd_ingest_eof, .events = POLLIN}};
+      poll(pfds, 2, -1);
+      if (pfds[0].revents & POLLIN) { uint64_t v; sys_read(evfd_indexer_arr[my_node_id], &v, 8); }
+      if (pfds[1].revents & POLLIN) { }
+      __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST); spin = 0;
+    }
+    spin = 0;
+
+    uint32_t major_id = t_state->chunk_queue[my_idx & META_RING_MASK];
+    struct ChunkMeta *meta = &g_state->meta_ring[major_id & META_RING_MASK];
+    uint64_t chunk_end = meta->raw_offset + meta->raw_length;
+    uint64_t actual_end = chunk_end; uint64_t search_end = chunk_end;
+
+    while (search_end > meta->raw_offset) {
+      uint64_t window_size = (search_end - meta->raw_offset > sizeof(tail_buf)) ? sizeof(tail_buf) : (search_end - meta->raw_offset);
+      uint64_t window_start = search_end - window_size;
+      ssize_t n;
+      do { n = pread(memfd, tail_buf, window_size, window_start); } while (n < 0 && errno == EINTR);
+      if (n > 0) {
+        char *nl = memrchr(tail_buf, '\n', n);
+        if (nl) { actual_end = window_start + (nl - tail_buf) + 1; break; }
+      } else if (n < 0 && errno == EAGAIN) continue;
+      else break;
+      search_end = window_start;
+    }
+    if (search_end <= meta->raw_offset) actual_end = meta->raw_offset;
+
+    // 1. Mark meta ready
+    atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
+    // 2. Put it on the Scanner's Ready Shelf
+    __atomic_store_n(&t_state->chunk_ready_head, my_idx + 1, __ATOMIC_RELEASE);
+
+    // PHYSICS FIX: Prevent Store-Load reordering on weak memory models
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    // 3. Exact Ticket Dispensing (Wakes all waiting scanners)
+    uint32_t mw = atomic_load_relaxed(&t_state->meta_waiters);
+    if (mw > 0) {
+        uint64_t v = mw;
+        sys_write(evfd_meta_arr[my_node_id], &v, 8);
+    }
+    my_idx++;
+  }
+}
+
 // ==============================================================================
 // 5. UNIFIED SCANNER LOOP
 // ==============================================================================
