@@ -1203,6 +1203,11 @@ static int ring_init_main(int argc, char **argv) {
   fd_escrow_r = malloc(global_num_nodes * sizeof(int));
   fd_escrow_w = malloc(global_num_nodes * sizeof(int));
 
+  if (!evfd_data_arr || !evfd_indexer_arr || !evfd_meta_arr || !fd_escrow_r || !fd_escrow_w) {
+      builtin_error("forkrun: malloc failed during ring_init");
+      return EXECUTION_FAILURE;
+  }
+
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     evfd_data_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     evfd_indexer_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
@@ -1335,9 +1340,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   unsigned long *nodemask = malloc(mask_words * sizeof(unsigned long));
   if (!nodemask) return EXECUTION_FAILURE;
 
-  int fallback_pipe[2] = {-1, -1};
-
-  enum { TM_UNKNOWN = 0, TM_COPY_FILE_RANGE, TM_SENDFILE, TM_SPLICE_DIRECT, TM_SPLICE_PIPE } transfer_method = TM_UNKNOWN;
+  enum { TM_UNKNOWN = 0, TM_COPY_FILE_RANGE, TM_SENDFILE, TM_READ_WRITE } transfer_method = TM_UNKNOWN;
+  char *bounce_buf = NULL;
   uint64_t one = 1;
 
   for (int i = 0; i < num_nodes * 2; i++) {
@@ -1380,15 +1384,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
     if (transfer_method == TM_UNKNOWN) {
       if (numa_enabled && num_nodes > 1) {
-          if (fallback_pipe[0] == -1) {
-            if (pipe(fallback_pipe) == 0) {
-                // PHYSICS FIX: Make the target pipe Non-Blocking to prevent fragmentation lock
-                fcntl(fallback_pipe[1], F_SETFL, O_NONBLOCK);
-                fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
-            }
-          }
-          if (fallback_pipe[0] != -1) transfer_method = TM_SPLICE_PIPE;
-          else transfer_method = TM_SPLICE_DIRECT;
+          transfer_method = TM_READ_WRITE;
       } else {
           loff_t in_off = lseek(infd, 0, SEEK_CUR);
           if (in_off != (loff_t)-1) {
@@ -1400,18 +1396,12 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             }
           }
           if (n < 0) {
-            n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
-            if (n >= 0) { transfer_method = TM_SPLICE_DIRECT; }
-            else if (errno == EINVAL) {
-              if (fallback_pipe[0] == -1) {
-                if (pipe(fallback_pipe) == 0) {
-                    fcntl(fallback_pipe[1], F_SETFL, O_NONBLOCK);
-                    fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
-                }
-              }
-              if (fallback_pipe[0] != -1) transfer_method = TM_SPLICE_PIPE;
-            }
+            transfer_method = TM_READ_WRITE;
           }
+      }
+      if (transfer_method == TM_READ_WRITE && !bounce_buf) {
+          bounce_buf = mmap(NULL, chunk_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+          if (bounce_buf == MAP_FAILED) return EXECUTION_FAILURE;
       }
     }
 
@@ -1423,46 +1413,37 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         case TM_SENDFILE:
           n = sendfile(outfd, infd, NULL, chunk_size);
           break;
-        case TM_SPLICE_DIRECT:
-          n = splice(infd, NULL, outfd, NULL, chunk_size, SPLICE_F_MOVE | SPLICE_F_MORE);
-          break;
-        case TM_SPLICE_PIPE:
-          if (fallback_pipe[0] != -1) {
-            size_t total_transferred = 0;
-            while (total_transferred < chunk_size) {
-              // Target is non-blocking. If buffers fill before bytes, it safely returns what it moved.
-              ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size - total_transferred, SPLICE_F_MOVE | SPLICE_F_MORE);
-              if (s1 < 0) {
-                  if (errno == EINTR) continue;
-                  if (errno == EAGAIN) {
-                      struct pollfd pfd = {.fd = infd, .events = POLLIN};
-                      poll(&pfd, 1, -1);
-                      continue;
-                  }
-                  if (total_transferred == 0) n = -1;
-                  break;
-              }
-              if (s1 == 0) {
-                  if (total_transferred == 0) n = 0;
-                  break;
-              }
-
-              size_t drained = 0;
-              while (drained < (size_t)s1) {
-                ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - drained, SPLICE_F_MOVE | SPLICE_F_MORE);
-                if (s2 <= 0) {
-                  if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) {
-                      usleep(10);
-                      continue;
-                  }
-                  break;
+        case TM_READ_WRITE:
+          {
+            ssize_t r = read(infd, bounce_buf, chunk_size);
+            if (r < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN) {
+                    struct pollfd pfd = {.fd = infd, .events = POLLIN};
+                    poll(&pfd, 1, -1);
+                    continue;
                 }
-                drained += s2;
-              }
-              total_transferred += drained;
-              if (drained < (size_t)s1) break; // Error writing downstream
+                n = -1; break;
             }
-            if (total_transferred > 0) n = total_transferred;
+            if (r == 0) { n = 0; break; }
+
+            size_t written = 0;
+            while (written < (size_t)r) {
+                ssize_t w = write(outfd, bounce_buf + written, r - written);
+                if (w <= 0) {
+                    if (w < 0 && (errno == EINTR || errno == EAGAIN)) {
+                        if (errno == EAGAIN) {
+                            struct pollfd pfd = {.fd = outfd, .events = POLLOUT};
+                            poll(&pfd, 1, -1);
+                        } else usleep(10);
+                        continue;
+                    }
+                    break;
+                }
+                written += w;
+            }
+            if (written == (size_t)r) n = r;
+            else n = -1;
           }
           break;
         default: break;
@@ -1503,7 +1484,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     last_target = target_node; current_offset += n; current_major++;
   }
 
-  if (fallback_pipe[0] != -1) { close(fallback_pipe[0]); close(fallback_pipe[1]); }
+  if (bounce_buf) munmap(bounce_buf, chunk_size);
   if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   free(nodemask);
 
@@ -2809,6 +2790,10 @@ static int ring_order_main(int argc, char **argv) {
 
   int heap_cap = 262144;
   struct HeapNode *heap = malloc(heap_cap * sizeof(struct HeapNode));
+  if (!heap) {
+      builtin_error("forkrun: malloc failed during ring_order");
+      return EXECUTION_FAILURE;
+  }
   int heap_sz = 0;
 
   uint32_t expected_major = 0; uint32_t expected_minor = 0;
@@ -3173,82 +3158,46 @@ static int ring_copy_main(int argc, char **argv) {
       if (evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
       total_moved += n;
     }
-    if (off < st.st_size) {
-      int pfd[2];
-      if (pipe(pfd) == 0) {
-        fcntl(pfd[1], F_SETFL, O_NONBLOCK);
-        fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
-        while (off < st.st_size) {
-          check_memory_pressure(&total_moved, &next_check, oom_threshold);
-          ssize_t s1 = splice(infd, &off, pfd[1], NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
-          if (s1 <= 0) {
-              if (s1 < 0 && (errno == EINTR || errno == EAGAIN)) continue;
-              break;
+  }
+
+  if (st.st_size == 0 || !S_ISREG(st.st_mode) || off < st.st_size) {
+    char *bounce_buf = mmap(NULL, chunk, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (bounce_buf == MAP_FAILED) goto err_out;
+
+    while (1) {
+      ssize_t r = read(infd, bounce_buf, chunk);
+      if (r < 0) {
+          if (errno == EINTR) continue;
+          if (errno == EAGAIN) {
+              struct pollfd pfd = {.fd = infd, .events = POLLIN};
+              poll(&pfd, 1, -1);
+              continue;
           }
-          size_t written = 0;
-          while (written < (size_t)s1) {
-            ssize_t s2 = splice(pfd[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
-            if (s2 <= 0) {
-                if (s2 < 0 && (errno == EINTR)) continue;
-                if (s2 < 0 && errno == EAGAIN) {
-                    struct pollfd pfd_out = {.fd = outfd, .events = POLLOUT};
-                    poll(&pfd_out, 1, -1);
-                    continue;
-                }
-                break;
-            }
-            written += s2;
-          }
-          if (written < (size_t)s1) break;
-          if (evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
-          total_moved += written;
-        }
-        close(pfd[0]); close(pfd[1]);
+          break;
       }
-    }
-  } else {
-    ssize_t n = splice(infd, NULL, outfd, NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
-    if (n >= 0) {
-      do {
-        if (n > 0 && evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
-        total_moved += n; check_memory_pressure(&total_moved, &next_check, oom_threshold);
-        n = splice(infd, NULL, outfd, NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
-      } while (n > 0);
-    } else if (errno == EINVAL) {
-      int pipefd[2]; if (pipe(pipefd) < 0) goto err_out;
-      fcntl(pipefd[1], F_SETFL, O_NONBLOCK);
-      fcntl(pipefd[1], F_SETPIPE_SZ, 1048576);
-      while (1) {
-        ssize_t n_in = splice(infd, NULL, pipefd[1], NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
-        if (n_in <= 0) {
-            if (n_in < 0 && (errno == EINTR)) continue;
-            if (n_in < 0 && errno == EAGAIN) {
-                struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
-                poll(&pfd_in, 1, -1);
-                continue;
-            }
-            break;
-        }
-        size_t written = 0;
-        while (written < (size_t)n_in) {
-          ssize_t m = splice(pipefd[0], NULL, outfd, NULL, n_in - written, SPLICE_F_MOVE | SPLICE_F_MORE);
-          if (m <= 0) {
-              if (m < 0 && (errno == EINTR)) continue;
-              if (m < 0 && errno == EAGAIN) {
-                  struct pollfd pfd_out = {.fd = outfd, .events = POLLOUT};
-                  poll(&pfd_out, 1, -1);
+      if (r == 0) break;
+
+      size_t written = 0;
+      while (written < (size_t)r) {
+          ssize_t w = write(outfd, bounce_buf + written, r - written);
+          if (w <= 0) {
+              if (w < 0 && (errno == EINTR || errno == EAGAIN)) {
+                  if (errno == EAGAIN) {
+                      struct pollfd pfd = {.fd = outfd, .events = POLLOUT};
+                      poll(&pfd, 1, -1);
+                  } else usleep(10);
                   continue;
               }
               break;
           }
-          written += m;
-        }
-        if (written < (size_t)n_in) break;
-        if (evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
-        total_moved += written; check_memory_pressure(&total_moved, &next_check, oom_threshold);
+          written += w;
       }
-      close(pipefd[0]); close(pipefd[1]);
+      if (written < (size_t)r) break;
+
+      if (evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
+      total_moved += written; check_memory_pressure(&total_moved, &next_check, oom_threshold);
     }
+    munmap(bounce_buf, chunk);
   }
 
   if (evfd_ingest_eof >= 0) { uint64_t val = 999999; sys_write(evfd_ingest_eof, &val, 8); }
