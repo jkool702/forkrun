@@ -3132,35 +3132,42 @@ static int ring_copy_main(int argc, char **argv) {
     oom_threshold = ((uint64_t)si_init.totalram * mu) / (uint64_t)threshold_div;
   }
   uint64_t total_moved = 0; uint64_t next_check = 16 * 1024 * 1024;
+  off_t off = 0;
+  bool use_bounce = true;
 
   if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
-    off_t off = 0;
-    while (off < st.st_size) {
-      check_memory_pressure(&total_moved, &next_check, oom_threshold);
-      loff_t current_off = off; size_t to_copy = (size_t)(st.st_size - off); if (to_copy > chunk) to_copy = chunk;
-      size_t copied_in_chunk = 0;
-      while (copied_in_chunk < to_copy) {
-        ssize_t n = copy_file_range(infd, &current_off, outfd, NULL, to_copy - copied_in_chunk, 0);
-        if (n < 0) { if (errno == EINTR) continue; if (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP) break; goto err_out; }
-        if (n == 0) break;
-        copied_in_chunk += n;
-      }
-      if (copied_in_chunk == 0 && (st.st_size - off > 0)) break;
-      off += copied_in_chunk;
-      if (evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
-      total_moved += copied_in_chunk;
-    }
-    while (off < st.st_size) {
-      check_memory_pressure(&total_moved, &next_check, oom_threshold);
-      ssize_t n = sendfile(outfd, infd, &off, chunk);
-      if (n < 0) { if (errno == EINTR) continue; break; }
-      if (n == 0) break;
-      if (evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
-      total_moved += n;
+    if (st.st_size == 0) {
+        // Let it fall through to read/write. Some special files (like /proc)
+        // report size 0 but have streaming content.
+    } else {
+        while (off < st.st_size) {
+          check_memory_pressure(&total_moved, &next_check, oom_threshold);
+          loff_t current_off = off; size_t to_copy = (size_t)(st.st_size - off); if (to_copy > chunk) to_copy = chunk;
+          size_t copied_in_chunk = 0;
+          while (copied_in_chunk < to_copy) {
+            ssize_t n = copy_file_range(infd, &current_off, outfd, NULL, to_copy - copied_in_chunk, 0);
+            if (n < 0) { if (errno == EINTR) continue; if (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP) break; goto err_out; }
+            if (n == 0) break;
+            copied_in_chunk += n;
+          }
+          if (copied_in_chunk == 0 && (st.st_size - off > 0)) break;
+          off += copied_in_chunk;
+          if (evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
+          total_moved += copied_in_chunk;
+        }
+        while (off < st.st_size) {
+          check_memory_pressure(&total_moved, &next_check, oom_threshold);
+          ssize_t n = sendfile(outfd, infd, &off, chunk);
+          if (n < 0) { if (errno == EINTR) continue; break; }
+          if (n == 0) break;
+          if (evfd_ingest_data >= 0) { uint64_t v = 1; sys_write(evfd_ingest_data, &v, 8); }
+          total_moved += n;
+        }
+        if (off >= st.st_size) use_bounce = false;
     }
   }
 
-  if (st.st_size == 0 || !S_ISREG(st.st_mode) || off < st.st_size) {
+  if (use_bounce) {
     char *bounce_buf = mmap(NULL, chunk, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
     if (bounce_buf == MAP_FAILED) goto err_out;
 
