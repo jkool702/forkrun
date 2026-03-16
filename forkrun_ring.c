@@ -1056,7 +1056,7 @@ static int ring_init_main(int argc, char **argv) {
     atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
     for (uint32_t n = 0; n < global_num_nodes; n++) {
       atomic_store_relaxed(&state[n].chunk_queue_head, 0);
-      atomic_store_relaxed(&state[n].chunk_ready_head, 0);        
+      atomic_store_relaxed(&state[n].chunk_ready_head, 0);
       atomic_store_relaxed(&state[n].chunk_queue_tail, 0);
       atomic_store_relaxed(&state[n].read_idx, 0);
       atomic_store_relaxed(&state[n].write_idx, 0);
@@ -1527,6 +1527,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     // 2. Put it on the Scanner's Ready Shelf
     __atomic_store_n(&t_state->chunk_ready_head, my_idx + 1, __ATOMIC_RELEASE);
 
+    // PHYSICS FIX: Prevent Store-Load reordering on weak memory models
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
     // 3. Exact Ticket Dispensing (Wakes all waiting scanners)
     uint32_t mw = atomic_load_relaxed(&t_state->meta_waiters);
     if (mw > 0) {
@@ -1549,6 +1552,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       if (force || atomic_load_relaxed(&local_state->active_waiters) > 0) { \
         atomic_store_release(&local_state->write_idx, local_scan_idx); \
         local_write_idx = local_scan_idx; \
+        __atomic_thread_fence(__ATOMIC_SEQ_CST); \
         if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
           uint64_t v = 1; \
           sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
@@ -1568,6 +1572,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         if (target_w > local_write_idx) { \
           atomic_store_release(&local_state->write_idx, target_w); \
           local_write_idx = target_w; \
+          __atomic_thread_fence(__ATOMIC_SEQ_CST); \
           if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
             uint64_t v = 1; \
             sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
@@ -2372,11 +2377,15 @@ static int ring_claim_main(int argc, char **argv) {
 restart_loop:
   while (1) {
     struct EscrowPacket ep;
-    if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0 &&
-        robust_pipe_read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
-      my_read_idx = ep.idx;
-      claim_count = ep.cnt;
-      break;
+    if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
+      // PHYSICS FIX: Do NOT use robust_pipe_read here. Raw read allows EAGAIN to fall through.
+      ssize_t er;
+      do { er = read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)); } while (er < 0 && errno == EINTR);
+      if (er == sizeof(ep)) {
+        my_read_idx = ep.idx;
+        claim_count = ep.cnt;
+        break;
+      }
     }
 
     uint64_t w_snap = atomic_load_acquire(&local_state->write_idx);
@@ -2511,7 +2520,11 @@ restart_loop:
           if (avail < claim_count) {
             struct EscrowPacket ep = {.idx = my_read_idx + avail,
                                       .cnt = claim_count - avail};
-            if (robust_pipe_write(fd_escrow_w[my_numa_node], &ep, sizeof(ep)) == sizeof(ep)) {
+            // PHYSICS FIX: Do NOT use robust_pipe_write. If pipe is full (EAGAIN),
+            // do not block. Retain inertia and loop until river catches up.
+            ssize_t ew;
+            do { ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep)); } while (ew < 0 && errno == EINTR);
+            if (ew == sizeof(ep)) {
               claim_count = avail;
               uint64_t one = 1;
               sys_write(evfd_data_arr[my_numa_node], &one, 8);
@@ -2912,15 +2925,15 @@ static int ring_fcntl_main(int argc, char **argv) {
 static int ring_pipe_main(int argc, char **argv) {
   if (argc < 2) return EXECUTION_FAILURE;
   int pfd[2]; if (pipe(pfd) < 0) { builtin_error("pipe failed: %s", strerror(errno)); return EXECUTION_FAILURE; }
-  fcntl(pfd[1], F_SETPIPE_SZ, 1048576); 
+  fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
 
   // PHYSICS FIX: Get the ACTUAL size granted by the kernel and export it dynamically
   int pipe_cap = 65536;
-  int ret = fcntl(pfd[1], F_GETPIPE_SZ); 
+  int ret = fcntl(pfd[1], F_GETPIPE_SZ);
   if (ret > 0) pipe_cap = ret;
 
   char buf[32];
-  snprintf(buf, sizeof(buf), "%d", pipe_cap); 
+  snprintf(buf, sizeof(buf), "%d", pipe_cap);
   bind_variable("RING_PIPE_CAPACITY_CUR", buf, 0);
 
   if (argc == 2) {
@@ -3038,7 +3051,7 @@ static int ring_fetcher_main(int argc, char **argv) {
 static int ring_fallow_phys_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]);
-  struct Interval *head = NULL; uint64_t limit = 0; 
+  struct Interval *head = NULL; uint64_t limit = 0;
   off_t last_punched = 0;
 
   char pkt_buf[4096];
@@ -3199,7 +3212,7 @@ static int ring_fallow_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]); int fd_file = atoi(argv[2]); bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
   if (state) atomic_store_release(&state[0].fallow_active, 1);
-  struct Interval *head = NULL; uint64_t next_idx = 0; 
+  struct Interval *head = NULL; uint64_t next_idx = 0;
   off_t last_punched = 0;
 
   char pkt_buf[4096];
