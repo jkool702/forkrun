@@ -1336,7 +1336,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   if (!nodemask) return EXECUTION_FAILURE;
 
   int fallback_pipe[2] = {-1, -1};
-  int fallback_pipe_cap = 65536;
 
   enum { TM_UNKNOWN = 0, TM_COPY_FILE_RANGE, TM_SENDFILE, TM_SPLICE_DIRECT, TM_SPLICE_PIPE } transfer_method = TM_UNKNOWN;
   uint64_t one = 1;
@@ -1383,9 +1382,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       if (numa_enabled && num_nodes > 1) {
           if (fallback_pipe[0] == -1) {
             if (pipe(fallback_pipe) == 0) {
+                // PHYSICS FIX: Make the target pipe Non-Blocking to prevent fragmentation lock
+                fcntl(fallback_pipe[1], F_SETFL, O_NONBLOCK);
                 fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
-                int cap = fcntl(fallback_pipe[1], F_GETPIPE_SZ);
-                if (cap > 0) fallback_pipe_cap = cap;
             }
           }
           if (fallback_pipe[0] != -1) transfer_method = TM_SPLICE_PIPE;
@@ -1406,9 +1405,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             else if (errno == EINVAL) {
               if (fallback_pipe[0] == -1) {
                 if (pipe(fallback_pipe) == 0) {
+                    fcntl(fallback_pipe[1], F_SETFL, O_NONBLOCK);
                     fcntl(fallback_pipe[1], F_SETPIPE_SZ, 1048576);
-                    int cap = fcntl(fallback_pipe[1], F_GETPIPE_SZ);
-                    if (cap > 0) fallback_pipe_cap = cap;
                 }
               }
               if (fallback_pipe[0] != -1) transfer_method = TM_SPLICE_PIPE;
@@ -1432,10 +1430,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           if (fallback_pipe[0] != -1) {
             size_t total_transferred = 0;
             while (total_transferred < chunk_size) {
-              size_t to_splice = chunk_size - total_transferred;
-              if (to_splice > fallback_pipe_cap) to_splice = fallback_pipe_cap;
-
-              ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, to_splice, SPLICE_F_MOVE | SPLICE_F_MORE);
+              // Target is non-blocking. If buffers fill before bytes, it safely returns what it moved.
+              ssize_t s1 = splice(infd, NULL, fallback_pipe[1], NULL, chunk_size - total_transferred, SPLICE_F_MOVE | SPLICE_F_MORE);
               if (s1 < 0) {
                   if (errno == EINTR) continue;
                   if (errno == EAGAIN) {
@@ -1456,10 +1452,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
                 ssize_t s2 = splice(fallback_pipe[0], NULL, outfd, NULL, s1 - drained, SPLICE_F_MOVE | SPLICE_F_MORE);
                 if (s2 <= 0) {
                   if (s2 < 0 && (errno == EINTR || errno == EAGAIN)) {
-                      if (errno == EAGAIN) {
-                          struct pollfd pfd = {.fd = outfd, .events = POLLOUT};
-                          poll(&pfd, 1, -1);
-                      } else usleep(10);
+                      usleep(10);
                       continue;
                   }
                   break;
@@ -3183,14 +3176,15 @@ static int ring_copy_main(int argc, char **argv) {
     if (off < st.st_size) {
       int pfd[2];
       if (pipe(pfd) == 0) {
+        fcntl(pfd[1], F_SETFL, O_NONBLOCK);
         fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
-        int pfd_cap = fcntl(pfd[1], F_GETPIPE_SZ);
-        if (pfd_cap <= 0) pfd_cap = 65536;
         while (off < st.st_size) {
           check_memory_pressure(&total_moved, &next_check, oom_threshold);
-          size_t to_splice = (chunk < pfd_cap) ? chunk : pfd_cap;
-          ssize_t s1 = splice(infd, &off, pfd[1], NULL, to_splice, SPLICE_F_MOVE | SPLICE_F_MORE);
-          if (s1 <= 0) break;
+          ssize_t s1 = splice(infd, &off, pfd[1], NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
+          if (s1 <= 0) {
+              if (s1 < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+              break;
+          }
           size_t written = 0;
           while (written < (size_t)s1) {
             ssize_t s2 = splice(pfd[0], NULL, outfd, NULL, s1 - written, SPLICE_F_MOVE | SPLICE_F_MORE);
@@ -3221,12 +3215,11 @@ static int ring_copy_main(int argc, char **argv) {
         n = splice(infd, NULL, outfd, NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
       } while (n > 0);
     } else if (errno == EINVAL) {
-      int pipefd[2]; if (pipe(pipefd) < 0) goto err_out; fcntl(pipefd[1], F_SETPIPE_SZ, 1048576);
-      int pipefd_cap = fcntl(pipefd[1], F_GETPIPE_SZ);
-      if (pipefd_cap <= 0) pipefd_cap = 65536;
+      int pipefd[2]; if (pipe(pipefd) < 0) goto err_out;
+      fcntl(pipefd[1], F_SETFL, O_NONBLOCK);
+      fcntl(pipefd[1], F_SETPIPE_SZ, 1048576);
       while (1) {
-        size_t to_splice = (chunk < pipefd_cap) ? chunk : pipefd_cap;
-        ssize_t n_in = splice(infd, NULL, pipefd[1], NULL, to_splice, SPLICE_F_MOVE | SPLICE_F_MORE);
+        ssize_t n_in = splice(infd, NULL, pipefd[1], NULL, chunk, SPLICE_F_MOVE | SPLICE_F_MORE);
         if (n_in <= 0) {
             if (n_in < 0 && (errno == EINTR)) continue;
             if (n_in < 0 && errno == EAGAIN) {
