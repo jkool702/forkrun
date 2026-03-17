@@ -1642,6 +1642,19 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           uint64_t v = w_wait; \
           sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
       } \
+      if (fd_spawn >= 0 && W < W_max_val) { \
+          uint64_t _r_idx = atomic_load_relaxed(&local_state->read_idx); \
+          uint64_t backlog = (local_scan_idx > _r_idx) ? local_scan_idx - _r_idx : 0; \
+          uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog; \
+          if (W_target > W) { \
+              uint64_t needed = W_target - W; \
+              char sbuf[64]; int slen; \
+              if (is_numa) slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed); \
+              else slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed); \
+              if (slen > 0) robust_pipe_write(fd_spawn, sbuf, slen); \
+              W += needed; atomic_store_relaxed(&local_state->active_workers, W); \
+          } \
+      } \
       usleep(100); \
     } \
     uint64_t pk = (uint64_t)batch_start; \
@@ -2234,25 +2247,6 @@ unified_scanner_eof:
     // 3. FINALIZATION (NUMA Finish vs UMA Tail Re-batching)
     // =========================================================
 
-    if (fd_spawn >= 0) {
-        uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);
-        if (W_curr < W_max_val) {
-            uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx);
-            uint64_t backlog = (local_scan_idx > r_idx) ? local_scan_idx - r_idx : 0;
-            uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog;
-            if (W_target > W_curr) {
-                uint64_t needed = W_target - W_curr;
-                if (needed > 0) {
-                    char sbuf[64]; int slen;
-                    if (is_numa) slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed);
-                    else slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
-                    if (slen > 0) robust_pipe_write(fd_spawn, sbuf, slen);
-                    W += needed; atomic_store_relaxed(&local_state->active_workers, W);
-                }
-            }
-        }
-    }
-
     if (is_numa) {
         if (!byte_mode && !fixed_batch) {
             atomic_store_release(&local_state->signed_batch_size, -(int64_t)Lmax);
@@ -2261,7 +2255,6 @@ unified_scanner_eof:
         atomic_store_release(&local_state->scanner_finished, 1);
         uint64_t blast = 999999;
         sys_write(evfd_data_arr[my_node_id], &blast, 8);
-        if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
     } else {
         if (!byte_mode) {
             uint64_t L_tail = pending_lines;
@@ -2336,7 +2329,30 @@ unified_scanner_eof:
         if (atomic_load_acquire(&local_state->active_waiters) > 0) {
             uint64_t v = 1; sys_write(evfd_data_arr[0], &v, 8);
         }
-        if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
+    }
+
+    // =========================================================
+    // FINAL SPAWN EVALUATION & TEARDOWN
+    // =========================================================
+    if (fd_spawn >= 0) {
+        uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);
+        if (W_curr < W_max_val) {
+            uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx);
+            uint64_t backlog = (local_scan_idx > r_idx) ? local_scan_idx - r_idx : 0;
+            uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog;
+            if (W_target > W_curr) {
+                uint64_t needed = W_target - W_curr;
+                if (needed > 0) {
+                    char sbuf[64]; int slen;
+                    if (is_numa) slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed);
+                    else slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
+                    if (slen > 0) robust_pipe_write(fd_spawn, sbuf, slen);
+                    W += needed; atomic_store_relaxed(&local_state->active_workers, W);
+                }
+            }
+        }
+        // Safely declare to the spawn listener that we are completely done
+        robust_pipe_write(fd_spawn, "x\n", 2);
     }
 
     munmap(buf, chunk_sz);

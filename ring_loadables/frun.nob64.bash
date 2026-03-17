@@ -395,7 +395,7 @@ toc() { :; }
                 # SLOW PATH (Asynchronous)
                 # Close both FDs so they do not leak into the pipeline
                 (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "" $REPLY "close" ) | '"$cmdline_str"'
+                ( ring_splice $fd_read 1 "" $REPLY "close" ) | ( '"$cmdline_str"' )
             fi'
             fi
 
@@ -984,6 +984,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=() # remove base64
+declare -A b64=()  # no base64
 
 _forkrun_bootstrap_setup --force
