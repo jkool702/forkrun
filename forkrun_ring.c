@@ -1585,7 +1585,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         } \
       } else { \
         uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx); \
-        uint64_t pending = local_scan_idx - r_idx; \
+        uint64_t pending = (local_scan_idx > r_idx) ? (local_scan_idx - r_idx) : 0; \
         uint64_t current_buffer = local_scan_idx - local_write_idx; \
         uint64_t target_buffer = 0; \
         if (pending >= 10 * W_curr) target_buffer = (W_curr << 2); \
@@ -1617,7 +1617,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       } else { \
         limit = atomic_load_acquire(&local_state->read_idx); \
       } \
-      bool limit_lines = ((local_scan_idx - limit) >= RING_SIZE); \
+      bool limit_lines = (local_scan_idx >= limit) ? ((local_scan_idx - limit) >= RING_SIZE) : false; \
       bool limit_chunks = is_numa && (cb_head >= 3) && (limit < chunk_bounds[(cb_head - 3) & 3]); \
       if (!limit_lines && !limit_chunks) break; \
       if (atomic_load_relaxed(&local_state->active_workers) == 0) break; \
