@@ -1325,7 +1325,18 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   if (num_nodes < 1) num_nodes = 1;
   if (num_nodes > 1024) num_nodes = 1024;
 
-  uint64_t chunk_size = 2 * 1024 * 1024ULL; // Lock to 2MB THP slice.
+  uint64_t chunk_size = 2 * 1024 * 1024ULL; // Default 2MB THP slice
+
+  // PHYSICS FIX: Resonance Alignment. In byte mode, chunks must perfectly fit the
+  // requested batch size to prevent tearing records across NUMA sockets.
+  if (state[0].mode_byte) {
+      uint64_t L = state[0].cfg_batch_start;
+      if (L > 0) {
+          uint64_t mult = (chunk_size + L - 1) / L; // Ceil division
+          chunk_size = mult * L;
+      }
+  }
+
   uint64_t current_offset = 0; uint32_t current_major = 0;
   int last_target = -1;
 
@@ -1509,6 +1520,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
 
   struct SharedState *t_state = &state[my_node_id];
   uint64_t my_idx = 0; char tail_buf[65536]; int spin = 0;
+  bool byte_mode = t_state->mode_byte;
 
   while (1) {
     while (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx) {
@@ -1532,28 +1544,31 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     uint32_t major_id = t_state->chunk_queue[my_idx & META_RING_MASK];
     struct ChunkMeta *meta = &g_state->meta_ring[major_id & META_RING_MASK];
     uint64_t chunk_end = meta->raw_offset + meta->raw_length;
-    uint64_t actual_end = chunk_end; uint64_t search_end = chunk_end;
+    uint64_t actual_end = chunk_end;
 
-    while (search_end > meta->raw_offset) {
-      uint64_t window_size = (search_end - meta->raw_offset > sizeof(tail_buf)) ? sizeof(tail_buf) : (search_end - meta->raw_offset);
-      uint64_t window_start = search_end - window_size;
-      ssize_t n;
-      do { n = pread(memfd, tail_buf, window_size, window_start); } while (n < 0 && errno == EINTR);
-      if (n > 0) {
-        char *nl = memrchr(tail_buf, '\n', n);
-        if (nl) { actual_end = window_start + (nl - tail_buf) + 1; break; }
-      } else if (n < 0 && errno == EAGAIN) continue;
-      else break;
-      search_end = window_start;
+    // PHYSICS FIX: Bypass delimiter search in byte mode!
+    if (!byte_mode) {
+        uint64_t search_end = chunk_end;
+        while (search_end > meta->raw_offset) {
+          uint64_t window_size = (search_end - meta->raw_offset > sizeof(tail_buf)) ? sizeof(tail_buf) : (search_end - meta->raw_offset);
+          uint64_t window_start = search_end - window_size;
+          ssize_t n;
+          do { n = pread(memfd, tail_buf, window_size, window_start); } while (n < 0 && errno == EINTR);
+          if (n > 0) {
+            char *nl = memrchr(tail_buf, '\n', n);
+            if (nl) { actual_end = window_start + (nl - tail_buf) + 1; break; }
+          } else if (n < 0 && errno == EAGAIN) continue;
+          else break;
+          search_end = window_start;
+        }
+        if (search_end <= meta->raw_offset) actual_end = meta->raw_offset;
     }
-    if (search_end <= meta->raw_offset) actual_end = meta->raw_offset;
 
     // 1. Mark meta ready
     atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
     // 2. Put it on the Scanner's Ready Shelf
     __atomic_store_n(&t_state->chunk_ready_head, my_idx + 1, __ATOMIC_RELEASE);
 
-    // PHYSICS FIX: Prevent Store-Load reordering on weak memory models
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
     // 3. Exact Ticket Dispensing (Wakes all waiting scanners)
@@ -1692,13 +1707,14 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         uint64_t _backlog = local_scan_idx - atomic_load_relaxed(&(state_ptr)->read_idx); \
         bool _no_starve = (atomic_load_relaxed(&(state_ptr)->active_waiters) == 0); \
         bool _spawn = false;                                                   \
-        if (fixed_batch) { if (_backlog > W && _no_starve) _spawn = true; }    \
+        if (fixed_batch || byte_mode) { if ((_backlog > W || byte_mode) && _no_starve) _spawn = true; } \
         else {                                                                 \
           if (_d_out > 0) { uint64_t _rate = _d_out / W; if (_rate == 0) _rate = 1; if ((_d_in / _rate) > W) _spawn = true; } \
           else if (_backlog > (W * 4) && _no_starve) { _spawn = true; }        \
         }                                                                      \
         if (_spawn && phase != 1) {                                            \
           uint64_t _grow = fixed_batch ? 1 : ((W + 1) / 2);                    \
+          if (byte_mode) _grow = W_max_val - W;                                \
           if (W + _grow > W_max_val) _grow = W_max_val - W;                    \
           if (_grow > 0 && fd_spawn >= 0) {                                    \
             char _sbuf[64]; int _slen;                                         \
@@ -1756,6 +1772,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t local_write_idx = 0;
 
     size_t chunk_sz = get_optimal_chunk_size();
+
+    // PHYSICS FIX: Align flat-mode buffer exactly to byte sizes to prevent internal shifting.
+    if (byte_mode && L > 0) {
+        uint64_t mult = (chunk_sz + L - 1) / L;
+        chunk_sz = mult * L;
+    }
 
     // PHYSICS FIX: mmap completely sidesteps bash_malloc intercepts!
     char *buf = mmap(NULL, chunk_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -2404,7 +2426,6 @@ restart_loop:
   while (1) {
     struct EscrowPacket ep;
     if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
-      // PHYSICS FIX: Do NOT use robust_pipe_read here. Raw read allows EAGAIN to fall through.
       ssize_t er;
       do { er = read(fd_escrow_r[my_numa_node], &ep, sizeof(ep)); } while (er < 0 && errno == EINTR);
       if (er == sizeof(ep)) {
@@ -2429,8 +2450,6 @@ restart_loop:
             atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
           }
         } else {
-          // PHYSICS FIX: claim_count MUST be 1 regardless of UMA/NUMA
-          // when return_bytes is active, to prevent multi-claim pipe buffer overflow.
           if (local_state->cfg_return_bytes) {
               claim_count = 1;
           } else {
@@ -2532,6 +2551,12 @@ restart_loop:
       if (diff < 0)
         diff = 0;
       claim_count = (uint64_t)diff;
+
+      // PHYSICS FIX: Protect the EOF claim from spanning NUMA chunks in byte returns!
+      if (local_state->cfg_return_bytes && claim_count > 1) {
+          claim_count = 1;
+      }
+
       if (claim_count == 0) {
         spin = 0;
         goto restart_loop;
@@ -2546,8 +2571,6 @@ restart_loop:
           if (avail < claim_count) {
             struct EscrowPacket ep = {.idx = my_read_idx + avail,
                                       .cnt = claim_count - avail};
-            // PHYSICS FIX: Do NOT use robust_pipe_write. If pipe is full (EAGAIN),
-            // do not block. Retain inertia and loop until river catches up.
             ssize_t ew;
             do { ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep)); } while (ew < 0 && errno == EINTR);
             if (ew == sizeof(ep)) {
@@ -2565,6 +2588,11 @@ restart_loop:
           if (diff < 0)
             diff = 0;
           claim_count = (uint64_t)diff;
+
+          if (local_state->cfg_return_bytes && claim_count > 1) {
+              claim_count = 1;
+          }
+
           break;
         }
         struct pollfd pfds[2] = {
