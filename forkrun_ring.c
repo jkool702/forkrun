@@ -1642,6 +1642,18 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           uint64_t v = w_wait; \
           sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
       } \
+      if (fd_spawn >= 0 && W < W_max_val) { \
+          uint64_t backlog = local_scan_idx - limit; \
+          uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog; \
+          if (W_target > W) { \
+              uint64_t needed = W_target - W; \
+              char sbuf[64]; int slen; \
+              if (is_numa) slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed); \
+              else slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed); \
+              if (slen > 0) robust_pipe_write(fd_spawn, sbuf, slen); \
+              W += needed; atomic_store_relaxed(&local_state->active_workers, W); \
+          } \
+      } \
       usleep(100); \
     } \
     uint64_t pk = (uint64_t)batch_start; \
