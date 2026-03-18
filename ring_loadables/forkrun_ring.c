@@ -784,6 +784,7 @@ struct SharedState {
   uint8_t fixed_batch;
   uint8_t cfg_return_bytes;
   uint8_t numa_enabled;
+  uint8_t exact_lines;
 
   uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
   uint64_t stats_chunks_local;
@@ -1101,6 +1102,7 @@ static int ring_init_main(int argc, char **argv) {
   uint64_t parsed_limit = 0;
   int64_t parsed_timeout = -1;
   uint8_t parsed_return_bytes = 0;
+  uint8_t parsed_exact_lines = 0;
 
   for (int i = 1; i < argc; i++) {
     const char *arg = argv[i];
@@ -1117,6 +1119,7 @@ static int ring_init_main(int argc, char **argv) {
     else if (strncmp(arg, "--timeout=", 10) == 0) parsed_timeout = atoll(arg + 10);
     else if (strncmp(arg, "--greedy", 8) == 0) parsed_timeout = 0;
     else if (strncmp(arg, "--return-bytes", 14) == 0) parsed_return_bytes = 1;
+    else if (strncmp(arg, "--exact-lines", 13) == 0) parsed_exact_lines = 1;
     else if (strncmp(arg, "--out=", 6) == 0) out_array_name = arg + 6;
     else if (strncmp(arg, "--stdin", 7) == 0) stdin_explicit = 1;
     else if (strncmp(arg, "--no-stdin", 10) == 0) stdin_explicit = 0;
@@ -1174,6 +1177,7 @@ static int ring_init_main(int argc, char **argv) {
     state[n].cfg_w_max = w_max_balanced;
     state[n].mode_byte = byte_mode ? 1 : 0;
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
+    state[n].exact_lines = parsed_exact_lines;
     state[n].cfg_limit = parsed_limit;
     state[n].cfg_timeout_us = parsed_timeout;
     state[n].cfg_return_bytes = parsed_return_bytes;
@@ -1632,7 +1636,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       } else { \
         limit = atomic_load_acquire(&local_state->read_idx); \
       } \
-      bool limit_lines = (local_scan_idx >= limit) ? ((local_scan_idx - limit) >= RING_SIZE) : false; \
+      uint64_t uma_max_ahead = W_max_val * 64; \
+      if (uma_max_ahead < 1024) uma_max_ahead = 1024; /* Safe floor for low worker counts */ \
+      bool limit_lines = (!is_numa) && (local_scan_idx > limit) && ((local_scan_idx - limit) >= uma_max_ahead); \
       bool limit_chunks = is_numa && (cb_head >= 3) && (limit < chunk_bounds[(cb_head - 3) & 3]); \
       if (!limit_lines && !limit_chunks) break; \
       if (atomic_load_relaxed(&local_state->active_workers) == 0) break; \
@@ -1775,6 +1781,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     bool fixed_batch = local_state->fixed_batch;
     bool fixed_workers = local_state->fixed_workers;
     bool return_bytes = local_state->cfg_return_bytes;
+    bool exact_lines = local_state->exact_lines;
 
     uint64_t W2 = fast_log2(W_max_val);
     uint64_t L2 = fast_log2(Lmax);
@@ -2192,7 +2199,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         flush = true;
                     } else if (starve_meter >= (W + DAMPING_OFFSET - 3)) {
                         bool trigger = (stall_meter >= (W + DAMPING_OFFSET - 3));
-                        if (trigger) {
+                        if (trigger && !exact_lines) {
                             if (timeout_us == 0) flush = true;
                             else if (timeout_us > 0) {
                                 if (first_wait_ts == 0) first_wait_ts = get_us_time();
