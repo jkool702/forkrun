@@ -335,7 +335,7 @@ static int g_debug = 0;
 // ==============================================================================
 
 // For IPC Pipes (Order/Fallow/Escrow). Uses poll() to wait for EAGAIN without burning CPU.
-static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count) {
+static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count, bool exact) {
     char *p = (char *)buf;
     size_t left = count;
     while (left > 0) {
@@ -347,21 +347,15 @@ static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count) {
                 poll(&pfd, 1, -1);
                 continue;
             }
-            return -1;
+            return (count - left) > 0 ? (ssize_t)(count - left) : -1;
         }
-        if (r == 0) {
-            // EOF reached
-            return count - left;
-        }
+        if (r == 0) return count - left; // EOF
         p += r;
         left -= r;
 
-        // CRITICAL FIX: If the caller requested a large buffer (4096),
-        // return early to prevent Fallow/Order threads from deadlocking.
-        // If they requested a small exact struct (< 64 bytes), block until filled.
-        if (count > 64 && (count - left) > 0) {
-            return count - left;
-        }
+        // CRITICAL FIX: If exact is false, return immediately after ANY successful
+        // read to prevent Fallow/Order threads from deadlocking on partial queues.
+        if (!exact) return count - left;
     }
     return count;
 }
@@ -1613,8 +1607,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         atomic_store_release(&local_state->write_idx, local_scan_idx); \
         local_write_idx = local_scan_idx; \
         __atomic_thread_fence(__ATOMIC_SEQ_CST); \
-        if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
-          uint64_t v = 1; \
+        uint32_t aw = atomic_load_acquire(&local_state->active_waiters); \
+        if (aw > 0) { \
+          uint64_t v = aw; \
           sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
         } \
       } else { \
@@ -1633,17 +1628,18 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           atomic_store_release(&local_state->write_idx, target_w); \
           local_write_idx = target_w; \
           __atomic_thread_fence(__ATOMIC_SEQ_CST); \
-          if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
-            uint64_t v = 1; \
+          uint32_t aw = atomic_load_acquire(&local_state->active_waiters); \
+          if (aw > 0) { \
+            uint64_t v = aw; \
             sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
           } \
         } \
       } \
     } \
     if (force) { \
-      if (atomic_load_acquire(&local_state->active_waiters) > 0 && \
-          local_write_idx > atomic_load_relaxed(&local_state->read_idx)) { \
-        uint64_t v = 1; \
+      uint32_t aw = atomic_load_acquire(&local_state->active_waiters); \
+      if (aw > 0 && local_write_idx > atomic_load_relaxed(&local_state->read_idx)) { \
+        uint64_t v = aw; \
         sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
       } \
     } \
@@ -2356,9 +2352,10 @@ unified_scanner_eof:
 
         atomic_store_release(&local_state->write_idx, local_scan_idx);
         atomic_store_release(&local_state->scanner_finished, 1);
-        if (atomic_load_acquire(&local_state->active_waiters) > 0) {
-            uint64_t v = 1; sys_write(evfd_data_arr[0], &v, 8);
-        }
+
+        // CRITICAL UMA FIX: Blast wake all workers at EOF so nobody gets left behind
+        uint64_t blast = 999999;
+        sys_write(evfd_data_arr[0], &blast, 8);
     }
 
     if (fd_spawn >= 0) {
@@ -2562,8 +2559,7 @@ restart_loop:
       continue;
     }
 
-    // 5. Poll (fd_escrow_r removed to prevent thundering herd;
-    //    evfd_data_arr EFD_SEMAPHORE already wakes exactly one waiter per escrow write)
+    // 5. Poll
     __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
     is_waiting_on_ring = true;
 
@@ -2885,7 +2881,7 @@ static int ring_order_main(int argc, char **argv) {
   size_t pkt_sz = sizeof(struct OrderPacket);
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered);
+    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break; // EOF or error
     buffered += n_read;
 
@@ -3133,7 +3129,7 @@ static int ring_fetcher_main(int argc, char **argv) {
   struct PhysPacket pp;
   while (1) {
     if (fd_token_in >= 0) { char t; if (sys_read(fd_token_in, &t, 1) <= 0) break; }
-    if (robust_pipe_read(fd_pipe, &pp, sizeof(pp)) <= 0) break;
+    if (robust_pipe_read(fd_pipe, &pp, sizeof(pp), true) <= 0) break;
     loff_t off_in = (loff_t)pp.off; loff_t off_out = lseek(fd_local, 0, SEEK_END);
     ssize_t ret = copy_file_range(fd_global, &off_in, fd_local, &off_out, pp.len, 0);
     if (ret < 0) {
@@ -3168,7 +3164,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
   size_t pkt_sz = sizeof(struct PhysPacket);
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered);
+    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break;
     buffered += n_read;
 
@@ -3314,7 +3310,7 @@ static int ring_fallow_main(int argc, char **argv) {
   size_t pkt_sz = sizeof(struct IndexPacket);
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered);
+    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break;
     buffered += n_read;
 
