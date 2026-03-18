@@ -35,7 +35,7 @@ frun __exec__ "$@"
     shift 1 # Remove __exec__
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx order_mode unsafe_flag stdin_flag byte_mode_flag order_mode unsafe_flag LC_ALL
     local -ga fd_out P order_args ring_init_opts
@@ -115,8 +115,8 @@ frun __exec__ "$@"
             -u|--unbuffered|--realtime)  order_mode='realtime' ;;
             --buffered|--atomic)         order_mode='buffered' ;;
 
-            -U|--unsafe)   unsafe_flag=true  ;;
-            +U|--safe)     unsafe_flag=false ;;
+            -U|--unsafe|--UNSAFE)   unsafe_flag=true  ;;
+            +U|--safe|--SAFE)     unsafe_flag=false ;;
 
             -s|--stdin)    stdin_flag=true  ;;
             +s|--no-stdin) stdin_flag=false ;;
@@ -126,11 +126,21 @@ frun __exec__ "$@"
 
             -z|--null)    delimiter_val='' ;;
 
+             # --- REPLACEMENT FLAGS (-i / -I) ---
+            -i|--insert)    insert_args_flag=true ;;
+            -I|--insert-id|--INSERT|--INSERT-ID) insert_id_flag=true ;;
+
             # --- LIMIT (-n 100) ---
             @(-n|--limit)?(?([= $'\t'])+([0-9+-])))
                 arg="${1#@(-n|--limit)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9+-])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--limit='"$REPLY") ;;
+
+            # --- EXACT LINES (-L 100) ---
+            @(-L|--exact-lines|--EXACT-LINES)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
+                arg="${1#@(-L|--exact-lines|--EXACT-LINES)?([= $'\t'])}";
+                [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && { exact_lines_val="${arg}"; last_conflict="exact_lines"; } ;;
 
             # --- LINES / BATCH (-l 1k or -l 100:1k) ---
             @(-l|--lines|--batchsize)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
@@ -160,7 +170,7 @@ frun __exec__ "$@"
             @(--nodes|--numa)?(?([= $'\t'])*))
                 arg="${1#@(--nodes|--numa)?([= $'\t'])}";
                 [[ ${arg} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && parsed_numa_nodes_arg="${arg}" ;;
+                [[ ${arg} ]] && { parsed_numa_nodes_arg="${arg}"; last_conflict="nodes"; } ;;
 
             # --- ORDER (-o buffered) ---
             @(-o|--order)?(?([= $'\t'])@(realtime|unbuffered|buffered|atomic|order?(ed))))
@@ -285,7 +295,28 @@ toc() { :; }
     }
 
     local numa_map_str
-    _forkrun_build_numa_map "$parsed_numa_nodes_arg"
+     _forkrun_build_numa_map "$parsed_numa_nodes_arg"
+
+    # --- Feature 2: -L vs NUMA Conflict Resolution ---
+    if [[ -n "${exact_lines_val:-}" ]] && (( FORKRUN_NUM_NODES > 1 )); then
+        if [[ "$last_conflict" == "exact_lines" ]]; then
+            printf '\nforkrun [WARNING]: To facilitate using exactly %s arguments per batch, forkrun will run in UMA mode. NUMA optimizations prevent -L from working properly, and will be disabled.\n\n' "${exact_lines_val}" >&2
+            # Force UMA mode by re-building the map with exactly 1 node
+            _forkrun_build_numa_map "1"
+        else
+            printf '\nforkrun [WARNING]: forkrun cannot guarantee exactly %s lines per batch in NUMA mode. The -L option has been downgraded to -l, which guarantees a maximum of %s lines per batch. If you need exactly %s lines per batch, remove the --nodes option from the invocation.\n\n' "${exact_lines_val}" "${exact_lines_val}" "${exact_lines_val}" >&2
+            # Downgrade to -l (clear exact lines flag so it just parses normally below)
+            _parse_count "lines" "${exact_lines_val}"
+            exact_lines_val=""
+        fi
+    fi
+
+    # If exact_lines_val survived (either it was UMA, or we forced UMA), apply it
+    if [[ -n "${exact_lines_val:-}" ]]; then
+        _parse_count "lines" "${exact_lines_val}"
+        ring_init_opts+=("--exact-lines")
+    fi
+
     ring_init_opts+=("--numa-map=$numa_map_str")
 
     # Initialize Ring
@@ -361,6 +392,11 @@ toc() { :; }
         # --- WORKER DEFINITION ---
         printf -v cmdline_str '%q ' "$@"
 
+        # 1. Replace {ID} with the Worker ID (and NUMA Node ID if applicable)
+        if ${insert_id_flag:-false}; then
+            cmdline_str="${cmdline_str//\\{ID\\}/\${RING_NODE_ID:+\${RING_NODE_ID}.}\${ID}}"
+        fi
+
         ring_ack_str="ring_ack $fd_fallow_w"
 
         if ${stdin_flag}; then
@@ -401,16 +437,30 @@ toc() { :; }
 
         elif ${byte_mode_flag}; then
             # BYTE ARGS PAYLOAD
+            local array_var='"${A}"'
+            if ${insert_args_flag:-false}; then
+                cmdline_str="${cmdline_str//\\{\\}/$array_var}"
+            else
+                cmdline_str+=" $array_var"
+            fi
+
             pCode='
             read -r -u $fd_read -N $REPLY A
-            '"$cmdline_str"' "${A}"'
+            '"$cmdline_str"
 
         else
             # LINE ARGS PAYLOAD (Default)
-            if ${unsafe_flag}; then
-                cmdline_str='IFS='"'"' '"'"' '"${cmdline_str}"' ${A[*]}'
+            local array_var='"${A[@]}"'
+            ${unsafe_flag} && array_var='${A[*]}'
+
+            if ${insert_args_flag:-false}; then
+                cmdline_str="${cmdline_str//\\{\\}/$array_var}"
             else
-                cmdline_str+=' "${A[@]}"'
+                cmdline_str+=" $array_var"
+            fi
+
+            if ${unsafe_flag}; then
+                cmdline_str="IFS=' ' ${cmdline_str}"
             fi
 
             if [[ ${delimiter_val} ]]; then
