@@ -1624,9 +1624,10 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           atomic_store_release(&local_state->write_idx, target_w); \
           local_write_idx = target_w; \
           __atomic_thread_fence(__ATOMIC_SEQ_CST); \
-          if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
-            uint64_t v = 1; \
-            sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
+         uint32_t aw = atomic_load_acquire(&local_state->active_waiters); \
+         if (aw > 0) { \
+           uint64_t v = aw; \
+           sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
           } \
         } \
       } \
