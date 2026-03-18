@@ -2547,7 +2547,8 @@ restart_loop:
       continue;
     }
 
-    // 5. Poll (Removed fd_escrow_r to prevent thundering herds!)
+    // 5. Poll (fd_escrow_r removed to prevent thundering herd;
+    //    evfd_data_arr EFD_SEMAPHORE already wakes exactly one waiter per escrow write)
     __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
     is_waiting_on_ring = true;
 
@@ -2556,18 +2557,31 @@ restart_loop:
         {.fd = evfd_eof, .events = POLLIN}};
 
     while (1) {
+      // Pre-check: ring data may have arrived since we last looked
       if (atomic_load_acquire(&local_state->write_idx) >
           atomic_load_relaxed(&local_state->read_idx))
         break;
+
       poll(pfds, 2, -1);
-      if (pfds[0].revents) {
+
+      // PHYSICS FIX: Capture ALL revents from this single poll before acting.
+      // evfd_data_arr uses EFD_SEMAPHORE, so writing 999999 (the scanner's
+      // blast-wake sentinel) produces 999999 individual tokens. If we check
+      // pfds[0] first and break on it, pfds[1] (evfd_eof) is never seen until
+      // all ~999999 tokens drain (~35k cycles at 28 workers). By capturing both
+      // flags before any break, a single poll pass catches EOF even if evfd_data
+      // is also firing. The token is consumed once unconditionally, then we break
+      // to restart_loop which handles ring -> escrow -> scanner_finished in order.
+      bool data_fired = (pfds[0].revents & POLLIN) != 0;
+      bool eof_fired  = (pfds[1].revents & POLLIN) != 0;
+
+      if (data_fired) {
         uint64_t v;
-        sys_read(evfd_data_arr[my_numa_node], &v, 8);
-        break;
+        sys_read(evfd_data_arr[my_numa_node], &v, 8); // consume exactly 1 token
       }
-      if (pfds[1].revents) {
-        break;
-      }
+
+      if (data_fired || eof_fired) break; // restart_loop handles priority ordering
+      // else: true spurious wakeup — re-poll
     }
     cleanup_waiter_state();
     spin = 0;
