@@ -1077,10 +1077,12 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].stats_chunks_assigned, 0);
       atomic_store_relaxed(&state[n].stats_chunks_local, 0);
       atomic_store_relaxed(&state[n].stats_chunks_stolen, 0);
+
       // Reset waiters to prevent spurious initial early flushes
       atomic_store_relaxed(&state[n].active_waiters, 0);
       atomic_store_relaxed(&state[n].indexer_waiters, 0);
       atomic_store_relaxed(&state[n].meta_waiters, 0);
+
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
         char dump[1024];
@@ -1635,23 +1637,20 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   do { \
     while (1) { \
       uint64_t limit; \
+      uint64_t uma_max_ahead = W_max_val * 64; \
+      if (uma_max_ahead < 1024) uma_max_ahead = 1024; \
       if (!is_numa && atomic_load_relaxed(&local_state->fallow_active)) { \
-        limit = atomic_load_acquire(&local_state->min_idx); \
+        uint64_t r = atomic_load_acquire(&local_state->read_idx); \
+        uint64_t m = atomic_load_acquire(&local_state->min_idx); \
+        limit = (r > m + uma_max_ahead) ? r - uma_max_ahead : m; \
       } else { \
         limit = atomic_load_acquire(&local_state->read_idx); \
       } \
-      uint64_t uma_max_ahead = W_max_val * 64; \
-      if (uma_max_ahead < 1024) uma_max_ahead = 1024; /* Safe floor for low worker counts */ \
       bool limit_lines = (!is_numa) && (local_scan_idx > limit) && ((local_scan_idx - limit) >= uma_max_ahead); \
       bool limit_chunks = is_numa && (cb_head >= 3) && (limit < chunk_bounds[(cb_head - 3) & 3]); \
       if (!limit_lines && !limit_chunks) break; \
       if (atomic_load_relaxed(&local_state->active_workers) == 0) break; \
       UNIFIED_ADAPTIVE_COMMIT(true); \
-      uint32_t w_wait = atomic_load_relaxed(&local_state->active_waiters); \
-      if (w_wait > 0) { \
-          uint64_t v = w_wait; \
-          sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
-      } \
       if (fd_spawn >= 0 && W < W_max_val) { \
           uint64_t _r_idx = atomic_load_relaxed(&local_state->read_idx); \
           uint64_t backlog = (local_scan_idx > _r_idx) ? local_scan_idx - _r_idx : 0; \
@@ -2451,10 +2450,10 @@ static int ring_claim_main(int argc, char **argv) {
 
 restart_loop:
   while (1) {
+    // 1. Ring check FIRST
     uint64_t w_snap = atomic_load_acquire(&local_state->write_idx);
     uint64_t r_curr = atomic_load_relaxed(&local_state->read_idx);
 
-    // 1. Ring check FIRST
     if (r_curr < w_snap) {
       int64_t sbatch = atomic_load_relaxed(&local_state->signed_batch_size);
       claim_count = 1;
@@ -2564,14 +2563,6 @@ restart_loop:
 
       poll(pfds, 2, -1);
 
-      // PHYSICS FIX: Capture ALL revents from this single poll before acting.
-      // evfd_data_arr uses EFD_SEMAPHORE, so writing 999999 (the scanner's
-      // blast-wake sentinel) produces 999999 individual tokens. If we check
-      // pfds[0] first and break on it, pfds[1] (evfd_eof) is never seen until
-      // all ~999999 tokens drain (~35k cycles at 28 workers). By capturing both
-      // flags before any break, a single poll pass catches EOF even if evfd_data
-      // is also firing. The token is consumed once unconditionally, then we break
-      // to restart_loop which handles ring -> escrow -> scanner_finished in order.
       bool data_fired = (pfds[0].revents & POLLIN) != 0;
       bool eof_fired  = (pfds[1].revents & POLLIN) != 0;
 
@@ -2581,8 +2572,8 @@ restart_loop:
       }
 
       if (data_fired || eof_fired) break; // restart_loop handles priority ordering
-      // else: true spurious wakeup — re-poll
     }
+
     cleanup_waiter_state();
     spin = 0;
   }
@@ -2640,13 +2631,15 @@ restart_loop:
         struct pollfd pfds[2] = {
             {.fd = evfd_data_arr[my_numa_node], .events = POLLIN},
             {.fd = evfd_eof, .events = POLLIN}};
+
         poll(pfds, 2, -1);
-        if (pfds[0].revents) {
-            uint64_t v; sys_read(evfd_data_arr[my_numa_node], &v, 8);
+
+        bool data_fired = (pfds[0].revents & POLLIN) != 0;
+        if (data_fired) {
+            uint64_t v;
+            sys_read(evfd_data_arr[my_numa_node], &v, 8);
         }
-        if (pfds[1].revents) {
-            break;
-        }
+        // Always loop back to top to re-evaluate w_curr
       }
       cleanup_waiter_state();
       if (claim_count == 0) {
