@@ -407,7 +407,7 @@ toc() { :; }
             if (( RING_BYTES_MAX <= RING_PIPE_CAPACITY - 4096 )); then
             pCode='
                 ring_pipe pr pw
-                ring_splice $fd_read $pw '"''"' $REPLY "close" 2>/dev/null || break
+                ring_splice $fd_read $pw '"''"' $REPLY "close" 2>/dev/null || exec {pw}>&-
                 '"$cmdline_str"' <&$pr
                 exec {pr}<&-'
             else
@@ -424,7 +424,7 @@ toc() { :; }
             if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
                 # FAST PATH (Synchronous)
                 # Note: ring_splice "close" closes $pw internally. We only close $pr.
-                ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || break
+                ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || exec {pw}>&-
                 '"$cmdline_str"' <&$pr
                 exec {pr}<&-
             else
