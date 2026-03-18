@@ -336,9 +336,10 @@ static int g_debug = 0;
 
 // For IPC Pipes (Order/Fallow/Escrow). Uses poll() to wait for EAGAIN without burning CPU.
 static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count) {
-    ssize_t r;
-    while (1) {
-        r = read(fd, buf, count);
+    char *p = (char *)buf;
+    size_t left = count;
+    while (left > 0) {
+        ssize_t r = read(fd, p, left);
         if (r < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -346,10 +347,23 @@ static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count) {
                 poll(&pfd, 1, -1);
                 continue;
             }
+            return -1;
         }
-        break;
+        if (r == 0) {
+            // EOF reached
+            return count - left;
+        }
+        p += r;
+        left -= r;
+
+        // CRITICAL FIX: If the caller requested a large buffer (4096),
+        // return early to prevent Fallow/Order threads from deadlocking.
+        // If they requested a small exact struct (< 64 bytes), block until filled.
+        if (count > 64 && (count - left) > 0) {
+            return count - left;
+        }
     }
-    return r;
+    return count;
 }
 
 static inline ssize_t robust_pipe_write(int fd, const void *buf, size_t count) {
