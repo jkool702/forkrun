@@ -336,10 +336,9 @@ static int g_debug = 0;
 
 // For IPC Pipes (Order/Fallow/Escrow). Uses poll() to wait for EAGAIN without burning CPU.
 static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count) {
-    char *p = (char *)buf;
-    size_t left = count;
-    while (left > 0) {
-        ssize_t r = read(fd, p, left);
+    ssize_t r;
+    while (1) {
+        r = read(fd, buf, count);
         if (r < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -347,13 +346,10 @@ static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count) {
                 poll(&pfd, 1, -1);
                 continue;
             }
-            return -1;
         }
-        if (r == 0) return count - left; // EOF
-        p += r;
-        left -= r;
+        break;
     }
-    return count;
+    return r;
 }
 
 static inline ssize_t robust_pipe_write(int fd, const void *buf, size_t count) {
@@ -1594,7 +1590,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
 // ==============================================================================
 // 5. UNIFIED SCANNER LOOP
 // ==============================================================================
-
 #define UNIFIED_ADAPTIVE_COMMIT(force) \
   do { \
     if (local_scan_idx > local_write_idx) { \
@@ -1624,12 +1619,18 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           atomic_store_release(&local_state->write_idx, target_w); \
           local_write_idx = target_w; \
           __atomic_thread_fence(__ATOMIC_SEQ_CST); \
-         uint32_t aw = atomic_load_acquire(&local_state->active_waiters); \
-         if (aw > 0) { \
-           uint64_t v = aw; \
-           sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
+          if (atomic_load_acquire(&local_state->active_waiters) > 0) { \
+            uint64_t v = 1; \
+            sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
           } \
         } \
+      } \
+    } \
+    if (force) { \
+      if (atomic_load_acquire(&local_state->active_waiters) > 0 && \
+          local_write_idx > atomic_load_relaxed(&local_state->read_idx)) { \
+        uint64_t v = 1; \
+        sys_write(evfd_data_arr[is_numa ? my_node_id : 0], &v, 8); \
       } \
     } \
   } while (0)
