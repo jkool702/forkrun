@@ -1987,6 +1987,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             }
 
             if (actual_start >= actual_end) {
+                // PHYSICS FIX: Align physical offset before generating empty flush
+                // to prevent wormholes spanning across multiple NUMA chunks.
+                batch_start = actual_start;
                 UNIFIED_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start, false, false);
                 if (is_numa) {
                     chunk_bounds[cb_head & 3] = local_scan_idx;
