@@ -673,13 +673,13 @@ static __thread uint32_t worker_last_major = 0;
 static __thread uint32_t worker_last_minor = 0;
 
 static int *evfd_data_arr = NULL;
+static int *evfd_eof_arr = NULL;
 static int *evfd_indexer_arr = NULL;
 static int *evfd_meta_arr = NULL;
 static int *fd_escrow_r = NULL;
 static int *fd_escrow_w = NULL;
 
 static int evfd_data = -1;
-static int evfd_eof = -1;
 static int evfd_ingest_data = -1;
 static int evfd_ingest_eof = -1;
 static int evfd_chunk_done = -1;
@@ -1218,18 +1218,20 @@ static int ring_init_main(int argc, char **argv) {
   }
 
   evfd_data_arr = malloc(global_num_nodes * sizeof(int));
+  evfd_eof_arr = malloc(global_num_nodes * sizeof(int));
   evfd_indexer_arr = malloc(global_num_nodes * sizeof(int));
   evfd_meta_arr = malloc(global_num_nodes * sizeof(int));
   fd_escrow_r = malloc(global_num_nodes * sizeof(int));
   fd_escrow_w = malloc(global_num_nodes * sizeof(int));
 
-  if (!evfd_data_arr || !evfd_indexer_arr || !evfd_meta_arr || !fd_escrow_r || !fd_escrow_w) {
+  if (!evfd_data_arr || !evfd_eof_arr || !evfd_indexer_arr || !evfd_meta_arr || !fd_escrow_r || !fd_escrow_w) {
       builtin_error("forkrun: malloc failed during ring_init");
       return EXECUTION_FAILURE;
   }
 
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     evfd_data_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+    evfd_eof_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     evfd_indexer_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     evfd_meta_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     int pfd[2];
@@ -1243,8 +1245,6 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
-  evfd_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  evfd_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
@@ -1254,7 +1254,6 @@ static int ring_init_main(int argc, char **argv) {
 
   char buf[32];
   snprintf(buf, sizeof(buf), "%d", evfd_data_arr[0]); bind_variable("EVFD_RING_DATA", buf, 0);
-  snprintf(buf, sizeof(buf), "%d", evfd_eof); bind_variable("EVFD_RING_EOF", buf, 0);
   snprintf(buf, sizeof(buf), "%d", evfd_ingest_data); bind_variable("EVFD_RING_INGEST_DATA", buf, 0);
   snprintf(buf, sizeof(buf), "%d", evfd_ingest_eof); bind_variable("EVFD_RING_INGEST_EOF", buf, 0);
 
@@ -1308,23 +1307,24 @@ static int ring_destroy_main(int argc, char **argv) {
   if (evfd_data_arr) {
     for (uint32_t n = 0; n < allocated_num_nodes; n++) {
       if (evfd_data_arr[n] >= 0) close(evfd_data_arr[n]);
+      if (evfd_eof_arr && evfd_eof_arr[n] >= 0) close(evfd_eof_arr[n]);
       if (evfd_indexer_arr && evfd_indexer_arr[n] >= 0) close(evfd_indexer_arr[n]);
       if (evfd_meta_arr && evfd_meta_arr[n] >= 0) close(evfd_meta_arr[n]);
       if (fd_escrow_r && fd_escrow_r[n] >= 0) close(fd_escrow_r[n]);
       if (fd_escrow_w && fd_escrow_w[n] >= 0) close(fd_escrow_w[n]);
     }
     free(evfd_data_arr); evfd_data_arr = NULL;
+    if (evfd_eof_arr) { free(evfd_eof_arr); evfd_eof_arr = NULL; }
     if (evfd_indexer_arr) { free(evfd_indexer_arr); evfd_indexer_arr = NULL; }
     if (evfd_meta_arr) { free(evfd_meta_arr); evfd_meta_arr = NULL; }
     free(fd_escrow_r); fd_escrow_r = NULL;
     free(fd_escrow_w); fd_escrow_w = NULL;
   }
   if (g_logical_to_phys_map) { free(g_logical_to_phys_map); g_logical_to_phys_map = NULL; }
-  if (evfd_eof >= 0) { close(evfd_eof); evfd_eof = -1; }
   if (evfd_ingest_data >= 0) { close(evfd_ingest_data); evfd_ingest_data = -1; }
   if (evfd_ingest_eof >= 0) { close(evfd_ingest_eof); evfd_ingest_eof = -1; }
   if (evfd_chunk_done >= 0) { close(evfd_chunk_done); evfd_chunk_done = -1; }
-  unbind_variable("EVFD_RING_DATA"); unbind_variable("EVFD_RING_EOF");
+  unbind_variable("EVFD_RING_DATA");
   unbind_variable("EVFD_RING_INGEST_DATA"); unbind_variable("EVFD_RING_INGEST_EOF");
   return EXECUTION_SUCCESS;
 }
@@ -2279,8 +2279,10 @@ unified_scanner_eof:
         }
         atomic_store_release(&local_state->write_idx, local_scan_idx);
         atomic_store_release(&local_state->scanner_finished, 1);
-        uint64_t blast = 999999;
-        sys_write(evfd_data_arr[my_node_id], &blast, 8);
+
+        // NEW STANDING WAVE EOF SIGNAL (NUMA)
+        uint64_t blast = 1;
+        sys_write(evfd_eof_arr[my_node_id], &blast, 8);
     } else {
         if (!byte_mode) {
             uint64_t L_tail = pending_lines;
@@ -2353,9 +2355,9 @@ unified_scanner_eof:
         atomic_store_release(&local_state->write_idx, local_scan_idx);
         atomic_store_release(&local_state->scanner_finished, 1);
 
-        // CRITICAL UMA FIX: Blast wake all workers at EOF so nobody gets left behind
-        uint64_t blast = 999999;
-        sys_write(evfd_data_arr[0], &blast, 8);
+        // NEW STANDING WAVE EOF SIGNAL (UMA)
+        uint64_t blast = 1;
+        sys_write(evfd_eof_arr[0], &blast, 8);
     }
 
     if (fd_spawn >= 0) {
@@ -2563,9 +2565,10 @@ restart_loop:
     __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
     is_waiting_on_ring = true;
 
+    // NUMA-isolated EOF standing wave polling
     struct pollfd pfds[2] = {
         {.fd = evfd_data_arr[my_numa_node], .events = POLLIN},
-        {.fd = evfd_eof, .events = POLLIN}};
+        {.fd = evfd_eof_arr[my_numa_node], .events = POLLIN}};
 
     while (1) {
       // Pre-check: ring data may have arrived since we last looked
@@ -2583,6 +2586,7 @@ restart_loop:
         sys_read(evfd_data_arr[my_numa_node], &v, 8); // consume exactly 1 token
       }
 
+      // NEVER read evfd_eof_arr here! Just break and let loop evaluate state.
       if (data_fired || eof_fired) break; // restart_loop handles priority ordering
     }
 
@@ -2640,9 +2644,11 @@ restart_loop:
 
           break;
         }
+
+        // NUMA-isolated EOF standing wave polling
         struct pollfd pfds[2] = {
             {.fd = evfd_data_arr[my_numa_node], .events = POLLIN},
-            {.fd = evfd_eof, .events = POLLIN}};
+            {.fd = evfd_eof_arr[my_numa_node], .events = POLLIN}};
 
         poll(pfds, 2, -1);
 
@@ -2651,7 +2657,7 @@ restart_loop:
             uint64_t v;
             sys_read(evfd_data_arr[my_numa_node], &v, 8);
         }
-        // Always loop back to top to re-evaluate w_curr
+        // NEVER read evfd_eof_arr here! Just loop back to top to re-evaluate w_curr
       }
       cleanup_waiter_state();
       if (claim_count == 0) {
@@ -3408,7 +3414,6 @@ static int ring_numa_stats_main(int argc, char **argv) {
   static int dispatch_##name(WORD_LIST *list) {                                \
     int argc; char **argv = make_builtin_argv(list, &argc); int ret = EXECUTION_FAILURE; \
     if (argv[0]) ret = func(argc, argv);                                       \
-    /* PHYSICS FIX: argv is allocated by Bash internals, MUST use xfree! */    \
     xfree(argv); return ret;                                                   \
   }
 FORKRUN_LOADABLES(DEFINE_DISPATCHER_X)
