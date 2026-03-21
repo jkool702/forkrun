@@ -6,7 +6,7 @@ Data preparation on multi-socket HPC systems like Frontier means running million
 
 ## What forkrun Is
 
-**forkrun** is an **intra-node** drop-in shell parallelizer that replaces `xargs -P` and GNU Parallel for streaming workloads on a single machine. It is incredibly easy to use—simply source the script, and it can immediately parallelize native bash functions or external commands:
+**forkrun** is an **intra-node** drop-in shell parallelizer that replaces `xargs -P` and GNU Parallel for streaming workloads on a single machine. It is easy to use—simply source the script, and it can immediately parallelize native bash functions or external commands:
 
 ```bash
 . frun.bash                         # sourcing frun.bash sets up *everything* needed to use `frun`
@@ -16,7 +16,7 @@ frun -k sort < records.tsv          # ordered output
 frun -s gzip < raw_logs             # stdin-passthrough mode
 ```
 
-Under the hood, forkrun is a **contention-free, NUMA-aware parallelization engine** implemented as a set of C loadable bash builtins. It coordinates workers through shared memory and atomic operations — no locks on the fast path, no cross-socket data migration, no per-item fork overhead.
+Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tuning parallelization engine** implemented as a set of C loadable bash builtins. It coordinates workers through shared memory and atomic operations — no locks on the fast path, no cross-socket data migration, no per-item fork overhead.
 
 ## How It Works
 
@@ -39,7 +39,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware parallelization engin
 | `printf %s\n` (I/O heavy) | **7.7 s** | ~350+ s | **~45×** |
 | Ordered output (`-k echo`) | **4.4 s** | ~220+ s | **~50×** |
 
-NOTE: These expected speedups are based onbenchmarks run on a UMA system. On Frontier's NUMA architecture, **the expected speedup is more** than what is shown in the above table.
+NOTE: All benchmarks run on UMA hardware. On NUMA hardware forkrun is expected to scale linearly due to its born-local NUMA approach.
 
 - **`-s` mode** is the headline: data flows memfd → kernel pipe → command stdin via `splice()`, entirely in kernel space. Bash never touches the data bytes — only the claim/dispatch coordination runs in userspace.
 - **`-b` mode**: allows for distributing batches of constant byte size without needing to scan for delimiters. Performance approaching kernel limits on memory movement.
