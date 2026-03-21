@@ -37,7 +37,7 @@ frun __exec__ "$@"
     # # # # # SETUP # # # # #
     local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
-    local -gx order_mode unsafe_flag stdin_flag byte_mode_flag order_mode unsafe_flag dry_run_flag LC_ALL
+    local -gx order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag LC_ALL
     local -ga fd_out P order_args ring_init_opts
 
     LC_ALL=C
