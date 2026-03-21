@@ -31,7 +31,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware parallelization engin
 ## Benchmarks (28-core i9-7940x system, 100M lines)
 
 | Workload | forkrun | GNU Parallel | Speedup |
-|----------|---------|-------------|---------|
+|----------|---------|--------------|---------|
 | `-s` stdin passthrough (100M lines, 1-byte avg, 100 MB) | **0.109 s** (~917M lines/s) | ~10M lines/s | **~90x** |
 | `-s` stdin passthrough (100M lines, 9-byte avg, 888 MB) | **0.430 s** (~2.07 GB/s) | ~100 MB/s | **~20x** |
 | `-b 512k` byte-based processing (100M lines, 1-byte avg, 100 MB) | **0.064 s** (~1.56B lines/s) | ~10M lines/s | **~150x** |
@@ -41,12 +41,12 @@ Under the hood, forkrun is a **contention-free, NUMA-aware parallelization engin
 
 NOTE: These expected speedups are based onbenchmarks run on a UMA system. On Frontier's NUMA architecture, **the expected speedup is more** than what is shown in the above table.
 
-**`-s` mode** is the headline: data flows memfd → kernel pipe → command stdin via `splice()`, entirely in kernel space. Bash never touches the data bytes — only the claim/dispatch coordination runs in userspace.
-**`-b` mode**: allows for distributing batches of constant byte size without needing to scan for delimiters. Performance approaching kernel limits on memory movement.
-**`-k` mode (Ordered output)**: Has virtually zero cost. As the benchmarks show, `frun -k echo` takes exactly the same time as unordered `frun echo` (`4.4 s`), whereas strict ordering brutally penalizes traditional tools.
-**CPU utilization**: 27.5 / 28 cores (98.2%) sustained across all modes. Median test shows 4:1 ratio of user:sys time.
-**Cross-socket traffic (NUMA, 4 nodes)**: 0.0–0.2% of chunks — born-local placement works and cross-node traffic is virtually eliminated.
-**File vs pipe input**: zero measurable difference — the ingest pipeline handles both identically.
+- **`-s` mode** is the headline: data flows memfd → kernel pipe → command stdin via `splice()`, entirely in kernel space. Bash never touches the data bytes — only the claim/dispatch coordination runs in userspace.
+- **`-b` mode**: allows for distributing batches of constant byte size without needing to scan for delimiters. Performance approaching kernel limits on memory movement.
+- **`-k` mode (Ordered output)**: Has virtually zero cost. As the benchmarks show, `frun -k echo` takes exactly the same time as unordered `frun echo` (`4.4 s`), whereas strict ordering brutally penalizes traditional tools.
+- **CPU utilization**: 27.5 / 28 cores (98.2%) sustained across all modes. Median test shows 4:1 ratio of user:sys time.
+- **Cross-socket traffic (NUMA, 4 nodes)**: 0.0–0.2% of chunks — born-local placement works and cross-node traffic is virtually eliminated.
+- **File vs pipe input**: zero measurable difference — the ingest pipeline handles both identically.
 
 ## Key Design Properties
 
@@ -58,11 +58,11 @@ NOTE: These expected speedups are based onbenchmarks run on a UMA system. On Fro
 
 ## Why It Matters for Frontier Data Prep
 
-Frontier's compute nodes rely on a single customized 64-core AMD EPYC "Trento" CPU configured with 4 NUMA domains (NPS4). Data prep workflows that run millions of fast shell transforms hit exactly the failure mode that forkrun was designed for: **high-frequency, low-latency operations on deep NUMA topologies**. GNU Parallel's per-item Perl initialization overhead and NUMA-oblivious scheduling leave most cores idle on this workload shape. forkrun keeps them saturated with node-local data, and has the potential to drastically reduce the total time spent in data prep.
+Frontier's compute nodes rely on a single customized 64-core AMD EPYC "Trento" CPU configured with 4 NUMA domains (NPS4). Data prep workflows that run millions of fast shell transforms hit exactly the failure mode that forkrun was designed for: **high-frequency, low-latency operations on deep NUMA topologies**. 
+
+GNU Parallel's per-item Perl initialization overhead and NUMA-oblivious scheduling leave most cores idle on this workload shape. forkrun keeps them saturated with node-local data, and has the potential to drastically reduce the total time spent in data prep.
 
 ## Contact / Source
 
-Anthony Barone
-anthonywbarone@gmail.com
-https://github.com/jkool702/forkrun
+Anthony Barone  |  anthonywbarone@gmail.com  |  https://github.com/jkool702/forkrun
 
