@@ -1324,7 +1324,7 @@ static int ring_destroy_main(int argc, char **argv) {
   if (evfd_ingest_data >= 0) { close(evfd_ingest_data); evfd_ingest_data = -1; }
   if (evfd_ingest_eof >= 0) { close(evfd_ingest_eof); evfd_ingest_eof = -1; }
   if (evfd_chunk_done >= 0) { close(evfd_chunk_done); evfd_chunk_done = -1; }
-  unbind_variable("EVFD_RING_DATA");
+  unbind_variable("EVFD_RING_DATA"); 
   unbind_variable("EVFD_RING_INGEST_DATA"); unbind_variable("EVFD_RING_INGEST_EOF");
   return EXECUTION_SUCCESS;
 }
@@ -2670,6 +2670,31 @@ restart_loop:
     }
   }
 
+  // WORMHOLE FIX 2: Escrow Poisoning Shield
+  // Re-evaluate FLAG_PARTIAL_BATCH now that slots are GUARANTEED to be initialized.
+  // This catches escrow packets that crossed chunk boundaries because they were stolen
+  // before the scanner populated them.
+  if (claim_count > 1) {
+    uint64_t safe_count = 1;
+    for (uint64_t i = 0; i < claim_count; i++) {
+      if (local_state->offset_ring[(my_read_idx + i) & RING_MASK] & FLAG_PARTIAL_BATCH) {
+        safe_count = i + 1;
+        break;
+      }
+    }
+    if (safe_count < claim_count) {
+      uint64_t remainder = claim_count - safe_count;
+      struct EscrowPacket ep = {.idx = my_read_idx + safe_count, .cnt = remainder};
+      ssize_t ew;
+      do { ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep)); } while (ew < 0 && errno == EINTR);
+      claim_count = safe_count;
+
+      // Wake up another worker to take the newly re-escrowed remainder
+      uint64_t one = 1;
+      sys_write(evfd_data_arr[my_numa_node], &one, 8);
+    }
+  }
+
   uint64_t final_val = 0;
 
   if (local_state->cfg_return_bytes) {
@@ -3417,6 +3442,7 @@ static int ring_numa_stats_main(int argc, char **argv) {
   static int dispatch_##name(WORD_LIST *list) {                                \
     int argc; char **argv = make_builtin_argv(list, &argc); int ret = EXECUTION_FAILURE; \
     if (argv[0]) ret = func(argc, argv);                                       \
+    /* PHYSICS FIX: argv is allocated by Bash internals, MUST use xfree! */    \
     xfree(argv); return ret;                                                   \
   }
 FORKRUN_LOADABLES(DEFINE_DISPATCHER_X)
