@@ -37,7 +37,7 @@ frun __exec__ "$@"
     # # # # # SETUP # # # # #
     local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
-    local -gx order_mode unsafe_flag stdin_flag byte_mode_flag order_mode unsafe_flag LC_ALL
+    local -gx order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag LC_ALL
     local -ga fd_out P order_args ring_init_opts
 
     LC_ALL=C
@@ -105,6 +105,7 @@ frun __exec__ "$@"
     unsafe_flag=false
     byte_mode_flag=false
     verbose_flag=false
+    dry_run_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
 
@@ -125,6 +126,8 @@ frun __exec__ "$@"
             +v|--no-verbose) verbose_flag=false ;;
 
             -z|--null)    delimiter_val='' ;;
+
+            -N|--dry-run|--DRY-RUN)    dry_run_flag=true  ;;
 
              # --- REPLACEMENT FLAGS (-i / -I) ---
             -i|--insert)    insert_args_flag=true ;;
@@ -392,10 +395,13 @@ toc() { :; }
         # --- WORKER DEFINITION ---
         printf -v cmdline_str '%q ' "$@"
 
-        # 1. Replace {ID} with the Worker ID (and NUMA Node ID if applicable)
+        # 1. Replace {ID} with the Worker ID, NUMA Node ID, and Worker Batch Num
         if ${insert_id_flag:-false}; then
-            cmdline_str="${cmdline_str//\\{ID\\}/\${RING_NODE_ID:+\${RING_NODE_ID}.}\${ID}}"
+            cmdline_str="${cmdline_str//\\{ID\\}/\${RING_NODE_ID:+\${RING_NODE_ID}.}\${ID}.\${W_BATCH}}"
         fi
+
+        ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"
+
 
         ring_ack_str="ring_ack $fd_fallow_w"
 
@@ -502,11 +508,17 @@ toc() { :; }
         worker_func_src+='
   {
     ID="$1"
-    shift 2
+    '
+       ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
+    '
+        worker_func_src+='shift 2
     ring_worker inc $fd_read
     while ring_claim; do
         if [[ "$REPLY" != "0" ]]; then
-            '"$pCode"'
+            '
+         ${insert_id_flag:-false} && worker_func_src+='((W_BATCH++))
+            '
+        worker_func_src+="${pCode}"'
         fi
         '"${ring_ack_str}"'
     done
@@ -1034,6 +1046,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()  # removed base64
+declare -A b64=()  # remove base64
 
 _forkrun_bootstrap_setup --force
