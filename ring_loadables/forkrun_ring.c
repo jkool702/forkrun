@@ -1873,10 +1873,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             uint64_t my_head = atomic_load_acquire(&t_state->chunk_ready_head);
 
             if (my_tail >= my_head) {
-                bool is_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
+                bool global_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
                 bool workers_starved = (atomic_load_relaxed(&local_state->read_idx) == atomic_load_relaxed(&local_state->write_idx));
 
-                int required_bl = (is_eof && workers_starved) ? 1 : 2;
+                // PHYSICS FIX: A node is only in true "tail mode" if it has exhausted all chunks
+                // assigned to it by ingest. If it still has chunks waiting for the indexer,
+                // it shouldn't aggressively scavenge 1-chunk backlogs from neighbors.
+                bool local_exhausted = (my_tail >= atomic_load_acquire(&t_state->chunk_queue_head));
+
+                int required_bl = (global_eof && local_exhausted && workers_starved) ? 1 : 2;
                 int max_bl = 0, best_ready_bl = 0, ready_target = -1, fallback_target = -1;
 
                 for (int i = 0; i < num_nodes; i++) {
