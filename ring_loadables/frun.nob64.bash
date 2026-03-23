@@ -522,8 +522,6 @@ P+=($!)
 
         eval "${worker_func_src}"
 
-        declare -p worker_func_src >&2
-
         # --- SPAWN LOOP ---
         nWorkers=0
         finished_scanners=0
