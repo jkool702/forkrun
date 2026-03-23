@@ -3100,7 +3100,12 @@ static int ring_splice_main(int argc, char **argv) {
   void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
 
   while (written < len) {
-    ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written, SPLICE_F_MOVE | SPLICE_F_MORE);
+    // PHYSICS FIX: Removed SPLICE_F_MOVE and SPLICE_F_MORE.
+    // SPLICE_F_MOVE attempts to detach pages from the tmpfs page cache.
+    // When ring_fallow concurrently calls fallocate(PUNCH_HOLE) on the same memfd,
+    // it causes a catastrophic kernel-level lock inversion / deadlock on the inode/page locks.
+    ssize_t s = splice(fd_in, p_off, fd_out, NULL, len - written, 0);
+
     if (s < 0) {
         if (errno == EINTR) continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
