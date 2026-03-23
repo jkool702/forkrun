@@ -406,18 +406,10 @@ toc() { :; }
         ring_ack_str="ring_ack $fd_fallow_w"
 
         if ${stdin_flag}; then
-             # STDIN PAYLOAD
-           : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+            # STDIN PAYLOAD
+            : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
 
-            # If the absolute max limit is safely inside 60KB, hardcode the fast path
-            if (( RING_BYTES_MAX <= RING_PIPE_CAPACITY - 4096 )); then
-            pCode='
-                ring_pipe pr pw
-                ring_splice $fd_read $pw '"''"' $REPLY "close" 2>/dev/null || exec {pw}>&-
-                '"$cmdline_str"' <&$pr
-                exec {pr}<&-'
-            else
-            # Otherwise, opportunistically probe the kernel's granted capacity
+            # opportunistically probe the kernel's granted capacity
             pCode='
             pipe_open_flag=0
             if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
@@ -439,9 +431,9 @@ toc() { :; }
                 (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
                 ( ring_splice $fd_read 1 "" $REPLY "close" ) | ( '"$cmdline_str"' )
             fi'
-            fi
 
         elif ${byte_mode_flag}; then
+            # BYTE MODE WITHOUT PASS-BY-STDIN
             # BYTE ARGS PAYLOAD
             local array_var='"${A}"'
             if ${insert_args_flag:-false}; then
@@ -529,6 +521,8 @@ P+=($!)
 }'
 
         eval "${worker_func_src}"
+
+        declare -p worker_func_src >&2
 
         # --- SPAWN LOOP ---
         nWorkers=0
@@ -1046,6 +1040,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()  # remove base64
+declare -A b64=() # remove base64
 
 _forkrun_bootstrap_setup --force
