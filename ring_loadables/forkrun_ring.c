@@ -797,6 +797,9 @@ struct SharedState {
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
   uint32_t major_ring[RING_SIZE] ALIGNED(4096);
   uint32_t minor_ring[RING_SIZE] ALIGNED(4096);
+
+  // NEW: Dynamic Topology-Aware Steal Thresholds
+  uint8_t steal_threshold[1024] ALIGNED(CACHE_LINE);
 };
 
 static struct GlobalState *g_state = NULL;
@@ -1215,6 +1218,41 @@ static int ring_init_main(int argc, char **argv) {
 
     if (byte_mode) atomic_store_relaxed(&state[n].signed_batch_size, 1);
     else atomic_store_relaxed(&state[n].signed_batch_size, (int64_t)state[n].cfg_batch_start);
+
+    // =========================================================================
+    // PHYSICS FIX: Dynamic Topology-Aware Steal Thresholds from ACPI SRAT Table
+    // =========================================================================
+    uint32_t phys_n = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
+    char dist_path[256];
+    snprintf(dist_path, sizeof(dist_path), "/sys/devices/system/node/node%u/distance", phys_n);
+    int dist_fd = open(dist_path, O_RDONLY);
+    char dist_buf[4096] = {0};
+    if (dist_fd >= 0) {
+        sys_read(dist_fd, dist_buf, sizeof(dist_buf) - 1);
+        close(dist_fd);
+    }
+
+    for (uint32_t i = 0; i < global_num_nodes; i++) {
+        uint32_t phys_i = g_logical_to_phys_map ? g_logical_to_phys_map[i] : 0;
+        int dist = (n == i) ? 10 : 20; // Default distances if SLIT table is missing
+
+        if (dist_buf[0] != '\0') {
+            const char *p = dist_buf;
+            // The ACPI SLIT file is space-separated. Skip to the phys_i-th integer.
+            for (uint32_t skip = 0; skip < phys_i && *p; skip++) {
+                while (*p && !isspace(*p)) p++;
+                while (*p && isspace(*p)) p++;
+            }
+            if (*p && isdigit(*p)) dist = atoi(p);
+        }
+
+        // Original Formula: 1 + (dist / 10)
+        // If you want your L3/CCD cache tweak, change this line to: 1 + ((dist + 9) / 10);
+        int thresh = 1 + (dist / 10);
+
+        if (thresh < 2) thresh = 2; // Absolute minimum steal threshold
+        state[n].steal_threshold[i] = (uint8_t)thresh;
+    }
   }
 
   evfd_data_arr = malloc(global_num_nodes * sizeof(int));
@@ -1875,29 +1913,37 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             if (my_tail >= my_head) {
                 bool global_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
                 bool workers_starved = (atomic_load_relaxed(&local_state->read_idx) == atomic_load_relaxed(&local_state->write_idx));
-
-                // PHYSICS FIX: A node is only in true "tail mode" if it has exhausted all chunks
-                // assigned to it by ingest. If it still has chunks waiting for the indexer,
-                // it shouldn't aggressively scavenge 1-chunk backlogs from neighbors.
                 bool local_exhausted = (my_tail >= atomic_load_acquire(&t_state->chunk_queue_head));
 
-                int required_bl = (global_eof && local_exhausted && workers_starved) ? 1 : 2;
+                // Absolute tail mode: Only trigger if the pipeline is dying AND we have nothing local left.
+                bool extreme_starvation = (global_eof && local_exhausted && workers_starved);
+
                 int max_bl = 0, best_ready_bl = 0, ready_target = -1, fallback_target = -1;
+                bool any_valid_backlog = false;
 
                 for (int i = 0; i < num_nodes; i++) {
+                    if (i == my_node_id) continue; // The outer check already proves we have no local chunks ready
+
                     uint64_t h = atomic_load_acquire(&state[i].chunk_ready_head);
                     uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
+
                     if (h > t) {
                         int bl = (int)(h - t);
-                        if (bl > max_bl) { max_bl = bl; fallback_target = i; }
+                        // Apply the physics-based topological steal threshold
+                        int required_bl = extreme_starvation ? 1 : local_state->steal_threshold[i];
 
-                        bool ready = true;
-                        if (atomic_load_acquire(&state[i].write_idx) == 0) ready = false;
-                        if (ready && bl > best_ready_bl) { best_ready_bl = bl; ready_target = i; }
+                        if (bl >= required_bl) {
+                            any_valid_backlog = true;
+                            if (bl > max_bl) { max_bl = bl; fallback_target = i; }
+
+                            bool ready = true;
+                            if (atomic_load_acquire(&state[i].write_idx) == 0) ready = false;
+                            if (ready && bl > best_ready_bl) { best_ready_bl = bl; ready_target = i; }
+                        }
                     }
                 }
 
-                if (max_bl == 0) {
+                if (!any_valid_backlog) {
                     uint64_t eof_target = atomic_load_acquire(&g_state->ingest_eof_idx);
                     if (eof_target != ~(uint64_t)0) {
                         uint64_t total_claimed = 0;
@@ -1909,8 +1955,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                         }
                     }
                 } else {
-                    if (ready_target != -1 && best_ready_bl >= required_bl) steal_target = ready_target;
-                    else if (fallback_target != -1 && max_bl >= required_bl) steal_target = fallback_target;
+                    if (ready_target != -1) steal_target = ready_target;
+                    else if (fallback_target != -1) steal_target = fallback_target;
                 }
 
                 // FIXED NUMA LATENCY BUBBLE: Don't claim an empty local queue
@@ -1992,8 +2038,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             }
 
             if (actual_start >= actual_end) {
-                // PHYSICS FIX: Align physical offset before generating empty flush
-                // to prevent wormholes spanning across multiple NUMA chunks.
                 batch_start = actual_start;
                 UNIFIED_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start, false, false);
                 if (is_numa) {
