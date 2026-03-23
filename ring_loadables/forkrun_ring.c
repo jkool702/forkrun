@@ -1063,12 +1063,19 @@ static int ring_init_main(int argc, char **argv) {
     atomic_store_relaxed(&g_state->ingest_publish_idx, 0);
     atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
 
-    // Drain stale eventfds to prevent false EOFs
+    // PHYSICS FIX: Comprehensively drain all eventfds to prevent false EOFs
+    // and spurious wakeups from previous invocations.
     uint64_t _drain;
-    sys_read(evfd_ingest_eof, &_drain, 8);
-    sys_read(evfd_ingest_data, &_drain, 8);
+    while (sys_read(evfd_ingest_eof, &_drain, 8) > 0) {}
+    while (sys_read(evfd_ingest_data, &_drain, 8) > 0) {}
+    while (sys_read(evfd_chunk_done, &_drain, 8) > 0) {}
 
     for (uint32_t n = 0; n < global_num_nodes; n++) {
+      if (evfd_eof_arr && evfd_eof_arr[n] >= 0) while (sys_read(evfd_eof_arr[n], &_drain, 8) > 0) {}
+      if (evfd_data_arr && evfd_data_arr[n] >= 0) while (sys_read(evfd_data_arr[n], &_drain, 8) > 0) {}
+      if (evfd_indexer_arr && evfd_indexer_arr[n] >= 0) while (sys_read(evfd_indexer_arr[n], &_drain, 8) > 0) {}
+      if (evfd_meta_arr && evfd_meta_arr[n] >= 0) while (sys_read(evfd_meta_arr[n], &_drain, 8) > 0) {}
+
       atomic_store_relaxed(&state[n].chunk_queue_head, 0);
       atomic_store_relaxed(&state[n].chunk_ready_head, 0);
       atomic_store_relaxed(&state[n].chunk_queue_tail, 0);
@@ -1219,9 +1226,7 @@ static int ring_init_main(int argc, char **argv) {
     if (byte_mode) atomic_store_relaxed(&state[n].signed_batch_size, 1);
     else atomic_store_relaxed(&state[n].signed_batch_size, (int64_t)state[n].cfg_batch_start);
 
-    // =========================================================================
-    // PHYSICS FIX: Dynamic Topology-Aware Steal Thresholds from ACPI SRAT Table
-    // =========================================================================
+    // Dynamic Topology-Aware Steal Thresholds from ACPI SRAT Table
     uint32_t phys_n = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
     char dist_path[256];
     snprintf(dist_path, sizeof(dist_path), "/sys/devices/system/node/node%u/distance", phys_n);
@@ -1234,11 +1239,10 @@ static int ring_init_main(int argc, char **argv) {
 
     for (uint32_t i = 0; i < global_num_nodes; i++) {
         uint32_t phys_i = g_logical_to_phys_map ? g_logical_to_phys_map[i] : 0;
-        int dist = (n == i) ? 10 : 20; // Default distances if SLIT table is missing
+        int dist = (n == i) ? 10 : 20;
 
         if (dist_buf[0] != '\0') {
             const char *p = dist_buf;
-            // The ACPI SLIT file is space-separated. Skip to the phys_i-th integer.
             for (uint32_t skip = 0; skip < phys_i && *p; skip++) {
                 while (*p && !isspace(*p)) p++;
                 while (*p && isspace(*p)) p++;
@@ -1246,11 +1250,10 @@ static int ring_init_main(int argc, char **argv) {
             if (*p && isdigit(*p)) dist = atoi(p);
         }
 
-        // Original Formula: 1 + (dist / 10)
-        // If you want your L3/CCD cache tweak, change this line to: 1 + ((dist + 9) / 10);
+        // Physics Formula: 1 + (dist / 10)
         int thresh = 1 + (dist / 10);
 
-        if (thresh < 2) thresh = 2; // Absolute minimum steal threshold
+        if (thresh < 2) thresh = 2;
         state[n].steal_threshold[i] = (uint8_t)thresh;
     }
   }
@@ -2949,7 +2952,10 @@ static int ring_order_main(int argc, char **argv) {
   bool use_zerocopy = false; struct stat st_out;
   if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
 
-  int heap_cap = 262144;
+  // PHYSICS FIX: Lower initial heap allocation from 262144 (8MB) to 1024 (32KB).
+  // It will geometrically expand via realloc() in heap_push() if skew is severe,
+  // but prevents massive wasted allocation overhead on small rapid workloads.
+  int heap_cap = 1024;
   struct HeapNode *heap = malloc(heap_cap * sizeof(struct HeapNode));
   if (!heap) {
       builtin_error("forkrun: malloc failed during ring_order");
