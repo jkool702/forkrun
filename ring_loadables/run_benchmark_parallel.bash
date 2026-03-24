@@ -41,7 +41,7 @@ J="-j $(nproc)"
 for opt in "" "-k" "-u"; do
     for cmd in ":" "echo" "printf '%s\n'"; do
         # tr -s ' ' removes extra spaces if $opt is empty
-        CMDS+=("$(echo "$J $opt -m $cmd" | tr -s ' ')")
+        CMDS+=("$(echo "-X $J $opt $cmd" | tr -s ' ')")
     done
 done
 

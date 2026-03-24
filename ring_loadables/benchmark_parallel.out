@@ -1,0 +1,3918 @@
+
+(1): time { parallel -X -j 28 : <f1 >/dev/null; }
+real	0m16.098s
+user	0m16.190s
+sys	0m0.844s
+
+CPU UTILIZATION: 1.058 / 28
+
+-----------------------------------------
+
+(2): time { parallel -X -j 28 : <f1 | wc -l; }
+real	0m17.460s
+user	0m17.406s
+sys	0m0.873s
+
+CPU UTILIZATION: 1.046 / 28
+
+-----------------------------------------
+
+(3): time { cat f1 | parallel -X -j 28 : >/dev/null; }
+real	0m15.891s
+user	0m15.963s
+sys	0m0.844s
+
+CPU UTILIZATION: 1.057 / 28
+
+-----------------------------------------
+
+(4): time { cat f1 | parallel -X -j 28 : | wc -l; }
+real	0m16.174s
+user	0m16.251s
+sys	0m0.789s
+
+CPU UTILIZATION: 1.053 / 28
+
+-----------------------------------------
+
+(5): time { parallel -X -j 28 echo <f1 >/dev/null; }
+real	0m17.212s
+user	0m17.288s
+sys	0m0.883s
+
+CPU UTILIZATION: 1.055 / 28
+
+-----------------------------------------
+
+(6): time { parallel -X -j 28 echo <f1 | wc -l; }
+real	0m18.253s
+user	0m18.421s
+sys	0m0.806s
+
+CPU UTILIZATION: 1.053 / 28
+
+-----------------------------------------
+
+(7): time { cat f1 | parallel -X -j 28 echo >/dev/null; }
+real	0m18.537s
+user	0m18.679s
+sys	0m0.778s
+
+CPU UTILIZATION: 1.049 / 28
+
+-----------------------------------------
+
+(8): time { cat f1 | parallel -X -j 28 echo | wc -l; }
+real	0m17.189s
+user	0m17.296s
+sys	0m0.866s
+
+CPU UTILIZATION: 1.056 / 28
+
+-----------------------------------------
+
+(9): time { parallel -X -j 28 printf '%s\n' <f1 >/dev/null; }
+real	0m18.769s
+user	0m19.098s
+sys	0m1.145s
+
+CPU UTILIZATION: 1.078 / 28
+
+-----------------------------------------
+
+(10): time { parallel -X -j 28 printf '%s\n' <f1 | wc -l; }
+real	0m17.778s
+user	0m18.147s
+sys	0m1.119s
+
+CPU UTILIZATION: 1.083 / 28
+
+-----------------------------------------
+
+(11): time { cat f1 | parallel -X -j 28 printf '%s\n' >/dev/null; }
+real	0m16.209s
+user	0m16.587s
+sys	0m1.192s
+
+CPU UTILIZATION: 1.096 / 28
+
+-----------------------------------------
+
+(12): time { cat f1 | parallel -X -j 28 printf '%s\n' | wc -l; }
+real	0m16.191s
+user	0m16.601s
+sys	0m1.155s
+
+CPU UTILIZATION: 1.096 / 28
+
+-----------------------------------------
+
+(13): time { parallel -X -j 28 -k : <f1 >/dev/null; }
+real	0m17.960s
+user	0m17.943s
+sys	0m0.870s
+
+CPU UTILIZATION: 1.047 / 28
+
+-----------------------------------------
+
+(14): time { parallel -X -j 28 -k : <f1 | wc -l; }
+real	0m17.382s
+user	0m17.404s
+sys	0m0.831s
+
+CPU UTILIZATION: 1.049 / 28
+
+-----------------------------------------
+
+(15): time { cat f1 | parallel -X -j 28 -k : >/dev/null; }
+real	0m17.296s
+user	0m17.356s
+sys	0m0.829s
+
+CPU UTILIZATION: 1.051 / 28
+
+-----------------------------------------
+
+(16): time { cat f1 | parallel -X -j 28 -k : | wc -l; }
+real	0m18.123s
+user	0m18.105s
+sys	0m0.867s
+
+CPU UTILIZATION: 1.046 / 28
+
+-----------------------------------------
+
+(17): time { parallel -X -j 28 -k echo <f1 >/dev/null; }
+real	0m16.744s
+user	0m16.855s
+sys	0m0.839s
+
+CPU UTILIZATION: 1.056 / 28
+
+-----------------------------------------
+
+(18): time { parallel -X -j 28 -k echo <f1 | wc -l; }
+real	0m18.334s
+user	0m18.434s
+sys	0m0.846s
+
+CPU UTILIZATION: 1.051 / 28
+
+-----------------------------------------
+
+(19): time { cat f1 | parallel -X -j 28 -k echo >/dev/null; }
+real	0m17.478s
+user	0m17.566s
+sys	0m0.867s
+
+CPU UTILIZATION: 1.054 / 28
+
+-----------------------------------------
+
+(20): time { cat f1 | parallel -X -j 28 -k echo | wc -l; }
+real	0m17.984s
+user	0m18.027s
+sys	0m0.889s
+
+CPU UTILIZATION: 1.051 / 28
+
+-----------------------------------------
+
+(21): time { parallel -X -j 28 -k printf '%s\n' <f1 >/dev/null; }
+real	0m17.298s
+user	0m17.690s
+sys	0m1.153s
+
+CPU UTILIZATION: 1.089 / 28
+
+-----------------------------------------
+
+(22): time { parallel -X -j 28 -k printf '%s\n' <f1 | wc -l; }
+real	0m16.854s
+user	0m17.234s
+sys	0m1.164s
+
+CPU UTILIZATION: 1.091 / 28
+
+-----------------------------------------
+
+(23): time { cat f1 | parallel -X -j 28 -k printf '%s\n' >/dev/null; }
+real	0m17.541s
+user	0m17.983s
+sys	0m1.072s
+
+CPU UTILIZATION: 1.086 / 28
+
+-----------------------------------------
+
+(24): time { cat f1 | parallel -X -j 28 -k printf '%s\n' | wc -l; }
+real	0m16.927s
+user	0m17.355s
+sys	0m1.115s
+
+CPU UTILIZATION: 1.091 / 28
+
+-----------------------------------------
+
+(25): time { parallel -X -j 28 -u : <f1 >/dev/null; }
+real	0m18.032s
+user	0m18.067s
+sys	0m0.844s
+
+CPU UTILIZATION: 1.048 / 28
+
+-----------------------------------------
+
+(26): time { parallel -X -j 28 -u : <f1 | wc -l; }
+real	0m17.414s
+user	0m17.478s
+sys	0m0.819s
+
+CPU UTILIZATION: 1.050 / 28
+
+-----------------------------------------
+
+(27): time { cat f1 | parallel -X -j 28 -u : >/dev/null; }
+real	0m17.167s
+user	0m17.165s
+sys	0m0.886s
+
+CPU UTILIZATION: 1.051 / 28
+
+-----------------------------------------
+
+(28): time { cat f1 | parallel -X -j 28 -u : | wc -l; }
+real	0m17.466s
+user	0m17.502s
+sys	0m0.862s
+
+CPU UTILIZATION: 1.051 / 28
+
+-----------------------------------------
+
+(29): time { parallel -X -j 28 -u echo <f1 >/dev/null; }
+real	0m17.497s
+user	0m17.564s
+sys	0m0.897s
+
+CPU UTILIZATION: 1.055 / 28
+
+-----------------------------------------
+
+(30): time { parallel -X -j 28 -u echo <f1 | wc -l; }
+real	0m16.127s
+user	0m16.276s
+sys	0m0.821s
+
+CPU UTILIZATION: 1.060 / 28
+
+-----------------------------------------
+
+(31): time { cat f1 | parallel -X -j 28 -u echo >/dev/null; }
+real	0m17.586s
+user	0m17.684s
+sys	0m0.845s
+
+CPU UTILIZATION: 1.053 / 28
+
+-----------------------------------------
+
+(32): time { cat f1 | parallel -X -j 28 -u echo | wc -l; }
+real	0m17.359s
+user	0m17.419s
+sys	0m0.894s
+
+CPU UTILIZATION: 1.054 / 28
+
+-----------------------------------------
+
+(33): time { parallel -X -j 28 -u printf '%s\n' <f1 >/dev/null; }
+real	0m17.547s
+user	0m17.943s
+sys	0m0.979s
+
+CPU UTILIZATION: 1.078 / 28
+
+-----------------------------------------
+
+(34): time { parallel -X -j 28 -u printf '%s\n' <f1 | wc -l; }
+real	0m17.228s
+user	0m17.937s
+sys	0m1.696s
+
+CPU UTILIZATION: 1.139 / 28
+
+-----------------------------------------
+
+(35): time { cat f1 | parallel -X -j 28 -u printf '%s\n' >/dev/null; }
+real	0m18.370s
+user	0m18.743s
+sys	0m0.987s
+
+CPU UTILIZATION: 1.074 / 28
+
+-----------------------------------------
+
+(36): time { cat f1 | parallel -X -j 28 -u printf '%s\n' | wc -l; }
+real	0m16.620s
+user	0m17.259s
+sys	0m1.650s
+
+CPU UTILIZATION: 1.137 / 28
+
+-----------------------------------------
+
+(37): time { parallel -j 28 --pipe : <f1 >/dev/null; }
+real	0m0.170s
+user	0m0.157s
+sys	0m0.161s
+
+CPU UTILIZATION: 1.870 / 28
+
+-----------------------------------------
+
+(38): time { parallel -j 28 --pipe : <f1 | wc -l; }
+real	0m0.162s
+user	0m0.146s
+sys	0m0.144s
+
+CPU UTILIZATION: 1.790 / 28
+
+-----------------------------------------
+
+(39): time { cat f1 | parallel -j 28 --pipe : >/dev/null; }
+real	0m0.160s
+user	0m0.158s
+sys	0m0.140s
+
+CPU UTILIZATION: 1.862 / 28
+
+-----------------------------------------
+
+(40): time { cat f1 | parallel -j 28 --pipe : | wc -l; }
+real	0m0.169s
+user	0m0.147s
+sys	0m0.164s
+
+CPU UTILIZATION: 1.840 / 28
+
+-----------------------------------------
+
+(41): time { parallel -j 28 --pipe cat <f1 >/dev/null; }
+real	0m0.161s
+user	0m0.153s
+sys	0m0.139s
+
+CPU UTILIZATION: 1.813 / 28
+
+-----------------------------------------
+
+(42): time { parallel -j 28 --pipe cat <f1 | wc -l; }
+real	0m0.170s
+user	0m0.160s
+sys	0m0.164s
+
+CPU UTILIZATION: 1.905 / 28
+
+-----------------------------------------
+
+(43): time { cat f1 | parallel -j 28 --pipe cat >/dev/null; }
+real	0m0.162s
+user	0m0.144s
+sys	0m0.157s
+
+CPU UTILIZATION: 1.858 / 28
+
+-----------------------------------------
+
+(44): time { cat f1 | parallel -j 28 --pipe cat | wc -l; }
+real	0m0.168s
+user	0m0.167s
+sys	0m0.142s
+
+CPU UTILIZATION: 1.839 / 28
+
+-----------------------------------------
+
+(45): time { parallel -j 28 --pipe tee <f1 >/dev/null; }
+real	0m0.166s
+user	0m0.155s
+sys	0m0.156s
+
+CPU UTILIZATION: 1.873 / 28
+
+-----------------------------------------
+
+(46): time { parallel -j 28 --pipe tee <f1 | wc -l; }
+real	0m0.160s
+user	0m0.150s
+sys	0m0.160s
+
+CPU UTILIZATION: 1.937 / 28
+
+-----------------------------------------
+
+(47): time { cat f1 | parallel -j 28 --pipe tee >/dev/null; }
+real	0m0.170s
+user	0m0.170s
+sys	0m0.143s
+
+CPU UTILIZATION: 1.841 / 28
+
+-----------------------------------------
+
+(48): time { cat f1 | parallel -j 28 --pipe tee | wc -l; }
+real	0m0.163s
+user	0m0.147s
+sys	0m0.161s
+
+CPU UTILIZATION: 1.889 / 28
+
+-----------------------------------------
+
+(49): time { parallel -j 28 --pipe --block 524288 : <f1 >/dev/null; }
+real	0m0.167s
+user	0m0.158s
+sys	0m0.157s
+
+CPU UTILIZATION: 1.886 / 28
+
+-----------------------------------------
+
+(50): time { parallel -j 28 --pipe --block 524288 : <f1 | wc -l; }
+real	0m0.164s
+user	0m0.157s
+sys	0m0.156s
+
+CPU UTILIZATION: 1.908 / 28
+
+-----------------------------------------
+
+(51): time { cat f1 | parallel -j 28 --pipe --block 524288 : >/dev/null; }
+real	0m0.161s
+user	0m0.152s
+sys	0m0.160s
+
+CPU UTILIZATION: 1.937 / 28
+
+-----------------------------------------
+
+(52): time { cat f1 | parallel -j 28 --pipe --block 524288 : | wc -l; }
+real	0m0.162s
+user	0m0.138s
+sys	0m0.172s
+
+CPU UTILIZATION: 1.913 / 28
+
+-----------------------------------------
+
+(53): time { parallel -j 28 --pipe --block 524288 cat <f1 >/dev/null; }
+real	0m0.159s
+user	0m0.144s
+sys	0m0.152s
+
+CPU UTILIZATION: 1.861 / 28
+
+-----------------------------------------
+
+(54): time { parallel -j 28 --pipe --block 524288 cat <f1 | wc -l; }
+real	0m0.161s
+user	0m0.151s
+sys	0m0.154s
+
+CPU UTILIZATION: 1.894 / 28
+
+-----------------------------------------
+
+(55): time { cat f1 | parallel -j 28 --pipe --block 524288 cat >/dev/null; }
+real	0m0.160s
+user	0m0.163s
+sys	0m0.139s
+
+CPU UTILIZATION: 1.887 / 28
+
+-----------------------------------------
+
+(56): time { cat f1 | parallel -j 28 --pipe --block 524288 cat | wc -l; }
+real	0m0.160s
+user	0m0.169s
+sys	0m0.138s
+
+CPU UTILIZATION: 1.918 / 28
+
+-----------------------------------------
+
+(57): time { parallel -j 28 --pipe --block 524288 tee <f1 >/dev/null; }
+real	0m0.165s
+user	0m0.145s
+sys	0m0.166s
+
+CPU UTILIZATION: 1.884 / 28
+
+-----------------------------------------
+
+(58): time { parallel -j 28 --pipe --block 524288 tee <f1 | wc -l; }
+real	0m0.170s
+user	0m0.162s
+sys	0m0.159s
+
+CPU UTILIZATION: 1.888 / 28
+
+-----------------------------------------
+
+(59): time { cat f1 | parallel -j 28 --pipe --block 524288 tee >/dev/null; }
+real	0m0.168s
+user	0m0.157s
+sys	0m0.158s
+
+CPU UTILIZATION: 1.875 / 28
+
+-----------------------------------------
+
+(60): time { cat f1 | parallel -j 28 --pipe --block 524288 tee | wc -l; }
+real	0m0.173s
+user	0m0.158s
+sys	0m0.160s
+
+CPU UTILIZATION: 1.838 / 28
+
+-----------------------------------------
+
+(61): time { parallel -j 28 --pipe --block 4096 : <f1 >/dev/null; }
+real	0m0.826s
+user	0m1.170s
+sys	0m1.457s
+
+CPU UTILIZATION: 3.180 / 28
+
+-----------------------------------------
+
+(62): time { parallel -j 28 --pipe --block 4096 : <f1 | wc -l; }
+real	0m0.810s
+user	0m1.115s
+sys	0m1.489s
+
+CPU UTILIZATION: 3.214 / 28
+
+-----------------------------------------
+
+(63): time { cat f1 | parallel -j 28 --pipe --block 4096 : >/dev/null; }
+real	0m0.829s
+user	0m1.106s
+sys	0m1.513s
+
+CPU UTILIZATION: 3.159 / 28
+
+-----------------------------------------
+
+(64): time { cat f1 | parallel -j 28 --pipe --block 4096 : | wc -l; }
+real	0m0.838s
+user	0m1.149s
+sys	0m1.511s
+
+CPU UTILIZATION: 3.174 / 28
+
+-----------------------------------------
+
+(65): time { parallel -j 28 --pipe --block 4096 cat <f1 >/dev/null; }
+real	0m0.822s
+user	0m1.172s
+sys	0m1.546s
+
+CPU UTILIZATION: 3.306 / 28
+
+-----------------------------------------
+
+(66): time { parallel -j 28 --pipe --block 4096 cat <f1 | wc -l; }
+real	0m0.817s
+user	0m1.193s
+sys	0m1.529s
+
+CPU UTILIZATION: 3.331 / 28
+
+-----------------------------------------
+
+(67): time { cat f1 | parallel -j 28 --pipe --block 4096 cat >/dev/null; }
+real	0m0.839s
+user	0m1.213s
+sys	0m1.521s
+
+CPU UTILIZATION: 3.258 / 28
+
+-----------------------------------------
+
+(68): time { cat f1 | parallel -j 28 --pipe --block 4096 cat | wc -l; }
+real	0m0.845s
+user	0m1.135s
+sys	0m1.588s
+
+CPU UTILIZATION: 3.222 / 28
+
+-----------------------------------------
+
+(69): time { parallel -j 28 --pipe --block 4096 tee <f1 >/dev/null; }
+real	0m0.812s
+user	0m1.113s
+sys	0m1.592s
+
+CPU UTILIZATION: 3.331 / 28
+
+-----------------------------------------
+
+(70): time { parallel -j 28 --pipe --block 4096 tee <f1 | wc -l; }
+real	0m0.804s
+user	0m1.139s
+sys	0m1.563s
+
+CPU UTILIZATION: 3.360 / 28
+
+-----------------------------------------
+
+(71): time { cat f1 | parallel -j 28 --pipe --block 4096 tee >/dev/null; }
+real	0m0.816s
+user	0m1.167s
+sys	0m1.539s
+
+CPU UTILIZATION: 3.316 / 28
+
+-----------------------------------------
+
+(72): time { cat f1 | parallel -j 28 --pipe --block 4096 tee | wc -l; }
+real	0m0.808s
+user	0m1.109s
+sys	0m1.566s
+
+CPU UTILIZATION: 3.310 / 28
+
+-----------------------------------------
+
+(73): time { parallel -j 28 -k --pipe : <f1 >/dev/null; }
+real	0m0.164s
+user	0m0.157s
+sys	0m0.140s
+
+CPU UTILIZATION: 1.810 / 28
+
+-----------------------------------------
+
+(74): time { parallel -j 28 -k --pipe : <f1 | wc -l; }
+real	0m0.160s
+user	0m0.156s
+sys	0m0.138s
+
+CPU UTILIZATION: 1.837 / 28
+
+-----------------------------------------
+
+(75): time { cat f1 | parallel -j 28 -k --pipe : >/dev/null; }
+real	0m0.160s
+user	0m0.155s
+sys	0m0.147s
+
+CPU UTILIZATION: 1.887 / 28
+
+-----------------------------------------
+
+(76): time { cat f1 | parallel -j 28 -k --pipe : | wc -l; }
+real	0m0.163s
+user	0m0.155s
+sys	0m0.145s
+
+CPU UTILIZATION: 1.840 / 28
+
+-----------------------------------------
+
+(77): time { parallel -j 28 -k --pipe cat <f1 >/dev/null; }
+real	0m0.167s
+user	0m0.144s
+sys	0m0.154s
+
+CPU UTILIZATION: 1.784 / 28
+
+-----------------------------------------
+
+(78): time { parallel -j 28 -k --pipe cat <f1 | wc -l; }
+real	0m0.162s
+user	0m0.153s
+sys	0m0.146s
+
+CPU UTILIZATION: 1.845 / 28
+
+-----------------------------------------
+
+(79): time { cat f1 | parallel -j 28 -k --pipe cat >/dev/null; }
+real	0m0.161s
+user	0m0.153s
+sys	0m0.138s
+
+CPU UTILIZATION: 1.807 / 28
+
+-----------------------------------------
+
+(80): time { cat f1 | parallel -j 28 -k --pipe cat | wc -l; }
+real	0m0.164s
+user	0m0.155s
+sys	0m0.140s
+
+CPU UTILIZATION: 1.798 / 28
+
+-----------------------------------------
+
+(81): time { parallel -j 28 -k --pipe tee <f1 >/dev/null; }
+real	0m0.173s
+user	0m0.149s
+sys	0m0.163s
+
+CPU UTILIZATION: 1.803 / 28
+
+-----------------------------------------
+
+(82): time { parallel -j 28 -k --pipe tee <f1 | wc -l; }
+real	0m0.168s
+user	0m0.159s
+sys	0m0.149s
+
+CPU UTILIZATION: 1.833 / 28
+
+-----------------------------------------
+
+(83): time { cat f1 | parallel -j 28 -k --pipe tee >/dev/null; }
+real	0m0.164s
+user	0m0.133s
+sys	0m0.166s
+
+CPU UTILIZATION: 1.823 / 28
+
+-----------------------------------------
+
+(84): time { cat f1 | parallel -j 28 -k --pipe tee | wc -l; }
+real	0m0.178s
+user	0m0.152s
+sys	0m0.167s
+
+CPU UTILIZATION: 1.792 / 28
+
+-----------------------------------------
+
+(85): time { parallel -j 28 -k --pipe --block 524288 : <f1 >/dev/null; }
+real	0m0.166s
+user	0m0.161s
+sys	0m0.143s
+
+CPU UTILIZATION: 1.831 / 28
+
+-----------------------------------------
+
+(86): time { parallel -j 28 -k --pipe --block 524288 : <f1 | wc -l; }
+real	0m0.169s
+user	0m0.155s
+sys	0m0.149s
+
+CPU UTILIZATION: 1.798 / 28
+
+-----------------------------------------
+
+(87): time { cat f1 | parallel -j 28 -k --pipe --block 524288 : >/dev/null; }
+real	0m0.162s
+user	0m0.138s
+sys	0m0.157s
+
+CPU UTILIZATION: 1.820 / 28
+
+-----------------------------------------
+
+(88): time { cat f1 | parallel -j 28 -k --pipe --block 524288 : | wc -l; }
+real	0m0.176s
+user	0m0.168s
+sys	0m0.146s
+
+CPU UTILIZATION: 1.784 / 28
+
+-----------------------------------------
+
+(89): time { parallel -j 28 -k --pipe --block 524288 cat <f1 >/dev/null; }
+real	0m0.166s
+user	0m0.160s
+sys	0m0.148s
+
+CPU UTILIZATION: 1.855 / 28
+
+-----------------------------------------
+
+(90): time { parallel -j 28 -k --pipe --block 524288 cat <f1 | wc -l; }
+real	0m0.168s
+user	0m0.150s
+sys	0m0.154s
+
+CPU UTILIZATION: 1.809 / 28
+
+-----------------------------------------
+
+(91): time { cat f1 | parallel -j 28 -k --pipe --block 524288 cat >/dev/null; }
+real	0m0.167s
+user	0m0.138s
+sys	0m0.165s
+
+CPU UTILIZATION: 1.814 / 28
+
+-----------------------------------------
+
+(92): time { cat f1 | parallel -j 28 -k --pipe --block 524288 cat | wc -l; }
+real	0m0.166s
+user	0m0.153s
+sys	0m0.148s
+
+CPU UTILIZATION: 1.813 / 28
+
+-----------------------------------------
+
+(93): time { parallel -j 28 -k --pipe --block 524288 tee <f1 >/dev/null; }
+real	0m0.163s
+user	0m0.159s
+sys	0m0.144s
+
+CPU UTILIZATION: 1.858 / 28
+
+-----------------------------------------
+
+(94): time { parallel -j 28 -k --pipe --block 524288 tee <f1 | wc -l; }
+real	0m0.165s
+user	0m0.160s
+sys	0m0.147s
+
+CPU UTILIZATION: 1.860 / 28
+
+-----------------------------------------
+
+(95): time { cat f1 | parallel -j 28 -k --pipe --block 524288 tee >/dev/null; }
+real	0m0.165s
+user	0m0.137s
+sys	0m0.165s
+
+CPU UTILIZATION: 1.830 / 28
+
+-----------------------------------------
+
+(96): time { cat f1 | parallel -j 28 -k --pipe --block 524288 tee | wc -l; }
+real	0m0.162s
+user	0m0.157s
+sys	0m0.139s
+
+CPU UTILIZATION: 1.827 / 28
+
+-----------------------------------------
+
+(97): time { parallel -j 28 -k --pipe --block 4096 : <f1 >/dev/null; }
+real	0m0.805s
+user	0m1.089s
+sys	0m1.472s
+
+CPU UTILIZATION: 3.181 / 28
+
+-----------------------------------------
+
+(98): time { parallel -j 28 -k --pipe --block 4096 : <f1 | wc -l; }
+real	0m0.814s
+user	0m1.119s
+sys	0m1.478s
+
+CPU UTILIZATION: 3.190 / 28
+
+-----------------------------------------
+
+(99): time { cat f1 | parallel -j 28 -k --pipe --block 4096 : >/dev/null; }
+real	0m0.821s
+user	0m1.078s
+sys	0m1.522s
+
+CPU UTILIZATION: 3.166 / 28
+
+-----------------------------------------
+
+(100): time { cat f1 | parallel -j 28 -k --pipe --block 4096 : | wc -l; }
+real	0m0.823s
+user	0m1.075s
+sys	0m1.544s
+
+CPU UTILIZATION: 3.182 / 28
+
+-----------------------------------------
+
+(101): time { parallel -j 28 -k --pipe --block 4096 cat <f1 >/dev/null; }
+real	0m0.813s
+user	0m1.098s
+sys	0m1.577s
+
+CPU UTILIZATION: 3.290 / 28
+
+-----------------------------------------
+
+(102): time { parallel -j 28 -k --pipe --block 4096 cat <f1 | wc -l; }
+real	0m0.813s
+user	0m1.157s
+sys	0m1.540s
+
+CPU UTILIZATION: 3.317 / 28
+
+-----------------------------------------
+
+(103): time { cat f1 | parallel -j 28 -k --pipe --block 4096 cat >/dev/null; }
+real	0m0.803s
+user	0m1.130s
+sys	0m1.535s
+
+CPU UTILIZATION: 3.318 / 28
+
+-----------------------------------------
+
+(104): time { cat f1 | parallel -j 28 -k --pipe --block 4096 cat | wc -l; }
+real	0m0.826s
+user	0m1.208s
+sys	0m1.509s
+
+CPU UTILIZATION: 3.289 / 28
+
+-----------------------------------------
+
+(105): time { parallel -j 28 -k --pipe --block 4096 tee <f1 >/dev/null; }
+real	0m0.814s
+user	0m1.099s
+sys	0m1.591s
+
+CPU UTILIZATION: 3.304 / 28
+
+-----------------------------------------
+
+(106): time { parallel -j 28 -k --pipe --block 4096 tee <f1 | wc -l; }
+real	0m0.812s
+user	0m1.093s
+sys	0m1.593s
+
+CPU UTILIZATION: 3.307 / 28
+
+-----------------------------------------
+
+(107): time { cat f1 | parallel -j 28 -k --pipe --block 4096 tee >/dev/null; }
+real	0m0.859s
+user	0m1.180s
+sys	0m1.587s
+
+CPU UTILIZATION: 3.221 / 28
+
+-----------------------------------------
+
+(108): time { cat f1 | parallel -j 28 -k --pipe --block 4096 tee | wc -l; }
+real	0m0.834s
+user	0m1.131s
+sys	0m1.612s
+
+CPU UTILIZATION: 3.288 / 28
+
+-----------------------------------------
+
+(109): time { parallel -j 28 -u --pipe : <f1 >/dev/null; }
+real	0m0.158s
+user	0m0.138s
+sys	0m0.150s
+
+CPU UTILIZATION: 1.822 / 28
+
+-----------------------------------------
+
+(110): time { parallel -j 28 -u --pipe : <f1 | wc -l; }
+real	0m0.157s
+user	0m0.141s
+sys	0m0.155s
+
+CPU UTILIZATION: 1.885 / 28
+
+-----------------------------------------
+
+(111): time { cat f1 | parallel -j 28 -u --pipe : >/dev/null; }
+real	0m0.156s
+user	0m0.142s
+sys	0m0.145s
+
+CPU UTILIZATION: 1.839 / 28
+
+-----------------------------------------
+
+(112): time { cat f1 | parallel -j 28 -u --pipe : | wc -l; }
+real	0m0.154s
+user	0m0.159s
+sys	0m0.128s
+
+CPU UTILIZATION: 1.863 / 28
+
+-----------------------------------------
+
+(113): time { parallel -j 28 -u --pipe cat <f1 >/dev/null; }
+real	0m0.160s
+user	0m0.144s
+sys	0m0.141s
+
+CPU UTILIZATION: 1.781 / 28
+
+-----------------------------------------
+
+(114): time { parallel -j 28 -u --pipe cat <f1 | wc -l; }
+real	0m0.155s
+user	0m0.130s
+sys	0m0.155s
+
+CPU UTILIZATION: 1.838 / 28
+
+-----------------------------------------
+
+(115): time { cat f1 | parallel -j 28 -u --pipe cat >/dev/null; }
+real	0m0.153s
+user	0m0.145s
+sys	0m0.133s
+
+CPU UTILIZATION: 1.816 / 28
+
+-----------------------------------------
+
+(116): time { cat f1 | parallel -j 28 -u --pipe cat | wc -l; }
+real	0m0.160s
+user	0m0.150s
+sys	0m0.140s
+
+CPU UTILIZATION: 1.812 / 28
+
+-----------------------------------------
+
+(117): time { parallel -j 28 -u --pipe tee <f1 >/dev/null; }
+real	0m0.173s
+user	0m0.164s
+sys	0m0.131s
+
+CPU UTILIZATION: 1.705 / 28
+
+-----------------------------------------
+
+(118): time { parallel -j 28 -u --pipe tee <f1 | wc -l; }
+real	0m0.157s
+user	0m0.145s
+sys	0m0.132s
+
+CPU UTILIZATION: 1.764 / 28
+
+-----------------------------------------
+
+(119): time { cat f1 | parallel -j 28 -u --pipe tee >/dev/null; }
+real	0m0.155s
+user	0m0.136s
+sys	0m0.141s
+
+CPU UTILIZATION: 1.787 / 28
+
+-----------------------------------------
+
+(120): time { cat f1 | parallel -j 28 -u --pipe tee | wc -l; }
+real	0m0.152s
+user	0m0.142s
+sys	0m0.125s
+
+CPU UTILIZATION: 1.756 / 28
+
+-----------------------------------------
+
+(121): time { parallel -j 28 -u --pipe --block 524288 : <f1 >/dev/null; }
+real	0m0.158s
+user	0m0.145s
+sys	0m0.138s
+
+CPU UTILIZATION: 1.791 / 28
+
+-----------------------------------------
+
+(122): time { parallel -j 28 -u --pipe --block 524288 : <f1 | wc -l; }
+real	0m0.169s
+user	0m0.161s
+sys	0m0.145s
+
+CPU UTILIZATION: 1.810 / 28
+
+-----------------------------------------
+
+(123): time { cat f1 | parallel -j 28 -u --pipe --block 524288 : >/dev/null; }
+real	0m0.157s
+user	0m0.148s
+sys	0m0.145s
+
+CPU UTILIZATION: 1.866 / 28
+
+-----------------------------------------
+
+(124): time { cat f1 | parallel -j 28 -u --pipe --block 524288 : | wc -l; }
+real	0m0.154s
+user	0m0.149s
+sys	0m0.137s
+
+CPU UTILIZATION: 1.857 / 28
+
+-----------------------------------------
+
+(125): time { parallel -j 28 -u --pipe --block 524288 cat <f1 >/dev/null; }
+real	0m0.159s
+user	0m0.140s
+sys	0m0.148s
+
+CPU UTILIZATION: 1.811 / 28
+
+-----------------------------------------
+
+(126): time { parallel -j 28 -u --pipe --block 524288 cat <f1 | wc -l; }
+real	0m0.163s
+user	0m0.157s
+sys	0m0.124s
+
+CPU UTILIZATION: 1.723 / 28
+
+-----------------------------------------
+
+(127): time { cat f1 | parallel -j 28 -u --pipe --block 524288 cat >/dev/null; }
+real	0m0.163s
+user	0m0.157s
+sys	0m0.137s
+
+CPU UTILIZATION: 1.803 / 28
+
+-----------------------------------------
+
+(128): time { cat f1 | parallel -j 28 -u --pipe --block 524288 cat | wc -l; }
+real	0m0.152s
+user	0m0.138s
+sys	0m0.149s
+
+CPU UTILIZATION: 1.888 / 28
+
+-----------------------------------------
+
+(129): time { parallel -j 28 -u --pipe --block 524288 tee <f1 >/dev/null; }
+real	0m0.154s
+user	0m0.127s
+sys	0m0.153s
+
+CPU UTILIZATION: 1.818 / 28
+
+-----------------------------------------
+
+(130): time { parallel -j 28 -u --pipe --block 524288 tee <f1 | wc -l; }
+real	0m0.158s
+user	0m0.137s
+sys	0m0.148s
+
+CPU UTILIZATION: 1.803 / 28
+
+-----------------------------------------
+
+(131): time { cat f1 | parallel -j 28 -u --pipe --block 524288 tee >/dev/null; }
+real	0m0.156s
+user	0m0.138s
+sys	0m0.153s
+
+CPU UTILIZATION: 1.865 / 28
+
+-----------------------------------------
+
+(132): time { cat f1 | parallel -j 28 -u --pipe --block 524288 tee | wc -l; }
+real	0m0.161s
+user	0m0.151s
+sys	0m0.149s
+
+CPU UTILIZATION: 1.863 / 28
+
+-----------------------------------------
+
+(133): time { parallel -j 28 -u --pipe --block 4096 : <f1 >/dev/null; }
+real	0m0.745s
+user	0m1.015s
+sys	0m1.471s
+
+CPU UTILIZATION: 3.336 / 28
+
+-----------------------------------------
+
+(134): time { parallel -j 28 -u --pipe --block 4096 : <f1 | wc -l; }
+real	0m0.734s
+user	0m1.038s
+sys	0m1.436s
+
+CPU UTILIZATION: 3.370 / 28
+
+-----------------------------------------
+
+(135): time { cat f1 | parallel -j 28 -u --pipe --block 4096 : >/dev/null; }
+real	0m0.738s
+user	0m1.027s
+sys	0m1.436s
+
+CPU UTILIZATION: 3.337 / 28
+
+-----------------------------------------
+
+(136): time { cat f1 | parallel -j 28 -u --pipe --block 4096 : | wc -l; }
+real	0m0.746s
+user	0m1.026s
+sys	0m1.453s
+
+CPU UTILIZATION: 3.323 / 28
+
+-----------------------------------------
+
+(137): time { parallel -j 28 -u --pipe --block 4096 cat <f1 >/dev/null; }
+real	0m0.771s
+user	0m1.055s
+sys	0m1.574s
+
+CPU UTILIZATION: 3.409 / 28
+
+-----------------------------------------
+
+(138): time { parallel -j 28 -u --pipe --block 4096 cat <f1 | wc -l; }
+real	0m0.759s
+user	0m1.054s
+sys	0m1.556s
+
+CPU UTILIZATION: 3.438 / 28
+
+-----------------------------------------
+
+(139): time { cat f1 | parallel -j 28 -u --pipe --block 4096 cat >/dev/null; }
+real	0m0.742s
+user	0m1.043s
+sys	0m1.552s
+
+CPU UTILIZATION: 3.497 / 28
+
+-----------------------------------------
+
+(140): time { cat f1 | parallel -j 28 -u --pipe --block 4096 cat | wc -l; }
+real	0m0.769s
+user	0m1.088s
+sys	0m1.517s
+
+CPU UTILIZATION: 3.387 / 28
+
+-----------------------------------------
+
+(141): time { parallel -j 28 -u --pipe --block 4096 tee <f1 >/dev/null; }
+real	0m0.761s
+user	0m1.084s
+sys	0m1.523s
+
+CPU UTILIZATION: 3.425 / 28
+
+-----------------------------------------
+
+(142): time { parallel -j 28 -u --pipe --block 4096 tee <f1 | wc -l; }
+real	0m0.744s
+user	0m1.041s
+sys	0m1.557s
+
+CPU UTILIZATION: 3.491 / 28
+
+-----------------------------------------
+
+(143): time { cat f1 | parallel -j 28 -u --pipe --block 4096 tee >/dev/null; }
+real	0m0.780s
+user	0m1.055s
+sys	0m1.603s
+
+CPU UTILIZATION: 3.407 / 28
+
+-----------------------------------------
+
+(144): time { cat f1 | parallel -j 28 -u --pipe --block 4096 tee | wc -l; }
+real	0m0.747s
+user	0m1.075s
+sys	0m1.537s
+
+CPU UTILIZATION: 3.496 / 28
+
+-----------------------------------------
+
+(145): time { parallel -X -j 28 : <f2 >/dev/null; }
+real	0m18.148s
+user	0m18.107s
+sys	0m1.258s
+
+CPU UTILIZATION: 1.067 / 28
+
+-----------------------------------------
+
+(146): time { parallel -X -j 28 : <f2 | wc -l; }
+real	0m17.612s
+user	0m17.665s
+sys	0m1.303s
+
+CPU UTILIZATION: 1.076 / 28
+
+-----------------------------------------
+
+(147): time { cat f2 | parallel -X -j 28 : >/dev/null; }
+real	0m17.839s
+user	0m17.876s
+sys	0m1.317s
+
+CPU UTILIZATION: 1.075 / 28
+
+-----------------------------------------
+
+(148): time { cat f2 | parallel -X -j 28 : | wc -l; }
+real	0m17.966s
+user	0m18.013s
+sys	0m1.293s
+
+CPU UTILIZATION: 1.074 / 28
+
+-----------------------------------------
+
+(149): time { parallel -X -j 28 echo <f2 >/dev/null; }
+real	0m18.082s
+user	0m18.275s
+sys	0m1.218s
+
+CPU UTILIZATION: 1.078 / 28
+
+-----------------------------------------
+
+(150): time { parallel -X -j 28 echo <f2 | wc -l; }
+real	0m16.792s
+user	0m17.009s
+sys	0m1.240s
+
+CPU UTILIZATION: 1.086 / 28
+
+-----------------------------------------
+
+(151): time { cat f2 | parallel -X -j 28 echo >/dev/null; }
+real	0m17.695s
+user	0m17.781s
+sys	0m1.318s
+
+CPU UTILIZATION: 1.079 / 28
+
+-----------------------------------------
+
+(152): time { cat f2 | parallel -X -j 28 echo | wc -l; }
+real	0m18.368s
+user	0m18.536s
+sys	0m1.247s
+
+CPU UTILIZATION: 1.077 / 28
+
+-----------------------------------------
+
+(153): time { parallel -X -j 28 printf '%s\n' <f2 >/dev/null; }
+real	0m17.213s
+user	0m17.631s
+sys	0m1.553s
+
+CPU UTILIZATION: 1.114 / 28
+
+-----------------------------------------
+
+(154): time { parallel -X -j 28 printf '%s\n' <f2 | wc -l; }
+real	0m16.702s
+user	0m17.083s
+sys	0m1.597s
+
+CPU UTILIZATION: 1.118 / 28
+
+-----------------------------------------
+
+(155): time { cat f2 | parallel -X -j 28 printf '%s\n' >/dev/null; }
+real	0m17.697s
+user	0m18.091s
+sys	0m1.598s
+
+CPU UTILIZATION: 1.112 / 28
+
+-----------------------------------------
+
+(156): time { cat f2 | parallel -X -j 28 printf '%s\n' | wc -l; }
+real	0m16.867s
+user	0m17.265s
+sys	0m1.544s
+
+CPU UTILIZATION: 1.115 / 28
+
+-----------------------------------------
+
+(157): time { parallel -X -j 28 -k : <f2 >/dev/null; }
+real	0m17.930s
+user	0m18.002s
+sys	0m1.264s
+
+CPU UTILIZATION: 1.074 / 28
+
+-----------------------------------------
+
+(158): time { parallel -X -j 28 -k : <f2 | wc -l; }
+real	0m16.867s
+user	0m17.029s
+sys	0m1.220s
+
+CPU UTILIZATION: 1.081 / 28
+
+-----------------------------------------
+
+(159): time { cat f2 | parallel -X -j 28 -k : >/dev/null; }
+real	0m17.012s
+user	0m17.104s
+sys	0m1.253s
+
+CPU UTILIZATION: 1.079 / 28
+
+-----------------------------------------
+
+(160): time { cat f2 | parallel -X -j 28 -k : | wc -l; }
+real	0m17.863s
+user	0m17.953s
+sys	0m1.255s
+
+CPU UTILIZATION: 1.075 / 28
+
+-----------------------------------------
+
+(161): time { parallel -X -j 28 -k echo <f2 >/dev/null; }
+real	0m17.969s
+user	0m18.105s
+sys	0m1.275s
+
+CPU UTILIZATION: 1.078 / 28
+
+-----------------------------------------
+
+(162): time { parallel -X -j 28 -k echo <f2 | wc -l; }
+real	0m17.521s
+user	0m17.664s
+sys	0m1.265s
+
+CPU UTILIZATION: 1.080 / 28
+
+-----------------------------------------
+
+(163): time { cat f2 | parallel -X -j 28 -k echo >/dev/null; }
+real	0m17.177s
+user	0m17.371s
+sys	0m1.226s
+
+CPU UTILIZATION: 1.082 / 28
+
+-----------------------------------------
+
+(164): time { cat f2 | parallel -X -j 28 -k echo | wc -l; }
+real	0m17.617s
+user	0m17.811s
+sys	0m1.241s
+
+CPU UTILIZATION: 1.081 / 28
+
+-----------------------------------------
+
+(165): time { parallel -X -j 28 -k printf '%s\n' <f2 >/dev/null; }
+real	0m17.416s
+user	0m17.946s
+sys	0m1.492s
+
+CPU UTILIZATION: 1.116 / 28
+
+-----------------------------------------
+
+(166): time { parallel -X -j 28 -k printf '%s\n' <f2 | wc -l; }
+real	0m18.013s
+user	0m18.434s
+sys	0m1.544s
+
+CPU UTILIZATION: 1.109 / 28
+
+-----------------------------------------
+
+(167): time { cat f2 | parallel -X -j 28 -k printf '%s\n' >/dev/null; }
+real	0m17.338s
+user	0m17.780s
+sys	0m1.500s
+
+CPU UTILIZATION: 1.112 / 28
+
+-----------------------------------------
+
+(168): time { cat f2 | parallel -X -j 28 -k printf '%s\n' | wc -l; }
+real	0m17.420s
+user	0m17.847s
+sys	0m1.550s
+
+CPU UTILIZATION: 1.113 / 28
+
+-----------------------------------------
+
+(169): time { parallel -X -j 28 -u : <f2 >/dev/null; }
+real	0m17.621s
+user	0m17.750s
+sys	0m1.189s
+
+CPU UTILIZATION: 1.074 / 28
+
+-----------------------------------------
+
+(170): time { parallel -X -j 28 -u : <f2 | wc -l; }
+real	0m17.528s
+user	0m17.730s
+sys	0m1.103s
+
+CPU UTILIZATION: 1.074 / 28
+
+-----------------------------------------
+
+(171): time { cat f2 | parallel -X -j 28 -u : >/dev/null; }
+real	0m15.916s
+user	0m16.117s
+sys	0m1.173s
+
+CPU UTILIZATION: 1.086 / 28
+
+-----------------------------------------
+
+(172): time { cat f2 | parallel -X -j 28 -u : | wc -l; }
+real	0m17.504s
+user	0m17.654s
+sys	0m1.232s
+
+CPU UTILIZATION: 1.078 / 28
+
+-----------------------------------------
+
+(173): time { parallel -X -j 28 -u echo <f2 >/dev/null; }
+real	0m15.966s
+user	0m16.163s
+sys	0m1.176s
+
+CPU UTILIZATION: 1.085 / 28
+
+-----------------------------------------
+
+(174): time { parallel -X -j 28 -u echo <f2 | wc -l; }
+real	0m17.980s
+user	0m18.149s
+sys	0m1.144s
+
+CPU UTILIZATION: 1.073 / 28
+
+-----------------------------------------
+
+(175): time { cat f2 | parallel -X -j 28 -u echo >/dev/null; }
+real	0m17.271s
+user	0m17.467s
+sys	0m1.205s
+
+CPU UTILIZATION: 1.081 / 28
+
+-----------------------------------------
+
+(176): time { cat f2 | parallel -X -j 28 -u echo | wc -l; }
+real	0m17.452s
+user	0m17.678s
+sys	0m1.201s
+
+CPU UTILIZATION: 1.081 / 28
+
+-----------------------------------------
+
+(177): time { parallel -X -j 28 -u printf '%s\n' <f2 >/dev/null; }
+real	0m16.069s
+user	0m16.651s
+sys	0m1.207s
+
+CPU UTILIZATION: 1.111 / 28
+
+-----------------------------------------
+
+(178): time { parallel -X -j 28 -u printf '%s\n' <f2 | wc -l; }
+real	0m17.324s
+user	0m18.047s
+sys	0m1.959s
+
+CPU UTILIZATION: 1.154 / 28
+
+-----------------------------------------
+
+(179): time { cat f2 | parallel -X -j 28 -u printf '%s\n' >/dev/null; }
+real	0m17.396s
+user	0m17.889s
+sys	0m1.344s
+
+CPU UTILIZATION: 1.105 / 28
+
+-----------------------------------------
+
+(180): time { cat f2 | parallel -X -j 28 -u printf '%s\n' | wc -l; }
+real	0m17.353s
+user	0m18.106s
+sys	0m2.078s
+
+CPU UTILIZATION: 1.163 / 28
+
+-----------------------------------------
+
+(181): time { parallel -j 28 --pipe : <f2 >/dev/null; }
+real	0m0.170s
+user	0m0.155s
+sys	0m0.170s
+
+CPU UTILIZATION: 1.911 / 28
+
+-----------------------------------------
+
+(182): time { parallel -j 28 --pipe : <f2 | wc -l; }
+real	0m0.176s
+user	0m0.158s
+sys	0m0.170s
+
+CPU UTILIZATION: 1.863 / 28
+
+-----------------------------------------
+
+(183): time { cat f2 | parallel -j 28 --pipe : >/dev/null; }
+real	0m0.172s
+user	0m0.153s
+sys	0m0.175s
+
+CPU UTILIZATION: 1.906 / 28
+
+-----------------------------------------
+
+(184): time { cat f2 | parallel -j 28 --pipe : | wc -l; }
+real	0m0.165s
+user	0m0.151s
+sys	0m0.165s
+
+CPU UTILIZATION: 1.915 / 28
+
+-----------------------------------------
+
+(185): time { parallel -j 28 --pipe cat <f2 >/dev/null; }
+real	0m0.173s
+user	0m0.163s
+sys	0m0.187s
+
+CPU UTILIZATION: 2.023 / 28
+
+-----------------------------------------
+
+(186): time { parallel -j 28 --pipe cat <f2 | wc -l; }
+real	0m0.170s
+user	0m0.147s
+sys	0m0.196s
+
+CPU UTILIZATION: 2.017 / 28
+
+-----------------------------------------
+
+(187): time { cat f2 | parallel -j 28 --pipe cat >/dev/null; }
+real	0m0.183s
+user	0m0.175s
+sys	0m0.191s
+
+CPU UTILIZATION: 2.000 / 28
+
+-----------------------------------------
+
+(188): time { cat f2 | parallel -j 28 --pipe cat | wc -l; }
+real	0m0.179s
+user	0m0.173s
+sys	0m0.185s
+
+CPU UTILIZATION: 2.000 / 28
+
+-----------------------------------------
+
+(189): time { parallel -j 28 --pipe tee <f2 >/dev/null; }
+real	0m0.169s
+user	0m0.165s
+sys	0m0.189s
+
+CPU UTILIZATION: 2.094 / 28
+
+-----------------------------------------
+
+(190): time { parallel -j 28 --pipe tee <f2 | wc -l; }
+real	0m0.173s
+user	0m0.156s
+sys	0m0.188s
+
+CPU UTILIZATION: 1.988 / 28
+
+-----------------------------------------
+
+(191): time { cat f2 | parallel -j 28 --pipe tee >/dev/null; }
+real	0m0.172s
+user	0m0.191s
+sys	0m0.155s
+
+CPU UTILIZATION: 2.011 / 28
+
+-----------------------------------------
+
+(192): time { cat f2 | parallel -j 28 --pipe tee | wc -l; }
+real	0m0.166s
+user	0m0.153s
+sys	0m0.187s
+
+CPU UTILIZATION: 2.048 / 28
+
+-----------------------------------------
+
+(193): time { parallel -j 28 --pipe --block 524288 : <f2 >/dev/null; }
+real	0m0.173s
+user	0m0.159s
+sys	0m0.162s
+
+CPU UTILIZATION: 1.855 / 28
+
+-----------------------------------------
+
+(194): time { parallel -j 28 --pipe --block 524288 : <f2 | wc -l; }
+real	0m0.187s
+user	0m0.154s
+sys	0m0.170s
+
+CPU UTILIZATION: 1.732 / 28
+
+-----------------------------------------
+
+(195): time { cat f2 | parallel -j 28 --pipe --block 524288 : >/dev/null; }
+real	0m0.173s
+user	0m0.156s
+sys	0m0.165s
+
+CPU UTILIZATION: 1.855 / 28
+
+-----------------------------------------
+
+(196): time { cat f2 | parallel -j 28 --pipe --block 524288 : | wc -l; }
+real	0m0.178s
+user	0m0.167s
+sys	0m0.158s
+
+CPU UTILIZATION: 1.825 / 28
+
+-----------------------------------------
+
+(197): time { parallel -j 28 --pipe --block 524288 cat <f2 >/dev/null; }
+real	0m0.182s
+user	0m0.162s
+sys	0m0.200s
+
+CPU UTILIZATION: 1.989 / 28
+
+-----------------------------------------
+
+(198): time { parallel -j 28 --pipe --block 524288 cat <f2 | wc -l; }
+real	0m0.177s
+user	0m0.162s
+sys	0m0.195s
+
+CPU UTILIZATION: 2.016 / 28
+
+-----------------------------------------
+
+(199): time { cat f2 | parallel -j 28 --pipe --block 524288 cat >/dev/null; }
+real	0m0.173s
+user	0m0.158s
+sys	0m0.203s
+
+CPU UTILIZATION: 2.086 / 28
+
+-----------------------------------------
+
+(200): time { cat f2 | parallel -j 28 --pipe --block 524288 cat | wc -l; }
+real	0m0.180s
+user	0m0.173s
+sys	0m0.191s
+
+CPU UTILIZATION: 2.022 / 28
+
+-----------------------------------------
+
+(201): time { parallel -j 28 --pipe --block 524288 tee <f2 >/dev/null; }
+real	0m0.177s
+user	0m0.174s
+sys	0m0.187s
+
+CPU UTILIZATION: 2.039 / 28
+
+-----------------------------------------
+
+(202): time { parallel -j 28 --pipe --block 524288 tee <f2 | wc -l; }
+real	0m0.172s
+user	0m0.172s
+sys	0m0.188s
+
+CPU UTILIZATION: 2.093 / 28
+
+-----------------------------------------
+
+(203): time { cat f2 | parallel -j 28 --pipe --block 524288 tee >/dev/null; }
+real	0m0.176s
+user	0m0.164s
+sys	0m0.186s
+
+CPU UTILIZATION: 1.988 / 28
+
+-----------------------------------------
+
+(204): time { cat f2 | parallel -j 28 --pipe --block 524288 tee | wc -l; }
+real	0m0.178s
+user	0m0.184s
+sys	0m0.186s
+
+CPU UTILIZATION: 2.078 / 28
+
+-----------------------------------------
+
+(205): time { parallel -j 28 --pipe --block 4096 : <f2 >/dev/null; }
+real	0m5.172s
+user	0m7.395s
+sys	0m10.220s
+
+CPU UTILIZATION: 3.405 / 28
+
+-----------------------------------------
+
+(206): time { parallel -j 28 --pipe --block 4096 : <f2 | wc -l; }
+real	0m5.062s
+user	0m7.280s
+sys	0m10.248s
+
+CPU UTILIZATION: 3.462 / 28
+
+-----------------------------------------
+
+(207): time { cat f2 | parallel -j 28 --pipe --block 4096 : >/dev/null; }
+real	0m5.143s
+user	0m7.369s
+sys	0m10.228s
+
+CPU UTILIZATION: 3.421 / 28
+
+-----------------------------------------
+
+(208): time { cat f2 | parallel -j 28 --pipe --block 4096 : | wc -l; }
+real	0m5.106s
+user	0m7.344s
+sys	0m10.226s
+
+CPU UTILIZATION: 3.441 / 28
+
+-----------------------------------------
+
+(209): time { parallel -j 28 --pipe --block 4096 cat <f2 >/dev/null; }
+real	0m5.158s
+user	0m7.569s
+sys	0m10.802s
+
+CPU UTILIZATION: 3.561 / 28
+
+-----------------------------------------
+
+(210): time { parallel -j 28 --pipe --block 4096 cat <f2 | wc -l; }
+real	0m5.165s
+user	0m7.630s
+sys	0m10.698s
+
+CPU UTILIZATION: 3.548 / 28
+
+-----------------------------------------
+
+(211): time { cat f2 | parallel -j 28 --pipe --block 4096 cat >/dev/null; }
+real	0m5.125s
+user	0m7.409s
+sys	0m10.921s
+
+CPU UTILIZATION: 3.576 / 28
+
+-----------------------------------------
+
+(212): time { cat f2 | parallel -j 28 --pipe --block 4096 cat | wc -l; }
+real	0m5.087s
+user	0m7.482s
+sys	0m10.791s
+
+CPU UTILIZATION: 3.592 / 28
+
+-----------------------------------------
+
+(213): time { parallel -j 28 --pipe --block 4096 tee <f2 >/dev/null; }
+real	0m5.127s
+user	0m7.539s
+sys	0m10.797s
+
+CPU UTILIZATION: 3.576 / 28
+
+-----------------------------------------
+
+(214): time { parallel -j 28 --pipe --block 4096 tee <f2 | wc -l; }
+real	0m5.163s
+user	0m7.769s
+sys	0m10.698s
+
+CPU UTILIZATION: 3.576 / 28
+
+-----------------------------------------
+
+(215): time { cat f2 | parallel -j 28 --pipe --block 4096 tee >/dev/null; }
+real	0m5.189s
+user	0m7.557s
+sys	0m10.929s
+
+CPU UTILIZATION: 3.562 / 28
+
+-----------------------------------------
+
+(216): time { cat f2 | parallel -j 28 --pipe --block 4096 tee | wc -l; }
+real	0m5.185s
+user	0m7.486s
+sys	0m10.985s
+
+CPU UTILIZATION: 3.562 / 28
+
+-----------------------------------------
+
+(217): time { parallel -j 28 -k --pipe : <f2 >/dev/null; }
+real	0m0.169s
+user	0m0.151s
+sys	0m0.172s
+
+CPU UTILIZATION: 1.911 / 28
+
+-----------------------------------------
+
+(218): time { parallel -j 28 -k --pipe : <f2 | wc -l; }
+real	0m0.180s
+user	0m0.162s
+sys	0m0.165s
+
+CPU UTILIZATION: 1.816 / 28
+
+-----------------------------------------
+
+(219): time { cat f2 | parallel -j 28 -k --pipe : >/dev/null; }
+real	0m0.168s
+user	0m0.161s
+sys	0m0.163s
+
+CPU UTILIZATION: 1.928 / 28
+
+-----------------------------------------
+
+(220): time { cat f2 | parallel -j 28 -k --pipe : | wc -l; }
+real	0m0.169s
+user	0m0.145s
+sys	0m0.176s
+
+CPU UTILIZATION: 1.899 / 28
+
+-----------------------------------------
+
+(221): time { parallel -j 28 -k --pipe cat <f2 >/dev/null; }
+real	0m0.172s
+user	0m0.167s
+sys	0m0.192s
+
+CPU UTILIZATION: 2.087 / 28
+
+-----------------------------------------
+
+(222): time { parallel -j 28 -k --pipe cat <f2 | wc -l; }
+real	0m0.184s
+user	0m0.176s
+sys	0m0.187s
+
+CPU UTILIZATION: 1.972 / 28
+
+-----------------------------------------
+
+(223): time { cat f2 | parallel -j 28 -k --pipe cat >/dev/null; }
+real	0m0.171s
+user	0m0.159s
+sys	0m0.189s
+
+CPU UTILIZATION: 2.035 / 28
+
+-----------------------------------------
+
+(224): time { cat f2 | parallel -j 28 -k --pipe cat | wc -l; }
+real	0m0.168s
+user	0m0.150s
+sys	0m0.194s
+
+CPU UTILIZATION: 2.047 / 28
+
+-----------------------------------------
+
+(225): time { parallel -j 28 -k --pipe tee <f2 >/dev/null; }
+real	0m0.172s
+user	0m0.155s
+sys	0m0.191s
+
+CPU UTILIZATION: 2.011 / 28
+
+-----------------------------------------
+
+(226): time { parallel -j 28 -k --pipe tee <f2 | wc -l; }
+real	0m0.177s
+user	0m0.175s
+sys	0m0.196s
+
+CPU UTILIZATION: 2.096 / 28
+
+-----------------------------------------
+
+(227): time { cat f2 | parallel -j 28 -k --pipe tee >/dev/null; }
+real	0m0.176s
+user	0m0.165s
+sys	0m0.189s
+
+CPU UTILIZATION: 2.011 / 28
+
+-----------------------------------------
+
+(228): time { cat f2 | parallel -j 28 -k --pipe tee | wc -l; }
+real	0m0.176s
+user	0m0.150s
+sys	0m0.201s
+
+CPU UTILIZATION: 1.994 / 28
+
+-----------------------------------------
+
+(229): time { parallel -j 28 -k --pipe --block 524288 : <f2 >/dev/null; }
+real	0m0.178s
+user	0m0.172s
+sys	0m0.158s
+
+CPU UTILIZATION: 1.853 / 28
+
+-----------------------------------------
+
+(230): time { parallel -j 28 -k --pipe --block 524288 : <f2 | wc -l; }
+real	0m0.170s
+user	0m0.153s
+sys	0m0.164s
+
+CPU UTILIZATION: 1.864 / 28
+
+-----------------------------------------
+
+(231): time { cat f2 | parallel -j 28 -k --pipe --block 524288 : >/dev/null; }
+real	0m0.187s
+user	0m0.157s
+sys	0m0.182s
+
+CPU UTILIZATION: 1.812 / 28
+
+-----------------------------------------
+
+(232): time { cat f2 | parallel -j 28 -k --pipe --block 524288 : | wc -l; }
+real	0m0.172s
+user	0m0.166s
+sys	0m0.161s
+
+CPU UTILIZATION: 1.901 / 28
+
+-----------------------------------------
+
+(233): time { parallel -j 28 -k --pipe --block 524288 cat <f2 >/dev/null; }
+real	0m0.190s
+user	0m0.175s
+sys	0m0.191s
+
+CPU UTILIZATION: 1.926 / 28
+
+-----------------------------------------
+
+(234): time { parallel -j 28 -k --pipe --block 524288 cat <f2 | wc -l; }
+real	0m0.181s
+user	0m0.172s
+sys	0m0.197s
+
+CPU UTILIZATION: 2.038 / 28
+
+-----------------------------------------
+
+(235): time { cat f2 | parallel -j 28 -k --pipe --block 524288 cat >/dev/null; }
+real	0m0.180s
+user	0m0.155s
+sys	0m0.207s
+
+CPU UTILIZATION: 2.011 / 28
+
+-----------------------------------------
+
+(236): time { cat f2 | parallel -j 28 -k --pipe --block 524288 cat | wc -l; }
+real	0m0.181s
+user	0m0.166s
+sys	0m0.202s
+
+CPU UTILIZATION: 2.033 / 28
+
+-----------------------------------------
+
+(237): time { parallel -j 28 -k --pipe --block 524288 tee <f2 >/dev/null; }
+real	0m0.169s
+user	0m0.163s
+sys	0m0.182s
+
+CPU UTILIZATION: 2.041 / 28
+
+-----------------------------------------
+
+(238): time { parallel -j 28 -k --pipe --block 524288 tee <f2 | wc -l; }
+real	0m0.174s
+user	0m0.165s
+sys	0m0.194s
+
+CPU UTILIZATION: 2.063 / 28
+
+-----------------------------------------
+
+(239): time { cat f2 | parallel -j 28 -k --pipe --block 524288 tee >/dev/null; }
+real	0m0.180s
+user	0m0.197s
+sys	0m0.170s
+
+CPU UTILIZATION: 2.038 / 28
+
+-----------------------------------------
+
+(240): time { cat f2 | parallel -j 28 -k --pipe --block 524288 tee | wc -l; }
+real	0m0.179s
+user	0m0.170s
+sys	0m0.180s
+
+CPU UTILIZATION: 1.955 / 28
+
+-----------------------------------------
+
+(241): time { parallel -j 28 -k --pipe --block 4096 : <f2 >/dev/null; }
+real	0m5.119s
+user	0m7.264s
+sys	0m10.339s
+
+CPU UTILIZATION: 3.438 / 28
+
+-----------------------------------------
+
+(242): time { parallel -j 28 -k --pipe --block 4096 : <f2 | wc -l; }
+real	0m5.211s
+user	0m7.523s
+sys	0m10.128s
+
+CPU UTILIZATION: 3.387 / 28
+
+-----------------------------------------
+
+(243): time { cat f2 | parallel -j 28 -k --pipe --block 4096 : >/dev/null; }
+real	0m5.143s
+user	0m7.312s
+sys	0m10.336s
+
+CPU UTILIZATION: 3.431 / 28
+
+-----------------------------------------
+
+(244): time { cat f2 | parallel -j 28 -k --pipe --block 4096 : | wc -l; }
+real	0m5.107s
+user	0m7.290s
+sys	0m10.214s
+
+CPU UTILIZATION: 3.427 / 28
+
+-----------------------------------------
+
+(245): time { parallel -j 28 -k --pipe --block 4096 cat <f2 >/dev/null; }
+real	0m5.158s
+user	0m7.574s
+sys	0m10.830s
+
+CPU UTILIZATION: 3.568 / 28
+
+-----------------------------------------
+
+(246): time { parallel -j 28 -k --pipe --block 4096 cat <f2 | wc -l; }
+real	0m5.182s
+user	0m7.609s
+sys	0m10.730s
+
+CPU UTILIZATION: 3.538 / 28
+
+-----------------------------------------
+
+(247): time { cat f2 | parallel -j 28 -k --pipe --block 4096 cat >/dev/null; }
+real	0m5.082s
+user	0m7.597s
+sys	0m10.655s
+
+CPU UTILIZATION: 3.591 / 28
+
+-----------------------------------------
+
+(248): time { cat f2 | parallel -j 28 -k --pipe --block 4096 cat | wc -l; }
+real	0m5.274s
+user	0m7.623s
+sys	0m10.924s
+
+CPU UTILIZATION: 3.516 / 28
+
+-----------------------------------------
+
+(249): time { parallel -j 28 -k --pipe --block 4096 tee <f2 >/dev/null; }
+real	0m5.183s
+user	0m7.510s
+sys	0m10.923s
+
+CPU UTILIZATION: 3.556 / 28
+
+-----------------------------------------
+
+(250): time { parallel -j 28 -k --pipe --block 4096 tee <f2 | wc -l; }
+real	0m5.216s
+user	0m7.656s
+sys	0m10.849s
+
+CPU UTILIZATION: 3.547 / 28
+
+-----------------------------------------
+
+(251): time { cat f2 | parallel -j 28 -k --pipe --block 4096 tee >/dev/null; }
+real	0m5.169s
+user	0m7.741s
+sys	0m10.777s
+
+CPU UTILIZATION: 3.582 / 28
+
+-----------------------------------------
+
+(252): time { cat f2 | parallel -j 28 -k --pipe --block 4096 tee | wc -l; }
+real	0m5.203s
+user	0m7.608s
+sys	0m10.855s
+
+CPU UTILIZATION: 3.548 / 28
+
+-----------------------------------------
+
+(253): time { parallel -j 28 -u --pipe : <f2 >/dev/null; }
+real	0m0.165s
+user	0m0.155s
+sys	0m0.159s
+
+CPU UTILIZATION: 1.903 / 28
+
+-----------------------------------------
+
+(254): time { parallel -j 28 -u --pipe : <f2 | wc -l; }
+real	0m0.160s
+user	0m0.149s
+sys	0m0.156s
+
+CPU UTILIZATION: 1.906 / 28
+
+-----------------------------------------
+
+(255): time { cat f2 | parallel -j 28 -u --pipe : >/dev/null; }
+real	0m0.163s
+user	0m0.145s
+sys	0m0.166s
+
+CPU UTILIZATION: 1.907 / 28
+
+-----------------------------------------
+
+(256): time { cat f2 | parallel -j 28 -u --pipe : | wc -l; }
+real	0m0.165s
+user	0m0.129s
+sys	0m0.183s
+
+CPU UTILIZATION: 1.890 / 28
+
+-----------------------------------------
+
+(257): time { parallel -j 28 -u --pipe cat <f2 >/dev/null; }
+real	0m0.157s
+user	0m0.148s
+sys	0m0.177s
+
+CPU UTILIZATION: 2.070 / 28
+
+-----------------------------------------
+
+(258): time { parallel -j 28 -u --pipe cat <f2 | wc -l; }
+real	0m0.162s
+user	0m0.160s
+sys	0m0.180s
+
+CPU UTILIZATION: 2.098 / 28
+
+-----------------------------------------
+
+(259): time { cat f2 | parallel -j 28 -u --pipe cat >/dev/null; }
+real	0m0.165s
+user	0m0.173s
+sys	0m0.169s
+
+CPU UTILIZATION: 2.072 / 28
+
+-----------------------------------------
+
+(260): time { cat f2 | parallel -j 28 -u --pipe cat | wc -l; }
+real	0m0.160s
+user	0m0.147s
+sys	0m0.181s
+
+CPU UTILIZATION: 2.050 / 28
+
+-----------------------------------------
+
+(261): time { parallel -j 28 -u --pipe tee <f2 >/dev/null; }
+real	0m0.157s
+user	0m0.167s
+sys	0m0.160s
+
+CPU UTILIZATION: 2.082 / 28
+
+-----------------------------------------
+
+(262): time { parallel -j 28 -u --pipe tee <f2 | wc -l; }
+real	0m0.157s
+user	0m0.146s
+sys	0m0.187s
+
+CPU UTILIZATION: 2.121 / 28
+
+-----------------------------------------
+
+(263): time { cat f2 | parallel -j 28 -u --pipe tee >/dev/null; }
+real	0m0.163s
+user	0m0.151s
+sys	0m0.186s
+
+CPU UTILIZATION: 2.067 / 28
+
+-----------------------------------------
+
+(264): time { cat f2 | parallel -j 28 -u --pipe tee | wc -l; }
+real	0m0.166s
+user	0m0.166s
+sys	0m0.173s
+
+CPU UTILIZATION: 2.042 / 28
+
+-----------------------------------------
+
+(265): time { parallel -j 28 -u --pipe --block 524288 : <f2 >/dev/null; }
+real	0m0.158s
+user	0m0.141s
+sys	0m0.151s
+
+CPU UTILIZATION: 1.848 / 28
+
+-----------------------------------------
+
+(266): time { parallel -j 28 -u --pipe --block 524288 : <f2 | wc -l; }
+real	0m0.167s
+user	0m0.138s
+sys	0m0.170s
+
+CPU UTILIZATION: 1.844 / 28
+
+-----------------------------------------
+
+(267): time { cat f2 | parallel -j 28 -u --pipe --block 524288 : >/dev/null; }
+real	0m0.175s
+user	0m0.162s
+sys	0m0.160s
+
+CPU UTILIZATION: 1.840 / 28
+
+-----------------------------------------
+
+(268): time { cat f2 | parallel -j 28 -u --pipe --block 524288 : | wc -l; }
+real	0m0.168s
+user	0m0.157s
+sys	0m0.157s
+
+CPU UTILIZATION: 1.869 / 28
+
+-----------------------------------------
+
+(269): time { parallel -j 28 -u --pipe --block 524288 cat <f2 >/dev/null; }
+real	0m0.162s
+user	0m0.179s
+sys	0m0.187s
+
+CPU UTILIZATION: 2.259 / 28
+
+-----------------------------------------
+
+(270): time { parallel -j 28 -u --pipe --block 524288 cat <f2 | wc -l; }
+real	0m0.164s
+user	0m0.178s
+sys	0m0.199s
+
+CPU UTILIZATION: 2.298 / 28
+
+-----------------------------------------
+
+(271): time { cat f2 | parallel -j 28 -u --pipe --block 524288 cat >/dev/null; }
+real	0m0.168s
+user	0m0.167s
+sys	0m0.200s
+
+CPU UTILIZATION: 2.184 / 28
+
+-----------------------------------------
+
+(272): time { cat f2 | parallel -j 28 -u --pipe --block 524288 cat | wc -l; }
+real	0m0.166s
+user	0m0.162s
+sys	0m0.195s
+
+CPU UTILIZATION: 2.150 / 28
+
+-----------------------------------------
+
+(273): time { parallel -j 28 -u --pipe --block 524288 tee <f2 >/dev/null; }
+real	0m0.165s
+user	0m0.185s
+sys	0m0.188s
+
+CPU UTILIZATION: 2.260 / 28
+
+-----------------------------------------
+
+(274): time { parallel -j 28 -u --pipe --block 524288 tee <f2 | wc -l; }
+real	0m0.162s
+user	0m0.178s
+sys	0m0.184s
+
+CPU UTILIZATION: 2.234 / 28
+
+-----------------------------------------
+
+(275): time { cat f2 | parallel -j 28 -u --pipe --block 524288 tee >/dev/null; }
+real	0m0.180s
+user	0m0.194s
+sys	0m0.186s
+
+CPU UTILIZATION: 2.111 / 28
+
+-----------------------------------------
+
+(276): time { cat f2 | parallel -j 28 -u --pipe --block 524288 tee | wc -l; }
+real	0m0.170s
+user	0m0.182s
+sys	0m0.196s
+
+CPU UTILIZATION: 2.223 / 28
+
+-----------------------------------------
+
+(277): time { parallel -j 28 -u --pipe --block 4096 : <f2 >/dev/null; }
+real	0m4.578s
+user	0m6.785s
+sys	0m10.027s
+
+CPU UTILIZATION: 3.672 / 28
+
+-----------------------------------------
+
+(278): time { parallel -j 28 -u --pipe --block 4096 : <f2 | wc -l; }
+real	0m4.667s
+user	0m7.022s
+sys	0m9.815s
+
+CPU UTILIZATION: 3.607 / 28
+
+-----------------------------------------
+
+(279): time { cat f2 | parallel -j 28 -u --pipe --block 4096 : >/dev/null; }
+real	0m4.689s
+user	0m6.887s
+sys	0m10.013s
+
+CPU UTILIZATION: 3.604 / 28
+
+-----------------------------------------
+
+(280): time { cat f2 | parallel -j 28 -u --pipe --block 4096 : | wc -l; }
+real	0m4.621s
+user	0m6.753s
+sys	0m10.033s
+
+CPU UTILIZATION: 3.632 / 28
+
+-----------------------------------------
+
+(281): time { parallel -j 28 -u --pipe --block 4096 cat <f2 >/dev/null; }
+real	0m4.608s
+user	0m7.014s
+sys	0m10.536s
+
+CPU UTILIZATION: 3.808 / 28
+
+-----------------------------------------
+
+(282): time { parallel -j 28 -u --pipe --block 4096 cat <f2 | wc -l; }
+real	0m4.695s
+user	0m6.967s
+sys	0m10.723s
+
+CPU UTILIZATION: 3.767 / 28
+
+-----------------------------------------
+
+(283): time { cat f2 | parallel -j 28 -u --pipe --block 4096 cat >/dev/null; }
+real	0m4.699s
+user	0m7.032s
+sys	0m10.617s
+
+CPU UTILIZATION: 3.755 / 28
+
+-----------------------------------------
+
+(284): time { cat f2 | parallel -j 28 -u --pipe --block 4096 cat | wc -l; }
+real	0m4.569s
+user	0m6.965s
+sys	0m10.554s
+
+CPU UTILIZATION: 3.834 / 28
+
+-----------------------------------------
+
+(285): time { parallel -j 28 -u --pipe --block 4096 tee <f2 >/dev/null; }
+real	0m4.683s
+user	0m7.018s
+sys	0m10.511s
+
+CPU UTILIZATION: 3.743 / 28
+
+-----------------------------------------
+
+(286): time { parallel -j 28 -u --pipe --block 4096 tee <f2 | wc -l; }
+real	0m4.598s
+user	0m7.014s
+sys	0m10.624s
+
+CPU UTILIZATION: 3.836 / 28
+
+-----------------------------------------
+
+(287): time { cat f2 | parallel -j 28 -u --pipe --block 4096 tee >/dev/null; }
+real	0m4.665s
+user	0m6.944s
+sys	0m10.761s
+
+CPU UTILIZATION: 3.795 / 28
+
+-----------------------------------------
+
+(288): time { cat f2 | parallel -j 28 -u --pipe --block 4096 tee | wc -l; }
+real	0m4.535s
+user	0m6.885s
+sys	0m10.497s
+
+CPU UTILIZATION: 3.832 / 28
+
+-----------------------------------------
+
+(289): time { parallel -X -j 28 : <f3 >/dev/null; }
+real	0m40.989s
+user	0m46.455s
+sys	0m9.147s
+
+CPU UTILIZATION: 1.356 / 28
+
+-----------------------------------------
+
+(290): time { parallel -X -j 28 : <f3 | wc -l; }
+real	0m38.905s
+user	0m44.147s
+sys	0m8.864s
+
+CPU UTILIZATION: 1.362 / 28
+
+-----------------------------------------
+
+(291): time { cat f3 | parallel -X -j 28 : >/dev/null; }
+real	0m40.914s
+user	0m45.867s
+sys	0m9.033s
+
+CPU UTILIZATION: 1.341 / 28
+
+-----------------------------------------
+
+(292): time { cat f3 | parallel -X -j 28 : | wc -l; }
+real	0m38.754s
+user	0m43.851s
+sys	0m9.082s
+
+CPU UTILIZATION: 1.365 / 28
+
+-----------------------------------------
+
+(293): time { parallel -X -j 28 echo <f3 >/dev/null; }
+real	0m41.071s
+user	0m46.340s
+sys	0m8.990s
+
+CPU UTILIZATION: 1.347 / 28
+
+-----------------------------------------
+
+(294): time { parallel -X -j 28 echo <f3 | wc -l; }
+real	0m39.959s
+user	0m45.415s
+sys	0m9.540s
+
+CPU UTILIZATION: 1.375 / 28
+
+-----------------------------------------
+
+(295): time { cat f3 | parallel -X -j 28 echo >/dev/null; }
+real	0m39.766s
+user	0m45.367s
+sys	0m9.705s
+
+CPU UTILIZATION: 1.384 / 28
+
+-----------------------------------------
+
+(296): time { cat f3 | parallel -X -j 28 echo | wc -l; }
+real	0m41.035s
+user	0m46.345s
+sys	0m9.249s
+
+CPU UTILIZATION: 1.354 / 28
+
+-----------------------------------------
+
+(297): time { parallel -X -j 28 printf '%s\n' <f3 >/dev/null; }
+real	0m41.002s
+user	0m46.849s
+sys	0m9.788s
+
+CPU UTILIZATION: 1.381 / 28
+
+-----------------------------------------
+
+(298): time { parallel -X -j 28 printf '%s\n' <f3 | wc -l; }
+real	0m38.780s
+user	0m44.945s
+sys	0m9.530s
+
+CPU UTILIZATION: 1.404 / 28
+
+-----------------------------------------
+
+(299): time { cat f3 | parallel -X -j 28 printf '%s\n' >/dev/null; }
+real	0m41.591s
+user	0m47.025s
+sys	0m10.254s
+
+CPU UTILIZATION: 1.377 / 28
+
+-----------------------------------------
+
+(300): time { cat f3 | parallel -X -j 28 printf '%s\n' | wc -l; }
+real	0m39.159s
+user	0m45.389s
+sys	0m9.898s
+
+CPU UTILIZATION: 1.411 / 28
+
+-----------------------------------------
+
+(301): time { parallel -X -j 28 -k : <f3 >/dev/null; }
+real	0m41.263s
+user	0m46.061s
+sys	0m9.205s
+
+CPU UTILIZATION: 1.339 / 28
+
+-----------------------------------------
+
+(302): time { parallel -X -j 28 -k : <f3 | wc -l; }
+real	0m38.904s
+user	0m44.061s
+sys	0m8.764s
+
+CPU UTILIZATION: 1.357 / 28
+
+-----------------------------------------
+
+(303): time { cat f3 | parallel -X -j 28 -k : >/dev/null; }
+real	0m39.205s
+user	0m44.205s
+sys	0m9.048s
+
+CPU UTILIZATION: 1.358 / 28
+
+-----------------------------------------
+
+(304): time { cat f3 | parallel -X -j 28 -k : | wc -l; }
+real	0m40.832s
+user	0m46.144s
+sys	0m9.212s
+
+CPU UTILIZATION: 1.355 / 28
+
+-----------------------------------------
+
+(305): time { parallel -X -j 28 -k echo <f3 >/dev/null; }
+real	0m41.390s
+user	0m46.478s
+sys	0m8.986s
+
+CPU UTILIZATION: 1.340 / 28
+
+-----------------------------------------
+
+(306): time { parallel -X -j 28 -k echo <f3 | wc -l; }
+real	0m38.652s
+user	0m44.423s
+sys	0m8.824s
+
+CPU UTILIZATION: 1.377 / 28
+
+-----------------------------------------
+
+(307): time { cat f3 | parallel -X -j 28 -k echo >/dev/null; }
+real	0m41.530s
+user	0m46.692s
+sys	0m9.747s
+
+CPU UTILIZATION: 1.358 / 28
+
+-----------------------------------------
+
+(308): time { cat f3 | parallel -X -j 28 -k echo | wc -l; }
+real	0m39.645s
+user	0m45.207s
+sys	0m9.638s
+
+CPU UTILIZATION: 1.383 / 28
+
+-----------------------------------------
+
+(309): time { parallel -X -j 28 -k printf '%s\n' <f3 >/dev/null; }
+real	0m41.357s
+user	0m46.942s
+sys	0m9.519s
+
+CPU UTILIZATION: 1.365 / 28
+
+-----------------------------------------
+
+(310): time { parallel -X -j 28 -k printf '%s\n' <f3 | wc -l; }
+real	0m40.750s
+user	0m46.626s
+sys	0m9.674s
+
+CPU UTILIZATION: 1.381 / 28
+
+-----------------------------------------
+
+(311): time { cat f3 | parallel -X -j 28 -k printf '%s\n' >/dev/null; }
+real	0m39.315s
+user	0m44.952s
+sys	0m9.754s
+
+CPU UTILIZATION: 1.391 / 28
+
+-----------------------------------------
+
+(312): time { cat f3 | parallel -X -j 28 -k printf '%s\n' | wc -l; }
+real	0m39.974s
+user	0m46.095s
+sys	0m10.148s
+
+CPU UTILIZATION: 1.406 / 28
+
+-----------------------------------------
+
+(313): time { parallel -X -j 28 -u : <f3 >/dev/null; }
+real	0m40.337s
+user	0m45.440s
+sys	0m8.839s
+
+CPU UTILIZATION: 1.345 / 28
+
+-----------------------------------------
+
+(314): time { parallel -X -j 28 -u : <f3 | wc -l; }
+real	0m40.630s
+user	0m45.588s
+sys	0m8.700s
+
+CPU UTILIZATION: 1.336 / 28
+
+-----------------------------------------
+
+(315): time { cat f3 | parallel -X -j 28 -u : >/dev/null; }
+real	0m40.482s
+user	0m45.579s
+sys	0m8.926s
+
+CPU UTILIZATION: 1.346 / 28
+
+-----------------------------------------
+
+(316): time { cat f3 | parallel -X -j 28 -u : | wc -l; }
+real	0m38.328s
+user	0m43.831s
+sys	0m9.212s
+
+CPU UTILIZATION: 1.383 / 28
+
+-----------------------------------------
+
+(317): time { parallel -X -j 28 -u echo <f3 >/dev/null; }
+real	0m38.394s
+user	0m44.253s
+sys	0m8.803s
+
+CPU UTILIZATION: 1.381 / 28
+
+-----------------------------------------
+
+(318): time { parallel -X -j 28 -u echo <f3 | wc -l; }
+real	0m38.668s
+user	0m44.602s
+sys	0m8.754s
+
+CPU UTILIZATION: 1.379 / 28
+
+-----------------------------------------
+
+(319): time { cat f3 | parallel -X -j 28 -u echo >/dev/null; }
+real	0m38.558s
+user	0m44.409s
+sys	0m8.819s
+
+CPU UTILIZATION: 1.380 / 28
+
+-----------------------------------------
+
+(320): time { cat f3 | parallel -X -j 28 -u echo | wc -l; }
+real	0m40.403s
+user	0m45.845s
+sys	0m9.254s
+
+CPU UTILIZATION: 1.363 / 28
+
+-----------------------------------------
+
+(321): time { parallel -X -j 28 -u printf '%s\n' <f3 >/dev/null; }
+real	0m40.761s
+user	0m46.925s
+sys	0m8.921s
+
+CPU UTILIZATION: 1.370 / 28
+
+-----------------------------------------
+
+(322): time { parallel -X -j 28 -u printf '%s\n' <f3 | wc -l; }
+real	0m37.964s
+user	0m45.009s
+sys	0m10.123s
+
+CPU UTILIZATION: 1.452 / 28
+
+-----------------------------------------
+
+(323): time { cat f3 | parallel -X -j 28 -u printf '%s\n' >/dev/null; }
+real	0m38.390s
+user	0m44.462s
+sys	0m9.382s
+
+CPU UTILIZATION: 1.402 / 28
+
+-----------------------------------------
+
+(324): time { cat f3 | parallel -X -j 28 -u printf '%s\n' | wc -l; }
+real	0m39.477s
+user	0m46.180s
+sys	0m10.802s
+
+CPU UTILIZATION: 1.443 / 28
+
+-----------------------------------------
+
+(325): time { parallel -j 28 --pipe : <f3 >/dev/null; }
+real	0m0.630s
+user	0m0.498s
+sys	0m0.867s
+
+CPU UTILIZATION: 2.166 / 28
+
+-----------------------------------------
+
+(326): time { parallel -j 28 --pipe : <f3 | wc -l; }
+real	0m0.623s
+user	0m0.501s
+sys	0m0.841s
+
+CPU UTILIZATION: 2.154 / 28
+
+-----------------------------------------
+
+(327): time { cat f3 | parallel -j 28 --pipe : >/dev/null; }
+real	0m0.656s
+user	0m0.521s
+sys	0m0.886s
+
+CPU UTILIZATION: 2.144 / 28
+
+-----------------------------------------
+
+(328): time { cat f3 | parallel -j 28 --pipe : | wc -l; }
+real	0m0.647s
+user	0m0.495s
+sys	0m0.888s
+
+CPU UTILIZATION: 2.137 / 28
+
+-----------------------------------------
+
+(329): time { parallel -j 28 --pipe cat <f3 >/dev/null; }
+real	0m0.681s
+user	0m0.821s
+sys	0m1.330s
+
+CPU UTILIZATION: 3.158 / 28
+
+-----------------------------------------
+
+(330): time { parallel -j 28 --pipe cat <f3 | wc -l; }
+real	0m0.700s
+user	0m0.788s
+sys	0m1.424s
+
+CPU UTILIZATION: 3.160 / 28
+
+-----------------------------------------
+
+(331): time { cat f3 | parallel -j 28 --pipe cat >/dev/null; }
+real	0m0.721s
+user	0m0.832s
+sys	0m1.391s
+
+CPU UTILIZATION: 3.083 / 28
+
+-----------------------------------------
+
+(332): time { cat f3 | parallel -j 28 --pipe cat | wc -l; }
+real	0m0.717s
+user	0m0.855s
+sys	0m1.372s
+
+CPU UTILIZATION: 3.105 / 28
+
+-----------------------------------------
+
+(333): time { parallel -j 28 --pipe tee <f3 >/dev/null; }
+real	0m0.684s
+user	0m0.816s
+sys	0m1.366s
+
+CPU UTILIZATION: 3.190 / 28
+
+-----------------------------------------
+
+(334): time { parallel -j 28 --pipe tee <f3 | wc -l; }
+real	0m0.684s
+user	0m0.876s
+sys	0m1.348s
+
+CPU UTILIZATION: 3.251 / 28
+
+-----------------------------------------
+
+(335): time { cat f3 | parallel -j 28 --pipe tee >/dev/null; }
+real	0m0.696s
+user	0m0.878s
+sys	0m1.333s
+
+CPU UTILIZATION: 3.176 / 28
+
+-----------------------------------------
+
+(336): time { cat f3 | parallel -j 28 --pipe tee | wc -l; }
+real	0m0.745s
+user	0m0.867s
+sys	0m1.455s
+
+CPU UTILIZATION: 3.116 / 28
+
+-----------------------------------------
+
+(337): time { parallel -j 28 --pipe --block 524288 : <f3 >/dev/null; }
+real	0m1.062s
+user	0m0.887s
+sys	0m1.461s
+
+CPU UTILIZATION: 2.210 / 28
+
+-----------------------------------------
+
+(338): time { parallel -j 28 --pipe --block 524288 : <f3 | wc -l; }
+real	0m1.061s
+user	0m0.907s
+sys	0m1.443s
+
+CPU UTILIZATION: 2.214 / 28
+
+-----------------------------------------
+
+(339): time { cat f3 | parallel -j 28 --pipe --block 524288 : >/dev/null; }
+real	0m1.127s
+user	0m0.916s
+sys	0m1.527s
+
+CPU UTILIZATION: 2.167 / 28
+
+-----------------------------------------
+
+(340): time { cat f3 | parallel -j 28 --pipe --block 524288 : | wc -l; }
+real	0m1.144s
+user	0m0.913s
+sys	0m1.566s
+
+CPU UTILIZATION: 2.166 / 28
+
+-----------------------------------------
+
+(341): time { parallel -j 28 --pipe --block 524288 cat <f3 >/dev/null; }
+real	0m1.119s
+user	0m1.478s
+sys	0m2.297s
+
+CPU UTILIZATION: 3.373 / 28
+
+-----------------------------------------
+
+(342): time { parallel -j 28 --pipe --block 524288 cat <f3 | wc -l; }
+real	0m1.145s
+user	0m1.444s
+sys	0m2.410s
+
+CPU UTILIZATION: 3.365 / 28
+
+-----------------------------------------
+
+(343): time { cat f3 | parallel -j 28 --pipe --block 524288 cat >/dev/null; }
+real	0m1.163s
+user	0m1.475s
+sys	0m2.314s
+
+CPU UTILIZATION: 3.257 / 28
+
+-----------------------------------------
+
+(344): time { cat f3 | parallel -j 28 --pipe --block 524288 cat | wc -l; }
+real	0m1.194s
+user	0m1.438s
+sys	0m2.398s
+
+CPU UTILIZATION: 3.212 / 28
+
+-----------------------------------------
+
+(345): time { parallel -j 28 --pipe --block 524288 tee <f3 >/dev/null; }
+real	0m1.138s
+user	0m1.497s
+sys	0m2.310s
+
+CPU UTILIZATION: 3.345 / 28
+
+-----------------------------------------
+
+(346): time { parallel -j 28 --pipe --block 524288 tee <f3 | wc -l; }
+real	0m1.154s
+user	0m1.469s
+sys	0m2.381s
+
+CPU UTILIZATION: 3.336 / 28
+
+-----------------------------------------
+
+(347): time { cat f3 | parallel -j 28 --pipe --block 524288 tee >/dev/null; }
+real	0m1.189s
+user	0m1.531s
+sys	0m2.338s
+
+CPU UTILIZATION: 3.253 / 28
+
+-----------------------------------------
+
+(348): time { cat f3 | parallel -j 28 --pipe --block 524288 tee | wc -l; }
+real	0m1.198s
+user	0m1.497s
+sys	0m2.368s
+
+CPU UTILIZATION: 3.226 / 28
+
+-----------------------------------------
+
+(349): time { parallel -j 28 --pipe --block 4096 : <f3 >/dev/null; }
+real	2m11.101s
+user	2m58.886s
+sys	4m22.405s
+
+CPU UTILIZATION: 3.366 / 28
+
+-----------------------------------------
+
+(350): time { parallel -j 28 --pipe --block 4096 : <f3 | wc -l; }
+real	2m10.953s
+user	2m59.054s
+sys	4m21.550s
+
+CPU UTILIZATION: 3.364 / 28
+
+-----------------------------------------
+
+(351): time { cat f3 | parallel -j 28 --pipe --block 4096 : >/dev/null; }
+real	2m12.764s
+user	3m0.467s
+sys	4m23.947s
+
+CPU UTILIZATION: 3.347 / 28
+
+-----------------------------------------
+
+(352): time { cat f3 | parallel -j 28 --pipe --block 4096 : | wc -l; }
+real	2m11.526s
+user	2m58.876s
+sys	4m20.456s
+
+CPU UTILIZATION: 3.340 / 28
+
+-----------------------------------------
+
+(353): time { parallel -j 28 --pipe --block 4096 cat <f3 >/dev/null; }
+real	2m8.081s
+user	2m59.930s
+sys	4m26.896s
+
+CPU UTILIZATION: 3.488 / 28
+
+-----------------------------------------
+
+(354): time { parallel -j 28 --pipe --block 4096 cat <f3 | wc -l; }
+real	2m11.163s
+user	3m2.576s
+sys	4m31.220s
+
+CPU UTILIZATION: 3.459 / 28
+
+-----------------------------------------
+
+(355): time { cat f3 | parallel -j 28 --pipe --block 4096 cat >/dev/null; }
+real	2m8.556s
+user	3m0.300s
+sys	4m29.808s
+
+CPU UTILIZATION: 3.501 / 28
+
+-----------------------------------------
+
+(356): time { cat f3 | parallel -j 28 --pipe --block 4096 cat | wc -l; }
+real	2m8.957s
+user	3m1.327s
+sys	4m28.865s
+
+CPU UTILIZATION: 3.491 / 28
+
+-----------------------------------------
+
+(357): time { parallel -j 28 --pipe --block 4096 tee <f3 >/dev/null; }
+real	2m11.192s
+user	3m4.693s
+sys	4m34.312s
+
+CPU UTILIZATION: 3.498 / 28
+
+-----------------------------------------
+
+(358): time { parallel -j 28 --pipe --block 4096 tee <f3 | wc -l; }
+real	2m7.898s
+user	3m0.627s
+sys	4m27.929s
+
+CPU UTILIZATION: 3.507 / 28
+
+-----------------------------------------
+
+(359): time { cat f3 | parallel -j 28 --pipe --block 4096 tee >/dev/null; }
+real	2m12.403s
+user	3m4.477s
+sys	4m33.488s
+
+CPU UTILIZATION: 3.458 / 28
+
+-----------------------------------------
+
+(360): time { cat f3 | parallel -j 28 --pipe --block 4096 tee | wc -l; }
+real	2m12.945s
+user	3m4.810s
+sys	4m34.134s
+
+CPU UTILIZATION: 3.452 / 28
+
+-----------------------------------------
+
+(361): time { parallel -j 28 -k --pipe : <f3 >/dev/null; }
+real	0m0.643s
+user	0m0.517s
+sys	0m0.847s
+
+CPU UTILIZATION: 2.121 / 28
+
+-----------------------------------------
+
+(362): time { parallel -j 28 -k --pipe : <f3 | wc -l; }
+real	0m0.618s
+user	0m0.508s
+sys	0m0.841s
+
+CPU UTILIZATION: 2.182 / 28
+
+-----------------------------------------
+
+(363): time { cat f3 | parallel -j 28 -k --pipe : >/dev/null; }
+real	0m0.667s
+user	0m0.510s
+sys	0m0.894s
+
+CPU UTILIZATION: 2.104 / 28
+
+-----------------------------------------
+
+(364): time { cat f3 | parallel -j 28 -k --pipe : | wc -l; }
+real	0m0.647s
+user	0m0.511s
+sys	0m0.880s
+
+CPU UTILIZATION: 2.149 / 28
+
+-----------------------------------------
+
+(365): time { parallel -j 28 -k --pipe cat <f3 >/dev/null; }
+real	0m0.662s
+user	0m0.788s
+sys	0m1.359s
+
+CPU UTILIZATION: 3.243 / 28
+
+-----------------------------------------
+
+(366): time { parallel -j 28 -k --pipe cat <f3 | wc -l; }
+real	0m0.698s
+user	0m0.845s
+sys	0m1.378s
+
+CPU UTILIZATION: 3.184 / 28
+
+-----------------------------------------
+
+(367): time { cat f3 | parallel -j 28 -k --pipe cat >/dev/null; }
+real	0m0.709s
+user	0m0.800s
+sys	0m1.379s
+
+CPU UTILIZATION: 3.073 / 28
+
+-----------------------------------------
+
+(368): time { cat f3 | parallel -j 28 -k --pipe cat | wc -l; }
+real	0m0.731s
+user	0m0.812s
+sys	0m1.446s
+
+CPU UTILIZATION: 3.088 / 28
+
+-----------------------------------------
+
+(369): time { parallel -j 28 -k --pipe tee <f3 >/dev/null; }
+real	0m0.682s
+user	0m0.856s
+sys	0m1.350s
+
+CPU UTILIZATION: 3.234 / 28
+
+-----------------------------------------
+
+(370): time { parallel -j 28 -k --pipe tee <f3 | wc -l; }
+real	0m0.713s
+user	0m0.824s
+sys	0m1.422s
+
+CPU UTILIZATION: 3.150 / 28
+
+-----------------------------------------
+
+(371): time { cat f3 | parallel -j 28 -k --pipe tee >/dev/null; }
+real	0m0.707s
+user	0m0.903s
+sys	0m1.330s
+
+CPU UTILIZATION: 3.158 / 28
+
+-----------------------------------------
+
+(372): time { cat f3 | parallel -j 28 -k --pipe tee | wc -l; }
+real	0m0.719s
+user	0m0.817s
+sys	0m1.436s
+
+CPU UTILIZATION: 3.133 / 28
+
+-----------------------------------------
+
+(373): time { parallel -j 28 -k --pipe --block 524288 : <f3 >/dev/null; }
+real	0m1.063s
+user	0m0.897s
+sys	0m1.460s
+
+CPU UTILIZATION: 2.217 / 28
+
+-----------------------------------------
+
+(374): time { parallel -j 28 -k --pipe --block 524288 : <f3 | wc -l; }
+real	0m1.027s
+user	0m0.896s
+sys	0m1.426s
+
+CPU UTILIZATION: 2.260 / 28
+
+-----------------------------------------
+
+(375): time { cat f3 | parallel -j 28 -k --pipe --block 524288 : >/dev/null; }
+real	0m1.115s
+user	0m0.903s
+sys	0m1.539s
+
+CPU UTILIZATION: 2.190 / 28
+
+-----------------------------------------
+
+(376): time { cat f3 | parallel -j 28 -k --pipe --block 524288 : | wc -l; }
+real	0m1.125s
+user	0m0.928s
+sys	0m1.520s
+
+CPU UTILIZATION: 2.176 / 28
+
+-----------------------------------------
+
+(377): time { parallel -j 28 -k --pipe --block 524288 cat <f3 >/dev/null; }
+real	0m1.115s
+user	0m1.402s
+sys	0m2.360s
+
+CPU UTILIZATION: 3.373 / 28
+
+-----------------------------------------
+
+(378): time { parallel -j 28 -k --pipe --block 524288 cat <f3 | wc -l; }
+real	0m1.155s
+user	0m1.490s
+sys	0m2.316s
+
+CPU UTILIZATION: 3.295 / 28
+
+-----------------------------------------
+
+(379): time { cat f3 | parallel -j 28 -k --pipe --block 524288 cat >/dev/null; }
+real	0m1.177s
+user	0m1.476s
+sys	0m2.339s
+
+CPU UTILIZATION: 3.241 / 28
+
+-----------------------------------------
+
+(380): time { cat f3 | parallel -j 28 -k --pipe --block 524288 cat | wc -l; }
+real	0m1.220s
+user	0m1.435s
+sys	0m2.465s
+
+CPU UTILIZATION: 3.196 / 28
+
+-----------------------------------------
+
+(381): time { parallel -j 28 -k --pipe --block 524288 tee <f3 >/dev/null; }
+real	0m1.156s
+user	0m1.521s
+sys	0m2.321s
+
+CPU UTILIZATION: 3.323 / 28
+
+-----------------------------------------
+
+(382): time { parallel -j 28 -k --pipe --block 524288 tee <f3 | wc -l; }
+real	0m1.187s
+user	0m1.514s
+sys	0m2.355s
+
+CPU UTILIZATION: 3.259 / 28
+
+-----------------------------------------
+
+(383): time { cat f3 | parallel -j 28 -k --pipe --block 524288 tee >/dev/null; }
+real	0m1.172s
+user	0m1.501s
+sys	0m2.344s
+
+CPU UTILIZATION: 3.280 / 28
+
+-----------------------------------------
+
+(384): time { cat f3 | parallel -j 28 -k --pipe --block 524288 tee | wc -l; }
+real	0m1.234s
+user	0m1.549s
+sys	0m2.414s
+
+CPU UTILIZATION: 3.211 / 28
+
+-----------------------------------------
+
+(385): time { parallel -j 28 -k --pipe --block 4096 : <f3 >/dev/null; }
+real	2m8.386s
+user	2m56.461s
+sys	4m17.435s
+
+CPU UTILIZATION: 3.379 / 28
+
+-----------------------------------------
+
+(386): time { parallel -j 28 -k --pipe --block 4096 : <f3 | wc -l; }
+real	2m8.494s
+user	2m57.652s
+sys	4m17.496s
+
+CPU UTILIZATION: 3.386 / 28
+
+-----------------------------------------
+
+(387): time { cat f3 | parallel -j 28 -k --pipe --block 4096 : >/dev/null; }
+real	2m12.948s
+user	2m59.871s
+sys	4m23.073s
+
+CPU UTILIZATION: 3.331 / 28
+
+-----------------------------------------
+
+(388): time { cat f3 | parallel -j 28 -k --pipe --block 4096 : | wc -l; }
+real	2m10.127s
+user	2m57.481s
+sys	4m20.874s
+
+CPU UTILIZATION: 3.368 / 28
+
+-----------------------------------------
+
+(389): time { parallel -j 28 -k --pipe --block 4096 cat <f3 >/dev/null; }
+real	2m13.301s
+user	3m3.024s
+sys	4m34.097s
+
+CPU UTILIZATION: 3.429 / 28
+
+-----------------------------------------
+
+(390): time { parallel -j 28 -k --pipe --block 4096 cat <f3 | wc -l; }
+real	2m7.742s
+user	2m58.667s
+sys	4m27.356s
+
+CPU UTILIZATION: 3.491 / 28
+
+-----------------------------------------
+
+(391): time { cat f3 | parallel -j 28 -k --pipe --block 4096 cat >/dev/null; }
+real	2m12.405s
+user	3m3.666s
+sys	4m34.373s
+
+CPU UTILIZATION: 3.459 / 28
+
+-----------------------------------------
+
+(392): time { cat f3 | parallel -j 28 -k --pipe --block 4096 cat | wc -l; }
+real	2m6.841s
+user	2m59.255s
+sys	4m26.029s
+
+CPU UTILIZATION: 3.510 / 28
+
+-----------------------------------------
+
+(393): time { parallel -j 28 -k --pipe --block 4096 tee <f3 >/dev/null; }
+real	2m12.186s
+user	3m3.972s
+sys	4m33.720s
+
+CPU UTILIZATION: 3.462 / 28
+
+-----------------------------------------
+
+(394): time { parallel -j 28 -k --pipe --block 4096 tee <f3 | wc -l; }
+real	2m13.992s
+user	3m3.993s
+sys	4m33.076s
+
+CPU UTILIZATION: 3.411 / 28
+
+-----------------------------------------
+
+(395): time { cat f3 | parallel -j 28 -k --pipe --block 4096 tee >/dev/null; }
+real	2m12.866s
+user	3m4.753s
+sys	4m36.284s
+
+CPU UTILIZATION: 3.469 / 28
+
+-----------------------------------------
+
+(396): time { cat f3 | parallel -j 28 -k --pipe --block 4096 tee | wc -l; }
+real	2m7.034s
+user	2m58.307s
+sys	4m27.970s
+
+CPU UTILIZATION: 3.513 / 28
+
+-----------------------------------------
+
+(397): time { parallel -j 28 -u --pipe : <f3 >/dev/null; }
+real	0m0.577s
+user	0m0.490s
+sys	0m0.808s
+
+CPU UTILIZATION: 2.249 / 28
+
+-----------------------------------------
+
+(398): time { parallel -j 28 -u --pipe : <f3 | wc -l; }
+real	0m0.561s
+user	0m0.489s
+sys	0m0.782s
+
+CPU UTILIZATION: 2.265 / 28
+
+-----------------------------------------
+
+(399): time { cat f3 | parallel -j 28 -u --pipe : >/dev/null; }
+real	0m0.617s
+user	0m0.460s
+sys	0m0.890s
+
+CPU UTILIZATION: 2.188 / 28
+
+-----------------------------------------
+
+(400): time { cat f3 | parallel -j 28 -u --pipe : | wc -l; }
+real	0m0.601s
+user	0m0.473s
+sys	0m0.839s
+
+CPU UTILIZATION: 2.183 / 28
+
+-----------------------------------------
+
+(401): time { parallel -j 28 -u --pipe cat <f3 >/dev/null; }
+real	0m0.601s
+user	0m0.785s
+sys	0m1.238s
+
+CPU UTILIZATION: 3.366 / 28
+
+-----------------------------------------
+
+(402): time { parallel -j 28 -u --pipe cat <f3 | wc -l; }
+real	0m0.587s
+user	0m0.718s
+sys	0m1.311s
+
+CPU UTILIZATION: 3.456 / 28
+
+-----------------------------------------
+
+(403): time { cat f3 | parallel -j 28 -u --pipe cat >/dev/null; }
+real	0m0.622s
+user	0m0.717s
+sys	0m1.338s
+
+CPU UTILIZATION: 3.303 / 28
+
+-----------------------------------------
+
+(404): time { cat f3 | parallel -j 28 -u --pipe cat | wc -l; }
+real	0m0.615s
+user	0m0.781s
+sys	0m1.306s
+
+CPU UTILIZATION: 3.393 / 28
+
+-----------------------------------------
+
+(405): time { parallel -j 28 -u --pipe tee <f3 >/dev/null; }
+real	0m0.584s
+user	0m0.778s
+sys	0m1.211s
+
+CPU UTILIZATION: 3.405 / 28
+
+-----------------------------------------
+
+(406): time { parallel -j 28 -u --pipe tee <f3 | wc -l; }
+real	0m0.588s
+user	0m0.746s
+sys	0m1.329s
+
+CPU UTILIZATION: 3.528 / 28
+
+-----------------------------------------
+
+(407): time { cat f3 | parallel -j 28 -u --pipe tee >/dev/null; }
+real	0m0.620s
+user	0m0.778s
+sys	0m1.318s
+
+CPU UTILIZATION: 3.380 / 28
+
+-----------------------------------------
+
+(408): time { cat f3 | parallel -j 28 -u --pipe tee | wc -l; }
+real	0m0.633s
+user	0m0.768s
+sys	0m1.370s
+
+CPU UTILIZATION: 3.377 / 28
+
+-----------------------------------------
+
+(409): time { parallel -j 28 -u --pipe --block 524288 : <f3 >/dev/null; }
+real	0m0.943s
+user	0m0.816s
+sys	0m1.390s
+
+CPU UTILIZATION: 2.339 / 28
+
+-----------------------------------------
+
+(410): time { parallel -j 28 -u --pipe --block 524288 : <f3 | wc -l; }
+real	0m0.943s
+user	0m0.837s
+sys	0m1.372s
+
+CPU UTILIZATION: 2.342 / 28
+
+-----------------------------------------
+
+(411): time { cat f3 | parallel -j 28 -u --pipe --block 524288 : >/dev/null; }
+real	0m1.011s
+user	0m0.822s
+sys	0m1.464s
+
+CPU UTILIZATION: 2.261 / 28
+
+-----------------------------------------
+
+(412): time { cat f3 | parallel -j 28 -u --pipe --block 524288 : | wc -l; }
+real	0m1.004s
+user	0m0.843s
+sys	0m1.459s
+
+CPU UTILIZATION: 2.292 / 28
+
+-----------------------------------------
+
+(413): time { parallel -j 28 -u --pipe --block 524288 cat <f3 >/dev/null; }
+real	0m0.975s
+user	0m1.396s
+sys	0m2.111s
+
+CPU UTILIZATION: 3.596 / 28
+
+-----------------------------------------
+
+(414): time { parallel -j 28 -u --pipe --block 524288 cat <f3 | wc -l; }
+real	0m0.985s
+user	0m1.348s
+sys	0m2.219s
+
+CPU UTILIZATION: 3.621 / 28
+
+-----------------------------------------
+
+(415): time { cat f3 | parallel -j 28 -u --pipe --block 524288 cat >/dev/null; }
+real	0m1.029s
+user	0m1.394s
+sys	0m2.207s
+
+CPU UTILIZATION: 3.499 / 28
+
+-----------------------------------------
+
+(416): time { cat f3 | parallel -j 28 -u --pipe --block 524288 cat | wc -l; }
+real	0m1.060s
+user	0m1.380s
+sys	0m2.267s
+
+CPU UTILIZATION: 3.440 / 28
+
+-----------------------------------------
+
+(417): time { parallel -j 28 -u --pipe --block 524288 tee <f3 >/dev/null; }
+real	0m0.982s
+user	0m1.356s
+sys	0m2.173s
+
+CPU UTILIZATION: 3.593 / 28
+
+-----------------------------------------
+
+(418): time { parallel -j 28 -u --pipe --block 524288 tee <f3 | wc -l; }
+real	0m0.977s
+user	0m1.380s
+sys	0m2.195s
+
+CPU UTILIZATION: 3.659 / 28
+
+-----------------------------------------
+
+(419): time { cat f3 | parallel -j 28 -u --pipe --block 524288 tee >/dev/null; }
+real	0m1.059s
+user	0m1.413s
+sys	0m2.173s
+
+CPU UTILIZATION: 3.386 / 28
+
+-----------------------------------------
+
+(420): time { cat f3 | parallel -j 28 -u --pipe --block 524288 tee | wc -l; }
+real	0m1.041s
+user	0m1.339s
+sys	0m2.292s
+
+CPU UTILIZATION: 3.487 / 28
+
+-----------------------------------------
+
+(421): time { parallel -j 28 -u --pipe --block 4096 : <f3 >/dev/null; }
+real	1m52.407s
+user	2m39.918s
+sys	3m58.768s
+
+CPU UTILIZATION: 3.546 / 28
+
+-----------------------------------------
+
+(422): time { parallel -j 28 -u --pipe --block 4096 : <f3 | wc -l; }
+real	1m57.464s
+user	2m46.766s
+sys	4m12.911s
+
+CPU UTILIZATION: 3.572 / 28
+
+-----------------------------------------
+
+(423): time { cat f3 | parallel -j 28 -u --pipe --block 4096 : >/dev/null; }
+real	1m59.247s
+user	2m45.988s
+sys	4m12.077s
+
+CPU UTILIZATION: 3.505 / 28
+
+-----------------------------------------
+
+(424): time { cat f3 | parallel -j 28 -u --pipe --block 4096 : | wc -l; }
+real	1m54.142s
+user	2m41.308s
+sys	4m4.827s
+
+CPU UTILIZATION: 3.558 / 28
+
+-----------------------------------------
+
+(425): time { parallel -j 28 -u --pipe --block 4096 cat <f3 >/dev/null; }
+real	1m52.785s
+user	2m44.574s
+sys	4m14.026s
+
+CPU UTILIZATION: 3.711 / 28
+
+-----------------------------------------
+
+(426): time { parallel -j 28 -u --pipe --block 4096 cat <f3 | wc -l; }
+real	1m51.750s
+user	2m44.025s
+sys	4m16.683s
+
+CPU UTILIZATION: 3.764 / 28
+
+-----------------------------------------
+
+(427): time { cat f3 | parallel -j 28 -u --pipe --block 4096 cat >/dev/null; }
+real	1m58.559s
+user	2m49.935s
+sys	4m22.645s
+
+CPU UTILIZATION: 3.648 / 28
+
+-----------------------------------------
+
+(428): time { cat f3 | parallel -j 28 -u --pipe --block 4096 cat | wc -l; }
+real	1m58.457s
+user	2m50.192s
+sys	4m24.866s
+
+CPU UTILIZATION: 3.672 / 28
+
+-----------------------------------------
+
+(429): time { parallel -j 28 -u --pipe --block 4096 tee <f3 >/dev/null; }
+real	1m59.660s
+user	2m50.456s
+sys	4m25.781s
+
+CPU UTILIZATION: 3.645 / 28
+
+-----------------------------------------
+
+(430): time { parallel -j 28 -u --pipe --block 4096 tee <f3 | wc -l; }
+real	1m51.708s
+user	2m43.635s
+sys	4m15.063s
+
+CPU UTILIZATION: 3.748 / 28
+
+-----------------------------------------
+
+(431): time { cat f3 | parallel -j 28 -u --pipe --block 4096 tee >/dev/null; }
+real	1m58.265s
+user	2m50.588s
+sys	4m24.722s
+
+CPU UTILIZATION: 3.680 / 28
+
+-----------------------------------------
+
+(432): time { cat f3 | parallel -j 28 -u --pipe --block 4096 tee | wc -l; }
+real	1m58.346s
+user	2m51.513s
+sys	4m25.780s
+
+CPU UTILIZATION: 3.695 / 28
+
+-----------------------------------------
+
+
+-----------------------------
+INPUT DATA STATS
+
+
+
+NAME: f1
+SIZE: 1000000 bytes
+LINE COUNT: 1000000 lines
+
+
+NAME: f2
+SIZE: 6888896 bytes
+LINE COUNT: 1000000 lines
+
+
+NAME: f3
+SIZE: 158734150 bytes
+LINE COUNT: 2016759 lines
+
+total sys = 10498978 us
+
+total user = 9643253 us
+
+total real = 7509580 us
+
+
+OVERALL CPU UTILIZATION: 2.682 / 28
+
