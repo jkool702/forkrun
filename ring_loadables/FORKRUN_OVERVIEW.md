@@ -100,7 +100,7 @@ Executing this roadmap, hardening the codebase for Exascale production environme
 
 forkrun is open source (MIT License). Drop `frun.bash` on a Frontier login node and run `. frun.bash && frun -s : < 1B_line_file` side-by-side with your current Parallel pipeline. 
 
-I’m happy to assist remotely or on-site. I live in Dandridge, TN (~1 hour away from ORNL) and available for an on-site demo with 24 hours notice.
+I’m happy to assist remotely or on-site. I live in Dandridge, TN (~1 hour away from ORNL) and am available for an on-site demo with 24 hours notice.
 
 Let's work together to get Frontier spending **more time doing science** and less time "waiting for data"!
 
