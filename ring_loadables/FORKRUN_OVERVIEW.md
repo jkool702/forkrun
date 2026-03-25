@@ -15,7 +15,7 @@ forkrun, in its fastest mode, can distribute **200 000+ batches/sec** on a singl
 frun my_bash_func < inputs.txt      # parallelize custom bash functions!
 cat data | frun sed 's/old/new/'    # pipe-based input
 frun -k sort < records.tsv          # ordered output
-frun -s gzip < raw_logs             # stdin-passthrough mode
+frun -s -I gzip {ID}.gz < raw_logs  # stdin-passthrough mode
 ```
 
 Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tuning parallelization engine** implemented as a set of C loadable bash builtins. It coordinates workers through shared memory and atomic operations — no locks on the fast path, no cross-socket data migration, no per-item fork overhead.
