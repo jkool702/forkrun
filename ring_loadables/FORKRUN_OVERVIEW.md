@@ -64,7 +64,7 @@ NOTE: All benchmarks run on UMA hardware. On NUMA hardware forkrun is expected t
 
 - **`-s` mode** is the headline: data flows memfd → kernel pipe → command stdin via `splice()`, entirely in kernel space. Bash never touches the data bytes — only the claim/dispatch coordination runs in userspace.
 - **`-b` mode**: allows for distributing batches of constant byte size without needing to scan for delimiters. Performance approaching kernel limits on memory movement.
-- **`-k` mode (Ordered output)**: has virtually zero cost. As the benchmarks show, `frun -k echo` takes exactly the same time as unordered `frun echo` (`4.4 s`), whereas strict ordering brutally penalizes traditional tools.
+- **`-k` mode (Ordered output)**: has virtually zero cost. Benchmarks indicate that ordering adds between 0-2% to the runtime, whereas strict ordering brutally penalizes traditional tools.
 - **CPU utilization**: avg 27.1 / 28 cores (95.2%) sustained across all modes for ~400 tests. "Default" mode tests saturate on avg 27.6 / 28 cores (98.6%).
 - **Cross-socket traffic (NUMA, 4 nodes)**: 0.0–0.2% of chunks — born-local placement works and cross-node traffic is virtually eliminated.
 - **File vs pipe input**: zero measurable difference — the ingest pipeline handles both identically.
