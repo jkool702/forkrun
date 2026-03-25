@@ -30,7 +30,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 
 **Adaptive tuning** is fully automatic. A three-phase controller (warmup → geometric ramp → PID steady-state) discovers the optimal batch size in O(log L) steps and continuously adjusts based on input rate, consumption rate, and worker starvation — with no user configuration required. forkrun runs efficiently whether it has 20 inputs from `ping` running on your laptop, or a billion lines from a file on a ramdisk running on a Frontier node.
 
-## Benchmarks (14-core/28-thread i9-7940x, 100m lines)
+## Benchmarks (14-core/28-thread i9-7940x, 100 M lines)
 
 | Workload                                      | forkrun                 | GNU Parallel                 | Speedup    | Notes |
 |-----------------------------------------------|-------------------------|------------------------------|------------|-------|
@@ -50,7 +50,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 - forkrun:      95 %  (27.1 / 28 cores)  (no centralized dispatcher - all 27.1 cores doing work)
 - GNU Parallel:  6 %  (2.68 / 28 Cores)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
 
-NOTE: All benchmarks run on UMA hardware. On NUMA hardware forkrun is expected to scale linearly (or bettrer) due to its born-local NUMA approach.
+NOTE: All benchmarks run on UMA hardware. On NUMA hardware forkrun is expected to scale linearly (or better) due to its born-local NUMA approach.
 
 - **`-s` mode** is the headline: data flows memfd → kernel pipe → command stdin via `splice()`, entirely in kernel space. Bash never touches the data bytes — only the claim/dispatch coordination runs in userspace.
 - **`-b` mode**: allows for distributing batches of constant byte size without needing to scan for delimiters. Performance approaching kernel limits on memory movement.
@@ -71,7 +71,7 @@ NOTE: All benchmarks run on UMA hardware. On NUMA hardware forkrun is expected t
 
 Frontier's compute nodes rely on a single customized 64-core AMD EPYC "Trento" CPU configured with 4 NUMA domains (NPS4). Data prep workflows that run millions of fast shell transforms hit exactly the failure mode that forkrun was designed for: **high-frequency, low-latency operations on deep NUMA topologies**. 
 
-GNU Parallel's per-item Perl initialization overhead and NUMA-oblivious scheduling leave most cores idle on this workload shape. forkrun keeps them saturated with node-local data, and has the potential to reclaim 30–40 % of Frontier’s total capacity on workloads where "data prep" contains is taking up a majority of ther node time and involves many fast-running tasks.
+GNU Parallel's per-item Perl initialization overhead and NUMA-oblivious scheduling leave most cores idle on this workload shape. forkrun keeps them saturated with node-local data, and has the potential to reclaim 30–40 % of Frontier’s total capacity on workloads where data prep takes up a majority of node time and involves many fast-running tasks.
 
 Ultimately, forkrun enables Frontier to spend **more time doing science** and less time "waiting for data".
 
