@@ -41,7 +41,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 | `-s` stdin passthrough (no-op)                | **893 M lines/s**       | 6.05 M lines/s (`--pipe`)    | **~148×**  | streaming / splice |
 | `-b 524288` byte batches (no-op)              | **1.54 B lines/s**      | 6.02 M lines/s (`--pipe`)    | **~256×**  | kernel-limited |
 
-**Batch rate (the stat that matters most for Frontier)**  
+**Batch distribution rate**  
 - forkrun default mode: **~10 000 – 12 000 batches/sec**  
 - forkrun `-s` mode: **> 200 000 batches/sec (UMA) / > 100 000 batches/sec (NUMA)**  
 - GNU Parallel (current tool): **~470 batches/sec**
