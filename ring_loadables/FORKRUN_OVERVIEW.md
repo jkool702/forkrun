@@ -85,13 +85,24 @@ Frontier's compute nodes rely on customized 64-core AMD EPYC "Trento" CPUs confi
 
 GNU Parallel's per-item Perl initialization overhead and NUMA-oblivious scheduling leave most cores idle on this workload shape. forkrun keeps them saturated with node-local data. On systems like Frontier, where data prep can dominate runtime for certain pipelines, this represents a **significant opportunity for reclaiming otherwise idle compute capacity**.
 
-Ultimately, forkrun enables Frontier to spend **more time doing science** and less time "waiting for data".
+## Current Limitations & Roadmap for Resilience
+
+forkrun currently guarantees correctness under the assumption that at least one worker per NUMA node remains alive until its assigned work completes — a safe assumption for local shell operations on healthy compute nodes. 
+
+Transitioning forkrun into a hardened, facility-wide utility requires advancing its fault-tolerance capabilities. Priorities for the development roadmap include:
+- **Failure isolation and per-batch retries** to handle transient worker crashes.
+- **Resume-after-interruption** state saving to gracefully handle preempted Slurm jobs.
+- **Deeper integration** with facility workload managers.
+
+Executing this roadmap, hardening the codebase for Exascale production environments, and providing dedicated facility support is the primary focus for proposed collaboration and funding with ORNL.
 
 ## Next steps
 
 forkrun is open source (MIT License). Drop `frun.bash` on a Frontier login node and run `. frun.bash && frun -s : < 1B_line_file` side-by-side with your current Parallel pipeline. 
 
-I’m happy to assist remotely or on-site. I live ~1 hour away from ORNL in Dandridge, TN and could be there as soon as tomorrow to demo forkrun in person.
+I’m happy to assist remotely or on-site. I live in Dandridge, TN (~1 hour away from ORNL) and available for an on-site demo with 24 hours notice.
+
+Let's work together to get Frontier spending **more time doing science** and less time "waiting for data"!
 
 ## Contact / Source
 
