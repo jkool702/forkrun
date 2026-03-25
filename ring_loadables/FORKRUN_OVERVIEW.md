@@ -102,7 +102,7 @@ forkrun is open source (MIT License). Drop `frun.bash` on a Frontier login node 
 
 I’m happy to assist remotely or on-site. I live in Dandridge, TN (~1 hour away from ORNL) and am available for an on-site demo with 24 hours notice.
 
-Let's work together to get Frontier spending **more time doing science** and less time "waiting for data"!
+Let's work together to get Frontier spending **more time doing science** and less time "waiting for data".
 
 ## Contact / Source
 
