@@ -12,20 +12,20 @@ forkrun is built for high-frequency, low-latency workloads on NUMA hardware - a 
 
 ## The Problem
 
-Data preparation on multi-socket HPC systems like Frontier means running millions of fast shell operations — format conversions, field extraction, validation checks, file transforms — across inputs that range from a few records to billions of lines. GNU Parallel and `xargs -P` were designed for long-running jobs, not microsecond-scale operations on NUMA hardware. At scale, their per-item fork overhead, cross-socket data migration, and lock contention become the bottleneck — not the work itself. 
+Data preparation on multi-socket HPC systems like Frontier means running millions of fast shell operations — format conversions, field extractions, validation checks, and file transforms — across inputs ranging from a few records to billions of lines. GNU Parallel and `xargs -P` were designed for long-running jobs, not microsecond-scale operations on NUMA hardware. At scale, their per-item fork overhead, cross-socket data migration, and lock contention become the bottleneck — not the work itself. 
 
-forkrun, in its fastest mode, can distribute **200 000+ batches/sec** on a single node — while **GNU Parallel struggles to break 500**. On Frontier this potentially turns 50% data-prep time into low single-digit percent.
+forkrun, in its fastest mode, can distribute **200 000+ batches/sec** on a single node — while **GNU Parallel struggles to break 500**. On Frontier, this potentially turns 50% of data-prep time into a low single-digit percentage.
 
 ## What forkrun Is
 
-**forkrun** is an **intra-node** drop-in shell parallelizer that replaces `xargs -P` and GNU Parallel for streaming workloads on a single machine. It is easy to use—simply source the script, and it can immediately parallelize native bash functions or external commands:
+**forkrun** is an **intra-node** drop-in shell parallelizer that replaces `xargs -P` and GNU Parallel for streaming workloads on a single machine. It is easy to use — source the script, and it can immediately parallelize native bash functions or external commands:
 
 ```bash
-. frun.bash                         # sourcing frun.bash sets up *everything*
-frun my_bash_func < inputs.txt      # parallelize custom bash functions!
-cat data | frun sed 's/old/new/'    # pipe-based input
-frun -k sort < records.tsv          # ordered output
-frun -s -I gzip {ID}.gz < raw_logs  # stdin-passthrough mode
+. frun.bash                              # sourcing frun.bash sets up *everything*
+frun my_bash_func < inputs.txt           # parallelize custom bash functions!
+cat file_list | frun -k sed 's/old/new/' # pipe-based input, ordered output
+frun -k sort < records.tsv               # stdin-passthrough, ordered output
+frun -s -I 'gzip -c >{ID}.gz' < raw_logs # stdin-passthrough, unique output names
 ```
 
 Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tuning parallelization engine** implemented as a set of C loadable bash builtins. It coordinates workers through shared memory and atomic operations — no locks on the fast path, no cross-socket data migration, no per-item fork overhead.
@@ -56,7 +56,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 - forkrun `-s` mode: **> 200 000 batches/sec (UMA) / > 100 000 batches/sec (NUMA)**  
 - GNU Parallel (current tool): **~470 batches/sec**
 
-**Avg CPU utilization across ~400 benchmarks**  
+**Average CPU utilization across ~400 benchmarks**  
 - forkrun:      95%  (27.1 / 28 cores)  (no centralized dispatcher - all 27.1 cores doing work)
 - GNU Parallel:  6%  (2.68 / 28 Cores)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
 
@@ -64,7 +64,7 @@ NOTE: All benchmarks run on UMA hardware. On NUMA hardware forkrun is expected t
 
 - **`-s` mode** is the headline: data flows memfd → kernel pipe → command stdin via `splice()`, entirely in kernel space. Bash never touches the data bytes — only the claim/dispatch coordination runs in userspace.
 - **`-b` mode**: allows for distributing batches of constant byte size without needing to scan for delimiters. Performance approaching kernel limits on memory movement.
-- **`-k` mode (Ordered output)**: has virtually zero cost. Benchmarks indicate that ordering adds between 0-2% to the runtime, whereas strict ordering brutally penalizes traditional tools.
+- **`-k` mode (Ordered output)**: has virtually zero cost. Benchmarks indicate that ordering adds under 2% to the runtime, whereas strict ordering brutally penalizes traditional tools.
 - **CPU utilization**: avg 27.1 / 28 cores (95.2%) sustained across all modes for ~400 tests. "Default" mode tests saturate on avg 27.6 / 28 cores (98.6%).
 - **Cross-socket traffic (NUMA, 4 nodes)**: 0.0–0.2% of chunks — born-local placement works and cross-node traffic is virtually eliminated.
 - **File vs pipe input**: zero measurable difference — the ingest pipeline handles both identically.
@@ -100,7 +100,7 @@ Executing this roadmap, hardening the codebase for Exascale production environme
 
 forkrun is open source (MIT License). Drop `frun.bash` on a Frontier login node and run `. frun.bash && frun -s : < 1B_line_file` side-by-side with your current Parallel pipeline. 
 
-I’m happy to assist remotely or on-site. I live in Dandridge, TN (~1 hour away from ORNL) and am available for an on-site demo with 24 hours notice.
+I’m happy to assist remotely or on-site. I live in Dandridge, TN (~1 hour away from ORNL) and am available for an on-site demo with 24 hour notice.
 
 Let's work together to get Frontier spending **more time doing science** and less time "waiting for data".
 
