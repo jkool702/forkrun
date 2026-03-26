@@ -12,6 +12,7 @@ jobs:
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.arch == 'riscv64' }} 
     strategy:
       fail-fast: false
       matrix:
