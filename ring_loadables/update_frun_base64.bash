@@ -15,7 +15,7 @@ fi
 unset b64
 declare -A b64
 shopt -s globstar
-for nn in ./**/*.so; do
+for nn in ./*.so; do
 mm="${nn#*forkrun_ring.}"
 mm="${mm%.so}"
 mm="${mm//-/_}"
