@@ -6,10 +6,10 @@ else
 fi
 
 frun() {
-## bash orchestrator function for forkrun, providing extremely fast shell streaming parallelization 
+## bash orchestrator function for forkrun, providing extremely fast shell streaming parallelization
 # USAGE:  . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
 # FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
-#  HELP:  . frun.bash && frun --help 
+#  HELP:  . frun.bash && frun --help
 (
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
@@ -110,9 +110,11 @@ frun __exec__ "$@"
         case "$1" in
             --usage|--help=usage)
                 cat <<'EOF' >&2
+
 USAGE: . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
 FLAGS: [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
-HELP:  . frun.bash && frun --help 
+HELP:  . frun.bash && frun --help
+
 EOF
                 ;;
             *)
@@ -130,7 +132,7 @@ EOF
   -d, --delim <char>    : Use a custom single-character record delimiter.
 
 ### OUTPUT MODES
-  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes. 
+  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes.
   -k, --ordered         : Ordered mode. Same as buffered, but output is printed strictly in input-batch order.
   -u, --realtime        : Unbuffered / realtime mode. Workers output directly to stdout. (Can cause kernel lock contention on massive streams).
   -o, --order <mode>    : Explicitly set the mode (buffered, ordered, realtime).
@@ -155,8 +157,11 @@ EOF
                           0,1: Explicitly bind to physical NUMA nodes 0 and 1.
                           0:3: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
   -N, --dry-run         : Dry run. Print the generated command strings instead of executing them.
-  -v, --verbose         : Increase verbosity (prints timing and flag summaries to stderr).
-  +v, --no-verbose      : Decrease verbosity.
+  -v, --verbose         : Increase verbosity (prints timing and flag summaries to stderr). Implies --stats.
+  +v, --no-verbose      : Decrease verbosity. Disables --stats.
+  -V, --version         : Prints forkrun version number
+  --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
+
 EOF
                 ;;
         esac
@@ -167,6 +172,7 @@ EOF
     unsafe_flag=false
     byte_mode_flag=false
     verbose_flag=false
+    stats_flag=false
     dry_run_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
@@ -174,26 +180,26 @@ EOF
     # Parse Arguments
     while true; do
         case "$1" in
-            -k|--keep-order|--ordered)   order_mode='ordered'  ;;
-            -u|--unbuffered|--realtime)  order_mode='realtime' ;;
-            --buffered|--atomic)         order_mode='buffered' ;;
+            -k|--keep-order|--ordered)          order_mode='ordered'  ;;
+            -u|--unbuffered|--realtime)         order_mode='realtime' ;;
+            --buffered|--atomic)                order_mode='buffered' ;;
 
-            -U|--unsafe|--UNSAFE)   unsafe_flag=true  ;;
-            +U|--safe|--SAFE)     unsafe_flag=false ;;
+            -U|--unsafe|--UNSAFE)                   unsafe_flag=true  ;;
+            +U|--safe|--SAFE)                       unsafe_flag=false ;;
 
-            -s|--stdin)    stdin_flag=true  ;;
-            +s|--no-stdin) stdin_flag=false ;;
+            -s|--stdin)                              stdin_flag=true  ;;
+            +s|--no-stdin)                           stdin_flag=false ;;
 
-            -v|--verbose)    verbose_flag=true  ;;
-            +v|--no-verbose) verbose_flag=false ;;
+            --stats)                                 stats_flag=true  ;;
+            -v|--verbose)        verbose_flag=true;  stats_flag=true  ;;
+            +v|--no-verbose)     verbose_flag=false; stats_flag=false ;;
 
-            -z|--null)    delimiter_val='' ;;
+            -z|--null)                            delimiter_val=''    ;;
 
-            -N|--dry-run|--DRY-RUN)    dry_run_flag=true  ;;
+            -N|--dry-run|--DRY-RUN)                dry_run_flag=true  ;;
 
-             # --- REPLACEMENT FLAGS (-i / -I) ---
-            -i|--insert)    insert_args_flag=true ;;
-            -I|--insert-id|--INSERT|--INSERT-ID) insert_id_flag=true ;;
+            -i|--insert)                       insert_args_flag=true  ;;
+            -I|--insert-id|--INSERT|--INSERT-ID) insert_id_flag=true  ;;
 
             # --- LIMIT (-n 100) ---
             @(-n|--limit)?(?([= $'\t'])+([0-9+-])))
@@ -255,9 +261,9 @@ EOF
                 [[ ${arg} ]] && delimiter_val="${arg:0:1}" ;;
 
             # help system
-            -h|-\?|--help|--help=*|--usage)
-                _frun_displayHelp "$1"
-                return 0 ;;
+            -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
+
+            -V|--version|--VERSION)   printf 'forkrun v3.0.0\n' >&2;  return 0  ;;
 
             --) shift; break ;;
 
@@ -635,7 +641,7 @@ P+=($!)
 
         wait
 
-        (( FORKRUN_NUM_NODES > 1 )) && ring_numa_stats
+        { ${stats_flag} || ${verbose_flag}; } && (( FORKRUN_NUM_NODES > 1 )) && ring_numa_stats
 
         ring_destroy
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
