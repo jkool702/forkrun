@@ -15,7 +15,7 @@ forkrun is built for high-frequency, low-latency workloads on deep NUMA hardware
 
 ## 🚀 Quick Start (Installation & Usage)
 
-`forkrun` is distributed as a single `bash` file with an embedded, self-extracting compiled C extension. There are no external dependencies (no Perl, no Python). 
+forkrun is distributed as a single `bash` file with an embedded, self-extracting compiled C extension. There are no external dependencies (no Perl, no Python). 
 
 Download and source it directly:
 ```bash
@@ -69,6 +69,12 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 
 forkrun is designed to run anywhere with zero friction:
 *   **Required:** Bash ≥ 4.0 (Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`).
+
+---
+
+## 🏛️ Legacy Version (v2)
+
+With the release of v3.0.0, `forkrun` has transitioned to a high-performance C-ring architecture (`frun.bash`). The older v2, pure-Bash coproc-based version (`forkrun.bash`) remains available in the `legacy/` directory. While v3 (`frun.bash`) is highly recommended for all modern workloads, v2 (`forkrun.bash`) remains as an alternate fully-functional high-performance bash stream parallelizer. forkrun v1 is not recommended for use.
 
 ---
 
