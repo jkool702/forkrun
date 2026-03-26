@@ -21,11 +21,11 @@ forkrun, in its fastest mode, can distribute **200 000+ batches/sec** on a singl
 **forkrun** is an **intra-node** drop-in shell parallelizer that replaces `xargs -P` and GNU Parallel for streaming workloads on a single machine. It is easy to use — source the script, and it can immediately parallelize native bash functions or external commands:
 
 ```bash
-. frun.bash                              # sourcing frun.bash sets up *everything*
-frun my_bash_func < inputs.txt           # parallelize custom bash functions!
-cat file_list | frun -k sed 's/old/new/' # pipe-based input, ordered output
-frun -k sort < records.tsv               # stdin-passthrough, ordered output
-frun -s -I 'gzip -c >{ID}.gz' < raw_logs # stdin-passthrough, unique output names
+. frun.bash                                # sourcing frun.bash sets up *everything*
+frun my_bash_func < inputs.txt             # parallelize custom bash functions!
+cat file_list | frun -k sed 's/old/new/'   # pipe-based input, ordered output
+frun -k sort < records.tsv                 # stdin-passthrough, ordered output
+frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
 ```
 
 Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tuning parallelization engine** implemented as a set of C loadable bash builtins. It coordinates workers through shared memory and atomic operations — no locks on the fast path, no cross-socket data migration, no per-item fork overhead.
