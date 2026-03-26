@@ -14,7 +14,7 @@ forkrun is built for high-frequency, low-latency workloads on NUMA hardware - a 
 
 Data preparation on multi-socket HPC systems like Frontier means running millions of fast shell operations — format conversions, field extractions, validation checks, and file transforms — across inputs ranging from a few records to billions of lines. GNU Parallel and `xargs -P` were designed for long-running jobs, not microsecond-scale operations on NUMA hardware. At scale, their per-item fork overhead, cross-socket data migration, and lock contention become the bottleneck — not the work itself. 
 
-forkrun, in its fastest mode, can distribute **200 000+ batches/sec** on a single node — while **GNU Parallel struggles to break 500**. On Frontier, this potentially turns 50% of data-prep time into a low single-digit percentage.
+forkrun, in its fastest mode, can distribute **200 000+ batches/sec** on a single node — while **GNU Parallel struggles to break 500**. On Frontier, this potentially reduces the cost of data prep (measured in total node time) from over 50% down to under 10%.
 
 ## What forkrun Is
 
@@ -58,7 +58,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 
 **Average CPU utilization across ~400 benchmarks**  
 - forkrun:      95%  (27.1 / 28 cores)  (no centralized dispatcher - all 27.1 cores doing work)
-- GNU Parallel:  6%  (2.68 / 28 Cores)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
+- GNU Parallel:  6%  (2.68 / 28 cores)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
 
 NOTE: All benchmarks run on UMA hardware. On NUMA hardware forkrun is expected to scale linearly (or better) due to its born-local NUMA approach.
 
