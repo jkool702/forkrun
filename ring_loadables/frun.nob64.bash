@@ -6,6 +6,10 @@ else
 fi
 
 frun() {
+## bash orchestrator function for forkrun, providing extremely fast shell streaming parallelization 
+# USAGE:  . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
+# FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
+#  HELP:  . frun.bash && frun --help 
 (
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
@@ -49,6 +53,7 @@ frun __exec__ "$@"
         shopt -s extglob;
     fi
 
+   # --- HELPER: Expand units (IEC/IEEE prefixes) ---
     _expand_unit() {
         local val iec num p
         val="${1,,}"
@@ -98,6 +103,63 @@ frun __exec__ "$@"
             esac
          fi
         return 0
+    }
+
+    # --- HELPER: Display HELP ---
+    _frun_displayHelp() {
+        case "$1" in
+            --usage|--help=usage)
+                cat <<'EOF' >&2
+USAGE: . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
+FLAGS: [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
+HELP:  . frun.bash && frun --help 
+EOF
+                ;;
+            *)
+                _frun_displayHelp "--usage"
+                cat <<'EOF' >&2
+
+# # # # # FORKRUN V3 FLAGS # # # # #
+
+### DATA PASSING & DELIMITERS
+  <default>             : Pass arguments fully quoted via cmdline ("${A[@]}"). (no flag needed)
+  -U, --unsafe          : Pass arguments unquoted via cmdline (${A[*]}).
+  -s, --stdin           : Pass data to the worker via its stdin (instead of via cmdline arguments).
+  -b, --bytes <N>       : Byte mode. Split the stream into N-byte chunks instead of using delimiters (implies -s). Supports standard prefixes (e.g., -b 1M).
+  -z, --null            : Use NULL (\0) as the record delimiter instead of newline.
+  -d, --delim <char>    : Use a custom single-character record delimiter.
+
+### OUTPUT MODES
+  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes. 
+  -k, --ordered         : Ordered mode. Same as buffered, but output is printed strictly in input-batch order.
+  -u, --realtime        : Unbuffered / realtime mode. Workers output directly to stdout. (Can cause kernel lock contention on massive streams).
+  -o, --order <mode>    : Explicitly set the mode (buffered, ordered, realtime).
+
+### WORKER & BATCH SCALING (Dynamic Ranges)
+  *Syntax note: Options accepting <init>:<max> allow you to define the starting value and the upper bound for the dynamic PID controller. Setting <init> and <max> to 0 or -1 has special meaning. Examples: 1:0 (DEFAULT) (start at 1, scale to default max) | 0:-1 (start at default max, scale to maximum allowed) | 4:16 (start at 4, scale to max of 16).*
+
+  -j, -P, --workers <W> : Set the number of concurrent workers. Supports <init>:<max> (e.g., -j 4:32). Default max is the number of logical cores.
+  -l, --lines <L>       : Set the batch size (lines per worker). Supports <init>:<max> (e.g., -l 10:10000). Default max is 4096.
+  -L, --exact-lines <N> : Force exactly N lines per batch. (Warning: Disables NUMA topological stealing to guarantee exact counts).
+  -t, --timeout <us>    : Set the maximum wait time (in microseconds) for a partial batch before flushing early.
+
+### STRING SUBSTITUTION
+  -i, --insert          : Replace {} in the command string with the inputs passed on stdin.
+  -I, --insert-id       : Replace {ID} in the command string with [{NODE_NUM}.]{WORKER_NUM}.{BATCH_NUM}. {ID} is unique per batch, and can be used to redirect output per batch.
+
+### LIMITS & TOPOLOGY
+  -n, --limit <N>       : Stop processing after exactly N records have been claimed.
+  --nodes, --numa <map> : Control NUMA topology mapping. Nodes that do not exist will be skipped (excluding for @N).
+                          auto (default): Autodetect all physical online nodes.
+                          @N: Oversubscribe / force N logical nodes.
+                          0,1: Explicitly bind to physical NUMA nodes 0 and 1.
+                          0:3: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
+  -N, --dry-run         : Dry run. Print the generated command strings instead of executing them.
+  -v, --verbose         : Increase verbosity (prints timing and flag summaries to stderr).
+  +v, --no-verbose      : Decrease verbosity.
+EOF
+                ;;
+        esac
     }
 
     # Config Vars
@@ -191,6 +253,11 @@ frun __exec__ "$@"
                 arg="${1#@(-d|--delim|--delimiter)?([= $'\t'])}";
                 [[ ${arg} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && delimiter_val="${arg:0:1}" ;;
+
+            # help system
+            -h|-\?|--help|--help=*|--usage)
+                _frun_displayHelp "$1"
+                return 0 ;;
 
             --) shift; break ;;
 
@@ -578,6 +645,40 @@ P+=($!)
   ) {fd00}<&0 {fd11}>&1 {fd22}>&2
 }
 
+# ==============================================================================
+# BASH AUTO-COMPLETION FOR FRUN
+# ==============================================================================
+_frun_complete() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    # V3 Supported Flags
+    opts="-k --keep-order --ordered -u --unbuffered --realtime --buffered --atomic \
+          -U --unsafe +U --safe -s --stdin +s --no-stdin -v --verbose +v --no-verbose \
+          -z --null -N --dry-run -i --insert -I --insert-id -n --limit -L --exact-lines \
+          -l --lines --batchsize -b --bytes -j -P --workers -t --timeout --nodes --numa \
+          -o --order -d --delim --delimiter -h --help --usage"
+
+    # If the user is currently typing a flag
+    if [[ ${cur} == -* ]] ; then
+        COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+        return 0
+    fi
+
+    # If the user is typing the command to parallelize
+    if [[ ${prev} == frun || ${prev} == -* ]]; then
+        COMPREPLY=( $(compgen -c -- "${cur}") )
+        return 0
+    fi
+}
+complete -F _frun_complete frun
+
+
+# ==============================================================================
+# AUTO-BOOTSTRAP FOR FRUN LOADABLES
+# ==============================================================================
 _forkrun_bootstrap_setup() {
 ## HELPER FUNCTION TO LOAD THE RING LOADABLES USED BY FORKRUN
 
@@ -729,7 +830,6 @@ _forkrun_base64_to_file() {
     { (( ${#FUNCNAME[@]} > 1 )) && [[ "${FUNCNAME[1]}" == '_forkrun_bootstrap_setup' ]]; } || shopt ${extglobState} extglob
 }
 
-
     local tmp_so dir rf bootstrap_flag need_memfd_create_flag need_memfd_b64_flag need_b64_flag have_memfd_loadables_flag force_flag fast_flag
     local -a candidates
 
@@ -784,7 +884,6 @@ _forkrun_base64_to_file() {
 
     # check for the memfd_create loadable
     enable | sed -zE 's/\n/ /g' | grep -qE '(ring_((memfd_create)|(seal)|(list)) .*){3}' || need_memfd_create_flag=true
-
 
     # set ARCH
     _forkrun_get_arch "$1"
@@ -891,7 +990,6 @@ _forkrun_base64_to_file() {
 
     return 0
 }
-
 
 
 _forkrun_file_to_base64() {
@@ -1038,6 +1136,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()  # remove b64
+declare -A b64=()  # REMOVED BASE64
 
 _forkrun_bootstrap_setup --force
