@@ -43,7 +43,7 @@ jobs:
           # RISC-V 64
           - arch: riscv64
             platform: linux/riscv64
-            docker_image: fedorariscv/base:latest
+            docker_image: fedora:latest
             extra_flags: ""
 
     steps:
