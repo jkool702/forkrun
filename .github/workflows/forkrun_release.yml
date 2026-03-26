@@ -154,47 +154,31 @@ jobs:
         with:
           path: all_artifacts
 
-      - name: Flatten Artifacts
-        run: |
-          mkdir -p artifacts
-          find all_artifacts -name "*.so" -exec mv {} artifacts/ \;
-          ls -l artifacts
-
-      - name: Generate New frun.bash Script
+      - name: Flatten Artifacts and Update frun.bash
         shell: bash
         run: |
-          cd artifacts
-          ls -l
-          for nn in *.so; do
-              command rm ../ring_loadables/forkrun-libs/"$nn"
-              command mv "$nn" ../ring_loadables/forkrun-libs
-          done
-
-          sleep 1
-          cd ../ring_loadables
+          # 1. Ensure target directory exists
+          mkdir -p ring_loadables/forkrun-libs
+          
+          # 2. Move all downloaded .so files into the target directory, overwriting old ones
+          find all_artifacts -name "*.so" -exec mv -f {} ring_loadables/forkrun-libs/ \;
+          
+          # 3. Source the updater and run it
+          # Assuming update_frun_base64.bash defines the function 'update_frun_base64'
+          cd ring_loadables
           source update_frun_base64.bash
-
-          sleep 1
+          
           cd forkrun-libs
-          ls -l
           update_frun_base64 ../../frun.bash
-
-          sleep 1
+          
+          # 4. Clean up downloaded artifacts to keep working tree clean for the PR
           cd ../../
-          chmod +x frun.bash
-          rm -r artifacts
-          
-      - name: Upload generated frun.bash as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: generated-frun-bash
-          path: frun.bash
-          
+          rm -rf all_artifacts
+
       - name: Verify Final Script
         shell: bash
         run: |
-          # Sanity check: Does the script run and load?
-          # This relies on the runner being x86_64 and having the x86-64-v2/v3 embedded
+          # Sanity check: Does the script run and load on the runner?
           . ./frun.bash && ring_version -a || echo 'WARNING: frun.bash may not have been properly updated' >&2
 
       - name: Create Pull Request
@@ -210,5 +194,6 @@ jobs:
             **Architectures:**
             - x86_64 (v2, v3, v4)
             - aarch64, ppc64le, s390x, riscv64
-          branch: "auto-build/update-loadables"
+          # Append the run_id to guarantee a unique branch name every time!
+          branch: "auto-build/update-loadables-${{ github.run_id }}"
           delete-branch: true
