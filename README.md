@@ -27,7 +27,7 @@ Once sourced, `frun` acts as a drop-in parallelizer:
 ```bash
 frun my_bash_func < inputs.txt             # parallelize custom bash functions natively!
 cat file_list | frun -k sed 's/old/new/'   # pipe-based input, ordered output
-frun -k sort < records.tsv                 # stdin-passthrough, ordered output
+frun -k -s sort < records.tsv              # stdin-passthrough, ordered output
 frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
 ```
 
