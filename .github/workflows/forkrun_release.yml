@@ -157,6 +157,9 @@ jobs:
       - name: Flatten Artifacts and Update frun.bash
         shell: bash
         run: |
+          set +e              # Turn off exit-on-error 
+          set +o pipefail     # Turn off pipefail
+          
           # 1. Ensure target directory exists
           mkdir -p ring_loadables/forkrun-libs
           
