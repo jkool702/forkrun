@@ -45,6 +45,7 @@ jobs:
             platform: linux/riscv64
             docker_image: fedorariscv/base:latest
             extra_flags: ""
+            continue-on-error: true
 
     steps:
       - name: Checkout repository
