@@ -35,7 +35,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 **The data pipeline** has four stages, each designed to preserve locality:
 1. **Ingest**: Data is `splice()`'d from stdin into a shared memfd. This is **PFS-friendly**, multiplexing data entirely in kernel space without generating filesystem metadata storms (no `stat()`/`open()` cascades). On multi-socket systems, `set_mempolicy(MPOL_BIND)` places each chunk's pages on a target NUMA node *before any worker touches them*. This placement is driven by real-time backpressure from the per-node indexers, making NUMA distribution completely self-load-balancing. Data is always **born-local**.
 2. **Index**: Per-node indexers (pinned to their socket) find record boundaries using AVX2/NEON SIMD scanning at memory bandwidth, dynamically batch based on runtime conditions, then publish offset markers into a per-node lock-free ring buffer.
-3. **Claim**: Workers claim batches via a single `atomic_fetch_add` — no CAS retry loops, no locks, no contention. Overshoots are handled by depositing remainders into an escrow pipe for idle workers to steal.
+3. **Claim**: Workers claim batches via a single `atomic_fetch_add` — no CAS retry loops, no locks, no contention. Workers who overshoot deposit remainders into an escrow pipe for idle workers to steal.
 4. **Reclaim**: A background fallow thread punches holes behind completed work via `fallocate(PUNCH_HOLE)`, bounding memory usage without breaking the offset coordinate system.
 
 **Adaptive tuning** is fully automatic. A three-phase controller (warmup → geometric ramp → PID steady-state) discovers the optimal batch size in O(log L) steps and continuously adjusts based on input rate, consumption rate, and worker starvation — with no user configuration required. forkrun runs efficiently whether it has 20 inputs from `ping` running on your laptop, or a billion lines from a file on a ramdisk running on a Frontier node.
@@ -51,6 +51,8 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 | `-s` stdin passthrough (no-op)                | **893 M lines/s**       | 6.05 M lines/s (`--pipe`)    | **~148×**  | streaming / splice |
 | `-b 524288` byte batches (no-op)              | **1.54 B lines/s**      | 6.02 M lines/s (`--pipe`)    | **~256×**  | kernel-limited |
 
+<small>NOTE: All benchmarks run on UMA hardware. On NUMA hardware, forkrun is expected to scale linearly (or better).</small>
+
 **Batch distribution rate**  
 - forkrun default mode: **~10 000 – 12 000 batches/sec**  
 - forkrun `-s` mode: **> 200 000 batches/sec (UMA) / > 100 000 batches/sec (NUMA)**  
@@ -60,8 +62,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 - forkrun:      95%  (27.1 / 28 cores)  (no centralized dispatcher - all 27.1 cores doing work)
 - GNU Parallel:  6%  (2.68 / 28 cores)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
 
-NOTE: All benchmarks run on UMA hardware. On NUMA hardware forkrun is expected to scale linearly (or better) due to its born-local NUMA approach.
-
+**Comparison of forkrun Modes**
 - **`-s` mode** is the headline: data flows memfd → kernel pipe → command stdin via `splice()`, entirely in kernel space. Bash never touches the data bytes — only the claim/dispatch coordination runs in userspace.
 - **`-b` mode**: allows for distributing batches of constant byte size without needing to scan for delimiters. Performance approaching kernel limits on memory movement.
 - **`-k` mode (Ordered output)**: has virtually zero cost. Benchmarks indicate that ordering adds under 2% to the runtime, whereas strict ordering brutally penalizes traditional tools.
@@ -76,6 +77,7 @@ NOTE: All benchmarks run on UMA hardware. On NUMA hardware forkrun is expected t
 - **Zero-copy data path**: `splice()`, `copy_file_range()`, and `sendfile()` move data without userspace copies. Scanner publishes byte-offsets and line counts for the data in the memfd. Workers read directly from the backing memfd.
 - **Self-tuning**: Automatic worker scaling, adaptive batch sizing, and early partial flush for low-latency trickle inputs. No manual `-n` or `-j` tuning required.
 - **Single-file deployment**: Ships as one bash file with an embedded loadable `.so`. Zero external dependencies — no Perl (unlike GNU Parallel) and no Python, making it perfect for lightweight containerized deployments. Requires only bash ≥ 4 and a Linux kernel ≥ 3.17.
+- **Secure & Verifiable Deployment**: Ships as one bash file with an embedded loadable .so. The binary is compiled and injected automatically via GitHub Actions, providing an auditable cryptographic trail from the C source code to `frun.bash`—meeting strict HPC facility security requirements.
 
 ## Why It Matters for Frontier: Data Prep
 
@@ -107,4 +109,3 @@ Let's work together to get Frontier spending **more time doing science** and les
 ## Contact / Source
 
 Anthony Barone  |  anthonywbarone@gmail.com  |  https://github.com/jkool702/forkrun
-
