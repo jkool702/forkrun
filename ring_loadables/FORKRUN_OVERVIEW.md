@@ -24,7 +24,7 @@ forkrun, in its fastest mode, can distribute **200 000+ batches/sec** on a singl
 . frun.bash                                # sourcing frun.bash sets up *everything*
 frun my_bash_func < inputs.txt             # parallelize custom bash functions!
 cat file_list | frun -k sed 's/old/new/'   # pipe-based input, ordered output
-frun -k sort < records.tsv                 # stdin-passthrough, ordered output
+frun -k -s sort < records.tsv              # stdin-passthrough, ordered output
 frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
 ```
 
