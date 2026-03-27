@@ -1,3 +1,5 @@
+TITLE: Show HN: forkrun – NUMA-aware shell parallelizer that breaks 1B lines/sec on 9-year-old consumer hardware
+
 Hi HN,
 
 Have you ever fired up GNU Parallel on a big machine only to watch it crawl along while barely using more than 2–3 cores? I got tired of that, so I built forkrun.
