@@ -19,9 +19,13 @@ On 9-year-old consumer hardware it can break 1 billion lines/second in its faste
 
 forkrun ships as a single bash file with an embedded, self-extracting C extension — no Perl, no Python, no install. The binary is built in public GitHub Actions so you can trace the base64 blob straight to the CI run.
 
+Benchmarking scripts and raw results: https://github.com/jkool702/forkrun/blob/main/BENCHMARKS
+Architecture deep-dive: https://github.com/jkool702/forkrun/blob/main/DOCS
+Repo: https://github.com/jkool702/forkrun
+
 Trying it is literally two commands:
 
-```bash
-. frun.bash
-frun shell_func_or_cmd <inputs
-```
+    . frun.bash
+    frun shell_func_or_cmd <inputs
+
+Happy to answer questions.
