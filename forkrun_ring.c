@@ -1258,12 +1258,12 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
-  evfd_data_arr = malloc(global_num_nodes * sizeof(int));
-  evfd_eof_arr = malloc(global_num_nodes * sizeof(int));
-  evfd_indexer_arr = malloc(global_num_nodes * sizeof(int));
-  evfd_meta_arr = malloc(global_num_nodes * sizeof(int));
-  fd_escrow_r = malloc(global_num_nodes * sizeof(int));
-  fd_escrow_w = malloc(global_num_nodes * sizeof(int));
+  evfd_data_arr = calloc(global_num_nodes, sizeof(int));
+  evfd_eof_arr = calloc(global_num_nodes, sizeof(int));
+  evfd_indexer_arr = calloc(global_num_nodes, sizeof(int));
+  evfd_meta_arr = calloc(global_num_nodes, sizeof(int));
+  fd_escrow_r = calloc(global_num_nodes, sizeof(int));
+  fd_escrow_w = calloc(global_num_nodes, sizeof(int));
 
   if (!evfd_data_arr || !evfd_eof_arr || !evfd_indexer_arr || !evfd_meta_arr || !fd_escrow_r || !fd_escrow_w) {
       builtin_error("forkrun: malloc failed during ring_init");
@@ -2923,7 +2923,10 @@ static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset, size_t coun
 }
 
 static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
-  const size_t BUF_SIZE = 65536; char *buf = malloc(BUF_SIZE); size_t total_read = 0; int retries = 0;
+  #define BUF_SIZE 65536
+  char buf[BUF_SIZE];
+  size_t total_read = 0;
+  int retries = 0;
   while (total_read < len) {
     size_t to_read = (len - total_read > BUF_SIZE) ? BUF_SIZE : (len - total_read);
     ssize_t r = pread(fd_in, buf, to_read, off + total_read);
@@ -2942,8 +2945,11 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
 
 static int ring_order_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
-  int fd_in = atoi(argv[1]); bool memfd_mode = (strcmp(argv[2], "memfd") == 0); const char *prefix = argv[2];
-  bool unordered_mode = false; bool numa_mode = (global_num_nodes > 1);
+  int fd_in = atoi(argv[1]);
+  bool memfd_mode = (strcmp(argv[2], "memfd") == 0);
+  const char *prefix = argv[2];
+  bool unordered_mode = false;
+  bool numa_mode = (global_num_nodes > 1);
   for (int i = 3; i < argc; i++) {
     if (strcmp(argv[i], "unordered") == 0) unordered_mode = true;
     if (strcmp(argv[i], "numa") == 0) numa_mode = true;
