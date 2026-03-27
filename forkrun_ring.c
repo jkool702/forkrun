@@ -3686,7 +3686,6 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
     }
     total_read += r;
   }
-  free(buf);
   return (total_read == len) ? 0 : -1;
 }
 
