@@ -263,7 +263,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)   printf 'forkrun v3.0.0\n' >&2;  return 0  ;;
+            -V|--version|--VERSION)   printf 'forkrun v3.0.1\n' >&2;  return 0  ;;
 
             --) shift; break ;;
 
