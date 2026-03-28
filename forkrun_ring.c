@@ -3644,8 +3644,8 @@ static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset,
   return (ssize_t)total;
 }
 
-static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
 #define BUF_SIZE 65536
+static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
   char buf[BUF_SIZE];
   size_t total_read = 0;
   int retries = 0;
@@ -3658,7 +3658,6 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
         usleep(10);
         continue;
       }
-      free(buf);
       return -1;
     }
     if (r == 0) {
@@ -3678,7 +3677,6 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
           usleep(10);
           continue;
         }
-        free(buf);
         return -1;
       }
       write_ptr += w;
