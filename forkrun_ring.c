@@ -1641,39 +1641,54 @@ static int ring_destroy_main(int argc, char **argv) {
 // traffic. The target node is selected based on indexer backpressure (self
 // load-balancing).
 static int ring_numa_ingest_main(int argc, char **argv) {
-  if (argc < 4) return EXECUTION_FAILURE;
-  int infd = atoi(argv[1]); int outfd = atoi(argv[2]); int num_nodes = atoi(argv[3]);
-  if (num_nodes < 1) num_nodes = 1;
-  if (num_nodes > 1024) num_nodes = 1024;
+  if (argc < 4)
+    return EXECUTION_FAILURE;
+  int infd = atoi(argv[1]);
+  int outfd = atoi(argv[2]);
+  int num_nodes = atoi(argv[3]);
+  if (num_nodes < 1)
+    num_nodes = 1;
+  if (num_nodes > 1024)
+    num_nodes = 1024;
 
   uint64_t chunk_size = 2 * 1024 * 1024ULL; // Default 2MB THP slice
 
   if (state[0].mode_byte) {
-      uint64_t L = state[0].cfg_batch_start;
-      if (L > 0) {
-          uint64_t mult = (chunk_size + L - 1) / L; // Ceil division
-          chunk_size = mult * L;
-      }
+    uint64_t L = state[0].cfg_batch_start;
+    if (L > 0) {
+      uint64_t mult = (chunk_size + L - 1) / L; // Ceil division
+      chunk_size = mult * L;
+    }
   }
 
-  uint64_t current_offset = 0; uint32_t current_major = 0;
+  uint64_t current_offset = 0;
+  uint32_t current_major = 0;
   int last_target = -1;
 
   unsigned long test_mask = 1UL;
-  bool numa_enabled = (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
-  if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
+  bool numa_enabled =
+      (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
+  if (numa_enabled)
+    syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
 
 #define BITS_PER_LONG (sizeof(unsigned long) * 8)
   uint32_t max_phys_id = 0;
   if (g_logical_to_phys_map) {
     for (int i = 0; i < num_nodes; i++)
-      if (g_logical_to_phys_map[i] > max_phys_id) max_phys_id = g_logical_to_phys_map[i];
+      if (g_logical_to_phys_map[i] > max_phys_id)
+        max_phys_id = g_logical_to_phys_map[i];
   }
   int mask_words = (max_phys_id / BITS_PER_LONG) + 1;
   unsigned long *nodemask = malloc(mask_words * sizeof(unsigned long));
-  if (!nodemask) return EXECUTION_FAILURE;
+  if (!nodemask)
+    return EXECUTION_FAILURE;
 
-  enum { TM_UNKNOWN = 0, TM_COPY_FILE_RANGE, TM_SENDFILE, TM_READ_WRITE } transfer_method = TM_UNKNOWN;
+  enum {
+    TM_UNKNOWN = 0,
+    TM_COPY_FILE_RANGE,
+    TM_SENDFILE,
+    TM_READ_WRITE
+  } transfer_method = TM_UNKNOWN;
   char *bounce_buf = NULL;
   uint64_t one = 1;
 
@@ -1689,27 +1704,34 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       uint64_t h = atomic_load_relaxed(&state[check].chunk_queue_head);
       uint64_t t = atomic_load_relaxed(&state[check].chunk_queue_tail);
       int bl = (int)(h - t);
-      if (bl < min_backlog) { min_backlog = bl; target_node = check; }
+      if (bl < min_backlog) {
+        min_backlog = bl;
+        target_node = check;
+      }
     }
 
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
-      if ((int64_t)(h - t) < 4) break;
+      if ((int64_t)(h - t) < 4)
+        break;
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
       if (poll(&pfd, 1, 100) > 0) {
-          uint64_t v;
-          sys_read(evfd_chunk_done, &v, 8);
+        uint64_t v;
+        sys_read(evfd_chunk_done, &v, 8);
       }
     }
 
     if (numa_enabled && num_nodes > 1) {
-      uint32_t target_phys = g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
+      uint32_t target_phys =
+          g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
       if (target_phys < mask_words * BITS_PER_LONG) {
         memset(nodemask, 0, mask_words * sizeof(unsigned long));
-        nodemask[target_phys / BITS_PER_LONG] |= (1UL << (target_phys % BITS_PER_LONG));
-        syscall(__NR_set_mempolicy, MPOL_BIND, nodemask, mask_words * BITS_PER_LONG);
+        nodemask[target_phys / BITS_PER_LONG] |=
+            (1UL << (target_phys % BITS_PER_LONG));
+        syscall(__NR_set_mempolicy, MPOL_BIND, nodemask,
+                mask_words * BITS_PER_LONG);
       }
     }
 
@@ -1717,89 +1739,105 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
     if (transfer_method == TM_UNKNOWN) {
       if (numa_enabled && num_nodes > 1) {
-          transfer_method = TM_READ_WRITE;
+        transfer_method = TM_READ_WRITE;
       } else {
-          loff_t in_off = lseek(infd, 0, SEEK_CUR);
-          if (in_off != (loff_t)-1) {
-            n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
-            if (n >= 0) { transfer_method = TM_COPY_FILE_RANGE; }
-            else {
-              n = sendfile(outfd, infd, NULL, chunk_size);
-              if (n >= 0) { transfer_method = TM_SENDFILE; }
+        loff_t in_off = lseek(infd, 0, SEEK_CUR);
+        if (in_off != (loff_t)-1) {
+          n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
+          if (n >= 0) {
+            transfer_method = TM_COPY_FILE_RANGE;
+          } else {
+            n = sendfile(outfd, infd, NULL, chunk_size);
+            if (n >= 0) {
+              transfer_method = TM_SENDFILE;
             }
           }
-          if (n < 0) {
-            transfer_method = TM_READ_WRITE;
-          }
+        }
+        if (n < 0) {
+          transfer_method = TM_READ_WRITE;
+        }
       }
       if (transfer_method == TM_READ_WRITE && !bounce_buf) {
-          bounce_buf = mmap(NULL, chunk_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-          if (bounce_buf == MAP_FAILED) {
-              free(nodemask); // FIX: Memory leak on mmap failure
-              return EXECUTION_FAILURE;
-          }
+        bounce_buf = mmap(NULL, chunk_size, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (bounce_buf == MAP_FAILED) {
+          free(nodemask); // FIX: Memory leak on mmap failure
+          return EXECUTION_FAILURE;
+        }
       }
     }
 
     if (transfer_method != TM_UNKNOWN) {
       switch (transfer_method) {
-        case TM_COPY_FILE_RANGE:
-          n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
-          break;
-        case TM_SENDFILE:
-          n = sendfile(outfd, infd, NULL, chunk_size);
-          break;
-        case TM_READ_WRITE:
-          {
-            ssize_t r = read(infd, bounce_buf, chunk_size);
-            if (r < 0) {
-                if (errno == EINTR) continue;
-                if (errno == EAGAIN) {
-                    struct pollfd pfd = {.fd = infd, .events = POLLIN};
-                    poll(&pfd, 1, -1);
-                    continue;
-                }
-                n = -1; break;
-            }
-            if (r == 0) { n = 0; break; }
-
-            size_t written = 0;
-            while (written < (size_t)r) {
-                ssize_t w = write(outfd, bounce_buf + written, r - written);
-                if (w <= 0) {
-                    if (w < 0 && (errno == EINTR || errno == EAGAIN)) {
-                        if (errno == EAGAIN) {
-                            struct pollfd pfd = {.fd = outfd, .events = POLLOUT};
-                            poll(&pfd, 1, -1);
-                        } else usleep(10);
-                        continue;
-                    }
-                    break;
-                }
-                written += w;
-            }
-            if (written == (size_t)r) n = r;
-            else n = -1;
+      case TM_COPY_FILE_RANGE:
+        n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
+        break;
+      case TM_SENDFILE:
+        n = sendfile(outfd, infd, NULL, chunk_size);
+        break;
+      case TM_READ_WRITE: {
+        ssize_t r = read(infd, bounce_buf, chunk_size);
+        if (r < 0) {
+          if (errno == EINTR)
+            continue;
+          if (errno == EAGAIN) {
+            struct pollfd pfd = {.fd = infd, .events = POLLIN};
+            poll(&pfd, 1, -1);
+            continue;
           }
+          n = -1;
           break;
-        default: break;
+        }
+        if (r == 0) {
+          n = 0;
+          break;
+        }
+
+        size_t written = 0;
+        while (written < (size_t)r) {
+          ssize_t w = write(outfd, bounce_buf + written, r - written);
+          if (w <= 0) {
+            if (w < 0 && (errno == EINTR || errno == EAGAIN)) {
+              if (errno == EAGAIN) {
+                struct pollfd pfd = {.fd = outfd, .events = POLLOUT};
+                poll(&pfd, 1, -1);
+              } else
+                usleep(10);
+              continue;
+            }
+            break;
+          }
+          written += w;
+        }
+        if (written == (size_t)r)
+          n = r;
+        else
+          n = -1;
+      } break;
+      default:
+        break;
       }
     }
 
     if (n < 0) {
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN) {
-            struct pollfd pfd = {.fd = infd, .events = POLLIN};
-            poll(&pfd, 1, -1);
-            continue;
-        }
-        break;
+      if (errno == EINTR)
+        continue;
+      if (errno == EAGAIN) {
+        struct pollfd pfd = {.fd = infd, .events = POLLIN};
+        poll(&pfd, 1, -1);
+        continue;
+      }
+      break;
     }
-    if (n == 0) break;
+    if (n == 0)
+      break;
 
-    struct ChunkMeta *meta = &g_state->meta_ring[current_major & META_RING_MASK];
-    meta->raw_offset = current_offset; meta->raw_length = n;
-    meta->target_node = target_node; meta->major_id = current_major;
+    struct ChunkMeta *meta =
+        &g_state->meta_ring[current_major & META_RING_MASK];
+    meta->raw_offset = current_offset;
+    meta->raw_length = n;
+    meta->target_node = target_node;
+    meta->major_id = current_major;
     atomic_store_relaxed(&meta->actual_end, 0);
 
     struct SharedState *t_state = &state[target_node];
@@ -1807,7 +1845,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     t_state->chunk_queue[q_idx & META_RING_MASK] = current_major;
 
     __atomic_store_n(&t_state->chunk_queue_head, q_idx + 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_state->ingest_publish_idx, current_major + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_state->ingest_publish_idx, current_major + 1,
+                     __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
     __atomic_fetch_add(&t_state->stats_chunks_assigned, 1, __ATOMIC_RELAXED);
@@ -1817,11 +1856,15 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       sys_write(evfd_indexer_arr[target_node], &w, 8);
     }
 
-    last_target = target_node; current_offset += n; current_major++;
+    last_target = target_node;
+    current_offset += n;
+    current_major++;
   }
 
-  if (bounce_buf) munmap(bounce_buf, chunk_size);
-  if (numa_enabled) syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
+  if (bounce_buf)
+    munmap(bounce_buf, chunk_size);
+  if (numa_enabled)
+    syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   free(nodemask);
 
   __atomic_store_n(&g_state->ingest_eof_idx, current_major, __ATOMIC_RELEASE);
@@ -2309,10 +2352,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
 
       uint64_t my_tail = atomic_load_relaxed(&t_state->chunk_queue_tail);
       uint64_t my_head = atomic_load_acquire(&t_state->chunk_ready_head);
+      bool global_eof =
+          (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
 
       if (my_tail >= my_head) {
-        bool global_eof =
-            (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
         bool workers_starved = (atomic_load_relaxed(&local_state->read_idx) ==
                                 atomic_load_relaxed(&local_state->write_idx));
         bool local_exhausted =
@@ -2377,9 +2420,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
         // If completely starved, yield to the OS to prevent 100% CPU spinning.
         if (steal_target == my_node_id) {
           int _starve_spin = 0;
+          int max_spin = global_eof ? 10 : 1000;
           // Spin briefly to handle micro-stalls without OS context-switching
           while (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail &&
-                 _starve_spin < 1000) {
+                 _starve_spin < max_spin) {
             cpu_relax();
             _starve_spin++;
           }
@@ -2392,7 +2436,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
             if (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail) {
               struct pollfd pfd = {.fd = evfd_meta_arr[my_node_id],
                                    .events = POLLIN};
-              poll(&pfd, 1, 10); // Sleep for up to 10ms yielding the CPU
+              poll(&pfd, 1,
+                   global_eof ? 1
+                              : 10); // Sleep for up to 10ms yielding the CPU
               if (pfd.revents & POLLIN) {
                 uint64_t v;
                 sys_read(evfd_meta_arr[my_node_id], &v, 8);
@@ -2413,6 +2459,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
       sys_write(evfd_chunk_done, &_one, 8);
 
       int meta_spin = 0;
+      int max_meta_spin = global_eof ? 10 : 10000;
       while (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
         if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
           if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx)
@@ -2423,7 +2470,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
           experienced_stall = true;
         }
 
-        if (meta_spin < 10000) {
+        if (meta_spin < max_meta_spin) {
           cpu_relax();
           meta_spin++;
         } else {
@@ -2434,7 +2481,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
           }
           struct pollfd pfd = {.fd = evfd_meta_arr[steal_target],
                                .events = POLLIN};
-          poll(&pfd, 1, 10);
+          poll(&pfd, 1, global_eof ? 1 : 10);
           if (pfd.revents & POLLIN) {
             uint64_t v;
             sys_read(evfd_meta_arr[steal_target], &v, 8);
