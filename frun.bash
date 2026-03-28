@@ -633,7 +633,7 @@ P+=($!)
             done
         done
 
-        ${verbose_flag} && printf '\nSPAWNED %s workers (%s)\n' "${nWorkers}" "${nWorkersA[*]}" >&2
+        ${verbose_flag} && printf '\nSPAWNED %s workers\n' "${nWorkers}" >&2
 
         # --- SHUTDOWN ---
         exec {fd_spawn_r}<&- {fd_fallow_w}>&-
