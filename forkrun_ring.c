@@ -2399,15 +2399,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
         }
 
         if (!any_valid_backlog) {
-          uint64_t eof_target = atomic_load_acquire(&g_state->ingest_eof_idx);
-          if (eof_target != ~(uint64_t)0) {
-            uint64_t total_claimed = 0;
-            for (int i = 0; i < num_nodes; i++) {
-              total_claimed += atomic_load_acquire(&state[i].chunk_queue_tail);
-            }
-            if (total_claimed >= eof_target) {
-              goto unified_scanner_eof;
-            }
+          // --- PHYSICS FIX: Instant NUMA Tear-down ---
+          // If ingest is finished (global_eof), and we have claimed all chunks
+          // assigned to our node (local_exhausted), and no other node has a
+          // backlog large enough to be worth stealing, we can safely exit
+          // immediately. We DO NOT need to wait for all chunks system-wide to
+          // be claimed.
+          if (global_eof && local_exhausted) {
+            goto unified_scanner_eof;
           }
         } else {
           if (ready_target != -1)
