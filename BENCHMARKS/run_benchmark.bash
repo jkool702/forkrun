@@ -106,5 +106,5 @@ done
 cpu=$(( 1000 * ( 10#0${outA[user]} + 10#0${outA[sys]} ) / 10#0${outA[real]} ))
 printf '\n\nOVERALL CPU UTILIZATION: %d.%03d / %d\n\n' "$(( cpu / 1000 ))" "$(( cpu % 1000 ))" "$(nproc)" | tee -a benchmark.out >&$fd2
 
-\rm "${F[@]}"
+\rm ./.time "${F[@]}"
 ) {fd1}>&1 {fd2}>&2
