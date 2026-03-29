@@ -203,49 +203,49 @@ EOF
 
             # --- LIMIT (-n 100) ---
             @(-n|--limit)?(?([= $'\t'])+([0-9+-])))
-                arg="${1#@(-n|--limit)?([= $'\t'])}";
+                arg="${1##@(-n|--limit)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9+-])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--limit='"$REPLY") ;;
 
             # --- EXACT LINES (-L 100) ---
             @(-L|--exact-lines|--EXACT-LINES)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
-                arg="${1#@(-L|--exact-lines|--EXACT-LINES)?([= $'\t'])}";
+                arg="${1##@(-L|--exact-lines|--EXACT-LINES)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && { exact_lines_val="${arg}"; last_conflict="exact_lines"; } ;;
 
             # --- LINES / BATCH (-l 1k or -l 100:1k) ---
             @(-l|--lines|--batchsize)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
-                arg="${1#@(-l|--lines|--batchsize)?([= $'\t'])}";
+                arg="${1##@(-l|--lines|--batchsize)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _parse_count "lines" "${arg}" ;;
 
             # --- BYTES (-b 1M) ---
             @(-b|--bytes)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
-                arg="${1#@(-b|--bytes)?([= $'\t'])}";
+                arg="${1##@(-b|--bytes)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
                 _parse_count "bytes" "${arg:-}" && ring_init_opts+=("--return-bytes") ;;
 
             # --- WORKERS (-j 4 or -j 1:8) ---
             @(-j|-P|--workers)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
-                arg="${1#@(-j|-P|--workers)?([= $'\t'])}";
+                arg="${1##@(-j|-P|--workers)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _parse_count "workers" "${arg}" ;;
 
             # --- TIMEOUT (-t 5000) ---
             @(-t|--timeout)?(?([= $'\t'])+([0-9.+-])))
-                arg="${1#@(-t|--timeout)?([= $'\t'])}";
+                arg="${1##@(-t|--timeout)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9.+-])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--timeout='"${REPLY}") ;;
 
             # --- NUMA NODES (--nodes auto) ---
             @(--nodes|--numa)?(?([= $'\t'])*))
-                arg="${1#@(--nodes|--numa)?([= $'\t'])}";
+                arg="${1##@(--nodes|--numa)?([= $'\t'])}";
                 [[ ${arg} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && { parsed_numa_nodes_arg="${arg}"; last_conflict="nodes"; } ;;
 
             # --- ORDER (-o buffered) ---
             @(-o|--order)?(?([= $'\t'])@(realtime|unbuffered|buffered|atomic|order?(ed))))
-                arg="${1#@(-o|--order)?([= $'\t'])}";
+                arg="${1##@(-o|--order)?([= $'\t'])}";
                 [[ ${arg}${2//@(realtime|unbuffered|buffered|atomic|order?(ed))/} ]] || { shift; arg="$1"; }
                 case "${arg}" in
                     realtime|unbuffered) order_mode='realtime' ;;
@@ -256,7 +256,7 @@ EOF
 
             # --- DELIMITER (-d x) ---
             @(-d|--delim|--delimiter)?(?([= $'\t'])*))
-                arg="${1#@(-d|--delim|--delimiter)?([= $'\t'])}";
+                arg="${1##@(-d|--delim|--delimiter)?([= $'\t'])}";
                 [[ ${arg} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && delimiter_val="${arg:0:1}" ;;
 
