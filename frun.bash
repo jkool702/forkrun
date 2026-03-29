@@ -550,7 +550,8 @@ toc() { :; }
             ring_ack_str+=' ${fd_out[$ID]}'
         }
 
-        type -p taskset &>/dev/null && have_taskset_flag=true || have_taskset_flag=false
+        #type -p taskset &>/dev/null && have_taskset_flag=true || have_taskset_flag=false
+        have_taskset_flag=false
 
         worker_func_src='spawn_worker() {
 (

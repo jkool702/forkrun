@@ -2433,12 +2433,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
 
             // Double check to prevent race conditions before sleeping
             if (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail) {
-              struct pollfd pfd = {.fd = evfd_meta_arr[my_node_id],
-                                   .events = POLLIN};
-              poll(&pfd, 1,
-                   global_eof ? 1
-                              : 10); // Sleep for up to 10ms yielding the CPU
-              if (pfd.revents & POLLIN) {
+              // --- PHYSICS FIX: Wait on both EOF and Data indefinitely (-1)
+              // --- Eliminates 10ms timeout polling which burns CPU during
+              // trickles.
+              struct pollfd pfds[2] = {
+                  {.fd = evfd_meta_arr[my_node_id], .events = POLLIN},
+                  {.fd = evfd_ingest_eof, .events = POLLIN}};
+              poll(pfds, 2, -1);
+              if (pfds[0].revents & POLLIN) {
                 uint64_t v;
                 sys_read(evfd_meta_arr[my_node_id], &v, 8);
               }
@@ -2478,10 +2480,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
             __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
             break;
           }
-          struct pollfd pfd = {.fd = evfd_meta_arr[steal_target],
-                               .events = POLLIN};
-          poll(&pfd, 1, global_eof ? 1 : 10);
-          if (pfd.revents & POLLIN) {
+          // --- PHYSICS FIX: Same elimination of 10ms timeout polling here for
+          // stolen chunks ---
+          struct pollfd pfds[2] = {
+              {.fd = evfd_meta_arr[steal_target], .events = POLLIN},
+              {.fd = evfd_ingest_eof, .events = POLLIN}};
+          poll(pfds, 2, -1);
+          if (pfds[0].revents & POLLIN) {
             uint64_t v;
             sys_read(evfd_meta_arr[steal_target], &v, 8);
           }
@@ -2526,9 +2531,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
                                  __ATOMIC_SEQ_CST);
               break;
             }
-            struct pollfd pfd = {.fd = evfd_meta_arr[tnode], .events = POLLIN};
-            poll(&pfd, 1, 10);
-            if (pfd.revents & POLLIN) {
+            // --- PHYSICS FIX: Third 10ms timeout eliminated ---
+            // This stops the scanner from constantly waking up while waiting
+            // for the previous indexer.
+            struct pollfd pfds[2] = {
+                {.fd = evfd_meta_arr[tnode], .events = POLLIN},
+                {.fd = evfd_ingest_eof, .events = POLLIN}};
+            poll(pfds, 2, -1);
+            if (pfds[0].revents & POLLIN) {
               uint64_t v;
               sys_read(evfd_meta_arr[tnode], &v, 8);
             }
