@@ -76,7 +76,7 @@ jobs:
               # 2. Extract Version from META
               FR_VERSION="unknown"
               if [ -f META ]; then
-                 FR_VERSION=$(grep -E "^VERSION:" META | sed -E "s/^VERSION:[ \t]*//")
+                 FR_VERSION="$(grep -E "^VERSION:" META | sed -E "s/^VERSION:[ \t]*//")_ASAN+UBSAN"
               fi
               echo "Compiling Version: $FR_VERSION"
 
@@ -89,7 +89,7 @@ jobs:
                  "-DSHELL"
                  "-DHAVE_CONFIG_H"
                  "-DBUILD_OS=\"Linux\""
-                 "-DFORKRUN_RING_VERSION=\"$FR_VERSION\"_ASAN+UBSAN"
+                 "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
                  "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
               )
               
