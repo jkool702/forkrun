@@ -317,6 +317,13 @@ toc() { :; }
         local -a online map parts req_list
         req="$1"
 
+        # NEW: Explicit Global UMA (No Pinning)
+        if [[ "$req" == "@0" || "$req" == "0" || "$req" == "uma" || "$req" == "none" ]]; then
+            export FORKRUN_NUM_NODES=1
+            numa_map_str=""
+            return 0
+        fi
+
         if [[ -r /sys/devices/system/node/online ]]; then
             local raw; read -r raw < /sys/devices/system/node/online
             if [[ -n "$raw" ]]; then
@@ -366,9 +373,12 @@ toc() { :; }
         # Fast native array join
         local IFS=','
         numa_map_str="${map[*]}"
-
-        # Export the node count directly while we still have the array
         export FORKRUN_NUM_NODES="${#map[@]}"
+
+        # NEW: If 'auto' discovered a 1-node machine, skip explicit pinning
+        if [[ "$req" == "auto" && "$FORKRUN_NUM_NODES" == 1 ]]; then
+            numa_map_str=""
+        fi
     }
 
     local numa_map_str
@@ -394,7 +404,9 @@ toc() { :; }
         ring_init_opts+=("--exact-lines")
     fi
 
-    ring_init_opts+=("--numa-map=$numa_map_str")
+    if [[ -n "$numa_map_str" ]]; then
+        ring_init_opts+=("--numa-map=$numa_map_str")
+    fi
 
     # Initialize Ring
     ring_init "${ring_init_opts[@]}"
@@ -551,28 +563,12 @@ toc() { :; }
             ring_ack_str+=' ${fd_out[$ID]}'
         }
 
-        #type -p taskset &>/dev/null && have_taskset_flag=true || have_taskset_flag=false
-        have_taskset_flag=false
-
         worker_func_src='spawn_worker() {
 (
   LC_ALL=C
   set +m
   export RING_NODE_ID="$2"
-'
 
-        if (( FORKRUN_NUM_NODES > 1 )) && ${have_taskset_flag}; then
-            worker_func_src+='
-  local -a p_nodes=(${numa_map_str//,/ })
-  local phys=${p_nodes[$2]}
-  if [[ -r /sys/devices/system/node/node${phys}/cpulist ]]; then
-      local cpu_list; read -r cpu_list < /sys/devices/system/node/node${phys}/cpulist
-      [[ $cpu_list ]] && taskset -pc "$cpu_list" $BASHPID >/dev/null 2>&1
-  fi
-'
-        fi
-
-        worker_func_src+='
   {
     ID="$1"
     '

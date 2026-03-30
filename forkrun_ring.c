@@ -737,6 +737,9 @@ static int fd_escrow[2] = {-1, -1};
 static uint32_t global_num_nodes = 0;
 static uint32_t allocated_num_nodes = 0;
 static uint32_t *g_logical_to_phys_map = NULL;
+static uint8_t g_explicit_pinning = 0; // NEW
+static uint32_t allocated_num_nodes = 0;
+static uint32_t *g_logical_to_phys_map = NULL;
 
 // EscrowPacket: Used to solve the "overshoot" problem. When a worker
 // speculatively claims more offsets than are currently available from the
@@ -1142,8 +1145,10 @@ static int ring_init_main(int argc, char **argv) {
     g_debug = 0;
 
   global_num_nodes = 0;
+  g_explicit_pinning = 0; // NEW
   for (int i = 1; i < argc; i++) {
     if (strncmp(argv[i], "--numa-map=", 11) == 0) {
+      g_explicit_pinning = 1; // NEW
       global_num_nodes = 1;
       for (const char *c = argv[i] + 11; *c; c++)
         if (*c == ',')
@@ -2321,6 +2326,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
   if (!is_numa)
     atomic_store_relaxed(&local_state->tail_idx, 0);
   atomic_store_relaxed(&local_state->active_workers, W);
+
+  // ---- NEW: Pin scanner if explicitly requested ----
+  if (!is_numa && g_explicit_pinning && g_logical_to_phys_map) {
+    pin_to_numa_node(g_logical_to_phys_map[0]);
+  }
+  // --------------------------------------------------
 
   if (fd_spawn >= 0 && W > 0) {
     char sbuf[64];
@@ -3890,7 +3901,8 @@ static int ring_worker_main(int argc, char **argv) {
   int node = my_numa_node;
 
   if (!strcmp(argv[1], "inc")) {
-    if (global_num_nodes > 1 && g_logical_to_phys_map) {
+    // CHANGED: Trigger pinning for explicit map even if nodes == 1
+    if ((global_num_nodes > 1 || g_explicit_pinning) && g_logical_to_phys_map) {
       if (pin_to_numa_node(g_logical_to_phys_map[node]) != 0 && g_debug) {
       }
     }
@@ -4284,6 +4296,21 @@ static int ring_copy_main(int argc, char **argv) {
   off_t off = 0;
   bool use_bounce = true;
 
+  // ---- NEW: Explicit Memory Pinning for Flat Pipeline ----
+  if (g_explicit_pinning && g_logical_to_phys_map) {
+    uint32_t target_phys = g_logical_to_phys_map[0];
+    int mask_words = (target_phys / (sizeof(unsigned long) * 8)) + 1;
+    unsigned long *nodemask = calloc(mask_words, sizeof(unsigned long));
+    if (nodemask) {
+      nodemask[target_phys / (sizeof(unsigned long) * 8)] |=
+          (1UL << (target_phys % (sizeof(unsigned long) * 8)));
+      syscall(__NR_set_mempolicy, MPOL_BIND, nodemask,
+              mask_words * sizeof(unsigned long) * 8);
+      free(nodemask);
+    }
+  }
+  // --------------------------------------------------------
+
   if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
     if (st.st_size == 0) {
       // Let it fall through to read/write. Some special files (like /proc)
@@ -4395,6 +4422,11 @@ static int ring_copy_main(int argc, char **argv) {
     uint64_t val = 999999;
     sys_write(evfd_ingest_eof, &val, 8);
   }
+  // ---- NEW ----
+  if (g_explicit_pinning) {
+    syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
+  }
+  // -------------
   return EXECUTION_SUCCESS;
 
 err_out:
@@ -4402,6 +4434,11 @@ err_out:
     uint64_t val = 999999;
     sys_write(evfd_ingest_eof, &val, 8);
   }
+  // ---- NEW ----
+  if (g_explicit_pinning) {
+    syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
+  }
+  // -------------
   return EXECUTION_FAILURE;
 }
 
