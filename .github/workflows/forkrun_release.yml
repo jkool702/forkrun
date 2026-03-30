@@ -70,7 +70,7 @@ jobs:
             ${{ matrix.docker_image }} \
             bash -c '
               # 1. Install Dependencies (Fedora/RHEL style)
-              dnf install -y @development-tools gcc make bash-devel git grep sed binutils || \
+              dnf install -y @development-tools gcc make bash-devel git grep sed binutils libtsan libtsan-static || \
               (apt-get update && apt-get install -y gcc make libbash-dev git grep sed binutils)
 
               # 2. Extract Version from META
