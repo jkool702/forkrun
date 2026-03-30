@@ -1245,9 +1245,14 @@ static int ring_init_main(int argc, char **argv) {
   }
 
   allocated_num_nodes = global_num_nodes;
-  size_t total_size = sizeof(struct GlobalState) +
-                      sizeof(struct SharedState) * global_num_nodes;
+
+  // --- PHYSICS FIX: Force g_state size to pad out to a 4K boundary ---
+  size_t global_size = (sizeof(struct GlobalState) + 4095ULL) & ~4095ULL;
+
+  size_t total_size =
+      global_size + (sizeof(struct SharedState) * global_num_nodes);
   total_size = (total_size + 4095ULL) & ~4095ULL;
+
   void *p = mmap(NULL, total_size, PROT_READ | PROT_WRITE,
                  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   if (p == MAP_FAILED) {
@@ -1256,7 +1261,8 @@ static int ring_init_main(int argc, char **argv) {
   }
 
   g_state = (struct GlobalState *)p;
-  state = (struct SharedState *)(g_state + 1);
+  // Step exactly 'global_size' bytes forward so state stays 4096-aligned
+  state = (struct SharedState *)((char *)p + global_size);
   memset(p, 0, total_size);
   atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
 
@@ -1570,8 +1576,9 @@ static int ring_destroy_main(int argc, char **argv) {
   (void)argc;
   (void)argv;
   if (g_state) {
-    size_t total_size = sizeof(struct GlobalState) +
-                        sizeof(struct SharedState) * allocated_num_nodes;
+    size_t global_size = (sizeof(struct GlobalState) + 4095ULL) & ~4095ULL;
+    size_t total_size =
+        global_size + (sizeof(struct SharedState) * allocated_num_nodes);
     total_size = (total_size + 4095ULL) & ~4095ULL;
     munmap(g_state, total_size);
     g_state = NULL;
