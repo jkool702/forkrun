@@ -738,8 +738,6 @@ static uint32_t global_num_nodes = 0;
 static uint32_t allocated_num_nodes = 0;
 static uint32_t *g_logical_to_phys_map = NULL;
 static uint8_t g_explicit_pinning = 0; // NEW
-static uint32_t allocated_num_nodes = 0;
-static uint32_t *g_logical_to_phys_map = NULL;
 
 // EscrowPacket: Used to solve the "overshoot" problem. When a worker
 // speculatively claims more offsets than are currently available from the
