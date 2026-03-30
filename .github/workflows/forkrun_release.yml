@@ -81,15 +81,14 @@ jobs:
               echo "Compiling Version: $FR_VERSION"
 
               # 3. Define Common Flags
-              OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC "
-              WARN_FLAGS="-DNDEBUG -Wall -Wextra "
+              OPT_FLAGS="-Og -g -fno-omit-frame-pointer -fsanitize=thread -fno-strict-aliasing -fno-semantic-interposition -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC "
               INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins "
               
               DEFS=(
                  "-DSHELL"
                  "-DHAVE_CONFIG_H"
                  "-DBUILD_OS=\"Linux\""
-                 "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
+                 "-DFORKRUN_RING_VERSION=\"$FR_VERSION\"_TSAN"
                  "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
               )
               
@@ -99,7 +98,7 @@ jobs:
                  local march_flag="$2"
                  local out_file="artifacts/forkrun_ring.${arch_name}.so"
                  
-                 echo ">>> Building $arch_name..."
+                 echo ">>> Building $arch_name (TSAN)..."
                  
                  # Dynamic Arch Definition
                  local ARCH_DEF="-DBUILD_ARCH=\"$arch_name\""
