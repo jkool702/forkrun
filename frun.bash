@@ -25,7 +25,7 @@ frun() {
 
         # EXEC into Clean Room
         # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
-        exec -c "${BASH:-bash}" --norc --noprofile -c 'enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
+        exec "${BASH:-bash}" --norc --noprofile -c 'enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
 export LC_ALL=C
 set +m
 shopt -s extglob
