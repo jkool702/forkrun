@@ -568,6 +568,7 @@ toc() { :; }
   LC_ALL=C
   set +m
   export RING_NODE_ID="$2"
+  trap "ring_worker dec; ring_cleanup_waiter" EXIT # <--- CRITICAL FIX
 
   {
     ID="$1"

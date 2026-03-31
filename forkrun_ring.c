@@ -743,6 +743,10 @@ static uint8_t g_explicit_pinning = 0; // NEW
 // speculatively claims more offsets than are currently available from the
 // scanner, it processes the available ones and "deposits" the remaining claimed
 // count into a side-channel pipe (escrow) for other idle workers to steal.
+// NOTE: A given worker can (at any given time) only have a single escrow claim,
+// and these claims are inherently rare occurrences (happen only in rare races).
+// This means in practice the escrow pipe buffer will NEVER fill up (even if
+// its capacity is 64 KB, and especially not at 1 MB).
 struct EscrowPacket {
   uint64_t idx;
   uint64_t cnt;
@@ -856,8 +860,9 @@ struct SharedState {
   uint8_t exact_lines;
 
   uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
-  uint64_t stats_chunks_local;
-  uint64_t stats_chunks_stolen;
+  uint64_t stats_chunks_processed;
+  uint64_t stats_chunks_i_stole;
+  uint64_t stats_chunks_stolen_from_me;
 
   uint32_t stride_ring[RING_SIZE] ALIGNED(4096);
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
@@ -1226,8 +1231,9 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].tail_idx, 0);
       atomic_store_relaxed(&state[n].scanner_finished, 0);
       atomic_store_relaxed(&state[n].stats_chunks_assigned, 0);
-      atomic_store_relaxed(&state[n].stats_chunks_local, 0);
-      atomic_store_relaxed(&state[n].stats_chunks_stolen, 0);
+      atomic_store_relaxed(&state[n].stats_chunks_processed, 0);
+      atomic_store_relaxed(&state[n].stats_chunks_i_stole, 0);
+      atomic_store_relaxed(&state[n].stats_chunks_stolen_from_me, 0);
 
       // Reset waiters to prevent spurious initial early flushes
       atomic_store_relaxed(&state[n].active_waiters, 0);
@@ -1266,7 +1272,11 @@ static int ring_init_main(int argc, char **argv) {
   memset(p, 0, total_size);
   atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
 
-  cfg_state = 0x202121;
+  // Config register: 0xBBLLWW where BB=bytes, LL=lines, WW=workers
+  // Each pair is (upper nibble = max policy, lower nibble = start policy)
+  // Nibble codes: 0=disabled 1=literal-1 2=default-max 3=hard-max 8=user-val
+  cfg_state =
+      0x202121; // DEFAULT: bytes=off/def, lines=1..4096, workers=1..$nproc
   int stdin_explicit = -1;
   const char *out_array_name = NULL;
   uint64_t parsed_limit = 0;
@@ -2332,11 +2342,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
     atomic_store_relaxed(&local_state->tail_idx, 0);
   atomic_store_relaxed(&local_state->active_workers, W);
 
-  // ---- NEW: Pin scanner if explicitly requested ----
-  if (!is_numa && g_explicit_pinning && g_logical_to_phys_map) {
-    pin_to_numa_node(g_logical_to_phys_map[0]);
+  // ---- NEW: Pin scanner ----
+  if (g_logical_to_phys_map) {
+    if (is_numa && my_node_id < global_num_nodes) {
+      pin_to_numa_node(g_logical_to_phys_map[my_node_id]);
+    } else if (!is_numa && g_explicit_pinning) {
+      pin_to_numa_node(g_logical_to_phys_map[0]);
+    }
   }
-  // --------------------------------------------------
+  // --------------------------
 
   if (fd_spawn >= 0 && W > 0) {
     char sbuf[64];
@@ -2516,10 +2530,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
         continue;
       }
 
-      if (steal_target == my_node_id) {
-        __atomic_fetch_add(&t_state->stats_chunks_local, 1, __ATOMIC_RELAXED);
-      } else {
-        __atomic_fetch_add(&t_state->stats_chunks_stolen, 1, __ATOMIC_RELAXED);
+      // PHYSICS FIX: Double-entry chunk accounting.
+      __atomic_fetch_add(&state[my_node_id].stats_chunks_processed, 1,
+                         __ATOMIC_RELAXED);
+      if (steal_target != my_node_id) {
+        __atomic_fetch_add(&state[my_node_id].stats_chunks_i_stole, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_fetch_add(&state[steal_target].stats_chunks_stolen_from_me, 1,
+                           __ATOMIC_RELAXED);
       }
 
       uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
@@ -4581,36 +4599,45 @@ static int ring_numa_stats_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
 
   uint64_t total_assigned = 0;
+  uint64_t total_processed = 0;
   uint64_t total_stolen = 0;
-  uint64_t total_local = 0;
 
-  fprintf(stderr, "\n=========================================\n");
+  fprintf(
+      stderr,
+      "\n=================================================================\n");
   fprintf(stderr, "NUMA TELEMETRY (CHUNKS)\n");
-  fprintf(stderr, "=========================================\n");
+  fprintf(
+      stderr,
+      "=================================================================\n");
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     uint64_t assigned = atomic_load_relaxed(&state[n].stats_chunks_assigned);
-    uint64_t local = atomic_load_relaxed(&state[n].stats_chunks_local);
-    uint64_t stolen = atomic_load_relaxed(&state[n].stats_chunks_stolen);
+    uint64_t processed = atomic_load_relaxed(&state[n].stats_chunks_processed);
+    uint64_t i_stole = atomic_load_relaxed(&state[n].stats_chunks_i_stole);
+    uint64_t stolen_from_me =
+        atomic_load_relaxed(&state[n].stats_chunks_stolen_from_me);
     uint32_t phys = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
 
     total_assigned += assigned;
-    total_local += local;
-    total_stolen += stolen;
+    total_processed += processed;
+    total_stolen += i_stole;
 
-    fprintf(
-        stderr,
-        "Node %u (Phys %u): %lu assigned | %lu processed local | %lu stolen\n",
-        n, phys, assigned, local, stolen);
+    fprintf(stderr,
+            "Node %u (Phys %u): %lu assigned | %lu processed | %lu I stole | "
+            "%lu stolen from me\n",
+            n, phys, assigned, processed, i_stole, stolen_from_me);
   }
-  fprintf(stderr, "-----------------------------------------\n");
-  uint64_t total_processed = total_local + total_stolen;
+  fprintf(
+      stderr,
+      "-----------------------------------------------------------------\n");
   double stolen_pct =
       total_processed > 0
           ? (100.0 * (double)total_stolen / (double)total_processed)
           : 0.0;
   fprintf(stderr, "Total Cross-Socket Traffic: %lu chunks (%.1f%%)\n",
           total_stolen, stolen_pct);
-  fprintf(stderr, "=========================================\n\n");
+  fprintf(
+      stderr,
+      "=================================================================\n\n");
 
   return EXECUTION_SUCCESS;
 }

@@ -6,10 +6,10 @@ else
 fi
 
 frun() {
-## bash orchestrator function for forkrun, providing extremely fast shell streaming parallelization
+## bash orchestrator function for forkrun, providing extremely fast shell streaming parallelization 
 # USAGE:  . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
 # FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
-#  HELP:  . frun.bash && frun --help
+#  HELP:  . frun.bash && frun --help 
 (
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
@@ -51,6 +51,7 @@ frun __exec__ "$@"
         extglob_was_set=true;
     else
         shopt -s extglob;
+        extglob_was_set=false;
     fi
 
    # --- HELPER: Expand units (IEC/IEEE prefixes) ---
@@ -113,7 +114,7 @@ frun __exec__ "$@"
 
 USAGE: . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
 FLAGS: [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
-HELP:  . frun.bash && frun --help
+HELP:  . frun.bash && frun --help 
 
 EOF
                 ;;
@@ -132,7 +133,7 @@ EOF
   -d, --delim <char>    : Use a custom single-character record delimiter.
 
 ### OUTPUT MODES
-  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes.
+  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes. 
   -k, --ordered         : Ordered mode. Same as buffered, but output is printed strictly in input-batch order.
   -u, --realtime        : Unbuffered / realtime mode. Workers output directly to stdout. (Can cause kernel lock contention on massive streams).
   -o, --order <mode>    : Explicitly set the mode (buffered, ordered, realtime).
@@ -208,8 +209,8 @@ EOF
                 [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--limit='"$REPLY") ;;
 
             # --- EXACT LINES (-L 100) ---
-            @(-L|--exact-lines|--EXACT-LINES)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
-                arg="${1##@(-L|--exact-lines|--EXACT-LINES)?([= $'\t'])}";
+            @(-L|--exact-lines|--LINES|--EXACT-LINES)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
+                arg="${1##@(-L|--exact-lines|--LINES|--EXACT-LINES)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && { exact_lines_val="${arg}"; last_conflict="exact_lines"; } ;;
 
@@ -316,6 +317,13 @@ toc() { :; }
         local -a online map parts req_list
         req="$1"
 
+        # NEW: Explicit Global UMA (No Pinning)
+        if [[ "$req" == "@0" || "$req" == "0" || "$req" == "uma" || "$req" == "none" ]]; then
+            export FORKRUN_NUM_NODES=1
+            numa_map_str=""
+            return 0
+        fi
+
         if [[ -r /sys/devices/system/node/online ]]; then
             local raw; read -r raw < /sys/devices/system/node/online
             if [[ -n "$raw" ]]; then
@@ -365,9 +373,12 @@ toc() { :; }
         # Fast native array join
         local IFS=','
         numa_map_str="${map[*]}"
-
-        # Export the node count directly while we still have the array
         export FORKRUN_NUM_NODES="${#map[@]}"
+
+        # NEW: If 'auto' discovered a 1-node machine, skip explicit pinning
+        if [[ "$req" == "auto" && "$FORKRUN_NUM_NODES" == 1 ]]; then
+            numa_map_str=""
+        fi
     }
 
     local numa_map_str
@@ -393,7 +404,9 @@ toc() { :; }
         ring_init_opts+=("--exact-lines")
     fi
 
-    ring_init_opts+=("--numa-map=$numa_map_str")
+    if [[ -n "$numa_map_str" ]]; then
+        ring_init_opts+=("--numa-map=$numa_map_str")
+    fi
 
     # Initialize Ring
     ring_init "${ring_init_opts[@]}"
@@ -550,27 +563,12 @@ toc() { :; }
             ring_ack_str+=' ${fd_out[$ID]}'
         }
 
-        type -p taskset &>/dev/null && have_taskset_flag=true || have_taskset_flag=false
-
         worker_func_src='spawn_worker() {
 (
   LC_ALL=C
   set +m
   export RING_NODE_ID="$2"
-'
 
-        if (( FORKRUN_NUM_NODES > 1 )) && ${have_taskset_flag}; then
-            worker_func_src+='
-  local -a p_nodes=(${numa_map_str//,/ })
-  local phys=${p_nodes[$2]}
-  if [[ -r /sys/devices/system/node/node${phys}/cpulist ]]; then
-      local cpu_list; read -r cpu_list < /sys/devices/system/node/node${phys}/cpulist
-      [[ $cpu_list ]] && taskset -pc "$cpu_list" $BASHPID >/dev/null 2>&1
-  fi
-'
-        fi
-
-        worker_func_src+='
   {
     ID="$1"
     '
@@ -633,7 +631,7 @@ P+=($!)
             done
         done
 
-        ${verbose_flag} && printf '\nSPAWNED %s workers (%s)\n' "${nWorkers}" "${nWorkersA[*]}" >&2
+        ${verbose_flag} && printf '\nSPAWNED %s workers\n' "${nWorkers}" >&2
 
         # --- SHUTDOWN ---
         exec {fd_spawn_r}<&- {fd_fallow_w}>&-
@@ -1142,6 +1140,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()  # REMOVED BASE64
+declare -A b64=() # removed base64
 
 _forkrun_bootstrap_setup --force
