@@ -568,7 +568,7 @@ toc() { :; }
   LC_ALL=C
   set +m
   export RING_NODE_ID="$2"
-  trap "ring_worker dec; ring_cleanup_waiter" EXIT # <--- CRITICAL FIX
+  trap "ring_worker dec; ring_cleanup_waiter" EXIT
 
   {
     ID="$1"
@@ -586,6 +586,7 @@ toc() { :; }
         fi
         '"${ring_ack_str}"'
     done
+    trap - EXIT
     ring_worker dec
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &
