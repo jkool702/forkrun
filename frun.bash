@@ -485,7 +485,9 @@ toc() { :; }
 
         # 1. Replace {ID} with the Worker ID, NUMA Node ID, and Worker Batch Num
         if ${insert_id_flag:-false}; then
-            cmdline_str="${cmdline_str//\\{ID\\}/\${RING_NODE_ID:+\${RING_NODE_ID}.}\${ID}.\${W_BATCH}}"
+        declare -p cmdline_str RING_NODE_ID ID W_BATCH >&2
+            cmdline_str="${cmdline_str//\\\{ID\\\}/\{\${RING_NODE_ID:+\$\{RING_NODE_ID\}.\}\$\{ID\}.\$\{W_BATCH\}\}}"
+        declare -p cmdline_str >&2
         fi
 
         ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"
