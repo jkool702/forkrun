@@ -736,13 +736,13 @@ seq 1 1000 > "$LARGE_INPUT"
 # Test 51: Large input with default settings
 run_test "Large input (1000 lines) default" \
   "cat '$LARGE_INPUT' | frun printf \"%s\\n\"" \
-  "$(cat "$LINE_INPUT"00 | sort -V)" \
+  "$(cat "$LINE_INPUT")" \
   0
 
 # Test 52: Large input with -j 8
 run_test "Large input with -j 8" \
   "cat '$LARGE_INPUT' | frun -j 8 printf \"%s\\n\"" \
-  "$(cat "$LINE_INPUT"00 | sort -V)" \
+  "$(cat "$LINE_INPUT")" \
   0
 
 # Test 53: Large input with -b 1k
