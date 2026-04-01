@@ -1,36 +1,0 @@
-[13:28:22] Generating test data...
-[K[TEST   1] Running: Ordered/100                                                  bash: line 1: frun: command not found
-[K[TEST   1] Running: Ordered/100                                                  ❌ FAIL: Timeout/CrashFAIL | Ordered/100 | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_1.txt
-[K[TEST   2] Running: Set/10000                                                    bash: line 1: frun: command not found
-[K[TEST   2] Running: Set/10000                                                    ❌ FAIL: Timeout/CrashFAIL | Set/10000 | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_2.txt
-[K[TEST   3] Running: Stdin/100                                                    bash: line 1: frun: command not found
-[K[TEST   3] Running: Stdin/100                                                    ❌ FAIL: Timeout/CrashFAIL | Stdin/100 | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_3.txt
-[K[TEST   4] Running: Exact-Lines/10000                                            bash: line 1: frun: command not found
-[K[TEST   4] Running: Exact-Lines/10000                                            ❌ FAIL: Timeout/CrashFAIL | Exact-Lines/10000 | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_4.txt
-[K[TEST   5] Running: Workers/1-4                                                  bash: line 1: frun: command not found
-[K[TEST   5] Running: Workers/1-4                                                  ❌ FAIL: Timeout/CrashFAIL | Workers/1-4 | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_5.txt
-[K[TEST   6] Running: Byte-Mode/Small                                              bash: line 1: frun: command not found
-[K[TEST   6] Running: Byte-Mode/Small                                              ❌ FAIL: Timeout/CrashFAIL | Byte-Mode/Small | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_6.txt
-[K[TEST   7] Running: UMA/10000                                                    bash: line 1: frun: command not found
-[K[TEST   7] Running: UMA/10000                                                    ❌ FAIL: Timeout/CrashFAIL | UMA/10000 | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_7.txt
-[K[TEST   8] Running: Oversubscribe/4-Node                                         bash: line 1: frun: command not found
-[K[TEST   8] Running: Oversubscribe/4-Node                                         ❌ FAIL: Timeout/CrashFAIL | Oversubscribe/4-Node | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_8.txt
-[K[TEST   9] Running: Delim-PIPE                                                   bash: line 1: frun: command not found
-[K[TEST   9] Running: Delim-PIPE                                                   ❌ FAIL: Timeout/CrashFAIL | Delim-PIPE | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_9.txt
-[K[TEST  10] Running: Delim-NULL                                                   bash: line 1: frun: command not found
-[K[TEST  10] Running: Delim-NULL                                                   ❌ FAIL: Timeout/CrashFAIL | Delim-NULL | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_10.txt
-[K[TEST  11] Running: Stress/64W                                                   bash: line 1: frun: command not found
-[K[TEST  11] Running: Stress/64W                                                   ❌ FAIL: Timeout/CrashFAIL | Stress/64W | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_11.txt
-[K[TEST  12] Running: Churn/L5                                                     bash: line 1: frun: command not found
-[K[TEST  12] Running: Churn/L5                                                     ❌ FAIL: Timeout/CrashFAIL | Churn/L5 | FAIL: Timeout/Crash | Out:/tmp/fve_WZmYWz/out_12.txt
-bash: line 1: frun: command not found
-FAIL | Limit-50 Timeout
-[K[TEST  13] Running: Limit-50                                                     DONE[13:28:23] ========================================
-[13:28:23]  FORKRUN VALIDATION REPORT
-[13:28:23] ========================================
-[13:28:23]  Total Tests  : 13
-[13:28:23]  Passed       : 0
-[13:28:23]  Failed       : 13
-[13:28:23]  Manifest     : manifest.log
-[13:28:23] ========================================
-[13:28:23] ❌ STATUS: FAILURES DETECTED. CHECK MANIFEST.
