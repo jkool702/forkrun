@@ -525,7 +525,7 @@ toc() { :; }
             # BYTE ARGS PAYLOAD
             array_var='"${A}"'
             if ${insert_args_flag:-false}; then
-                cmdline_str="${cmdline_str//\\{\\}/$array_var}"
+                cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
             else
                 cmdline_str+=" $array_var"
             fi
@@ -540,7 +540,7 @@ toc() { :; }
             ${unsafe_flag} && array_var='${A[*]}'
 
             if ${insert_args_flag:-false}; then
-                cmdline_str="${cmdline_str//\\{\\}/$array_var}"
+                cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
             else
                 cmdline_str+=" $array_var"
             fi
