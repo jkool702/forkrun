@@ -307,6 +307,8 @@ toc() { :; }
 
     ${byte_mode_flag:-false} && ring_init_opts+=('--lines=x')
 
+    ring_init_opts+=("--delim=${delimiter_val}")
+
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
 
     # --- NUMA Node Discovery and Topology Mapping ---

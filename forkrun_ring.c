@@ -858,6 +858,7 @@ struct SharedState {
   uint8_t cfg_return_bytes;
   uint8_t numa_enabled;
   uint8_t exact_lines;
+  uint8_t cfg_delim;  // Record delimiter character (default '\n')
 
   uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
   uint64_t stats_chunks_processed;
@@ -1283,6 +1284,7 @@ static int ring_init_main(int argc, char **argv) {
   int64_t parsed_timeout = -1;
   uint8_t parsed_return_bytes = 0;
   uint8_t parsed_exact_lines = 0;
+  uint8_t parsed_delim = '\n';
 
   for (int i = 1; i < argc; i++) {
     const char *arg = argv[i];
@@ -1320,6 +1322,8 @@ static int ring_init_main(int argc, char **argv) {
       stdin_explicit = 1;
     else if (strncmp(arg, "--no-stdin", 10) == 0)
       stdin_explicit = 0;
+    else if (strncmp(arg, "--delim=", 8) == 0)
+      parsed_delim = (uint8_t)arg[8];
     else if (strncmp(arg, "--nodes=", 8) != 0 &&
              strncmp(arg, "--numa-map=", 11) != 0 && arg[0] != '-')
       out_array_name = arg;
@@ -1404,6 +1408,7 @@ static int ring_init_main(int argc, char **argv) {
     state[n].mode_byte = byte_mode ? 1 : 0;
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
     state[n].exact_lines = parsed_exact_lines;
+    state[n].cfg_delim = parsed_delim;
     state[n].cfg_limit = parsed_limit;
     state[n].cfg_timeout_us = parsed_timeout;
     state[n].cfg_return_bytes = parsed_return_bytes;
@@ -2293,6 +2298,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
   bool fixed_workers = local_state->fixed_workers;
   bool return_bytes = local_state->cfg_return_bytes;
   bool exact_lines = local_state->exact_lines;
+  char delim = (char)local_state->cfg_delim;
 
   uint64_t W2 = fast_log2(W_max_val);
   uint64_t L2 = fast_log2(Lmax);
@@ -2803,7 +2809,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
           scan_target = 1;
 
         uint64_t lines_found = 0;
-        char delim = '\n';
+
 
         char *safe_end = end;
         if (BytesMax > 0) {
@@ -2999,7 +3005,7 @@ unified_scanner_eof:
     if (!byte_mode) {
       uint64_t L_tail = pending_lines;
       char *p_scan = p;
-      char delim = '\n';
+
       while (p_scan < end) {
         char *nl = memchr(p_scan, delim, end - p_scan);
         if (nl) {
