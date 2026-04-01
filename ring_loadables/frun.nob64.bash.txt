@@ -307,6 +307,8 @@ toc() { :; }
 
     ${byte_mode_flag:-false} && ring_init_opts+=('--lines=x')
 
+    ring_init_opts+=("--delim=${delimiter_val}")
+
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
 
     # --- NUMA Node Discovery and Topology Mapping ---
@@ -483,7 +485,9 @@ toc() { :; }
 
         # 1. Replace {ID} with the Worker ID, NUMA Node ID, and Worker Batch Num
         if ${insert_id_flag:-false}; then
-            cmdline_str="${cmdline_str//\\{ID\\}/\${RING_NODE_ID:+\${RING_NODE_ID}.}\${ID}.\${W_BATCH}}"
+        declare -p cmdline_str RING_NODE_ID ID W_BATCH >&2
+            cmdline_str="${cmdline_str//\\\{ID\\\}/\{\${RING_NODE_ID:+\$\{RING_NODE_ID\}.\}\$\{ID\}.\$\{W_BATCH\}\}}"
+        declare -p cmdline_str >&2
         fi
 
         ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"
@@ -523,7 +527,7 @@ toc() { :; }
             # BYTE ARGS PAYLOAD
             array_var='"${A}"'
             if ${insert_args_flag:-false}; then
-                cmdline_str="${cmdline_str//\\{\\}/$array_var}"
+                cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
             else
                 cmdline_str+=" $array_var"
             fi
@@ -538,7 +542,7 @@ toc() { :; }
             ${unsafe_flag} && array_var='${A[*]}'
 
             if ${insert_args_flag:-false}; then
-                cmdline_str="${cmdline_str//\\{\\}/$array_var}"
+                cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
             else
                 cmdline_str+=" $array_var"
             fi
@@ -1142,6 +1146,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()  # remove base64
+declare -A b64=()   # removed base64
 
 _forkrun_bootstrap_setup --force
