@@ -1489,6 +1489,16 @@ static int ring_init_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
   }
 
+  // Initialize all eventfds to -1 (invalid) before attempting to create them
+  for (uint32_t n = 0; n < global_num_nodes; n++) {
+    evfd_data_arr[n] = -1;
+    evfd_eof_arr[n] = -1;
+    evfd_indexer_arr[n] = -1;
+    evfd_meta_arr[n] = -1;
+    fd_escrow_r[n] = -1;
+    fd_escrow_w[n] = -1;
+  }
+
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     evfd_data_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     evfd_eof_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
@@ -1504,15 +1514,18 @@ static int ring_init_main(int argc, char **argv) {
       fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
       fd_escrow_r[n] = pfd[0];
       fd_escrow_w[n] = pfd[1];
-    } else {
-      fd_escrow_r[n] = -1;
-      fd_escrow_w[n] = -1;
     }
   }
 
   evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+
+  // Check that critical eventfds were created successfully
+  if (evfd_ingest_data < 0 || evfd_ingest_eof < 0 || evfd_chunk_done < 0) {
+    builtin_error("forkrun: eventfd creation failed");
+    return EXECUTION_FAILURE;
+  }
 
   evfd_data = evfd_data_arr[0];
   fd_escrow[0] = fd_escrow_r[0];
@@ -3650,7 +3663,10 @@ static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap,
                       uint64_t key, struct OrderPacket pkt) {
   if (*sz >= *cap) {
     *cap = (*cap) * 2;
-    *heap_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
+    struct HeapNode *new_heap = realloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
+    if (!new_heap)
+      return; // Silent failure - preserve existing heap
+    *heap_ptr = new_heap;
   }
   struct HeapNode *heap = *heap_ptr;
   int i = (*sz)++;
@@ -4205,6 +4221,12 @@ static int ring_fetcher_main(int argc, char **argv) {
         copy_file_range(fd_global, &off_in, fd_local, &off_out, pp.len, 0);
     if (ret < 0) {
       char *buf = malloc(65536);
+      if (!buf) {
+        uint64_t one = 1;
+        sys_write(fd_local_sig, &one, 8);
+        robust_pipe_write(fd_global_ack, &pp, sizeof(pp));
+        continue;
+      }
       uint64_t copied = 0;
       lseek(fd_global, pp.off, SEEK_SET);
       lseek(fd_local, 0, SEEK_END);
@@ -4276,13 +4298,15 @@ static int ring_fallow_phys_main(int argc, char **argv) {
         }
       } else if (pp->off > limit) {
         struct Interval *n = malloc(sizeof(struct Interval));
-        n->s = pp->off;
-        n->e = pp->off + pp->len;
-        struct Interval **curr = &head;
-        while (*curr && (*curr)->s < n->s)
-          curr = &((*curr)->next);
-        n->next = *curr;
-        *curr = n;
+        if (n) {
+          n->s = pp->off;
+          n->e = pp->off + pp->len;
+          struct Interval **curr = &head;
+          while (*curr && (*curr)->s < n->s)
+            curr = &((*curr)->next);
+          n->next = *curr;
+          *curr = n;
+        }
       }
     }
 
