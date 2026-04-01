@@ -3026,8 +3026,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
 
     if (is_numa) {
       UNIFIED_ADAPTIVE_COMMIT(true);
-      if (limit_items > 0 &&
-          atomic_load_relaxed(&state[0].global_scanned) >= limit_items)
+    }
+
+    // --- PHYSICS FIX: Break out of infinite loop for UMA limit ---
+    if (limit_items > 0) {
+      uint64_t current_global =
+          is_numa ? atomic_load_relaxed(&state[0].global_scanned)
+                  : total_scanned;
+      if (current_global >= limit_items)
         break;
     }
   }
@@ -3044,7 +3050,10 @@ unified_scanner_eof:
     uint64_t blast = 1;
     sys_write(evfd_eof_arr[my_node_id], &blast, 8);
   } else {
-    if (!byte_mode) {
+    // --- PHYSICS FIX: Prevent UMA ghost batches violating exact limit ---
+    bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
+
+    if (!byte_mode && !limit_hit) {
       uint64_t L_tail = pending_lines;
       char *p_scan = p;
 
