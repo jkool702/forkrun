@@ -258,8 +258,10 @@ EOF
             # --- DELIMITER (-d x) ---
             @(-d|--delim|--delimiter)?(?([= $'\t'])*))
                 arg="${1##@(-d|--delim|--delimiter)?([= $'\t'])}";
-                [[ ${arg} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && delimiter_val="${arg:0:1}" ;;
+                if [[ -z "${arg}" && "$1" == @(-d|--delim|--delimiter) ]]; then
+                    shift; arg="$1";
+                fi
+                delimiter_val="${arg:0:1}" ;;
 
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
@@ -485,9 +487,7 @@ toc() { :; }
 
         # 1. Replace {ID} with the Worker ID, NUMA Node ID, and Worker Batch Num
         if ${insert_id_flag:-false}; then
-        declare -p cmdline_str RING_NODE_ID ID W_BATCH >&2
             cmdline_str="${cmdline_str//\\\{ID\\\}/\{\${RING_NODE_ID:+\$\{RING_NODE_ID\}.\}\$\{ID\}.\$\{W_BATCH\}\}}"
-        declare -p cmdline_str >&2
         fi
 
         ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"

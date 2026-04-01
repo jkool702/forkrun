@@ -858,7 +858,7 @@ struct SharedState {
   uint8_t cfg_return_bytes;
   uint8_t numa_enabled;
   uint8_t exact_lines;
-  uint8_t cfg_delim;  // Record delimiter character (default '\n')
+  uint8_t cfg_delim; // Record delimiter character (default '\n')
 
   uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
   uint64_t stats_chunks_processed;
@@ -1892,6 +1892,49 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   free(nodemask);
 
+  // --- PHYSICS FIX: DUMMY CHUNK FOR ORPHANED TAIL DATA ---
+  // Append a 0-length chunk at EOF. This forces the indexer to map `actual_end`
+  // directly to the EOF boundary, allowing the scanner to rescue and process
+  // any trailing data that wasn't properly terminated by a delimiter.
+  int target_node = last_target == -1 ? 0 : (last_target + 1) % num_nodes;
+  while (1) {
+    uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
+    uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
+    if ((int64_t)(h - t) < 4)
+      break;
+    struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
+    if (poll(&pfd, 1, 100) > 0) {
+      uint64_t v;
+      sys_read(evfd_chunk_done, &v, 8);
+    }
+  }
+
+  struct ChunkMeta *meta = &g_state->meta_ring[current_major & META_RING_MASK];
+  meta->raw_offset = current_offset;
+  meta->raw_length = 0;
+  meta->target_node = target_node;
+  meta->major_id = current_major;
+  atomic_store_relaxed(&meta->actual_end, 0);
+
+  struct SharedState *t_state = &state[target_node];
+  uint64_t q_idx = atomic_load_relaxed(&t_state->chunk_queue_head);
+  t_state->chunk_queue[q_idx & META_RING_MASK] = current_major;
+
+  __atomic_store_n(&t_state->chunk_queue_head, q_idx + 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&g_state->ingest_publish_idx, current_major + 1,
+                   __ATOMIC_RELEASE);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+  __atomic_fetch_add(&t_state->stats_chunks_assigned, 1, __ATOMIC_RELAXED);
+
+  uint64_t w = atomic_load_relaxed(&t_state->indexer_waiters);
+  if (w > 0) {
+    uint64_t v = w;
+    sys_write(evfd_indexer_arr[target_node], &v, 8);
+  }
+  current_major++;
+  // --------------------------------------------------------
+
   __atomic_store_n(&g_state->ingest_eof_idx, current_major, __ATOMIC_RELEASE);
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
   uint64_t v = 999999;
@@ -1973,7 +2016,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           n = pread(memfd, tail_buf, window_size, window_start);
         } while (n < 0 && errno == EINTR);
         if (n > 0) {
-          char *nl = memrchr(tail_buf, '\n', n);
+          char *nl = memrchr(tail_buf, t_state->cfg_delim, n);
           if (nl) {
             actual_end = window_start + (nl - tail_buf) + 1;
             break;
@@ -2809,7 +2852,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
           scan_target = 1;
 
         uint64_t lines_found = 0;
-
 
         char *safe_end = end;
         if (BytesMax > 0) {
@@ -4156,7 +4198,7 @@ static int ring_indexer_main(int argc, char **argv) {
           (sizeof(tail_buf) < chunk_target) ? sizeof(tail_buf) : chunk_target;
       ssize_t n = pread(fd_data, tail_buf, scan_sz, scan_end - scan_sz);
       if (n > 0) {
-        char *nl = memrchr(tail_buf, '\n', n);
+        char *nl = memrchr(tail_buf, state[0].cfg_delim, n);
         if (nl) {
           uint64_t actual_end = (scan_end - scan_sz) + (nl - tail_buf) + 1;
           struct PhysPacket pp = {.off = current_pos,
