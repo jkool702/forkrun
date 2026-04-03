@@ -2326,8 +2326,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
 // rate and worker starvation. It handles both legacy flat pipelines (UMA) and
 // deep NUMA topologies.
 static inline __attribute__((always_inline)) int
-core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
-                  const bool is_numa) {
+core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, const bool is_numa) {
   struct SharedState *local_state = is_numa ? &state[my_node_id] : &state[0];
 
   uint64_t L = local_state->cfg_batch_start;
@@ -2759,20 +2758,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
             is_numa ? (chunk_end - current_p_offset) : (uint64_t)(end - p);
         uint64_t take = 0;
 
-        if (limit_items > 0) {
-          if (!is_numa && total_scanned >= limit_items) {
-            status = 1;
-            break;
-          }
-          if (is_numa) {
-            uint64_t prev =
-                __atomic_fetch_add(&state[0].global_scanned,
-                                   (avail >= L ? L : avail), __ATOMIC_SEQ_CST);
-            if (prev >= limit_items)
-              break;
-          }
-        }
-
         if (avail >= L) {
           take = L;
           flush = true;
@@ -2795,17 +2780,44 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
           }
         }
 
-        if (flush) {
+        if (flush && take > 0 && limit_items > 0) {
+          if (is_numa) {
+            uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, take, __ATOMIC_SEQ_CST);
+            if (prev >= limit_items) {
+              limit_reached = true;
+              take = 0;
+              flush = false;
+            } else if (prev + take >= limit_items) {
+              take = limit_items - prev;
+              limit_reached = true;
+            }
+          } else {
+            if (total_scanned >= limit_items) {
+              status = 1;
+              limit_reached = true;
+              take = 0;
+              flush = false;
+            } else if (total_scanned + take >= limit_items) {
+              take = limit_items - total_scanned;
+              limit_reached = true;
+              status = 1;
+            }
+          }
+        }
+
+        if (flush && take > 0) {
           current_p_offset =
               is_numa ? (current_p_offset + take)
                       : (buf_base_offset + (uint64_t)(p - buf) + take);
           if (!is_numa)
             pending_lines = 0;
 
-          bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
+          bool is_last = is_numa ? (current_p_offset >= chunk_end || limit_reached) : limit_reached;
           uint32_t stride =
               is_numa ? (uint32_t)(current_p_offset - batch_start) : 1;
-          uint32_t cv = is_numa ? take : 1;
+
+          // PHYSICS FIX: Both NUMA and UMA use `take` to accurately flag partial batches
+          uint32_t cv = take;
 
           UNIFIED_SCANNER_FLUSH(cv, stride, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
@@ -2822,10 +2834,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
 
           p += take;
           batch_start += is_numa ? take : current_p_offset - batch_start;
-          total_scanned += is_numa ? take : 1;
+
+          // PHYSICS FIX: Track actual bytes processed to correctly enforce -n limit
+          total_scanned += take;
           pending_lines = 0;
         } else {
-          if (!is_numa)
+          if (!is_numa && !limit_reached)
             force_refill = true;
         }
       } else {
@@ -2852,6 +2866,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes,
           scan_target = 1;
 
         uint64_t lines_found = 0;
+
 
         char *safe_end = end;
         if (BytesMax > 0) {
