@@ -1689,6 +1689,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   uint64_t current_offset = 0;
   uint32_t current_major = 0;
   int last_target = -1;
+  bool limit_reached_exit = false; // NEW: Track why we exited
 
   unsigned long test_mask = 1UL;
   bool numa_enabled =
@@ -1730,7 +1731,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           break;
         }
       }
-      if (all_done) goto ingest_done;
+      if (all_done) { limit_reached_exit = true; goto ingest_done; }
     }
 
     int target_node = 0;
@@ -1761,7 +1762,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             break;
           }
         }
-        if (all_done) goto ingest_done;
+        if (all_done) { limit_reached_exit = true; goto ingest_done; }
       }
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
@@ -1776,8 +1777,12 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         {.fd = infd, .events = POLLIN},
         {.fd = evfd_chunk_done, .events = POLLIN}
     };
-    poll(pfds_gate, 2, -1);
-    
+    int p_res = poll(pfds_gate, 2, -1);
+    if (p_res < 0) {
+        if (errno == EINTR) continue;
+        break;
+    }
+
     // Clear the level-triggered eventfd so it doesn't spin
     if (pfds_gate[1].revents & POLLIN) {
         uint64_t dummy;
@@ -1793,7 +1798,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           break;
         }
       }
-      if (all_done) goto ingest_done;
+      if (all_done) { limit_reached_exit = true; goto ingest_done; }
     }
 
     // If infd isn't ready (we woke strictly on eventfd), loop around
@@ -1873,10 +1878,27 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           if (w <= 0) {
             if (w < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
               if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                struct pollfd pfd = {.fd = outfd, .events = POLLOUT};
-                poll(&pfd, 1, 10);
-              } else
+                // PHYSICS FIX: Wait infinitely on BOTH write-space and scanner completion
+                struct pollfd pfds_out[2] = {
+                    {.fd = outfd, .events = POLLOUT},
+                    {.fd = evfd_chunk_done, .events = POLLIN}
+                };
+                int p_out_res = poll(pfds_out, 2, -1);
+                if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
+                  if (state[0].cfg_limit > 0) {
+                    bool all_done = true;
+                    for (int i = 0; i < num_nodes; i++) {
+                      if (!atomic_load_acquire(&state[i].scanner_finished)) {
+                        all_done = false;
+                        break;
+                      }
+                    }
+                    if (all_done) { limit_reached_exit = true; goto ingest_done; }
+                  }
+                }
+              } else {
                 usleep(10);
+              }
               continue;
             }
             break;
@@ -1937,6 +1959,16 @@ ingest_done:
     syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   free(nodemask);
 
+  // PHYSICS FIX: If we exited due to limits, the scanners are dead. Do NOT append dummy chunk.
+  if (limit_reached_exit) {
+    __atomic_store_n(&g_state->ingest_eof_idx, current_major, __ATOMIC_RELEASE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    uint64_t v = 999999;
+    sys_write(evfd_ingest_eof, &v, 8);
+    return EXECUTION_SUCCESS;
+  }
+
+  // --- NORMAL EOF: DUMMY CHUNK FOR ORPHANED TAIL DATA ---
   int target_node = last_target == -1 ? 0 : (last_target + 1) % num_nodes;
   while (1) {
     uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
@@ -2824,11 +2856,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           if (is_numa) {
             uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, take, __ATOMIC_SEQ_CST);
             if (prev >= limit_items) {
+              __atomic_fetch_sub(&state[0].global_scanned, take, __ATOMIC_SEQ_CST);
               limit_reached = true;
               take = 0;
               flush = false;
+              current_p_offset = chunk_end; // PHYSICS FIX: Advance pointer to cleanly break loop
             } else if (prev + take >= limit_items) {
-              take = limit_items - prev;
+              uint64_t overshoot = (prev + take) - limit_items;
+              take -= overshoot;
+              __atomic_fetch_sub(&state[0].global_scanned, overshoot, __ATOMIC_SEQ_CST);
               limit_reached = true;
             }
           } else {
@@ -2837,6 +2873,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               limit_reached = true;
               take = 0;
               flush = false;
+              p = end; // PHYSICS FIX: Advance pointer to cleanly break loop
             } else if (total_scanned + take >= limit_items) {
               take = limit_items - total_scanned;
               limit_reached = true;
@@ -4433,6 +4470,7 @@ static int ring_copy_main(int argc, char **argv) {
   uint64_t next_check = 16 * 1024 * 1024;
   off_t off = 0;
   bool use_bounce = true;
+  bool limit_reached_exit = false;
 
   if (g_explicit_pinning && g_logical_to_phys_map) {
     uint32_t target_phys = g_logical_to_phys_map[0];
@@ -4448,11 +4486,10 @@ static int ring_copy_main(int argc, char **argv) {
   }
 
   if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
-    if (st.st_size == 0) {
-      // Let it fall through to read/write.
-    } else {
+    if (st.st_size > 0) {
       while (off < st.st_size) {
         if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+            limit_reached_exit = true;
             off = st.st_size;
             use_bounce = false;
             break;
@@ -4464,7 +4501,10 @@ static int ring_copy_main(int argc, char **argv) {
           to_copy = chunk;
         size_t copied_in_chunk = 0;
         while (copied_in_chunk < to_copy) {
-          if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) break;
+          if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+              limit_reached_exit = true;
+              break;
+          }
           ssize_t n = copy_file_range(infd, &current_off, outfd, NULL,
                                       to_copy - copied_in_chunk, 0);
           if (n < 0) {
@@ -4488,8 +4528,9 @@ static int ring_copy_main(int argc, char **argv) {
         }
         total_moved += copied_in_chunk;
       }
-      while (off < st.st_size) {
+      while (off < st.st_size && !limit_reached_exit) {
         if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+            limit_reached_exit = true;
             use_bounce = false;
             break;
         }
@@ -4513,7 +4554,7 @@ static int ring_copy_main(int argc, char **argv) {
     }
   }
 
-  if (use_bounce) {
+  if (use_bounce && !limit_reached_exit) {
     char *bounce_buf = mmap(NULL, chunk, PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (bounce_buf == MAP_FAILED)
@@ -4527,7 +4568,11 @@ static int ring_copy_main(int argc, char **argv) {
           {.fd = infd, .events = POLLIN},
           {.fd = evfd_chunk_done, .events = POLLIN}
       };
-      poll(pfds_gate, 2, -1);
+      int p_res = poll(pfds_gate, 2, -1);
+      if (p_res < 0) {
+          if (errno == EINTR) continue;
+          break;
+      }
 
       if (pfds_gate[1].revents & POLLIN) {
           uint64_t dummy;
@@ -4556,17 +4601,28 @@ static int ring_copy_main(int argc, char **argv) {
         if (w <= 0) {
           if (w < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-              struct pollfd pfd = {.fd = outfd, .events = POLLOUT};
-              poll(&pfd, 1, 10);
-            } else
+              // PHYSICS FIX: Wait infinitely on BOTH write-space and scanner completion
+              struct pollfd pfds_out[2] = {
+                  {.fd = outfd, .events = POLLOUT},
+                  {.fd = evfd_chunk_done, .events = POLLIN}
+              };
+              int p_out_res = poll(pfds_out, 2, -1);
+              if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
+                 if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+                     limit_reached_exit = true;
+                     break;
+                 }
+              }
+            } else {
               usleep(10);
+            }
             continue;
           }
           break;
         }
         written += w;
       }
-      if (written < (size_t)r)
+      if (written < (size_t)r || limit_reached_exit)
         break;
 
       if (evfd_ingest_data >= 0) {
