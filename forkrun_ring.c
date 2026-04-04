@@ -1691,6 +1691,22 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   int last_target = -1;
   bool limit_reached_exit = false; // NEW: Track why we exited
 
+#define NUMA_CHECK_SCANNERS_DONE() do { \
+  if (state[0].cfg_limit > 0) { \
+    bool _all_done = true; \
+    for (int _i = 0; _i < num_nodes; _i++) { \
+      if (!atomic_load_acquire(&state[_i].scanner_finished)) { \
+        _all_done = false; \
+        break; \
+      } \
+    } \
+    if (_all_done) { \
+      limit_reached_exit = true; \
+      goto ingest_done; \
+    } \
+  } \
+} while(0)
+
   unsigned long test_mask = 1UL;
   bool numa_enabled =
       (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
@@ -1723,16 +1739,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
 
   while (1) {
-    if (state[0].cfg_limit > 0) {
-      bool all_done = true;
-      for (int i = 0; i < num_nodes; i++) {
-        if (!atomic_load_acquire(&state[i].scanner_finished)) {
-          all_done = false;
-          break;
-        }
-      }
-      if (all_done) { limit_reached_exit = true; goto ingest_done; }
-    }
+    NUMA_CHECK_SCANNERS_DONE();
 
     int target_node = 0;
     int min_backlog = INT_MAX;
@@ -1754,16 +1761,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       if ((int64_t)(h - t) < 4)
         break;
 
-      if (state[0].cfg_limit > 0) {
-        bool all_done = true;
-        for (int i = 0; i < num_nodes; i++) {
-          if (!atomic_load_acquire(&state[i].scanner_finished)) {
-            all_done = false;
-            break;
-          }
-        }
-        if (all_done) { limit_reached_exit = true; goto ingest_done; }
-      }
+      NUMA_CHECK_SCANNERS_DONE();
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
       if (poll(&pfd, 1, -1) > 0) {
@@ -1790,16 +1788,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     }
 
     // Check if the eventfd wake was because scanners finished
-    if (state[0].cfg_limit > 0) {
-      bool all_done = true;
-      for (int i = 0; i < num_nodes; i++) {
-        if (!atomic_load_acquire(&state[i].scanner_finished)) {
-          all_done = false;
-          break;
-        }
-      }
-      if (all_done) { limit_reached_exit = true; goto ingest_done; }
-    }
+    NUMA_CHECK_SCANNERS_DONE();
 
     // If infd isn't ready (we woke strictly on eventfd), loop around
     // PHYSICS FIX: Must catch POLLHUP/POLLERR so read() can trigger EOF (return 0)
@@ -1885,16 +1874,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
                 };
                 int p_out_res = poll(pfds_out, 2, -1);
                 if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
-                  if (state[0].cfg_limit > 0) {
-                    bool all_done = true;
-                    for (int i = 0; i < num_nodes; i++) {
-                      if (!atomic_load_acquire(&state[i].scanner_finished)) {
-                        all_done = false;
-                        break;
-                      }
-                    }
-                    if (all_done) { limit_reached_exit = true; goto ingest_done; }
-                  }
+                  uint64_t dummy;
+                  sys_read(evfd_chunk_done, &dummy, 8); // PHYSICS FIX: Clear the token so we don't hot-spin!
+                  NUMA_CHECK_SCANNERS_DONE();
                 }
               } else {
                 usleep(10);
@@ -4608,9 +4590,11 @@ static int ring_copy_main(int argc, char **argv) {
               };
               int p_out_res = poll(pfds_out, 2, -1);
               if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
+                 uint64_t dummy;
+                 sys_read(evfd_chunk_done, &dummy, 8); // PHYSICS FIX: Clear the token so we don't hot-spin!
                  if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
                      limit_reached_exit = true;
-                     break;
+                     break; 
                  }
               }
             } else {
