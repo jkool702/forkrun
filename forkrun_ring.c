@@ -1691,22 +1691,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   int last_target = -1;
   bool limit_reached_exit = false; // NEW: Track why we exited
 
-#define NUMA_CHECK_SCANNERS_DONE() do { \
-  if (state[0].cfg_limit > 0) { \
-    bool _all_done = true; \
-    for (int _i = 0; _i < num_nodes; _i++) { \
-      if (!atomic_load_acquire(&state[_i].scanner_finished)) { \
-        _all_done = false; \
-        break; \
-      } \
-    } \
-    if (_all_done) { \
-      limit_reached_exit = true; \
-      goto ingest_done; \
-    } \
-  } \
-} while(0)
-
   unsigned long test_mask = 1UL;
   bool numa_enabled =
       (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
@@ -1738,6 +1722,23 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     sys_write(evfd_chunk_done, &one, 8);
   }
 
+// PHYSICS FIX: DRY Macro for scanner completion checks
+#define NUMA_CHECK_SCANNERS_DONE() do { \
+  if (state[0].cfg_limit > 0) { \
+    bool _all_done = true; \
+    for (int _i = 0; _i < num_nodes; _i++) { \
+      if (!atomic_load_acquire(&state[_i].scanner_finished)) { \
+        _all_done = false; \
+        break; \
+      } \
+    } \
+    if (_all_done) { \
+      limit_reached_exit = true; \
+      goto ingest_done; \
+    } \
+  } \
+} while(0)
+
   while (1) {
     NUMA_CHECK_SCANNERS_DONE();
 
@@ -1754,7 +1755,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       }
     }
 
-    // INFINITE QUEUE WAIT GATE
+    // GATE 1: Wait for Queue Space
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
@@ -1764,35 +1765,24 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       NUMA_CHECK_SCANNERS_DONE();
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
-      if (poll(&pfd, 1, -1) > 0) {
+      if (poll(&pfd, 1, 10) > 0) {
         uint64_t v;
         sys_read(evfd_chunk_done, &v, 8);
       }
     }
 
-    // INFINITE EVENT-DRIVEN INGEST GATE
-    struct pollfd pfds_gate[2] = {
-        {.fd = infd, .events = POLLIN},
-        {.fd = evfd_chunk_done, .events = POLLIN}
-    };
-    int p_res = poll(pfds_gate, 2, -1);
+    // GATE 2: Wait for Stdin
+    struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
+    int p_res = poll(&pfd_in, 1, 10);
     if (p_res < 0) {
         if (errno == EINTR) continue;
         break;
     }
 
-    // Clear the level-triggered eventfd so it doesn't spin
-    if (pfds_gate[1].revents & POLLIN) {
-        uint64_t dummy;
-        sys_read(evfd_chunk_done, &dummy, 8);
-    }
-
-    // Check if the eventfd wake was because scanners finished
     NUMA_CHECK_SCANNERS_DONE();
 
-    // If infd isn't ready (we woke strictly on eventfd), loop around
-    // PHYSICS FIX: Must catch POLLHUP/POLLERR so read() can trigger EOF (return 0)
-    if (!(pfds_gate[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+    // PHYSICS FIX: Catch POLLHUP/POLLERR so read() can trigger EOF cleanly
+    if (!(pfd_in.revents & (POLLIN | POLLHUP | POLLERR))) {
         continue;
     }
 
@@ -1867,17 +1857,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           if (w <= 0) {
             if (w < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
               if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // PHYSICS FIX: Wait infinitely on BOTH write-space and scanner completion
-                struct pollfd pfds_out[2] = {
-                    {.fd = outfd, .events = POLLOUT},
-                    {.fd = evfd_chunk_done, .events = POLLIN}
-                };
-                int p_out_res = poll(pfds_out, 2, -1);
-                if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
-                  uint64_t dummy;
-                  sys_read(evfd_chunk_done, &dummy, 8); // PHYSICS FIX: Clear the token so we don't hot-spin!
-                  NUMA_CHECK_SCANNERS_DONE();
-                }
+                struct pollfd pfd_out = {.fd = outfd, .events = POLLOUT};
+                poll(&pfd_out, 1, 10);
+                NUMA_CHECK_SCANNERS_DONE();
               } else {
                 usleep(10);
               }
@@ -1940,8 +1922,9 @@ ingest_done:
   if (numa_enabled)
     syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   free(nodemask);
+#undef NUMA_CHECK_SCANNERS_DONE
 
-  // PHYSICS FIX: If we exited due to limits, the scanners are dead. Do NOT append dummy chunk.
+  // PHYSICS FIX: If exited due to limits, scanners are dead. Do NOT append dummy chunk.
   if (limit_reached_exit) {
     __atomic_store_n(&g_state->ingest_eof_idx, current_major, __ATOMIC_RELEASE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -4545,26 +4528,19 @@ static int ring_copy_main(int argc, char **argv) {
     while (1) {
       if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) break;
 
-      // INFINITE EVENT-DRIVEN INGEST GATE
-      struct pollfd pfds_gate[2] = {
-          {.fd = infd, .events = POLLIN},
-          {.fd = evfd_chunk_done, .events = POLLIN}
-      };
-      int p_res = poll(pfds_gate, 2, -1);
+      struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
+      int p_res = poll(&pfd_in, 1, 10);
       if (p_res < 0) {
           if (errno == EINTR) continue;
           break;
       }
 
-      if (pfds_gate[1].revents & POLLIN) {
-          uint64_t dummy;
-          sys_read(evfd_chunk_done, &dummy, 8);
+      if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+          limit_reached_exit = true;
+          break;
       }
 
-      if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) break;
-
-      // PHYSICS FIX: Must catch POLLHUP/POLLERR so read() can trigger EOF (return 0)
-      if (!(pfds_gate[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+      if (!(pfd_in.revents & (POLLIN | POLLHUP | POLLERR))) {
           continue;
       }
 
@@ -4583,19 +4559,11 @@ static int ring_copy_main(int argc, char **argv) {
         if (w <= 0) {
           if (w < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-              // PHYSICS FIX: Wait infinitely on BOTH write-space and scanner completion
-              struct pollfd pfds_out[2] = {
-                  {.fd = outfd, .events = POLLOUT},
-                  {.fd = evfd_chunk_done, .events = POLLIN}
-              };
-              int p_out_res = poll(pfds_out, 2, -1);
-              if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
-                 uint64_t dummy;
-                 sys_read(evfd_chunk_done, &dummy, 8); // PHYSICS FIX: Clear the token so we don't hot-spin!
-                 if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
-                     limit_reached_exit = true;
-                     break; 
-                 }
+              struct pollfd pfd_out = {.fd = outfd, .events = POLLOUT};
+              poll(&pfd_out, 1, 10);
+              if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+                 limit_reached_exit = true;
+                 break;
               }
             } else {
               usleep(10);
