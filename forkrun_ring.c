@@ -3885,10 +3885,6 @@ static int ring_order_main(int argc, char **argv) {
   if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode))
     use_zerocopy = true;
 
-  // PHYSICS FIX: Lower initial heap allocation from 262144 (8MB) to 1024
-  // (32KB). It will geometrically expand via realloc() in heap_push() if skew
-  // is severe, but prevents massive wasted allocation overhead on small rapid
-  // workloads.
   int heap_cap = 1024;
   struct HeapNode *heap = malloc(heap_cap * sizeof(struct HeapNode));
   if (!heap) {
@@ -3907,8 +3903,45 @@ static int ring_order_main(int argc, char **argv) {
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered,
                                       sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0)
+    if (n_read <= 0) {
+      // PHYSICS FIX: EOF reached. Force-drain the heap.
+      // No smaller sequence number will ever arrive. What remains is the final truth.
+      if (!unordered_mode) {
+        while (heap_sz > 0) {
+          struct HeapNode top;
+          heap_pop(heap, &heap_sz, &top);
+          if (memfd_mode) {
+            off_t offset = (off_t)top.pkt.off;
+            if (use_zerocopy)
+              robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len);
+            else
+              ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len);
+            off_t aligned_start = (top.pkt.off / 4096) * 4096;
+            off_t punch_len = (top.pkt.off - aligned_start) + top.pkt.len;
+            fallocate(top.pkt.fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                      aligned_start, punch_len);
+          } else {
+            char path[256];
+            if (numa_mode)
+              snprintf(path, sizeof(path), "%s.%u.%u", prefix, top.pkt.major_idx,
+                       (top.pkt.minor_idx & ~FLAG_MAJOR_EOF));
+            else
+              snprintf(path, sizeof(path), "%s.%u", prefix, top.pkt.major_idx);
+            int fd_file = open(path, O_RDONLY);
+            if (fd_file >= 0) {
+              off_t offset = 0;
+              struct stat st;
+              if (fstat(fd_file, &st) == 0 && st.st_size > 0)
+                robust_sendfile(1, fd_file, &offset, st.st_size);
+              close(fd_file);
+              unlink(path);
+            }
+          }
+        }
+      }
       break; // EOF or error
+    }
+
     buffered += n_read;
 
     size_t count = buffered / pkt_sz;
