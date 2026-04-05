@@ -4384,6 +4384,8 @@ static int ring_fallow_phys_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]);
   int fd_file = atoi(argv[2]);
+  bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0); // PHYSICS FIX: Catch the dry flag!
+
   struct Interval *head = NULL;
   uint64_t limit = 0;
   off_t last_punched = 0;
@@ -4413,7 +4415,8 @@ static int ring_fallow_phys_main(int argc, char **argv) {
           free(tmp);
         }
         off_t aligned = (off_t)((limit / 4096) * 4096);
-        if (aligned > last_punched) {
+        // PHYSICS FIX: Only punch holes if NOT in dry run
+        if (!dry_run && aligned > last_punched) {
           fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
                     last_punched, aligned - last_punched);
           last_punched = aligned;
