@@ -460,7 +460,6 @@ toc() { :; }
         (
             exec {fd_fallow_w}>&-
             fallow_args=( "${fd_fallow_r}" "${fd_write}" )
-            [[ "${order_mode}" == "realtime" ]] || fallow_args+=( "dry" )
             if (( FORKRUN_NUM_NODES > 1 )); then
                 ring_fallow_phys "${fallow_args[@]}"
             else

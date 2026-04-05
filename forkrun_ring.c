@@ -1755,7 +1755,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       }
     }
 
-    // GATE 1: Wait for Queue Space
+    // INFINITE QUEUE WAIT GATE
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
@@ -1765,24 +1765,35 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       NUMA_CHECK_SCANNERS_DONE();
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
-      if (poll(&pfd, 1, 10) > 0) {
+      if (poll(&pfd, 1, -1) > 0) {
         uint64_t v;
         sys_read(evfd_chunk_done, &v, 8);
       }
     }
 
-    // GATE 2: Wait for Stdin
-    struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
-    int p_res = poll(&pfd_in, 1, 10);
+    // INFINITE EVENT-DRIVEN INGEST GATE
+    struct pollfd pfds_gate[2] = {
+        {.fd = infd, .events = POLLIN},
+        {.fd = evfd_chunk_done, .events = POLLIN}
+    };
+    int p_res = poll(pfds_gate, 2, -1);
     if (p_res < 0) {
         if (errno == EINTR) continue;
         break;
     }
 
+    // Clear the level-triggered eventfd so it doesn't spin
+    if (pfds_gate[1].revents & POLLIN) {
+        uint64_t dummy;
+        sys_read(evfd_chunk_done, &dummy, 8);
+    }
+
+    // Check if the eventfd wake was because scanners finished
     NUMA_CHECK_SCANNERS_DONE();
 
-    // PHYSICS FIX: Catch POLLHUP/POLLERR so read() can trigger EOF cleanly
-    if (!(pfd_in.revents & (POLLIN | POLLHUP | POLLERR))) {
+    // If infd isn't ready (we woke strictly on eventfd), loop around
+    // PHYSICS FIX: Must catch POLLHUP/POLLERR so read() can trigger EOF (return 0)
+    if (!(pfds_gate[0].revents & (POLLIN | POLLHUP | POLLERR))) {
         continue;
     }
 
@@ -1841,8 +1852,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       case TM_READ_WRITE: {
         ssize_t r = read(infd, bounce_buf, chunk_size);
         if (r < 0) {
-          if (errno == EINTR)
-            continue;
+          if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
           n = -1;
           break;
         }
@@ -1857,9 +1867,17 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           if (w <= 0) {
             if (w < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
               if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                struct pollfd pfd_out = {.fd = outfd, .events = POLLOUT};
-                poll(&pfd_out, 1, 10);
-                NUMA_CHECK_SCANNERS_DONE();
+                // PHYSICS FIX: Wait infinitely on BOTH write-space and scanner completion
+                struct pollfd pfds_out[2] = {
+                    {.fd = outfd, .events = POLLOUT},
+                    {.fd = evfd_chunk_done, .events = POLLIN}
+                };
+                int p_out_res = poll(pfds_out, 2, -1);
+                if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
+                  uint64_t dummy;
+                  sys_read(evfd_chunk_done, &dummy, 8); // PHYSICS FIX: Clear the token so we don't hot-spin!
+                  NUMA_CHECK_SCANNERS_DONE();
+                }
               } else {
                 usleep(10);
               }
@@ -1880,8 +1898,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     }
 
     if (n < 0) {
-      if (errno == EINTR)
-        continue;
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
       break;
     }
     if (n == 0)
@@ -3904,41 +3921,6 @@ static int ring_order_main(int argc, char **argv) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered,
                                       sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) {
-      // PHYSICS FIX: EOF reached. Force-drain the heap.
-      // No smaller sequence number will ever arrive. What remains is the final truth.
-      if (!unordered_mode) {
-        while (heap_sz > 0) {
-          struct HeapNode top;
-          heap_pop(heap, &heap_sz, &top);
-          if (memfd_mode) {
-            off_t offset = (off_t)top.pkt.off;
-            if (use_zerocopy)
-              robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len);
-            else
-              ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len);
-            off_t aligned_start = (top.pkt.off / 4096) * 4096;
-            off_t punch_len = (top.pkt.off - aligned_start) + top.pkt.len;
-            fallocate(top.pkt.fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                      aligned_start, punch_len);
-          } else {
-            char path[256];
-            if (numa_mode)
-              snprintf(path, sizeof(path), "%s.%u.%u", prefix, top.pkt.major_idx,
-                       (top.pkt.minor_idx & ~FLAG_MAJOR_EOF));
-            else
-              snprintf(path, sizeof(path), "%s.%u", prefix, top.pkt.major_idx);
-            int fd_file = open(path, O_RDONLY);
-            if (fd_file >= 0) {
-              off_t offset = 0;
-              struct stat st;
-              if (fstat(fd_file, &st) == 0 && st.st_size > 0)
-                robust_sendfile(1, fd_file, &offset, st.st_size);
-              close(fd_file);
-              unlink(path);
-            }
-          }
-        }
-      }
       break; // EOF or error
     }
 
@@ -4384,7 +4366,6 @@ static int ring_fallow_phys_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]);
   int fd_file = atoi(argv[2]);
-  bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0); // PHYSICS FIX: Catch the dry flag!
 
   struct Interval *head = NULL;
   uint64_t limit = 0;
@@ -4415,8 +4396,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
           free(tmp);
         }
         off_t aligned = (off_t)((limit / 4096) * 4096);
-        // PHYSICS FIX: Only punch holes if NOT in dry run
-        if (!dry_run && aligned > last_punched) {
+        if (aligned > last_punched) {
           fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
                     last_punched, aligned - last_punched);
           last_punched = aligned;
@@ -4509,7 +4489,7 @@ static int ring_copy_main(int argc, char **argv) {
           ssize_t n = copy_file_range(infd, &current_off, outfd, NULL,
                                       to_copy - copied_in_chunk, 0);
           if (n < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
               continue;
             if (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
                 errno == EOPNOTSUPP)
@@ -4538,7 +4518,7 @@ static int ring_copy_main(int argc, char **argv) {
         check_memory_pressure(&total_moved, &next_check, oom_threshold);
         ssize_t n = sendfile(outfd, infd, &off, chunk);
         if (n < 0) {
-          if (errno == EINTR)
+          if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
             continue;
           break;
         }
@@ -4566,14 +4546,13 @@ static int ring_copy_main(int argc, char **argv) {
 
       struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
       int p_res = poll(&pfd_in, 1, 10);
-      if (p_res < 0) {
-          if (errno == EINTR) continue;
-          break;
-      }
-
-      if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
-          limit_reached_exit = true;
-          break;
+      if (p_res <= 0) {
+          if (p_res < 0 && errno != EINTR) break;
+          if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+              limit_reached_exit = true;
+              break;
+          }
+          continue;
       }
 
       if (!(pfd_in.revents & (POLLIN | POLLHUP | POLLERR))) {
@@ -4582,7 +4561,7 @@ static int ring_copy_main(int argc, char **argv) {
 
       ssize_t r = read(infd, bounce_buf, chunk);
       if (r < 0) {
-        if (errno == EINTR)
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
           continue;
         break;
       }
