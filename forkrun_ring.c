@@ -1778,8 +1778,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     };
     int p_res = poll(pfds_gate, 2, -1);
     if (p_res < 0) {
-        if (errno == EINTR) continue;
-        break;
+        // PHYSICS FIX: Prevent silent suicide on transient kernel memory pressure
+        if (errno != EINTR && errno != EAGAIN) break;
+        continue;
     }
 
     // Clear the level-triggered eventfd so it doesn't spin
@@ -1873,6 +1874,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
                     {.fd = evfd_chunk_done, .events = POLLIN}
                 };
                 int p_out_res = poll(pfds_out, 2, -1);
+                // PHYSICS FIX: Safe poll error handling
+                if (p_out_res < 0 && errno != EINTR && errno != EAGAIN) break;
                 if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
                   uint64_t dummy;
                   sys_read(evfd_chunk_done, &dummy, 8); // PHYSICS FIX: Clear the token so we don't hot-spin!
@@ -4547,7 +4550,8 @@ static int ring_copy_main(int argc, char **argv) {
       struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
       int p_res = poll(&pfd_in, 1, 10);
       if (p_res <= 0) {
-          if (p_res < 0 && errno != EINTR) break;
+          // PHYSICS FIX: Prevent silent suicide on transient kernel memory pressure
+          if (p_res < 0 && errno != EINTR && errno != EAGAIN) break;
           if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
               limit_reached_exit = true;
               break;
@@ -4575,7 +4579,9 @@ static int ring_copy_main(int argc, char **argv) {
           if (w < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
               struct pollfd pfd_out = {.fd = outfd, .events = POLLOUT};
-              poll(&pfd_out, 1, 10);
+              int p_out_res = poll(&pfd_out, 1, 10);
+              // PHYSICS FIX: Safe poll error handling
+              if (p_out_res < 0 && errno != EINTR && errno != EAGAIN) break;
               if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
                  limit_reached_exit = true;
                  break;
