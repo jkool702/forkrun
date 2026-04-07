@@ -2814,6 +2814,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
         current_p_offset = buf_base_offset + (uint64_t)(p - buf);
 
+        // WORMHOLE FIX 4: UMA EOF Race Shield
+        // Capture ingest_complete BEFORE pread. If it becomes complete
+        // after pread returns 0, we must loop to verify no final bytes slipped in.
+        bool was_complete = atomic_load_acquire(&local_state->ingest_complete);
+
         ssize_t n;
         do {
           n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
@@ -2832,53 +2837,64 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             end = buf + n;
           }
 
-          if (!atomic_load_acquire(&local_state->ingest_complete)) {
-            struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
-                                     {.fd = evfd_ingest_eof, .events = POLLIN}};
-            if (poll(pfds, 2, 0) > 0) {
-              if (pfds[1].revents & POLLIN)
-                atomic_store_release(&local_state->ingest_complete, 1);
-            }
-          }
-          if (atomic_load_acquire(&local_state->ingest_complete)) {
+          if (was_complete) {
+            // It was complete BEFORE pread. 'n' is absolute truth.
             if (n == 0 || (n > 0 && (uint64_t)n <= prev_avail))
-              status = 1;
+                status = 1;
           } else {
-            status = 0;
-            bool starving =
-                (atomic_load_relaxed(&local_state->active_waiters) > 0);
-            UNIFIED_ADAPTIVE_COMMIT(starving);
-
-            int poll_timeout = 100;
-            if (starving && timeout_us >= 0) {
-              if (first_wait_ts == 0)
-                first_wait_ts = get_us_time();
-              uint64_t now = get_us_time();
-              if (timeout_us == 0 ||
-                  (now - first_wait_ts >= (uint64_t)timeout_us))
-                poll_timeout = 0;
-              else {
-                uint64_t rem = (timeout_us - (now - first_wait_ts)) / 1000;
-                poll_timeout = (rem > 100) ? 100 : (int)rem;
+            // Check if it became complete in the background
+            if (!atomic_load_acquire(&local_state->ingest_complete)) {
+              struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
+                                       {.fd = evfd_ingest_eof, .events = POLLIN}};
+              if (poll(pfds, 2, 0) > 0) {
+                if (pfds[1].revents & POLLIN)
+                  atomic_store_release(&local_state->ingest_complete, 1);
               }
-            } else
-              first_wait_ts = 0;
-
-            struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
-                                     {.fd = evfd_ingest_eof, .events = POLLIN}};
-            if (poll(pfds, 2, poll_timeout) > 0) {
-              if (pfds[0].revents & POLLIN) {
-                uint64_t v;
-                sys_read(evfd_ingest_data, &v, 8);
-              }
-              if (pfds[1].revents & POLLIN)
-                atomic_store_release(&local_state->ingest_complete, 1);
             }
-            current_stall = true;
-            stall_meter = (stall_meter + (W + DAMPING_OFFSET)) >> 1;
-            if (p < end)
+
+            if (atomic_load_acquire(&local_state->ingest_complete)) {
+              // It became complete AFTER our pread. We cannot trust 'n'.
+              // We must loop around and pread one last time.
               force_refill = true;
-            continue;
+              continue;
+            } else {
+              // Still not complete. Go into wait routine.
+              status = 0;
+              bool starving =
+                  (atomic_load_relaxed(&local_state->active_waiters) > 0);
+              UNIFIED_ADAPTIVE_COMMIT(starving);
+
+              int poll_timeout = 100;
+              if (starving && timeout_us >= 0) {
+                if (first_wait_ts == 0)
+                  first_wait_ts = get_us_time();
+                uint64_t now = get_us_time();
+                if (timeout_us == 0 ||
+                    (now - first_wait_ts >= (uint64_t)timeout_us))
+                  poll_timeout = 0;
+                else {
+                  uint64_t rem = (timeout_us - (now - first_wait_ts)) / 1000;
+                  poll_timeout = (rem > 100) ? 100 : (int)rem;
+                }
+              } else
+                first_wait_ts = 0;
+
+              struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
+                                       {.fd = evfd_ingest_eof, .events = POLLIN}};
+              if (poll(pfds, 2, poll_timeout) > 0) {
+                if (pfds[0].revents & POLLIN) {
+                  uint64_t v;
+                  sys_read(evfd_ingest_data, &v, 8);
+                }
+                if (pfds[1].revents & POLLIN)
+                  atomic_store_release(&local_state->ingest_complete, 1);
+              }
+              current_stall = true;
+              stall_meter = (stall_meter + (W + DAMPING_OFFSET)) >> 1;
+              if (p < end)
+                force_refill = true;
+              continue;
+            }
           }
         }
       }
@@ -3538,6 +3554,14 @@ restart_loop:
 
     // 3. Scanner finished check THIRD
     if (atomic_load_acquire(&local_state->scanner_finished)) {
+      // WORMHOLE FIX 3: EOF Race Shield (Top of Loop)
+      // Re-read write_idx to ensure the scanner didn't publish data between
+      // our w_snap snapshot and turning on the scanner_finished light.
+      if (atomic_load_acquire(&local_state->read_idx) <
+          atomic_load_acquire(&local_state->write_idx)) {
+        continue; // There is still valid data! Loop back to claim it.
+      }
+
       if (__atomic_fetch_sub(&local_state->active_workers, 1,
                              __ATOMIC_SEQ_CST) == 1)
         return 2;
@@ -3589,10 +3613,15 @@ restart_loop:
   uint64_t w_curr = atomic_load_acquire(&local_state->write_idx);
   if (my_read_idx + claim_count > w_curr) {
     if (atomic_load_acquire(&local_state->scanner_finished)) {
+      // WORMHOLE FIX 3: EOF Race Shield (Fast Path Overshoot)
+      // If we overshot, we MUST re-read the final write_idx before truncating
+      // our claim, otherwise we destroy perfectly valid data.
+      w_curr = atomic_load_acquire(&local_state->write_idx);
       int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
       if (diff < 0)
         diff = 0;
-      claim_count = (uint64_t)diff;
+      if ((uint64_t)diff < claim_count)
+        claim_count = (uint64_t)diff;
 
       if (local_state->cfg_return_bytes && claim_count > 1) {
         claim_count = 1;
@@ -3627,10 +3656,13 @@ restart_loop:
           }
         }
         if (atomic_load_acquire(&local_state->scanner_finished)) {
+          // WORMHOLE FIX 3: EOF Race Shield (Slow Path Overshoot)
+          w_curr = atomic_load_acquire(&local_state->write_idx);
           int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
           if (diff < 0)
             diff = 0;
-          claim_count = (uint64_t)diff;
+          if ((uint64_t)diff < claim_count)
+            claim_count = (uint64_t)diff;
 
           if (local_state->cfg_return_bytes && claim_count > 1) {
             claim_count = 1;
@@ -4376,11 +4408,22 @@ static int ring_indexer_main(int argc, char **argv) {
         return EXECUTION_FAILURE;
       current_pos += chunk_target;
     }
+
     // PHYSICS FIX: 10ms instead of 100ms stat fallback
     if (poll(pfds, 1, 10) > 0) {
       uint64_t v;
-      if (sys_read(fd_sig, &v, 8) > 0)
+      if (sys_read(fd_sig, &v, 8) > 0) {
+        // WORMHOLE FIX 5: Legacy Indexer EOF Race Shield
+        // Ensure we process any final bytes written between our last stat and this signal.
+        if (fstat(fd_data, &st) == 0) {
+          uint64_t final_avail = (uint64_t)st.st_size;
+          if (final_avail > current_pos) {
+            struct PhysPacket pp = {.off = current_pos, .len = final_avail - current_pos};
+            robust_pipe_write(fd_pipe, &pp, sizeof(pp));
+          }
+        }
         break;
+      }
     }
   }
   return EXECUTION_SUCCESS;
