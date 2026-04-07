@@ -592,8 +592,6 @@ toc() { :; }
         fi
         '"${ring_ack_str}"'
     done
-    trap - EXIT
-    ring_worker dec
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &
 P+=($!)

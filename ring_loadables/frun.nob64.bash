@@ -42,6 +42,7 @@ frun __exec__ "$@"
     local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag LC_ALL
+    local -a fallow_args
     local -ga fd_out P order_args ring_init_opts
 
     LC_ALL=C
@@ -258,13 +259,15 @@ EOF
             # --- DELIMITER (-d x) ---
             @(-d|--delim|--delimiter)?(?([= $'\t'])*))
                 arg="${1##@(-d|--delim|--delimiter)?([= $'\t'])}";
-                [[ ${arg} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && delimiter_val="${arg:0:1}" ;;
+                if [[ -z "${arg}" && "$1" == @(-d|--delim|--delimiter) ]]; then
+                    shift; arg="$1";
+                fi
+                delimiter_val="${arg:0:1}" ;;
 
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)   printf 'forkrun v3.0.1\n' >&2;  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.0.1';  return 0  ;;
 
             --) shift; break ;;
 
@@ -456,10 +459,11 @@ toc() { :; }
 
         (
             exec {fd_fallow_w}>&-
+            fallow_args=( "${fd_fallow_r}" "${fd_write}" )
             if (( FORKRUN_NUM_NODES > 1 )); then
-                ring_fallow_phys ${fd_fallow_r} ${fd_write}
+                ring_fallow_phys "${fallow_args[@]}"
             else
-                ring_fallow ${fd_fallow_r} ${fd_write}
+                ring_fallow "${fallow_args[@]}"
             fi
         ) &
         exec {fd_fallow_r}<&-
@@ -485,9 +489,7 @@ toc() { :; }
 
         # 1. Replace {ID} with the Worker ID, NUMA Node ID, and Worker Batch Num
         if ${insert_id_flag:-false}; then
-        declare -p cmdline_str RING_NODE_ID ID W_BATCH >&2
             cmdline_str="${cmdline_str//\\\{ID\\\}/\{\${RING_NODE_ID:+\$\{RING_NODE_ID\}.\}\$\{ID\}.\$\{W_BATCH\}\}}"
-        declare -p cmdline_str >&2
         fi
 
         ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"
@@ -1146,6 +1148,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()   # removed base64
+declare -A b64=()  # removed base64
 
 _forkrun_bootstrap_setup --force

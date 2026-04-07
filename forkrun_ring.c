@@ -952,6 +952,35 @@ static int get_cgroup_free_memory(uint64_t *free_mem) {
   return -1;
 }
 
+// ==============================================================================
+// OOM PROTECTION AND MEMORY SENSING
+// ==============================================================================
+
+// Helper to get available memory (accounting for reclaimable cache like memfd)
+static inline uint64_t get_mem_available(struct sysinfo *si) {
+    uint64_t mem_avail = 0;
+    int fd = open("/proc/meminfo", O_RDONLY);
+    if (fd >= 0) {
+        char buf[1024];
+        ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            char *p = strstr(buf, "MemAvailable:");
+            if (p) {
+                p += 13;
+                while (*p == ' ' || *p == '\t') p++;
+                mem_avail = strtoull(p, NULL, 10) * 1024ULL; // KB to Bytes
+            }
+        }
+    }
+    if (mem_avail > 0) return mem_avail;
+
+    // Fallback for very old kernels without MemAvailable exposed
+    uint64_t mu = (uint64_t)si->mem_unit ? si->mem_unit : 1;
+    return ((uint64_t)si->freeram + (uint64_t)si->bufferram) * mu;
+}
+
 static inline void check_memory_pressure(uint64_t *total_moved,
                                          uint64_t *next_check,
                                          uint64_t oom_threshold) {
@@ -973,16 +1002,27 @@ static inline void check_memory_pressure(uint64_t *total_moved,
     } else {
       struct sysinfo si;
       if (sysinfo(&si) == 0) {
-        uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
-        free_b = (uint64_t)si.freeram * mu;
+        free_b = get_mem_available(&si);
         if (free_b < oom_threshold && state) {
-          OOM_WAIT_FOR_MEMORY(free_b, oom_threshold, si, mu);
+          int _oom_sleep_us = 1000;
+          int _oom_waited_us = 0;
+          while (free_b < oom_threshold && _oom_waited_us < 30000000) {
+            usleep(_oom_sleep_us);
+            _oom_waited_us += _oom_sleep_us;
+            sysinfo(&si);
+            free_b = get_mem_available(&si);
+            _oom_sleep_us += _oom_sleep_us >> 1;
+            if (_oom_sleep_us > 100000)
+              _oom_sleep_us = 100000;
+          }
         }
       }
     }
-    *next_check += 16 * 1024 * 1024;
+    // PHYSICS FIX: properly track next check boundary to prevent check spamming
+    *next_check = *total_moved + 16 * 1024 * 1024;
   }
 }
+
 
 #define S_DIS 0
 #define S_MIN 1
@@ -1686,6 +1726,24 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     }
   }
 
+  // --- OOM Protection Initialization ---
+  uint64_t oom_threshold = 134217728;
+  long threshold_div = 128;
+  const char *s_div = get_string_value("RING_INGEST_DIVISOR");
+  if (s_div) {
+    long v = atol(s_div);
+    if (v > 0)
+      threshold_div = v;
+  }
+  struct sysinfo si_init;
+  if (sysinfo(&si_init) == 0) {
+    uint64_t mu = (uint64_t)si_init.mem_unit ? si_init.mem_unit : 1;
+    oom_threshold = ((uint64_t)si_init.totalram * mu) / (uint64_t)threshold_div;
+  }
+  uint64_t total_moved = 0;
+  uint64_t next_check = 16 * 1024 * 1024;
+  // -------------------------------------
+
   uint64_t current_offset = 0;
   uint32_t current_major = 0;
   int last_target = -1;
@@ -1741,6 +1799,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
   while (1) {
     NUMA_CHECK_SCANNERS_DONE();
+
+    // PHYSICS FIX: Inject memory pressure backpressure for NUMA
+    check_memory_pressure(&total_moved, &next_check, oom_threshold);
 
     int target_node = 0;
     int min_backlog = INT_MAX;
@@ -1886,6 +1947,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
               }
               continue;
             }
+            if (w < 0 && (errno == ENOSPC || errno == ENOMEM)) {
+              usleep(10000); // PHYSICS FIX: Wait for fallow to punch holes and free space!
+              continue;
+            }
             break;
           }
           written += w;
@@ -1902,6 +1967,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
     if (n < 0) {
       if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      if (errno == ENOSPC || errno == ENOMEM) {
+        usleep(10000); // PHYSICS FIX: Catch ENOSPC on sendfile/copy_file_range
+        continue;
+      }
       break;
     }
     if (n == 0)
@@ -1934,6 +2003,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     last_target = target_node;
     current_offset += n;
     current_major++;
+    total_moved += n;
   }
 
 ingest_done:
@@ -1954,10 +2024,10 @@ ingest_done:
   }
 
   // --- NORMAL EOF: DUMMY CHUNK FOR ORPHANED TAIL DATA ---
-  int target_node = last_target == -1 ? 0 : (last_target + 1) % num_nodes;
+  int target_node_eof = last_target == -1 ? 0 : (last_target + 1) % num_nodes;
   while (1) {
-    uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
-    uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
+    uint64_t h = atomic_load_relaxed(&state[target_node_eof].chunk_queue_head);
+    uint64_t t = atomic_load_acquire(&state[target_node_eof].chunk_queue_tail);
     if ((int64_t)(h - t) < 4)
       break;
     struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
@@ -1967,35 +2037,35 @@ ingest_done:
     }
   }
 
-  struct ChunkMeta *meta = &g_state->meta_ring[current_major & META_RING_MASK];
-  meta->raw_offset = current_offset;
-  meta->raw_length = 0;
-  meta->target_node = target_node;
-  meta->major_id = current_major;
-  atomic_store_relaxed(&meta->actual_end, 0);
+  struct ChunkMeta *meta_eof = &g_state->meta_ring[current_major & META_RING_MASK];
+  meta_eof->raw_offset = current_offset;
+  meta_eof->raw_length = 0;
+  meta_eof->target_node = target_node_eof;
+  meta_eof->major_id = current_major;
+  atomic_store_relaxed(&meta_eof->actual_end, 0);
 
-  struct SharedState *t_state = &state[target_node];
-  uint64_t q_idx = atomic_load_relaxed(&t_state->chunk_queue_head);
-  t_state->chunk_queue[q_idx & META_RING_MASK] = current_major;
+  struct SharedState *t_state_eof = &state[target_node_eof];
+  uint64_t q_idx_eof = atomic_load_relaxed(&t_state_eof->chunk_queue_head);
+  t_state_eof->chunk_queue[q_idx_eof & META_RING_MASK] = current_major;
 
-  __atomic_store_n(&t_state->chunk_queue_head, q_idx + 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&t_state_eof->chunk_queue_head, q_idx_eof + 1, __ATOMIC_RELEASE);
   __atomic_store_n(&g_state->ingest_publish_idx, current_major + 1,
                    __ATOMIC_RELEASE);
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-  __atomic_fetch_add(&t_state->stats_chunks_assigned, 1, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&t_state_eof->stats_chunks_assigned, 1, __ATOMIC_RELAXED);
 
-  uint64_t w = atomic_load_relaxed(&t_state->indexer_waiters);
-  if (w > 0) {
-    uint64_t v = w;
-    sys_write(evfd_indexer_arr[target_node], &v, 8);
+  uint64_t w_eof = atomic_load_relaxed(&t_state_eof->indexer_waiters);
+  if (w_eof > 0) {
+    uint64_t v = w_eof;
+    sys_write(evfd_indexer_arr[target_node_eof], &v, 8);
   }
   current_major++;
 
   __atomic_store_n(&g_state->ingest_eof_idx, current_major, __ATOMIC_RELEASE);
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
-  uint64_t v = 999999;
-  sys_write(evfd_ingest_eof, &v, 8);
+  uint64_t v_eof = 999999;
+  sys_write(evfd_ingest_eof, &v_eof, 8);
   return EXECUTION_SUCCESS;
 }
 
@@ -4494,6 +4564,10 @@ static int ring_copy_main(int argc, char **argv) {
           if (n < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
               continue;
+            if (errno == ENOSPC || errno == ENOMEM) {
+              usleep(10000); // PHYSICS FIX: Await Fallow Reclamation
+              continue;
+            }
             if (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
                 errno == EOPNOTSUPP)
               break;
@@ -4523,6 +4597,10 @@ static int ring_copy_main(int argc, char **argv) {
         if (n < 0) {
           if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
             continue;
+          if (errno == ENOSPC || errno == ENOMEM) {
+            usleep(10000); // PHYSICS FIX: Await Fallow Reclamation
+            continue;
+          }
           break;
         }
         if (n == 0)
@@ -4589,6 +4667,10 @@ static int ring_copy_main(int argc, char **argv) {
             } else {
               usleep(10);
             }
+            continue;
+          }
+          if (w < 0 && (errno == ENOSPC || errno == ENOMEM)) {
+            usleep(10000); // PHYSICS FIX: Await Fallow Reclamation
             continue;
           }
           break;
