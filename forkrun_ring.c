@@ -2488,11 +2488,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
   size_t chunk_sz = get_optimal_chunk_size();
 
+  // PHYSICS FIX: Align flat-mode buffer exactly to byte sizes to prevent internal shifting.
   if (byte_mode && L > 0) {
     uint64_t mult = (chunk_sz + L - 1) / L;
     chunk_sz = mult * L;
   }
 
+  // PHYSICS FIX: mmap completely sidesteps bash_malloc intercepts!
   char *buf = mmap(NULL, chunk_sz, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (buf == MAP_FAILED)
@@ -2613,11 +2615,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
         if (!any_valid_backlog) {
           // --- PHYSICS FIX: Instant NUMA Tear-down ---
-          // If ingest is finished (global_eof), and we have claimed all chunks
-          // assigned to our node (local_exhausted), and no other node has a
-          // backlog large enough to be worth stealing, we can safely exit
-          // immediately. We DO NOT need to wait for all chunks system-wide to
-          // be claimed.
           if (global_eof && local_exhausted) {
             goto unified_scanner_eof;
           }
@@ -2646,9 +2643,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
             // Double check to prevent race conditions before sleeping
             if (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail) {
-              // --- PHYSICS FIX: Wait on both EOF and Data indefinitely (-1)
-              // --- Eliminates 10ms timeout polling which burns CPU during
-              // trickles.
               struct pollfd pfds[2] = {
                   {.fd = evfd_meta_arr[my_node_id], .events = POLLIN},
                   {.fd = evfd_ingest_eof, .events = POLLIN}};
@@ -2693,8 +2687,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
             break;
           }
-          // --- PHYSICS FIX: Same elimination of 10ms timeout polling here for
-          // stolen chunks ---
           struct pollfd pfds[2] = {
               {.fd = evfd_meta_arr[steal_target], .events = POLLIN},
               {.fd = evfd_ingest_eof, .events = POLLIN}};
@@ -2748,9 +2740,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                                  __ATOMIC_SEQ_CST);
               break;
             }
-            // --- PHYSICS FIX: Third 10ms timeout eliminated ---
-            // This stops the scanner from constantly waking up while waiting
-            // for the previous indexer.
             struct pollfd pfds[2] = {
                 {.fd = evfd_meta_arr[tnode], .events = POLLIN},
                 {.fd = evfd_ingest_eof, .events = POLLIN}};
@@ -2903,11 +2892,23 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
       bool flush = false;
       bool limit_reached = false;
+      bool force_flush_bytes = false; // WORMHOLE FIX 8
 
       if (byte_mode) {
         uint64_t avail =
             is_numa ? (chunk_end - current_p_offset) : (uint64_t)(end - p);
         uint64_t take = 0;
+
+        if (limit_items > 0) {
+          if (!is_numa && total_scanned >= limit_items) {
+            status = 1;
+            break;
+          }
+          if (is_numa) {
+            uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, (avail >= L ? L : avail), __ATOMIC_SEQ_CST);
+            if (prev >= limit_items) break;
+          }
+        }
 
         if (avail >= L) {
           take = L;
@@ -2931,49 +2932,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           }
         }
 
-        if (flush && take > 0 && limit_items > 0) {
-          if (is_numa) {
-            uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, take, __ATOMIC_SEQ_CST);
-            if (prev >= limit_items) {
-              __atomic_fetch_sub(&state[0].global_scanned, take, __ATOMIC_SEQ_CST);
-              limit_reached = true;
-              take = 0;
-              flush = false;
-              current_p_offset = chunk_end; // PHYSICS FIX: Advance pointer to cleanly break loop
-            } else if (prev + take >= limit_items) {
-              uint64_t overshoot = (prev + take) - limit_items;
-              take -= overshoot;
-              __atomic_fetch_sub(&state[0].global_scanned, overshoot, __ATOMIC_SEQ_CST);
-              limit_reached = true;
-            }
-          } else {
-            if (total_scanned >= limit_items) {
-              status = 1;
-              limit_reached = true;
-              take = 0;
-              flush = false;
-              p = end; // PHYSICS FIX: Advance pointer to cleanly break loop
-            } else if (total_scanned + take >= limit_items) {
-              take = limit_items - total_scanned;
-              limit_reached = true;
-              status = 1;
-            }
-          }
-        }
-
-        if (flush && take > 0) {
+        if (flush) {
           current_p_offset =
               is_numa ? (current_p_offset + take)
                       : (buf_base_offset + (uint64_t)(p - buf) + take);
           if (!is_numa)
             pending_lines = 0;
 
-          bool is_last = is_numa ? (current_p_offset >= chunk_end || limit_reached) : limit_reached;
+          bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
           uint32_t stride =
               is_numa ? (uint32_t)(current_p_offset - batch_start) : 1;
-
-          // PHYSICS FIX: Both NUMA and UMA use `take` to accurately flag partial batches
-          uint32_t cv = take;
+          uint32_t cv = is_numa ? take : 1;
 
           UNIFIED_SCANNER_FLUSH(cv, stride, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
@@ -2990,12 +2959,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           p += take;
           batch_start += is_numa ? take : current_p_offset - batch_start;
-
-          // PHYSICS FIX: Track actual bytes processed to correctly enforce -n limit
-          total_scanned += take;
+          total_scanned += is_numa ? take : 1;
           pending_lines = 0;
         } else {
-          if (!is_numa && !limit_reached)
+          if (!is_numa)
             force_refill = true;
         }
       } else {
@@ -3022,7 +2989,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           scan_target = 1;
 
         uint64_t lines_found = 0;
-
 
         char *safe_end = end;
         if (BytesMax > 0) {
@@ -3081,7 +3047,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 uint64_t payload = line_end_offset - batch_start;
                 uint64_t overhead = (lines_found + 1) * 8;
                 if ((payload + overhead) > BytesMax) {
-                  limit_reached = true;
+                  // WORMHOLE FIX 8: The BytesMax Continuation
+                  // Do NOT set limit_reached (which triggers global EOF).
+                  // Instead, force a flush so the scanner continues processing the rest of the chunk.
+                  force_flush_bytes = true;
                   break;
                 }
               }
@@ -3126,7 +3095,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           status = 1;
 
         if (pending_lines > 0) {
-          if (pending_lines >= L || limit_reached ||
+          if (pending_lines >= L || limit_reached || force_flush_bytes ||
               (is_numa && current_p_offset >= chunk_end) ||
               (!is_numa && status == 1)) {
             flush = true;
@@ -3149,6 +3118,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           force_refill = true;
 
         if (flush) {
+          // WORMHOLE FIX 8: Ensure a force_flush_bytes doesn't accidentally trigger a FLAG_MAJOR_EOF chunk end
           bool is_last = is_numa
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
@@ -3197,19 +3167,38 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
     if (is_numa) {
       UNIFIED_ADAPTIVE_COMMIT(true);
-    }
-
-    // --- PHYSICS FIX: Break out of infinite loop for UMA limit ---
-    if (limit_items > 0) {
-      uint64_t current_global =
-          is_numa ? atomic_load_relaxed(&state[0].global_scanned)
-                  : total_scanned;
-      if (current_global >= limit_items)
-        break;
+      if (limit_items > 0 && atomic_load_relaxed(&state[0].global_scanned) >= limit_items) break;
     }
   }
 
 unified_scanner_eof:
+  // =========================================================
+  // 3. FINALIZATION (NUMA Finish vs UMA Tail Re-batching)
+  // =========================================================
+
+  if (fd_spawn >= 0) {
+    uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);
+    if (W_curr < W_max_val) {
+      uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx);
+      uint64_t backlog = (local_scan_idx > r_idx) ? local_scan_idx - r_idx : 0;
+      uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog;
+      if (W_target > W_curr) {
+        uint64_t needed = W_target - W_curr;
+        if (needed > 0) {
+          char sbuf[64];
+          int slen;
+          if (is_numa)
+            slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed);
+          else
+            slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
+          if (slen > 0)
+            robust_pipe_write(fd_spawn, sbuf, slen);
+          W += needed;
+          atomic_store_relaxed(&local_state->active_workers, W);
+        }
+      }
+    }
+  }
 
   if (is_numa) {
     if (!byte_mode && !fixed_batch) {
@@ -3217,10 +3206,9 @@ unified_scanner_eof:
     }
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
-
-    uint64_t blast = 1;
-    sys_write(evfd_eof_arr[my_node_id], &blast, 8);
-    if (evfd_chunk_done >= 0) sys_write(evfd_chunk_done, &blast, 8); // POKE INGEST PUMP
+    uint64_t blast = 999999;
+    sys_write(evfd_data_arr[my_node_id], &blast, 8);
+    if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
   } else {
     // --- PHYSICS FIX: Prevent UMA ghost batches violating exact limit ---
     bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
@@ -3345,35 +3333,11 @@ unified_scanner_eof:
 
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
-
-    uint64_t blast = 1;
-    sys_write(evfd_eof_arr[0], &blast, 8);
-    if (evfd_chunk_done >= 0) sys_write(evfd_chunk_done, &blast, 8); // POKE INGEST PUMP
-  }
-
-  if (fd_spawn >= 0) {
-    uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);
-    if (W_curr < W_max_val) {
-      uint64_t r_idx = atomic_load_relaxed(&local_state->read_idx);
-      uint64_t backlog = (local_scan_idx > r_idx) ? local_scan_idx - r_idx : 0;
-      uint64_t W_target = (backlog > W_max_val) ? W_max_val : backlog;
-      if (W_target > W_curr) {
-        uint64_t needed = W_target - W_curr;
-        if (needed > 0) {
-          char sbuf[64];
-          int slen;
-          if (is_numa)
-            slen = snprintf(sbuf, sizeof(sbuf), "%d:%lu\n", my_node_id, needed);
-          else
-            slen = snprintf(sbuf, sizeof(sbuf), "%lu\n", needed);
-          if (slen > 0)
-            robust_pipe_write(fd_spawn, sbuf, slen);
-          W += needed;
-          atomic_store_relaxed(&local_state->active_workers, W);
-        }
-      }
+    if (atomic_load_acquire(&local_state->active_waiters) > 0) {
+      uint64_t v = 1;
+      sys_write(evfd_data_arr[0], &v, 8);
     }
-    robust_pipe_write(fd_spawn, "x\n", 2);
+    if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
   }
 
   munmap(buf, chunk_sz);

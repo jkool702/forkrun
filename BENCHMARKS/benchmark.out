@@ -12,80 +12,15 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m4.360s
-user	1m53.940s
-sys	0m0.977s
+real	0m4.278s
+user	1m50.971s
+sys	0m1.015s
 
-CPU UTILIZATION: 26.357 / 28
+CPU UTILIZATION: 26.177 / 28
 
 -----------------------------------------
 
 (2): time { frun   : <f1 | wc -l; }
-
-=================================================================
-NUMA TELEMETRY (CHUNKS)
-=================================================================
-Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
------------------------------------------------------------------
-Total Cross-Socket Traffic: 0 chunks (0.0%)
-=================================================================
-
-0
-real	0m4.394s
-user	1m51.772s
-sys	0m0.935s
-
-CPU UTILIZATION: 25.650 / 28
-
------------------------------------------
-
-(3): time { cat f1 | frun   : >/dev/null; }
-
-=================================================================
-NUMA TELEMETRY (CHUNKS)
-=================================================================
-Node 0 (Phys 0): 372 assigned | 370 processed | 0 I stole | 2 stolen from me
-Node 1 (Phys 1): 378 assigned | 379 processed | 1 I stole | 0 stolen from me
-Node 2 (Phys 2): 388 assigned | 388 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 389 assigned | 390 processed | 1 I stole | 0 stolen from me
------------------------------------------------------------------
-Total Cross-Socket Traffic: 2 chunks (0.1%)
-=================================================================
-
-real	0m4.380s
-user	1m54.153s
-sys	0m1.103s
-
-CPU UTILIZATION: 26.314 / 28
-
------------------------------------------
-
-(4): time { cat f1 | frun   : | wc -l; }
-
-=================================================================
-NUMA TELEMETRY (CHUNKS)
-=================================================================
-Node 0 (Phys 0): 395 assigned | 394 processed | 0 I stole | 1 stolen from me
-Node 1 (Phys 1): 386 assigned | 387 processed | 1 I stole | 0 stolen from me
-Node 2 (Phys 2): 380 assigned | 379 processed | 0 I stole | 1 stolen from me
-Node 3 (Phys 3): 366 assigned | 367 processed | 1 I stole | 0 stolen from me
------------------------------------------------------------------
-Total Cross-Socket Traffic: 2 chunks (0.1%)
-=================================================================
-
-0
-real	0m4.454s
-user	1m55.028s
-sys	0m1.129s
-
-CPU UTILIZATION: 26.079 / 28
-
------------------------------------------
-
-(5): time { frun   echo <f1 >/dev/null; }
 
 =================================================================
 NUMA TELEMETRY (CHUNKS)
@@ -98,15 +33,59 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m4.809s
-user	2m2.871s
-sys	0m1.191s
+0
+real	0m4.274s
+user	1m52.687s
+sys	0m0.954s
 
-CPU UTILIZATION: 25.797 / 28
+CPU UTILIZATION: 26.588 / 28
 
 -----------------------------------------
 
-(6): time { frun   echo <f1 | wc -l; }
+(3): time { cat f1 | frun   : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 376 assigned | 376 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.268s
+user	1m53.857s
+sys	0m1.168s
+
+CPU UTILIZATION: 26.950 / 28
+
+-----------------------------------------
+
+(4): time { cat f1 | frun   : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 379 assigned | 380 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 390 assigned | 389 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 381 assigned | 382 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 377 assigned | 376 processed | 0 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+0
+real	0m4.236s
+user	1m52.999s
+sys	0m1.123s
+
+CPU UTILIZATION: 26.940 / 28
+
+-----------------------------------------
+
+(5): time { frun   echo <f1 >/dev/null; }
 
 =================================================================
 NUMA TELEMETRY (CHUNKS)
@@ -119,12 +98,33 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-25555
-real	0m4.773s
-user	2m2.709s
-sys	0m1.313s
+real	0m4.594s
+user	2m1.375s
+sys	0m1.285s
 
-CPU UTILIZATION: 25.984 / 28
+CPU UTILIZATION: 26.700 / 28
+
+-----------------------------------------
+
+(6): time { frun   echo <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25555
+real	0m4.603s
+user	2m1.579s
+sys	0m1.294s
+
+CPU UTILIZATION: 26.694 / 28
 
 -----------------------------------------
 
@@ -133,19 +133,19 @@ CPU UTILIZATION: 25.984 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 388 assigned | 387 processed | 0 I stole | 1 stolen from me
-Node 1 (Phys 1): 388 assigned | 387 processed | 0 I stole | 1 stolen from me
-Node 2 (Phys 2): 376 assigned | 376 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 375 assigned | 377 processed | 2 I stole | 0 stolen from me
+Node 0 (Phys 0): 367 assigned | 366 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 392 assigned | 392 processed | 1 I stole | 1 stolen from me
+Node 2 (Phys 2): 386 assigned | 388 processed | 2 I stole | 0 stolen from me
+Node 3 (Phys 3): 382 assigned | 381 processed | 0 I stole | 1 stolen from me
 -----------------------------------------------------------------
-Total Cross-Socket Traffic: 2 chunks (0.1%)
+Total Cross-Socket Traffic: 3 chunks (0.2%)
 =================================================================
 
-real	0m4.728s
-user	2m3.441s
-sys	0m1.436s
+real	0m4.563s
+user	2m1.670s
+sys	0m1.514s
 
-CPU UTILIZATION: 26.412 / 28
+CPU UTILIZATION: 26.996 / 28
 
 -----------------------------------------
 
@@ -154,20 +154,20 @@ CPU UTILIZATION: 26.412 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 388 assigned | 387 processed | 0 I stole | 1 stolen from me
-Node 1 (Phys 1): 369 assigned | 369 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 388 assigned | 389 processed | 1 I stole | 0 stolen from me
-Node 3 (Phys 3): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+Node 0 (Phys 0): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 378 assigned | 378 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 391 assigned | 391 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
-Total Cross-Socket Traffic: 1 chunks (0.1%)
+Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
 25551
-real	0m4.688s
-user	2m2.708s
-sys	0m1.478s
+real	0m4.576s
+user	2m1.942s
+sys	0m1.481s
 
-CPU UTILIZATION: 26.490 / 28
+CPU UTILIZATION: 26.971 / 28
 
 -----------------------------------------
 
@@ -184,11 +184,11 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m8.174s
-user	2m46.328s
-sys	0m49.543s
+real	0m8.128s
+user	2m42.421s
+sys	0m49.237s
 
-CPU UTILIZATION: 26.409 / 28
+CPU UTILIZATION: 26.040 / 28
 
 -----------------------------------------
 
@@ -206,11 +206,11 @@ Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
 100000000
-real	0m8.200s
-user	2m45.489s
-sys	0m51.180s
+real	0m8.170s
+user	2m48.825s
+sys	0m51.051s
 
-CPU UTILIZATION: 26.423 / 28
+CPU UTILIZATION: 26.912 / 28
 
 -----------------------------------------
 
@@ -219,19 +219,19 @@ CPU UTILIZATION: 26.423 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 387 assigned | 387 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 372 assigned | 372 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 390 assigned | 390 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 378 assigned | 378 processed | 0 I stole | 0 stolen from me
+Node 0 (Phys 0): 382 assigned | 381 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 391 assigned | 391 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 374 assigned | 375 processed | 1 I stole | 0 stolen from me
 -----------------------------------------------------------------
-Total Cross-Socket Traffic: 0 chunks (0.0%)
+Total Cross-Socket Traffic: 1 chunks (0.1%)
 =================================================================
 
-real	0m8.188s
-user	2m47.116s
-sys	0m50.235s
+real	0m7.913s
+user	2m44.705s
+sys	0m50.061s
 
-CPU UTILIZATION: 26.545 / 28
+CPU UTILIZATION: 27.140 / 28
 
 -----------------------------------------
 
@@ -240,20 +240,20 @@ CPU UTILIZATION: 26.545 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 392 assigned | 391 processed | 0 I stole | 1 stolen from me
-Node 1 (Phys 1): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 384 assigned | 384 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 370 assigned | 371 processed | 1 I stole | 0 stolen from me
+Node 0 (Phys 0): 380 assigned | 381 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 383 assigned | 382 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 387 assigned | 387 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 377 assigned | 377 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 1 chunks (0.1%)
 =================================================================
 
 100000000
-real	0m8.430s
-user	2m47.327s
-sys	0m50.328s
+real	0m7.963s
+user	2m44.882s
+sys	0m51.708s
 
-CPU UTILIZATION: 25.819 / 28
+CPU UTILIZATION: 27.199 / 28
 
 -----------------------------------------
 
@@ -270,11 +270,11 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m4.363s
-user	1m53.965s
-sys	0m0.972s
+real	0m4.227s
+user	1m52.203s
+sys	0m1.062s
 
-CPU UTILIZATION: 26.343 / 28
+CPU UTILIZATION: 26.795 / 28
 
 -----------------------------------------
 
@@ -284,19 +284,19 @@ CPU UTILIZATION: 26.343 / 28
 NUMA TELEMETRY (CHUNKS)
 =================================================================
 Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
 Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
 0
-real	0m4.339s
-user	1m54.071s
-sys	0m0.966s
+real	0m4.271s
+user	1m52.674s
+sys	0m1.020s
 
-CPU UTILIZATION: 26.512 / 28
+CPU UTILIZATION: 26.619 / 28
 
 -----------------------------------------
 
@@ -305,19 +305,19 @@ CPU UTILIZATION: 26.512 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 387 assigned | 387 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 375 assigned | 375 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 0 (Phys 0): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 383 assigned | 384 processed | 1 I stole | 0 stolen from me
+Node 2 (Phys 2): 372 assigned | 371 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 390 assigned | 390 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
-Total Cross-Socket Traffic: 0 chunks (0.0%)
+Total Cross-Socket Traffic: 1 chunks (0.1%)
 =================================================================
 
-real	0m4.372s
-user	1m54.946s
-sys	0m1.128s
+real	0m4.247s
+user	1m53.150s
+sys	0m1.176s
 
-CPU UTILIZATION: 26.549 / 28
+CPU UTILIZATION: 26.919 / 28
 
 -----------------------------------------
 
@@ -326,20 +326,20 @@ CPU UTILIZATION: 26.549 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 0 (Phys 0): 389 assigned | 389 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 378 assigned | 378 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 376 assigned | 376 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 384 assigned | 384 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
 0
-real	0m4.273s
-user	1m53.799s
-sys	0m1.224s
+real	0m4.217s
+user	1m52.454s
+sys	0m1.178s
 
-CPU UTILIZATION: 26.918 / 28
+CPU UTILIZATION: 26.946 / 28
 
 -----------------------------------------
 
@@ -348,19 +348,19 @@ CPU UTILIZATION: 26.918 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
 Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m4.632s
-user	2m2.090s
-sys	0m1.247s
+real	0m4.596s
+user	2m2.230s
+sys	0m1.233s
 
-CPU UTILIZATION: 26.627 / 28
+CPU UTILIZATION: 26.863 / 28
 
 -----------------------------------------
 
@@ -371,18 +371,18 @@ NUMA TELEMETRY (CHUNKS)
 =================================================================
 Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
 25555
-real	0m4.689s
-user	2m1.470s
-sys	0m1.318s
+real	0m4.670s
+user	2m0.830s
+sys	0m1.339s
 
-CPU UTILIZATION: 26.186 / 28
+CPU UTILIZATION: 26.160 / 28
 
 -----------------------------------------
 
@@ -391,19 +391,19 @@ CPU UTILIZATION: 26.186 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 375 assigned | 376 processed | 1 I stole | 0 stolen from me
-Node 1 (Phys 1): 383 assigned | 382 processed | 0 I stole | 1 stolen from me
-Node 2 (Phys 2): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 0 (Phys 0): 368 assigned | 369 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 389 assigned | 389 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 381 assigned | 380 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 389 assigned | 389 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 1 chunks (0.1%)
 =================================================================
 
-real	0m4.695s
-user	2m3.375s
-sys	0m1.499s
+real	0m4.577s
+user	2m2.061s
+sys	0m1.378s
 
-CPU UTILIZATION: 26.597 / 28
+CPU UTILIZATION: 26.969 / 28
 
 -----------------------------------------
 
@@ -412,20 +412,20 @@ CPU UTILIZATION: 26.597 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 389 assigned | 389 processed | 1 I stole | 1 stolen from me
-Node 1 (Phys 1): 388 assigned | 388 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 373 assigned | 373 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 377 assigned | 377 processed | 1 I stole | 1 stolen from me
+Node 0 (Phys 0): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 374 assigned | 374 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 387 assigned | 387 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
-Total Cross-Socket Traffic: 2 chunks (0.1%)
+Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
 25551
-real	0m4.848s
-user	2m4.077s
-sys	0m1.579s
+real	0m4.578s
+user	2m2.022s
+sys	0m1.497s
 
-CPU UTILIZATION: 25.919 / 28
+CPU UTILIZATION: 26.980 / 28
 
 -----------------------------------------
 
@@ -442,11 +442,11 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m8.398s
-user	2m46.080s
-sys	0m49.698s
+real	0m7.986s
+user	2m45.546s
+sys	0m49.640s
 
-CPU UTILIZATION: 25.693 / 28
+CPU UTILIZATION: 26.945 / 28
 
 -----------------------------------------
 
@@ -464,11 +464,11 @@ Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
 100000000
-real	0m8.295s
-user	2m45.415s
-sys	0m49.775s
+real	0m8.055s
+user	2m45.173s
+sys	0m50.123s
 
-CPU UTILIZATION: 25.942 / 28
+CPU UTILIZATION: 26.728 / 28
 
 -----------------------------------------
 
@@ -477,19 +477,19 @@ CPU UTILIZATION: 25.942 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 389 assigned | 389 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 378 assigned | 378 processed | 0 I stole | 0 stolen from me
+Node 0 (Phys 0): 391 assigned | 390 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 375 assigned | 375 processed | 0 I stole | 0 stolen from me
 Node 2 (Phys 2): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 377 assigned | 377 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 378 assigned | 379 processed | 1 I stole | 0 stolen from me
 -----------------------------------------------------------------
-Total Cross-Socket Traffic: 0 chunks (0.0%)
+Total Cross-Socket Traffic: 1 chunks (0.1%)
 =================================================================
 
-real	0m8.302s
-user	2m48.550s
-sys	0m51.094s
+real	0m7.971s
+user	2m45.913s
+sys	0m50.519s
 
-CPU UTILIZATION: 26.456 / 28
+CPU UTILIZATION: 27.152 / 28
 
 -----------------------------------------
 
@@ -498,24 +498,45 @@ CPU UTILIZATION: 26.456 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 378 assigned | 379 processed | 1 I stole | 0 stolen from me
-Node 1 (Phys 1): 390 assigned | 389 processed | 0 I stole | 1 stolen from me
-Node 2 (Phys 2): 375 assigned | 375 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 384 assigned | 384 processed | 0 I stole | 0 stolen from me
+Node 0 (Phys 0): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 387 assigned | 386 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 382 assigned | 383 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 377 assigned | 377 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 1 chunks (0.1%)
 =================================================================
 
 100000000
-real	0m8.320s
-user	2m47.687s
-sys	0m50.235s
+real	0m8.012s
+user	2m46.869s
+sys	0m50.827s
 
-CPU UTILIZATION: 26.192 / 28
+CPU UTILIZATION: 27.171 / 28
 
 -----------------------------------------
 
 (25): time { frun -k  : <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.313s
+user	1m51.702s
+sys	0m0.871s
+
+CPU UTILIZATION: 26.100 / 28
+
+-----------------------------------------
+
+(26): time { frun -k  : <f1 | wc -l; }
 
 =================================================================
 NUMA TELEMETRY (CHUNKS)
@@ -528,33 +549,12 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m4.402s
-user	1m53.390s
-sys	0m0.882s
-
-CPU UTILIZATION: 25.959 / 28
-
------------------------------------------
-
-(26): time { frun -k  : <f1 | wc -l; }
-
-=================================================================
-NUMA TELEMETRY (CHUNKS)
-=================================================================
-Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
------------------------------------------------------------------
-Total Cross-Socket Traffic: 0 chunks (0.0%)
-=================================================================
-
 0
-real	0m4.458s
-user	1m52.344s
-sys	0m0.941s
+real	0m4.279s
+user	1m52.955s
+sys	0m1.068s
 
-CPU UTILIZATION: 25.411 / 28
+CPU UTILIZATION: 26.647 / 28
 
 -----------------------------------------
 
@@ -563,19 +563,19 @@ CPU UTILIZATION: 25.411 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 376 assigned | 375 processed | 1 I stole | 2 stolen from me
-Node 1 (Phys 1): 381 assigned | 381 processed | 1 I stole | 1 stolen from me
-Node 2 (Phys 2): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 387 assigned | 388 processed | 1 I stole | 0 stolen from me
+Node 0 (Phys 0): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
-Total Cross-Socket Traffic: 3 chunks (0.2%)
+Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m4.458s
-user	1m55.471s
-sys	0m1.094s
+real	0m4.283s
+user	1m53.592s
+sys	0m1.204s
 
-CPU UTILIZATION: 26.147 / 28
+CPU UTILIZATION: 26.802 / 28
 
 -----------------------------------------
 
@@ -584,20 +584,20 @@ CPU UTILIZATION: 26.147 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 375 assigned | 375 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 389 assigned | 389 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 393 assigned | 393 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 370 assigned | 370 processed | 0 I stole | 0 stolen from me
+Node 0 (Phys 0): 387 assigned | 387 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 371 assigned | 371 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 389 assigned | 389 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
 0
-real	0m4.435s
-user	1m54.518s
-sys	0m1.210s
+real	0m4.264s
+user	1m53.213s
+sys	0m1.140s
 
-CPU UTILIZATION: 26.094 / 28
+CPU UTILIZATION: 26.818 / 28
 
 -----------------------------------------
 
@@ -614,11 +614,11 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m4.856s
-user	2m4.008s
-sys	0m1.169s
+real	0m4.597s
+user	2m1.801s
+sys	0m1.314s
 
-CPU UTILIZATION: 25.777 / 28
+CPU UTILIZATION: 26.781 / 28
 
 -----------------------------------------
 
@@ -636,11 +636,11 @@ Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
 25555
-real	0m4.830s
-user	2m3.450s
-sys	0m1.309s
+real	0m4.647s
+user	1m59.080s
+sys	0m1.373s
 
-CPU UTILIZATION: 25.830 / 28
+CPU UTILIZATION: 25.920 / 28
 
 -----------------------------------------
 
@@ -649,19 +649,19 @@ CPU UTILIZATION: 25.830 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 388 assigned | 387 processed | 0 I stole | 1 stolen from me
-Node 1 (Phys 1): 360 assigned | 360 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 395 assigned | 395 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 384 assigned | 385 processed | 1 I stole | 0 stolen from me
+Node 0 (Phys 0): 394 assigned | 393 processed | 1 I stole | 2 stolen from me
+Node 1 (Phys 1): 373 assigned | 373 processed | 1 I stole | 1 stolen from me
+Node 2 (Phys 2): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 379 assigned | 380 processed | 1 I stole | 0 stolen from me
 -----------------------------------------------------------------
-Total Cross-Socket Traffic: 1 chunks (0.1%)
+Total Cross-Socket Traffic: 3 chunks (0.2%)
 =================================================================
 
-real	0m4.788s
-user	2m4.065s
-sys	0m1.410s
+real	0m4.584s
+user	2m2.152s
+sys	0m1.433s
 
-CPU UTILIZATION: 26.206 / 28
+CPU UTILIZATION: 26.960 / 28
 
 -----------------------------------------
 
@@ -670,20 +670,20 @@ CPU UTILIZATION: 26.206 / 28
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
-Node 0 (Phys 0): 392 assigned | 392 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 372 assigned | 372 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 384 assigned | 385 processed | 1 I stole | 0 stolen from me
-Node 3 (Phys 3): 379 assigned | 378 processed | 0 I stole | 1 stolen from me
+Node 0 (Phys 0): 377 assigned | 376 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 388 assigned | 389 processed | 1 I stole | 0 stolen from me
+Node 2 (Phys 2): 387 assigned | 387 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 375 assigned | 375 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 1 chunks (0.1%)
 =================================================================
 
-25544
-real	0m4.666s
-user	2m3.647s
-sys	0m1.531s
+25541
+real	0m4.615s
+user	2m2.691s
+sys	0m1.524s
 
-CPU UTILIZATION: 26.827 / 28
+CPU UTILIZATION: 26.915 / 28
 
 -----------------------------------------
 
@@ -700,15 +700,166 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m8.163s
-user	2m47.340s
-sys	0m50.174s
+real	0m8.025s
+user	2m46.219s
+sys	0m50.222s
 
-CPU UTILIZATION: 26.646 / 28
+CPU UTILIZATION: 26.970 / 28
 
 -----------------------------------------
 
 (34): time { frun -k  printf %s\n <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m8.008s
+user	2m43.668s
+sys	0m49.924s
+
+CPU UTILIZATION: 26.672 / 28
+
+-----------------------------------------
+
+(35): time { cat f1 | frun -k  printf %s\n >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 377 assigned | 377 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 390 assigned | 390 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m8.075s
+user	2m48.019s
+sys	0m51.177s
+
+CPU UTILIZATION: 27.145 / 28
+
+-----------------------------------------
+
+(36): time { cat f1 | frun -k  printf %s\n | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 376 assigned | 376 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 385 assigned | 385 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m7.931s
+user	2m44.889s
+sys	0m50.520s
+
+CPU UTILIZATION: 27.160 / 28
+
+-----------------------------------------
+
+(37): time { frun -k -l 1:0 : <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.249s
+user	1m52.225s
+sys	0m1.035s
+
+CPU UTILIZATION: 26.655 / 28
+
+-----------------------------------------
+
+(38): time { frun -k -l 1:0 : <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m4.302s
+user	1m52.559s
+sys	0m0.982s
+
+CPU UTILIZATION: 26.392 / 28
+
+-----------------------------------------
+
+(39): time { cat f1 | frun -k -l 1:0 : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 384 assigned | 384 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 380 assigned | 381 processed | 1 I stole | 0 stolen from me
+Node 2 (Phys 2): 389 assigned | 388 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 374 assigned | 374 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+real	0m4.216s
+user	1m52.242s
+sys	0m1.211s
+
+CPU UTILIZATION: 26.910 / 28
+
+-----------------------------------------
+
+(40): time { cat f1 | frun -k -l 1:0 : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 388 assigned | 389 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 382 assigned | 381 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 377 assigned | 377 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+0
+real	0m4.270s
+user	1m54.142s
+sys	0m1.108s
+
+CPU UTILIZATION: 26.990 / 28
+
+-----------------------------------------
+
+(41): time { frun -k -l 1:0 echo <f1 >/dev/null; }
 
 =================================================================
 NUMA TELEMETRY (CHUNKS)
@@ -721,34 +872,2872 @@ Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-100000000
-real	0m8.459s
-user	2m46.537s
-sys	0m49.619s
+real	0m4.631s
+user	2m0.032s
+sys	0m1.351s
 
-CPU UTILIZATION: 25.553 / 28
+CPU UTILIZATION: 26.210 / 28
 
 -----------------------------------------
 
-(35): time { cat f1 | frun -k  printf %s\n >/dev/null; }
+(42): time { frun -k -l 1:0 echo <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25555
+real	0m4.661s
+user	2m3.173s
+sys	0m1.402s
+
+CPU UTILIZATION: 26.727 / 28
+
+-----------------------------------------
+
+(43): time { cat f1 | frun -k -l 1:0 echo >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 375 assigned | 375 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 376 assigned | 376 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 390 assigned | 390 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.618s
+user	2m3.191s
+sys	0m1.337s
+
+CPU UTILIZATION: 26.965 / 28
+
+-----------------------------------------
+
+(44): time { cat f1 | frun -k -l 1:0 echo | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 394 assigned | 394 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 393 assigned | 393 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 378 assigned | 379 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 362 assigned | 361 processed | 0 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+25544
+real	0m4.600s
+user	2m2.444s
+sys	0m1.470s
+
+CPU UTILIZATION: 26.937 / 28
+
+-----------------------------------------
+
+(45): time { frun -k -l 1:0 printf %s\n <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 11 assigned | 11 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m8.073s
+user	2m43.107s
+sys	0m49.317s
+
+CPU UTILIZATION: 26.312 / 28
+
+-----------------------------------------
+
+(46): time { frun -k -l 1:0 printf %s\n <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 11 assigned | 11 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m8.031s
+user	2m41.869s
+sys	0m49.406s
+
+CPU UTILIZATION: 26.307 / 28
+
+-----------------------------------------
+
+(47): time { cat f1 | frun -k -l 1:0 printf %s\n >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 395 assigned | 397 processed | 2 I stole | 0 stolen from me
+Node 1 (Phys 1): 377 assigned | 376 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 369 assigned | 368 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+real	0m8.022s
+user	2m47.580s
+sys	0m50.504s
+
+CPU UTILIZATION: 27.185 / 28
+
+-----------------------------------------
+
+(48): time { cat f1 | frun -k -l 1:0 printf %s\n | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 388 assigned | 388 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m7.983s
+user	2m46.026s
+sys	0m50.744s
+
+CPU UTILIZATION: 27.153 / 28
+
+-----------------------------------------
+
+(49): time { frun -u  : <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.211s
+user	1m51.950s
+sys	0m0.778s
+
+CPU UTILIZATION: 26.769 / 28
+
+-----------------------------------------
+
+(50): time { frun -u  : <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m4.204s
+user	1m51.825s
+sys	0m0.732s
+
+CPU UTILIZATION: 26.773 / 28
+
+-----------------------------------------
+
+(51): time { cat f1 | frun -u  : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 376 assigned | 376 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 389 assigned | 389 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.233s
+user	1m53.254s
+sys	0m0.944s
+
+CPU UTILIZATION: 26.978 / 28
+
+-----------------------------------------
+
+(52): time { cat f1 | frun -u  : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 382 assigned | 382 processed | 1 I stole | 1 stolen from me
+Node 1 (Phys 1): 384 assigned | 383 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 376 assigned | 376 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 385 assigned | 386 processed | 1 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+0
+real	0m4.202s
+user	1m52.395s
+sys	0m0.862s
+
+CPU UTILIZATION: 26.953 / 28
+
+-----------------------------------------
+
+(53): time { frun -u  echo <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.646s
+user	2m0.014s
+sys	0m0.824s
+
+CPU UTILIZATION: 26.009 / 28
+
+-----------------------------------------
+
+(54): time { frun -u  echo <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25555
+real	0m4.601s
+user	2m1.646s
+sys	0m1.057s
+
+CPU UTILIZATION: 26.668 / 28
+
+-----------------------------------------
+
+(55): time { cat f1 | frun -u  echo >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 390 assigned | 389 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 393 assigned | 394 processed | 1 I stole | 0 stolen from me
+Node 2 (Phys 2): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 365 assigned | 365 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+real	0m4.528s
+user	2m0.974s
+sys	0m0.985s
+
+CPU UTILIZATION: 26.934 / 28
+
+-----------------------------------------
+
+(56): time { cat f1 | frun -u  echo | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 391 assigned | 391 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 375 assigned | 375 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 369 assigned | 369 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 392 assigned | 392 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25551
+real	0m4.562s
+user	2m2.157s
+sys	0m1.216s
+
+CPU UTILIZATION: 27.043 / 28
+
+-----------------------------------------
+
+(57): time { frun -u  printf %s\n <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m7.478s
+user	2m42.793s
+sys	0m38.454s
+
+CPU UTILIZATION: 26.911 / 28
+
+-----------------------------------------
+
+(58): time { frun -u  printf %s\n <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m27.030s
+user	2m2.332s
+sys	9m59.058s
+
+CPU UTILIZATION: 26.688 / 28
+
+-----------------------------------------
+
+(59): time { cat f1 | frun -u  printf %s\n >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 375 assigned | 374 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 376 assigned | 375 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 382 assigned | 383 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 394 assigned | 395 processed | 1 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+real	0m7.190s
+user	2m45.717s
+sys	0m29.056s
+
+CPU UTILIZATION: 27.089 / 28
+
+-----------------------------------------
+
+(60): time { cat f1 | frun -u  printf %s\n | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m24.672s
+user	2m4.278s
+sys	9m1.184s
+
+CPU UTILIZATION: 26.972 / 28
+
+-----------------------------------------
+
+(61): time { frun -u -l 1:0 : <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.233s
+user	1m51.740s
+sys	0m0.713s
+
+CPU UTILIZATION: 26.565 / 28
+
+-----------------------------------------
+
+(62): time { frun -u -l 1:0 : <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m4.213s
+user	1m51.792s
+sys	0m0.690s
+
+CPU UTILIZATION: 26.698 / 28
+
+-----------------------------------------
+
+(63): time { cat f1 | frun -u -l 1:0 : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 387 assigned | 387 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 391 assigned | 391 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 369 assigned | 369 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.206s
+user	1m52.266s
+sys	0m0.925s
+
+CPU UTILIZATION: 26.911 / 28
+
+-----------------------------------------
+
+(64): time { cat f1 | frun -u -l 1:0 : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 391 assigned | 391 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 371 assigned | 371 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 369 assigned | 368 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 396 assigned | 397 processed | 1 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+0
+real	0m4.252s
+user	1m53.562s
+sys	0m0.970s
+
+CPU UTILIZATION: 26.936 / 28
+
+-----------------------------------------
+
+(65): time { frun -u -l 1:0 echo <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m4.540s
+user	2m0.438s
+sys	0m0.791s
+
+CPU UTILIZATION: 26.702 / 28
+
+-----------------------------------------
+
+(66): time { frun -u -l 1:0 echo <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25555
+real	0m4.575s
+user	2m1.604s
+sys	0m0.887s
+
+CPU UTILIZATION: 26.773 / 28
+
+-----------------------------------------
+
+(67): time { cat f1 | frun -u -l 1:0 echo >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 381 assigned | 382 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 389 assigned | 388 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 377 assigned | 377 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+real	0m4.557s
+user	2m1.678s
+sys	0m0.902s
+
+CPU UTILIZATION: 26.899 / 28
+
+-----------------------------------------
+
+(68): time { cat f1 | frun -u -l 1:0 echo | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 371 assigned | 371 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 392 assigned | 393 processed | 1 I stole | 0 stolen from me
+Node 2 (Phys 2): 389 assigned | 389 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 375 assigned | 374 processed | 0 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+25551
+real	0m4.556s
+user	2m1.692s
+sys	0m1.166s
+
+CPU UTILIZATION: 26.966 / 28
+
+-----------------------------------------
+
+(69): time { frun -u -l 1:0 printf %s\n <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m7.584s
+user	2m44.702s
+sys	0m38.744s
+
+CPU UTILIZATION: 26.825 / 28
+
+-----------------------------------------
+
+(70): time { frun -u -l 1:0 printf %s\n <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m26.568s
+user	2m2.523s
+sys	9m51.180s
+
+CPU UTILIZATION: 26.863 / 28
+
+-----------------------------------------
+
+(71): time { cat f1 | frun -u -l 1:0 printf %s\n >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 381 assigned | 382 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 384 assigned | 382 processed | 0 I stole | 2 stolen from me
+Node 2 (Phys 2): 380 assigned | 381 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+real	0m7.263s
+user	2m48.878s
+sys	0m28.394s
+
+CPU UTILIZATION: 27.161 / 28
+
+-----------------------------------------
+
+(72): time { cat f1 | frun -u -l 1:0 printf %s\n | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 382 assigned | 382 processed | 1 I stole | 1 stolen from me
+Node 1 (Phys 1): 381 assigned | 381 processed | 1 I stole | 1 stolen from me
+Node 2 (Phys 2): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+100000000
+real	0m27.122s
+user	2m3.691s
+sys	10m8.353s
+
+CPU UTILIZATION: 26.990 / 28
+
+-----------------------------------------
+
+(73): time { frun -U  : <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.429s
+user	0m35.886s
+sys	0m0.682s
+
+CPU UTILIZATION: 25.589 / 28
+
+-----------------------------------------
+
+(74): time { frun -U  : <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m1.457s
+user	0m36.559s
+sys	0m0.703s
+
+CPU UTILIZATION: 25.574 / 28
+
+-----------------------------------------
+
+(75): time { cat f1 | frun -U  : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 390 assigned | 391 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 383 assigned | 382 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 375 assigned | 375 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+real	0m1.439s
+user	0m36.501s
+sys	0m0.783s
+
+CPU UTILIZATION: 25.909 / 28
+
+-----------------------------------------
+
+(76): time { cat f1 | frun -U  : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 392 assigned | 392 processed | 1 I stole | 1 stolen from me
+Node 1 (Phys 1): 384 assigned | 384 processed | 2 I stole | 2 stolen from me
+Node 2 (Phys 2): 371 assigned | 370 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 380 assigned | 381 processed | 1 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 4 chunks (0.3%)
+=================================================================
+
+0
+real	0m1.414s
+user	0m35.949s
+sys	0m0.844s
+
+CPU UTILIZATION: 26.020 / 28
+
+-----------------------------------------
+
+(77): time { frun -U  echo <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.430s
+user	0m36.214s
+sys	0m0.781s
+
+CPU UTILIZATION: 25.870 / 28
+
+-----------------------------------------
+
+(78): time { frun -U  echo <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25555
+real	0m1.442s
+user	0m36.382s
+sys	0m0.843s
+
+CPU UTILIZATION: 25.814 / 28
+
+-----------------------------------------
+
+(79): time { cat f1 | frun -U  echo >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 392 assigned | 392 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 390 assigned | 390 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 359 assigned | 359 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.422s
+user	0m36.163s
+sys	0m0.937s
+
+CPU UTILIZATION: 26.090 / 28
+
+-----------------------------------------
+
+(80): time { cat f1 | frun -U  echo | wc -l; }
 
 =================================================================
 NUMA TELEMETRY (CHUNKS)
 =================================================================
 Node 0 (Phys 0): 390 assigned | 390 processed | 0 I stole | 0 stolen from me
-Node 1 (Phys 1): 389 assigned | 389 processed | 0 I stole | 0 stolen from me
-Node 2 (Phys 2): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
-Node 3 (Phys 3): 362 assigned | 362 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 381 assigned | 381 processed | 1 I stole | 1 stolen from me
+Node 2 (Phys 2): 364 assigned | 364 processed | 1 I stole | 1 stolen from me
+Node 3 (Phys 3): 392 assigned | 392 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+25551
+real	0m1.424s
+user	0m36.048s
+sys	0m1.001s
+
+CPU UTILIZATION: 26.017 / 28
+
+-----------------------------------------
+
+(81): time { frun -U  printf %s\n <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
 -----------------------------------------------------------------
 Total Cross-Socket Traffic: 0 chunks (0.0%)
 =================================================================
 
-real	0m8.359s
-user	2m47.959s
-sys	0m50.082s
+real	0m1.449s
+user	0m36.253s
+sys	0m0.804s
 
-CPU UTILIZATION: 26.084 / 28
+CPU UTILIZATION: 25.574 / 28
 
 -----------------------------------------
 
-(36): time { cat f1 | frun -k  printf %s\n | wc -l; }
+(82): time { frun -U  printf %s\n <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25555
+real	0m1.439s
+user	0m36.171s
+sys	0m0.809s
+
+CPU UTILIZATION: 25.698 / 28
+
+-----------------------------------------
+
+(83): time { cat f1 | frun -U  printf %s\n >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 395 assigned | 395 processed | 1 I stole | 1 stolen from me
+Node 1 (Phys 1): 395 assigned | 395 processed | 1 I stole | 1 stolen from me
+Node 2 (Phys 2): 362 assigned | 361 processed | 1 I stole | 2 stolen from me
+Node 3 (Phys 3): 375 assigned | 376 processed | 1 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 4 chunks (0.3%)
+=================================================================
+
+real	0m1.433s
+user	0m36.354s
+sys	0m0.919s
+
+CPU UTILIZATION: 26.010 / 28
+
+-----------------------------------------
+
+(84): time { cat f1 | frun -U  printf %s\n | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 393 assigned | 393 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 384 assigned | 384 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 371 assigned | 371 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25551
+real	0m1.431s
+user	0m36.274s
+sys	0m1.023s
+
+CPU UTILIZATION: 26.063 / 28
+
+-----------------------------------------
+
+(85): time { frun -U -l 1:0 : <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.439s
+user	0m36.269s
+sys	0m0.719s
+
+CPU UTILIZATION: 25.703 / 28
+
+-----------------------------------------
+
+(86): time { frun -U -l 1:0 : <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m1.434s
+user	0m36.009s
+sys	0m0.776s
+
+CPU UTILIZATION: 25.652 / 28
+
+-----------------------------------------
+
+(87): time { cat f1 | frun -U -l 1:0 : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 387 assigned | 386 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 387 assigned | 388 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 372 assigned | 372 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+real	0m1.409s
+user	0m36.017s
+sys	0m0.761s
+
+CPU UTILIZATION: 26.102 / 28
+
+-----------------------------------------
+
+(88): time { cat f1 | frun -U -l 1:0 : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 394 assigned | 395 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 369 assigned | 369 processed | 1 I stole | 1 stolen from me
+Node 2 (Phys 2): 363 assigned | 362 processed | 1 I stole | 2 stolen from me
+Node 3 (Phys 3): 401 assigned | 401 processed | 1 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 4 chunks (0.3%)
+=================================================================
+
+0
+real	0m1.426s
+user	0m36.290s
+sys	0m0.846s
+
+CPU UTILIZATION: 26.042 / 28
+
+-----------------------------------------
+
+(89): time { frun -U -l 1:0 echo <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.421s
+user	0m35.965s
+sys	0m0.774s
+
+CPU UTILIZATION: 25.854 / 28
+
+-----------------------------------------
+
+(90): time { frun -U -l 1:0 echo <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25555
+real	0m1.441s
+user	0m35.995s
+sys	0m0.829s
+
+CPU UTILIZATION: 25.554 / 28
+
+-----------------------------------------
+
+(91): time { cat f1 | frun -U -l 1:0 echo >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 378 assigned | 377 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 388 assigned | 388 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 387 assigned | 388 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 374 assigned | 374 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+real	0m1.439s
+user	0m36.492s
+sys	0m0.870s
+
+CPU UTILIZATION: 25.963 / 28
+
+-----------------------------------------
+
+(92): time { cat f1 | frun -U -l 1:0 echo | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 368 assigned | 368 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 396 assigned | 396 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 385 assigned | 385 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 378 assigned | 378 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25551
+real	0m1.435s
+user	0m36.228s
+sys	0m1.013s
+
+CPU UTILIZATION: 25.951 / 28
+
+-----------------------------------------
+
+(93): time { frun -U -l 1:0 printf %s\n <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.435s
+user	0m36.126s
+sys	0m0.783s
+
+CPU UTILIZATION: 25.720 / 28
+
+-----------------------------------------
+
+(94): time { frun -U -l 1:0 printf %s\n <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25555
+real	0m1.439s
+user	0m35.684s
+sys	0m0.874s
+
+CPU UTILIZATION: 25.405 / 28
+
+-----------------------------------------
+
+(95): time { cat f1 | frun -U -l 1:0 printf %s\n >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 363 assigned | 364 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 394 assigned | 393 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 393 assigned | 393 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 377 assigned | 377 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+real	0m1.456s
+user	0m36.878s
+sys	0m0.902s
+
+CPU UTILIZATION: 25.947 / 28
+
+-----------------------------------------
+
+(96): time { cat f1 | frun -U -l 1:0 printf %s\n | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 388 assigned | 388 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 374 assigned | 374 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 386 assigned | 386 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25551
+real	0m1.429s
+user	0m36.184s
+sys	0m0.930s
+
+CPU UTILIZATION: 25.972 / 28
+
+-----------------------------------------
+
+(97): time { frun -s : <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 14 assigned | 14 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 10 assigned | 10 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m0.335s
+user	0m1.691s
+sys	0m0.681s
+
+CPU UTILIZATION: 7.080 / 28
+
+-----------------------------------------
+
+(98): time { frun -s : <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 11 assigned | 11 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m0.200s
+user	0m1.551s
+sys	0m0.747s
+
+CPU UTILIZATION: 11.490 / 28
+
+-----------------------------------------
+
+(99): time { cat f1 | frun -s : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 423 assigned | 422 processed | 36 I stole | 37 stolen from me
+Node 1 (Phys 1): 389 assigned | 373 processed | 30 I stole | 46 stolen from me
+Node 2 (Phys 2): 339 assigned | 354 processed | 41 I stole | 26 stolen from me
+Node 3 (Phys 3): 376 assigned | 378 processed | 25 I stole | 23 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 132 chunks (8.6%)
+=================================================================
+
+real	0m0.223s
+user	0m1.913s
+sys	0m1.675s
+
+CPU UTILIZATION: 16.089 / 28
+
+-----------------------------------------
+
+(100): time { cat f1 | frun -s : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 373 assigned | 371 processed | 20 I stole | 22 stolen from me
+Node 1 (Phys 1): 399 assigned | 388 processed | 19 I stole | 30 stolen from me
+Node 2 (Phys 2): 360 assigned | 354 processed | 22 I stole | 28 stolen from me
+Node 3 (Phys 3): 395 assigned | 414 processed | 30 I stole | 11 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 91 chunks (6.0%)
+=================================================================
+
+0
+real	0m0.209s
+user	0m1.897s
+sys	0m1.561s
+
+CPU UTILIZATION: 16.545 / 28
+
+-----------------------------------------
+
+(101): time { frun -s cat <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.189s
+user	0m10.217s
+sys	0m17.665s
+
+CPU UTILIZATION: 23.449 / 28
+
+-----------------------------------------
+
+(102): time { frun -s cat <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m1.211s
+user	0m10.159s
+sys	0m18.301s
+
+CPU UTILIZATION: 23.501 / 28
+
+-----------------------------------------
+
+(103): time { cat f1 | frun -s cat >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 381 assigned | 382 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 384 assigned | 383 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 379 assigned | 379 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+real	0m1.223s
+user	0m10.243s
+sys	0m18.241s
+
+CPU UTILIZATION: 23.290 / 28
+
+-----------------------------------------
+
+(104): time { cat f1 | frun -s cat | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 383 assigned | 382 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 380 assigned | 382 processed | 2 I stole | 0 stolen from me
+Node 2 (Phys 2): 383 assigned | 382 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+100000000
+real	0m1.210s
+user	0m10.159s
+sys	0m18.430s
+
+CPU UTILIZATION: 23.627 / 28
+
+-----------------------------------------
+
+(105): time { frun -s tee <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.201s
+user	0m10.274s
+sys	0m17.302s
+
+CPU UTILIZATION: 22.960 / 28
+
+-----------------------------------------
+
+(106): time { frun -s tee <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m1.197s
+user	0m10.212s
+sys	0m17.901s
+
+CPU UTILIZATION: 23.486 / 28
+
+-----------------------------------------
+
+(107): time { cat f1 | frun -s tee >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.188s
+user	0m10.283s
+sys	0m17.700s
+
+CPU UTILIZATION: 23.554 / 28
+
+-----------------------------------------
+
+(108): time { cat f1 | frun -s tee | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 384 assigned | 383 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 380 assigned | 382 processed | 2 I stole | 0 stolen from me
+Node 3 (Phys 3): 380 assigned | 379 processed | 0 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+100000000
+real	0m1.189s
+user	0m10.044s
+sys	0m18.061s
+
+CPU UTILIZATION: 23.637 / 28
+
+-----------------------------------------
+
+(109): time { frun -b 524288 : <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m0.114s
+user	0m0.034s
+sys	0m0.158s
+
+CPU UTILIZATION: 1.684 / 28
+
+-----------------------------------------
+
+(110): time { frun -b 524288 : <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m0.110s
+user	0m0.048s
+sys	0m0.145s
+
+CPU UTILIZATION: 1.754 / 28
+
+-----------------------------------------
+
+(111): time { cat f1 | frun -b 524288 : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 385 assigned | 389 processed | 4 I stole | 0 stolen from me
+Node 1 (Phys 1): 383 assigned | 379 processed | 0 I stole | 4 stolen from me
+Node 2 (Phys 2): 381 assigned | 381 processed | 1 I stole | 1 stolen from me
+Node 3 (Phys 3): 378 assigned | 378 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 5 chunks (0.3%)
+=================================================================
+
+real	0m0.128s
+user	0m0.371s
+sys	0m0.331s
+
+CPU UTILIZATION: 5.484 / 28
+
+-----------------------------------------
+
+(112): time { cat f1 | frun -b 524288 : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 384 assigned | 385 processed | 2 I stole | 1 stolen from me
+Node 1 (Phys 1): 381 assigned | 378 processed | 0 I stole | 3 stolen from me
+Node 2 (Phys 2): 383 assigned | 388 processed | 5 I stole | 0 stolen from me
+Node 3 (Phys 3): 379 assigned | 376 processed | 0 I stole | 3 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 7 chunks (0.5%)
+=================================================================
+
+0
+real	0m0.137s
+user	0m0.382s
+sys	0m0.425s
+
+CPU UTILIZATION: 5.890 / 28
+
+-----------------------------------------
+
+(113): time { frun -b 524288 cat <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 12 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 12 assigned | 13 processed | 1 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (2.0%)
+=================================================================
+
+real	0m0.115s
+user	0m0.126s
+sys	0m0.321s
+
+CPU UTILIZATION: 3.886 / 28
+
+-----------------------------------------
+
+(114): time { frun -b 524288 cat <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 12 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 13 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (2.0%)
+=================================================================
+
+100000000
+real	0m0.121s
+user	0m0.109s
+sys	0m0.381s
+
+CPU UTILIZATION: 4.049 / 28
+
+-----------------------------------------
+
+(115): time { cat f1 | frun -b 524288 cat >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 382 assigned | 381 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 387 assigned | 386 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 379 assigned | 380 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 379 assigned | 380 processed | 1 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+real	0m0.187s
+user	0m0.657s
+sys	0m1.009s
+
+CPU UTILIZATION: 8.909 / 28
+
+-----------------------------------------
+
+(116): time { cat f1 | frun -b 524288 cat | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m0.193s
+user	0m0.654s
+sys	0m1.090s
+
+CPU UTILIZATION: 9.036 / 28
+
+-----------------------------------------
+
+(117): time { frun -b 524288 tee <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 12 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 13 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (2.0%)
+=================================================================
+
+real	0m0.112s
+user	0m0.114s
+sys	0m0.303s
+
+CPU UTILIZATION: 3.723 / 28
+
+-----------------------------------------
+
+(118): time { frun -b 524288 tee <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 12 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 13 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (2.0%)
+=================================================================
+
+100000000
+real	0m0.122s
+user	0m0.116s
+sys	0m0.357s
+
+CPU UTILIZATION: 3.877 / 28
+
+-----------------------------------------
+
+(119): time { cat f1 | frun -b 524288 tee >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 384 assigned | 385 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 382 assigned | 381 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 378 assigned | 378 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+real	0m0.187s
+user	0m0.646s
+sys	0m1.001s
+
+CPU UTILIZATION: 8.807 / 28
+
+-----------------------------------------
+
+(120): time { cat f1 | frun -b 524288 tee | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 386 assigned | 387 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 378 assigned | 377 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+100000000
+real	0m0.191s
+user	0m0.645s
+sys	0m1.050s
+
+CPU UTILIZATION: 8.874 / 28
+
+-----------------------------------------
+
+(121): time { frun -b4096 -s : <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 11 assigned | 11 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m0.205s
+user	0m1.468s
+sys	0m0.655s
+
+CPU UTILIZATION: 10.356 / 28
+
+-----------------------------------------
+
+(122): time { frun -b4096 -s : <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 11 assigned | 11 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m0.276s
+user	0m1.509s
+sys	0m0.637s
+
+CPU UTILIZATION: 7.775 / 28
+
+-----------------------------------------
+
+(123): time { cat f1 | frun -b4096 -s : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 369 assigned | 381 processed | 24 I stole | 12 stolen from me
+Node 1 (Phys 1): 388 assigned | 378 processed | 12 I stole | 22 stolen from me
+Node 2 (Phys 2): 367 assigned | 368 processed | 15 I stole | 14 stolen from me
+Node 3 (Phys 3): 403 assigned | 400 processed | 14 I stole | 17 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 65 chunks (4.3%)
+=================================================================
+
+real	0m0.210s
+user	0m1.842s
+sys	0m1.490s
+
+CPU UTILIZATION: 15.866 / 28
+
+-----------------------------------------
+
+(124): time { cat f1 | frun -b4096 -s : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 378 assigned | 385 processed | 35 I stole | 28 stolen from me
+Node 1 (Phys 1): 353 assigned | 340 processed | 26 I stole | 39 stolen from me
+Node 2 (Phys 2): 403 assigned | 408 processed | 34 I stole | 29 stolen from me
+Node 3 (Phys 3): 393 assigned | 394 processed | 26 I stole | 25 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 121 chunks (7.9%)
+=================================================================
+
+0
+real	0m0.213s
+user	0m1.867s
+sys	0m1.747s
+
+CPU UTILIZATION: 16.967 / 28
+
+-----------------------------------------
+
+(125): time { frun -b4096 -s cat <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.162s
+user	0m9.681s
+sys	0m17.284s
+
+CPU UTILIZATION: 23.205 / 28
+
+-----------------------------------------
+
+(126): time { frun -b4096 -s cat <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m1.162s
+user	0m9.636s
+sys	0m17.445s
+
+CPU UTILIZATION: 23.305 / 28
+
+-----------------------------------------
+
+(127): time { cat f1 | frun -b4096 -s cat >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 383 assigned | 383 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 381 assigned | 381 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.156s
+user	0m9.580s
+sys	0m17.647s
+
+CPU UTILIZATION: 23.552 / 28
+
+-----------------------------------------
+
+(128): time { cat f1 | frun -b4096 -s cat | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 381 assigned | 382 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 382 assigned | 381 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 384 assigned | 384 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 380 assigned | 380 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.1%)
+=================================================================
+
+100000000
+real	0m1.152s
+user	0m9.648s
+sys	0m17.502s
+
+CPU UTILIZATION: 23.567 / 28
+
+-----------------------------------------
+
+(129): time { frun -b4096 -s tee <f1 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m1.136s
+user	0m9.775s
+sys	0m16.715s
+
+CPU UTILIZATION: 23.318 / 28
+
+-----------------------------------------
+
+(130): time { frun -b4096 -s tee <f1 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 13 assigned | 13 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 12 assigned | 12 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m1.152s
+user	0m9.838s
+sys	0m16.930s
+
+CPU UTILIZATION: 23.236 / 28
+
+-----------------------------------------
+
+(131): time { cat f1 | frun -b4096 -s tee >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 384 assigned | 384 processed | 1 I stole | 1 stolen from me
+Node 1 (Phys 1): 379 assigned | 379 processed | 1 I stole | 1 stolen from me
+Node 2 (Phys 2): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+real	0m1.138s
+user	0m9.564s
+sys	0m17.257s
+
+CPU UTILIZATION: 23.568 / 28
+
+-----------------------------------------
+
+(132): time { cat f1 | frun -b4096 -s tee | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 381 assigned | 383 processed | 2 I stole | 0 stolen from me
+Node 1 (Phys 1): 383 assigned | 382 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 381 assigned | 380 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 382 assigned | 382 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.1%)
+=================================================================
+
+100000000
+real	0m1.135s
+user	0m9.664s
+sys	0m17.090s
+
+CPU UTILIZATION: 23.571 / 28
+
+-----------------------------------------
+
+(133): time { frun   : <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m5.183s
+user	2m17.150s
+sys	0m2.622s
+
+CPU UTILIZATION: 26.967 / 28
+
+-----------------------------------------
+
+(134): time { frun   : <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m5.136s
+user	2m15.755s
+sys	0m2.602s
+
+CPU UTILIZATION: 26.938 / 28
+
+-----------------------------------------
+
+(135): time { cat f2 | frun   : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3440 assigned | 3439 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 3261 assigned | 3263 processed | 2 I stole | 0 stolen from me
+Node 2 (Phys 2): 3483 assigned | 3482 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 3381 assigned | 3381 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.0%)
+=================================================================
+
+real	0m5.157s
+user	2m16.274s
+sys	0m3.223s
+
+CPU UTILIZATION: 27.050 / 28
+
+-----------------------------------------
+
+(136): time { cat f2 | frun   : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3422 assigned | 3422 processed | 1 I stole | 1 stolen from me
+Node 1 (Phys 1): 3412 assigned | 3412 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 3361 assigned | 3360 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 3370 assigned | 3371 processed | 1 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.0%)
+=================================================================
+
+0
+real	0m5.178s
+user	2m16.843s
+sys	0m3.160s
+
+CPU UTILIZATION: 27.038 / 28
+
+-----------------------------------------
+
+(137): time { frun   echo <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 109 assigned | 109 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m5.563s
+user	2m26.079s
+sys	0m3.353s
+
+CPU UTILIZATION: 26.861 / 28
+
+-----------------------------------------
+
+(138): time { frun   echo <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 102 assigned | 102 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 109 assigned | 109 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25597
+real	0m5.709s
+user	2m27.091s
+sys	0m3.776s
+
+CPU UTILIZATION: 26.426 / 28
+
+-----------------------------------------
+
+(139): time { cat f2 | frun   echo >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3401 assigned | 3399 processed | 4 I stole | 6 stolen from me
+Node 1 (Phys 1): 3437 assigned | 3436 processed | 5 I stole | 6 stolen from me
+Node 2 (Phys 2): 3467 assigned | 3467 processed | 5 I stole | 5 stolen from me
+Node 3 (Phys 3): 3260 assigned | 3263 processed | 6 I stole | 3 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 20 chunks (0.1%)
+=================================================================
+
+real	0m5.730s
+user	2m27.136s
+sys	0m4.047s
+
+CPU UTILIZATION: 26.384 / 28
+
+-----------------------------------------
+
+(140): time { cat f2 | frun   echo | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3361 assigned | 3359 processed | 5 I stole | 7 stolen from me
+Node 1 (Phys 1): 3452 assigned | 3454 processed | 6 I stole | 4 stolen from me
+Node 2 (Phys 2): 3350 assigned | 3348 processed | 3 I stole | 5 stolen from me
+Node 3 (Phys 3): 3402 assigned | 3404 processed | 5 I stole | 3 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 19 chunks (0.1%)
+=================================================================
+
+28314
+real	0m5.824s
+user	2m29.725s
+sys	0m4.377s
+
+CPU UTILIZATION: 26.459 / 28
+
+-----------------------------------------
+
+(141): time { frun   printf %s\n <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m9.143s
+user	3m10.561s
+sys	0m53.533s
+
+CPU UTILIZATION: 26.697 / 28
+
+-----------------------------------------
+
+(142): time { frun   printf %s\n <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 109 assigned | 109 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m9.154s
+user	3m10.484s
+sys	0m53.723s
+
+CPU UTILIZATION: 26.677 / 28
+
+-----------------------------------------
+
+(143): time { cat f2 | frun   printf %s\n >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3422 assigned | 3422 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 3443 assigned | 3443 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 3324 assigned | 3324 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 3376 assigned | 3376 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m9.223s
+user	3m14.226s
+sys	0m53.689s
+
+CPU UTILIZATION: 26.880 / 28
+
+-----------------------------------------
+
+(144): time { cat f2 | frun   printf %s\n | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3321 assigned | 3322 processed | 2 I stole | 1 stolen from me
+Node 1 (Phys 1): 3423 assigned | 3422 processed | 1 I stole | 2 stolen from me
+Node 2 (Phys 2): 3424 assigned | 3424 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 3397 assigned | 3397 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 3 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m9.226s
+user	3m12.573s
+sys	0m54.927s
+
+CPU UTILIZATION: 26.826 / 28
+
+-----------------------------------------
+
+(145): time { frun  -l 1:0 : <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m5.259s
+user	2m16.733s
+sys	0m2.723s
+
+CPU UTILIZATION: 26.517 / 28
+
+-----------------------------------------
+
+(146): time { frun  -l 1:0 : <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 109 assigned | 109 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m5.249s
+user	2m15.974s
+sys	0m2.515s
+
+CPU UTILIZATION: 26.383 / 28
+
+-----------------------------------------
+
+(147): time { cat f2 | frun  -l 1:0 : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3607 assigned | 3608 processed | 3 I stole | 2 stolen from me
+Node 1 (Phys 1): 3256 assigned | 3259 processed | 6 I stole | 3 stolen from me
+Node 2 (Phys 2): 3416 assigned | 3411 processed | 1 I stole | 6 stolen from me
+Node 3 (Phys 3): 3286 assigned | 3287 processed | 2 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 12 chunks (0.1%)
+=================================================================
+
+real	0m5.264s
+user	2m16.307s
+sys	0m3.269s
+
+CPU UTILIZATION: 26.515 / 28
+
+-----------------------------------------
+
+(148): time { cat f2 | frun  -l 1:0 : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3394 assigned | 3390 processed | 3 I stole | 7 stolen from me
+Node 1 (Phys 1): 3348 assigned | 3350 processed | 5 I stole | 3 stolen from me
+Node 2 (Phys 2): 3372 assigned | 3373 processed | 4 I stole | 3 stolen from me
+Node 3 (Phys 3): 3451 assigned | 3452 processed | 2 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 14 chunks (0.1%)
+=================================================================
+
+0
+real	0m5.337s
+user	2m17.775s
+sys	0m3.222s
+
+CPU UTILIZATION: 26.418 / 28
+
+-----------------------------------------
+
+(149): time { frun  -l 1:0 echo <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m5.766s
+user	2m28.115s
+sys	0m3.613s
+
+CPU UTILIZATION: 26.314 / 28
+
+-----------------------------------------
+
+(150): time { frun  -l 1:0 echo <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25597
+real	0m5.690s
+user	2m26.668s
+sys	0m3.770s
+
+CPU UTILIZATION: 26.439 / 28
+
+-----------------------------------------
+
+(151): time { cat f2 | frun  -l 1:0 echo >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3436 assigned | 3437 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 3189 assigned | 3188 processed | 0 I stole | 1 stolen from me
+Node 2 (Phys 2): 3559 assigned | 3559 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 3381 assigned | 3381 processed | 1 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.0%)
+=================================================================
+
+real	0m5.685s
+user	2m26.972s
+sys	0m4.094s
+
+CPU UTILIZATION: 26.572 / 28
+
+-----------------------------------------
+
+(152): time { cat f2 | frun  -l 1:0 echo | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3434 assigned | 3432 processed | 9 I stole | 11 stolen from me
+Node 1 (Phys 1): 3343 assigned | 3344 processed | 9 I stole | 8 stolen from me
+Node 2 (Phys 2): 3423 assigned | 3417 processed | 12 I stole | 18 stolen from me
+Node 3 (Phys 3): 3365 assigned | 3372 processed | 18 I stole | 11 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 48 chunks (0.4%)
+=================================================================
+
+28314
+real	0m5.786s
+user	2m27.339s
+sys	0m4.562s
+
+CPU UTILIZATION: 26.253 / 28
+
+-----------------------------------------
+
+(153): time { frun  -l 1:0 printf %s\n <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m9.078s
+user	3m10.684s
+sys	0m54.760s
+
+CPU UTILIZATION: 27.037 / 28
+
+-----------------------------------------
+
+(154): time { frun  -l 1:0 printf %s\n <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m9.072s
+user	3m10.871s
+sys	0m54.260s
+
+CPU UTILIZATION: 27.020 / 28
+
+-----------------------------------------
+
+(155): time { cat f2 | frun  -l 1:0 printf %s\n >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3418 assigned | 3418 processed | 2 I stole | 2 stolen from me
+Node 1 (Phys 1): 3405 assigned | 3405 processed | 2 I stole | 2 stolen from me
+Node 2 (Phys 2): 3330 assigned | 3329 processed | 1 I stole | 2 stolen from me
+Node 3 (Phys 3): 3412 assigned | 3413 processed | 2 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 7 chunks (0.1%)
+=================================================================
+
+real	0m8.975s
+user	3m10.527s
+sys	0m53.926s
+
+CPU UTILIZATION: 27.237 / 28
+
+-----------------------------------------
+
+(156): time { cat f2 | frun  -l 1:0 printf %s\n | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3410 assigned | 3411 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 3375 assigned | 3374 processed | 1 I stole | 2 stolen from me
+Node 2 (Phys 2): 3357 assigned | 3356 processed | 0 I stole | 1 stolen from me
+Node 3 (Phys 3): 3423 assigned | 3424 processed | 1 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 3 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m9.057s
+user	3m11.268s
+sys	0m53.872s
+
+CPU UTILIZATION: 27.066 / 28
+
+-----------------------------------------
+
+(157): time { frun -k  : <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 103 assigned | 103 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 109 assigned | 109 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m5.185s
+user	2m17.098s
+sys	0m2.521s
+
+CPU UTILIZATION: 26.927 / 28
+
+-----------------------------------------
+
+(158): time { frun -k  : <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m5.188s
+user	2m17.131s
+sys	0m2.616s
+
+CPU UTILIZATION: 26.936 / 28
+
+-----------------------------------------
+
+(159): time { cat f2 | frun -k  : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3413 assigned | 3412 processed | 0 I stole | 1 stolen from me
+Node 1 (Phys 1): 3485 assigned | 3485 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 3406 assigned | 3407 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 3261 assigned | 3261 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.0%)
+=================================================================
+
+real	0m5.276s
+user	2m18.751s
+sys	0m3.205s
+
+CPU UTILIZATION: 26.905 / 28
+
+-----------------------------------------
+
+(160): time { cat f2 | frun -k  : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3515 assigned | 3516 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 3335 assigned | 3336 processed | 1 I stole | 0 stolen from me
+Node 2 (Phys 2): 3439 assigned | 3439 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 3276 assigned | 3274 processed | 0 I stole | 2 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.0%)
+=================================================================
+
+0
+real	0m5.174s
+user	2m16.126s
+sys	0m3.254s
+
+CPU UTILIZATION: 26.938 / 28
+
+-----------------------------------------
+
+(161): time { frun -k  echo <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 103 assigned | 103 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m5.600s
+user	2m27.537s
+sys	0m3.545s
+
+CPU UTILIZATION: 26.978 / 28
+
+-----------------------------------------
+
+(162): time { frun -k  echo <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 110 assigned | 110 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25597
+real	0m5.660s
+user	2m28.231s
+sys	0m3.874s
+
+CPU UTILIZATION: 26.873 / 28
+
+-----------------------------------------
+
+(163): time { cat f2 | frun -k  echo >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3396 assigned | 3397 processed | 1 I stole | 0 stolen from me
+Node 1 (Phys 1): 3364 assigned | 3364 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 3392 assigned | 3392 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 3413 assigned | 3412 processed | 0 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.0%)
+=================================================================
+
+real	0m5.588s
+user	2m26.686s
+sys	0m4.093s
+
+CPU UTILIZATION: 26.982 / 28
+
+-----------------------------------------
+
+(164): time { cat f2 | frun -k  echo | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3481 assigned | 3481 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 3253 assigned | 3253 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 3480 assigned | 3481 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 3351 assigned | 3350 processed | 0 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 1 chunks (0.0%)
+=================================================================
+
+28307
+real	0m5.606s
+user	2m27.299s
+sys	0m4.400s
+
+CPU UTILIZATION: 27.060 / 28
+
+-----------------------------------------
+
+(165): time { frun -k  printf %s\n <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m8.991s
+user	3m10.072s
+sys	0m54.017s
+
+CPU UTILIZATION: 27.148 / 28
+
+-----------------------------------------
+
+(166): time { frun -k  printf %s\n <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+100000000
+real	0m9.033s
+user	3m10.682s
+sys	0m54.026s
+
+CPU UTILIZATION: 27.090 / 28
+
+-----------------------------------------
+
+(167): time { cat f2 | frun -k  printf %s\n >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3426 assigned | 3426 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 3340 assigned | 3340 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 3392 assigned | 3392 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 3407 assigned | 3407 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m8.984s
+user	3m10.620s
+sys	0m53.761s
+
+CPU UTILIZATION: 27.201 / 28
+
+-----------------------------------------
+
+(168): time { cat f2 | frun -k  printf %s\n | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3388 assigned | 3389 processed | 2 I stole | 1 stolen from me
+Node 1 (Phys 1): 3333 assigned | 3333 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 3492 assigned | 3492 processed | 1 I stole | 1 stolen from me
+Node 3 (Phys 3): 3352 assigned | 3351 processed | 0 I stole | 1 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 3 chunks (0.0%)
+=================================================================
+
+99997268
+real	0m9.023s
+user	3m11.101s
+sys	0m54.330s
+
+CPU UTILIZATION: 27.200 / 28
+
+-----------------------------------------
+
+(169): time { frun -k -l 1:0 : <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 103 assigned | 103 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m5.153s
+user	2m16.391s
+sys	0m2.582s
+
+CPU UTILIZATION: 26.969 / 28
+
+-----------------------------------------
+
+(170): time { frun -k -l 1:0 : <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 106 assigned | 106 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+0
+real	0m5.113s
+user	2m14.698s
+sys	0m2.656s
+
+CPU UTILIZATION: 26.863 / 28
+
+-----------------------------------------
+
+(171): time { cat f2 | frun -k -l 1:0 : >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3465 assigned | 3465 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 3412 assigned | 3410 processed | 0 I stole | 2 stolen from me
+Node 2 (Phys 2): 3305 assigned | 3306 processed | 1 I stole | 0 stolen from me
+Node 3 (Phys 3): 3383 assigned | 3384 processed | 1 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 2 chunks (0.0%)
+=================================================================
+
+real	0m5.139s
+user	2m15.505s
+sys	0m3.312s
+
+CPU UTILIZATION: 27.012 / 28
+
+-----------------------------------------
+
+(172): time { cat f2 | frun -k -l 1:0 : | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 3291 assigned | 3293 processed | 7 I stole | 5 stolen from me
+Node 1 (Phys 1): 3354 assigned | 3356 processed | 6 I stole | 4 stolen from me
+Node 2 (Phys 2): 3447 assigned | 3451 processed | 7 I stole | 3 stolen from me
+Node 3 (Phys 3): 3473 assigned | 3465 processed | 4 I stole | 12 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 24 chunks (0.2%)
+=================================================================
+
+0
+real	0m5.268s
+user	2m17.833s
+sys	0m3.457s
+
+CPU UTILIZATION: 26.820 / 28
+
+-----------------------------------------
+
+(173): time { frun -k -l 1:0 echo <f2 >/dev/null; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 108 assigned | 108 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 105 assigned | 105 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+real	0m5.604s
+user	2m25.797s
+sys	0m3.655s
+
+CPU UTILIZATION: 26.668 / 28
+
+-----------------------------------------
+
+(174): time { frun -k -l 1:0 echo <f2 | wc -l; }
+
+=================================================================
+NUMA TELEMETRY (CHUNKS)
+=================================================================
+Node 0 (Phys 0): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 1 (Phys 1): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 2 (Phys 2): 107 assigned | 107 processed | 0 I stole | 0 stolen from me
+Node 3 (Phys 3): 104 assigned | 104 processed | 0 I stole | 0 stolen from me
+-----------------------------------------------------------------
+Total Cross-Socket Traffic: 0 chunks (0.0%)
+=================================================================
+
+25597
+real	0m5.572s
+user	2m25.712s
+sys	0m3.760s
+
+CPU UTILIZATION: 26.825 / 28
+
+-----------------------------------------
+
+(175): time { cat f2 | frun -k -l 1:0 echo >/dev/null; }
