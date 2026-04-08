@@ -3478,7 +3478,7 @@ static int ring_claim_main(int argc, char **argv) {
 
 restart_loop:
   while (1) {
-    // 1. Ring check FIRST
+    // 1. Ring check FIRST (Local Work)
     uint64_t w_snap = atomic_load_acquire(&local_state->write_idx);
     uint64_t r_curr = atomic_load_relaxed(&local_state->read_idx);
 
@@ -3548,7 +3548,7 @@ restart_loop:
       break;
     }
 
-    // 2. Escrow check SECOND
+    // 2. Escrow check SECOND (Non-Local Work)
     if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
       struct EscrowPacket ep;
       ssize_t er;
@@ -3562,13 +3562,26 @@ restart_loop:
       }
     }
 
-    // 3. Scanner finished check THIRD
+    // 3. Scanner finished check THIRD (The 3 Sequential Conditions for EOF)
+    // CONDITION 1: Has the supplier declared EOF permanently?
     if (atomic_load_acquire(&local_state->scanner_finished)) {
+
+      // CONDITION 2: Re-verify local work is empty AFTER observing Supplier EOF
       if (atomic_load_acquire(&local_state->read_idx) <
           atomic_load_acquire(&local_state->write_idx)) {
         continue;
       }
 
+      // CONDITION 3: Re-verify non-local work (Escrow) is empty AFTER Cond 1 & 2
+      if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
+        struct pollfd pfd = {.fd = fd_escrow_r[my_numa_node], .events = POLLIN};
+        // A timeout of 0 makes this non-blocking.
+        if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+          continue; // Escrow has data! Loop back to claim it.
+        }
+      }
+
+      // All 3 physical conditions are met in order. Consensus achieved. Terminate.
       if (__atomic_fetch_sub(&local_state->active_workers, 1,
                              __ATOMIC_SEQ_CST) == 1)
         return 2;
