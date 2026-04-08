@@ -4033,10 +4033,12 @@ static int ring_order_main(int argc, char **argv) {
             robust_sendfile(1, op->fd, &offset, op->len);
           else
             ring_copy_chunk(op->fd, 1, offset, op->len);
-          off_t aligned_start = (op->off / 4096) * 4096;
-          off_t punch_len = (op->off - aligned_start) + op->len;
-          fallocate(op->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                    aligned_start, punch_len);
+            off_t aligned_start = (op->off) & ~4095ULL;
+            off_t aligned_end = (op->off + op->len) & ~4095ULL;
+            if (aligned_end > aligned_start) {
+              fallocate(op->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                        aligned_start, aligned_end - aligned_start);
+            }
         } else {
           char path[256];
           if (numa_mode)
@@ -4071,10 +4073,12 @@ static int ring_order_main(int argc, char **argv) {
               robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len);
             else
               ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len);
-            off_t aligned_start = (top.pkt.off / 4096) * 4096;
-            off_t punch_len = (top.pkt.off - aligned_start) + top.pkt.len;
-            fallocate(top.pkt.fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                      aligned_start, punch_len);
+              off_t aligned_start = (top.pkt.off) & ~4095ULL;
+              off_t aligned_end = (top.pkt.off + top.pkt.len) & ~4095ULL;
+              if (aligned_end > aligned_start) {
+                fallocate(top.pkt.fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                        aligned_start, aligned_end - aligned_start);
+              }
           } else {
             char path[256];
             if (numa_mode)
