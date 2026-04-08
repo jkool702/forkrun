@@ -720,6 +720,8 @@ static __thread uint64_t worker_last_idx = 0;
 static __thread uint64_t worker_last_cnt = 0;
 static __thread uint32_t worker_last_major = 0;
 static __thread uint32_t worker_last_minor = 0;
+static __thread uint64_t tl_remainder_idx = 0;
+static __thread uint64_t tl_remainder_cnt = 0;
 
 static int *evfd_data_arr = NULL;
 static int *evfd_eof_arr = NULL;
@@ -3466,6 +3468,14 @@ static int ring_claim_main(int argc, char **argv) {
   if (fd_read < 0)
     fd_read = worker_cached_fd;
 
+  // WORMHOLE FIX 6: Drain thread-local stash from previous EAGAIN overflow
+  if (tl_remainder_cnt > 0) {
+    my_read_idx = tl_remainder_idx;
+    claim_count = tl_remainder_cnt;
+    tl_remainder_cnt = 0;
+    goto check_boundaries;
+  }
+
 restart_loop:
   while (1) {
     // 1. Ring check FIRST
@@ -3538,7 +3548,7 @@ restart_loop:
       break;
     }
 
-    // 2. Escrow check SECOND - only reached when ring is apparently empty
+    // 2. Escrow check SECOND
     if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
       struct EscrowPacket ep;
       ssize_t er;
@@ -3554,12 +3564,9 @@ restart_loop:
 
     // 3. Scanner finished check THIRD
     if (atomic_load_acquire(&local_state->scanner_finished)) {
-      // WORMHOLE FIX 3: EOF Race Shield (Top of Loop)
-      // Re-read write_idx to ensure the scanner didn't publish data between
-      // our w_snap snapshot and turning on the scanner_finished light.
       if (atomic_load_acquire(&local_state->read_idx) <
           atomic_load_acquire(&local_state->write_idx)) {
-        continue; // There is still valid data! Loop back to claim it.
+        continue;
       }
 
       if (__atomic_fetch_sub(&local_state->active_workers, 1,
@@ -3580,13 +3587,11 @@ restart_loop:
     __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
     is_waiting_on_ring = true;
 
-    // NUMA-isolated EOF standing wave polling
     struct pollfd pfds[2] = {
         {.fd = evfd_data_arr[my_numa_node], .events = POLLIN},
         {.fd = evfd_eof_arr[my_numa_node], .events = POLLIN}};
 
     while (1) {
-      // Pre-check: ring data may have arrived since we last looked
       if (atomic_load_acquire(&local_state->write_idx) >
           atomic_load_relaxed(&local_state->read_idx))
         break;
@@ -3598,12 +3603,11 @@ restart_loop:
 
       if (data_fired) {
         uint64_t v;
-        sys_read(evfd_data_arr[my_numa_node], &v, 8); // consume exactly 1 token
+        sys_read(evfd_data_arr[my_numa_node], &v, 8);
       }
 
-      // NEVER read evfd_eof_arr here! Just break and let loop evaluate state.
       if (data_fired || eof_fired)
-        break; // restart_loop handles priority ordering
+        break;
     }
 
     cleanup_waiter_state();
@@ -3613,9 +3617,6 @@ restart_loop:
   uint64_t w_curr = atomic_load_acquire(&local_state->write_idx);
   if (my_read_idx + claim_count > w_curr) {
     if (atomic_load_acquire(&local_state->scanner_finished)) {
-      // WORMHOLE FIX 3: EOF Race Shield (Fast Path Overshoot)
-      // If we overshot, we MUST re-read the final write_idx before truncating
-      // our claim, otherwise we destroy perfectly valid data.
       w_curr = atomic_load_acquire(&local_state->write_idx);
       int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
       if (diff < 0)
@@ -3656,7 +3657,6 @@ restart_loop:
           }
         }
         if (atomic_load_acquire(&local_state->scanner_finished)) {
-          // WORMHOLE FIX 3: EOF Race Shield (Slow Path Overshoot)
           w_curr = atomic_load_acquire(&local_state->write_idx);
           int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
           if (diff < 0)
@@ -3671,7 +3671,6 @@ restart_loop:
           break;
         }
 
-        // NUMA-isolated EOF standing wave polling
         struct pollfd pfds[2] = {
             {.fd = evfd_data_arr[my_numa_node], .events = POLLIN},
             {.fd = evfd_eof_arr[my_numa_node], .events = POLLIN}};
@@ -3683,8 +3682,6 @@ restart_loop:
           uint64_t v;
           sys_read(evfd_data_arr[my_numa_node], &v, 8);
         }
-        // NEVER read evfd_eof_arr here! Just loop back to top to re-evaluate
-        // w_curr
       }
       cleanup_waiter_state();
       if (claim_count == 0) {
@@ -3694,10 +3691,8 @@ restart_loop:
     }
   }
 
-  // WORMHOLE FIX 2: Escrow Poisoning Shield
-  // Re-evaluate FLAG_PARTIAL_BATCH now that slots are GUARANTEED to be
-  // initialized. This catches escrow packets that crossed chunk boundaries
-  // because they were stolen before the scanner populated them.
+check_boundaries:
+  // WORMHOLE FIX 2 & 6: Escrow Poisoning Shield + EAGAIN Overflow Protection
   if (claim_count > 1) {
     uint64_t safe_count = 1;
     for (uint64_t i = 0; i < claim_count; i++) {
@@ -3715,11 +3710,17 @@ restart_loop:
       do {
         ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep));
       } while (ew < 0 && errno == EINTR);
-      claim_count = safe_count;
 
-      // Wake up another worker to take the newly re-escrowed remainder
-      uint64_t one = 1;
-      sys_write(evfd_data_arr[my_numa_node], &one, 8);
+      if (ew < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        // Pipe is full. Worker stashes the remainder to process it itself on the next loop.
+        tl_remainder_idx = ep.idx;
+        tl_remainder_cnt = ep.cnt;
+      } else if (ew == sizeof(ep)) {
+        uint64_t one = 1;
+        sys_write(evfd_data_arr[my_numa_node], &one, 8);
+      }
+
+      claim_count = safe_count;
     }
   }
 
