@@ -3181,7 +3181,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
     if (is_numa) {
       UNIFIED_ADAPTIVE_COMMIT(true);
-      if (limit_items > 0 && atomic_load_relaxed(&state[0].global_scanned) >= limit_items) break;
+    }
+
+    // CRITICAL FIX: Universal limit break for both UMA and NUMA
+    if (limit_items > 0) {
+      uint64_t current_global = is_numa ? atomic_load_relaxed(&state[0].global_scanned) : total_scanned;
+      if (current_global >= limit_items) break;
     }
   }
 
