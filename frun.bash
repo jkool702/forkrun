@@ -42,6 +42,7 @@ frun __exec__ "$@"
     local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag LC_ALL
+    local -a fallow_args
     local -ga fd_out P order_args ring_init_opts
 
     LC_ALL=C
@@ -258,13 +259,15 @@ EOF
             # --- DELIMITER (-d x) ---
             @(-d|--delim|--delimiter)?(?([= $'\t'])*))
                 arg="${1##@(-d|--delim|--delimiter)?([= $'\t'])}";
-                [[ ${arg} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && delimiter_val="${arg:0:1}" ;;
+                if [[ -z "${arg}" && "$1" == @(-d|--delim|--delimiter) ]]; then
+                    shift; arg="$1";
+                fi
+                delimiter_val="${arg:0:1}" ;;
 
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)   printf 'forkrun v3.0.1\n' >&2;  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.0.1';  return 0  ;;
 
             --) shift; break ;;
 
@@ -307,6 +310,8 @@ toc() { :; }
 
     ${byte_mode_flag:-false} && ring_init_opts+=('--lines=x')
 
+    ring_init_opts+=("--delim=${delimiter_val}")
+
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
 
     # --- NUMA Node Discovery and Topology Mapping ---
@@ -316,6 +321,13 @@ toc() { :; }
         local req c
         local -a online map parts req_list
         req="$1"
+
+        # NEW: Explicit Global UMA (No Pinning)
+        if [[ "$req" == "@0" || "$req" == "0" || "$req" == "uma" || "$req" == "none" ]]; then
+            export FORKRUN_NUM_NODES=1
+            numa_map_str=""
+            return 0
+        fi
 
         if [[ -r /sys/devices/system/node/online ]]; then
             local raw; read -r raw < /sys/devices/system/node/online
@@ -366,9 +378,12 @@ toc() { :; }
         # Fast native array join
         local IFS=','
         numa_map_str="${map[*]}"
-
-        # Export the node count directly while we still have the array
         export FORKRUN_NUM_NODES="${#map[@]}"
+
+        # NEW: If 'auto' discovered a 1-node machine, skip explicit pinning
+        if [[ "$req" == "auto" && "$FORKRUN_NUM_NODES" == 1 ]]; then
+            numa_map_str=""
+        fi
     }
 
     local numa_map_str
@@ -394,7 +409,9 @@ toc() { :; }
         ring_init_opts+=("--exact-lines")
     fi
 
-    ring_init_opts+=("--numa-map=$numa_map_str")
+    if [[ -n "$numa_map_str" ]]; then
+        ring_init_opts+=("--numa-map=$numa_map_str")
+    fi
 
     # Initialize Ring
     ring_init "${ring_init_opts[@]}"
@@ -442,10 +459,11 @@ toc() { :; }
 
         (
             exec {fd_fallow_w}>&-
+            fallow_args=( "${fd_fallow_r}" "${fd_write}" )
             if (( FORKRUN_NUM_NODES > 1 )); then
-                ring_fallow_phys ${fd_fallow_r} ${fd_write}
+                ring_fallow_phys "${fallow_args[@]}"
             else
-                ring_fallow ${fd_fallow_r} ${fd_write}
+                ring_fallow "${fallow_args[@]}"
             fi
         ) &
         exec {fd_fallow_r}<&-
@@ -471,7 +489,7 @@ toc() { :; }
 
         # 1. Replace {ID} with the Worker ID, NUMA Node ID, and Worker Batch Num
         if ${insert_id_flag:-false}; then
-            cmdline_str="${cmdline_str//\\{ID\\}/\${RING_NODE_ID:+\${RING_NODE_ID}.}\${ID}.\${W_BATCH}}"
+            cmdline_str="${cmdline_str//\\\{ID\\\}/\{\${RING_NODE_ID:+\$\{RING_NODE_ID\}.\}\$\{ID\}.\$\{W_BATCH\}\}}"
         fi
 
         ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"
@@ -511,7 +529,7 @@ toc() { :; }
             # BYTE ARGS PAYLOAD
             array_var='"${A}"'
             if ${insert_args_flag:-false}; then
-                cmdline_str="${cmdline_str//\\{\\}/$array_var}"
+                cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
             else
                 cmdline_str+=" $array_var"
             fi
@@ -526,7 +544,7 @@ toc() { :; }
             ${unsafe_flag} && array_var='${A[*]}'
 
             if ${insert_args_flag:-false}; then
-                cmdline_str="${cmdline_str//\\{\\}/$array_var}"
+                cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
             else
                 cmdline_str+=" $array_var"
             fi
@@ -551,28 +569,13 @@ toc() { :; }
             ring_ack_str+=' ${fd_out[$ID]}'
         }
 
-        #type -p taskset &>/dev/null && have_taskset_flag=true || have_taskset_flag=false
-        have_taskset_flag=false
-
         worker_func_src='spawn_worker() {
 (
   LC_ALL=C
   set +m
   export RING_NODE_ID="$2"
-'
+  trap "ring_worker dec; ring_cleanup_waiter" EXIT
 
-        if (( FORKRUN_NUM_NODES > 1 )) && ${have_taskset_flag}; then
-            worker_func_src+='
-  local -a p_nodes=(${numa_map_str//,/ })
-  local phys=${p_nodes[$2]}
-  if [[ -r /sys/devices/system/node/node${phys}/cpulist ]]; then
-      local cpu_list; read -r cpu_list < /sys/devices/system/node/node${phys}/cpulist
-      [[ $cpu_list ]] && taskset -pc "$cpu_list" $BASHPID >/dev/null 2>&1
-  fi
-'
-        fi
-
-        worker_func_src+='
   {
     ID="$1"
     '
@@ -589,7 +592,6 @@ toc() { :; }
         fi
         '"${ring_ack_str}"'
     done
-    ring_worker dec
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &
 P+=($!)
