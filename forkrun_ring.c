@@ -3982,34 +3982,36 @@ struct OrderFdState {
     off_t last_punched;
 };
 
-// Safely punches holes in per-worker memfds by ensuring we only ever punch
-// contiguous regions starting from 0, preventing out-of-order escrow batches
-// from vaporizing chronologically later batches that were written earlier in the file.
+// Safely punches holes in per-worker memfds for NUMA mode, preventing out-of-order
+// escrow batches from vaporizing chronologically later batches.
 static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len,
                                    struct OrderFdState **fd_states_ptr, int *fd_states_cap_ptr) {
+    if (p_fd < 0) return; // Shield against buffer underflow from invalid FDs
+
     struct OrderFdState *fd_states = *fd_states_ptr;
     int fd_states_cap = *fd_states_cap_ptr;
 
     if (p_fd >= fd_states_cap) {
         int new_cap = p_fd + 128;
-        fd_states = realloc(fd_states, new_cap * sizeof(struct OrderFdState));
-        if (!fd_states) return; // Silent fallback: halts GC for new FDs but prevents crash
-        memset(&fd_states[fd_states_cap], 0, (new_cap - fd_states_cap) * sizeof(struct OrderFdState));
-        *fd_states_ptr = fd_states;
+        struct OrderFdState *new_states = realloc(fd_states, new_cap * sizeof(struct OrderFdState));
+        if (!new_states) return; // Silent fallback: halts GC for new FDs but prevents crash
+        memset(&new_states[fd_states_cap], 0, (new_cap - fd_states_cap) * sizeof(struct OrderFdState));
+        *fd_states_ptr = new_states;
         *fd_states_cap_ptr = new_cap;
+        fd_states = new_states;
     }
 
     struct OrderFdState *fs = &fd_states[p_fd];
 
     if ((uint64_t)p_off == fs->limit) {
         fs->limit += p_len;
-        while (fs->head && fs->head->s == fs->limit) {
+        while (fs->head && fs->head->s <= fs->limit) {
             struct Interval *tmp = fs->head;
-            fs->limit = tmp->e;
+            if (tmp->e > fs->limit) fs->limit = tmp->e;
             fs->head = tmp->next;
             free(tmp);
         }
-        off_t aligned = (off_t)((fs->limit ) & ~4095ULL);
+        off_t aligned = (off_t)((fs->limit / 4096ULL) * 4096ULL);
         if (aligned > fs->last_punched) {
             fallocate(p_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
                       fs->last_punched, aligned - fs->last_punched);
@@ -4058,10 +4060,15 @@ static int ring_order_main(int argc, char **argv) {
   int heap_sz = 0;
 
   int fd_states_cap = 256;
-  struct OrderFdState *fd_states = calloc(fd_states_cap, sizeof(struct OrderFdState));
-  if (!fd_states) {
-    free(heap);
-    return EXECUTION_FAILURE;
+  struct OrderFdState *fd_states = NULL;
+
+  // Only allocate the complex state-tracking machinery if NUMA is active
+  if (numa_mode) {
+      fd_states = calloc(fd_states_cap, sizeof(struct OrderFdState));
+      if (!fd_states) {
+          free(heap);
+          return EXECUTION_FAILURE;
+      }
   }
 
   uint32_t expected_major = 0;
@@ -4099,7 +4106,17 @@ static int ring_order_main(int argc, char **argv) {
           else
             ring_copy_chunk(op->fd, 1, offset, op->len);
 
-          safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
+          if (numa_mode) {
+              safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
+          } else {
+              // UMA Fast Path: Stateless chronological punch
+              off_t aligned_start = (op->off) & ~4095ULL;
+              off_t aligned_end = (op->off + op->len) & ~4095ULL;
+              if (aligned_end > aligned_start && op->fd >= 0) {
+                  fallocate(op->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                            aligned_start, aligned_end - aligned_start);
+              }
+          }
         } else {
           char path[256];
           if (numa_mode)
@@ -4135,7 +4152,17 @@ static int ring_order_main(int argc, char **argv) {
             else
               ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len);
 
-            safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
+            if (numa_mode) {
+                safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
+            } else {
+                // UMA Fast Path: Stateless chronological punch
+                off_t aligned_start = (top.pkt.off) & ~4095ULL;
+                off_t aligned_end = (top.pkt.off + top.pkt.len) & ~4095ULL;
+                if (aligned_end > aligned_start && top.pkt.fd >= 0) {
+                    fallocate(top.pkt.fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                              aligned_start, aligned_end - aligned_start);
+                }
+            }
           } else {
             char path[256];
             if (numa_mode)
@@ -4173,16 +4200,18 @@ static int ring_order_main(int argc, char **argv) {
     buffered -= consumed;
   }
 
-  // Final memory cleanup
-  for (int i = 0; i < fd_states_cap; i++) {
-      struct Interval *curr = fd_states[i].head;
-      while (curr) {
-          struct Interval *tmp = curr;
-          curr = curr->next;
-          free(tmp);
+  // Final memory cleanup (only if allocated in NUMA mode)
+  if (numa_mode && fd_states) {
+      for (int i = 0; i < fd_states_cap; i++) {
+          struct Interval *curr = fd_states[i].head;
+          while (curr) {
+              struct Interval *tmp = curr;
+              curr = curr->next;
+              free(tmp);
+          }
       }
+      free(fd_states);
   }
-  free(fd_states);
   free(heap);
   return EXECUTION_SUCCESS;
 }
