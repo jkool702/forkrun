@@ -722,6 +722,7 @@ static __thread uint32_t worker_last_major = 0;
 static __thread uint32_t worker_last_minor = 0;
 static __thread uint64_t tl_remainder_idx = 0;
 static __thread uint64_t tl_remainder_cnt = 0;
+static __thread bool tl_recently_escrowed = false;
 
 static int *evfd_data_arr = NULL;
 static int *evfd_eof_arr = NULL;
@@ -2121,11 +2122,18 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           {.fd = evfd_indexer_arr[my_node_id], .events = POLLIN},
           {.fd = evfd_ingest_eof, .events = POLLIN}};
       poll(pfds, 2, -1);
-      if (pfds[0].revents & POLLIN) {
+      
+      bool data_fired = (pfds[0].revents & POLLIN) != 0;
+      bool eof_fired = (pfds[1].revents & POLLIN) != 0;
+      
+      // RULE: 1. Check local work. consume & loop
+      if (data_fired) {
         uint64_t v;
         sys_read(evfd_indexer_arr[my_node_id], &v, 8);
-      }
-      if (pfds[1].revents & POLLIN) {
+      } 
+      // RULE: 3. EOF evfd. Handled by outer loop Condition 1 check.
+      else if (eof_fired) {
+          // Do nothing. Outer loop checks g_state->ingest_eof_idx != ~(uint64_t)0
       }
       __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST);
       spin = 0;
@@ -2873,12 +2881,18 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
                                        {.fd = evfd_ingest_eof, .events = POLLIN}};
               if (poll(pfds, 2, poll_timeout) > 0) {
-                if (pfds[0].revents & POLLIN) {
+                bool data_fired = (pfds[0].revents & POLLIN) != 0;
+                bool eof_fired = (pfds[1].revents & POLLIN) != 0;
+                
+                // RULE: 1. check if local work evfd was non-zero. consume & loop
+                if (data_fired) {
                   uint64_t v;
                   sys_read(evfd_ingest_data, &v, 8);
-                }
-                if (pfds[1].revents & POLLIN)
+                } 
+                // RULE: 3. check EOF evfd ONLY if work evfd is zero
+                else if (eof_fired) {
                   atomic_store_release(&local_state->ingest_complete, 1);
+                }
               }
               current_stall = true;
               stall_meter = (stall_meter + (W + DAMPING_OFFSET)) >> 1;
@@ -3206,8 +3220,12 @@ unified_scanner_eof:
     }
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
+
+    // RULE: Set EOF evfd ONLY after scanner is fully finished
     uint64_t blast = 999999;
     sys_write(evfd_data_arr[my_node_id], &blast, 8);
+    sys_write(evfd_eof_arr[my_node_id], &blast, 8);
+
     if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
   } else {
     // --- PHYSICS FIX: Prevent UMA ghost batches violating exact limit ---
@@ -3333,10 +3351,12 @@ unified_scanner_eof:
 
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
-    if (atomic_load_acquire(&local_state->active_waiters) > 0) {
-      uint64_t v = 1;
-      sys_write(evfd_data_arr[0], &v, 8);
-    }
+
+    // RULE: Blast wakeups universally to prevent lost wakeups at EOF
+    uint64_t blast = 999999;
+    sys_write(evfd_data_arr[0], &blast, 8);
+    sys_write(evfd_eof_arr[0], &blast, 8);
+
     if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
   }
 
@@ -3432,7 +3452,6 @@ static int ring_claim_main(int argc, char **argv) {
   if (fd_read < 0)
     fd_read = worker_cached_fd;
 
-  // WORMHOLE FIX 6: Drain thread-local stash from previous EAGAIN overflow
   if (tl_remainder_cnt > 0) {
     my_read_idx = tl_remainder_idx;
     claim_count = tl_remainder_cnt;
@@ -3441,6 +3460,28 @@ static int ring_claim_main(int argc, char **argv) {
   }
 
 restart_loop:
+  
+  // NEW: ESCROW PRIORITY INVERSION (Head-of-line blocking prevention)
+  // If this specific worker just dropped a partial batch into escrow,
+  // it prioritizes getting it back before touching the main ring.
+  if (tl_recently_escrowed) {
+      tl_recently_escrowed = false;
+      if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
+          struct EscrowPacket ep;
+          ssize_t er;
+          do {
+              er = read(fd_escrow_r[my_numa_node], &ep, sizeof(ep));
+          } while (er < 0 && errno == EINTR);
+          if (er == sizeof(ep)) {
+              my_read_idx = ep.idx;
+              claim_count = ep.cnt;
+              // We successfully reclaimed our (or someone else's) escrow.
+              // Bypass the ring check entirely.
+              goto check_boundaries; 
+          }
+      }
+  }
+
   while (1) {
     // 1. Ring check FIRST (Local Work)
     uint64_t w_snap = atomic_load_acquire(&local_state->write_idx);
@@ -3539,18 +3580,13 @@ restart_loop:
       // CONDITION 3: Re-verify non-local work (Escrow) is empty AFTER Cond 1 & 2
       if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
         struct pollfd pfd = {.fd = fd_escrow_r[my_numa_node], .events = POLLIN};
-        // A timeout of 0 makes this non-blocking.
         if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
-          continue; // Escrow has data! Loop back to claim it.
+          continue;
         }
       }
 
       // All 3 physical conditions are met in order. Consensus achieved. Terminate.
-      if (__atomic_fetch_sub(&local_state->active_workers, 1,
-                             __ATOMIC_SEQ_CST) == 1)
-        return 2;
-      bind_var_or_array(v_target, "0", 0);
-      return 1;
+      return 2;
     }
 
     // 4. Spin
@@ -3564,27 +3600,43 @@ restart_loop:
     __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
     is_waiting_on_ring = true;
 
-    struct pollfd pfds[2] = {
+    // RULE: 3-way simultaneous poll
+    struct pollfd pfds[3] = {
         {.fd = evfd_data_arr[my_numa_node], .events = POLLIN},
-        {.fd = evfd_eof_arr[my_numa_node], .events = POLLIN}};
+        {.fd = (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) ? fd_escrow_r[my_numa_node] : -1, .events = POLLIN},
+        {.fd = evfd_eof_arr[my_numa_node], .events = POLLIN}
+    };
 
     while (1) {
+      // RULE: Must simultaneously poll until parent EOF + empty local work is verified
       if (atomic_load_acquire(&local_state->write_idx) >
           atomic_load_relaxed(&local_state->read_idx))
         break;
 
-      poll(pfds, 2, -1);
+      if (atomic_load_acquire(&local_state->scanner_finished))
+        break;
+
+      poll(pfds, 3, -1);
 
       bool data_fired = (pfds[0].revents & POLLIN) != 0;
-      bool eof_fired = (pfds[1].revents & POLLIN) != 0;
+      bool escrow_fired = (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN) != 0);
+      bool eof_fired = (pfds[2].revents & POLLIN) != 0;
 
+      // RULE: Strict checking order
+      // 1. check if the "local work evfd" was non-zero. if so consume it and loop back.
       if (data_fired) {
         uint64_t v;
-        sys_read(evfd_data_arr[my_numa_node], &v, 8);
+        sys_read(pfds[0].fd, &v, 8);
+        continue;
       }
-
-      if (data_fired || eof_fired)
-        break;
+      // 2. check if the non-local work evfd was non-zero. if so consume it and loop back.
+      else if (escrow_fired) {
+        break; // Break so outer loop's Escrow Check processes it
+      }
+      // 3. check if EOF evfd was non-zero. exit ONLY when EOF is nonzero and work evfds are zero
+      else if (eof_fired && !data_fired && !escrow_fired) {
+        break; // Break so outer loop's Scanner Finished check triggers safe exit
+      }
     }
 
     cleanup_waiter_state();
@@ -3655,9 +3707,11 @@ restart_loop:
         poll(pfds, 2, -1);
 
         bool data_fired = (pfds[0].revents & POLLIN) != 0;
+
         if (data_fired) {
           uint64_t v;
           sys_read(evfd_data_arr[my_numa_node], &v, 8);
+          // Let loop naturally re-evaluate w_curr
         }
       }
       cleanup_waiter_state();
@@ -3669,7 +3723,6 @@ restart_loop:
   }
 
 check_boundaries:
-  // WORMHOLE FIX 2 & 6: Escrow Poisoning Shield + EAGAIN Overflow Protection
   if (claim_count > 1) {
     uint64_t safe_count = 1;
     for (uint64_t i = 0; i < claim_count; i++) {
@@ -3689,12 +3742,14 @@ check_boundaries:
       } while (ew < 0 && errno == EINTR);
 
       if (ew < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        // Pipe is full. Worker stashes the remainder to process it itself on the next loop.
         tl_remainder_idx = ep.idx;
         tl_remainder_cnt = ep.cnt;
       } else if (ew == sizeof(ep)) {
         uint64_t one = 1;
         sys_write(evfd_data_arr[my_numa_node], &one, 8);
+        
+        // NEW: We successfully dropped into escrow. Flag ourselves to pick it up ASAP.
+        tl_recently_escrowed = true; 
       }
 
       claim_count = safe_count;
