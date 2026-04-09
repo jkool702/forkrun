@@ -1,5 +1,8 @@
+{
 (
 (
+
+{
 # source frun 
 shopt -s globstar
 shopt -s extglob
@@ -9,11 +12,11 @@ shopt -s extglob
 
 # setup test files
 fLines=100000000
-fLines=1000000
 [[ -f ./f1 ]] || yes $'\n'|head -n $fLines >f1
 [[ -f ./f2 ]] || seq $fLines >f2
-[[ -f ./f3 ]] ||  find /usr /etc /opt /var /home -type f >f3
-#[[ -f ./f4 ]] ||  find / -type f >f4
+[[ -f ./f3 ]] || find /usr /etc /opt /var /home -type f >f3
+#[[ -f ./f4 ]] || find / -type f >f4
+} 2>/dev/null
 
 # setup tests
 if [[ -f ./f4 ]]; then
@@ -80,7 +83,7 @@ printf '\n\nNAME: %s\nSIZE: %s bytes\nLINE COUNT: %s lines\n' "$f" "$(du -d 0 -b
 done
 
 
-) | tee benchmark.out
+)
 
 unset outA;
 declare -A outA;
@@ -101,11 +104,12 @@ done
 
 for f in "${!outA[@]}"; do
 	v="${outA[$f]}"
-	printf '\ntotal %s = %s us\n' "$f" "$v" | tee -a benchmark.out >&$fd2
+	printf '\ntotal %s = %s us\n' "$f" "$v" >&$fd2
 done
 
 cpu=$(( 1000 * ( 10#0${outA[user]} + 10#0${outA[sys]} ) / 10#0${outA[real]} ))
-printf '\n\nOVERALL CPU UTILIZATION: %d.%03d / %d\n\n' "$(( cpu / 1000 ))" "$(( cpu % 1000 ))" "$(nproc)" | tee -a benchmark.out >&$fd2
+printf '\n\nOVERALL CPU UTILIZATION: %d.%03d / %d\n\n' "$(( cpu / 1000 ))" "$(( cpu % 1000 ))" "$(nproc)"  >&$fd2
 
 \rm ./.time "${F[@]}"
 ) {fd1}>&1 {fd2}>&2
+} 2>&1 | tee benchmark.out
