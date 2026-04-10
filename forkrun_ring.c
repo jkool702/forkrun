@@ -2249,6 +2249,12 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }                                                                          \
   } while (0)
 
+/*
+ * WRAP-AROUND SHIELD LOGIC:
+ * Calculates physical wrap-around distance. Yield the scanner if:
+ * 1. Slot-based wrap-around shield boundary is hit (applies to BOTH UMA and NUMA)
+ * 2. Chunk-based memory shield boundary is hit (applies ONLY to NUMA)
+ */
 #define UNIFIED_SCANNER_FLUSH(_cnt_val, _stride_val, _is_last, _maj_id,        \
                               _minor_val, _batch_end_offset, _do_fencepost,    \
                               _overwrite)                                      \
@@ -2265,18 +2271,14 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       } else {                                                                 \
         limit = atomic_load_acquire(&local_state->read_idx);                   \
       }                                                                        \
-      // Calculate the physical wrap-around shield distance
       uint64_t max_ahead = is_numa ? (RING_SIZE / 2) : uma_max_ahead;          \
                                                                                \
-      // 1. Slot-based wrap-around shield (applies to BOTH UMA and NUMA)       \
       bool limit_lines = (local_scan_idx > limit) &&                           \
                          ((local_scan_idx - limit) >= max_ahead);              \
                                                                                \
-      // 2. Chunk-based memory shield (applies ONLY to NUMA)                   \
       bool limit_chunks = is_numa && (cb_head >= 3) &&                         \
                           (limit < chunk_bounds[(cb_head - 3) & 3]);           \
                                                                                \
-      // If either boundary is hit, yield the scanner                          \
       if (!limit_lines && !limit_chunks)                                       \
         break;                                                                 \
       if (atomic_load_relaxed(&local_state->active_workers) == 0)              \
