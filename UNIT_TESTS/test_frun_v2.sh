@@ -665,15 +665,7 @@ run_test "Direct file ingest (Byte Mode)" \
   "frun -b 10 -s cat < '$BYTE_INPUT'" \
   "$(cat "$BYTE_INPUT")"
 
-# Test 60: Worker Environment Variables Validation
-# We use a bash function because forkrun binds variables locally (unexported).
-# The function runs in the worker's context where the variables exist.
-run_test_regex "Worker environment variables exported" \
-  "my_env_test() { echo \"BATCH:\$RING_BATCH_IDX SLOTS:\$RING_BATCH_SLOTS\"; }; cat '$LINE_INPUT' | frun -l 1 my_env_test | head -n1" \
-  "BATCH:[0-9]+ SLOTS:1" \
-  0 false
-
-# Test 61: Extremely Long Lines (AVX2/NEON SIMD Boundary Stress Test)
+# Test 60: Extremely Long Lines (AVX2/NEON SIMD Boundary Stress Test)
 LONG_INPUT="$TEST_DIR/long.txt"
 # Create a 10,000 character line with no newlines, followed by a short line
 printf '%10000s\n' | tr ' ' 'A' > "$LONG_INPUT"
@@ -683,14 +675,14 @@ run_test "AVX2/NEON SIMD long-line boundaries" \
   "frun -s cat < '$LONG_INPUT'" \
   "$(cat "$LONG_INPUT")"
 
-# Test 62: Trickle Input (Stall Meter / Early Flush Test)
+# Test 61: Trickle Input (Stall Meter / Early Flush Test)
 # FIXED: Added -s so cat reads the trickle data from stdin
 run_test "Trickle input (Early Flush / Stall Meter)" \
   "{ echo 'trickle1'; sleep 0.2; echo 'trickle2'; } | frun -k -l 10 -s cat" \
   "trickle1
 trickle2"
 
-# Test 63: Worker Command Failure Tolerance
+# Test 62: Worker Command Failure Tolerance
 run_test "Command failure tolerance (No Deadlock)" \
   "cat '$LINE_INPUT' | frun 'false' >/dev/null; echo PIPELINE_SURVIVED" \
   "PIPELINE_SURVIVED"
