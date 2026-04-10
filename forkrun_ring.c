@@ -3228,7 +3228,6 @@ unified_scanner_eof:
 
     // RULE: Set EOF evfd ONLY after scanner is fully finished
     uint64_t blast = 999999;
-    sys_write(evfd_data_arr[my_node_id], &blast, 8);
     sys_write(evfd_eof_arr[my_node_id], &blast, 8);
 
     if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
@@ -3359,7 +3358,6 @@ unified_scanner_eof:
 
     // RULE: Blast wakeups universally to prevent lost wakeups at EOF
     uint64_t blast = 999999;
-    sys_write(evfd_data_arr[0], &blast, 8);
     sys_write(evfd_eof_arr[0], &blast, 8);
 
     if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
