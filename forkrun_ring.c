@@ -2265,10 +2265,18 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       } else {                                                                 \
         limit = atomic_load_acquire(&local_state->read_idx);                   \
       }                                                                        \
-      bool limit_lines = (!is_numa) && (local_scan_idx > limit) &&             \
-                         ((local_scan_idx - limit) >= uma_max_ahead);          \
+      // Calculate the physical wrap-around shield distance
+      uint64_t max_ahead = is_numa ? (RING_SIZE / 2) : uma_max_ahead;          \
+                                                                               \
+      // 1. Slot-based wrap-around shield (applies to BOTH UMA and NUMA)       \
+      bool limit_lines = (local_scan_idx > limit) &&                           \
+                         ((local_scan_idx - limit) >= max_ahead);              \
+                                                                               \
+      // 2. Chunk-based memory shield (applies ONLY to NUMA)                   \
       bool limit_chunks = is_numa && (cb_head >= 3) &&                         \
                           (limit < chunk_bounds[(cb_head - 3) & 3]);           \
+                                                                               \
+      // If either boundary is hit, yield the scanner                          \
       if (!limit_lines && !limit_chunks)                                       \
         break;                                                                 \
       if (atomic_load_relaxed(&local_state->active_workers) == 0)              \
@@ -3527,7 +3535,7 @@ restart_loop:
         claim_count = w_snap - r_curr;
 
       if (claim_count > 1) {
-        uint64_t safe_count = 1;
+        uint64_t safe_count = claim_count; // <--- CRITICAL FIX: Default to full claim
         for (uint64_t i = 0; i < claim_count; i++) {
           if (local_state->offset_ring[(r_curr + i) & RING_MASK] &
               FLAG_PARTIAL_BATCH) {
@@ -3727,7 +3735,7 @@ restart_loop:
 
 check_boundaries:
   if (claim_count > 1) {
-    uint64_t safe_count = 1;
+    uint64_t safe_count = claim_count; // <--- CRITICAL FIX: Default to full claim
     for (uint64_t i = 0; i < claim_count; i++) {
       if (local_state->offset_ring[(my_read_idx + i) & RING_MASK] &
           FLAG_PARTIAL_BATCH) {
