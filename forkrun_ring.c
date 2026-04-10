@@ -2547,7 +2547,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
   // ---- NEW: Pin scanner ----
   if (g_logical_to_phys_map) {
-    if (is_numa && my_node_id < global_num_nodes) {
+    if (is_numa && (uint32_t)my_node_id < global_num_nodes) {
       pin_to_numa_node(g_logical_to_phys_map[my_node_id]);
     } else if (!is_numa && g_explicit_pinning) {
       pin_to_numa_node(g_logical_to_phys_map[0]);
