@@ -267,7 +267,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.0.1';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.0.2';  return 0  ;;
 
             --) shift; break ;;
 
@@ -592,8 +592,6 @@ toc() { :; }
         fi
         '"${ring_ack_str}"'
     done
-    trap - EXIT
-    ring_worker dec
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &
 P+=($!)
@@ -1148,6 +1146,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()  # removed base64
+declare -A b64=()   # removed base64
 
 _forkrun_bootstrap_setup --force

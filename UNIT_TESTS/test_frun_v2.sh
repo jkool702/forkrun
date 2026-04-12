@@ -545,7 +545,7 @@ run_test_regex "Dry run (-N)" \
 
 run_test "Version (-V)" \
   "frun -V" \
-  "forkrun v3.0.1"
+  "forkrun v3.0.2"
 
 run_test_regex "Help (--help)" \
   "frun --help 2>&1" \
