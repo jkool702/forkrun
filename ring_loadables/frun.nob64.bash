@@ -21,7 +21,7 @@ frun() {
         (( ${#ring_funcs[@]} > 0 )) || ring_list 'ring_funcs'
         printf -v ring_enable '%s ' "${ring_funcs[@]}"
 
-        FORKRUN_FRUN_SRC="$(declare -f -- frun "$@" ${FORKRUN_REQ_FUNCS} 2>/dev/null)"
+        FORKRUN_FRUN_SRC="$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null)"
 
         # EXEC into Clean Room
         # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
@@ -134,7 +134,7 @@ EOF
   -d, --delim <char>    : Use a custom single-character record delimiter.
 
 ### OUTPUT MODES
-  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes. 
+  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes.
   -k, --ordered         : Ordered mode. Same as buffered, but output is printed strictly in input-batch order.
   -u, --realtime        : Unbuffered / realtime mode. Workers output directly to stdout. (Can cause kernel lock contention on massive streams).
   -o, --order <mode>    : Explicitly set the mode (buffered, ordered, realtime).
@@ -163,6 +163,12 @@ EOF
   +v, --no-verbose      : Decrease verbosity. Disables --stats.
   -V, --version         : Prints forkrun version number
   --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
+
+### ENVIRONMENT VARS
+
+- `FORKRUN_EXTRA_FUNCS`           : Use this to specify required sub-functions.  EXAMPLE:  `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`.
+  - If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be.
+  - Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`
 
 EOF
                 ;;
