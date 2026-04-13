@@ -43,4 +43,10 @@
 - `+v`, `--no-verbose`        : Decrease verbosity. Disables --stats.
 - `-V`, `--version`           : Prints forkrun version number
 -  `--stats`                  : Prints NUMA statistics to stderr (currently ignored for UMA)
+
+### ENVIRONMENT VARS
+
+- `FORKRUN_REQ_FUNCS`           : Use this to specify required sub-functions.  EXAMPLE:  `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. 
+  - If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. 
+  - Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`
   
