@@ -21,7 +21,7 @@ frun() {
         (( ${#ring_funcs[@]} > 0 )) || ring_list 'ring_funcs'
         printf -v ring_enable '%s ' "${ring_funcs[@]}"
 
-        FORKRUN_FRUN_SRC="$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null)"
+        FORKRUN_FRUN_SRC="$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; [[ -n "${FORKRUN_EXTRA_VARS:-}" ]] && declare -p ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
 
         # EXEC into Clean Room
         # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
@@ -166,9 +166,11 @@ EOF
 
 ### ENVIRONMENT VARS
 
-- `FORKRUN_EXTRA_FUNCS`           : Use this to specify required sub-functions.  EXAMPLE:  `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`.
-  - If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be.
-  - Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`
+- `FORKRUN_EXTRA_FUNCS` : Use this to specify required sub-functions to pass into frun's environment.
+  - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`.
+
+- `FORKRUN_EXTRA_VARS`  : Use this to specify (environment) variables to pass into frun's environment
+  - If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
 
 EOF
                 ;;

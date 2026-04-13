@@ -1,0 +1,1730 @@
+
+================================================================
+SECTION 1: BASH FUNCTION THROUGHPUT (vs built-ins and external cmds)
+================================================================
+
+(1): [func-throughput] time { frun  : <f_bench >/dev/null; }
+real	0m0.142s
+user	0m1.215s
+sys	0m0.111s
+
+CPU UTILIZATION: 9.338 / 28
+
+-----------------------------------------
+
+(2): [func-throughput] time { cat f_bench | frun  : >/dev/null; }
+real	0m0.131s
+user	0m1.344s
+sys	0m0.119s
+
+CPU UTILIZATION: 11.167 / 28
+
+-----------------------------------------
+
+(3): [func-throughput] time { frun  _bench_noop_func <f_bench >/dev/null; }
+real	0m0.149s
+user	0m1.374s
+sys	0m0.103s
+
+CPU UTILIZATION: 9.912 / 28
+
+-----------------------------------------
+
+(4): [func-throughput] time { cat f_bench | frun  _bench_noop_func >/dev/null; }
+real	0m0.144s
+user	0m1.476s
+sys	0m0.125s
+
+CPU UTILIZATION: 11.118 / 28
+
+-----------------------------------------
+
+(5): [func-throughput] time { frun  _bench_printf_func _bench_printf_func <f_bench >/dev/null; }
+real	0m0.228s
+user	0m2.430s
+sys	0m0.590s
+
+CPU UTILIZATION: 13.245 / 28
+
+-----------------------------------------
+
+(6): [func-throughput] time { cat f_bench | frun  _bench_printf_func _bench_printf_func >/dev/null; }
+real	0m0.218s
+user	0m2.821s
+sys	0m0.625s
+
+CPU UTILIZATION: 15.807 / 28
+
+-----------------------------------------
+
+(7): [func-throughput] time { frun  _bench_classify_func _bench_classify_func <f_bench >/dev/null; }
+real	0m0.158s
+user	0m1.303s
+sys	0m0.110s
+
+CPU UTILIZATION: 8.943 / 28
+
+-----------------------------------------
+
+(8): [func-throughput] time { cat f_bench | frun  _bench_classify_func _bench_classify_func >/dev/null; }
+real	0m0.152s
+user	0m1.471s
+sys	0m0.136s
+
+CPU UTILIZATION: 10.572 / 28
+
+-----------------------------------------
+
+(9): [func-throughput] time { frun -k : <f_bench >/dev/null; }
+real	0m0.160s
+user	0m1.201s
+sys	0m0.128s
+
+CPU UTILIZATION: 8.306 / 28
+
+-----------------------------------------
+
+(10): [func-throughput] time { cat f_bench | frun -k : >/dev/null; }
+real	0m0.145s
+user	0m1.386s
+sys	0m0.113s
+
+CPU UTILIZATION: 10.337 / 28
+
+-----------------------------------------
+
+(11): [func-throughput] time { frun -k _bench_noop_func <f_bench >/dev/null; }
+real	0m0.147s
+user	0m1.245s
+sys	0m0.117s
+
+CPU UTILIZATION: 9.265 / 28
+
+-----------------------------------------
+
+(12): [func-throughput] time { cat f_bench | frun -k _bench_noop_func >/dev/null; }
+real	0m0.143s
+user	0m1.448s
+sys	0m0.117s
+
+CPU UTILIZATION: 10.944 / 28
+
+-----------------------------------------
+
+(13): [func-throughput] time { frun -k _bench_printf_func _bench_printf_func <f_bench >/dev/null; }
+real	0m0.228s
+user	0m2.400s
+sys	0m0.572s
+
+CPU UTILIZATION: 13.035 / 28
+
+-----------------------------------------
+
+(14): [func-throughput] time { cat f_bench | frun -k _bench_printf_func _bench_printf_func >/dev/null; }
+real	0m0.222s
+user	0m2.743s
+sys	0m0.695s
+
+CPU UTILIZATION: 15.486 / 28
+
+-----------------------------------------
+
+(15): [func-throughput] time { frun -k _bench_classify_func _bench_classify_func <f_bench >/dev/null; }
+real	0m0.154s
+user	0m1.326s
+sys	0m0.121s
+
+CPU UTILIZATION: 9.396 / 28
+
+-----------------------------------------
+
+(16): [func-throughput] time { cat f_bench | frun -k _bench_classify_func _bench_classify_func >/dev/null; }
+real	0m0.146s
+user	0m1.514s
+sys	0m0.131s
+
+CPU UTILIZATION: 11.267 / 28
+
+-----------------------------------------
+
+(17): [func-throughput] time { frun -s : <f_bench >/dev/null; }
+real	0m0.081s
+user	0m0.099s
+sys	0m0.124s
+
+CPU UTILIZATION: 2.753 / 28
+
+-----------------------------------------
+
+(18): [func-throughput] time { cat f_bench | frun -s : >/dev/null; }
+real	0m0.079s
+user	0m0.130s
+sys	0m0.139s
+
+CPU UTILIZATION: 3.405 / 28
+
+-----------------------------------------
+
+================================================================
+SECTION 2: FORKRUN_EXTRA_FUNCS OVERHEAD
+Measures cost of dependent-function chain vs direct function dispatch
+================================================================
+
+(19): [extra-funcs] plain function (baseline)
+real	0m0.228s
+user	0m2.598s
+sys	0m0.612s
+
+CPU UTILIZATION: 14.078 / 28
+
+-----------------------------------------
+
+(20): [extra-funcs] outer calls inner via FORKRUN_EXTRA_FUNCS
+real	0m0.274s
+user	0m3.115s
+sys	0m0.625s
+
+CPU UTILIZATION: 13.649 / 28
+
+-----------------------------------------
+
+================================================================
+SECTION 3: BATCH SIZE SWEEP
+Lines/sec as a function of -l N. Identifies the throughput cliff.
+================================================================
+
+(21): [batch-sweep] time { frun -l 1 : <f_bench >/dev/null; }
+real	9m24.256s
+user	9m53.738s
+sys	0m9.344s
+
+CPU UTILIZATION: 1.068 / 28
+
+-----------------------------------------
+
+(22): [batch-sweep] time { frun -l 1 _bench_printf_func <f_bench >/dev/null; }
+real	8m2.395s
+user	8m37.926s
+sys	0m11.118s
+
+CPU UTILIZATION: 1.096 / 28
+
+-----------------------------------------
+
+(23): [batch-sweep] time { frun -l 2 : <f_bench >/dev/null; }
+real	2m3.712s
+user	2m17.920s
+sys	0m4.211s
+
+CPU UTILIZATION: 1.148 / 28
+
+-----------------------------------------
+
+(24): [batch-sweep] time { frun -l 2 _bench_printf_func <f_bench >/dev/null; }
+real	2m5.451s
+user	2m24.208s
+sys	0m5.487s
+
+CPU UTILIZATION: 1.193 / 28
+
+-----------------------------------------
+
+(25): [batch-sweep] time { frun -l 4 : <f_bench >/dev/null; }
+real	0m34.019s
+user	0m41.743s
+sys	0m2.068s
+
+CPU UTILIZATION: 1.287 / 28
+
+-----------------------------------------
+
+(26): [batch-sweep] time { frun -l 4 _bench_printf_func <f_bench >/dev/null; }
+real	0m35.558s
+user	0m45.186s
+sys	0m2.718s
+
+CPU UTILIZATION: 1.347 / 28
+
+-----------------------------------------
+
+(27): [batch-sweep] time { frun -l 8 : <f_bench >/dev/null; }
+real	0m9.492s
+user	0m13.363s
+sys	0m0.892s
+
+CPU UTILIZATION: 1.501 / 28
+
+-----------------------------------------
+
+(28): [batch-sweep] time { frun -l 8 _bench_printf_func <f_bench >/dev/null; }
+real	0m10.302s
+user	0m15.871s
+sys	0m1.432s
+
+CPU UTILIZATION: 1.679 / 28
+
+-----------------------------------------
+
+(29): [batch-sweep] time { frun -l 16 : <f_bench >/dev/null; }
+real	0m2.372s
+user	0m4.828s
+sys	0m0.449s
+
+CPU UTILIZATION: 2.224 / 28
+
+-----------------------------------------
+
+(30): [batch-sweep] time { frun -l 16 _bench_printf_func <f_bench >/dev/null; }
+real	0m2.284s
+user	0m6.015s
+sys	0m0.967s
+
+CPU UTILIZATION: 3.056 / 28
+
+-----------------------------------------
+
+(31): [batch-sweep] time { frun -l 32 : <f_bench >/dev/null; }
+real	0m0.608s
+user	0m2.247s
+sys	0m0.275s
+
+CPU UTILIZATION: 4.148 / 28
+
+-----------------------------------------
+
+(32): [batch-sweep] time { frun -l 32 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.688s
+user	0m3.753s
+sys	0m0.844s
+
+CPU UTILIZATION: 6.681 / 28
+
+-----------------------------------------
+
+(33): [batch-sweep] time { frun -l 64 : <f_bench >/dev/null; }
+real	0m0.216s
+user	0m1.343s
+sys	0m0.184s
+
+CPU UTILIZATION: 7.069 / 28
+
+-----------------------------------------
+
+(34): [batch-sweep] time { frun -l 64 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.276s
+user	0m2.544s
+sys	0m0.716s
+
+CPU UTILIZATION: 11.811 / 28
+
+-----------------------------------------
+
+(35): [batch-sweep] time { frun -l 128 : <f_bench >/dev/null; }
+real	0m0.137s
+user	0m1.216s
+sys	0m0.139s
+
+CPU UTILIZATION: 9.890 / 28
+
+-----------------------------------------
+
+(36): [batch-sweep] time { frun -l 128 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.227s
+user	0m2.534s
+sys	0m0.693s
+
+CPU UTILIZATION: 14.215 / 28
+
+-----------------------------------------
+
+(37): [batch-sweep] time { frun -l 256 : <f_bench >/dev/null; }
+real	0m0.139s
+user	0m1.212s
+sys	0m0.146s
+
+CPU UTILIZATION: 9.769 / 28
+
+-----------------------------------------
+
+(38): [batch-sweep] time { frun -l 256 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.228s
+user	0m2.486s
+sys	0m0.626s
+
+CPU UTILIZATION: 13.649 / 28
+
+-----------------------------------------
+
+(39): [batch-sweep] time { frun -l 512 : <f_bench >/dev/null; }
+real	0m0.138s
+user	0m1.228s
+sys	0m0.119s
+
+CPU UTILIZATION: 9.760 / 28
+
+-----------------------------------------
+
+(40): [batch-sweep] time { frun -l 512 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.224s
+user	0m2.441s
+sys	0m0.562s
+
+CPU UTILIZATION: 13.406 / 28
+
+-----------------------------------------
+
+(41): [batch-sweep] time { frun -l 1024 : <f_bench >/dev/null; }
+real	0m0.142s
+user	0m1.176s
+sys	0m0.114s
+
+CPU UTILIZATION: 9.084 / 28
+
+-----------------------------------------
+
+(42): [batch-sweep] time { frun -l 1024 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.225s
+user	0m2.516s
+sys	0m0.565s
+
+CPU UTILIZATION: 13.693 / 28
+
+-----------------------------------------
+
+(43): [batch-sweep] time { frun -l 2048 : <f_bench >/dev/null; }
+real	0m0.134s
+user	0m1.158s
+sys	0m0.108s
+
+CPU UTILIZATION: 9.447 / 28
+
+-----------------------------------------
+
+(44): [batch-sweep] time { frun -l 2048 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.214s
+user	0m2.431s
+sys	0m0.563s
+
+CPU UTILIZATION: 13.990 / 28
+
+-----------------------------------------
+
+(45): [batch-sweep] time { frun -l 4096 : <f_bench >/dev/null; }
+real	0m0.135s
+user	0m1.115s
+sys	0m0.100s
+
+CPU UTILIZATION: 9.000 / 28
+
+-----------------------------------------
+
+(46): [batch-sweep] time { frun -l 4096 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.218s
+user	0m2.460s
+sys	0m0.565s
+
+CPU UTILIZATION: 13.876 / 28
+
+-----------------------------------------
+
+================================================================
+SECTION 4: WORKER COUNT SWEEP
+Lines/sec as a function of -j N. Identifies the saturation point.
+================================================================
+
+(47): [worker-sweep] time { frun -j 1 : <f_bench >/dev/null; }
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+real	0m0.288s
+user	0m0.682s
+sys	0m0.079s
+
+CPU UTILIZATION: 2.642 / 28
+
+-----------------------------------------
+
+(48): [worker-sweep] time { frun -j 1 _bench_printf_func <f_bench >/dev/null; }
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+real	0m0.636s
+user	0m0.933s
+sys	0m0.200s
+
+CPU UTILIZATION: 1.781 / 28
+
+-----------------------------------------
+
+(49): [worker-sweep] time { frun -j 2 : <f_bench >/dev/null; }
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+real	0m0.288s
+user	0m0.673s
+sys	0m0.082s
+
+CPU UTILIZATION: 2.621 / 28
+
+-----------------------------------------
+
+(50): [worker-sweep] time { frun -j 2 _bench_printf_func <f_bench >/dev/null; }
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+--: line 662: ${fd_out[$ID]}: ambiguous redirect
+real	0m0.618s
+user	0m1.143s
+sys	0m0.269s
+
+CPU UTILIZATION: 2.284 / 28
+
+-----------------------------------------
+
+(51): [worker-sweep] time { frun -j 4 : <f_bench >/dev/null; }
+real	0m0.291s
+user	0m0.691s
+sys	0m0.082s
+
+CPU UTILIZATION: 2.656 / 28
+
+-----------------------------------------
+
+(52): [worker-sweep] time { frun -j 4 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.605s
+user	0m1.409s
+sys	0m0.424s
+
+CPU UTILIZATION: 3.029 / 28
+
+-----------------------------------------
+
+(53): [worker-sweep] time { frun -j 7 : <f_bench >/dev/null; }
+real	0m0.282s
+user	0m0.671s
+sys	0m0.077s
+
+CPU UTILIZATION: 2.652 / 28
+
+-----------------------------------------
+
+(54): [worker-sweep] time { frun -j 7 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.667s
+user	0m1.465s
+sys	0m0.403s
+
+CPU UTILIZATION: 2.800 / 28
+
+-----------------------------------------
+
+(55): [worker-sweep] time { frun -j 14 : <f_bench >/dev/null; }
+real	0m0.160s
+user	0m0.731s
+sys	0m0.088s
+
+CPU UTILIZATION: 5.118 / 28
+
+-----------------------------------------
+
+(56): [worker-sweep] time { frun -j 14 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.264s
+user	0m1.464s
+sys	0m0.437s
+
+CPU UTILIZATION: 7.200 / 28
+
+-----------------------------------------
+
+(57): [worker-sweep] time { frun -j 28 : <f_bench >/dev/null; }
+real	0m0.131s
+user	0m1.235s
+sys	0m0.098s
+
+CPU UTILIZATION: 10.175 / 28
+
+-----------------------------------------
+
+(58): [worker-sweep] time { frun -j 28 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.203s
+user	0m2.456s
+sys	0m0.563s
+
+CPU UTILIZATION: 14.871 / 28
+
+-----------------------------------------
+
+(59): [worker-sweep] time { frun -j 56 : <f_bench >/dev/null; }
+real	0m0.134s
+user	0m1.341s
+sys	0m0.163s
+
+CPU UTILIZATION: 11.223 / 28
+
+-----------------------------------------
+
+(60): [worker-sweep] time { frun -j 56 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.206s
+user	0m2.749s
+sys	0m0.669s
+
+CPU UTILIZATION: 16.592 / 28
+
+-----------------------------------------
+
+================================================================
+SECTION 5: LATENCY BENCHMARK (small N)
+Total wall time for N=1..10000. Isolates dispatch overhead.
+================================================================
+
+(61): [latency] N=1: time { seq 1 | frun : >/dev/null; }
+real	0m0.080s
+user	0m0.030s
+sys	0m0.063s
+
+CPU UTILIZATION: 1.162 / 28
+
+-----------------------------------------
+
+(62): [latency-func] N=1: time { seq 1 | frun _bench_noop_func >/dev/null; }
+real	0m0.075s
+user	0m0.026s
+sys	0m0.061s
+
+CPU UTILIZATION: 1.160 / 28
+
+-----------------------------------------
+
+(63): [latency] N=2: time { seq 2 | frun : >/dev/null; }
+real	0m0.076s
+user	0m0.029s
+sys	0m0.060s
+
+CPU UTILIZATION: 1.171 / 28
+
+-----------------------------------------
+
+(64): [latency-func] N=2: time { seq 2 | frun _bench_noop_func >/dev/null; }
+real	0m0.073s
+user	0m0.025s
+sys	0m0.060s
+
+CPU UTILIZATION: 1.164 / 28
+
+-----------------------------------------
+
+(65): [latency] N=5: time { seq 5 | frun : >/dev/null; }
+real	0m0.073s
+user	0m0.025s
+sys	0m0.063s
+
+CPU UTILIZATION: 1.205 / 28
+
+-----------------------------------------
+
+(66): [latency-func] N=5: time { seq 5 | frun _bench_noop_func >/dev/null; }
+real	0m0.075s
+user	0m0.033s
+sys	0m0.060s
+
+CPU UTILIZATION: 1.240 / 28
+
+-----------------------------------------
+
+(67): [latency] N=10: time { seq 10 | frun : >/dev/null; }
+real	0m0.070s
+user	0m0.029s
+sys	0m0.061s
+
+CPU UTILIZATION: 1.285 / 28
+
+-----------------------------------------
+
+(68): [latency-func] N=10: time { seq 10 | frun _bench_noop_func >/dev/null; }
+real	0m0.074s
+user	0m0.027s
+sys	0m0.065s
+
+CPU UTILIZATION: 1.243 / 28
+
+-----------------------------------------
+
+(69): [latency] N=20: time { seq 20 | frun : >/dev/null; }
+real	0m0.077s
+user	0m0.028s
+sys	0m0.069s
+
+CPU UTILIZATION: 1.259 / 28
+
+-----------------------------------------
+
+(70): [latency-func] N=20: time { seq 20 | frun _bench_noop_func >/dev/null; }
+real	0m0.074s
+user	0m0.032s
+sys	0m0.059s
+
+CPU UTILIZATION: 1.229 / 28
+
+-----------------------------------------
+
+(71): [latency] N=50: time { seq 50 | frun : >/dev/null; }
+real	0m0.072s
+user	0m0.021s
+sys	0m0.068s
+
+CPU UTILIZATION: 1.236 / 28
+
+-----------------------------------------
+
+(72): [latency-func] N=50: time { seq 50 | frun _bench_noop_func >/dev/null; }
+real	0m0.074s
+user	0m0.034s
+sys	0m0.059s
+
+CPU UTILIZATION: 1.256 / 28
+
+-----------------------------------------
+
+(73): [latency] N=100: time { seq 100 | frun : >/dev/null; }
+real	0m0.074s
+user	0m0.031s
+sys	0m0.061s
+
+CPU UTILIZATION: 1.243 / 28
+
+-----------------------------------------
+
+(74): [latency-func] N=100: time { seq 100 | frun _bench_noop_func >/dev/null; }
+real	0m0.069s
+user	0m0.030s
+sys	0m0.056s
+
+CPU UTILIZATION: 1.246 / 28
+
+-----------------------------------------
+
+(75): [latency] N=200: time { seq 200 | frun : >/dev/null; }
+real	0m0.075s
+user	0m0.024s
+sys	0m0.069s
+
+CPU UTILIZATION: 1.240 / 28
+
+-----------------------------------------
+
+(76): [latency-func] N=200: time { seq 200 | frun _bench_noop_func >/dev/null; }
+real	0m0.078s
+user	0m0.030s
+sys	0m0.066s
+
+CPU UTILIZATION: 1.230 / 28
+
+-----------------------------------------
+
+(77): [latency] N=500: time { seq 500 | frun : >/dev/null; }
+real	0m0.079s
+user	0m0.030s
+sys	0m0.067s
+
+CPU UTILIZATION: 1.227 / 28
+
+-----------------------------------------
+
+(78): [latency-func] N=500: time { seq 500 | frun _bench_noop_func >/dev/null; }
+real	0m0.072s
+user	0m0.032s
+sys	0m0.056s
+
+CPU UTILIZATION: 1.222 / 28
+
+-----------------------------------------
+
+(79): [latency] N=1000: time { seq 1000 | frun : >/dev/null; }
+real	0m0.074s
+user	0m0.033s
+sys	0m0.063s
+
+CPU UTILIZATION: 1.297 / 28
+
+-----------------------------------------
+
+(80): [latency-func] N=1000: time { seq 1000 | frun _bench_noop_func >/dev/null; }
+real	0m0.072s
+user	0m0.024s
+sys	0m0.066s
+
+CPU UTILIZATION: 1.250 / 28
+
+-----------------------------------------
+
+(81): [latency] N=2000: time { seq 2000 | frun : >/dev/null; }
+real	0m0.077s
+user	0m0.027s
+sys	0m0.073s
+
+CPU UTILIZATION: 1.298 / 28
+
+-----------------------------------------
+
+(82): [latency-func] N=2000: time { seq 2000 | frun _bench_noop_func >/dev/null; }
+real	0m0.076s
+user	0m0.030s
+sys	0m0.068s
+
+CPU UTILIZATION: 1.289 / 28
+
+-----------------------------------------
+
+(83): [latency] N=5000: time { seq 5000 | frun : >/dev/null; }
+real	0m0.069s
+user	0m0.026s
+sys	0m0.065s
+
+CPU UTILIZATION: 1.318 / 28
+
+-----------------------------------------
+
+(84): [latency-func] N=5000: time { seq 5000 | frun _bench_noop_func >/dev/null; }
+real	0m0.077s
+user	0m0.034s
+sys	0m0.072s
+
+CPU UTILIZATION: 1.376 / 28
+
+-----------------------------------------
+
+(85): [latency] N=10000: time { seq 10000 | frun : >/dev/null; }
+real	0m0.074s
+user	0m0.032s
+sys	0m0.067s
+
+CPU UTILIZATION: 1.337 / 28
+
+-----------------------------------------
+
+(86): [latency-func] N=10000: time { seq 10000 | frun _bench_noop_func >/dev/null; }
+real	0m0.076s
+user	0m0.043s
+sys	0m0.066s
+
+CPU UTILIZATION: 1.434 / 28
+
+-----------------------------------------
+
+================================================================
+SECTION 6: STARTUP / FIRST-RESULT OVERHEAD (single item)
+Time from pipe-write to first stdout byte. Reflects init cost.
+================================================================
+
+(87): [startup] time { echo 'x' | frun : >/dev/null; }
+real	0m0.076s
+user	0m0.024s
+sys	0m0.064s
+
+CPU UTILIZATION: 1.157 / 28
+
+-----------------------------------------
+
+(88): [startup] time { echo 'x' | frun _bench_noop_func >/dev/null; }
+real	0m0.077s
+user	0m0.030s
+sys	0m0.058s
+
+CPU UTILIZATION: 1.142 / 28
+
+-----------------------------------------
+
+(89): [startup] time { echo 'x' | frun _bench_printf_func _bench_printf_func >/dev/null; }
+real	0m0.073s
+user	0m0.019s
+sys	0m0.066s
+
+CPU UTILIZATION: 1.164 / 28
+
+-----------------------------------------
+
+(90): [startup] time { echo 'x' | frun echo >/dev/null; }
+real	0m0.072s
+user	0m0.024s
+sys	0m0.060s
+
+CPU UTILIZATION: 1.166 / 28
+
+-----------------------------------------
+
+================================================================
+SECTION 7: NUMA TOPOLOGY VARIANTS
+================================================================
+
+(91): [numa-topo] time { frun --nodes=auto : <f_bench >/dev/null; }
+real	0m0.150s
+user	0m1.142s
+sys	0m0.111s
+
+CPU UTILIZATION: 8.353 / 28
+
+-----------------------------------------
+
+(92): [numa-topo] time { frun --nodes=auto _bench_printf_func <f_bench >/dev/null; }
+real	0m0.217s
+user	0m2.463s
+sys	0m0.595s
+
+CPU UTILIZATION: 14.092 / 28
+
+-----------------------------------------
+
+(93): [numa-topo] time { frun --nodes=1 : <f_bench >/dev/null; }
+real	0m0.084s
+user	0m1.341s
+sys	0m0.072s
+
+CPU UTILIZATION: 16.821 / 28
+
+-----------------------------------------
+
+(94): [numa-topo] time { frun --nodes=1 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.159s
+user	0m2.755s
+sys	0m0.585s
+
+CPU UTILIZATION: 21.006 / 28
+
+-----------------------------------------
+
+(95): [numa-topo] time { frun --nodes=2 : <f_bench >/dev/null; }
+real	0m0.109s
+user	0m1.296s
+sys	0m0.087s
+
+CPU UTILIZATION: 12.688 / 28
+
+-----------------------------------------
+
+(96): [numa-topo] time { frun --nodes=2 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.198s
+user	0m2.646s
+sys	0m0.603s
+
+CPU UTILIZATION: 16.409 / 28
+
+-----------------------------------------
+
+(97): [numa-topo] time { frun --nodes=@2 : <f_bench >/dev/null; }
+real	0m0.102s
+user	0m1.256s
+sys	0m0.090s
+
+CPU UTILIZATION: 13.196 / 28
+
+-----------------------------------------
+
+(98): [numa-topo] time { frun --nodes=@2 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.182s
+user	0m2.598s
+sys	0m0.549s
+
+CPU UTILIZATION: 17.291 / 28
+
+-----------------------------------------
+
+(99): [numa-topo] time { frun --nodes=@4 : <f_bench >/dev/null; }
+real	0m0.145s
+user	0m1.205s
+sys	0m0.094s
+
+CPU UTILIZATION: 8.958 / 28
+
+-----------------------------------------
+
+(100): [numa-topo] time { frun --nodes=@4 _bench_printf_func <f_bench >/dev/null; }
+real	0m0.239s
+user	0m2.465s
+sys	0m0.614s
+
+CPU UTILIZATION: 12.882 / 28
+
+-----------------------------------------
+
+================================================================
+SECTION 8: LONG-LINE THROUGHPUT (SIMD scanner stress)
+Each line is 200 chars. Tests scanner boundary efficiency.
+================================================================
+
+(101): [longlines] time { frun  : <f_longlines >/dev/null; }
+real	0m0.140s
+user	0m0.646s
+sys	0m0.191s
+
+CPU UTILIZATION: 5.978 / 28
+
+-----------------------------------------
+
+(102): [longlines] time { frun -s : <f_longlines >/dev/null; }
+real	0m0.083s
+user	0m0.082s
+sys	0m0.119s
+
+CPU UTILIZATION: 2.421 / 28
+
+-----------------------------------------
+
+(103): [longlines] time { frun  _bench_printf_func <f_longlines >/dev/null; }
+real	0m0.177s
+user	0m1.052s
+sys	0m0.293s
+
+CPU UTILIZATION: 7.598 / 28
+
+-----------------------------------------
+
+
+-----------------------------
+BENCHMARK INPUT FILE STATS
+
+NAME: f_bench
+SIZE: 6888896 bytes
+LINE COUNT: 1000000 lines
+
+NAME: f_longlines
+SIZE: 20100000 bytes
+LINE COUNT: 100000 lines
+
+NAME: f_bytes
+SIZE: 104857600 bytes
+LINE COUNT: 0 lines
+
