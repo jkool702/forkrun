@@ -1267,7 +1267,7 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].total_lines_consumed, 0);
       atomic_store_relaxed(&state[n].global_scanned, 0);
       atomic_store_relaxed(&state[n].min_idx, 0);
-      atomic_store_relaxed(&state[n].fallow_active, 0);
+      atomic_store_relaxed(&state[n].fallow_active, 1);
       atomic_store_relaxed(&state[n].tail_idx, 0);
       atomic_store_relaxed(&state[n].scanner_finished, 0);
       atomic_store_relaxed(&state[n].stats_chunks_assigned, 0);
