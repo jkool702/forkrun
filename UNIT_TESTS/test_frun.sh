@@ -790,7 +790,7 @@ print_section "Variable Serialization (FORKRUN_EXTRA_VARS)"
 
 # Test 1: Simple String Propagation
 run_test "FORKRUN_EXTRA_VARS passes simple strings" \
-  "MY_STR='Hello World'; print_str() { for arg in \"\$@\"; do echo \"\$MY_STR: \$arg\"; done; }; cat '$LINE_INPUT' | FORKRUN_EXTRA_FUNCS='print_str' FORKRUN_EXTRA_VARS='MY_STR' frun -l 1 print_str | head -n 1" \
+  "MY_STR='Hello World'; print_str() { for arg in \"\$@\"; do echo \"\$MY_STR: \$arg\"; done; }; cat '$LINE_INPUT' | FORKRUN_EXTRA_FUNCS='print_str' FORKRUN_EXTRA_VARS='MY_STR' frun -k -l 1 print_str | head -n 1" \
   "Hello World: line1"
 
 # Test 2: Standard Array Propagation (Preserving spaces/indexes)

@@ -3411,6 +3411,27 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 // for other idle workers to steal. Escrow is pure advisory capability; forward
 // progress is guaranteed by strictly monotonic indices.
 static int ring_claim_main(int argc, char **argv) {
+  // --- UNIVERSAL SIGPIPE / TEARDOWN SHIELD ---
+  if (state) {
+      // 1. Did someone else pull the fire alarm? (e.g., ring_order, or Fallow dying)
+      if (atomic_load_relaxed(&state[0].fallow_active) == 0) {
+          return EXECUTION_FAILURE; 
+      }
+
+      // 2. Sentry duty: Check if stdout is broken (Crucial for -u realtime mode)
+      // We only poll every 64 claims to ensure absolute zero overhead on the fast path.
+      static __thread int claim_calls = 0;
+      if ((claim_calls++ & 63) == 0) {
+          struct pollfd pfd_stdout = {.fd = 1, .events = POLLOUT};
+          if (poll(&pfd_stdout, 1, 0) > 0 && (pfd_stdout.revents & POLLERR)) {
+              // The downstream pipe was cut (e.g., head -n 5). Pull the fire alarm!
+              atomic_store_release(&state[0].fallow_active, 0);
+              return EXECUTION_FAILURE;
+          }
+      }
+  }
+  // -------------------------------------------
+
   const char *v_target = "REPLY";
   int fd_read = -1;
 
@@ -3840,6 +3861,10 @@ check_boundaries:
 // When a worker finishes processing a batch, it sends an acknowledgment packet
 // to the fallow pipe (legacy) or directly updates output tracking. This signal
 // is what allows the system to later garbage-collect the processed data.
+// Worker Acknowledgment:
+// When a worker finishes processing a batch, it sends an acknowledgment packet
+// to the fallow pipe (legacy) or directly updates output tracking. This signal
+// is what allows the system to later garbage-collect the processed data.
 static int ring_ack_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
@@ -3884,10 +3909,10 @@ static int ring_ack_main(int argc, char **argv) {
           local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
       uint64_t end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
       struct PhysPacket pp = {.off = start, .len = end - start};
-      robust_pipe_write(fd_fallow, &pp, sizeof(pp));
+      if (robust_pipe_write(fd_fallow, &pp, sizeof(pp)) < 0) return EXECUTION_FAILURE;
     } else {
       struct IndexPacket ip = {.idx = op.major_idx, .cnt = op.cnt};
-      robust_pipe_write(fd_fallow, &ip, sizeof(ip));
+      if (robust_pipe_write(fd_fallow, &ip, sizeof(ip)) < 0) return EXECUTION_FAILURE;
     }
   }
 
@@ -3908,11 +3933,12 @@ static int ring_ack_main(int argc, char **argv) {
         op.fd = fd_target;
         op.off = (uint64_t)last_ack_offset;
         op.len = (uint64_t)(curr - last_ack_offset);
-        robust_pipe_write(fd_pipe, &op, sizeof(op));
+        if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) return EXECUTION_FAILURE;
         last_ack_offset = curr;
       }
-    } else
-      robust_pipe_write(fd_target, &op, sizeof(op));
+    } else {
+      if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) return EXECUTION_FAILURE;
+    }
   }
   return EXECUTION_SUCCESS;
 }
@@ -4163,7 +4189,7 @@ static int ring_order_main(int argc, char **argv) {
 
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0) break; 
+    if (n_read <= 0) break;
     buffered += n_read;
     size_t count = buffered / pkt_sz;
     struct OrderPacket *ops = (struct OrderPacket *)pkt_buf;
@@ -4183,7 +4209,10 @@ static int ring_order_main(int argc, char **argv) {
           } else {
             if (ring_copy_chunk(op->fd, 1, offset, op->len) < 0) stdout_broken = true;
           }
-          if (stdout_broken) break;
+          if (stdout_broken) {
+              if (state) atomic_store_release(&state[0].fallow_active, 0); // <--- FIRE ALARM
+              break;
+          }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
         } else {
           // Legacy file unlinking mode...
@@ -4203,7 +4232,10 @@ static int ring_order_main(int argc, char **argv) {
             } else {
               if (ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len) < 0) stdout_broken = true;
             }
-            if (stdout_broken) break;
+            if (stdout_broken) {
+                if (state) atomic_store_release(&state[0].fallow_active, 0); // <--- FIRE ALARM
+                break;
+            }
             safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
           }
           if (numa_mode) {
@@ -4213,7 +4245,10 @@ static int ring_order_main(int argc, char **argv) {
         }
       }
     }
-    if (stdout_broken) break; // Break outer read loop on SIGPIPE
+    if (stdout_broken) {
+        if (state) atomic_store_release(&state[0].fallow_active, 0); // <--- FIRE ALARM
+        break; // Break outer read loop on SIGPIPE
+    }
     size_t consumed = count * pkt_sz;
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;

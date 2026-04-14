@@ -9,7 +9,10 @@
 #   SECTION 3: Batch Size Sweep (-l 1 → -l max): tuning sensitivity
 #   SECTION 4: Worker Count Sweep (-j 1 → -j nproc*2)
 #   SECTION 5: Latency Benchmark (small inputs, dispatch overhead matters)
-#   SECTION 6: Startup Overhead (time to first result, single-item input)
+#   SECTION 6: Startup Overhead (100-line input, ring init cost)
+#   SECTION 7: NUMA Topology Variants (NUMA systems only)
+#   SECTION 8: Long-Line Throughput (SIMD scanner boundary stress)
+#   SECTION 9: Byte-Mode Throughput (-b chunk sweep, no delimiters)
 #
 # USAGE:
 #   Append to run_benchmark.bash, or run standalone:
@@ -57,7 +60,7 @@ getCPU() {
 # ---------------------------------------------------------------------------
 # Setup test files if not already present
 # ---------------------------------------------------------------------------
-fLines=1000000   # 1M lines — fast enough to run alongside main benchmarks
+fLines=10000000   # 10M lines — fast enough to run alongside main benchmarks
 
 [[ -f ./f_bench ]] || seq $fLines > f_bench
 
@@ -118,7 +121,12 @@ echo '================================================================'
 sleep 0.1
 
 for Fk in f_bench; do
-    for mode_flags in '' '-k' '-s'; do
+    # Note: '-s' mode is intentionally excluded from this section.
+    # In -s mode frun pipes batch bytes directly to the command's stdin.
+    # The ':' builtin never reads stdin, so every splice immediately gets
+    # EPIPE — producing garbage timing results. '-s' throughput is measured
+    # separately in Section 8 via the stdin-passthrough ('cat') benchmark.
+    for mode_flags in '' '-k'; do
         for cmd_desc in \
             ':                 :' \
             '_bench_noop_func  _bench_noop_func' \
@@ -127,9 +135,6 @@ for Fk in f_bench; do
         do
             cmd="${cmd_desc%%  *}"
             desc="${cmd_desc##*  }"
-
-            # Avoid trying to use functions in -s mode (not applicable)
-            [[ "$mode_flags" == '-s' && "$cmd" != ':' && "$cmd" != 'cat' ]] && continue
 
             ((K++))
             echo
@@ -275,17 +280,22 @@ done
 
 # ============================================================================
 # SECTION 6: Startup / First-Result Overhead
-# Measures how long frun takes to produce output from a single input item.
-# This is the absolute floor for latency-sensitive use cases.
-# The 'read' trick captures the first line of output and its timestamp.
+# Measures total wall time for a minimal but real input (100 lines).
+# echo 'x' | frun is too small to time reliably — the process-start noise
+# dominates and results are not reproducible. 100 lines keeps the data
+# phase negligible while giving the ring/scanner a real cycle to complete.
 # ============================================================================
 
 echo
 echo '================================================================'
-echo 'SECTION 6: STARTUP / FIRST-RESULT OVERHEAD (single item)'
-echo 'Time from pipe-write to first stdout byte. Reflects init cost.'
+echo 'SECTION 6: STARTUP / FIRST-RESULT OVERHEAD (100-line input)'
+echo 'Time from first stdin byte to last stdout byte. Reflects init cost.'
 echo '================================================================'
 sleep 0.1
+
+# Generate a tiny file once — avoids seq startup time being included in the
+# benchmark itself.
+[[ -f ./f_small ]] || seq 100 > f_small
 
 for cmd_desc in \
     ':                 :' \
@@ -297,8 +307,8 @@ for cmd_desc in \
 
     ((K++))
     echo
-    echo "($K): [startup] time { echo 'x' | frun $desc >/dev/null; }"
-    { time { echo 'x' | frun $cmd >/dev/null 2>&$fd2; }; } \
+    echo "($K): [startup] time { frun $desc <f_small >/dev/null; }"
+    { time { frun $cmd <f_small >/dev/null 2>&$fd2; }; } \
         2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
     getCPU
 done
@@ -362,10 +372,41 @@ for Fk in f_longlines; do
 done
 
 # ============================================================================
+# SECTION 9: Byte-Mode Throughput (-b / -s)
+# f_bytes has NO newlines — frun in line mode would treat it as one
+# enormous batch. This section uses byte-mode (-b N) where frun splits
+# on fixed byte boundaries instead of delimiter scanning.
+# Sweep chunk sizes from 4K to 1M to find the splice throughput peak.
+# ============================================================================
+
+echo
+echo '================================================================'
+echo 'SECTION 9: BYTE-MODE THROUGHPUT (-b chunk sweep on f_bytes)'
+echo 'No newlines in input. Tests fixed-size chunk dispatch path.'
+echo '================================================================'
+sleep 0.1
+
+for chunk in 4096 16384 65536 262144 524288 1048576; do
+    ((K++))
+    echo
+    echo "($K): [byte-mode] time { frun -b $chunk -s cat <f_bytes >/dev/null; }"
+    { time { frun -b $chunk -s cat <f_bytes >/dev/null 2>&$fd2; }; } \
+        2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+    getCPU
+
+    ((K++))
+    echo
+    echo "($K): [byte-mode] time { frun -b $chunk -s : <f_bytes >/dev/null; }"
+    { time { frun -b $chunk -s : <f_bytes >/dev/null 2>&$fd2; }; } \
+        2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
+    getCPU
+done
+
+# ============================================================================
 # INPUT FILE STATS
 # ============================================================================
 printf '\n\n-----------------------------\nBENCHMARK INPUT FILE STATS\n\n'
-for f in f_bench f_longlines f_bytes; do
+for f in f_bench f_longlines f_bytes f_small; do
     [[ -f "$f" ]] || continue
     printf 'NAME: %s\nSIZE: %s bytes\nLINE COUNT: %s lines\n\n' \
         "$f" \
@@ -373,8 +414,8 @@ for f in f_bench f_longlines f_bytes; do
         "$(wc -l < "$f")"
 done
 
-# Cleanup files that we created (leave f_bench for reuse by main benchmark)
-\rm -f ./.time
+# Cleanup temporary files created by this script
+\rm -f ./.time f_small
 
 ) {fd1}>&1 {fd2}>&2
 )

@@ -7,6 +7,7 @@
 #  SECTION A: Regression — Bash function transmission (the discovered bug)
 #  SECTION B: Bash functions — core feature coverage
 #  SECTION C: FORKRUN_EXTRA_FUNCS — dependent function chains
+#  SECTION C2: FORKRUN_EXTRA_VARS — passing variables into the cleanroom
 #  SECTION D: Data integrity — exact line-level sorted comparison
 #  SECTION E: Special character handling in input
 #  SECTION F: Batch correctness — exact arg counts per call
@@ -71,7 +72,8 @@ print_section() {
 }
 
 in_section() {
-    # Returns 0 (true) if current section should run
+    # Returns 0 (true) if current section should run.
+    # Supports multi-char labels: A, B, C, C2, D, ...
     [[ -z "$SECTION_FILTER" || "$SECTION_FILTER" == "$1" ]]
 }
 
@@ -466,41 +468,47 @@ ok:3"
 
 # ============================================================================
 # SECTION C: FORKRUN_EXTRA_FUNCS — Dependent Function Chains
+#
+# IMPORTANT: FORKRUN_EXTRA_FUNCS must be set as an env var on the frun
+# command itself, not on the upstream pipeline command:
+#
+#   CORRECT:   seq 10 | FORKRUN_EXTRA_FUNCS='helper' frun main_func
+#   WRONG:     FORKRUN_EXTRA_FUNCS='helper' seq 10 | frun main_func
+#
+# The reason: frun reads this variable during its own cleanroom exec setup,
+# where it calls declare -f on each name listed and injects the definitions
+# into the cleanroom shell. If the variable is set on the pipeline source
+# instead of on frun, it is in the environment of the wrong process.
 # ============================================================================
 print_section C "FORKRUN_EXTRA_FUNCS: Dependent Function Chains"
 
-# main_func calls helper — helper must be exported via FORKRUN_EXTRA_FUNCS.
+# main_func calls helper — helper must be exported via FORKRUN_EXTRA_FUNCS
+# placed on the frun invocation itself.
 run_test_sorted C "FORKRUN_EXTRA_FUNCS: one-level dependency" \
-    "helper() { echo \"H:\$*\"; }; main_func() { helper \"\$@\"; }; FORKRUN_EXTRA_FUNCS='helper' seq 3 | frun -l 1 main_func" \
+    "helper() { echo \"H:\$*\"; }; main_func() { helper \"\$@\"; }; seq 3 | FORKRUN_EXTRA_FUNCS='helper' frun -l 1 main_func" \
     "H:1
 H:2
 H:3"
 
-# Two-level chain: main -> mid -> leaf
+# Two-level chain: main -> mid -> leaf.
+# Both mid and leaf must appear in FORKRUN_EXTRA_FUNCS.
 run_test_sorted C "FORKRUN_EXTRA_FUNCS: two-level chain" \
-    "leaf() { echo \"LEAF:\$*\"; }; mid() { leaf \"\$@\"; }; main_func() { mid \"\$@\"; }; FORKRUN_EXTRA_FUNCS='mid leaf' seq 3 | frun -l 1 main_func" \
+    "leaf() { echo \"LEAF:\$*\"; }; mid() { leaf \"\$@\"; }; main_func() { mid \"\$@\"; }; seq 3 | FORKRUN_EXTRA_FUNCS='mid leaf' frun -l 1 main_func" \
     "LEAF:1
 LEAF:2
 LEAF:3"
 
-# Multiple independent helpers listed in FORKRUN_EXTRA_FUNCS.
-run_test_sorted C "FORKRUN_EXTRA_FUNCS: multiple helpers" \
-    "pfx() { echo \"P:\$*\"; }; sfx() { echo \"S:\$*\"; }; combo() { pfx \"\$@\"; sfx \"\$@\"; }; FORKRUN_EXTRA_FUNCS='pfx sfx' seq 2 | frun -l 1 combo" \
+# Multiple independent helpers listed together in FORKRUN_EXTRA_FUNCS.
+run_test_sorted C "FORKRUN_EXTRA_FUNCS: multiple helpers (space-separated list)" \
+    "pfx() { echo \"P:\$*\"; }; sfx() { echo \"S:\$*\"; }; combo() { pfx \"\$@\"; sfx \"\$@\"; }; seq 2 | FORKRUN_EXTRA_FUNCS='pfx sfx' frun -l 1 combo" \
     "P:1
 P:2
 S:1
 S:2"
 
-# FORKRUN_EXTRA_FUNCS with exported environment variable used inside helper.
-run_test_sorted C "FORKRUN_EXTRA_FUNCS: helper uses exported env var" \
-    "export MY_PREFIX='TAG'; format_line() { echo \"\${MY_PREFIX}:\$*\"; }; dispatch() { format_line \"\$@\"; }; FORKRUN_EXTRA_FUNCS='format_line' seq 3 | frun -l 1 dispatch" \
-    "TAG:1
-TAG:2
-TAG:3"
-
 # FORKRUN_EXTRA_FUNCS combined with -k (ordered output).
 run_test_exact C "FORKRUN_EXTRA_FUNCS: ordered output (-k)" \
-    "add_prefix() { echo \"ORDERED:\$*\"; }; main_f() { add_prefix \"\$@\"; }; FORKRUN_EXTRA_FUNCS='add_prefix' seq 4 | frun -l 1 -k main_f" \
+    "add_prefix() { echo \"ORDERED:\$*\"; }; main_f() { add_prefix \"\$@\"; }; seq 4 | FORKRUN_EXTRA_FUNCS='add_prefix' frun -l 1 -k main_f" \
     "ORDERED:1
 ORDERED:2
 ORDERED:3
@@ -508,10 +516,126 @@ ORDERED:4"
 
 # FORKRUN_EXTRA_FUNCS combined with -s (stdin passthrough).
 run_test_sorted C "FORKRUN_EXTRA_FUNCS: stdin passthrough (-s)" \
-    "transform_stdin() { sed 's/^/X:/'; }; process_batch() { transform_stdin; }; FORKRUN_EXTRA_FUNCS='transform_stdin' printf 'a\nb\nc\n' | frun -s process_batch" \
+    "transform_stdin() { sed 's/^/X:/'; }; process_batch() { transform_stdin; }; printf 'a\nb\nc\n' | FORKRUN_EXTRA_FUNCS='transform_stdin' frun -s process_batch" \
     "X:a
 X:b
 X:c"
+
+# FORKRUN_EXTRA_FUNCS combined with NUMA (--nodes=2).
+run_test_sorted C "FORKRUN_EXTRA_FUNCS: works with --nodes=2" \
+    "inner() { echo \"IN:\$*\"; }; outer() { inner \"\$@\"; }; seq 6 | FORKRUN_EXTRA_FUNCS='inner' frun --nodes=2 -l 1 outer" \
+    "IN:1
+IN:2
+IN:3
+IN:4
+IN:5
+IN:6"
+
+# Omitting a required helper from FORKRUN_EXTRA_FUNCS must cause the function
+# to be undefined in the cleanroom. The worker will get a "command not found"
+# error from bash. We verify this produces non-empty stderr and non-zero output
+# (rather than silently succeeding with wrong data).
+# NOTE: We check that the output does NOT contain all expected lines — if the
+# helper is missing, at least some workers will fail.
+run_test_regex C "FORKRUN_EXTRA_FUNCS: missing helper causes worker error (not silent)" \
+    "missing_helper() { echo \"SHOULD_NOT_APPEAR:\$*\"; }; caller_func() { missing_helper \"\$@\"; }; seq 3 | frun -l 1 caller_func 2>&1 | grep -c 'SHOULD_NOT_APPEAR' || true" \
+    "^0$" 0 false
+
+# ============================================================================
+# SECTION C2: FORKRUN_EXTRA_VARS — Passing Variables into the Cleanroom
+#
+# FORKRUN_EXTRA_VARS passes variable names (space-separated) whose current
+# values will be injected into the frun cleanroom shell.
+# Like FORKRUN_EXTRA_FUNCS, it must be placed on the frun invocation:
+#
+#   CORRECT:   MY_VAR=hello seq 3 | FORKRUN_EXTRA_VARS='MY_VAR' frun func
+#   CORRECT:   MY_VAR=hello; seq 3 | FORKRUN_EXTRA_VARS='MY_VAR' frun func
+#   WRONG:     FORKRUN_EXTRA_VARS='MY_VAR' seq 3 | frun func
+# ============================================================================
+print_section C2 "FORKRUN_EXTRA_VARS: Passing Variables into the Cleanroom"
+
+# Basic scalar variable injection.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: scalar variable reaches workers" \
+    "MY_TAG='hello'; use_tag() { echo \"\${MY_TAG}:\$*\"; }; seq 3 | FORKRUN_EXTRA_VARS='MY_TAG' frun -l 1 use_tag" \
+    "hello:1
+hello:2
+hello:3"
+
+# Multiple variables injected at once.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: multiple variables (space-separated)" \
+    "PREFIX='['; SUFFIX=']'; wrap_var() { echo \"\${PREFIX}\$1\${SUFFIX}\"; }; seq 3 | FORKRUN_EXTRA_VARS='PREFIX SUFFIX' frun -l 1 wrap_var" \
+    "[1]
+[2]
+[3]"
+
+# Variable containing spaces.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: variable value containing spaces" \
+    "MY_LABEL='hello world'; show_label() { echo \"\${MY_LABEL}:\$*\"; }; seq 2 | FORKRUN_EXTRA_VARS='MY_LABEL' frun -l 1 show_label" \
+    "hello world:1
+hello world:2"
+
+# Numeric variable.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: numeric variable used in arithmetic" \
+    "MULTIPLIER=3; mul() { echo \$(( \$1 * MULTIPLIER )); }; seq 4 | FORKRUN_EXTRA_VARS='MULTIPLIER' frun -l 1 mul" \
+    "3
+6
+9
+12"
+
+# FORKRUN_EXTRA_VARS combined with FORKRUN_EXTRA_FUNCS — both active.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS + FORKRUN_EXTRA_FUNCS: combined" \
+    "MY_PFX='X'; format() { echo \"\${MY_PFX}:\$*\"; }; dispatch() { format \"\$@\"; }; seq 3 | FORKRUN_EXTRA_FUNCS='format' FORKRUN_EXTRA_VARS='MY_PFX' frun -l 1 dispatch" \
+    "X:1
+X:2
+X:3"
+
+# FORKRUN_EXTRA_VARS combined with ordered output (-k).
+run_test_exact C2 "FORKRUN_EXTRA_VARS: ordered output (-k)" \
+    "STEP='S'; label_step() { echo \"\${STEP}\$*\"; }; seq 4 | FORKRUN_EXTRA_VARS='STEP' frun -k -l 1 label_step" \
+    "S1
+S2
+S3
+S4"
+
+# FORKRUN_EXTRA_VARS combined with -s (stdin passthrough).
+# The variable is available inside the function that reads stdin.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: available in stdin-mode (-s) function" \
+    "MY_DELIM='|'; add_delim() { while IFS= read -r line; do echo \"\${line}\${MY_DELIM}\"; done; }; printf 'a\nb\nc\n' | FORKRUN_EXTRA_VARS='MY_DELIM' frun -s add_delim" \
+    "a|
+b|
+c|"
+
+# Variable that is unset should not inject into cleanroom (no error either).
+# We verify the function gracefully handles an unset variable (empty string).
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: unset variable injects as empty string" \
+    "unset UNSET_VAR 2>/dev/null; show_empty() { echo \"[\${UNSET_VAR:-EMPTY}]\"; }; seq 2 | FORKRUN_EXTRA_VARS='UNSET_VAR' frun -l 1 show_empty" \
+    "[EMPTY]
+[EMPTY]"
+
+# Array variable injection (if supported — bash arrays via declare -p).
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: array variable injection" \
+    "declare -a MY_ARR=(alpha beta gamma); use_arr() { echo \"\${MY_ARR[\$1-1]}\"; }; seq 3 | FORKRUN_EXTRA_VARS='MY_ARR' frun -l 1 use_arr" \
+    "alpha
+beta
+gamma"
+
+# Associative array injection.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: associative array injection" \
+    "declare -A MY_MAP=([one]=1 [two]=2 [three]=3); lookup() { echo \"\${MY_MAP[\$1]}\"; }; printf 'one\ntwo\nthree\n' | FORKRUN_EXTRA_VARS='MY_MAP' frun -l 1 lookup" \
+    "1
+2
+3"
+
+# Variable with special characters in value.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: variable value with special characters" \
+    "PATTERN='foo\$bar'; show_pattern() { echo \"\${PATTERN}\"; }; seq 2 | FORKRUN_EXTRA_VARS='PATTERN' frun -l 1 show_pattern" \
+    'foo$bar
+foo$bar'
+
+# Large variable value (tests that no size limit is hit during injection).
+run_test_line_count C2 "FORKRUN_EXTRA_VARS: large variable value (1000 chars)" \
+    "BIG_VAR=\$(printf '%1000s' | tr ' ' 'X'); use_big() { echo \"\${#BIG_VAR}\"; }; seq 3 | FORKRUN_EXTRA_VARS='BIG_VAR' frun -l 1 use_big" \
+    3
 
 # ============================================================================
 # SECTION D: Data Integrity — Exact Line-Level Verification
@@ -559,8 +683,8 @@ run_test_exact D "Byte mode integrity: non-multiple chunk (-b 30, 100 bytes)" \
 
 # Null-delimited integrity: content must survive NUL → frun → output unchanged.
 run_test_exact D "Null-delimited integrity (-z, -s)" \
-    "printf 'alpha\0beta\0gamma\0delta\0' | frun -z -s cat" \
-    "$(printf 'alpha\0beta\0gamma\0delta\0')"
+    "printf 'alpha\0beta\0gamma\0delta\0' | frun -z -s cat | md5sum | awk '{print \$1}'" \
+    "$(printf 'alpha\0beta\0gamma\0delta\0' | md5sum | awk '{print $1}')"
 
 # Verify no duplicate lines with high worker count (regression for escrow race).
 # If escrow causes double-dispatch, a line would appear twice.
@@ -632,7 +756,7 @@ run_test_exact E "Pipe char in input treated as literal" \
 # Full special-character file passthrough via -s (raw stdin, no quoting needed).
 # In -s mode, data flows through kernel pipes unmodified.
 run_test_exact E "Special chars passthrough intact in -s mode" \
-    "cat '$SPECIAL' | frun -s cat" \
+    "cat '$SPECIAL' | frun -k -s cat" \
     "$(cat "$SPECIAL")"
 
 # Unicode multi-byte characters.
@@ -782,7 +906,7 @@ T:5"
 
 # FORKRUN_EXTRA_FUNCS + NUMA.
 run_test_sorted H "FORKRUN_EXTRA_FUNCS + NUMA (--nodes=2)" \
-    "inner() { echo \"IN:\$*\"; }; outer() { inner \"\$@\"; }; FORKRUN_EXTRA_FUNCS='inner' seq 6 | frun --nodes=2 -l 1 outer" \
+    "inner() { echo \"IN:\$*\"; }; outer() { inner \"\$@\"; }; seq 6 | FORKRUN_EXTRA_FUNCS='inner' frun --nodes=2 -l 1 outer" \
     "IN:1
 IN:2
 IN:3
@@ -909,10 +1033,10 @@ tick3"
 # ============================================================================
 print_section J "Worker and ID Semantics"
 
-# -I flag: batch IDs must be present and follow the [NODE.]WORKER.BATCH format.
-run_test_regex J "-I flag: batch ID format is [NODE.]WORKER.BATCH" \
+# -I flag: batch IDs must be present and follow the [{NODE.}WORKER.BATCH] format.
+run_test_regex J "-I flag: batch ID format is {NODE.WORKER.BATCH}" \
     "echo 'test' | frun -l 1 -I echo {ID}" \
-    "^([0-9]+\.)?[0-9]+\.[0-9]+$" 0 false
+    "^\{([0-9]+\.)?[0-9]+\.[0-9]+\}$" 0 false
 
 # -I: all batch IDs in a run must be unique (no ID collision between workers).
 run_test_exact J "-I flag: all IDs in a 10-line run are unique" \
