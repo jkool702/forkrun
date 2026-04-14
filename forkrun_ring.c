@@ -4160,7 +4160,6 @@ static int ring_order_main(int argc, char **argv) {
   if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]);
   bool memfd_mode = (strcmp(argv[2], "memfd") == 0);
-  const char *prefix = argv[2];
   bool unordered_mode = false;
   bool numa_mode = (global_num_nodes > 1);
   for (int i = 3; i < argc; i++) {
