@@ -598,7 +598,7 @@ toc() { :; }
             '
         worker_func_src+="${pCode}"'
         fi
-        '"${ring_ack_str}"'
+        '"${ring_ack_str}"' || break
     done
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &

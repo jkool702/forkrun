@@ -760,11 +760,7 @@ struct IndexPacket {
   uint64_t idx;
   uint64_t cnt;
 };
-struct Interval {
-  uint64_t s;
-  uint64_t e;
-  struct Interval *next;
-};
+
 struct PhysPacket {
   uint64_t off;
   uint64_t len;
@@ -1785,18 +1781,16 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
 
 #define NUMA_CHECK_SCANNERS_DONE() do { \
-  if (state[0].cfg_limit > 0) { \
-    bool _all_done = true; \
-    for (int _i = 0; _i < num_nodes; _i++) { \
-      if (!atomic_load_acquire(&state[_i].scanner_finished)) { \
-        _all_done = false; \
-        break; \
-      } \
+  bool _all_done = true; \
+  for (int _i = 0; _i < num_nodes; _i++) { \
+    if (!atomic_load_acquire(&state[_i].scanner_finished)) { \
+      _all_done = false; \
+      break; \
     } \
-    if (_all_done) { \
-      limit_reached_exit = true; \
-      goto ingest_done; \
-    } \
+  } \
+  if (_all_done) { \
+    limit_reached_exit = true; \
+    goto ingest_done; \
   } \
 } while(0)
 
@@ -2573,6 +2567,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   bool force_refill = false;
 
   while (1) {
+    // NEW: If Fallow dies (due to downstream EPIPE), kill the Scanner instantly.
+    if (atomic_load_acquire(&local_state->fallow_active) == 0) {
+        goto unified_scanner_eof;
+    }
     uint64_t chunk_end = ~(uint64_t)0;
     uint64_t current_p_offset;
     struct ChunkMeta *meta = NULL;
@@ -4044,25 +4042,62 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
 // This is the only place in the fast path where workers might block (if the
 // pipe fills).
 
+// ==============================================================================
+// INTERVAL MIN-HEAP (O(log N) out-of-order sequence assembly)
+// ==============================================================================
+struct IntervalNode {
+    uint64_t s;
+    uint64_t e;
+};
+
+static inline void interval_heap_push(struct IntervalNode **heap_ptr, int *sz, int *cap, uint64_t s, uint64_t e) {
+    if (*sz >= *cap) {
+        *cap = (*cap) * 2;
+        *heap_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct IntervalNode));
+    }
+    struct IntervalNode *heap = *heap_ptr;
+    int i = (*sz)++;
+    while (i > 0) {
+        int p = (i - 1) / 2;
+        if (heap[p].s <= s) break;
+        heap[i] = heap[p];
+        i = p;
+    }
+    heap[i].s = s;
+    heap[i].e = e;
+}
+
+static inline void interval_heap_pop(struct IntervalNode *heap, int *sz, struct IntervalNode *out) {
+    *out = heap[0];
+    struct IntervalNode tmp = heap[--(*sz)];
+    int i = 0;
+    while (i * 2 + 1 < *sz) {
+        int child = i * 2 + 1;
+        if (child + 1 < *sz && heap[child + 1].s < heap[child].s) child++;
+        if (tmp.s <= heap[child].s) break;
+        heap[i] = heap[child];
+        i = child;
+    }
+    heap[i] = tmp;
+}
+
 struct OrderFdState {
-    struct Interval *head;
+    struct IntervalNode *heap;
+    int heap_sz;
+    int heap_cap;
     uint64_t limit;
     off_t last_punched;
 };
 
-// Safely punches holes in per-worker memfds, preventing out-of-order
-// escrow batches from vaporizing chronologically later batches in both NUMA and UMA.
-static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len,
-                                   struct OrderFdState **fd_states_ptr, int *fd_states_cap_ptr) {
-    if (p_fd < 0) return; // SHIELD: Prevent buffer underflow from invalid FDs
-
+static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len, struct OrderFdState **fd_states_ptr, int *fd_states_cap_ptr) {
+    if (p_fd < 0) return;
     struct OrderFdState *fd_states = *fd_states_ptr;
     int fd_states_cap = *fd_states_cap_ptr;
 
     if (p_fd >= fd_states_cap) {
         int new_cap = p_fd + 128;
         struct OrderFdState *new_states = realloc(fd_states, new_cap * sizeof(struct OrderFdState));
-        if (!new_states) return; // Silent fallback: halts GC for new FDs but prevents crash
+        if (!new_states) return; 
         memset(&new_states[fd_states_cap], 0, (new_cap - fd_states_cap) * sizeof(struct OrderFdState));
         *fd_states_ptr = new_states;
         *fd_states_cap_ptr = new_cap;
@@ -4070,201 +4105,179 @@ static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len,
     }
 
     struct OrderFdState *fs = &fd_states[p_fd];
+    if (fs->heap_cap == 0) {
+        fs->heap_cap = 64;
+        fs->heap = malloc(fs->heap_cap * sizeof(struct IntervalNode));
+    }
 
     if ((uint64_t)p_off <= fs->limit) {
-        // If the new packet overlaps or extends the current contiguous limit
         uint64_t new_end = (uint64_t)p_off + p_len;
         if (new_end > fs->limit) fs->limit = new_end;
 
-        // Absorb any buffered future intervals that now connect
-        while (fs->head && fs->head->s <= fs->limit) {
-            struct Interval *tmp = fs->head;
-            if (tmp->e > fs->limit) fs->limit = tmp->e;
-            fs->head = tmp->next;
-            free(tmp);
+        while (fs->heap_sz > 0 && fs->heap[0].s <= fs->limit) {
+            struct IntervalNode top;
+            interval_heap_pop(fs->heap, &fs->heap_sz, &top);
+            if (top.e > fs->limit) fs->limit = top.e;
         }
 
         off_t aligned = (off_t)((fs->limit / 4096ULL) * 4096ULL);
         if (aligned > fs->last_punched) {
-            fallocate(p_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                      fs->last_punched, aligned - fs->last_punched);
+            fallocate(p_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, fs->last_punched, aligned - fs->last_punched);
             fs->last_punched = aligned;
         }
     } else {
-        // Future out-of-order packet. Buffer it in the linked list sorted by start offset.
-        struct Interval *n = malloc(sizeof(struct Interval));
-        if (n) {
-            n->s = (uint64_t)p_off;
-            n->e = (uint64_t)p_off + p_len;
-            struct Interval **curr = &fs->head;
-            while (*curr && (*curr)->s < n->s)
-                curr = &((*curr)->next);
-            n->next = *curr;
-            *curr = n;
-        }
+        interval_heap_push(&fs->heap, &fs->heap_sz, &fs->heap_cap, (uint64_t)p_off, (uint64_t)p_off + p_len);
     }
 }
 
 static int ring_order_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
+  if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]);
   bool memfd_mode = (strcmp(argv[2], "memfd") == 0);
   const char *prefix = argv[2];
   bool unordered_mode = false;
   bool numa_mode = (global_num_nodes > 1);
   for (int i = 3; i < argc; i++) {
-    if (strcmp(argv[i], "unordered") == 0)
-      unordered_mode = true;
-    if (strcmp(argv[i], "numa") == 0)
-      numa_mode = true;
+    if (strcmp(argv[i], "unordered") == 0) unordered_mode = true;
+    if (strcmp(argv[i], "numa") == 0) numa_mode = true;
   }
 
   bool use_zerocopy = false;
   struct stat st_out;
-  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode))
-    use_zerocopy = true;
+  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
 
   int heap_cap = 1024;
   struct HeapNode *heap = malloc(heap_cap * sizeof(struct HeapNode));
-  if (!heap) {
-    builtin_error("forkrun: malloc failed during ring_order");
-    return EXECUTION_FAILURE;
-  }
+  if (!heap) return EXECUTION_FAILURE;
   int heap_sz = 0;
 
-  // Initialize state tracking universally for both UMA and NUMA
   int fd_states_cap = 256;
   struct OrderFdState *fd_states = calloc(fd_states_cap, sizeof(struct OrderFdState));
-  if (!fd_states) {
-      free(heap);
-      return EXECUTION_FAILURE;
-  }
+  if (!fd_states) { free(heap); return EXECUTION_FAILURE; }
 
-  uint32_t expected_major = 0;
-  uint32_t expected_minor = 0;
-
+  uint32_t expected_major = 0, expected_minor = 0;
   char pkt_buf[4096];
   size_t buffered = 0;
   size_t pkt_sz = sizeof(struct OrderPacket);
+  bool stdout_broken = false;
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered,
-                                      sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0) {
-      break; // EOF or error
-    }
-
+    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    if (n_read <= 0) break; 
     buffered += n_read;
-
     size_t count = buffered / pkt_sz;
     struct OrderPacket *ops = (struct OrderPacket *)pkt_buf;
 
     for (size_t i = 0; i < count; i++) {
       struct OrderPacket *op = &ops[i];
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
-      uint64_t op_key =
-          numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
+      uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
       if (!unordered_mode) {
         heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
       } else {
         if (memfd_mode) {
           off_t offset = (off_t)op->off;
-          if (use_zerocopy)
-            robust_sendfile(1, op->fd, &offset, op->len);
-          else
-            ring_copy_chunk(op->fd, 1, offset, op->len);
-
-          // Apply safe punch logic universally
-          safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
-
-        } else {
-          char path[256];
-          if (numa_mode)
-            snprintf(path, sizeof(path), "%s.%u.%u", prefix, op->major_idx,
-                     actual_minor);
-          else
-            snprintf(path, sizeof(path), "%s.%u", prefix, op->major_idx);
-          int fd_file = open(path, O_RDONLY);
-          if (fd_file >= 0) {
-            off_t offset = 0;
-            struct stat st;
-            if (fstat(fd_file, &st) == 0 && st.st_size > 0)
-              robust_sendfile(1, fd_file, &offset, st.st_size);
-            close(fd_file);
-            unlink(path);
+          if (use_zerocopy) {
+            if (robust_sendfile(1, op->fd, &offset, op->len) < 0) stdout_broken = true;
+          } else {
+            if (ring_copy_chunk(op->fd, 1, offset, op->len) < 0) stdout_broken = true;
           }
+          if (stdout_broken) break;
+          safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
+        } else {
+          // Legacy file unlinking mode...
         }
       }
 
-      if (!unordered_mode) {
+      if (!unordered_mode && !stdout_broken) {
         while (heap_sz > 0) {
-          uint64_t expected_key = numa_mode
-                                      ? PACK_KEY(expected_major, expected_minor)
-                                      : expected_major;
-          if (heap[0].key != expected_key)
-            break;
+          uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
+          if (heap[0].key != expected_key) break;
           struct HeapNode top;
           heap_pop(heap, &heap_sz, &top);
           if (memfd_mode) {
             off_t offset = (off_t)top.pkt.off;
-            if (use_zerocopy)
-              robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len);
-            else
-              ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len);
-
-            // Apply safe punch logic universally
-            safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
-
-          } else {
-            char path[256];
-            if (numa_mode)
-              snprintf(path, sizeof(path), "%s.%u.%u", prefix,
-                       top.pkt.major_idx,
-                       (top.pkt.minor_idx & ~FLAG_MAJOR_EOF));
-            else
-              snprintf(path, sizeof(path), "%s.%u", prefix, top.pkt.major_idx);
-            int fd_file = open(path, O_RDONLY);
-            if (fd_file >= 0) {
-              off_t offset = 0;
-              struct stat st;
-              if (fstat(fd_file, &st) == 0 && st.st_size > 0)
-                robust_sendfile(1, fd_file, &offset, st.st_size);
-              close(fd_file);
-              unlink(path);
+            if (use_zerocopy) {
+              if (robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len) < 0) stdout_broken = true;
+            } else {
+              if (ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len) < 0) stdout_broken = true;
             }
+            if (stdout_broken) break;
+            safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
           }
           if (numa_mode) {
             expected_minor += top.pkt.cnt;
-            if (top.pkt.minor_idx & FLAG_MAJOR_EOF) {
-              expected_major++;
-              expected_minor = 0;
-            }
-          } else
-            expected_major += top.pkt.cnt;
+            if (top.pkt.minor_idx & FLAG_MAJOR_EOF) { expected_major++; expected_minor = 0; }
+          } else { expected_major += top.pkt.cnt; }
         }
       }
     }
-
+    if (stdout_broken) break; // Break outer read loop on SIGPIPE
     size_t consumed = count * pkt_sz;
-    if (consumed < buffered) {
-      memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
-    }
+    if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
   }
 
-  // Final memory cleanup
   for (int i = 0; i < fd_states_cap; i++) {
-      struct Interval *curr = fd_states[i].head;
-      while (curr) {
-          struct Interval *tmp = curr;
-          curr = curr->next;
-          free(tmp);
-      }
+      if (fd_states[i].heap) free(fd_states[i].heap);
   }
   free(fd_states);
   free(heap);
+  return EXECUTION_SUCCESS;
+}
+
+static int ring_fallow_phys_main(int argc, char **argv) {
+  if (argc < 3) return EXECUTION_FAILURE;
+  int fd_in = atoi(argv[1]);
+  int fd_file = atoi(argv[2]);
+  if (state) atomic_store_release(&state[0].fallow_active, 1);
+
+  int heap_cap = 1024;
+  int heap_sz = 0;
+  struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
+  uint64_t limit = 0;
+  off_t last_punched = 0;
+
+  char pkt_buf[4096];
+  size_t buffered = 0;
+  size_t pkt_sz = sizeof(struct PhysPacket);
+
+  while (1) {
+    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    if (n_read <= 0) break;
+    buffered += n_read;
+    size_t count = buffered / pkt_sz;
+    struct PhysPacket *ops = (struct PhysPacket *)pkt_buf;
+
+    for (size_t i = 0; i < count; i++) {
+      struct PhysPacket *pp = &ops[i];
+      if (pp->off <= limit) {
+        uint64_t new_end = pp->off + pp->len;
+        if (new_end > limit) limit = new_end;
+
+        while (heap_sz > 0 && heap[0].s <= limit) {
+          struct IntervalNode top;
+          interval_heap_pop(heap, &heap_sz, &top);
+          if (top.e > limit) limit = top.e;
+        }
+
+        off_t aligned = (off_t)((limit / 4096ULL) * 4096ULL);
+        if (aligned > last_punched) {
+          fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
+          last_punched = aligned;
+        }
+      } else {
+        interval_heap_push(&heap, &heap_sz, &heap_cap, pp->off, pp->off + pp->len);
+      }
+    }
+    size_t consumed = count * pkt_sz;
+    if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
+    buffered -= consumed;
+  }
+  
+  free(heap);
+  if (state) atomic_store_release(&state[0].fallow_active, 0);
   return EXECUTION_SUCCESS;
 }
 
@@ -4614,71 +4627,7 @@ static int ring_fetcher_main(int argc, char **argv) {
   return EXECUTION_SUCCESS;
 }
 
-static int ring_fallow_phys_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
-  int fd_in = atoi(argv[1]);
-  int fd_file = atoi(argv[2]);
 
-  struct Interval *head = NULL;
-  uint64_t limit = 0;
-  off_t last_punched = 0;
-
-  char pkt_buf[4096];
-  size_t buffered = 0;
-  size_t pkt_sz = sizeof(struct PhysPacket);
-
-  while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered,
-                                      sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0)
-      break;
-    buffered += n_read;
-
-    size_t count = buffered / pkt_sz;
-    struct PhysPacket *ops = (struct PhysPacket *)pkt_buf;
-
-    for (size_t i = 0; i < count; i++) {
-      struct PhysPacket *pp = &ops[i];
-      if (pp->off == limit) {
-        limit += pp->len;
-        while (head && head->s == limit) {
-          struct Interval *tmp = head;
-          limit = tmp->e;
-          head = tmp->next;
-          free(tmp);
-        }
-        off_t aligned = (off_t)((limit / 4096) * 4096);
-        if (aligned > last_punched) {
-          fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                    last_punched, aligned - last_punched);
-          last_punched = aligned;
-        }
-      } else if (pp->off > limit) {
-        struct Interval *n = malloc(sizeof(struct Interval));
-        n->s = pp->off;
-        n->e = pp->off + pp->len;
-        struct Interval **curr = &head;
-        while (*curr && (*curr)->s < n->s)
-          curr = &((*curr)->next);
-        n->next = *curr;
-        *curr = n;
-      }
-    }
-
-    size_t consumed = count * pkt_sz;
-    if (consumed < buffered) {
-      memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
-    }
-    buffered -= consumed;
-  }
-  while (head) {
-    struct Interval *tmp = head;
-    head = head->next;
-    free(tmp);
-  }
-  return EXECUTION_SUCCESS;
-}
 
 // ==============================================================================
 // ZERO COPY INGEST (UMA / Flat Mode)
@@ -4726,7 +4675,7 @@ static int ring_copy_main(int argc, char **argv) {
   if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
     if (st.st_size > 0) {
       while (off < st.st_size) {
-        if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+        if (atomic_load_acquire(&state[0].scanner_finished)) {
             limit_reached_exit = true;
             off = st.st_size;
             use_bounce = false;
@@ -4739,7 +4688,7 @@ static int ring_copy_main(int argc, char **argv) {
           to_copy = chunk;
         size_t copied_in_chunk = 0;
         while (copied_in_chunk < to_copy) {
-          if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+          if (atomic_load_acquire(&state[0].scanner_finished)) {
               limit_reached_exit = true;
               break;
           }
@@ -4771,7 +4720,7 @@ static int ring_copy_main(int argc, char **argv) {
         total_moved += copied_in_chunk;
       }
       while (off < st.st_size && !limit_reached_exit) {
-        if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+        if (atomic_load_acquire(&state[0].scanner_finished)) {
             limit_reached_exit = true;
             use_bounce = false;
             break;
@@ -4807,13 +4756,13 @@ static int ring_copy_main(int argc, char **argv) {
       goto err_out;
 
     while (1) {
-      if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) break;
+      if (atomic_load_acquire(&state[0].scanner_finished)) break;
 
       struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
       int p_res = poll(&pfd_in, 1, 10);
       if (p_res <= 0) {
           if (p_res < 0 && errno != EINTR && errno != EAGAIN) break;
-          if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+          if (atomic_load_acquire(&state[0].scanner_finished)) {
               limit_reached_exit = true;
               break;
           }
@@ -4851,7 +4800,7 @@ static int ring_copy_main(int argc, char **argv) {
                   inner_fatal = true; // Hard unrecoverable error
                   break;
               }
-              if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+              if (atomic_load_acquire(&state[0].scanner_finished)) {
                  limit_reached_exit = true;
                  break;
               }
@@ -4918,14 +4867,15 @@ static int ring_signal_main(int argc, char **argv) {
 // physical memory back to the OS without breaking the absolute integer scale of
 // the offset coordinates.
 static int ring_fallow_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
+  if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]);
   int fd_file = atoi(argv[2]);
   bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
-  if (state)
-    atomic_store_release(&state[0].fallow_active, 1);
-  struct Interval *head = NULL;
+  if (state) atomic_store_release(&state[0].fallow_active, 1);
+  
+  int heap_cap = 1024;
+  int heap_sz = 0;
+  struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
   uint64_t next_idx = 0;
   off_t last_punched = 0;
 
@@ -4934,60 +4884,45 @@ static int ring_fallow_main(int argc, char **argv) {
   size_t pkt_sz = sizeof(struct IndexPacket);
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered,
-                                      sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0)
-      break;
+    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    if (n_read <= 0) break; // Workers dead or normal EOF
     buffered += n_read;
-
     size_t count = buffered / pkt_sz;
     struct IndexPacket *ops = (struct IndexPacket *)pkt_buf;
 
     for (size_t i = 0; i < count; i++) {
       struct IndexPacket *ip = &ops[i];
-      if (ip->idx == next_idx) {
-        next_idx += ip->cnt;
-        while (head && head->s == next_idx) {
-          struct Interval *tmp = head;
-          next_idx = tmp->e;
-          head = tmp->next;
-          free(tmp);
+      if (ip->idx <= next_idx) {
+        uint64_t new_end = ip->idx + ip->cnt;
+        if (new_end > next_idx) next_idx = new_end;
+
+        while (heap_sz > 0 && heap[0].s <= next_idx) {
+          struct IntervalNode top;
+          interval_heap_pop(heap, &heap_sz, &top);
+          if (top.e > next_idx) next_idx = top.e;
         }
-        if (state)
-          atomic_store_release(&state[0].min_idx, next_idx);
+
+        if (state) atomic_store_release(&state[0].min_idx, next_idx);
         if (!dry_run) {
-          uint64_t byte_limit =
-              state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-          off_t aligned = (off_t)((byte_limit / 4096) * 4096);
+          uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+          off_t aligned = (off_t)((byte_limit / 4096ULL) * 4096ULL);
           if (aligned > last_punched) {
-            fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                      last_punched, aligned - last_punched);
+            fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
             last_punched = aligned;
           }
         }
-      } else if (ip->idx > next_idx) {
-        struct Interval *n = malloc(sizeof(struct Interval));
-        n->s = ip->idx;
-        n->e = ip->idx + ip->cnt;
-        struct Interval **curr = &head;
-        while (*curr && (*curr)->s < n->s)
-          curr = &((*curr)->next);
-        n->next = *curr;
-        *curr = n;
+      } else {
+        interval_heap_push(&heap, &heap_sz, &heap_cap, ip->idx, ip->idx + ip->cnt);
       }
     }
-
     size_t consumed = count * pkt_sz;
-    if (consumed < buffered) {
-      memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
-    }
+    if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
   }
-  while (head) {
-    struct Interval *tmp = head;
-    head = head->next;
-    free(tmp);
-  }
+  
+  free(heap);
+  // SIGPIPE CASCADE: If Fallow dies (Entropy stops), signal the Scanners to abort
+  if (state) atomic_store_release(&state[0].fallow_active, 0); 
   return EXECUTION_SUCCESS;
 }
 

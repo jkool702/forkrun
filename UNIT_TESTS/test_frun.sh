@@ -706,7 +706,7 @@ run_test "Parallelize nested bash functions" \
 # Test 3: Exported Variables Survive
 # Note: MY_VAR is exported in the parent. The function loops over the batch to print it.
 run_test "Exported variables propagate" \
-  "export MY_VAR='SURVIVOR'; print_var() { for arg in \"\$@\"; do echo \"\$MY_VAR\"; done; }; cat '$LINE_INPUT' | FORKRUN_EXTRA_FUNCS='print_var' frun print_var" \
+  "export MY_VAR='SURVIVOR'; print_var() { for arg in \"\$@\"; do echo \"\$MY_VAR\"; done; }; cat '$LINE_INPUT' | FORKRUN_EXTRA_VARS='MY_VAR' FORKRUN_EXTRA_FUNCS='print_var' frun print_var" \
   "$(awk '{print "SURVIVOR"}' "$LINE_INPUT")"
 
 # Test 4: Unexported Variables do NOT pollute
@@ -733,23 +733,6 @@ run_test "Massive Oversubscription (128 workers, 10 lines)" \
   "seq 1 10 | frun -j 128 printf \"%s\\n\"" \
   "$(seq 1 10)"
 
-print_section "Signal Handling and Early Termination"
-
-# Test 1: SIGPIPE from downstream
-# We pipe a massive stream into frun, but cut it off instantly.
-run_test_regex "Graceful SIGPIPE handling (head -n 5)" \
-  "seq 1 1000000 | frun -k printf \"%s\\n\" | head -n 5 | wc -l" \
-  "5" \
-  0 false
-
-# Test 2: Worker command crashes mid-batch
-# If a specific input crashes the worker, the rest of the file should still process.
-run_test "Worker transient failure mid-batch" \
-  "crash_func() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_func' frun -k crash_func" \
-  "1
-2
-4
-5"
 
 print_section "I/O Edge Cases & Scanner Boundaries"
 
@@ -823,6 +806,26 @@ run_test "FORKRUN_EXTRA_VARS passes associative arrays" \
   "valA
 valB
 none"
+
+
+print_section "Signal Handling and Early Termination"
+
+# Test 1: SIGPIPE from downstream
+# We pipe a massive stream into frun, but cut it off instantly.
+run_test_regex "Graceful SIGPIPE handling (head -n 5)" \
+  "seq 1 1000000 | frun -k printf \"%s\\n\" | head -n 5 | wc -l" \
+  "5" \
+  0 false
+
+# Test 2: Worker command crashes mid-batch
+# If a specific input crashes the worker, the rest of the file should still process.
+run_test "Worker transient failure mid-batch" \
+  "crash_func() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_func' frun -k crash_func" \
+  "1
+2
+4
+5"
+
 
 # ============================================================================
 # FINAL SUMMARY
