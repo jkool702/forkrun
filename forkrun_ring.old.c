@@ -1,4 +1,3 @@
-
 // forkrun_ring.c v3.0.2
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
@@ -1193,7 +1192,7 @@ static void apply_config(char type, char sub, const char *arg) {
       }
     }
   }
-  cfg_state &= ~clear_mask;
+  //cfg_state &= ~clear_mask;
   cfg_state |= set_mask;
 }
 
@@ -2286,7 +2285,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                               _overwrite)                                      \
   do {                                                                         \
     while (1) {                                                                \
-      if (atomic_load_relaxed(&local_state->emergency_abort)) goto unified_scanner_eof; \
       uint64_t limit;                                                          \
       uint64_t uma_max_ahead = W_max_val * 64;                                 \
       if (uma_max_ahead < 1024)                                                \
@@ -2862,7 +2860,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
         ssize_t n;
         do {
-          if (atomic_load_relaxed(&local_state->emergency_abort)) goto unified_scanner_eof;
           n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
         } while (n < 0 && errno == EINTR);
 
@@ -3074,7 +3071,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           p = simd_res;
         } else {
           while (lines_found < scan_target) {
-            if (atomic_load_relaxed(&local_state->emergency_abort)) goto unified_scanner_eof;
             if (p >= end) {
               if (is_numa) {
                 uint64_t read_start = buf_base_offset + (p - buf);
@@ -3084,7 +3080,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 if (to_read > 0) {
                   ssize_t n;
                   do {
-                    if (atomic_load_relaxed(&local_state->emergency_abort)) goto unified_scanner_eof;
                     n = pread(fd_or_memfd, buf, to_read, read_start);
                   } while (n < 0 && errno == EINTR);
                   if (n > 0) {
@@ -3284,7 +3279,7 @@ unified_scanner_eof:
     // --- PHYSICS FIX: Prevent UMA ghost batches violating exact limit ---
     bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
 
-    if (!byte_mode && !limit_hit && !atomic_load_relaxed(&local_state->emergency_abort)) {
+    if (!byte_mode && !limit_hit) {
       uint64_t L_tail = pending_lines;
       char *p_scan = p;
 
@@ -3345,7 +3340,6 @@ unified_scanner_eof:
 
         uint64_t lines_found = 0;
         while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
-          if (atomic_load_relaxed(&local_state->emergency_abort)) goto tail_abort;
           if (p >= end) {
             uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
             ssize_t n;
@@ -3396,7 +3390,6 @@ unified_scanner_eof:
       }
     }
 
-tail_abort:
     uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
     local_state->offset_ring[local_scan_idx & RING_MASK] =
         (uint64_t)final_sentinel | FLAG_PARTIAL_BATCH;
