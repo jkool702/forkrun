@@ -1149,7 +1149,7 @@ _forkrun_file_to_base64() {
     { (( ${#FUNCNAME[@]} > 1 )) && [[ "${FUNCNAME[1]}" == *'frun'* ]]; } || shopt ${extglobState} extglob
 }
 
-FORKRUN_FRUN_SRC="$(declare -f frun)"
+#FORKRUN_FRUN_SRC="$(declare -f frun)"
 unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
