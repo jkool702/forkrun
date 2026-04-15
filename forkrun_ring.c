@@ -11,28 +11,6 @@
 // 5. Min-Heap Orderer: Resolves extreme skew with O(log N) sorting.
 // ======================================================================================
 
-// PHYSICS PARADIGM OVERVIEW:
-//
-// forkrun operates as a frictionless, one-way, born-local river of data:
-// 1. Ingest (Born-local): Data pages are physically pinned to specific NUMA
-// sockets at birth
-//    via `set_mempolicy(MPOL_BIND)` driven by backpressure from indexers. This
-//    minimizes cross-socket migration and enforces conservation of locality.
-// 2. Inertial Claiming (Workers): Workers are "inertial particles". They claim
-// a large block
-//    speculatively via lock-free `atomic_fetch_add` (no CAS retry loops). If
-//    they overshoot (claim > available), they process the available data and
-//    dump the remainder into an "escrow" side-channel (pipe) for others,
-//    preventing slow-path blocks.
-// 3. Fallow (Entropy Export): As the workflow unspools, a background fallow
-// thread
-//    punches holes in the backing memfd via `fallocate(PUNCH_HOLE)` to prevent
-//    OOM without breaking the absolute integer offsets.
-//
-// CRITICAL INVARIANT: The fast path has no locks and no CAS retry loops.
-// Batch signs (-N / +N) encode the scanner's advisory vs the worker's finalized
-// contract.
-
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
@@ -73,11 +51,6 @@
 #pragma GCC target("avx2,popcnt")
 #include <immintrin.h>
 
-// High-throughput AVX2 SIMD scanner. Scans 32 bytes at a time for delimiters.
-// Uses `_mm256_movemask_epi8` and `__builtin_popcount` on the bitmask of
-// matches to instantly skip ahead by multiple records rather than branching per
-// character. If the batch 'target' constraint is met inside the 32-byte vector,
-// `__builtin_ctz` finds the exact boundary.
 __attribute__((target("avx2,popcnt"))) static inline char *
 scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
   uint64_t remaining = target;
@@ -127,7 +100,6 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
 #if defined(__aarch64__)
 #include <arm_neon.h>
 
-// ARM NEON equivalent of the AVX2 scanner. Scans 16 bytes at a time.
 static inline char *scan_batch_neon(char *p, char *end, uint64_t target,
                                     char delim) {
   uint64_t remaining = target;
@@ -209,7 +181,6 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
   return NULL;
 }
 
-// --- Architecture Specific Pause Logic ---
 #if defined(__x86_64__) || defined(__i386__)
 #define cpu_relax() __builtin_ia32_pause()
 #elif defined(__aarch64__) || defined(__arm__)
@@ -227,7 +198,6 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define cpu_relax() __asm__ __volatile__("" ::: "memory")
 #endif
 
-// --- NUMA Syscalls & Constants ---
 #ifndef MPOL_DEFAULT
 #define MPOL_DEFAULT 0
 #endif
@@ -292,7 +262,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define RING_SIZE_LOG2 20
 #define RING_SIZE (1ULL << RING_SIZE_LOG2)
 #define RING_MASK (RING_SIZE - 1)
-#define CACHE_LINE 128 // Safe for all modern architectures
+#define CACHE_LINE 128
 #define ALIGNED(x) __attribute__((aligned(x > CACHE_LINE ? x : CACHE_LINE)))
 #define MAX_CHUNK_SIZE (32 * 1024 * 1024)
 #define DAMPING_OFFSET 6
@@ -338,11 +308,8 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #include "variables.h"
 #include "builtins.h"
 #include "common.h"
-#include "xmalloc.h" // MUST precede undefs so xfree(argv) compiles correctly
+#include "xmalloc.h"
 
-// PHYSICS FIX: Bash violently hijacks memory allocators via macros in config.h.
-// We MUST undefine them here to ensure our C structures strictly use glibc libc allocators.
-// Crossing streams causes `invalid chunk size` and `double free` heap detonations.
 #undef malloc
 #undef free
 #undef realloc
@@ -364,12 +331,7 @@ static int g_debug = 0;
     }                                                                          \
   } while (0)
 
-// ==============================================================================
-// PHYSICS FIX: ROBUST IPC IO WRAPPERS
-// ==============================================================================
 
-// For IPC Pipes (Order/Fallow/Escrow). Uses poll() to wait for EAGAIN without
-// burning CPU.
 static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count,
                                        bool exact) {
   char *p = (char *)buf;
@@ -391,8 +353,6 @@ static inline ssize_t robust_pipe_read(int fd, void *buf, size_t count,
     p += r;
     left -= r;
 
-    // CRITICAL FIX: If exact is false, return immediately after ANY successful
-    // read to prevent Fallow/Order threads from deadlocking on partial queues.
     if (!exact)
       return count - left;
   }
@@ -420,8 +380,6 @@ static inline ssize_t robust_pipe_write(int fd, const void *buf, size_t count) {
   return count;
 }
 
-// For EventFDs. Strictly returns -1 EAGAIN if empty so lock-free loops can
-// proceed.
 static inline ssize_t sys_read(int fd, void *buf, size_t count) {
   ssize_t r;
   do {
@@ -438,7 +396,6 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   return w;
 }
 
-// RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
   X(ring_init, ring_init_main, "ring_init [FLAGS]",                            \
     "Initialize ring with config")                                             \
@@ -453,13 +410,13 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_numa_scanner, ring_numa_scanner_main,                                 \
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
-  X(ring_claim, ring_claim_main, "ring_claim [VAR] [FD]", "Claim batch")       \
+  X(ring_claim, ring_claim_main, "ring_claim[VAR] [FD]", "Claim batch")       \
   X(ring_worker, ring_worker_main, "ring_worker [inc|dec] [FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
   X(ring_ingest, ring_ingest_main, "ring_ingest", "Signal ingest")             \
-  X(ring_fallow, ring_fallow_main, "ring_fallow <PIPE> <FILE> [dry]",          \
+  X(ring_fallow, ring_fallow_main, "ring_fallow <PIPE> <FILE>[dry]",          \
     "Logical fallow")                                                          \
   X(ring_ack, ring_ack_main, "ring_ack <FD> <FD_OUT>", "Ack batch")            \
   X(ring_order, ring_order_main, "ring_order <FD> <PFX|memfd> [unordered]",    \
@@ -482,7 +439,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
     "Show build metadata")                                                     \
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats",                  \
     "Print NUMA telemetry")                                                    \
-  X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")
+  X(ring_list, ring_list_main, "ring_list[VAR]", "List loadables")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -740,22 +697,13 @@ static int fd_escrow[2] = {-1, -1};
 static uint32_t global_num_nodes = 0;
 static uint32_t allocated_num_nodes = 0;
 static uint32_t *g_logical_to_phys_map = NULL;
-static uint8_t g_explicit_pinning = 0; // NEW
+static uint8_t g_explicit_pinning = 0;
 
-// EscrowPacket: Used to solve the "overshoot" problem. When a worker
-// speculatively claims more offsets than are currently available from the
-// scanner, it processes the available ones and "deposits" the remaining claimed
-// count into a side-channel pipe (escrow) for other idle workers to steal.
-// NOTE: A given worker can (at any given time) only have a single escrow claim,
-// and these claims are inherently rare occurrences (happen only in rare races).
-// This means in practice the escrow pipe buffer will NEVER fill up (even if
-// its capacity is 64 KB, and especially not at 1 MB).
 struct EscrowPacket {
   uint64_t idx;
   uint64_t cnt;
 };
 
-// IndexPacket: Legacy flat-mode packet for passing physical offsets.
 struct IndexPacket {
   uint64_t idx;
   uint64_t cnt;
@@ -779,21 +727,14 @@ struct OrderPacket {
 #define META_RING_SIZE 4096
 #define META_RING_MASK (META_RING_SIZE - 1)
 
-// ChunkMeta: Lock-free metadata describing a slice of physical data added by
-// ingest. Workers and the global scanner use this to align physical bounds
-// without taking locks.
 struct ChunkMeta {
   uint64_t raw_offset;
   uint64_t raw_length;
   uint32_t target_node;
-  // major_id aligns with chunk boundaries, minor_id will align with individual
-  // records.
   uint32_t major_id;
   volatile uint64_t actual_end ALIGNED(CACHE_LINE);
 };
 
-// GlobalState: Contains cross-socket coordination for the pipeline,
-// particularly the metadata ring written by Ingest and read by Indexers.
 struct GlobalState {
   uint64_t ingest_publish_idx ALIGNED(CACHE_LINE);
   uint64_t ingest_eof_idx ALIGNED(CACHE_LINE);
@@ -801,10 +742,6 @@ struct GlobalState {
   struct ChunkMeta meta_ring[META_RING_SIZE];
 };
 
-// SharedState: Per-NUMA-socket lock-free ring and state counters.
-// This enforces "Conservation of Momentum" - each socket manages its own data
-// river. Workers on node i read from state[i]. Variables are CACHE_LINE aligned
-// to prevent false-sharing ping-pong between cores on the fast path.
 struct SharedState {
   uint64_t chunk_queue_head ALIGNED(CACHE_LINE);
   uint8_t _pad_cq_head[CACHE_LINE - sizeof(uint64_t)];
@@ -857,7 +794,7 @@ struct SharedState {
   uint8_t cfg_return_bytes;
   uint8_t numa_enabled;
   uint8_t exact_lines;
-  uint8_t cfg_delim; // Record delimiter character (default '\n')
+  uint8_t cfg_delim;
 
   uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
   uint64_t stats_chunks_processed;
@@ -870,7 +807,6 @@ struct SharedState {
   uint32_t major_ring[RING_SIZE] ALIGNED(4096);
   uint32_t minor_ring[RING_SIZE] ALIGNED(4096);
 
-  // NEW: Dynamic Topology-Aware Steal Thresholds
   uint8_t steal_threshold[1024] ALIGNED(CACHE_LINE);
 };
 
@@ -888,13 +824,8 @@ static inline void cleanup_waiter_state() {
 }
 
 // EMERGENCY SHUTDOWN: Global fire alarm sentry.
-// Any thread (Worker or Orderer) can call this to trigger an immediate system-wide
-// abort. It atomically flips fallow_active to 0 (CAS ensures we only blast once),
-// then blasts ALL EOF eventfds to wake every sleeping poll across the engine.
-// Data eventfds are left untouched to preserve the conservation laws of the ring.
 static inline void pull_fire_alarm() {
     if (!state) return;
-    // CAS: Only the first caller blasts the eventfds
     uint8_t expected = 1;
     if (__atomic_compare_exchange_n(&state[0].fallow_active, &expected, 0, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
         uint64_t blast = 999999;
@@ -905,6 +836,7 @@ static inline void pull_fire_alarm() {
         if (evfd_chunk_done >= 0) sys_write(evfd_chunk_done, &blast, 8); // Wake up Ingest
     }
 }
+
 
 #define OOM_WAIT_FOR_MEMORY(free_b_var, threshold, si_var, mu_var)             \
   do {                                                                         \
@@ -970,11 +902,6 @@ static int get_cgroup_free_memory(uint64_t *free_mem) {
   return -1;
 }
 
-// ==============================================================================
-// OOM PROTECTION AND MEMORY SENSING
-// ==============================================================================
-
-// Helper to get available memory (accounting for reclaimable cache like memfd)
 static inline uint64_t get_mem_available(struct sysinfo *si) {
     uint64_t mem_avail = 0;
     int fd = open("/proc/meminfo", O_RDONLY);
@@ -988,13 +915,11 @@ static inline uint64_t get_mem_available(struct sysinfo *si) {
             if (p) {
                 p += 13;
                 while (*p == ' ' || *p == '\t') p++;
-                mem_avail = strtoull(p, NULL, 10) * 1024ULL; // KB to Bytes
+                mem_avail = strtoull(p, NULL, 10) * 1024ULL;
             }
         }
     }
     if (mem_avail > 0) return mem_avail;
-
-    // Fallback for very old kernels without MemAvailable exposed
     uint64_t mu = (uint64_t)si->mem_unit ? si->mem_unit : 1;
     return ((uint64_t)si->freeram + (uint64_t)si->bufferram) * mu;
 }
@@ -1036,7 +961,6 @@ static inline void check_memory_pressure(uint64_t *total_moved,
         }
       }
     }
-    // PHYSICS FIX: properly track next check boundary to prevent check spamming
     *next_check = *total_moved + 16 * 1024 * 1024;
   }
 }
@@ -1065,10 +989,6 @@ static inline void check_memory_pressure(uint64_t *total_moved,
 #define M_B_B (0xF << SH_B_B)
 #define M_STDIN (1 << SH_STDIN)
 #define M_BMODE (1 << SH_BMODE)
-
-#define M_W_ALL (M_W_A | M_W_B)
-#define M_L_ALL (M_L_A | M_L_B)
-#define M_B_ALL (M_B_A | M_B_B)
 
 static uint64_t get_v_def(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
@@ -1253,8 +1173,6 @@ static int ring_init_main(int argc, char **argv) {
     atomic_store_relaxed(&g_state->ingest_publish_idx, 0);
     atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
 
-    // PHYSICS FIX: Comprehensively drain all eventfds to prevent false EOFs
-    // and spurious wakeups from previous invocations.
     uint64_t _drain;
     while (sys_read(evfd_ingest_eof, &_drain, 8) > 0) {
     }
@@ -1286,7 +1204,7 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].total_lines_consumed, 0);
       atomic_store_relaxed(&state[n].global_scanned, 0);
       atomic_store_relaxed(&state[n].min_idx, 0);
-      atomic_store_relaxed(&state[n].fallow_active, 1);
+      atomic_store_relaxed(&state[n].fallow_active, 1); // <--- CRITICAL FIX
       atomic_store_relaxed(&state[n].tail_idx, 0);
       atomic_store_relaxed(&state[n].scanner_finished, 0);
       atomic_store_relaxed(&state[n].stats_chunks_assigned, 0);
@@ -1294,7 +1212,6 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].stats_chunks_i_stole, 0);
       atomic_store_relaxed(&state[n].stats_chunks_stolen_from_me, 0);
 
-      // Reset waiters to prevent spurious initial early flushes
       atomic_store_relaxed(&state[n].active_waiters, 0);
       atomic_store_relaxed(&state[n].indexer_waiters, 0);
       atomic_store_relaxed(&state[n].meta_waiters, 0);
@@ -1311,9 +1228,7 @@ static int ring_init_main(int argc, char **argv) {
 
   allocated_num_nodes = global_num_nodes;
 
-  // --- PHYSICS FIX: Force g_state size to pad out to a 4K boundary ---
   size_t global_size = (sizeof(struct GlobalState) + 4095ULL) & ~4095ULL;
-
   size_t total_size =
       global_size + (sizeof(struct SharedState) * global_num_nodes);
   total_size = (total_size + 4095ULL) & ~4095ULL;
@@ -1326,16 +1241,12 @@ static int ring_init_main(int argc, char **argv) {
   }
 
   g_state = (struct GlobalState *)p;
-  // Step exactly 'global_size' bytes forward so state stays 4096-aligned
   state = (struct SharedState *)((char *)p + global_size);
   memset(p, 0, total_size);
   atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
 
-  // Config register: 0xBBLLWW where BB=bytes, LL=lines, WW=workers
-  // Each pair is (upper nibble = max policy, lower nibble = start policy)
-  // Nibble codes: 0=disabled 1=literal-1 2=default-max 3=hard-max 8=user-val
   cfg_state =
-      0x202121; // DEFAULT: bytes=off/def, lines=1..4096, workers=1..$nproc
+      0x202121;
   int stdin_explicit = -1;
   const char *out_array_name = NULL;
   uint64_t parsed_limit = 0;
@@ -1497,7 +1408,6 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].signed_batch_size,
                            (int64_t)state[n].cfg_batch_start);
 
-    // Dynamic Topology-Aware Steal Thresholds from ACPI SRAT Table
     uint32_t phys_n = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
     char dist_path[256];
     snprintf(dist_path, sizeof(dist_path),
@@ -1525,9 +1435,7 @@ static int ring_init_main(int argc, char **argv) {
           dist = atoi(p);
       }
 
-      // Physics Formula: 1 + (dist / 10)
       int thresh = 1 + (dist / 10);
-
       if (thresh < 2)
         thresh = 2;
       state[n].steal_threshold[i] = (uint8_t)thresh;
@@ -1717,13 +1625,6 @@ static int ring_destroy_main(int argc, char **argv) {
 // 4. NUMA INGEST
 // ==============================================================================
 
-// NUMA Ingest (Born-local): Reads data from stdin and splices it into a shared
-// memfd. It applies `set_mempolicy(MPOL_BIND)` to physically place the data
-// pages on a specific NUMA node *before* any worker touches them, thus
-// enforcing "Conservation of Locality" and preventing cross-socket memory
-// traffic. The target node is selected based on indexer backpressure (self
-// load-balancing).
-
 static int ring_numa_ingest_main(int argc, char **argv) {
   if (argc < 4)
     return EXECUTION_FAILURE;
@@ -1745,7 +1646,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     }
   }
 
-  // --- OOM Protection Initialization ---
   uint64_t oom_threshold = 134217728;
   long threshold_div = 128;
   const char *s_div = get_string_value("RING_INGEST_DIVISOR");
@@ -1761,7 +1661,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
   uint64_t total_moved = 0;
   uint64_t next_check = 16 * 1024 * 1024;
-  // -------------------------------------
 
   uint64_t current_offset = 0;
   uint32_t current_major = 0;
@@ -1800,7 +1699,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
 
 #define NUMA_CHECK_SCANNERS_DONE() do { \
-  /* EMERGENCY BYPASS: If someone pulled the fire alarm, abort ingest immediately */ \
   if (atomic_load_relaxed(&state[0].fallow_active) == 0) { \
     limit_reached_exit = true; \
     goto ingest_done; \
@@ -1835,7 +1733,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       }
     }
 
-    // INFINITE QUEUE WAIT GATE
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
@@ -1851,7 +1748,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       }
     }
 
-    // INFINITE EVENT-DRIVEN INGEST GATE
     struct pollfd pfds_gate[2] = {
         {.fd = infd, .events = POLLIN},
         {.fd = evfd_chunk_done, .events = POLLIN}
@@ -1955,10 +1851,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
                 if (p_out_res < 0) {
                     if (errno == EINTR || errno == EAGAIN) continue;
                     if (errno == ENOMEM) {
-                        usleep(10000); // Wait for memory, do NOT break loop
+                        usleep(10000);
                         continue;
                     }
-                    inner_fatal = true; // Hard unrecoverable error
+                    inner_fatal = true;
                     break;
                 }
                 if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
@@ -1972,7 +1868,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
               continue;
             }
             if (w < 0 && (errno == ENOSPC || errno == ENOMEM)) {
-              usleep(10000); // Wait for fallow
+              usleep(10000);
               continue;
             }
             inner_fatal = true;
@@ -1983,7 +1879,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
         if (inner_fatal) {
             n = -1;
-            errno = EIO; // Override errno so the outer loop doesn't mistakenly retry and overwrite bounce_buf
+            errno = EIO;
         } else {
             n = r;
         }
@@ -1996,10 +1892,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     if (n < 0) {
       if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
       if (errno == ENOSPC || errno == ENOMEM) {
-        usleep(10000); // Catch ENOSPC on sendfile/copy_file_range
+        usleep(10000);
         continue;
       }
-      break; // Safe hard exit
+      break;
     }
     if (n == 0)
       break;
@@ -2096,10 +1992,6 @@ ingest_done:
 }
 
 
-// NUMA Indexer: One indexer is pinned to each NUMA socket. It reads the raw
-// chunks written by ingest and coordinates the metadata boundary alignments
-// (major/minor IDs). It acts as the bridge between the single global memfd and
-// the per-socket lock-free rings.
 static int ring_indexer_numa_main(int argc, char **argv) {
   if (argc < 3)
     return EXECUTION_FAILURE;
@@ -2140,18 +2032,15 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           {.fd = evfd_indexer_arr[my_node_id], .events = POLLIN},
           {.fd = evfd_ingest_eof, .events = POLLIN}};
       poll(pfds, 2, -1);
-      
+
       bool data_fired = (pfds[0].revents & POLLIN) != 0;
       bool eof_fired = (pfds[1].revents & POLLIN) != 0;
-      
-      // RULE: 1. Check local work. consume & loop
+
       if (data_fired) {
         uint64_t v;
         sys_read(evfd_indexer_arr[my_node_id], &v, 8);
-      } 
-      // RULE: 3. EOF evfd. Handled by outer loop Condition 1 check.
+      }
       else if (eof_fired) {
-          // Do nothing. Outer loop checks g_state->ingest_eof_idx != ~(uint64_t)0
       }
       __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST);
       spin = 0;
@@ -2163,7 +2052,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     uint64_t chunk_end = meta->raw_offset + meta->raw_length;
     uint64_t actual_end = chunk_end;
 
-    // PHYSICS FIX: Bypass delimiter search in byte mode!
     if (!byte_mode) {
       uint64_t search_end = chunk_end;
       while (search_end > meta->raw_offset) {
@@ -2192,14 +2080,10 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         actual_end = meta->raw_offset;
     }
 
-    // 1. Mark meta ready
     atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
-    // 2. Put it on the Scanner's Ready Shelf
     __atomic_store_n(&t_state->chunk_ready_head, my_idx + 1, __ATOMIC_RELEASE);
-
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-    // 3. Exact Ticket Dispensing (Wakes all waiting scanners)
     uint32_t mw = atomic_load_relaxed(&t_state->meta_waiters);
     if (mw > 0) {
       uint64_t v = mw;
@@ -2209,9 +2093,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   }
 }
 
-// ==============================================================================
-// 5. UNIFIED SCANNER LOOP
-// ==============================================================================
 #define UNIFIED_ADAPTIVE_COMMIT(force)                                         \
   do {                                                                         \
     if (local_scan_idx > local_write_idx) {                                    \
@@ -2267,12 +2148,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }                                                                          \
   } while (0)
 
-/*
- * WRAP-AROUND SHIELD LOGIC:
- * Calculates physical wrap-around distance. Yield the scanner if:
- * 1. Slot-based wrap-around shield boundary is hit (applies to BOTH UMA and NUMA)
- * 2. Chunk-based memory shield boundary is hit (applies ONLY to NUMA)
- */
 #define UNIFIED_SCANNER_FLUSH(_cnt_val, _stride_val, _is_last, _maj_id,        \
                               _minor_val, _batch_end_offset, _do_fencepost,    \
                               _overwrite)                                      \
@@ -2490,12 +2365,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }                                                                          \
   } while (0)
 
-// The Core Unified Scanner Function: This is the "PID-controlled source" of the
-// river. It uses SIMD instructions to find record delimiters at memory
-// bandwidth. It employs a 3-phase flow controller (Warmup -> Geometric Ramp ->
-// PID Steady-state) to dynamically adapt the batch size based on input stall
-// rate and worker starvation. It handles both legacy flat pipelines (UMA) and
-// deep NUMA topologies.
 static inline __attribute__((always_inline)) int
 core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, const bool is_numa) {
   struct SharedState *local_state = is_numa ? &state[my_node_id] : &state[0];
@@ -2524,13 +2393,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
   size_t chunk_sz = get_optimal_chunk_size();
 
-  // PHYSICS FIX: Align flat-mode buffer exactly to byte sizes to prevent internal shifting.
   if (byte_mode && L > 0) {
     uint64_t mult = (chunk_sz + L - 1) / L;
     chunk_sz = mult * L;
   }
 
-  // PHYSICS FIX: mmap completely sidesteps bash_malloc intercepts!
   char *buf = mmap(NULL, chunk_sz, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (buf == MAP_FAILED)
@@ -2563,7 +2430,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     atomic_store_relaxed(&local_state->tail_idx, 0);
   atomic_store_relaxed(&local_state->active_workers, W);
 
-  // ---- NEW: Pin scanner ----
   if (g_logical_to_phys_map) {
     if (is_numa && (uint32_t)my_node_id < global_num_nodes) {
       pin_to_numa_node(g_logical_to_phys_map[my_node_id]);
@@ -2571,7 +2437,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       pin_to_numa_node(g_logical_to_phys_map[0]);
     }
   }
-  // --------------------------
 
   if (fd_spawn >= 0 && W > 0) {
     char sbuf[64];
@@ -2591,7 +2456,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   bool force_refill = false;
 
   while (1) {
-    // EMERGENCY BYPASS: If someone pulled the fire alarm, kill the Scanner instantly.
     if (atomic_load_relaxed(&local_state->fallow_active) == 0) {
         goto unified_scanner_eof;
     }
@@ -2654,7 +2518,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         }
 
         if (!any_valid_backlog) {
-          // --- PHYSICS FIX: Instant NUMA Tear-down ---
           if (global_eof && local_exhausted) {
             goto unified_scanner_eof;
           }
@@ -2665,23 +2528,18 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             steal_target = fallback_target;
         }
 
-        // FIXED NUMA LATENCY BUBBLE: Don't claim an empty local queue
-        // If completely starved, yield to the OS to prevent 100% CPU spinning.
         if (steal_target == my_node_id) {
           int _starve_spin = 0;
           int max_spin = global_eof ? 10 : 1000;
-          // Spin briefly to handle micro-stalls without OS context-switching
           while (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail &&
                  _starve_spin < max_spin) {
             cpu_relax();
             _starve_spin++;
           }
 
-          // If STILL starved after spinning, yield the CPU
           if (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail) {
             __atomic_fetch_add(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
 
-            // Double check to prevent race conditions before sleeping
             if (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail) {
               struct pollfd pfds[2] = {
                   {.fd = evfd_meta_arr[my_node_id], .events = POLLIN},
@@ -2745,7 +2603,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         continue;
       }
 
-      // PHYSICS FIX: Double-entry chunk accounting.
       __atomic_fetch_add(&state[my_node_id].stats_chunks_processed, 1,
                          __ATOMIC_RELAXED);
       if (steal_target != my_node_id) {
@@ -2845,9 +2702,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         uint64_t prev_avail = (p < end) ? (uint64_t)(end - p) : 0;
         current_p_offset = buf_base_offset + (uint64_t)(p - buf);
 
-        // WORMHOLE FIX 4: UMA EOF Race Shield
-        // Capture ingest_complete BEFORE pread. If it becomes complete
-        // after pread returns 0, we must loop to verify no final bytes slipped in.
         bool was_complete = atomic_load_acquire(&local_state->ingest_complete);
 
         ssize_t n;
@@ -2869,11 +2723,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           }
 
           if (was_complete) {
-            // It was complete BEFORE pread. 'n' is absolute truth.
             if (n == 0 || (n > 0 && (uint64_t)n <= prev_avail))
                 status = 1;
           } else {
-            // Check if it became complete in the background
             if (!atomic_load_acquire(&local_state->ingest_complete)) {
               struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
                                        {.fd = evfd_ingest_eof, .events = POLLIN}};
@@ -2884,12 +2736,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             }
 
             if (atomic_load_acquire(&local_state->ingest_complete)) {
-              // It became complete AFTER our pread. We cannot trust 'n'.
-              // We must loop around and pread one last time.
               force_refill = true;
               continue;
             } else {
-              // Still not complete. Go into wait routine.
               status = 0;
               bool starving =
                   (atomic_load_relaxed(&local_state->active_waiters) > 0);
@@ -2915,13 +2764,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               if (poll(pfds, 2, poll_timeout) > 0) {
                 bool data_fired = (pfds[0].revents & POLLIN) != 0;
                 bool eof_fired = (pfds[1].revents & POLLIN) != 0;
-                
-                // RULE: 1. check if local work evfd was non-zero. consume & loop
+
                 if (data_fired) {
                   uint64_t v;
                   sys_read(evfd_ingest_data, &v, 8);
-                } 
-                // RULE: 3. check EOF evfd ONLY if work evfd is zero
+                }
                 else if (eof_fired) {
                   atomic_store_release(&local_state->ingest_complete, 1);
                 }
@@ -2938,7 +2785,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
       bool flush = false;
       bool limit_reached = false;
-      bool force_flush_bytes = false; // WORMHOLE FIX 8
+      bool force_flush_bytes = false;
 
       if (byte_mode) {
         uint64_t avail =
@@ -3093,9 +2940,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 uint64_t payload = line_end_offset - batch_start;
                 uint64_t overhead = (lines_found + 1) * 8;
                 if ((payload + overhead) > BytesMax) {
-                  // WORMHOLE FIX 8: The BytesMax Continuation
-                  // Do NOT set limit_reached (which triggers global EOF).
-                  // Instead, force a flush so the scanner continues processing the rest of the chunk.
                   force_flush_bytes = true;
                   break;
                 }
@@ -3164,7 +3008,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           force_refill = true;
 
         if (flush) {
-          // WORMHOLE FIX 8: Ensure a force_flush_bytes doesn't accidentally trigger a FLAG_MAJOR_EOF chunk end
           bool is_last = is_numa
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
@@ -3215,7 +3058,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       UNIFIED_ADAPTIVE_COMMIT(true);
     }
 
-    // CRITICAL FIX: Universal limit break for both UMA and NUMA
     if (limit_items > 0) {
       uint64_t current_global = is_numa ? atomic_load_relaxed(&state[0].global_scanned) : total_scanned;
       if (current_global >= limit_items) break;
@@ -3223,10 +3065,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   }
 
 unified_scanner_eof:
-  // =========================================================
-  // 3. FINALIZATION (NUMA Finish vs UMA Tail Re-batching)
-  // =========================================================
-
   if (fd_spawn >= 0) {
     uint64_t W_curr = atomic_load_relaxed(&local_state->active_workers);
     if (W_curr < W_max_val) {
@@ -3258,13 +3096,11 @@ unified_scanner_eof:
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
 
-    // RULE: Set EOF evfd ONLY after scanner is fully finished
     uint64_t blast = 999999;
     sys_write(evfd_eof_arr[my_node_id], &blast, 8);
 
     if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
   } else {
-    // --- PHYSICS FIX: Prevent UMA ghost batches violating exact limit ---
     bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
 
     if (!byte_mode && !limit_hit) {
@@ -3388,7 +3224,6 @@ unified_scanner_eof:
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
 
-    // RULE: Blast wakeups universally to prevent lost wakeups at EOF
     uint64_t blast = 999999;
     sys_write(evfd_eof_arr[0], &blast, 8);
 
@@ -3399,16 +3234,11 @@ unified_scanner_eof:
   return EXECUTION_SUCCESS;
 }
 
-// ==============================================================================
-// 6. SCANNER WRAPPER ENTRY POINTS
-// ==============================================================================
-
 static int ring_scanner_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
   int fd = atoi(argv[1]);
   int fd_spawn = (argc >= 3) ? atoi(argv[2]) : -1;
-  // Call Unified Loop with is_numa = false
   return core_scanner_loop(fd, 0, fd_spawn, 1, false);
 }
 
@@ -3419,42 +3249,13 @@ static int ring_numa_scanner_main(int argc, char **argv) {
   int my_node_id = atoi(argv[2]);
   int fd_spawn = atoi(argv[3]);
   int num_nodes = atoi(argv[4]);
-  // Call Unified Loop with is_numa = true
   return core_scanner_loop(memfd, my_node_id, fd_spawn, num_nodes, true);
 }
 
-// ==============================================================================
-// 7. CONSUMERS (Claim, Ack, Order)
-// ==============================================================================
-
-// Workers Claiming Data (Inertial Particles):
-// The fast path is a single lock-free `atomic_fetch_add` to claim a batch of
-// records. There are NO CAS retry loops on the fast path. If a worker
-// overshoots and claims records that haven't arrived yet (inertia), it
-// processes the available ones and deposits the remainder into an escrow pipe
-// for other idle workers to steal. Escrow is pure advisory capability; forward
-// progress is guaranteed by strictly monotonic indices.
 static int ring_claim_main(int argc, char **argv) {
-  // --- UNIVERSAL SIGPIPE / TEARDOWN SHIELD ---
-  if (state) {
-      // 1. Did someone else pull the fire alarm? (e.g., ring_order, or Fallow dying)
-      if (atomic_load_relaxed(&state[0].fallow_active) == 0) {
-          return EXECUTION_FAILURE; 
-      }
-
-      // 2. Sentry duty: Check if stdout is broken (Crucial for -u realtime mode)
-      // We only poll every 64 claims to ensure absolute zero overhead on the fast path.
-      static __thread int claim_calls = 0;
-      if ((claim_calls++ & 63) == 0) {
-          struct pollfd pfd_stdout = {.fd = 1, .events = POLLOUT};
-          if (poll(&pfd_stdout, 1, 0) > 0 && (pfd_stdout.revents & (POLLERR | POLLHUP))) {
-              // The downstream pipe was cut (e.g., head -n 5). Pull the fire alarm!
-              pull_fire_alarm();
-              return EXECUTION_FAILURE;
-          }
-      }
+  if (state && atomic_load_relaxed(&state[0].fallow_active) == 0) {
+      return EXECUTION_FAILURE;
   }
-  // -------------------------------------------
 
   const char *v_target = "REPLY";
   int fd_read = -1;
@@ -3516,10 +3317,7 @@ static int ring_claim_main(int argc, char **argv) {
   }
 
 restart_loop:
-  
-  // NEW: ESCROW PRIORITY INVERSION (Head-of-line blocking prevention)
-  // If this specific worker just dropped a partial batch into escrow,
-  // it prioritizes getting it back before touching the main ring.
+
   if (tl_recently_escrowed) {
       tl_recently_escrowed = false;
       if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
@@ -3531,15 +3329,12 @@ restart_loop:
           if (er == sizeof(ep)) {
               my_read_idx = ep.idx;
               claim_count = ep.cnt;
-              // We successfully reclaimed our (or someone else's) escrow.
-              // Bypass the ring check entirely.
-              goto check_boundaries; 
+              goto check_boundaries;
           }
       }
   }
 
   while (1) {
-    // 1. Ring check FIRST (Local Work)
     uint64_t w_snap = atomic_load_acquire(&local_state->write_idx);
     uint64_t r_curr = atomic_load_relaxed(&local_state->read_idx);
 
@@ -3580,7 +3375,7 @@ restart_loop:
         claim_count = w_snap - r_curr;
 
       if (claim_count > 1) {
-        uint64_t safe_count = claim_count; // <--- CRITICAL FIX: Default to full claim
+        uint64_t safe_count = claim_count;
         for (uint64_t i = 0; i < claim_count; i++) {
           if (local_state->offset_ring[(r_curr + i) & RING_MASK] &
               FLAG_PARTIAL_BATCH) {
@@ -3609,7 +3404,6 @@ restart_loop:
       break;
     }
 
-    // 2. Escrow check SECOND (Non-Local Work)
     if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
       struct EscrowPacket ep;
       ssize_t er;
@@ -3623,40 +3417,29 @@ restart_loop:
       }
     }
 
-    // 3. Scanner finished check THIRD (The 3 Sequential Conditions for EOF)
-    // CONDITION 1: Has the supplier declared EOF permanently?
     if (atomic_load_acquire(&local_state->scanner_finished)) {
-
-      // CONDITION 2: Re-verify local work is empty AFTER observing Supplier EOF
       if (atomic_load_acquire(&local_state->read_idx) <
           atomic_load_acquire(&local_state->write_idx)) {
         continue;
       }
-
-      // CONDITION 3: Re-verify non-local work (Escrow) is empty AFTER Cond 1 & 2
       if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
         struct pollfd pfd = {.fd = fd_escrow_r[my_numa_node], .events = POLLIN};
         if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
           continue;
         }
       }
-
-      // All 3 physical conditions are met in order. Consensus achieved. Terminate.
       return 2;
     }
 
-    // 4. Spin
     if (spin < 100) {
       cpu_relax();
       spin++;
       continue;
     }
 
-    // 5. Poll
     __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
     is_waiting_on_ring = true;
 
-    // RULE: 3-way simultaneous poll
     struct pollfd pfds[3] = {
         {.fd = evfd_data_arr[my_numa_node], .events = POLLIN},
         {.fd = (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) ? fd_escrow_r[my_numa_node] : -1, .events = POLLIN},
@@ -3664,7 +3447,6 @@ restart_loop:
     };
 
     while (1) {
-      // RULE: Must simultaneously poll until parent EOF + empty local work is verified
       if (atomic_load_acquire(&local_state->write_idx) >
           atomic_load_relaxed(&local_state->read_idx))
         break;
@@ -3674,7 +3456,6 @@ restart_loop:
 
       poll(pfds, 3, -1);
 
-      // EMERGENCY BYPASS: If someone pulled the fire alarm while we slept, exit immediately
       if (atomic_load_relaxed(&state[0].fallow_active) == 0) {
         cleanup_waiter_state();
         return EXECUTION_FAILURE;
@@ -3684,20 +3465,16 @@ restart_loop:
       bool escrow_fired = (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN) != 0);
       bool eof_fired = (pfds[2].revents & POLLIN) != 0;
 
-      // RULE: Strict checking order
-      // 1. check if the "local work evfd" was non-zero. if so consume it and loop back.
       if (data_fired) {
         uint64_t v;
         sys_read(pfds[0].fd, &v, 8);
         continue;
       }
-      // 2. check if the non-local work evfd was non-zero. if so consume it and loop back.
       else if (escrow_fired) {
-        break; // Break so outer loop's Escrow Check processes it
+        break;
       }
-      // 3. check if EOF evfd was non-zero. exit ONLY when EOF is nonzero and work evfds are zero
       else if (eof_fired && !data_fired && !escrow_fired) {
-        break; // Break so outer loop's Scanner Finished check triggers safe exit
+        break;
       }
     }
 
@@ -3768,7 +3545,6 @@ restart_loop:
 
         poll(pfds, 2, -1);
 
-        // EMERGENCY BYPASS: If someone pulled the fire alarm while we slept, exit immediately
         if (atomic_load_relaxed(&state[0].fallow_active) == 0) {
           cleanup_waiter_state();
           return EXECUTION_FAILURE;
@@ -3779,7 +3555,6 @@ restart_loop:
         if (data_fired) {
           uint64_t v;
           sys_read(evfd_data_arr[my_numa_node], &v, 8);
-          // Let loop naturally re-evaluate w_curr
         }
       }
       cleanup_waiter_state();
@@ -3792,7 +3567,7 @@ restart_loop:
 
 check_boundaries:
   if (claim_count > 1) {
-    uint64_t safe_count = claim_count; // <--- CRITICAL FIX: Default to full claim
+    uint64_t safe_count = claim_count;
     for (uint64_t i = 0; i < claim_count; i++) {
       if (local_state->offset_ring[(my_read_idx + i) & RING_MASK] &
           FLAG_PARTIAL_BATCH) {
@@ -3815,9 +3590,7 @@ check_boundaries:
       } else if (ew == sizeof(ep)) {
         uint64_t one = 1;
         sys_write(evfd_data_arr[my_numa_node], &one, 8);
-        
-        // NEW: We successfully dropped into escrow. Flag ourselves to pick it up ASAP.
-        tl_recently_escrowed = true; 
+        tl_recently_escrowed = true;
       }
 
       claim_count = safe_count;
@@ -3893,19 +3666,13 @@ check_boundaries:
   return 0;
 }
 
-// Worker Acknowledgment:
-// When a worker finishes processing a batch, it sends an acknowledgment packet
-// to the fallow pipe (legacy) or directly updates output tracking. This signal
-// is what allows the system to later garbage-collect the processed data.
-// Worker Acknowledgment:
-// When a worker finishes processing a batch, it sends an acknowledgment packet
-// to the fallow pipe (legacy) or directly updates output tracking. This signal
-// is what allows the system to later garbage-collect the processed data.
 static int ring_ack_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
   int fd_fallow = atoi(argv[1]);
   int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
+
+  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
 
   struct OrderPacket op = {0};
 
@@ -3945,10 +3712,16 @@ static int ring_ack_main(int argc, char **argv) {
           local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
       uint64_t end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
       struct PhysPacket pp = {.off = start, .len = end - start};
-      if (robust_pipe_write(fd_fallow, &pp, sizeof(pp)) < 0) return EXECUTION_FAILURE;
+      if (robust_pipe_write(fd_fallow, &pp, sizeof(pp)) < 0) {
+          signal(SIGPIPE, old_handler);
+          return EXECUTION_FAILURE;
+      }
     } else {
       struct IndexPacket ip = {.idx = op.major_idx, .cnt = op.cnt};
-      if (robust_pipe_write(fd_fallow, &ip, sizeof(ip)) < 0) return EXECUTION_FAILURE;
+      if (robust_pipe_write(fd_fallow, &ip, sizeof(ip)) < 0) {
+          signal(SIGPIPE, old_handler);
+          return EXECUTION_FAILURE;
+      }
     }
   }
 
@@ -3964,27 +3737,30 @@ static int ring_ack_main(int argc, char **argv) {
       if (s_order_pipe) {
         int fd_pipe = atoi(s_order_pipe);
         off_t curr = lseek(fd_target, 0, SEEK_CUR);
-        if (curr == (off_t)-1)
+        if (curr == (off_t)-1) {
+          signal(SIGPIPE, old_handler);
           return EXECUTION_FAILURE;
+        }
         op.fd = fd_target;
         op.off = (uint64_t)last_ack_offset;
         op.len = (uint64_t)(curr - last_ack_offset);
-        if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) return EXECUTION_FAILURE;
+        if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) {
+            signal(SIGPIPE, old_handler);
+            return EXECUTION_FAILURE;
+        }
         last_ack_offset = curr;
       }
     } else {
-      if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) return EXECUTION_FAILURE;
+      if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) {
+          signal(SIGPIPE, old_handler);
+          return EXECUTION_FAILURE;
+      }
     }
   }
+  signal(SIGPIPE, old_handler);
   return EXECUTION_SUCCESS;
 }
 
-// --- MIN-HEAP ORDERING ---
-// Min-Heap logic for Output Ordering:
-// Workers finish out of order depending on the data size and OS scheduling.
-// To guarantee strict output ordering, packets are inserted into a min-heap
-// keyed by their logical sequence number. The orderer thread continuously pops
-// the heap as the next expected sequence number arrives.
 struct HeapNode {
   uint64_t key;
   struct OrderPacket pkt;
@@ -4094,19 +3870,6 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
   return (total_read == len) ? 0 : -1;
 }
 
-
-// ==============================================================================
-// OUTPUT ORDERING ENGINE (The "Lorentz Transformation" for data streams)
-// ==============================================================================
-
-// Receives out-of-order data segments from workers via the order pipe.
-// Uses a min-heap to buffer them and emits contiguous prefixes to stdout.
-// This is the only place in the fast path where workers might block (if the
-// pipe fills).
-
-// ==============================================================================
-// INTERVAL MIN-HEAP (O(log N) out-of-order sequence assembly)
-// ==============================================================================
 struct IntervalNode {
     uint64_t s;
     uint64_t e;
@@ -4159,7 +3922,7 @@ static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len, struct O
     if (p_fd >= fd_states_cap) {
         int new_cap = p_fd + 128;
         struct OrderFdState *new_states = realloc(fd_states, new_cap * sizeof(struct OrderFdState));
-        if (!new_states) return; 
+        if (!new_states) return;
         memset(&new_states[fd_states_cap], 0, (new_cap - fd_states_cap) * sizeof(struct OrderFdState));
         *fd_states_ptr = new_states;
         *fd_states_cap_ptr = new_cap;
@@ -4222,6 +3985,8 @@ static int ring_order_main(int argc, char **argv) {
   size_t pkt_sz = sizeof(struct OrderPacket);
   bool stdout_broken = false;
 
+  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break;
@@ -4249,8 +4014,6 @@ static int ring_order_main(int argc, char **argv) {
               break;
           }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
-        } else {
-          // Legacy file unlinking mode...
         }
       }
 
@@ -4282,7 +4045,7 @@ static int ring_order_main(int argc, char **argv) {
     }
     if (stdout_broken) {
         pull_fire_alarm();
-        break; // Break outer read loop on SIGPIPE
+        break;
     }
     size_t consumed = count * pkt_sz;
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
@@ -4294,6 +4057,7 @@ static int ring_order_main(int argc, char **argv) {
   }
   free(fd_states);
   free(heap);
+  signal(SIGPIPE, old_handler);
   return EXECUTION_SUCCESS;
 }
 
@@ -4345,7 +4109,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
   }
-  
+
   free(heap);
   if (state) atomic_store_release(&state[0].fallow_active, 0);
   return EXECUTION_SUCCESS;
@@ -4380,7 +4144,6 @@ static int ring_worker_main(int argc, char **argv) {
   int node = my_numa_node;
 
   if (!strcmp(argv[1], "inc")) {
-    // CHANGED: Trigger pinning for explicit map even if nodes == 1
     if ((global_num_nodes > 1 || g_explicit_pinning) && g_logical_to_phys_map) {
       if (pin_to_numa_node(g_logical_to_phys_map[node]) != 0 && g_debug) {
       }
@@ -4486,8 +4249,6 @@ static int ring_pipe_main(int argc, char **argv) {
   }
   fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
 
-  // PHYSICS FIX: Get the ACTUAL size granted by the kernel and export it
-  // dynamically
   int pipe_cap = 65536;
   int ret = fcntl(pfd[1], F_GETPIPE_SZ);
   if (ret > 0)
@@ -4697,8 +4458,6 @@ static int ring_fetcher_main(int argc, char **argv) {
   return EXECUTION_SUCCESS;
 }
 
-
-
 // ==============================================================================
 // ZERO COPY INGEST (UMA / Flat Mode)
 // ==============================================================================
@@ -4746,7 +4505,7 @@ static int ring_copy_main(int argc, char **argv) {
     if (st.st_size > 0) {
       while (off < st.st_size) {
         // EMERGENCY BYPASS: Check fire alarm before scanner_finished
-        if (atomic_load_relaxed(&state[0].fallow_active) == 0) {
+        if (state && atomic_load_relaxed(&state[0].fallow_active) == 0) {
             limit_reached_exit = true;
             off = st.st_size;
             use_bounce = false;
@@ -4797,6 +4556,11 @@ static int ring_copy_main(int argc, char **argv) {
         total_moved += copied_in_chunk;
       }
       while (off < st.st_size && !limit_reached_exit) {
+        if (state && atomic_load_relaxed(&state[0].fallow_active) == 0) {
+            limit_reached_exit = true;
+            use_bounce = false;
+            break;
+        }
         if (atomic_load_acquire(&state[0].scanner_finished)) {
             limit_reached_exit = true;
             use_bounce = false;
@@ -4834,7 +4598,7 @@ static int ring_copy_main(int argc, char **argv) {
 
     while (1) {
       // EMERGENCY BYPASS: Check fire alarm before scanner_finished
-      if (atomic_load_relaxed(&state[0].fallow_active) == 0) break;
+      if (state && atomic_load_relaxed(&state[0].fallow_active) == 0) break;
       if (atomic_load_acquire(&state[0].scanner_finished)) break;
 
       struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
@@ -4951,7 +4715,7 @@ static int ring_fallow_main(int argc, char **argv) {
   int fd_file = atoi(argv[2]);
   bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
   if (state) atomic_store_release(&state[0].fallow_active, 1);
-  
+
   int heap_cap = 1024;
   int heap_sz = 0;
   struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
@@ -4998,10 +4762,8 @@ static int ring_fallow_main(int argc, char **argv) {
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
   }
-  
+
   free(heap);
-  // SIGPIPE CASCADE: If Fallow dies (Entropy stops), signal the Scanners to abort
-  if (state) atomic_store_release(&state[0].fallow_active, 0); 
   return EXECUTION_SUCCESS;
 }
 

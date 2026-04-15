@@ -454,7 +454,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
   X(ring_claim, ring_claim_main, "ring_claim [VAR] [FD]", "Claim batch")       \
-  X(ring_worker, ring_worker_main, "ring_worker[inc|dec] [FD]",               \
+  X(ring_worker, ring_worker_main, "ring_worker [inc|dec] [FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
@@ -477,7 +477,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_fcntl, ring_fcntl_main, "ring_fcntl <FD> <cmd>", "File control")      \
   X(ring_pipe, ring_pipe_main, "ring_pipe <ARR|RD> [WR]", "Create pipe")       \
   X(ring_splice, ring_splice_main,                                             \
-    "ring_splice <IN> <OUT> <OFF> <LEN>[close]", "Splice data")               \
+    "ring_splice <IN> <OUT> <OFF> <LEN> [close]", "Splice data")               \
   X(ring_version, ring_version_main, "ring_version [-t|-o|-m|-g|-f|-a]",       \
     "Show build metadata")                                                     \
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats",                  \
@@ -885,6 +885,25 @@ static inline void cleanup_waiter_state() {
     }
     is_waiting_on_ring = false;
   }
+}
+
+// EMERGENCY SHUTDOWN: Global fire alarm sentry.
+// Any thread (Worker or Orderer) can call this to trigger an immediate system-wide
+// abort. It atomically flips fallow_active to 0 (CAS ensures we only blast once),
+// then blasts ALL EOF eventfds to wake every sleeping poll across the engine.
+// Data eventfds are left untouched to preserve the conservation laws of the ring.
+static inline void pull_fire_alarm() {
+    if (!state) return;
+    // CAS: Only the first caller blasts the eventfds
+    uint8_t expected = 1;
+    if (__atomic_compare_exchange_n(&state[0].fallow_active, &expected, 0, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+        uint64_t blast = 999999;
+        for (uint32_t n = 0; n < allocated_num_nodes; n++) {
+            if (evfd_eof_arr && evfd_eof_arr[n] >= 0) sys_write(evfd_eof_arr[n], &blast, 8);
+        }
+        if (evfd_ingest_eof >= 0) sys_write(evfd_ingest_eof, &blast, 8);
+        if (evfd_chunk_done >= 0) sys_write(evfd_chunk_done, &blast, 8); // Wake up Ingest
+    }
 }
 
 #define OOM_WAIT_FOR_MEMORY(free_b_var, threshold, si_var, mu_var)             \
@@ -1781,6 +1800,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
 
 #define NUMA_CHECK_SCANNERS_DONE() do { \
+  /* EMERGENCY BYPASS: If someone pulled the fire alarm, abort ingest immediately */ \
+  if (atomic_load_relaxed(&state[0].fallow_active) == 0) { \
+    limit_reached_exit = true; \
+    goto ingest_done; \
+  } \
   bool _all_done = true; \
   for (int _i = 0; _i < num_nodes; _i++) { \
     if (!atomic_load_acquire(&state[_i].scanner_finished)) { \
@@ -2116,15 +2140,15 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           {.fd = evfd_indexer_arr[my_node_id], .events = POLLIN},
           {.fd = evfd_ingest_eof, .events = POLLIN}};
       poll(pfds, 2, -1);
-
+      
       bool data_fired = (pfds[0].revents & POLLIN) != 0;
       bool eof_fired = (pfds[1].revents & POLLIN) != 0;
-
+      
       // RULE: 1. Check local work. consume & loop
       if (data_fired) {
         uint64_t v;
         sys_read(evfd_indexer_arr[my_node_id], &v, 8);
-      }
+      } 
       // RULE: 3. EOF evfd. Handled by outer loop Condition 1 check.
       else if (eof_fired) {
           // Do nothing. Outer loop checks g_state->ingest_eof_idx != ~(uint64_t)0
@@ -2567,8 +2591,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   bool force_refill = false;
 
   while (1) {
-    // NEW: If Fallow dies (due to downstream EPIPE), kill the Scanner instantly.
-    if (atomic_load_acquire(&local_state->fallow_active) == 0) {
+    // EMERGENCY BYPASS: If someone pulled the fire alarm, kill the Scanner instantly.
+    if (atomic_load_relaxed(&local_state->fallow_active) == 0) {
         goto unified_scanner_eof;
     }
     uint64_t chunk_end = ~(uint64_t)0;
@@ -2891,12 +2915,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               if (poll(pfds, 2, poll_timeout) > 0) {
                 bool data_fired = (pfds[0].revents & POLLIN) != 0;
                 bool eof_fired = (pfds[1].revents & POLLIN) != 0;
-
+                
                 // RULE: 1. check if local work evfd was non-zero. consume & loop
                 if (data_fired) {
                   uint64_t v;
                   sys_read(evfd_ingest_data, &v, 8);
-                }
+                } 
                 // RULE: 3. check EOF evfd ONLY if work evfd is zero
                 else if (eof_fired) {
                   atomic_store_release(&local_state->ingest_complete, 1);
@@ -3415,7 +3439,7 @@ static int ring_claim_main(int argc, char **argv) {
   if (state) {
       // 1. Did someone else pull the fire alarm? (e.g., ring_order, or Fallow dying)
       if (atomic_load_relaxed(&state[0].fallow_active) == 0) {
-          return EXECUTION_FAILURE;
+          return EXECUTION_FAILURE; 
       }
 
       // 2. Sentry duty: Check if stdout is broken (Crucial for -u realtime mode)
@@ -3425,7 +3449,7 @@ static int ring_claim_main(int argc, char **argv) {
           struct pollfd pfd_stdout = {.fd = 1, .events = POLLOUT};
           if (poll(&pfd_stdout, 1, 0) > 0 && (pfd_stdout.revents & (POLLERR | POLLHUP))) {
               // The downstream pipe was cut (e.g., head -n 5). Pull the fire alarm!
-              atomic_store_release(&state[0].fallow_active, 0);
+              pull_fire_alarm();
               return EXECUTION_FAILURE;
           }
       }
@@ -3492,7 +3516,7 @@ static int ring_claim_main(int argc, char **argv) {
   }
 
 restart_loop:
-
+  
   // NEW: ESCROW PRIORITY INVERSION (Head-of-line blocking prevention)
   // If this specific worker just dropped a partial batch into escrow,
   // it prioritizes getting it back before touching the main ring.
@@ -3509,7 +3533,7 @@ restart_loop:
               claim_count = ep.cnt;
               // We successfully reclaimed our (or someone else's) escrow.
               // Bypass the ring check entirely.
-              goto check_boundaries;
+              goto check_boundaries; 
           }
       }
   }
@@ -3650,6 +3674,12 @@ restart_loop:
 
       poll(pfds, 3, -1);
 
+      // EMERGENCY BYPASS: If someone pulled the fire alarm while we slept, exit immediately
+      if (atomic_load_relaxed(&state[0].fallow_active) == 0) {
+        cleanup_waiter_state();
+        return EXECUTION_FAILURE;
+      }
+
       bool data_fired = (pfds[0].revents & POLLIN) != 0;
       bool escrow_fired = (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN) != 0);
       bool eof_fired = (pfds[2].revents & POLLIN) != 0;
@@ -3738,6 +3768,12 @@ restart_loop:
 
         poll(pfds, 2, -1);
 
+        // EMERGENCY BYPASS: If someone pulled the fire alarm while we slept, exit immediately
+        if (atomic_load_relaxed(&state[0].fallow_active) == 0) {
+          cleanup_waiter_state();
+          return EXECUTION_FAILURE;
+        }
+
         bool data_fired = (pfds[0].revents & POLLIN) != 0;
 
         if (data_fired) {
@@ -3779,9 +3815,9 @@ check_boundaries:
       } else if (ew == sizeof(ep)) {
         uint64_t one = 1;
         sys_write(evfd_data_arr[my_numa_node], &one, 8);
-
+        
         // NEW: We successfully dropped into escrow. Flag ourselves to pick it up ASAP.
-        tl_recently_escrowed = true;
+        tl_recently_escrowed = true; 
       }
 
       claim_count = safe_count;
@@ -3861,6 +3897,10 @@ check_boundaries:
 // When a worker finishes processing a batch, it sends an acknowledgment packet
 // to the fallow pipe (legacy) or directly updates output tracking. This signal
 // is what allows the system to later garbage-collect the processed data.
+// Worker Acknowledgment:
+// When a worker finishes processing a batch, it sends an acknowledgment packet
+// to the fallow pipe (legacy) or directly updates output tracking. This signal
+// is what allows the system to later garbage-collect the processed data.
 static int ring_ack_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
@@ -3933,7 +3973,7 @@ static int ring_ack_main(int argc, char **argv) {
         last_ack_offset = curr;
       }
     } else {
-        if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) return EXECUTION_FAILURE;
+      if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) return EXECUTION_FAILURE;
     }
   }
   return EXECUTION_SUCCESS;
@@ -4119,7 +4159,7 @@ static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len, struct O
     if (p_fd >= fd_states_cap) {
         int new_cap = p_fd + 128;
         struct OrderFdState *new_states = realloc(fd_states, new_cap * sizeof(struct OrderFdState));
-        if (!new_states) return;
+        if (!new_states) return; 
         memset(&new_states[fd_states_cap], 0, (new_cap - fd_states_cap) * sizeof(struct OrderFdState));
         *fd_states_ptr = new_states;
         *fd_states_cap_ptr = new_cap;
@@ -4205,10 +4245,12 @@ static int ring_order_main(int argc, char **argv) {
             if (ring_copy_chunk(op->fd, 1, offset, op->len) < 0) stdout_broken = true;
           }
           if (stdout_broken) {
-              if (state) atomic_store_release(&state[0].fallow_active, 0); // <--- FIRE ALARM
+              pull_fire_alarm();
               break;
           }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
+        } else {
+          // Legacy file unlinking mode...
         }
       }
 
@@ -4226,7 +4268,7 @@ static int ring_order_main(int argc, char **argv) {
               if (ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len) < 0) stdout_broken = true;
             }
             if (stdout_broken) {
-                if (state) atomic_store_release(&state[0].fallow_active, 0); // <--- FIRE ALARM
+                pull_fire_alarm();
                 break;
             }
             safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
@@ -4239,7 +4281,7 @@ static int ring_order_main(int argc, char **argv) {
       }
     }
     if (stdout_broken) {
-        if (state) atomic_store_release(&state[0].fallow_active, 0); // <--- FIRE ALARM
+        pull_fire_alarm();
         break; // Break outer read loop on SIGPIPE
     }
     size_t consumed = count * pkt_sz;
@@ -4303,7 +4345,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
   }
-
+  
   free(heap);
   if (state) atomic_store_release(&state[0].fallow_active, 0);
   return EXECUTION_SUCCESS;
@@ -4703,6 +4745,13 @@ static int ring_copy_main(int argc, char **argv) {
   if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
     if (st.st_size > 0) {
       while (off < st.st_size) {
+        // EMERGENCY BYPASS: Check fire alarm before scanner_finished
+        if (atomic_load_relaxed(&state[0].fallow_active) == 0) {
+            limit_reached_exit = true;
+            off = st.st_size;
+            use_bounce = false;
+            break;
+        }
         if (atomic_load_acquire(&state[0].scanner_finished)) {
             limit_reached_exit = true;
             off = st.st_size;
@@ -4784,6 +4833,8 @@ static int ring_copy_main(int argc, char **argv) {
       goto err_out;
 
     while (1) {
+      // EMERGENCY BYPASS: Check fire alarm before scanner_finished
+      if (atomic_load_relaxed(&state[0].fallow_active) == 0) break;
       if (atomic_load_acquire(&state[0].scanner_finished)) break;
 
       struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
@@ -4858,6 +4909,7 @@ static int ring_copy_main(int argc, char **argv) {
     }
     munmap(bounce_buf, chunk);
   }
+
   if (evfd_ingest_eof >= 0) {
     uint64_t val = 999999;
     sys_write(evfd_ingest_eof, &val, 8);
@@ -4899,7 +4951,7 @@ static int ring_fallow_main(int argc, char **argv) {
   int fd_file = atoi(argv[2]);
   bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
   if (state) atomic_store_release(&state[0].fallow_active, 1);
-
+  
   int heap_cap = 1024;
   int heap_sz = 0;
   struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
@@ -4946,10 +4998,10 @@ static int ring_fallow_main(int argc, char **argv) {
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
   }
-
+  
   free(heap);
   // SIGPIPE CASCADE: If Fallow dies (Entropy stops), signal the Scanners to abort
-  if (state) atomic_store_release(&state[0].fallow_active, 0);
+  if (state) atomic_store_release(&state[0].fallow_active, 0); 
   return EXECUTION_SUCCESS;
 }
 
