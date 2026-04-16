@@ -1193,7 +1193,7 @@ static void apply_config(char type, char sub, const char *arg) {
       }
     }
   }
-  cfg_state &= ~clear_mask;
+  //cfg_state &= ~clear_mask;
   cfg_state |= set_mask;
 }
 
