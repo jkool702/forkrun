@@ -1105,16 +1105,17 @@ static uint32_t cfg_state = 0;
 static uint64_t user_vals[6] = {0};
 
 static void apply_config(char type, char sub, const char *arg) {
+  uint32_t clear_mask = 0;
   uint32_t set_mask = 0;
   int val_code = S_USER;
   uint64_t u_val = 0;
 
   if (strcmp(arg, "x") == 0) {
     if (type == 1) {
-      cfg_state &= ~M_L_ALL;
+      clear_mask |= M_L_ALL;
       set_mask |= M_BMODE;
     } else if (type == 2) {
-      cfg_state &= ~(M_B_ALL | M_BMODE);
+      clear_mask |= (M_B_ALL | M_BMODE);
     }
   } else {
     if (arg[0] == '\0')
@@ -1144,11 +1145,11 @@ static void apply_config(char type, char sub, const char *arg) {
       cfg_state &= ~M_L_ALL;
     }
     if (type == 0)
-      cfg_state &= ~M_W_ALL;
+      clear_mask |= M_W_ALL;
     if (type == 1)
-      cfg_state &= ~M_L_ALL;
+      clear_mask |= M_L_ALL;
     if (type == 2)
-      cfg_state &= ~M_B_ALL;
+      clear_mask |= M_B_ALL;
 
 #define APPLY_SLOT(idx_u, sh)                                                  \
   do {                                                                         \
@@ -1191,6 +1192,7 @@ static void apply_config(char type, char sub, const char *arg) {
       }
     }
   }
+  //cfg_state &= ~clear_mask;
   cfg_state |= set_mask;
 }
 
