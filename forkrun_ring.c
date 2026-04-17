@@ -454,6 +454,8 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
   X(ring_claim, ring_claim_main, "ring_claim [VAR] [FD]", "Claim batch")       \
+  X(ring_escrow_deposit, ring_escrow_deposit_main, "ring_escrow_deposit",      \
+    "Deposit failed batch to escrow")                                          \
   X(ring_worker, ring_worker_main, "ring_worker [inc|dec] [FD]",               \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
@@ -466,7 +468,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
     "Reorder output")                                                          \
   X(ring_copy, ring_copy_main, "ring_copy <OUT> <IN>", "Zero-copy ingest")     \
   X(ring_signal, ring_signal_main, "ring_signal <FD>", "Signal eventfd")       \
-  X(lseek, lseek_main, "lseek <FD> <OFF> [WHENCE] [VAR]", "Seek fd")           \
+  X(lseek, lseek_main, "lseek <FD> <OFF>[WHENCE] [VAR]", "Seek fd")           \
   X(ring_indexer, ring_indexer_main, "ring_indexer", "NUMA Indexer")           \
   X(ring_fetcher, ring_fetcher_main, "ring_fetcher", "NUMA Fetcher")           \
   X(ring_fallow_phys, ring_fallow_phys_main, "ring_fallow_phys",               \
@@ -478,7 +480,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_pipe, ring_pipe_main, "ring_pipe <ARR|RD> [WR]", "Create pipe")       \
   X(ring_splice, ring_splice_main,                                             \
     "ring_splice <IN> <OUT> <OFF> <LEN> [close]", "Splice data")               \
-  X(ring_version, ring_version_main, "ring_version [-t|-o|-m|-g|-f|-a]",       \
+  X(ring_version, ring_version_main, "ring_version[-t|-o|-m|-g|-f|-a]",       \
     "Show build metadata")                                                     \
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats",                  \
     "Print NUMA telemetry")                                                    \
@@ -723,6 +725,7 @@ static __thread uint32_t worker_last_minor = 0;
 static __thread uint64_t tl_remainder_idx = 0;
 static __thread uint64_t tl_remainder_cnt = 0;
 static __thread bool tl_recently_escrowed = false;
+static __thread uint32_t worker_last_num_kills = 0;
 
 static int *evfd_data_arr = NULL;
 static int *evfd_eof_arr = NULL;
@@ -753,6 +756,8 @@ static uint8_t g_explicit_pinning = 0; // NEW
 struct EscrowPacket {
   uint64_t idx;
   uint64_t cnt;
+  uint32_t num_kills;
+  uint32_t _pad;
 };
 
 // IndexPacket: Legacy flat-mode packet for passing physical offsets.
@@ -1105,17 +1110,16 @@ static uint32_t cfg_state = 0;
 static uint64_t user_vals[6] = {0};
 
 static void apply_config(char type, char sub, const char *arg) {
-  uint32_t clear_mask = 0;
   uint32_t set_mask = 0;
   int val_code = S_USER;
   uint64_t u_val = 0;
 
   if (strcmp(arg, "x") == 0) {
     if (type == 1) {
-      clear_mask |= M_L_ALL;
+      cfg_state &= ~M_L_ALL;
       set_mask |= M_BMODE;
     } else if (type == 2) {
-      clear_mask |= (M_B_ALL | M_BMODE);
+      cfg_state &= ~(M_B_ALL | M_BMODE);
     }
   } else {
     if (arg[0] == '\0')
@@ -1145,11 +1149,11 @@ static void apply_config(char type, char sub, const char *arg) {
       cfg_state &= ~M_L_ALL;
     }
     if (type == 0)
-      clear_mask |= M_W_ALL;
+      cfg_state &= ~M_W_ALL;
     if (type == 1)
-      clear_mask |= M_L_ALL;
+      cfg_state &= ~M_L_ALL;
     if (type == 2)
-      clear_mask |= M_B_ALL;
+      cfg_state &= ~M_B_ALL;
 
 #define APPLY_SLOT(idx_u, sh)                                                  \
   do {                                                                         \
@@ -1192,7 +1196,6 @@ static void apply_config(char type, char sub, const char *arg) {
       }
     }
   }
-  //cfg_state &= ~clear_mask;
   cfg_state |= set_mask;
 }
 
@@ -3552,11 +3555,9 @@ static int ring_claim_main(int argc, char **argv) {
     goto check_boundaries;
   }
 
-restart_loop:
-
   // NEW: ESCROW PRIORITY INVERSION (Head-of-line blocking prevention)
-  // If this specific worker just dropped a partial batch into escrow,
-  // it prioritizes getting it back before touching the main ring.
+  // If this specific worker just dropped a partial batch into escrow, or if it was
+  // explicitly spawned to replace a dead worker (`inc_replace`), it checks escrow FIRST.
   if (tl_recently_escrowed) {
       tl_recently_escrowed = false;
       if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
@@ -3568,12 +3569,26 @@ restart_loop:
           if (er == sizeof(ep)) {
               my_read_idx = ep.idx;
               claim_count = ep.cnt;
+              worker_last_num_kills = ep.num_kills;
+              
+              // NEW: Check the limit
+              int limit = 3;
+              const char *s_kills = get_string_value("FORKRUN_NUM_KILLS_LIMIT");
+              if (s_kills) limit = atoi(s_kills);
+
+              if (limit > 0 && worker_last_num_kills >= (uint32_t)limit) {
+                  bind_variable("RING_POISONED", "1", 0);
+              } else {
+                  bind_variable("RING_POISONED", "0", 0);
+              }
               // We successfully reclaimed our (or someone else's) escrow.
               // Bypass the ring check entirely.
               goto check_boundaries;
           }
       }
   }
+
+restart_loop:
 
   while (1) {
     // 1. Ring check FIRST (Local Work)
@@ -3631,6 +3646,10 @@ restart_loop:
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
                                        __ATOMIC_SEQ_CST);
 
+      // NEW: Clear poison tracking for fresh main-ring batches
+      worker_last_num_kills = 0;
+      bind_variable("RING_POISONED", "0", 0);
+
       if (!local_state->numa_enabled) {
         int64_t sbatch_check =
             atomic_load_relaxed(&local_state->signed_batch_size);
@@ -3656,6 +3675,18 @@ restart_loop:
       if (er == sizeof(ep)) {
         my_read_idx = ep.idx;
         claim_count = ep.cnt;
+        worker_last_num_kills = ep.num_kills;
+
+        // NEW: Check the limit
+        int limit = 3;
+        const char *s_kills = get_string_value("FORKRUN_NUM_KILLS_LIMIT");
+        if (s_kills) limit = atoi(s_kills);
+
+        if (limit > 0 && worker_last_num_kills >= (uint32_t)limit) {
+            bind_variable("RING_POISONED", "1", 0);
+        } else {
+            bind_variable("RING_POISONED", "0", 0);
+        }
         break;
       }
     }
@@ -3769,7 +3800,8 @@ restart_loop:
           uint64_t avail = w_curr - my_read_idx;
           if (avail < claim_count) {
             struct EscrowPacket ep = {.idx = my_read_idx + avail,
-                                      .cnt = claim_count - avail};
+                                      .cnt = claim_count - avail,
+                                      .num_kills = worker_last_num_kills};
             ssize_t ew;
             do {
               ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep));
@@ -3840,7 +3872,8 @@ check_boundaries:
     if (safe_count < claim_count) {
       uint64_t remainder = claim_count - safe_count;
       struct EscrowPacket ep = {.idx = my_read_idx + safe_count,
-                                .cnt = remainder};
+                                .cnt = remainder,
+                                .num_kills = worker_last_num_kills};
       ssize_t ew;
       do {
         ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep));
@@ -3853,7 +3886,7 @@ check_boundaries:
         uint64_t one = 1;
         sys_write(evfd_data_arr[my_numa_node], &one, 8);
 
-        // NEW: We successfully dropped into escrow. Flag ourselves to pick it up ASAP.
+        // We successfully dropped the remainder into escrow. Flag ourselves to pick it up ASAP.
         tl_recently_escrowed = true;
       }
 
@@ -3902,6 +3935,12 @@ check_boundaries:
   u64toa(claim_count, buf);
   bind_variable("RING_BATCH_SLOTS", buf, 0);
 
+  // --- NEW: Export the absolute byte offset for exact logging ---
+  uint64_t exact_start_offset = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+  u64toa(exact_start_offset, buf);
+  bind_variable("RING_START_OFFSET", buf, 0);
+  // --------------------------------------------------------------
+
   if (local_state->numa_enabled) {
     worker_last_major = local_state->major_ring[my_read_idx & RING_MASK];
     worker_last_minor =
@@ -3928,6 +3967,33 @@ check_boundaries:
     }
   }
   return 0;
+}
+
+// Deposit a failed batch into the escrow pipe so a surviving worker can retry it.
+static int ring_escrow_deposit_main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
+    
+    int limit = 3;
+    const char *s_kills = get_string_value("FORKRUN_NUM_KILLS_LIMIT");
+    if (s_kills) limit = atoi(s_kills);
+
+    // If cnt is 0 (success) OR limit is 0 (disabled), do not deposit
+    if (worker_last_cnt == 0 || limit == 0) return EXECUTION_SUCCESS;
+
+    struct EscrowPacket ep = {
+        .idx = worker_last_idx,
+        .cnt = worker_last_cnt,
+        .num_kills = worker_last_num_kills + 1
+    };
+
+    int node = (my_numa_node == -1) ? 0 : my_numa_node;
+    if (fd_escrow_w && fd_escrow_w[node] >= 0) {
+        robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
+    }
+    
+    worker_last_cnt = 0; 
+    return EXECUTION_SUCCESS;
 }
 
 // Worker Acknowledgment:
@@ -4026,6 +4092,7 @@ static int ring_ack_main(int argc, char **argv) {
     }
   }
 
+  worker_last_cnt = 0; // Mark the claim as successfully completed (preventing escrow deposit on natural exit)
   signal(SIGPIPE, old_handler);
   return EXECUTION_SUCCESS;
 }
@@ -4478,13 +4545,18 @@ static int ring_worker_main(int argc, char **argv) {
   }
   int node = my_numa_node;
 
-  if (!strcmp(argv[1], "inc")) {
+  if (!strcmp(argv[1], "inc") || !strcmp(argv[1], "inc_replace")) {
     // CHANGED: Trigger pinning for explicit map even if nodes == 1
     if ((global_num_nodes > 1 || g_explicit_pinning) && g_logical_to_phys_map) {
       if (pin_to_numa_node(g_logical_to_phys_map[node]) != 0 && g_debug) {
       }
     }
     __atomic_fetch_add(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);
+
+    if (!strcmp(argv[1], "inc_replace")) {
+        tl_recently_escrowed = true; // Inherit the dead worker's priority duty!
+    }
+
     if (argc >= 3 && isdigit(argv[2][0]))
       worker_cached_fd = atoi(argv[2]);
   } else if (!strcmp(argv[1], "dec")) {

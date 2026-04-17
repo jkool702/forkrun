@@ -672,7 +672,7 @@ P+=($!)
         ${verbose_flag} && printf '\nSPAWNED %s workers\n' "${nWorkers}" >&2
 
         # --- SHUTDOWN ---
-        exec {fd_spawn_r}<&- {fd_fallow_w}>&-
+        exec {fd_spawn_r}<&- {fd_spawn_w}>&- {fd_fallow_w}>&-
         [[ "${order_mode}" == "realtime" ]] || exec {fd_order_w}>&-
 
         wait

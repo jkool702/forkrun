@@ -464,8 +464,10 @@ toc() { :; }
             ) &
         fi
 
+        exec {fd_spawn_w}>&-
+
         (
-            exec {fd_fallow_w}>&- {fd_spawn_w}>&-
+            exec {fd_fallow_w}>&-
             fallow_args=( "${fd_fallow_r}" "${fd_write}" )
             if (( FORKRUN_NUM_NODES > 1 )); then
                 ring_fallow_phys "${fallow_args[@]}"
@@ -479,7 +481,7 @@ toc() { :; }
         [[ "${order_mode}" == "realtime" ]] || {
             ring_pipe fd_order_r fd_order_w
             (
-                exec {fd_order_w}>&- {fd_spawn_w}>&-
+                exec {fd_order_w}>&-
 
                 order_args=( "${fd_order_r}" 'memfd' )
                 [[ "${order_mode}" == "buffered" ]] && order_args+=( "unordered" )
@@ -581,34 +583,16 @@ toc() { :; }
   LC_ALL=C
   set +m
   export RING_NODE_ID="$2"
-  
-  # NEW: The universal fault-tolerant event trap with FORKRUN_NUM_KILLS_LIMIT logic
-  trap '\''ret=$?; ring_escrow_deposit; ring_worker dec; ring_cleanup_waiter; if (( ret > 0 && ret < 128 && ${FORKRUN_NUM_KILLS_LIMIT:-3} != 0 )); then echo "respawn:$RING_NODE_ID" >&${fd_spawn_w}; else echo "done" >&${fd_spawn_w}; fi'\'' EXIT
+  trap "ring_worker dec; ring_cleanup_waiter" EXIT
 
   {
     ID="$1"
-    SPAWN_TYPE="$3"
     '
        ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
-        worker_func_src+='shift $# # Clear args safely
-
-    # Boot cleanly onto the fast-path, or inherit a dead worker'\''s escrow priority
-    if [[ "$SPAWN_TYPE" == "replace" ]]; then
-        ring_worker inc_replace $fd_read
-    else
-        ring_worker inc $fd_read
-    fi
-
+        worker_func_src+='shift 2
+    ring_worker inc $fd_read
     while ring_claim; do
-        if [[ "${RING_POISONED:-0}" == "1" ]]; then
-            printf "forkrun [WARNING]: Batch %s (byte offset %s, size %s) discarded after hitting failure limit (%s).\n" \
-                   "$RING_BATCH_IDX" "$RING_START_OFFSET" "$REPLY" "${FORKRUN_NUM_KILLS_LIMIT:-3}" >&2
-            RING_POISONED=0
-            '"${ring_ack_str}"'
-            continue
-        fi
-
         if [[ "$REPLY" != "0" ]]; then
             '
          ${insert_id_flag:-false} && worker_func_src+='((W_BATCH++))
@@ -624,49 +608,42 @@ P+=($!)
 
         eval "${worker_func_src}"
 
-        # --- SPAWN EVENT LOOP ---
+        # --- SPAWN LOOP ---
         nWorkers=0
         finished_scanners=0
-        running_workers=0
 
         declare -a node_workers
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
         (( node_worker_max < 1 )) && node_worker_max=1
 
-        # Event loop resolves automatically when scanners AND workers finish
-        while (( finished_scanners < FORKRUN_NUM_NODES || running_workers > 0 )); do
+        while (( finished_scanners < FORKRUN_NUM_NODES )); do
+            # FIX: If the pipe hits EOF (all scanners dead/exited), break out safely
             if ! read -r -u $fd_spawn_r msg; then
                 break
             fi
 
             if [[ "$msg" == *'x'* ]]; then
                 ((finished_scanners++))
-            elif [[ "$msg" == "done" ]]; then
-                ((running_workers--))
-            elif [[ "$msg" == respawn:* ]]; then
-                node_idx="${msg#*:}"
-                spawn_worker "$nWorkers" "$node_idx" "replace"
-                ((nWorkers++))
-            else
-                # Parse directed spawn "node:count" or legacy "count"
-                if [[ "$msg" == *:* ]]; then
-                    node_idx="${msg%%:*}"
-                    spawn_count="${msg#*:}"
-                else
-                    node_idx=0
-                    spawn_count="$msg"
-                fi
-
-                target=$(( node_workers[node_idx] + spawn_count ))
-                (( target > node_worker_max )) && target=$node_worker_max
-
-                for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
-                    spawn_worker "$nWorkers" "$node_idx"
-                    ((running_workers++))
-                    ((nWorkers++))
-                done
+                continue
             fi
+
+            # Parse directed spawn "node:count" or legacy "count"
+            if [[ "$msg" == *:* ]]; then
+                node_idx="${msg%%:*}"
+                spawn_count="${msg#*:}"
+            else
+                node_idx=0
+                spawn_count="$msg"
+            fi
+
+            target=$(( node_workers[node_idx] + spawn_count ))
+            (( target > node_worker_max )) && target=$node_worker_max
+
+            for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
+                spawn_worker "$nWorkers" "$node_idx"
+                ((nWorkers++))
+            done
         done
 
         ${verbose_flag} && printf '\nSPAWNED %s workers\n' "${nWorkers}" >&2
