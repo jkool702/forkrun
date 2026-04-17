@@ -1036,7 +1036,7 @@ print_section J "Worker and ID Semantics"
 # -I flag: batch IDs must be present and follow the [{NODE.}WORKER.BATCH] format.
 run_test_regex J "-I flag: batch ID format is {NODE.WORKER.BATCH}" \
     "echo 'test' | frun -l 1 -I echo {ID}" \
-    "^\{([0-9]+\.)?[0-9]+\.[0-9]+\}$" 0 false
+    "^\{([0-9]+\.)?[0-9]+\.[0-9]+\} .*$" 0 false
 
 # -I: all batch IDs in a run must be unique (no ID collision between workers).
 run_test_exact J "-I flag: all IDs in a 10-line run are unique" \
