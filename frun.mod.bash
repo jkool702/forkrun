@@ -1,4 +1,5 @@
 #!/usr/bin/bash
+
 if shopt -q extglob; then
    extglob_was_set=true;
 else
