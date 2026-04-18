@@ -577,17 +577,16 @@ toc() { :; }
         }
 
         worker_func_src='spawn_worker() {
+    local ID="$1" NODE_ID="$2" SPAWN_TYPE="$3"
 (
   LC_ALL=C
   set +m
-  export RING_NODE_ID="$2"
+  export RING_NODE_ID="$NODE_ID"
   
-  # NEW: The universal fault-tolerant event trap with FORKRUN_NUM_KILLS_LIMIT logic
-  trap '\''ret=$?; ring_escrow_deposit; ring_worker dec; ring_cleanup_waiter; if (( ret > 0 && ret < 128 && ${FORKRUN_NUM_KILLS_LIMIT:-3} != 0 )); then echo "respawn:$RING_NODE_ID" >&${fd_spawn_w}; else echo "done" >&${fd_spawn_w}; fi'\'' EXIT
+  # The trap ONLY asks for a respawn if it failed gracefully. Otherwise it just exits.
+  trap '\''ret=$?; ring_escrow_deposit; ring_worker dec; ring_cleanup_waiter; if (( ret > 0 && ret < 128 && ${FORKRUN_NUM_KILLS_LIMIT:-3} != 0 )); then echo "respawn:$ID:$RING_NODE_ID" >&${fd_spawn_w}; fi'\'' EXIT
 
   {
-    ID="$1"
-    SPAWN_TYPE="$3"
     '
        ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
@@ -630,49 +629,91 @@ P+=($!)
         running_workers=0
 
         declare -a node_workers
+        declare -A worker_ids worker_nodes worker_pids
+
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
         (( node_worker_max < 1 )) && node_worker_max=1
 
         # Event loop resolves automatically when scanners AND workers finish
         while (( finished_scanners < FORKRUN_NUM_NODES || running_workers > 0 )); do
-            if ! read -r -u $fd_spawn_r msg; then
-                break
+            
+            # Poll the Scanner pipe AND all active Worker Death pipes (Wait forever)
+            if ! ring_poll -v ready_fds $fd_spawn_r "${!worker_ids[@]}"; then
+                continue # Spurious wake or interrupt
             fi
 
-            if [[ "$msg" == *'x'* ]]; then
-                ((finished_scanners++))
-            elif [[ "$msg" == "done" ]]; then
-                ((running_workers--))
-            elif [[ "$msg" == respawn:* ]]; then
-                node_idx="${msg#*:}"
-                spawn_worker "$nWorkers" "$node_idx" "replace"
-                ((nWorkers++))
-            else
-                # Parse directed spawn "node:count" or legacy "count"
-                if [[ "$msg" == *:* ]]; then
-                    node_idx="${msg%%:*}"
-                    spawn_count="${msg#*:}"
-                else
-                    node_idx=0
-                    spawn_count="$msg"
+            # RULE: Process Intent (fd_spawn_r) BEFORE Physics (POLLHUP)
+            if [[ " $ready_fds " == *" $fd_spawn_r "* ]]; then
+                if ! read -r -u $fd_spawn_r msg; then
+                    break # EOF on spawn pipe (all writers dead)
                 fi
-
-                target=$(( node_workers[node_idx] + spawn_count ))
-                (( target > node_worker_max )) && target=$node_worker_max
-
-                for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
-                    spawn_worker "$nWorkers" "$node_idx"
+                
+                if [[ "$msg" == *'x'* ]]; then
+                    ((finished_scanners++))
+                elif [[ "$msg" == respawn:* ]]; then
+                    local ids="${msg#*:}"
+                    local dead_id="${ids%%:*}"
+                    local dead_node="${ids#*:}"
+                    
+                    ring_pipe death_r death_w
+                    spawn_worker "$dead_id" "$dead_node" "replace"
+                    exec {death_w}>&- # Parent drops write handle
+                    
+                    worker_ids[$death_r]=$dead_id
+                    worker_nodes[$death_r]=$dead_node
+                    worker_pids[$death_r]=${P[-1]}
                     ((running_workers++))
-                    ((nWorkers++))
-                done
+                else
+                    if [[ "$msg" == *:* ]]; then
+                        node_idx="${msg%%:*}"
+                        spawn_count="${msg#*:}"
+                    else
+                        node_idx=0
+                        spawn_count="$msg"
+                    fi
+
+                    target=$(( node_workers[node_idx] + spawn_count ))
+                    (( target > node_worker_max )) && target=$node_worker_max
+
+                    for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
+                        ring_pipe death_r death_w
+                        spawn_worker "$nWorkers" "$node_idx" "normal"
+                        exec {death_w}>&- # Parent drops write handle
+                        
+                        worker_ids[$death_r]=$nWorkers
+                        worker_nodes[$death_r]=$node_idx
+                        worker_pids[$death_r]=${P[-1]}
+                        
+                        ((running_workers++))
+                        ((nWorkers++))
+                    done
+                fi
             fi
+            
+            # RULE: Process Physics (Death Pipes)
+            for ready_fd in $ready_fds; do
+                if [[ "$ready_fd" != "$fd_spawn_r" ]]; then
+                    dead_pid="${worker_pids[$ready_fd]}"
+                    
+                    # Reap the process to prevent zombies (instantly returns)
+                    wait "$dead_pid" 2>/dev/null || true
+                    
+                    # Cleanup tracking
+                    unset worker_ids[$ready_fd]
+                    unset worker_nodes[$ready_fd]
+                    unset worker_pids[$ready_fd]
+                    exec {ready_fd}<&-
+                    
+                    ((running_workers--))
+                fi
+            done
         done
 
         ${verbose_flag} && printf '\nSPAWNED %s workers\n' "${nWorkers}" >&2
 
         # --- SHUTDOWN ---
-        exec {fd_spawn_r}<&- {fd_spawn_w}>&- {fd_fallow_w}>&-
+        exec {fd_spawn_r}<&- {fd_fallow_w}>&-
         [[ "${order_mode}" == "realtime" ]] || exec {fd_order_w}>&-
 
         wait

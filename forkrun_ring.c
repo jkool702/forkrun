@@ -484,7 +484,8 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
     "Show build metadata")                                                     \
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats",                  \
     "Print NUMA telemetry")                                                    \
-  X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")
+  X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")            \
+  X(ring_poll, ring_poll_main, "ring_poll [-t ms] [-v VAR] fd1 fd2...", "Poll FDs")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -5181,6 +5182,67 @@ static int ring_fallow_main(int argc, char **argv) {
   pull_fire_alarm();
 
   return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// EVENT MULTIPLEXER (The "Death Pipe" Poller)
+// ==============================================================================
+static int ring_poll_main(int argc, char **argv) {
+    int timeout = -1;
+    char *var_name = "REPLY";
+    int start_idx = 1;
+
+    // Parse optional arguments
+    while (start_idx < argc) {
+        if (strcmp(argv[start_idx], "-t") == 0 && start_idx + 1 < argc) {
+            timeout = atoi(argv[start_idx + 1]);
+            start_idx += 2;
+        } else if (strcmp(argv[start_idx], "-v") == 0 && start_idx + 1 < argc) {
+            var_name = argv[start_idx + 1];
+            start_idx += 2;
+        } else {
+            break;
+        }
+    }
+
+    int nfds = argc - start_idx;
+    if (nfds <= 0) return 1; // Return 1 on empty/timeout
+
+    struct pollfd *pfds = malloc(nfds * sizeof(struct pollfd));
+    if (!pfds) return EXECUTION_FAILURE;
+
+    for (int i = 0; i < nfds; i++) {
+        pfds[i].fd = atoi(argv[start_idx + i]);
+        pfds[i].events = POLLIN; 
+    }
+
+    int r = poll(pfds, nfds, timeout);
+    if (r > 0) {
+        // Allocate space: Max 12 bytes per FD (e.g. "1048576 ")
+        char *buf = malloc(nfds * 12 + 1);
+        if (!buf) {
+            free(pfds);
+            return EXECUTION_FAILURE;
+        }
+        
+        int pos = 0;
+        for (int i = 0; i < nfds; i++) {
+            if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+                pos += snprintf(buf + pos, (nfds * 12 + 1) - pos, "%d ", pfds[i].fd);
+            }
+        }
+        
+        if (pos > 0) buf[pos - 1] = '\0'; // Strip trailing space
+        else buf[0] = '\0';
+
+        bind_variable(var_name, buf, 0);
+        free(buf);
+        free(pfds);
+        return EXECUTION_SUCCESS;
+    }
+    
+    free(pfds);
+    return (r == 0) ? 1 : EXECUTION_FAILURE; // 1 = clean timeout, fail = error
 }
 
 static int ring_version_main(int argc, char **argv) {
