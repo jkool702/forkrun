@@ -294,17 +294,6 @@ printf 'a\0b\0c\0d\0' > "$NULL_INPUT"
 printf 'a b\nc d\ne f\n' > "$SPACE_INPUT"
 printf 'αβγ\nδεζ\nηθι\n' > "$MIXED_INPUT"
 
-
-# Test 2: Worker command crashes mid-batch
-# If a specific input crashes the worker, the rest of the file should still process.
-run_test "Worker transient failure mid-batch" \
-  "crash_func() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_func' frun -j 2 -l 1 -k crash_func" \
-  "1
-2
-4
-5"
-
-
 # ============================================================================
 # CORE MODE TESTS
 # ============================================================================
@@ -837,6 +826,17 @@ run_test "Worker transient failure mid-batch" \
 4
 5"
 
+# Test 3: Worker command crashes once mid-batch
+# If a specific input crashes only once it should recover and the rest of the file should still process.
+run_test "Worker one-time transient failure mid-batch" \
+  "crash_func() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && ! [[ -f ./.crash  ]]; then : >./.crash; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 -k crash_func" \
+  "1
+2
+3
+4
+5"
+
+\rm ./.crash
 
 # ============================================================================
 # FINAL SUMMARY
