@@ -3581,11 +3581,13 @@ restart_loop:
               snprintf(buf, sizeof(buf), "%u", ep.num_kills);
               bind_variable("RING_NUM_KILLS", buf, 0);
 
-              int limit = 3;
-              const char *s_lim = get_string_value("FORKRUN_NUM_KILLS_LIMIT");
+              int limit = 3; // Default to 3 retries
+              const char *s_lim = get_string_value("FORKRUN_RETRY_LIMIT");
               if (s_lim) limit = atoi(s_lim);
 
-              if (limit > 0 && ep.num_kills >= (uint32_t)limit) {
+              // If limit is negative, we allow infinite retries (never poison)
+              // If limit is >= 0, we poison the batch when kills reaches the limit
+              if (limit >= 0 && ep.num_kills >= (uint32_t)limit) {
                   bind_variable("RING_POISONED", "1", 0);
               } else {
                   bind_variable("RING_POISONED", "0", 0);
@@ -3691,11 +3693,13 @@ restart_loop:
         snprintf(buf, sizeof(buf), "%u", ep.num_kills);
         bind_variable("RING_NUM_KILLS", buf, 0);
 
-        int limit = 3;
-        const char *s_lim = get_string_value("FORKRUN_NUM_KILLS_LIMIT");
+        int limit = 3; // Default to 3 retries
+        const char *s_lim = get_string_value("FORKRUN_RETRY_LIMIT");
         if (s_lim) limit = atoi(s_lim);
 
-        if (limit > 0 && ep.num_kills >= (uint32_t)limit) {
+        // If limit is negative, we allow infinite retries (never poison)
+        // If limit is >= 0, we poison the batch when kills reaches the limit
+        if (limit >= 0 && ep.num_kills >= (uint32_t)limit) {
             bind_variable("RING_POISONED", "1", 0);
         } else {
             bind_variable("RING_POISONED", "0", 0);
