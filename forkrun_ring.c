@@ -485,6 +485,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")            \
   X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr>", "Poll FDs") \
   X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
+  X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
   X(ring_scanner_eof, ring_scanner_eof_main, "ring_scanner_eof <node>", "Force scanner EOF") \
   X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow")
 
@@ -5170,6 +5171,18 @@ static int ring_revert_output_main(int argc, char **argv) {
 }
 
 // ==============================================================================
+// ACK SYNC: Synchronize output offset for a fresh worker taking over a slot
+// ==============================================================================
+static int ring_ack_init_main(int argc, char **argv) {
+    if (argc < 2) return EXECUTION_FAILURE;
+    int fd = atoi(argv[1]);
+    if (fd >= 0) {
+        last_ack_offset = lseek(fd, 0, SEEK_CUR);
+    }
+    return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
 // NODE CONTROL: Gracefully shutdown a specific NUMA node if its scanner crashes early
 // ==============================================================================
 static int ring_scanner_eof_main(int argc, char **argv) {
@@ -5270,7 +5283,7 @@ static int ring_poll_main(int argc, char **argv) {
     LOAD_ARRAY(work_arr_name, 2);
 
     // If there is nothing left to poll (or only the dead spawn pipe), break the while loop
-    if (p_cnt == 0 || (p_cnt == 1 && fd_spawn_r < 0)) {
+    if (p_cnt == 0) {
         free(pfds); free(meta);
         return EXECUTION_FAILURE; 
     }
@@ -5293,11 +5306,33 @@ static int ring_poll_main(int argc, char **argv) {
     for (int i = 0; i < p_cnt; i++) {
         if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
             if (meta[i].type == 0) { 
-                // --- SPAWN PIPE ---
+                // --- SPAWN PIPE (1-byte robust read to prevent truncation) ---
                 char buf[64];
-                ssize_t n = read(pfds[i].fd, buf, sizeof(buf) - 1);
-                if (n > 0) {
-                    buf[n] = '\0';
+                int len = 0;
+                bool eof = false;
+                while (len < (int)sizeof(buf) - 1) {
+                    char c;
+                    ssize_t n = read(pfds[i].fd, &c, 1);
+                    if (n > 0) {
+                        if (c == '\n') break;
+                        buf[len++] = c;
+                    } else if (n == 0) {
+                        eof = true;
+                        break;
+                    } else {
+                        if (errno == EINTR) continue;
+                        break; // EAGAIN or error
+                    }
+                }
+                buf[len] = '\0';
+                
+                if (len > 0) {
+                    if (buf[0] == 'x') {
+                        bind_variable("POLL_EVENT", "IGNORE", 0);
+                        free(pfds); free(meta);
+                        return EXECUTION_SUCCESS;
+                    }
+                    
                     char *colon = strchr(buf, ':');
                     int node = 0, count = 0;
                     if (colon) {
@@ -5307,7 +5342,6 @@ static int ring_poll_main(int argc, char **argv) {
                     } else {
                         count = atoi(buf);
                     }
-                    if (count == 0) continue; 
                     
                     bind_variable("POLL_EVENT", "SPAWN", 0);
                     char arg_buf[32];
@@ -5318,9 +5352,12 @@ static int ring_poll_main(int argc, char **argv) {
                     
                     free(pfds); free(meta);
                     return EXECUTION_SUCCESS;
-                } else if (n == 0 || (n < 0 && errno != EAGAIN)) {
-                    // EOF
+                } else if (eof || (pfds[i].revents & POLLHUP)) {
                     bind_variable("POLL_EVENT", "EOF", 0);
+                    free(pfds); free(meta);
+                    return EXECUTION_SUCCESS;
+                } else {
+                    bind_variable("POLL_EVENT", "IGNORE", 0);
                     free(pfds); free(meta);
                     return EXECUTION_SUCCESS;
                 }

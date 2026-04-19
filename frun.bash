@@ -1,4 +1,5 @@
 #!/usr/bin/bash
+
 if shopt -q extglob; then
    extglob_was_set=true;
 else
@@ -581,8 +582,8 @@ toc() { :; }
         fi
 
         [[ "${order_mode}" == "realtime" ]] || {
-            pCode+=' >&${fd_out[$ID]}'
-            ring_ack_str+=' ${fd_out[$ID]}'
+            pCode+=' >&${fd_out[$RING_WID]}'
+            ring_ack_str+=' ${fd_out[$RING_WID]}'
         }
 
         worker_func_src='spawn_worker() {
@@ -596,30 +597,31 @@ toc() { :; }
     status=$?
     ring_worker dec; ring_cleanup_waiter
     
-    # Tweak 3: Only attempt recovery if we actually held an active batch
+    # Only attempt recovery if we actually held an active batch
     if (( status != 0 && RING_BATCH_SLOTS > 0 )); then
         (( RING_NUM_KILLS++ ))
         
-        # Tweak 4: Revert partial corrupted output (unless realtime mode)
-        if [[ "$order_mode" != "realtime" && -n "${fd_out[$ID]:-}" ]]; then
-            ring_revert_output "${fd_out[$ID]}"
+        # Revert partial corrupted output from this failed run (unless realtime)
+        if [[ "$order_mode" != "realtime" && -n "${fd_out[$RING_WID]:-}" ]]; then
+            ring_revert_output "${fd_out[$RING_WID]}"
         fi
 
-        if (( RING_NUM_KILLS >= ${FORKRUN_NUM_KILLS_LIMIT:-3} )); then
-            echo "forkrun [WARN]: Batch $RING_MAJOR.$RING_MINOR abandoned after $RING_NUM_KILLS failures." >&2
-            # Send normal ack. Because we reverted the output, it commits an empty chunk.
-            '"${ring_ack_str}"'
-        else
-            ring_escrow_put "$RING_NODE_ID" "$RING_BATCH_IDX" "$RING_BATCH_SLOTS" "$RING_NUM_KILLS"
-        fi
+        # Always throw it back into escrow. 
+        # If kills >= LIMIT, the NEXT worker will see RING_POISONED=1 and safely skip & ack it.
+        ring_escrow_put "$RING_NODE_ID" "$RING_BATCH_IDX" "$RING_BATCH_SLOTS" "$RING_NUM_KILLS"
     fi
     exit $status
   '\'' EXIT
 
   {
-    ID="$1"
+    ID="$1" # ID is passed purely for user payload compatibility/insertion
     RING_BATCH_SLOTS=0
     RING_NUM_KILLS=0
+    
+    # Initialize the output tracking for this specific worker slot
+    if [[ "$order_mode" != "realtime" && -n "${fd_out[$RING_WID]:-}" ]]; then
+        ring_ack_init "${fd_out[$RING_WID]}"
+    fi
     '
        ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
@@ -638,7 +640,7 @@ toc() { :; }
         fi
         '"${ring_ack_str}"' || break
         
-        # Tweak 3: Clear the active claim flag so a sleep-death doesnt duplicate it
+        # Clear the active claim flag so a sleep-death doesn'\''t duplicate it
         RING_BATCH_SLOTS=0
     done
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
@@ -658,9 +660,9 @@ W_NODE[$3]=$2
 
         fd_spawn_arg="$fd_spawn_r"
 
-        # Reactor watches the Spawn Pipe, ALL Scanners, and ALL Workers simultaneously
         while ring_poll "$fd_spawn_arg" fd_scan_death_r fd_worker_r; do
             case "$POLL_EVENT" in
+                IGNORE) ;;
                 SPAWN)
                     spawn_count=$POLL_ARG1
                     node_idx=$POLL_ARG2
@@ -676,7 +678,7 @@ W_NODE[$3]=$2
                         done
                         
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
-                        spawn_worker "$nWorkers" "$node_idx" "$wID"
+                        spawn_worker "$wID" "$node_idx" "$wID"
                         exec {fd_worker_w[$wID]}>&-
                         ((nWorkers++))
                     done
@@ -696,14 +698,12 @@ W_NODE[$3]=$2
                     exec {fd_worker_r[$wID]}<&-
                     unset 'fd_worker_r[$wID]' 'P[$wID]'
                     
-                    # Recover node locality for respawn
                     node_idx=${W_NODE[$wID]:-0}
                     unset 'W_NODE[$wID]'
                     
-                    # Ensure we don't spawn if the scanner stream has already ended
                     if [[ "$fd_spawn_arg" != "-1" ]]; then
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
-                        spawn_worker "$nWorkers" "$node_idx" "$wID"
+                        spawn_worker "$wID" "$node_idx" "$wID"
                         exec {fd_worker_w[$wID]}>&-
                         ((nWorkers++))
                     fi
@@ -723,13 +723,11 @@ W_NODE[$3]=$2
                         ring_scanner_eof "$sID"
                     fi
                     
-                    # Cleanly un-track the finished scanner
                     exec {fd_scan_death_r[$sID]}<&-
                     unset 'fd_scan_death_r[$sID]' 'SCANNER_P[$sID]'
                     ;;
                     
                 EOF)
-                    # The central spawn pipe has closed. Stop pulling from it.
                     fd_spawn_arg="-1"
                     ;;
             esac
