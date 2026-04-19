@@ -593,7 +593,7 @@ toc() { :; }
   export RING_NODE_ID="$2"
   export RING_WID="$3"
   
-  trap '\''
+  trap '"'"'
     status=$?
     ring_worker dec; ring_cleanup_waiter
     
@@ -611,7 +611,7 @@ toc() { :; }
         ring_escrow_put "$RING_NODE_ID" "$RING_BATCH_IDX" "$RING_BATCH_SLOTS" "$RING_NUM_KILLS"
     fi
     exit $status
-  '\'' EXIT
+  '"'"' EXIT
 
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion
@@ -640,7 +640,7 @@ toc() { :; }
         fi
         '"${ring_ack_str}"' || break
         
-        # Clear the active claim flag so a sleep-death doesn'\''t duplicate it
+        # Clear the active claim flag so a sleep-death doesnt duplicate it
         RING_BATCH_SLOTS=0
     done
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
@@ -653,7 +653,7 @@ W_NODE[$3]=$2
 
         # --- SPAWN LOOP REACTOR ---
         nWorkers=0
-        declare -a node_workers W_NODE fd_worker_r fd_worker_w P
+        local -a node_workers W_NODE fd_worker_r fd_worker_w P
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
         (( node_worker_max < 1 )) && node_worker_max=1
@@ -701,7 +701,7 @@ W_NODE[$3]=$2
                     node_idx=${W_NODE[$wID]:-0}
                     unset 'W_NODE[$wID]'
                     
-                    if [[ "$fd_spawn_arg" != "-1" ]]; then
+                    if [[ "$fd_spawn_arg" != "-1" ]] || (( status != 0 )); then
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
                         spawn_worker "$wID" "$node_idx" "$wID"
                         exec {fd_worker_w[$wID]}>&-
@@ -1242,6 +1242,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()   # removed base64
+declare -A b64=()    # removed base64 
 
-forkrun_bootstrap_setup --force
+_forkrun_bootstrap_setup --force
