@@ -820,7 +820,7 @@ run_test_regex "Graceful SIGPIPE handling (head -n 5)" \
 # Test 2: Worker command crashes mid-batch
 # If a specific input crashes the worker, the rest of the file should still process.
 run_test "Worker transient failure mid-batch" \
-  "crash_func() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_func' frun -k crash_func" \
+  "crash_func() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 -k crash_func" \
   "1
 2
 4
