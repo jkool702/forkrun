@@ -22,7 +22,7 @@ frun() {
         (( ${#ring_funcs[@]} > 0 )) || ring_list 'ring_funcs'
         printf -v ring_enable '%s ' "${ring_funcs[@]}"
 
-        FORKRUN_FRUN_SRC="$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; [[ -n "${FORKRUN_EXTRA_VARS:-}" ]] && declare -p ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
+        FORKRUN_FRUN_SRC+="$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; [[ -n "${FORKRUN_EXTRA_VARS:-}" ]] && declare -p ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
 
         # EXEC into Clean Room
         # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
@@ -1237,11 +1237,11 @@ _forkrun_file_to_base64() {
     { (( ${#FUNCNAME[@]} > 1 )) && [[ "${FUNCNAME[1]}" == *'frun'* ]]; } || shopt ${extglobState} extglob
 }
 
-#FORKRUN_FRUN_SRC="$(declare -f frun)"
+FORKRUN_FRUN_SRC="ulimit -n $(ulimit -Hn)"$'\n'
 unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()    # removed base64 
+declare -A b64=()   # remove base64
 
 _forkrun_bootstrap_setup --force
