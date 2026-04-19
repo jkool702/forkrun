@@ -436,32 +436,40 @@ toc() { :; }
         ring_pipe fd_fallow_r fd_fallow_w
 
         # --- 2 & 3. THE PRODUCER PLUMBING ---
-        if (( FORKRUN_NUM_NODES > 1 )); then
-            # NUMA TOPOLOGICAL PIPELINE (No Pipes, Lock-Free Meta Ring)
-            ordered_flag=0
-            [[ "${order_mode}" == "ordered" ]] && ordered_flag=1
+            declare -a fd_scan_death_r fd_scan_death_w SCANNER_P
+        
+            if (( FORKRUN_NUM_NODES > 1 )); then
+                # NUMA TOPOLOGICAL PIPELINE (No Pipes, Lock-Free Meta Ring)
+                ordered_flag=0
+                [[ "${order_mode}" == "ordered" ]] && ordered_flag=1
 
-            ( ring_numa_ingest ${fd0} ${fd_write} $FORKRUN_NUM_NODES $ordered_flag ) &
+                ( ring_numa_ingest ${fd0} ${fd_write} $FORKRUN_NUM_NODES $ordered_flag ) &
 
-            for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                ( ring_indexer_numa ${fd_scan} $i ) &
-            done
+                for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
+                    ( ring_indexer_numa ${fd_scan} $i ) &
+                done
 
-            for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
+                for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
+                    ring_pipe fd_scan_death_r[$i] fd_scan_death_w[$i]
+                    (
+                        exec {fd_fallow_w}>&-
+                        ring_numa_scanner ${fd_scan} $i $fd_spawn_w $FORKRUN_NUM_NODES
+                    ) &
+                    SCANNER_P[$i]=$!
+                    exec {fd_scan_death_w[$i]}>&-
+                done
+
+            else
+                # LEGACY FLAT PIPELINE
+                ( ring_copy ${fd_write} ${fd0}; ring_signal ) &
+                ring_pipe fd_scan_death_r[0] fd_scan_death_w[0]
                 (
-                    exec {fd_fallow_w}>&-
-                    ring_numa_scanner ${fd_scan} $i $fd_spawn_w $FORKRUN_NUM_NODES
+                    exec {fd_spawn_r}<&-
+                    ring_scanner ${fd_scan} ${fd_spawn_w}
                 ) &
-            done
-
-        else
-            # LEGACY FLAT PIPELINE
-            ( ring_copy ${fd_write} ${fd0}; ring_signal ) &
-            (
-                exec {fd_spawn_r}<&-
-                ring_scanner ${fd_scan} ${fd_spawn_w}
-            ) &
-        fi
+                SCANNER_P[0]=$!
+                exec {fd_scan_death_w[0]}>&-
+            fi
 
         exec {fd_spawn_w}>&-
 
@@ -582,67 +590,149 @@ toc() { :; }
   LC_ALL=C
   set +m
   export RING_NODE_ID="$2"
-  trap "ring_worker dec; ring_cleanup_waiter" EXIT
+  export RING_WID="$3"
+  
+  trap '\''
+    status=$?
+    ring_worker dec; ring_cleanup_waiter
+    
+    # Tweak 3: Only attempt recovery if we actually held an active batch
+    if (( status != 0 && RING_BATCH_SLOTS > 0 )); then
+        (( RING_NUM_KILLS++ ))
+        
+        # Tweak 4: Revert partial corrupted output (unless realtime mode)
+        if [[ "$order_mode" != "realtime" && -n "${fd_out[$ID]:-}" ]]; then
+            ring_revert_output "${fd_out[$ID]}"
+        fi
+
+        if (( RING_NUM_KILLS >= ${FORKRUN_NUM_KILLS_LIMIT:-3} )); then
+            echo "forkrun [WARN]: Batch $RING_MAJOR.$RING_MINOR abandoned after $RING_NUM_KILLS failures." >&2
+            # Send normal ack. Because we reverted the output, it commits an empty chunk.
+            '"${ring_ack_str}"'
+        else
+            ring_escrow_put "$RING_NODE_ID" "$RING_BATCH_IDX" "$RING_BATCH_SLOTS" "$RING_NUM_KILLS"
+        fi
+    fi
+    exit $status
+  '\'' EXIT
 
   {
     ID="$1"
+    RING_BATCH_SLOTS=0
+    RING_NUM_KILLS=0
     '
        ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
-        worker_func_src+='shift 2
+        worker_func_src+='shift 3
     ring_worker inc $fd_read
     while ring_claim; do
-        if [[ "$REPLY" != "0" ]]; then
-            '
+        if [[ "${RING_POISONED:-0}" == "1" ]]; then
+            echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS:-?} times)." >&2
+        else
+            if [[ "$REPLY" != "0" ]]; then
+                '
          ${insert_id_flag:-false} && worker_func_src+='((W_BATCH++))
-            '
+                '
         worker_func_src+="${pCode}"'
+            fi
         fi
         '"${ring_ack_str}"' || break
+        
+        # Tweak 3: Clear the active claim flag so a sleep-death doesnt duplicate it
+        RING_BATCH_SLOTS=0
     done
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &
-P+=($!)
+P[$3]=$!
+W_NODE[$3]=$2
 }'
 
         eval "${worker_func_src}"
 
-        # --- SPAWN LOOP ---
+        # --- SPAWN LOOP REACTOR ---
         nWorkers=0
-        finished_scanners=0
-
-        declare -a node_workers
+        declare -a node_workers W_NODE fd_worker_r fd_worker_w P
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
         (( node_worker_max < 1 )) && node_worker_max=1
 
-        while (( finished_scanners < FORKRUN_NUM_NODES )); do
-            # FIX: If the pipe hits EOF (all scanners dead/exited), break out safely
-            if ! read -r -u $fd_spawn_r msg; then
-                break
-            fi
+        fd_spawn_arg="$fd_spawn_r"
 
-            if [[ "$msg" == *'x'* ]]; then
-                ((finished_scanners++))
-                continue
-            fi
+        # Reactor watches the Spawn Pipe, ALL Scanners, and ALL Workers simultaneously
+        while ring_poll "$fd_spawn_arg" fd_scan_death_r fd_worker_r; do
+            case "$POLL_EVENT" in
+                SPAWN)
+                    spawn_count=$POLL_ARG1
+                    node_idx=$POLL_ARG2
+                    
+                    target=$(( node_workers[node_idx] + spawn_count ))
+                    (( target > node_worker_max )) && target=$node_worker_max
 
-            # Parse directed spawn "node:count" or legacy "count"
-            if [[ "$msg" == *:* ]]; then
-                node_idx="${msg%%:*}"
-                spawn_count="${msg#*:}"
-            else
-                node_idx=0
-                spawn_count="$msg"
-            fi
-
-            target=$(( node_workers[node_idx] + spawn_count ))
-            (( target > node_worker_max )) && target=$node_worker_max
-
-            for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
-                spawn_worker "$nWorkers" "$node_idx"
-                ((nWorkers++))
-            done
+                    for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
+                        # Find first empty wID slot
+                        wID=-1
+                        for (( i=0; i<32768; i++ )); do
+                            if [[ -z "${P[$i]:-}" ]]; then wID=$i; break; fi
+                        done
+                        
+                        ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
+                        spawn_worker "$nWorkers" "$node_idx" "$wID"
+                        exec {fd_worker_w[$wID]}>&-
+                        ((nWorkers++))
+                    done
+                    ;;
+                    
+                WORKER_DEATH)
+                    wID=$POLL_ARG1
+                    wait "${P[$wID]}" 2>/dev/null
+                    status=$?
+                    
+                    if (( status > 128 && status != 143 )); then
+                        echo "forkrun [FATAL]: Worker $wID killed by signal $((status - 128)). Aborting." >&2
+                        ring_abort
+                        exit 1
+                    fi
+                    
+                    exec {fd_worker_r[$wID]}<&-
+                    unset 'fd_worker_r[$wID]' 'P[$wID]'
+                    
+                    # Recover node locality for respawn
+                    node_idx=${W_NODE[$wID]:-0}
+                    unset 'W_NODE[$wID]'
+                    
+                    # Ensure we don't spawn if the scanner stream has already ended
+                    if [[ "$fd_spawn_arg" != "-1" ]]; then
+                        ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
+                        spawn_worker "$nWorkers" "$node_idx" "$wID"
+                        exec {fd_worker_w[$wID]}>&-
+                        ((nWorkers++))
+                    fi
+                    ;;
+                    
+                SCAN_DEATH)
+                    sID=$POLL_ARG1
+                    wait "${SCANNER_P[$sID]}" 2>/dev/null
+                    status=$?
+                    
+                    if (( status > 128 && status != 143 )); then
+                        echo "forkrun [FATAL]: Scanner $sID killed by signal $((status - 128)). Aborting." >&2
+                        ring_abort
+                        exit 1
+                    elif (( status != 0 )); then
+                        echo "forkrun [WARN]: Scanner $sID exited early with status $status. Forcing graceful EOF." >&2
+                        ring_scanner_eof "$sID"
+                    fi
+                    
+                    # Cleanly un-track the finished scanner
+                    exec {fd_scan_death_r[$sID]}<&-
+                    unset 'fd_scan_death_r[$sID]' 'SCANNER_P[$sID]'
+                    ;;
+                    
+                EOF)
+                    # The central spawn pipe has closed. Stop pulling from it.
+                    fd_spawn_arg="-1"
+                    ;;
+            esac
         done
 
         ${verbose_flag} && printf '\nSPAWNED %s workers\n' "${nWorkers}" >&2

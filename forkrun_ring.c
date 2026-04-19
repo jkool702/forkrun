@@ -482,7 +482,11 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
     "Show build metadata")                                                     \
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats",                  \
     "Print NUMA telemetry")                                                    \
-  X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")
+  X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")            \
+  X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr>", "Poll FDs") \
+  X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
+  X(ring_scanner_eof, ring_scanner_eof_main, "ring_scanner_eof <node>", "Force scanner EOF") \
+  X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -753,6 +757,8 @@ static uint8_t g_explicit_pinning = 0; // NEW
 struct EscrowPacket {
   uint64_t idx;
   uint64_t cnt;
+  uint32_t num_kills;
+  uint32_t _pad;
 };
 
 // IndexPacket: Legacy flat-mode packet for passing physical offsets.
@@ -3568,6 +3574,23 @@ restart_loop:
           if (er == sizeof(ep)) {
               my_read_idx = ep.idx;
               claim_count = ep.cnt;
+              
+              // --- NEW: Export state ---
+              char buf[32];
+              snprintf(buf, sizeof(buf), "%u", ep.num_kills);
+              bind_variable("RING_NUM_KILLS", buf, 0);
+
+              int limit = 3;
+              const char *s_lim = get_string_value("FORKRUN_NUM_KILLS_LIMIT");
+              if (s_lim) limit = atoi(s_lim);
+
+              if (limit > 0 && ep.num_kills >= (uint32_t)limit) {
+                  bind_variable("RING_POISONED", "1", 0);
+              } else {
+                  bind_variable("RING_POISONED", "0", 0);
+              }
+              // ------------------------
+
               // We successfully reclaimed our (or someone else's) escrow.
               // Bypass the ring check entirely.
               goto check_boundaries;
@@ -3631,6 +3654,11 @@ restart_loop:
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
                                        __ATOMIC_SEQ_CST);
 
+      // --- NEW: Reset poison tracking for fresh main-ring batches ---
+      bind_variable("RING_NUM_KILLS", "0", 0);
+      bind_variable("RING_POISONED", "0", 0);
+      // --------------------------------------------------------------
+
       if (!local_state->numa_enabled) {
         int64_t sbatch_check =
             atomic_load_relaxed(&local_state->signed_batch_size);
@@ -3656,6 +3684,23 @@ restart_loop:
       if (er == sizeof(ep)) {
         my_read_idx = ep.idx;
         claim_count = ep.cnt;
+
+        // --- NEW: Export state ---
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%u", ep.num_kills);
+        bind_variable("RING_NUM_KILLS", buf, 0);
+
+        int limit = 3;
+        const char *s_lim = get_string_value("FORKRUN_NUM_KILLS_LIMIT");
+        if (s_lim) limit = atoi(s_lim);
+
+        if (limit > 0 && ep.num_kills >= (uint32_t)limit) {
+            bind_variable("RING_POISONED", "1", 0);
+        } else {
+            bind_variable("RING_POISONED", "0", 0);
+        }
+        // ------------------------
+        
         break;
       }
     }
@@ -5109,6 +5154,191 @@ static int ring_fallow_main(int argc, char **argv) {
   pull_fire_alarm();
 
   return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// TRANSACTION ROLLBACK: Erase partial output from a corrupted batch
+// ==============================================================================
+static int ring_revert_output_main(int argc, char **argv) {
+    if (argc < 2) return EXECUTION_FAILURE;
+    int fd = atoi(argv[1]);
+    if (fd >= 0) {
+        if (ftruncate(fd, last_ack_offset) == -1) return EXECUTION_FAILURE;
+        if (lseek(fd, last_ack_offset, SEEK_SET) == (off_t)-1) return EXECUTION_FAILURE;
+    }
+    return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// NODE CONTROL: Gracefully shutdown a specific NUMA node if its scanner crashes early
+// ==============================================================================
+static int ring_scanner_eof_main(int argc, char **argv) {
+    if (argc < 2) return EXECUTION_FAILURE;
+    int node = atoi(argv[1]);
+    if (node < 0 || node >= (int)global_num_nodes) node = 0;
+    
+    // Set the finished flag so workers know no more chunks are coming
+    if (state) atomic_store_release(&state[node].scanner_finished, 1);
+    
+    // Blast the EOF eventfd to wake up any sleeping workers
+    if (evfd_eof_arr && evfd_eof_arr[node] >= 0) {
+        uint64_t blast = 999999;
+        sys_write(evfd_eof_arr[node], &blast, 8);
+    }
+    return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// ESCROW RECOVERY: Explicitly deposit a failed batch into the escrow channel
+// ==============================================================================
+static int ring_escrow_put_main(int argc, char **argv) {
+    if (argc < 5) return EXECUTION_FAILURE;
+    int node = atoi(argv[1]);
+    uint64_t idx = strtoull(argv[2], NULL, 10);
+    uint64_t cnt = strtoull(argv[3], NULL, 10);
+    uint32_t kills = (uint32_t)atoi(argv[4]);
+
+    struct EscrowPacket ep = { .idx = idx, .cnt = cnt, .num_kills = kills };
+
+    if (fd_escrow_w && fd_escrow_w[node] >= 0) {
+        robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
+    }
+    return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// EVENT MULTIPLEXER (The "Death Pipe" Reactor)
+// ==============================================================================
+#ifndef element_forw
+#define element_forw(a) ((a)->next)
+#define element_index(a) ((a)->ind)
+#define element_value(a) ((a)->value)
+#endif
+
+struct PollMeta {
+    arrayind_t id;
+    int type; // 0 = spawn, 1 = scanner, 2 = worker
+};
+
+static int ring_poll_main(int argc, char **argv) {
+    if (argc < 4) return EXECUTION_FAILURE;
+    int fd_spawn_r = atoi(argv[1]);
+    const char *scan_arr_name = argv[2];
+    const char *work_arr_name = argv[3];
+
+    int max_poll = 8192;
+    struct pollfd *pfds = malloc(max_poll * sizeof(struct pollfd));
+    struct PollMeta *meta = malloc(max_poll * sizeof(struct PollMeta));
+    if (!pfds || !meta) return EXECUTION_FAILURE;
+
+    int p_cnt = 0;
+
+    // 1. Load the Spawn Pipe
+    if (fd_spawn_r >= 0) {
+        pfds[p_cnt].fd = fd_spawn_r;
+        pfds[p_cnt].events = POLLIN;
+        meta[p_cnt].id = -1;
+        meta[p_cnt].type = 0;
+        p_cnt++;
+    }
+
+    // Helper macro to load Bash arrays dynamically
+    #define LOAD_ARRAY(arr_name, type_val) \
+        do { \
+            SHELL_VAR *v = find_variable(arr_name); \
+            if (v && array_p(v)) { \
+                ARRAY *arr = array_cell(v); \
+                if (arr) { \
+                    ARRAY_ELEMENT *ae; \
+                    for (ae = element_forw(arr->head); ae != arr->head; ae = element_forw(ae)) { \
+                        if (p_cnt >= max_poll) break; \
+                        char *val = element_value(ae); \
+                        if (val && val[0]) { \
+                            pfds[p_cnt].fd = atoi(val); \
+                            pfds[p_cnt].events = POLLHUP | POLLIN | POLLERR; \
+                            meta[p_cnt].id = element_index(ae); \
+                            meta[p_cnt].type = type_val; \
+                            p_cnt++; \
+                        } \
+                    } \
+                } \
+            } \
+        } while(0)
+
+    // 2. Load Scanner and Worker Death Pipes
+    LOAD_ARRAY(scan_arr_name, 1);
+    LOAD_ARRAY(work_arr_name, 2);
+
+    // If there is nothing left to poll (or only the dead spawn pipe), break the while loop
+    if (p_cnt == 0 || (p_cnt == 1 && fd_spawn_r < 0)) {
+        free(pfds); free(meta);
+        return EXECUTION_FAILURE; 
+    }
+
+    int r;
+    do {
+        if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
+            free(pfds); free(meta);
+            return EXECUTION_FAILURE;
+        }
+        r = poll(pfds, p_cnt, 100); // 100ms timeout to continuously check for fire alarm
+    } while (r == 0 || (r < 0 && errno == EINTR));
+
+    if (r < 0) {
+        free(pfds); free(meta);
+        return EXECUTION_FAILURE;
+    }
+
+    // 3. Process the Events
+    for (int i = 0; i < p_cnt; i++) {
+        if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+            if (meta[i].type == 0) { 
+                // --- SPAWN PIPE ---
+                char buf[64];
+                ssize_t n = read(pfds[i].fd, buf, sizeof(buf) - 1);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    char *colon = strchr(buf, ':');
+                    int node = 0, count = 0;
+                    if (colon) {
+                        *colon = '\0';
+                        node = atoi(buf);
+                        count = atoi(colon + 1);
+                    } else {
+                        count = atoi(buf);
+                    }
+                    if (count == 0) continue; 
+                    
+                    bind_variable("POLL_EVENT", "SPAWN", 0);
+                    char arg_buf[32];
+                    snprintf(arg_buf, sizeof(arg_buf), "%d", count);
+                    bind_variable("POLL_ARG1", arg_buf, 0);
+                    snprintf(arg_buf, sizeof(arg_buf), "%d", node);
+                    bind_variable("POLL_ARG2", arg_buf, 0);
+                    
+                    free(pfds); free(meta);
+                    return EXECUTION_SUCCESS;
+                } else if (n == 0 || (n < 0 && errno != EAGAIN)) {
+                    // EOF
+                    bind_variable("POLL_EVENT", "EOF", 0);
+                    free(pfds); free(meta);
+                    return EXECUTION_SUCCESS;
+                }
+            } else { 
+                // --- DEATH PIPES (Scanner or Worker) ---
+                bind_variable("POLL_EVENT", meta[i].type == 1 ? "SCAN_DEATH" : "WORKER_DEATH", 0);
+                char arg_buf[32];
+                snprintf(arg_buf, sizeof(arg_buf), "%lld", (long long)meta[i].id);
+                bind_variable("POLL_ARG1", arg_buf, 0);
+                
+                free(pfds); free(meta);
+                return EXECUTION_SUCCESS;
+            }
+        }
+    }
+
+    free(pfds); free(meta);
+    return EXECUTION_SUCCESS;
 }
 
 static int ring_version_main(int argc, char **argv) {
