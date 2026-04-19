@@ -22,7 +22,7 @@ frun() {
         (( ${#ring_funcs[@]} > 0 )) || ring_list 'ring_funcs'
         printf -v ring_enable '%s ' "${ring_funcs[@]}"
 
-        FORKRUN_FRUN_SRC+="$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; [[ -n "${FORKRUN_EXTRA_VARS:-}" ]] && declare -p ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
+        FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; [[ -n "${FORKRUN_EXTRA_VARS:-}" ]] && declare -p ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
 
         # EXEC into Clean Room
         # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
