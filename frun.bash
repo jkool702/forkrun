@@ -597,13 +597,6 @@ toc() { :; }
   export RING_NODE_ID="$2"
   export RING_WID="$3"
   
-  # Prevent sibling write-ends from keeping the POLLHUP from firing
-  for _fd_i in "${!fd_worker_w[@]}"; do
-      if (( _fd_i != RING_WID )); then
-          exec {fd_worker_w[_fd_i]}>&- {fd_worker_r[_fd_i]}<&- 2>/dev/null
-      fi
-  done
-  
   _ring_registered=false
   
   trap '"'"'
@@ -710,7 +703,7 @@ W_NODE[$3]=$2
                     fi
                     
                     exec {fd_worker_r[$wID]}<&-
-                    unset 'fd_worker_r[$wID]' 'P[$wID]'
+                    unset 'fd_worker_r[$wID]' 'fd_worker_w[$wID]' 'P[$wID]'
                     
                     node_idx=${W_NODE[$wID]:-0}
                     unset 'W_NODE[$wID]'
