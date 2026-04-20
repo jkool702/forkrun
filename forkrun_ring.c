@@ -3304,7 +3304,7 @@ unified_scanner_eof:
     uint64_t blast = 999999;
     sys_write(evfd_eof_arr[my_node_id], &blast, 8);
 
-    if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
+    if (fd_spawn >= 0) { /* Sentinel write removed */ }
   } else {
     // --- PHYSICS FIX: Prevent UMA ghost batches violating exact limit ---
     bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
@@ -3436,7 +3436,7 @@ tail_abort:
     uint64_t blast = 999999;
     sys_write(evfd_eof_arr[0], &blast, 8);
 
-    if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
+    if (fd_spawn >= 0) { /* Sentinel write removed */ }
   }
 
   munmap(buf, chunk_sz);
@@ -5331,12 +5331,6 @@ static int ring_poll_main(int argc, char **argv) {
                 buf[len] = '\0';
                 
                 if (len > 0) {
-                    if (buf[0] == 'x') {
-                        bind_variable("POLL_EVENT", "IGNORE", 0);
-                        free(pfds); free(meta);
-                        return EXECUTION_SUCCESS;
-                    }
-                    
                     char *colon = strchr(buf, ':');
                     int node = 0, count = 0;
                     if (colon) {

@@ -597,9 +597,18 @@ toc() { :; }
   export RING_NODE_ID="$2"
   export RING_WID="$3"
   
+  # Prevent sibling write-ends from keeping the POLLHUP from firing
+  for _fd_i in "${!fd_worker_w[@]}"; do
+      if (( _fd_i != RING_WID )); then
+          exec {fd_worker_w[_fd_i]}>&- {fd_worker_r[_fd_i]}<&- 2>/dev/null
+      fi
+  done
+  
+  _ring_registered=false
+  
   trap '"'"'
     status=$?
-    ring_worker dec; ring_cleanup_waiter
+    ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
     
     # Only attempt recovery if we actually held an active batch
     if (( status != 0 && RING_BATCH_SLOTS > 0 )); then
@@ -631,6 +640,7 @@ toc() { :; }
     '
         worker_func_src+='shift 3
     ring_worker inc $fd_read
+    _ring_registered=true
     while ring_claim; do
         if [[ "${RING_POISONED:-0}" == "1" ]]; then
             echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS:-?} times)." >&2
@@ -705,7 +715,8 @@ W_NODE[$3]=$2
                     node_idx=${W_NODE[$wID]:-0}
                     unset 'W_NODE[$wID]'
                     
-                    if [[ "$fd_spawn_arg" != "-1" ]] || (( status != 0 )); then
+                    # ONLY respawn if the worker crashed. Clean exit (0) means no work left.
+                    if (( status != 0 )); then
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
                         spawn_worker "$wID" "$node_idx" "$wID"
                         exec {fd_worker_w[$wID]}>&-
@@ -1246,6 +1257,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()   # remove base64
+declare -A b64=()   # removed base64
 
 _forkrun_bootstrap_setup --force
