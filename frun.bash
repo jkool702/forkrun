@@ -715,12 +715,15 @@ W_NODE[$3]=$2
                     node_idx=${W_NODE[$wID]:-0}
                     unset 'W_NODE[$wID]'
                     
+                    (( node_workers[node_idx]-- ))
+                    
                     # ONLY respawn if the worker crashed. Clean exit (0) means no work left.
                     if (( status != 0 )); then
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
                         spawn_worker "$wID" "$node_idx" "$wID"
                         exec {fd_worker_w[$wID]}>&-
                         ((nWorkers++))
+                        (( node_workers[node_idx]++ ))
                     fi
                     ;;
                     
