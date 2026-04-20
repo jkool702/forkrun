@@ -289,6 +289,41 @@ EOF
         shift
     done
     unset arg
+    # --- AST MANIPULATION FOR BASH FUNCTIONS ---
+    retry_errors_flag=false
+    if [[ -n "$1" ]] && declare -F "$1" >/dev/null 2>&1; then
+        local func_def body body_start body_trimmed test_body
+        func_def="$(declare -f "$1")"
+
+        # 1. Extract the contents inside the global { ... }
+        body="${func_def#*\{}"
+        body="${body%\}}"
+
+        # Trim leading and trailing whitespace
+        body_trimmed="${body##+([[:space:]])}"
+        body_trimmed="${body_trimmed%%+([[:space:]])}"
+
+        # 2. Check if it visually starts and ends with parentheses
+        if [[ "$body_trimmed" == \(*\) ]]; then
+            # Strip the very first '(' and the very last ')'
+            test_body="${body_trimmed#\(}"
+            test_body="${test_body%\)}"
+
+            # 3. THE GENIUS CHECK: Ask the Bash parser if this is valid!
+            # We run this in a subshell to keep the environment perfectly clean.
+            # Explicit newlines prevent trailing comments from breaking the brace.
+            if ( "${BASH:-bash}" -O extglob -n -c "function _frun_syntax_check() {"$'\n'"${test_body}"$'\n'"}" ) >/dev/null 2>&1; then
+                # It is a verified global subshell!
+                # Strip the last ')' and inject 'true' safely inside it.
+                retry_errors_flag=true
+                body_start="${body_trimmed%\)*}"
+                eval "${func_def%%\{*}"'{'$'\n'"${body_start}"$'\n''true'$'\n'')'$'\n''}'
+            fi
+        fi
+
+        unset func_def body body_start body_trimmed test_body
+    fi
+
     ${extglob_was_set} || shopt -u extglob
 
     if ${verbose_flag}; then
@@ -536,13 +571,17 @@ toc() { :; }
                 # FAST PATH (Synchronous)
                 # Note: ring_splice "close" closes $pw internally. We only close $pr.
                 ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || exec {pw}>&-
-                '"$cmdline_str"' <&$pr
+                '"$cmdline_str"' <&$pr'
+            ${retry_errors_flag} && pCode+=' || exit $?'
+            pCode+='
                 exec {pr}<&-
             else
                 # SLOW PATH (Asynchronous)
                 # Close both FDs so they do not leak into the pipeline
                 (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "" $REPLY "close" ) | ( '"$cmdline_str"' )
+                ( ring_splice $fd_read 1 "" $REPLY "close" ) | ( '"$cmdline_str"' )'
+            ${retry_errors_flag} && pCode+=' || exit $?'
+            pCode+='
             fi'
 
         elif ${byte_mode_flag}; then
@@ -589,6 +628,8 @@ toc() { :; }
             pCode+=' >&${fd_out[$RING_WID]}'
             ring_ack_str+=' ${fd_out[$RING_WID]}'
         }
+
+        ${retry_errors_flag} && ! ${stdin_flag} && pCode+=' || exit $?'
 
         worker_func_src='spawn_worker() {
 (
@@ -1253,6 +1294,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()   # removed base64
+declare -A b64=()    # removed base64
 
 _forkrun_bootstrap_setup --force
