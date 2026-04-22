@@ -701,12 +701,16 @@ W_NODE[$3]=$2
 
         # --- SPAWN LOOP REACTOR ---
         nWorkers=0
-        local -a node_workers W_NODE fd_worker_r fd_worker_w P
+        local -a node_workers W_NODE fd_worker_r fd_worker_w P wID_free
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
         (( node_worker_max < 1 )) && node_worker_max=1
 
         fd_spawn_arg="$fd_spawn_r"
+
+        for (( nn=0; nn<($nWorkersMax+FORKRUN_NUM_NODES); nn++)); do
+            wID_free[$nn]=''
+        done
 
         while ring_poll "$fd_spawn_arg" fd_scan_death_r fd_worker_r; do
             case "$POLL_EVENT" in
@@ -720,10 +724,8 @@ W_NODE[$3]=$2
 
                     for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
                         # Find first empty wID slot
-                        wID=-1
-                        for (( i=0; i<32768; i++ )); do
-                            if [[ -z "${P[$i]:-}" ]]; then wID=$i; break; fi
-                        done
+                        for wID in "${!wID_free[@]}"; do break; done
+                        unset 'wID_free[$wID]'
                         
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
                         spawn_worker "$wID" "$node_idx" "$wID"
@@ -758,6 +760,8 @@ W_NODE[$3]=$2
                         exec {fd_worker_w[$wID]}>&-
                         ((nWorkers++))
                         (( node_workers[node_idx]++ ))
+                    else
+                        wID_free[$wID]=''
                     fi
                     ;;
                     
