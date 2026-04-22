@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.0.2
+// forkrun_ring.c v3.1.0
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -298,7 +298,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.0.2"
+#define FORKRUN_RING_VERSION "v3.1.0"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)

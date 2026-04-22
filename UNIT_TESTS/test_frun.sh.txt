@@ -549,7 +549,7 @@ run_test_regex "Dry run (-N)" \
 
 run_test "Version (-V)" \
   "frun -V" \
-  "forkrun v3.0.2"
+  "forkrun v3.1.0"
 
 # FIXED: Check for USAGE string explicitly without exact match
 run_test_regex "Help (--help)" \
@@ -903,7 +903,7 @@ print_section "Misc additional tests"
 
 # Force extreme out-of-order completion to stress min-heap
 run_test "Min-heap ordering: 100 batches with random sleep skew" \
-  "skewed() { sleep 0.\$((RANDOM%50)); echo \"\$1\"; }; export -f skewed 2>/dev/null; seq 1 100 | FORKRUN_EXTRA_FUNCS='skewed' frun -k -j 16 skewed" \
+  "skewed() { sleep 0.\$((RANDOM%50)); echo \"\$1\"; }; export -f skewed 2>/dev/null; seq 1 100 | FORKRUN_EXTRA_FUNCS='skewed' frun -l 1 -k -j 16 skewed" \
   "$(seq 1 100)"
 
 # Downstream consumer dies mid-stream; verify clean abort
