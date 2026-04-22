@@ -683,7 +683,7 @@ run_test_exact D "Byte mode integrity: non-multiple chunk (-b 30, 100 bytes)" \
 
 # Null-delimited integrity: content must survive NUL → frun → output unchanged.
 run_test_exact D "Null-delimited integrity (-z, -s)" \
-    "printf 'alpha\0beta\0gamma\0delta\0' | frun -z -s cat | md5sum | awk '{print \$1}'" \
+    "printf 'alpha\0beta\0gamma\0delta\0' | frun -z -k -s cat | md5sum | awk '{print \$1}'" \
     "$(printf 'alpha\0beta\0gamma\0delta\0' | md5sum | awk '{print $1}')"
 
 # Verify no duplicate lines with high worker count (regression for escrow race).
@@ -1245,7 +1245,7 @@ run_test_sorted L "L4a: One-time crash produces no duplicate output" \
 
 # Verify exact line count after self-healing (10 unique lines, no extras).
 run_test_line_count L "L4b: Self-heal: output has exact expected line count (10)" \
-    "crash_once_cnt() { local _cm=\"/tmp/_frun_test_cnt\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_once_cnt' frun -l 1 crash_once_cnt" \
+    "crash_once_cnt() { local _cm=\"/tmp/_frun_test_cnt\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; rm -f \"\$_cm\"; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_once_cnt' frun -l 1 crash_once_cnt" \
     10
 
 # ---------- L5: Ordered output correctness with failures ----------
