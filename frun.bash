@@ -316,7 +316,7 @@ EOF
                 # It is a verified global subshell!
                 # Strip the last ')' and inject 'true' safely inside it.
                 retry_errors_flag=true
-                body_start="${body_trimmed%\)*}"
+                body_start="${body_trimmed%?}"
                 eval "${func_def%%\{*}"'{'$'\n'"${body_start}"$'\n''true'$'\n'')'$'\n''}'
             fi
         fi

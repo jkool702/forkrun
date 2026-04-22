@@ -4104,7 +4104,7 @@ static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap,
   if (*sz >= *cap) {
     *cap = (*cap) * 2;
     void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
-    if (!new_ptr) return; // Drop on OOM to prevent segfault
+    if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
     *heap_ptr = new_ptr;
   }
   struct HeapNode *heap = *heap_ptr;
@@ -4217,7 +4217,7 @@ static inline void interval_heap_push(struct IntervalNode **heap_ptr, int *sz, i
     if (*sz >= *cap) {
         *cap = (*cap) * 2;
         void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct IntervalNode));
-        if (!new_ptr) return; // Drop on OOM to prevent segfault
+        if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
         *heap_ptr = new_ptr;
     }
     struct IntervalNode *heap = *heap_ptr;
@@ -5261,8 +5261,9 @@ static int ring_poll_main(int argc, char **argv) {
 
     int max_poll = 8192;
     struct pollfd *pfds = malloc(max_poll * sizeof(struct pollfd));
+    if (!pfds) return EXECUTION_FAILURE;
     struct PollMeta *meta = malloc(max_poll * sizeof(struct PollMeta));
-    if (!pfds || !meta) return EXECUTION_FAILURE;
+    if (!meta) { free(pfds); return EXECUTION_FAILURE; }
 
     int p_cnt = 0;
 
