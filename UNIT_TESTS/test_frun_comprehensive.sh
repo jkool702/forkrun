@@ -916,7 +916,7 @@ IN:6"
 
 # Bash function + null delimiter (-z) + stdin.
 run_test_exact H "Bash function + null delimiter (-z -s)" \
-    "to_upper_stdin() { tr '[:lower:]' '[:upper:]'; }; printf 'abc\0def\0' | frun -z -s to_upper_stdin" \
+    "to_upper_stdin() { tr '[:lower:]' '[:upper:]'; }; printf 'abc\0def\0' | frun -k -z -s to_upper_stdin" \
     "$(printf 'ABC\0DEF\0')"
 
 # Bash function + custom delimiter (-d).
