@@ -19,6 +19,11 @@ forkrun is distributed as a single `bash` file with an embedded, self-extracting
 
 Download and source it directly:
 ```bash
+# Option 1: download and source
+wget https://raw.githubusercontent.com/jkool702/forkrun/main/frun.bash
+source ./frun.bash
+
+# Option 2: source curl stream
 source <(curl -sL https://raw.githubusercontent.com/jkool702/forkrun/main/frun.bash)
 ```
 *(Note: Sourcing the script sets up the required C loadable builtins in your shell environment).*
