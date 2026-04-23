@@ -486,8 +486,8 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr>", "Poll FDs") \
   X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
   X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
-  X(ring_scanner_eof, ring_scanner_eof_main, "ring_scanner_eof <node>", "Force scanner EOF") \
-  X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow")
+  X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow") \
+  X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -1308,6 +1308,14 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].active_waiters, 0);
       atomic_store_relaxed(&state[n].indexer_waiters, 0);
       atomic_store_relaxed(&state[n].meta_waiters, 0);
+
+      // Reset PID Controller / Flow State
+      atomic_store_relaxed(&state[n].batch_change_idx, 0);
+      atomic_store_relaxed(&state[n].active_workers, state[n].cfg_w_start);
+      if (state[n].mode_byte)
+        atomic_store_relaxed(&state[n].signed_batch_size, 1);
+      else
+        atomic_store_relaxed(&state[n].signed_batch_size, -(int64_t)state[n].cfg_batch_start);
 
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
@@ -4104,7 +4112,7 @@ static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap,
   if (*sz >= *cap) {
     *cap = (*cap) * 2;
     void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
-    if (!new_ptr) return; // Drop on OOM to prevent segfault
+    if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
     *heap_ptr = new_ptr;
   }
   struct HeapNode *heap = *heap_ptr;
@@ -4217,7 +4225,7 @@ static inline void interval_heap_push(struct IntervalNode **heap_ptr, int *sz, i
     if (*sz >= *cap) {
         *cap = (*cap) * 2;
         void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct IntervalNode));
-        if (!new_ptr) return; // Drop on OOM to prevent segfault
+        if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
         *heap_ptr = new_ptr;
     }
     struct IntervalNode *heap = *heap_ptr;
@@ -5203,25 +5211,6 @@ static int ring_ack_init_main(int argc, char **argv) {
 }
 
 // ==============================================================================
-// NODE CONTROL: Gracefully shutdown a specific NUMA node if its scanner crashes early
-// ==============================================================================
-static int ring_scanner_eof_main(int argc, char **argv) {
-    if (argc < 2) return EXECUTION_FAILURE;
-    int node = atoi(argv[1]);
-    if (node < 0 || node >= (int)global_num_nodes) node = 0;
-    
-    // Set the finished flag so workers know no more chunks are coming
-    if (state) atomic_store_release(&state[node].scanner_finished, 1);
-    
-    // Blast the EOF eventfd to wake up any sleeping workers
-    if (evfd_eof_arr && evfd_eof_arr[node] >= 0) {
-        uint64_t blast = 999999;
-        sys_write(evfd_eof_arr[node], &blast, 8);
-    }
-    return EXECUTION_SUCCESS;
-}
-
-// ==============================================================================
 // ESCROW RECOVERY: Explicitly deposit a failed batch into the escrow channel
 // ==============================================================================
 static int ring_escrow_put_main(int argc, char **argv) {
@@ -5231,11 +5220,20 @@ static int ring_escrow_put_main(int argc, char **argv) {
     uint64_t cnt = strtoull(argv[3], NULL, 10);
     uint32_t kills = (uint32_t)atoi(argv[4]);
 
+    if (node < 0 || node >= (int)global_num_nodes) node = 0;
+
     struct EscrowPacket ep = { .idx = idx, .cnt = cnt, .num_kills = kills };
 
     if (fd_escrow_w && fd_escrow_w[node] >= 0) {
         robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
     }
+    return EXECUTION_SUCCESS;
+}
+
+// Emergency Abort Trigger
+static int ring_abort_main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    pull_fire_alarm();
     return EXECUTION_SUCCESS;
 }
 
@@ -5261,8 +5259,9 @@ static int ring_poll_main(int argc, char **argv) {
 
     int max_poll = 8192;
     struct pollfd *pfds = malloc(max_poll * sizeof(struct pollfd));
+    if (!pfds) return EXECUTION_FAILURE;
     struct PollMeta *meta = malloc(max_poll * sizeof(struct PollMeta));
-    if (!pfds || !meta) return EXECUTION_FAILURE;
+    if (!meta) { free(pfds); return EXECUTION_FAILURE; }
 
     int p_cnt = 0;
 
