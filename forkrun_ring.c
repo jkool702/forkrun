@@ -1315,7 +1315,7 @@ static int ring_init_main(int argc, char **argv) {
       if (state[n].mode_byte)
         atomic_store_relaxed(&state[n].signed_batch_size, 1);
       else
-        atomic_store_relaxed(&state[n].signed_batch_size, -(int64_t)state[n].cfg_batch_start);
+        atomic_store_relaxed(&state[n].signed_batch_size, (int64_t)state[n].cfg_batch_start);
 
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
