@@ -770,13 +770,10 @@ W_NODE[$3]=$2
                     wait "${SCANNER_P[$sID]}" 2>/dev/null
                     status=$?
                     
-                    if (( status > 128 && status != 143 )); then
-                        echo "forkrun [FATAL]: Scanner $sID killed by signal $((status - 128)). Aborting." >&2
+                    if (( status != 0 )); then
+                        echo "forkrun [FATAL]: Scanner $sID exited with error status $status. Aborting to prevent data loss." >&2
                         ring_abort
                         exit 1
-                    elif (( status != 0 )); then
-                        echo "forkrun [WARN]: Scanner $sID exited early with status $status. Forcing graceful EOF." >&2
-                        ring_scanner_eof "$sID"
                     fi
                     
                     exec {fd_scan_death_r[$sID]}<&-

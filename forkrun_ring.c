@@ -486,7 +486,6 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr>", "Poll FDs") \
   X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
   X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
-  X(ring_scanner_eof, ring_scanner_eof_main, "ring_scanner_eof <node>", "Force scanner EOF") \
   X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
@@ -5203,25 +5202,6 @@ static int ring_ack_init_main(int argc, char **argv) {
 }
 
 // ==============================================================================
-// NODE CONTROL: Gracefully shutdown a specific NUMA node if its scanner crashes early
-// ==============================================================================
-static int ring_scanner_eof_main(int argc, char **argv) {
-    if (argc < 2) return EXECUTION_FAILURE;
-    int node = atoi(argv[1]);
-    if (node < 0 || node >= (int)global_num_nodes) node = 0;
-    
-    // Set the finished flag so workers know no more chunks are coming
-    if (state) atomic_store_release(&state[node].scanner_finished, 1);
-    
-    // Blast the EOF eventfd to wake up any sleeping workers
-    if (evfd_eof_arr && evfd_eof_arr[node] >= 0) {
-        uint64_t blast = 999999;
-        sys_write(evfd_eof_arr[node], &blast, 8);
-    }
-    return EXECUTION_SUCCESS;
-}
-
-// ==============================================================================
 // ESCROW RECOVERY: Explicitly deposit a failed batch into the escrow channel
 // ==============================================================================
 static int ring_escrow_put_main(int argc, char **argv) {
@@ -5230,6 +5210,8 @@ static int ring_escrow_put_main(int argc, char **argv) {
     uint64_t idx = strtoull(argv[2], NULL, 10);
     uint64_t cnt = strtoull(argv[3], NULL, 10);
     uint32_t kills = (uint32_t)atoi(argv[4]);
+
+    if (node < 0 || node >= (int)global_num_nodes) node = 0;
 
     struct EscrowPacket ep = { .idx = idx, .cnt = cnt, .num_kills = kills };
 
