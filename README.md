@@ -8,6 +8,7 @@
 - **200,000+ batch dispatches/sec** (vs ~500 for GNU Parallel)
 - **~95–99% CPU utilization** across all cores (vs ~6% for GNU Parallel)
 - **Near-zero cross-socket memory traffic** (NUMA-aware “born-local” design)
+- **Automatic recovery and retry** when a worker unexpectedly dies processing a batch (v3.1.0+)
 
 forkrun is built for high-frequency, low-latency workloads on deep NUMA hardware — a regime where existing tools leave most cores idle due to IPC overhead and cross-socket data migration.
 
@@ -88,7 +89,6 @@ With the release of v3.0.0, `forkrun` has transitioned to a high-performance C-r
 forkrun currently guarantees correctness under the assumption that at least one worker per NUMA node remains alive until its assigned work completes — a safe assumption for local shell operations on healthy compute nodes. 
 
 Priorities for the development roadmap include:
-- **Failure isolation and per-batch retries** to handle transient worker crashes.
 - **Resume-after-interruption** state saving to gracefully handle preempted cluster/Slurm jobs.
 - **Deeper integration** with facility workload managers.
 
