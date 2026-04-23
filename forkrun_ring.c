@@ -1309,6 +1309,14 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].indexer_waiters, 0);
       atomic_store_relaxed(&state[n].meta_waiters, 0);
 
+      // Reset PID Controller / Flow State
+      atomic_store_relaxed(&state[n].batch_change_idx, 0);
+      atomic_store_relaxed(&state[n].active_workers, state[n].cfg_w_start);
+      if (state[n].mode_byte)
+        atomic_store_relaxed(&state[n].signed_batch_size, 1);
+      else
+        atomic_store_relaxed(&state[n].signed_batch_size, -(int64_t)state[n].cfg_batch_start);
+
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
         char dump[1024];
