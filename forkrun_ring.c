@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.1.0
+// forkrun_ring.c v3.1.1
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -298,7 +298,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.1.0"
+#define FORKRUN_RING_VERSION "v3.1.1"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -486,7 +486,8 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr>", "Poll FDs") \
   X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
   X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
-  X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow")
+  X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow") \
+  X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -1307,6 +1308,14 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].active_waiters, 0);
       atomic_store_relaxed(&state[n].indexer_waiters, 0);
       atomic_store_relaxed(&state[n].meta_waiters, 0);
+
+      // Reset PID Controller / Flow State
+      atomic_store_relaxed(&state[n].batch_change_idx, 0);
+      atomic_store_relaxed(&state[n].active_workers, state[n].cfg_w_start);
+      if (state[n].mode_byte)
+        atomic_store_relaxed(&state[n].signed_batch_size, 1);
+      else
+        atomic_store_relaxed(&state[n].signed_batch_size, (int64_t)state[n].cfg_batch_start);
 
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
@@ -5218,6 +5227,13 @@ static int ring_escrow_put_main(int argc, char **argv) {
     if (fd_escrow_w && fd_escrow_w[node] >= 0) {
         robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
     }
+    return EXECUTION_SUCCESS;
+}
+
+// Emergency Abort Trigger
+static int ring_abort_main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    pull_fire_alarm();
     return EXECUTION_SUCCESS;
 }
 
