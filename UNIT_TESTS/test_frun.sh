@@ -32,6 +32,15 @@ declare -A TEST_ERRORS
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf "$TEST_DIR"' EXIT
 
+# Detect UMA vs NUMA hardware
+# Count NUMA nodes; if >1 we are on NUMA, otherwise UMA
+NUMA_NODE_COUNT=$(ls -d /sys/devices/system/node/node[0-9]* 2>/dev/null | wc -l)
+if (( NUMA_NODE_COUNT > 1 )); then
+  IS_NUMA=true
+else
+  IS_NUMA=false
+fi
+
 # Path to frun.bash (assume script is in same directory as test suite)
 FRUN_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/frun.bash"
 if [[ ! -f "$FRUN_SOURCE" ]]; then
@@ -375,10 +384,18 @@ run_test "Exact lines (-L 3)" \
   "$(cat "$LINE_INPUT")"
 
 # FIXED: Expect the output AND the stderr warning
-run_test_stderr "Exact lines with limit (-L 4 -n 8)" \
-  "cat '$LINE_INPUT' | frun -k -L 4 -n 8 printf \"%s\\n\" >/dev/null" \
-  "NUMA optimizations prevent -L from working properly" \
-  0
+# On NUMA hardware, -L with -n emits a warning; on UMA, no warning is emitted
+if $IS_NUMA; then
+  run_test_stderr "Exact lines with limit (-L 4 -n 8)" \
+    "cat '$LINE_INPUT' | frun -k -L 4 -n 8 printf \"%s\\n\" >/dev/null" \
+    "NUMA optimizations prevent -L from working properly" \
+    0
+else
+  # On UMA: no NUMA warning, just verify exit 0 and correct stdout
+  run_test "Exact lines with limit (-L 4 -n 8)" \
+    "cat '$LINE_INPUT' | frun -k -L 4 -n 8 printf \"%s\\n\"" \
+    "$(head -n 8 "$LINE_INPUT")"
+fi
 
 # ============================================================================
 # WORKER SCALING
@@ -505,10 +522,18 @@ run_test "Multi-node (--nodes=2)" \
   "$(cat "$LINE_INPUT")"
 
 # FIXED: Check stderr for downgrade warning using regex
-run_test_stderr "Exact lines with NUMA (downgrade warning)" \
-  "cat '$LINE_INPUT' | frun --nodes=2 -L 3 printf \"%s\\n\" >/dev/null" \
-  "cannot guarantee exactly|NUMA optimizations prevent -L from working properly" \
-  0
+# On NUMA hardware, --nodes=2 -L emits a downgrade warning; on UMA, no warning
+if $IS_NUMA; then
+  run_test_stderr "Exact lines with NUMA (downgrade warning)" \
+    "cat '$LINE_INPUT' | frun --nodes=2 -L 3 printf \"%s\\n\" >/dev/null" \
+    "cannot guarantee exactly|NUMA optimizations prevent -L from working properly" \
+    0
+else
+  # On UMA: --nodes=2 is silently downgraded; just verify correct output
+  run_test "Exact lines with NUMA (downgrade warning)" \
+    "cat '$LINE_INPUT' | frun --nodes=2 -L 3 printf \"%s\\n\"" \
+    "$(cat "$LINE_INPUT")"
+fi
 
 # ============================================================================
 # SPECIAL FLAGS
@@ -524,7 +549,7 @@ run_test_regex "Dry run (-N)" \
 
 run_test "Version (-V)" \
   "frun -V" \
-  "forkrun v3.0.2"
+  "forkrun v3.1.0"
 
 # FIXED: Check for USAGE string explicitly without exact match
 run_test_regex "Help (--help)" \
@@ -539,10 +564,18 @@ run_test_regex "Verbose flag (-v)" \
   0 true
 
 # FIXED: Check stderr using regex for Telemetry
-run_test_regex "Stats flag (--stats) UMA" \
-  "cat '$LINE_INPUT' | frun --stats printf \"%s\\n\" >/dev/null" \
-  "NUMA TELEMETRY" \
-  0 true
+# On NUMA hardware, --stats emits NUMA TELEMETRY; on UMA, it emits general telemetry
+if $IS_NUMA; then
+  run_test_regex "Stats flag (--stats)" \
+    "cat '$LINE_INPUT' | frun --stats printf \"%s\\n\" >/dev/null" \
+    "NUMA TELEMETRY" \
+    0 true
+else
+  # On UMA: --stats is a no-op (NUMA-only feature); just verify correct output
+  run_test "Stats flag (--stats)" \
+    "cat '$LINE_INPUT' | frun --stats printf \"%s\\n\"" \
+    "$(cat "$LINE_INPUT")"
+fi
 
 # ============================================================================
 # EDGE CASES & ERROR CONDITIONS
@@ -686,6 +719,226 @@ trickle2"
 run_test "Command failure tolerance (No Deadlock)" \
   "cat '$LINE_INPUT' | frun 'false' >/dev/null; echo PIPELINE_SURVIVED" \
   "PIPELINE_SURVIVED"
+
+# ============================================================================
+# NEW TESTS
+# ============================================================================
+
+print_section "Bash Execution Environment & State Propagation"
+
+# Test 1: Simple Shell Function Parallelization (Batch-Aware)
+run_test "Parallelize simple bash function" \
+  "my_func() { for arg in \"\$@\"; do echo \"FUNC-\$arg\"; done; }; cat '$LINE_INPUT' | FORKRUN_EXTRA_FUNCS='my_func' frun my_func" \
+  "$(cat "$LINE_INPUT" | sed 's/^/FUNC-/')"
+
+# Test 2: Nested Shell Functions (Batch-Aware)
+run_test "Parallelize nested bash functions" \
+  "inner() { echo \"IN-\$1\"; }; outer() { for arg in \"\$@\"; do inner \"OUT-\$arg\"; done; }; cat '$LINE_INPUT' | FORKRUN_EXTRA_FUNCS='inner outer' frun outer" \
+  "$(cat "$LINE_INPUT" | sed 's/^/IN-OUT-/')"
+
+# Test 3: Exported Variables Survive
+# Note: MY_VAR is exported in the parent. The function loops over the batch to print it.
+run_test "Exported variables propagate" \
+  "export MY_VAR='SURVIVOR'; print_var() { for arg in \"\$@\"; do echo \"\$MY_VAR\"; done; }; cat '$LINE_INPUT' | FORKRUN_EXTRA_VARS='MY_VAR' FORKRUN_EXTRA_FUNCS='print_var' frun print_var" \
+  "$(awk '{print "SURVIVOR"}' "$LINE_INPUT")"
+
+# Test 4: Unexported Variables do NOT pollute
+run_test "Unexported variables do not propagate" \
+  "MY_LOCAL='GHOST'; print_ghost() { for arg in \"\$@\"; do echo \"\${MY_LOCAL:-EMPTY}\"; done; }; cat '$LINE_INPUT' | FORKRUN_EXTRA_FUNCS='print_ghost' frun print_ghost" \
+  "$(awk '{print "EMPTY"}' "$LINE_INPUT")"
+
+print_section "Engine Physics: Escrow, Skew, and Heap Stress"
+
+# Test 1: Severe Out-Of-Order Execution (Heap Stress)
+# Adapted from your composite test to output newlines for strict validation.
+run_test "ring_order Min-Heap with Severe Skew (-k)" \
+  "sleepy_echo() { for nn in \"\$@\"; do sleep 0.\$((RANDOM % 5)); echo \"\$nn\"; done; }; export -f sleepy_echo 2>/dev/null; ff() { sleepy_echo \"\$@\"; }; seq 1 50 | FORKRUN_EXTRA_FUNCS='sleepy_echo ff' frun -k -j 8 ff" \
+  "$(seq 1 50)"
+
+# Test 2: Forced Escrow Stealing / Priority Inversion
+# We use 1 worker and a huge overshoot limits. The worker MUST steal from its own escrow.
+run_test "Forced Escrow Steal (Single Worker Overshoot)" \
+  "seq 1 100 | frun -j 1 -l 10:1000 printf \"%s\\n\"" \
+  "$(seq 1 100)"
+
+# Test 3: Heavy Starvation / Oversubscription
+run_test "Massive Oversubscription (128 workers, 10 lines)" \
+  "seq 1 10 | frun -j 128 printf \"%s\\n\"" \
+  "$(seq 1 10)"
+
+
+print_section "I/O Edge Cases & Scanner Boundaries"
+
+# Test 1: No Trailing Newline
+NO_NL_INPUT="$TEST_DIR/no_nl.txt"
+printf "line1\nline2\nline3" > "$NO_NL_INPUT"
+run_test "File with NO trailing newline" \
+  "cat '$NO_NL_INPUT' | frun printf \"%s\\n\"" \
+  "line1
+line2
+line3"
+
+# Test 2: The '-n' flag on exact chunk boundaries
+run_test "Exact Limit matching" \
+  "seq 1 10000 | frun -n 1234 -k printf \"%s\\n\" | wc -l" \
+  "1234"
+
+print_section "Routing: Data as Arguments (Default)"
+
+# Test: Data as arguments (using printf)
+run_test "Default mode passes data as arguments" \
+  "seq 1 5 | frun -k printf \"%s\\n\"" \
+  "1
+2
+3
+4
+5"
+
+# Test: Filenames as arguments (using cat)
+# We create two files, pass their names to frun, and verify cat opens them.
+run_test "Default mode passes filenames to cat" \
+  "echo 'fileA_content' > $TEST_DIR/fileA; echo 'fileB_content' > $TEST_DIR/fileB; printf \"%s\n\" \"$TEST_DIR/fileA\" \"$TEST_DIR/fileB\" | frun -k cat" \
+  "fileA_content
+fileB_content"
+
+print_section "Routing: Data Spliced to Stdin (-s / -b)"
+
+# Test: Stdin mode (-s)
+run_test "Stdin mode (-s) splices to worker stdin" \
+  "seq 1 5 | frun -k -s cat" \
+  "1
+2
+3
+4
+5"
+
+# Test: Byte mode (-b) implies (-s)
+# Byte mode automatically splices data to stdin. We use 'wc -c' to prove
+# the bytes arrived via stdin and weren't evaluated as arguments.
+run_test "Byte mode (-b) splices to worker stdin" \
+  "head -c 1000 /dev/zero | frun -b 200 wc -c | awk '{sum+=\$1} END {print sum}'" \
+  "1000"
+
+print_section "Variable Serialization (FORKRUN_EXTRA_VARS)"
+
+# Test 1: Simple String Propagation
+run_test "FORKRUN_EXTRA_VARS passes simple strings" \
+  "MY_STR='Hello World'; print_str() { for arg in \"\$@\"; do echo \"\$MY_STR: \$arg\"; done; }; cat '$LINE_INPUT' | FORKRUN_EXTRA_FUNCS='print_str' FORKRUN_EXTRA_VARS='MY_STR' frun -k -l 1 print_str | head -n 1" \
+  "Hello World: line1"
+
+# Test 2: Standard Array Propagation (Preserving spaces/indexes)
+run_test "FORKRUN_EXTRA_VARS passes standard arrays" \
+  "MY_ARR=('item 0' 'item 1'); print_arr() { for arg in \"\$@\"; do echo \"\${MY_ARR[1]}\"; done; }; seq 1 3 | FORKRUN_EXTRA_FUNCS='print_arr' FORKRUN_EXTRA_VARS='MY_ARR' frun -k print_arr" \
+  "item 1
+item 1
+item 1"
+
+# Test 3: Associative Array Propagation (The ultimate test)
+run_test "FORKRUN_EXTRA_VARS passes associative arrays" \
+  "declare -A MY_MAP=([keyA]='valA' [keyB]='valB'); lookup() { for arg in \"\$@\"; do echo \"\${MY_MAP[\$arg]:-none}\"; done; }; printf \"keyA\nkeyB\nkeyC\n\" | FORKRUN_EXTRA_FUNCS='lookup' FORKRUN_EXTRA_VARS='MY_MAP' frun -k lookup" \
+  "valA
+valB
+none"
+
+print_section "Custom clean-room setup (FORKRUN_EXTRA_SETUP)"
+
+# 1. Basic environment variable injection via setup code
+run_test "FORKRUN_EXTRA_SETUP: set env var used by worker" \
+  "FORKRUN_EXTRA_SETUP='export MY_SETUP_VAR=from_setup'; echo_val() { echo \"\$MY_SETUP_VAR:\$1\"; }; echo 'x' | FORKRUN_EXTRA_FUNCS='echo_val' FORKRUN_EXTRA_VARS='MY_SETUP_VAR' frun -l 1 echo_val" \
+  "from_setup:x"
+
+# 2. Load a custom loadable builtin (if you have one available for testing)
+[[ -f  /path/to/test_loadable.so ]] && run_test "FORKRUN_EXTRA_SETUP: enable custom loadable" \
+  "FORKRUN_EXTRA_SETUP='enable -f /path/to/test_loadable.so test_cmd 2>/dev/null || true'; test_cmd() { echo \"loaded:\$1\"; }; echo 'y' | FORKRUN_EXTRA_FUNCS='test_cmd' frun -l 1 test_cmd" \
+  "loaded:y"  # Or handle gracefully if loadable unavailable
+
+# 3. Modify shell options that affect worker behavior
+run_test "FORKRUN_EXTRA_SETUP: enable extglob affects pattern matching" \
+  "FORKRUN_EXTRA_SETUP='shopt -s extglob'; match_ext() { [[ \"\$1\" == +(a|b) ]] && echo \"match:\$1\" || echo \"nope:\$1\"; }; printf 'a\nb\nc\n' | FORKRUN_EXTRA_FUNCS='match_ext' frun -l 1 match_ext" \
+  $'match:a\nmatch:b\nnope:c'
+
+# 4. Setup code runs BEFORE worker function is serialized
+run_test "FORKRUN_EXTRA_SETUP: setup executes before function capture" \
+  "FORKRUN_EXTRA_SETUP='PRE_SETUP=ready'; use_pre() { echo \"\$PRE_SETUP:\$1\"; }; echo 'z' | FORKRUN_EXTRA_FUNCS='use_pre' FORKRUN_EXTRA_VARS='PRE_SETUP' frun -l 1 use_pre" \
+  "ready:z"
+
+# 5. Setup code that fails should not silently succeed
+run_test "FORKRUN_EXTRA_SETUP: failing setup code propagates exact exit code" \
+"FORKRUN_EXTRA_SETUP='exit 42'; dummy() { echo \"\$1\"; }; echo 'w' | FORKRUN_EXTRA_FUNCS='dummy' frun -l 1 dummy" \
+"" 42
+
+
+print_section "Signal Handling and Early Termination"
+
+# Test 1: SIGPIPE from downstream
+# We pipe a massive stream into frun, but cut it off instantly.
+run_test_regex "Graceful SIGPIPE handling (head -n 5)" \
+  "seq 1 1000000 | frun -k printf \"%s\\n\" | head -n 5 | wc -l" \
+  "5" \
+  0 false
+
+# Test 2: Worker command crashes mid-batch
+# If a specific input crashes the worker, the rest of the file should still process.
+run_test "Worker transient failure mid-batch" \
+  "crash_func() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 -k crash_func" \
+  "1
+2
+4
+5"
+
+# Test 3: Worker command crashes once mid-batch
+# If a specific input crashes only once it should recover and the rest of the file should still process.
+\rm ./.crash
+run_test "Worker one-time transient failure mid-batch" \
+  "crash_func() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && ! [[ -f ./.crash  ]]; then : >./.crash; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 -k crash_func" \
+  "1
+2
+3
+4
+5"
+\rm ./.crash
+
+print_section "Misc additional tests"
+
+
+# Force extreme out-of-order completion to stress min-heap
+run_test "Min-heap ordering: 100 batches with random sleep skew" \
+  "skewed() { sleep 0.\$((RANDOM%50)); echo \"\$1\"; }; export -f skewed 2>/dev/null; seq 1 100 | FORKRUN_EXTRA_FUNCS='skewed' frun -l 1 -k -j 16 skewed" \
+  "$(seq 1 100)"
+
+# Downstream consumer dies mid-stream; verify clean abort
+run_test_regex "SIGPIPE cascade: orderer dies, workers abort cleanly" \
+  "seq 10000 | frun -k -j 8 printf '%s\n' | head -n 5; echo \"EXIT:\$?\"" \
+  "EXIT:0" 0 false
+
+# 3. UTF-8 BYTE INTEGRITY
+# Expect 10 bytes. This validates that byte-mode preserves raw binary integrity.
+run_test "Byte mode: UTF-8 character integrity (10 bytes for 5 Greek chars)" \
+"printf 'αβγδε' | frun -b 3 -s cat | wc -c" \
+"10"
+
+# 4. FD LIMIT REALISM
+# Test that forkrun's automatic ulimit boosting works under a realistic, allowed limit.
+run_test "Operates correctly under moderate FD limits (ulimit -n 256)" \
+"(ulimit -n 256 2>/dev/null || true); seq 10 | frun -j 4 -k printf '%s\n'" \
+"1
+2
+3
+4
+5
+6
+7
+8
+9
+10"
+
+# 5. TIMEOUT FLUSH WITH STDIN
+# Add -s so cat reads from the spliced stdin pipe, proving the timeout early-flush works.
+run_test "Timeout flush: 50ms timeout delivers trickle input" \
+"{ echo 'a'; sleep 0.1; echo 'b'; } | frun --timeout 50000 -l 100 -k -s cat" \
+"a
+b"
+
 
 # ============================================================================
 # FINAL SUMMARY

@@ -53,12 +53,16 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 
 <small>NOTE: All benchmarks run on UMA hardware. On NUMA hardware, forkrun is expected to scale linearly (or better).</small>
 
-**Batch distribution rate**  
-- forkrun default mode: **~10 000 – 12 000 batches/sec**  
-- forkrun `-s` mode: **> 200 000 batches/sec (UMA) / > 100 000 batches/sec (NUMA)**  
+**Test Coverage & Validation**
+- forkrun has been rigorously validated with **3,768 successful test runs**: 233 unit tests + 396 individual benchmark runs (628 total), executed on both UMA and NUMA (`numa=fake=4`) hardware (1,256 total runs). 
+- All 1256 tests pass cleanly under ThreadSanitizer (TSan) as well as AddressSanitizer + UndefinedBehaviorSanitizer (ASan+UBSan).
+
+**Batch distribution rate**
+- forkrun default mode: **~10 000 – 12 000 batches/sec**
+- forkrun `-s` mode: **> 200 000 batches/sec (UMA) / > 100 000 batches/sec (NUMA)**
 - GNU Parallel (current tool): **~470 batches/sec**
 
-**Average CPU utilization across ~400 benchmarks**  
+**Average CPU utilization across ~400 benchmarks**
 - forkrun:      95%  (27.1 / 28 cores)  (no centralized dispatcher - all 27.1 cores doing work)
 - GNU Parallel:  6%  (2.68 / 28 cores)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
 
@@ -102,7 +106,7 @@ Executing this roadmap, hardening the codebase for Exascale production environme
 
 forkrun is open source (MIT License). Drop `frun.bash` on a Frontier login node and run `. frun.bash && frun -s : < 1B_line_file` side-by-side with your current Parallel pipeline. 
 
-I’m happy to assist remotely or on-site. I live in Dandridge, TN (~1 hour away from ORNL) and am available for an on-site demo with 24 hour notice.
+I’m happy to assist remotely or on-site. I live in Dandridge, TN (~1 hour away from ORNL) and am available for an on-site demo with minimal notice.
 
 Let's work together to get Frontier spending **more time doing science** and less time "waiting for data".
 

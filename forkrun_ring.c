@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.0.2
+// forkrun_ring.c v3.1.0
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -298,7 +298,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.0.2"
+#define FORKRUN_RING_VERSION "v3.1.0"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -482,7 +482,11 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
     "Show build metadata")                                                     \
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats",                  \
     "Print NUMA telemetry")                                                    \
-  X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")
+  X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")            \
+  X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr>", "Poll FDs") \
+  X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
+  X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
+  X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -753,6 +757,8 @@ static uint8_t g_explicit_pinning = 0; // NEW
 struct EscrowPacket {
   uint64_t idx;
   uint64_t cnt;
+  uint32_t num_kills;
+  uint32_t _pad;
 };
 
 // IndexPacket: Legacy flat-mode packet for passing physical offsets.
@@ -760,11 +766,7 @@ struct IndexPacket {
   uint64_t idx;
   uint64_t cnt;
 };
-struct Interval {
-  uint64_t s;
-  uint64_t e;
-  struct Interval *next;
-};
+
 struct PhysPacket {
   uint64_t off;
   uint64_t len;
@@ -839,6 +841,7 @@ struct SharedState {
   uint8_t scanner_finished;
   uint8_t fallow_active;
   uint8_t ingest_complete;
+  uint8_t emergency_abort;
 
   uint32_t indexer_waiters ALIGNED(CACHE_LINE);
   uint32_t meta_waiters ALIGNED(CACHE_LINE);
@@ -889,6 +892,25 @@ static inline void cleanup_waiter_state() {
     }
     is_waiting_on_ring = false;
   }
+}
+
+// EMERGENCY SHUTDOWN: Global fire alarm sentry.
+// Any thread (Worker or Orderer) can call this to trigger an immediate system-wide
+// abort. It atomically flips emergency_abort to 1 (CAS ensures we only blast once),
+// then blasts ALL EOF eventfds to wake every sleeping poll across the engine.
+// Data eventfds are left untouched to preserve the conservation laws of the ring.
+static inline void pull_fire_alarm() {
+    if (!state) return;
+    // CAS: Only the first caller blasts the eventfds
+    uint8_t expected = 0;
+    if (__atomic_compare_exchange_n(&state[0].emergency_abort, &expected, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+        uint64_t blast = 999999;
+        for (uint32_t n = 0; n < allocated_num_nodes; n++) {
+            if (evfd_eof_arr && evfd_eof_arr[n] >= 0) sys_write(evfd_eof_arr[n], &blast, 8);
+        }
+        if (evfd_ingest_eof >= 0) sys_write(evfd_ingest_eof, &blast, 8);
+        if (evfd_chunk_done >= 0) sys_write(evfd_chunk_done, &blast, 8); // Wake up Ingest
+    }
 }
 
 #define OOM_WAIT_FOR_MEMORY(free_b_var, threshold, si_var, mu_var)             \
@@ -1176,6 +1198,7 @@ static void apply_config(char type, char sub, const char *arg) {
       }
     }
   }
+  //cfg_state &= ~clear_mask;
   cfg_state |= set_mask;
 }
 
@@ -1272,6 +1295,7 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].global_scanned, 0);
       atomic_store_relaxed(&state[n].min_idx, 0);
       atomic_store_relaxed(&state[n].fallow_active, 0);
+      atomic_store_relaxed(&state[n].emergency_abort, 0);
       atomic_store_relaxed(&state[n].tail_idx, 0);
       atomic_store_relaxed(&state[n].scanner_finished, 0);
       atomic_store_relaxed(&state[n].stats_chunks_assigned, 0);
@@ -1580,12 +1604,20 @@ static int ring_init_main(int argc, char **argv) {
     if (!v)
       return EXECUTION_FAILURE;
 
-    int *created_fds = malloc(sizeof(int) * vals[1]);
+    // Calculate true total max workers across all nodes to prevent out-of-bounds
+    uint64_t actual_total_w_max = 0;
+    for (uint32_t n = 0; n < global_num_nodes; n++) {
+        uint64_t w_max_balanced = vals[1] / global_num_nodes;
+        if (w_max_balanced < 1) w_max_balanced = 1;
+        actual_total_w_max += w_max_balanced;
+    }
+
+    int *created_fds = malloc(sizeof(int) * actual_total_w_max);
     if (!created_fds)
       return EXECUTION_FAILURE;
     int created_cnt = 0;
     int failure = 0;
-    for (uint64_t i = 0; i < vals[1]; i++) {
+    for (uint64_t i = 0; i < actual_total_w_max; i++) {
       int fd = xcreate_anon_file("forkrun_out");
       if (fd >= 0) {
         created_fds[created_cnt++] = fd;
@@ -1785,6 +1817,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   }
 
 #define NUMA_CHECK_SCANNERS_DONE() do { \
+  if (atomic_load_relaxed(&state[0].emergency_abort)) { \
+    limit_reached_exit = true; \
+    goto ingest_done; \
+  } \
   if (state[0].cfg_limit > 0) { \
     bool _all_done = true; \
     for (int _i = 0; _i < num_nodes; _i++) { \
@@ -2043,6 +2079,8 @@ ingest_done:
       uint64_t v;
       sys_read(evfd_chunk_done, &v, 8);
     }
+    // Add emergency check to ensure we don't stall in flush at EOF if SIGPIPE happened
+    if (atomic_load_relaxed(&state[0].emergency_abort)) break;
   }
 
   struct ChunkMeta *meta_eof = &g_state->meta_ring[current_major & META_RING_MASK];
@@ -2102,6 +2140,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   bool byte_mode = t_state->mode_byte;
 
   while (1) {
+    if (atomic_load_relaxed(&state[0].emergency_abort)) {
+      return EXECUTION_FAILURE;
+    }
     while (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx) {
       if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
         if (atomic_load_acquire(&t_state->chunk_queue_head) <= my_idx)
@@ -2122,15 +2163,20 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           {.fd = evfd_indexer_arr[my_node_id], .events = POLLIN},
           {.fd = evfd_ingest_eof, .events = POLLIN}};
       poll(pfds, 2, -1);
-      
+
+      if (atomic_load_relaxed(&state[0].emergency_abort)) {
+        __atomic_fetch_sub(&t_state->indexer_waiters, 1, __ATOMIC_SEQ_CST);
+        return EXECUTION_FAILURE;
+      }
+
       bool data_fired = (pfds[0].revents & POLLIN) != 0;
       bool eof_fired = (pfds[1].revents & POLLIN) != 0;
-      
+
       // RULE: 1. Check local work. consume & loop
       if (data_fired) {
         uint64_t v;
         sys_read(evfd_indexer_arr[my_node_id], &v, 8);
-      } 
+      }
       // RULE: 3. EOF evfd. Handled by outer loop Condition 1 check.
       else if (eof_fired) {
           // Do nothing. Outer loop checks g_state->ingest_eof_idx != ~(uint64_t)0
@@ -2260,6 +2306,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                               _overwrite)                                      \
   do {                                                                         \
     while (1) {                                                                \
+      if (atomic_load_relaxed(&state[0].emergency_abort)) goto unified_scanner_eof; \
       uint64_t limit;                                                          \
       uint64_t uma_max_ahead = W_max_val * 64;                                 \
       if (uma_max_ahead < 1024)                                                \
@@ -2573,6 +2620,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   bool force_refill = false;
 
   while (1) {
+    // EMERGENCY BYPASS: If someone pulled the fire alarm, kill the Scanner instantly.
+    if (atomic_load_relaxed(&state[0].emergency_abort)) {
+        goto unified_scanner_eof;
+    }
+
     uint64_t chunk_end = ~(uint64_t)0;
     uint64_t current_p_offset;
     struct ChunkMeta *meta = NULL;
@@ -2665,6 +2717,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                   {.fd = evfd_meta_arr[my_node_id], .events = POLLIN},
                   {.fd = evfd_ingest_eof, .events = POLLIN}};
               poll(pfds, 2, -1);
+              if (atomic_load_relaxed(&state[0].emergency_abort)) {
+                  __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
+                  goto unified_scanner_eof;
+              }
               if (pfds[0].revents & POLLIN) {
                 uint64_t v;
                 sys_read(evfd_meta_arr[my_node_id], &v, 8);
@@ -2709,6 +2765,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               {.fd = evfd_meta_arr[steal_target], .events = POLLIN},
               {.fd = evfd_ingest_eof, .events = POLLIN}};
           poll(pfds, 2, -1);
+          if (atomic_load_relaxed(&state[0].emergency_abort)) {
+              __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
+              goto unified_scanner_eof;
+          }
           if (pfds[0].revents & POLLIN) {
             uint64_t v;
             sys_read(evfd_meta_arr[steal_target], &v, 8);
@@ -2762,6 +2822,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 {.fd = evfd_meta_arr[tnode], .events = POLLIN},
                 {.fd = evfd_ingest_eof, .events = POLLIN}};
             poll(pfds, 2, -1);
+            if (atomic_load_relaxed(&state[0].emergency_abort)) {
+                __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
+                goto unified_scanner_eof;
+            }
             if (pfds[0].revents & POLLIN) {
               uint64_t v;
               sys_read(evfd_meta_arr[tnode], &v, 8);
@@ -2830,6 +2894,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
         ssize_t n;
         do {
+          if (atomic_load_relaxed(&state[0].emergency_abort)) goto unified_scanner_eof;
           n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
         } while (n < 0 && errno == EINTR);
 
@@ -2891,14 +2956,18 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
                                        {.fd = evfd_ingest_eof, .events = POLLIN}};
               if (poll(pfds, 2, poll_timeout) > 0) {
+                // EMERGENCY BYPASS
+                if (atomic_load_relaxed(&state[0].emergency_abort)) {
+                    goto unified_scanner_eof;
+                }
                 bool data_fired = (pfds[0].revents & POLLIN) != 0;
                 bool eof_fired = (pfds[1].revents & POLLIN) != 0;
-                
+
                 // RULE: 1. check if local work evfd was non-zero. consume & loop
                 if (data_fired) {
                   uint64_t v;
                   sys_read(evfd_ingest_data, &v, 8);
-                } 
+                }
                 // RULE: 3. check EOF evfd ONLY if work evfd is zero
                 else if (eof_fired) {
                   atomic_store_release(&local_state->ingest_complete, 1);
@@ -3037,6 +3106,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           p = simd_res;
         } else {
           while (lines_found < scan_target) {
+            if (atomic_load_relaxed(&state[0].emergency_abort)) goto unified_scanner_eof;
             if (p >= end) {
               if (is_numa) {
                 uint64_t read_start = buf_base_offset + (p - buf);
@@ -3046,6 +3116,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 if (to_read > 0) {
                   ssize_t n;
                   do {
+                    if (atomic_load_relaxed(&state[0].emergency_abort)) goto unified_scanner_eof;
                     n = pread(fd_or_memfd, buf, to_read, read_start);
                   } while (n < 0 && errno == EINTR);
                   if (n > 0) {
@@ -3240,12 +3311,12 @@ unified_scanner_eof:
     uint64_t blast = 999999;
     sys_write(evfd_eof_arr[my_node_id], &blast, 8);
 
-    if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
+    if (fd_spawn >= 0) { /* Sentinel write removed */ }
   } else {
     // --- PHYSICS FIX: Prevent UMA ghost batches violating exact limit ---
     bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
 
-    if (!byte_mode && !limit_hit) {
+    if (!byte_mode && !limit_hit && !atomic_load_relaxed(&state[0].emergency_abort)) {
       uint64_t L_tail = pending_lines;
       char *p_scan = p;
 
@@ -3306,6 +3377,7 @@ unified_scanner_eof:
 
         uint64_t lines_found = 0;
         while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
+          if (atomic_load_relaxed(&state[0].emergency_abort)) goto tail_abort;
           if (p >= end) {
             uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
             ssize_t n;
@@ -3356,6 +3428,7 @@ unified_scanner_eof:
       }
     }
 
+tail_abort:
     uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
     local_state->offset_ring[local_scan_idx & RING_MASK] =
         (uint64_t)final_sentinel | FLAG_PARTIAL_BATCH;
@@ -3370,7 +3443,7 @@ unified_scanner_eof:
     uint64_t blast = 999999;
     sys_write(evfd_eof_arr[0], &blast, 8);
 
-    if (fd_spawn >= 0) robust_pipe_write(fd_spawn, "x\n", 2);
+    if (fd_spawn >= 0) { /* Sentinel write removed */ }
   }
 
   munmap(buf, chunk_sz);
@@ -3465,6 +3538,27 @@ static int ring_claim_main(int argc, char **argv) {
   if (fd_read < 0)
     fd_read = worker_cached_fd;
 
+  // --- UNIVERSAL SIGPIPE / TEARDOWN SHIELD ---
+  if (state) {
+      // 1. Did someone else pull the fire alarm? (e.g., ring_order, or Fallow dying)
+      if (atomic_load_relaxed(&state[0].emergency_abort)) {
+          return EXECUTION_FAILURE;
+      }
+
+      // 2. Sentry duty: Check if stdout is broken (Crucial for -u realtime mode)
+      // We only poll every 64 claims to ensure absolute zero overhead on the fast path.
+      static __thread int claim_calls = 0;
+      if ((claim_calls++ & 63) == 0) {
+          struct pollfd pfd_stdout = {.fd = 1, .events = POLLOUT};
+          if (poll(&pfd_stdout, 1, 0) > 0 && (pfd_stdout.revents & (POLLERR | POLLHUP))) {
+              // The downstream pipe was cut (e.g., head -n 5). Pull the fire alarm!
+              pull_fire_alarm();
+              return EXECUTION_FAILURE;
+          }
+      }
+  }
+  // -------------------------------------------
+
   if (tl_remainder_cnt > 0) {
     my_read_idx = tl_remainder_idx;
     claim_count = tl_remainder_cnt;
@@ -3473,7 +3567,7 @@ static int ring_claim_main(int argc, char **argv) {
   }
 
 restart_loop:
-  
+
   // NEW: ESCROW PRIORITY INVERSION (Head-of-line blocking prevention)
   // If this specific worker just dropped a partial batch into escrow,
   // it prioritizes getting it back before touching the main ring.
@@ -3488,9 +3582,28 @@ restart_loop:
           if (er == sizeof(ep)) {
               my_read_idx = ep.idx;
               claim_count = ep.cnt;
+              
+              // --- NEW: Export state ---
+              char buf[32];
+              snprintf(buf, sizeof(buf), "%u", ep.num_kills);
+              bind_variable("RING_NUM_KILLS", buf, 0);
+
+              int limit = 3; // Default to 3 retries
+              const char *s_lim = get_string_value("FORKRUN_RETRY_LIMIT");
+              if (s_lim) limit = atoi(s_lim);
+
+              // If limit is negative, we allow infinite retries (never poison)
+              // If limit is >= 0, we poison the batch when kills reaches the limit
+              if (limit >= 0 && ep.num_kills >= (uint32_t)limit) {
+                  bind_variable("RING_POISONED", "1", 0);
+              } else {
+                  bind_variable("RING_POISONED", "0", 0);
+              }
+              // ------------------------
+
               // We successfully reclaimed our (or someone else's) escrow.
               // Bypass the ring check entirely.
-              goto check_boundaries; 
+              goto check_boundaries;
           }
       }
   }
@@ -3551,6 +3664,11 @@ restart_loop:
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
                                        __ATOMIC_SEQ_CST);
 
+      // --- NEW: Reset poison tracking for fresh main-ring batches ---
+      bind_variable("RING_NUM_KILLS", "0", 0);
+      bind_variable("RING_POISONED", "0", 0);
+      // --------------------------------------------------------------
+
       if (!local_state->numa_enabled) {
         int64_t sbatch_check =
             atomic_load_relaxed(&local_state->signed_batch_size);
@@ -3576,6 +3694,25 @@ restart_loop:
       if (er == sizeof(ep)) {
         my_read_idx = ep.idx;
         claim_count = ep.cnt;
+
+        // --- NEW: Export state ---
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%u", ep.num_kills);
+        bind_variable("RING_NUM_KILLS", buf, 0);
+
+        int limit = 3; // Default to 3 retries
+        const char *s_lim = get_string_value("FORKRUN_RETRY_LIMIT");
+        if (s_lim) limit = atoi(s_lim);
+
+        // If limit is negative, we allow infinite retries (never poison)
+        // If limit is >= 0, we poison the batch when kills reaches the limit
+        if (limit >= 0 && ep.num_kills >= (uint32_t)limit) {
+            bind_variable("RING_POISONED", "1", 0);
+        } else {
+            bind_variable("RING_POISONED", "0", 0);
+        }
+        // ------------------------
+        
         break;
       }
     }
@@ -3630,6 +3767,12 @@ restart_loop:
         break;
 
       poll(pfds, 3, -1);
+
+      // EMERGENCY BYPASS: If someone pulled the fire alarm while we slept, exit immediately
+      if (atomic_load_relaxed(&state[0].emergency_abort)) {
+        cleanup_waiter_state();
+        return EXECUTION_FAILURE;
+      }
 
       bool data_fired = (pfds[0].revents & POLLIN) != 0;
       bool escrow_fired = (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN) != 0);
@@ -3719,6 +3862,12 @@ restart_loop:
 
         poll(pfds, 2, -1);
 
+        // EMERGENCY BYPASS: If someone pulled the fire alarm while we slept, exit immediately
+        if (atomic_load_relaxed(&state[0].emergency_abort)) {
+          cleanup_waiter_state();
+          return EXECUTION_FAILURE;
+        }
+
         bool data_fired = (pfds[0].revents & POLLIN) != 0;
 
         if (data_fired) {
@@ -3760,9 +3909,9 @@ check_boundaries:
       } else if (ew == sizeof(ep)) {
         uint64_t one = 1;
         sys_write(evfd_data_arr[my_numa_node], &one, 8);
-        
+
         // NEW: We successfully dropped into escrow. Flag ourselves to pick it up ASAP.
-        tl_recently_escrowed = true; 
+        tl_recently_escrowed = true;
       }
 
       claim_count = safe_count;
@@ -3848,6 +3997,8 @@ static int ring_ack_main(int argc, char **argv) {
   int fd_fallow = atoi(argv[1]);
   int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
 
+  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+
   struct OrderPacket op = {0};
 
   struct SharedState *local_state =
@@ -3886,10 +4037,16 @@ static int ring_ack_main(int argc, char **argv) {
           local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
       uint64_t end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
       struct PhysPacket pp = {.off = start, .len = end - start};
-      robust_pipe_write(fd_fallow, &pp, sizeof(pp));
+      if (robust_pipe_write(fd_fallow, &pp, sizeof(pp)) < 0) {
+          signal(SIGPIPE, old_handler);
+          return EXECUTION_FAILURE;
+      }
     } else {
       struct IndexPacket ip = {.idx = op.major_idx, .cnt = op.cnt};
-      robust_pipe_write(fd_fallow, &ip, sizeof(ip));
+      if (robust_pipe_write(fd_fallow, &ip, sizeof(ip)) < 0) {
+          signal(SIGPIPE, old_handler);
+          return EXECUTION_FAILURE;
+      }
     }
   }
 
@@ -3905,17 +4062,28 @@ static int ring_ack_main(int argc, char **argv) {
       if (s_order_pipe) {
         int fd_pipe = atoi(s_order_pipe);
         off_t curr = lseek(fd_target, 0, SEEK_CUR);
-        if (curr == (off_t)-1)
+        if (curr == (off_t)-1) {
+          signal(SIGPIPE, old_handler);
           return EXECUTION_FAILURE;
+        }
         op.fd = fd_target;
         op.off = (uint64_t)last_ack_offset;
         op.len = (uint64_t)(curr - last_ack_offset);
-        robust_pipe_write(fd_pipe, &op, sizeof(op));
+        if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) {
+            signal(SIGPIPE, old_handler);
+            return EXECUTION_FAILURE;
+        }
         last_ack_offset = curr;
       }
-    } else
-      robust_pipe_write(fd_target, &op, sizeof(op));
+    } else {
+      if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) {
+          signal(SIGPIPE, old_handler);
+          return EXECUTION_FAILURE;
+      }
+    }
   }
+
+  signal(SIGPIPE, old_handler);
   return EXECUTION_SUCCESS;
 }
 
@@ -3934,7 +4102,9 @@ static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap,
                       uint64_t key, struct OrderPacket pkt) {
   if (*sz >= *cap) {
     *cap = (*cap) * 2;
-    *heap_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
+    void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
+    if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
+    *heap_ptr = new_ptr;
   }
   struct HeapNode *heap = *heap_ptr;
   int i = (*sz)++;
@@ -4034,6 +4204,47 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
   return (total_read == len) ? 0 : -1;
 }
 
+// ==============================================================================
+// INTERVAL MIN-HEAP (O(log N) out-of-order sequence assembly)
+// ==============================================================================
+struct IntervalNode {
+    uint64_t s;
+    uint64_t e;
+};
+
+static inline void interval_heap_push(struct IntervalNode **heap_ptr, int *sz, int *cap, uint64_t s, uint64_t e) {
+    if (*sz >= *cap) {
+        *cap = (*cap) * 2;
+        void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct IntervalNode));
+        if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
+        *heap_ptr = new_ptr;
+    }
+    struct IntervalNode *heap = *heap_ptr;
+    int i = (*sz)++;
+    while (i > 0) {
+        int p = (i - 1) / 2;
+        if (heap[p].s <= s) break;
+        heap[i] = heap[p];
+        i = p;
+    }
+    heap[i].s = s;
+    heap[i].e = e;
+}
+
+static inline void interval_heap_pop(struct IntervalNode *heap, int *sz, struct IntervalNode *out) {
+    *out = heap[0];
+    struct IntervalNode tmp = heap[--(*sz)];
+    int i = 0;
+    while (i * 2 + 1 < *sz) {
+        int child = i * 2 + 1;
+        if (child + 1 < *sz && heap[child + 1].s < heap[child].s) child++;
+        if (tmp.s <= heap[child].s) break;
+        heap[i] = heap[child];
+        i = child;
+    }
+    heap[i] = tmp;
+}
+
 
 // ==============================================================================
 // OUTPUT ORDERING ENGINE (The "Lorentz Transformation" for data streams)
@@ -4045,16 +4256,15 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
 // pipe fills).
 
 struct OrderFdState {
-    struct Interval *head;
+    struct IntervalNode *heap;
+    int heap_sz;
+    int heap_cap;
     uint64_t limit;
     off_t last_punched;
 };
 
-// Safely punches holes in per-worker memfds, preventing out-of-order
-// escrow batches from vaporizing chronologically later batches in both NUMA and UMA.
-static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len,
-                                   struct OrderFdState **fd_states_ptr, int *fd_states_cap_ptr) {
-    if (p_fd < 0) return; // SHIELD: Prevent buffer underflow from invalid FDs
+static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len, struct OrderFdState **fd_states_ptr, int *fd_states_cap_ptr) {
+    if (p_fd < 0) return;
 
     struct OrderFdState *fd_states = *fd_states_ptr;
     int fd_states_cap = *fd_states_cap_ptr;
@@ -4062,7 +4272,7 @@ static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len,
     if (p_fd >= fd_states_cap) {
         int new_cap = p_fd + 128;
         struct OrderFdState *new_states = realloc(fd_states, new_cap * sizeof(struct OrderFdState));
-        if (!new_states) return; // Silent fallback: halts GC for new FDs but prevents crash
+        if (!new_states) return;
         memset(&new_states[fd_states_cap], 0, (new_cap - fd_states_cap) * sizeof(struct OrderFdState));
         *fd_states_ptr = new_states;
         *fd_states_cap_ptr = new_cap;
@@ -4071,89 +4281,68 @@ static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len,
 
     struct OrderFdState *fs = &fd_states[p_fd];
 
+    if (fs->heap_cap == 0) {
+        fs->heap_cap = 64;
+        fs->heap = malloc(fs->heap_cap * sizeof(struct IntervalNode));
+    }
+
     if ((uint64_t)p_off <= fs->limit) {
-        // If the new packet overlaps or extends the current contiguous limit
         uint64_t new_end = (uint64_t)p_off + p_len;
         if (new_end > fs->limit) fs->limit = new_end;
 
-        // Absorb any buffered future intervals that now connect
-        while (fs->head && fs->head->s <= fs->limit) {
-            struct Interval *tmp = fs->head;
-            if (tmp->e > fs->limit) fs->limit = tmp->e;
-            fs->head = tmp->next;
-            free(tmp);
+        while (fs->heap_sz > 0 && fs->heap[0].s <= fs->limit) {
+            struct IntervalNode top;
+            interval_heap_pop(fs->heap, &fs->heap_sz, &top);
+            if (top.e > fs->limit) fs->limit = top.e;
         }
 
         off_t aligned = (off_t)((fs->limit / 4096ULL) * 4096ULL);
         if (aligned > fs->last_punched) {
-            fallocate(p_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                      fs->last_punched, aligned - fs->last_punched);
+            fallocate(p_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, fs->last_punched, aligned - fs->last_punched);
             fs->last_punched = aligned;
         }
     } else {
-        // Future out-of-order packet. Buffer it in the linked list sorted by start offset.
-        struct Interval *n = malloc(sizeof(struct Interval));
-        if (n) {
-            n->s = (uint64_t)p_off;
-            n->e = (uint64_t)p_off + p_len;
-            struct Interval **curr = &fs->head;
-            while (*curr && (*curr)->s < n->s)
-                curr = &((*curr)->next);
-            n->next = *curr;
-            *curr = n;
-        }
+        interval_heap_push(&fs->heap, &fs->heap_sz, &fs->heap_cap, (uint64_t)p_off, (uint64_t)p_off + p_len);
     }
 }
 
 static int ring_order_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
+  if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]);
   bool memfd_mode = (strcmp(argv[2], "memfd") == 0);
   const char *prefix = argv[2];
   bool unordered_mode = false;
   bool numa_mode = (global_num_nodes > 1);
   for (int i = 3; i < argc; i++) {
-    if (strcmp(argv[i], "unordered") == 0)
-      unordered_mode = true;
-    if (strcmp(argv[i], "numa") == 0)
-      numa_mode = true;
+    if (strcmp(argv[i], "unordered") == 0) unordered_mode = true;
+    if (strcmp(argv[i], "numa") == 0) numa_mode = true;
   }
 
   bool use_zerocopy = false;
   struct stat st_out;
-  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode))
-    use_zerocopy = true;
+  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
 
   int heap_cap = 1024;
   struct HeapNode *heap = malloc(heap_cap * sizeof(struct HeapNode));
-  if (!heap) {
-    builtin_error("forkrun: malloc failed during ring_order");
-    return EXECUTION_FAILURE;
-  }
+  if (!heap) return EXECUTION_FAILURE;
   int heap_sz = 0;
 
-  // Initialize state tracking universally for both UMA and NUMA
   int fd_states_cap = 256;
   struct OrderFdState *fd_states = calloc(fd_states_cap, sizeof(struct OrderFdState));
-  if (!fd_states) {
-      free(heap);
-      return EXECUTION_FAILURE;
-  }
+  if (!fd_states) { free(heap); return EXECUTION_FAILURE; }
 
-  uint32_t expected_major = 0;
-  uint32_t expected_minor = 0;
+  uint32_t expected_major = 0, expected_minor = 0;
 
   char pkt_buf[4096];
   size_t buffered = 0;
   size_t pkt_sz = sizeof(struct OrderPacket);
 
+  bool stdout_broken = false;
+  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered,
-                                      sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0) {
-      break; // EOF or error
-    }
+    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    if (n_read <= 0) break;
 
     buffered += n_read;
 
@@ -4163,20 +4352,22 @@ static int ring_order_main(int argc, char **argv) {
     for (size_t i = 0; i < count; i++) {
       struct OrderPacket *op = &ops[i];
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
-      uint64_t op_key =
-          numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
+      uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
       if (!unordered_mode) {
         heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
       } else {
         if (memfd_mode) {
           off_t offset = (off_t)op->off;
-          if (use_zerocopy)
-            robust_sendfile(1, op->fd, &offset, op->len);
-          else
-            ring_copy_chunk(op->fd, 1, offset, op->len);
-
-          // Apply safe punch logic universally
+          if (use_zerocopy) {
+            if (robust_sendfile(1, op->fd, &offset, op->len) < 0) stdout_broken = true;
+          } else {
+            if (ring_copy_chunk(op->fd, 1, offset, op->len) < 0) stdout_broken = true;
+          }
+          if (stdout_broken) {
+              pull_fire_alarm();
+              break;
+          }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
 
         } else {
@@ -4198,23 +4389,23 @@ static int ring_order_main(int argc, char **argv) {
         }
       }
 
-      if (!unordered_mode) {
+      if (!unordered_mode && !stdout_broken) {
         while (heap_sz > 0) {
-          uint64_t expected_key = numa_mode
-                                      ? PACK_KEY(expected_major, expected_minor)
-                                      : expected_major;
-          if (heap[0].key != expected_key)
-            break;
+          uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
+          if (heap[0].key != expected_key) break;
           struct HeapNode top;
           heap_pop(heap, &heap_sz, &top);
           if (memfd_mode) {
             off_t offset = (off_t)top.pkt.off;
-            if (use_zerocopy)
-              robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len);
-            else
-              ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len);
-
-            // Apply safe punch logic universally
+            if (use_zerocopy) {
+              if (robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len) < 0) stdout_broken = true;
+            } else {
+              if (ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len) < 0) stdout_broken = true;
+            }
+            if (stdout_broken) {
+                pull_fire_alarm();
+                break;
+            }
             safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
 
           } else {
@@ -4237,34 +4428,86 @@ static int ring_order_main(int argc, char **argv) {
           }
           if (numa_mode) {
             expected_minor += top.pkt.cnt;
-            if (top.pkt.minor_idx & FLAG_MAJOR_EOF) {
-              expected_major++;
-              expected_minor = 0;
-            }
-          } else
-            expected_major += top.pkt.cnt;
+            if (top.pkt.minor_idx & FLAG_MAJOR_EOF) { expected_major++; expected_minor = 0; }
+          } else { expected_major += top.pkt.cnt; }
         }
       }
     }
 
-    size_t consumed = count * pkt_sz;
-    if (consumed < buffered) {
-      memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
+    if (stdout_broken) {
+        pull_fire_alarm();
+        break; // Break outer read loop on SIGPIPE
     }
+
+    size_t consumed = count * pkt_sz;
+    if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
   }
 
-  // Final memory cleanup
   for (int i = 0; i < fd_states_cap; i++) {
-      struct Interval *curr = fd_states[i].head;
-      while (curr) {
-          struct Interval *tmp = curr;
-          curr = curr->next;
-          free(tmp);
-      }
+      if (fd_states[i].heap) free(fd_states[i].heap);
   }
   free(fd_states);
   free(heap);
+  signal(SIGPIPE, old_handler);
+  return EXECUTION_SUCCESS;
+}
+
+static int ring_fallow_phys_main(int argc, char **argv) {
+  if (argc < 3) return EXECUTION_FAILURE;
+  int fd_in = atoi(argv[1]);
+  int fd_file = atoi(argv[2]);
+  if (state) atomic_store_release(&state[0].fallow_active, 1);
+
+  int heap_cap = 1024;
+  int heap_sz = 0;
+  struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
+  uint64_t limit = 0;
+  off_t last_punched = 0;
+
+  char pkt_buf[4096];
+  size_t buffered = 0;
+  size_t pkt_sz = sizeof(struct PhysPacket);
+
+  while (1) {
+    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    if (n_read <= 0) break;
+    buffered += n_read;
+    size_t count = buffered / pkt_sz;
+    struct PhysPacket *ops = (struct PhysPacket *)pkt_buf;
+
+    for (size_t i = 0; i < count; i++) {
+      struct PhysPacket *pp = &ops[i];
+      if (pp->off <= limit) {
+        uint64_t new_end = pp->off + pp->len;
+        if (new_end > limit) limit = new_end;
+
+        while (heap_sz > 0 && heap[0].s <= limit) {
+          struct IntervalNode top;
+          interval_heap_pop(heap, &heap_sz, &top);
+          if (top.e > limit) limit = top.e;
+        }
+
+        off_t aligned = (off_t)((limit / 4096ULL) * 4096ULL);
+        if (aligned > last_punched) {
+          fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
+          last_punched = aligned;
+        }
+      } else {
+        interval_heap_push(&heap, &heap_sz, &heap_cap, pp->off, pp->off + pp->len);
+      }
+    }
+    size_t consumed = count * pkt_sz;
+    if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
+    buffered -= consumed;
+  }
+
+  free(heap);
+  if (state) atomic_store_release(&state[0].fallow_active, 0);
+
+  // SIGPIPE CASCADE: If Fallow dies unexpectedly, signal the Scanners to abort
+  pull_fire_alarm();
+
   return EXECUTION_SUCCESS;
 }
 
@@ -4486,6 +4729,10 @@ static int ring_splice_main(int argc, char **argv) {
         signal(SIGPIPE, old_handler);
         return EXECUTION_SUCCESS;
       }
+      if (errno == ENOSPC || errno == ENOMEM) {
+        usleep(10000); // 10ms wait for fallow to punch holes
+        continue;
+      }
       if (close_out)
         close(fd_out);
       builtin_error("splice failed: %s", strerror(errno));
@@ -4614,72 +4861,6 @@ static int ring_fetcher_main(int argc, char **argv) {
   return EXECUTION_SUCCESS;
 }
 
-static int ring_fallow_phys_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
-  int fd_in = atoi(argv[1]);
-  int fd_file = atoi(argv[2]);
-
-  struct Interval *head = NULL;
-  uint64_t limit = 0;
-  off_t last_punched = 0;
-
-  char pkt_buf[4096];
-  size_t buffered = 0;
-  size_t pkt_sz = sizeof(struct PhysPacket);
-
-  while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered,
-                                      sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0)
-      break;
-    buffered += n_read;
-
-    size_t count = buffered / pkt_sz;
-    struct PhysPacket *ops = (struct PhysPacket *)pkt_buf;
-
-    for (size_t i = 0; i < count; i++) {
-      struct PhysPacket *pp = &ops[i];
-      if (pp->off == limit) {
-        limit += pp->len;
-        while (head && head->s == limit) {
-          struct Interval *tmp = head;
-          limit = tmp->e;
-          head = tmp->next;
-          free(tmp);
-        }
-        off_t aligned = (off_t)((limit / 4096) * 4096);
-        if (aligned > last_punched) {
-          fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                    last_punched, aligned - last_punched);
-          last_punched = aligned;
-        }
-      } else if (pp->off > limit) {
-        struct Interval *n = malloc(sizeof(struct Interval));
-        n->s = pp->off;
-        n->e = pp->off + pp->len;
-        struct Interval **curr = &head;
-        while (*curr && (*curr)->s < n->s)
-          curr = &((*curr)->next);
-        n->next = *curr;
-        *curr = n;
-      }
-    }
-
-    size_t consumed = count * pkt_sz;
-    if (consumed < buffered) {
-      memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
-    }
-    buffered -= consumed;
-  }
-  while (head) {
-    struct Interval *tmp = head;
-    head = head->next;
-    free(tmp);
-  }
-  return EXECUTION_SUCCESS;
-}
-
 // ==============================================================================
 // ZERO COPY INGEST (UMA / Flat Mode)
 // ==============================================================================
@@ -4726,6 +4907,13 @@ static int ring_copy_main(int argc, char **argv) {
   if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
     if (st.st_size > 0) {
       while (off < st.st_size) {
+        // EMERGENCY BYPASS: Check fire alarm before scanner_finished
+        if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
+            limit_reached_exit = true;
+            off = st.st_size;
+            use_bounce = false;
+            break;
+        }
         if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
             limit_reached_exit = true;
             off = st.st_size;
@@ -4739,7 +4927,7 @@ static int ring_copy_main(int argc, char **argv) {
           to_copy = chunk;
         size_t copied_in_chunk = 0;
         while (copied_in_chunk < to_copy) {
-          if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+          if (atomic_load_acquire(&state[0].scanner_finished)) {
               limit_reached_exit = true;
               break;
           }
@@ -4771,6 +4959,11 @@ static int ring_copy_main(int argc, char **argv) {
         total_moved += copied_in_chunk;
       }
       while (off < st.st_size && !limit_reached_exit) {
+        if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
+            limit_reached_exit = true;
+            use_bounce = false;
+            break;
+        }
         if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
             limit_reached_exit = true;
             use_bounce = false;
@@ -4807,13 +5000,15 @@ static int ring_copy_main(int argc, char **argv) {
       goto err_out;
 
     while (1) {
+      // EMERGENCY BYPASS: Check fire alarm before scanner_finished
+      if (state && atomic_load_relaxed(&state[0].emergency_abort)) break;
       if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) break;
 
       struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
       int p_res = poll(&pfd_in, 1, 10);
       if (p_res <= 0) {
           if (p_res < 0 && errno != EINTR && errno != EAGAIN) break;
-          if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+          if (atomic_load_acquire(&state[0].scanner_finished)) {
               limit_reached_exit = true;
               break;
           }
@@ -4851,7 +5046,7 @@ static int ring_copy_main(int argc, char **argv) {
                   inner_fatal = true; // Hard unrecoverable error
                   break;
               }
-              if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+              if (atomic_load_acquire(&state[0].scanner_finished)) {
                  limit_reached_exit = true;
                  break;
               }
@@ -4918,14 +5113,15 @@ static int ring_signal_main(int argc, char **argv) {
 // physical memory back to the OS without breaking the absolute integer scale of
 // the offset coordinates.
 static int ring_fallow_main(int argc, char **argv) {
-  if (argc < 3)
-    return EXECUTION_FAILURE;
+  if (argc < 3) return EXECUTION_FAILURE;
   int fd_in = atoi(argv[1]);
   int fd_file = atoi(argv[2]);
   bool dry_run = (argc > 3 && strcmp(argv[3], "dry") == 0);
-  if (state)
-    atomic_store_release(&state[0].fallow_active, 1);
-  struct Interval *head = NULL;
+  if (state) atomic_store_release(&state[0].fallow_active, 1);
+
+  int heap_cap = 1024;
+  int heap_sz = 0;
+  struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
   uint64_t next_idx = 0;
   off_t last_punched = 0;
 
@@ -4934,10 +5130,8 @@ static int ring_fallow_main(int argc, char **argv) {
   size_t pkt_sz = sizeof(struct IndexPacket);
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered,
-                                      sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0)
-      break;
+    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    if (n_read <= 0) break; // Workers dead or normal EOF
     buffered += n_read;
 
     size_t count = buffered / pkt_sz;
@@ -4945,50 +5139,240 @@ static int ring_fallow_main(int argc, char **argv) {
 
     for (size_t i = 0; i < count; i++) {
       struct IndexPacket *ip = &ops[i];
-      if (ip->idx == next_idx) {
-        next_idx += ip->cnt;
-        while (head && head->s == next_idx) {
-          struct Interval *tmp = head;
-          next_idx = tmp->e;
-          head = tmp->next;
-          free(tmp);
+      if (ip->idx <= next_idx) {
+        uint64_t new_end = ip->idx + ip->cnt;
+        if (new_end > next_idx) next_idx = new_end;
+
+        while (heap_sz > 0 && heap[0].s <= next_idx) {
+          struct IntervalNode top;
+          interval_heap_pop(heap, &heap_sz, &top);
+          if (top.e > next_idx) next_idx = top.e;
         }
-        if (state)
-          atomic_store_release(&state[0].min_idx, next_idx);
+
+        if (state) atomic_store_release(&state[0].min_idx, next_idx);
         if (!dry_run) {
-          uint64_t byte_limit =
-              state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-          off_t aligned = (off_t)((byte_limit / 4096) * 4096);
+          uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+          off_t aligned = (off_t)((byte_limit / 4096ULL) * 4096ULL);
           if (aligned > last_punched) {
-            fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-                      last_punched, aligned - last_punched);
+            fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
             last_punched = aligned;
           }
         }
-      } else if (ip->idx > next_idx) {
-        struct Interval *n = malloc(sizeof(struct Interval));
-        n->s = ip->idx;
-        n->e = ip->idx + ip->cnt;
-        struct Interval **curr = &head;
-        while (*curr && (*curr)->s < n->s)
-          curr = &((*curr)->next);
-        n->next = *curr;
-        *curr = n;
+      } else {
+        interval_heap_push(&heap, &heap_sz, &heap_cap, ip->idx, ip->idx + ip->cnt);
       }
     }
 
     size_t consumed = count * pkt_sz;
-    if (consumed < buffered) {
-      memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
-    }
+    if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
   }
-  while (head) {
-    struct Interval *tmp = head;
-    head = head->next;
-    free(tmp);
-  }
+
+  free(heap);
+  // SIGPIPE CASCADE: If Fallow dies (Entropy stops), signal the Scanners to abort
+  if (state) atomic_store_release(&state[0].fallow_active, 0);
+  pull_fire_alarm();
+
   return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// TRANSACTION ROLLBACK: Erase partial output from a corrupted batch
+// ==============================================================================
+static int ring_revert_output_main(int argc, char **argv) {
+    if (argc < 2) return EXECUTION_FAILURE;
+    int fd = atoi(argv[1]);
+    if (fd >= 0) {
+        if (ftruncate(fd, last_ack_offset) == -1) return EXECUTION_FAILURE;
+        if (lseek(fd, last_ack_offset, SEEK_SET) == (off_t)-1) return EXECUTION_FAILURE;
+    }
+    return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// ACK SYNC: Synchronize output offset for a fresh worker taking over a slot
+// ==============================================================================
+static int ring_ack_init_main(int argc, char **argv) {
+    if (argc < 2) return EXECUTION_FAILURE;
+    int fd = atoi(argv[1]);
+    if (fd >= 0) {
+        last_ack_offset = lseek(fd, 0, SEEK_CUR);
+    }
+    return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// ESCROW RECOVERY: Explicitly deposit a failed batch into the escrow channel
+// ==============================================================================
+static int ring_escrow_put_main(int argc, char **argv) {
+    if (argc < 5) return EXECUTION_FAILURE;
+    int node = atoi(argv[1]);
+    uint64_t idx = strtoull(argv[2], NULL, 10);
+    uint64_t cnt = strtoull(argv[3], NULL, 10);
+    uint32_t kills = (uint32_t)atoi(argv[4]);
+
+    if (node < 0 || node >= (int)global_num_nodes) node = 0;
+
+    struct EscrowPacket ep = { .idx = idx, .cnt = cnt, .num_kills = kills };
+
+    if (fd_escrow_w && fd_escrow_w[node] >= 0) {
+        robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
+    }
+    return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// EVENT MULTIPLEXER (The "Death Pipe" Reactor)
+// ==============================================================================
+#ifndef element_forw
+#define element_forw(a) ((a)->next)
+#define element_index(a) ((a)->ind)
+#define element_value(a) ((a)->value)
+#endif
+
+struct PollMeta {
+    arrayind_t id;
+    int type; // 0 = spawn, 1 = scanner, 2 = worker
+};
+
+static int ring_poll_main(int argc, char **argv) {
+    if (argc < 4) return EXECUTION_FAILURE;
+    int fd_spawn_r = atoi(argv[1]);
+    const char *scan_arr_name = argv[2];
+    const char *work_arr_name = argv[3];
+
+    int max_poll = 8192;
+    struct pollfd *pfds = malloc(max_poll * sizeof(struct pollfd));
+    if (!pfds) return EXECUTION_FAILURE;
+    struct PollMeta *meta = malloc(max_poll * sizeof(struct PollMeta));
+    if (!meta) { free(pfds); return EXECUTION_FAILURE; }
+
+    int p_cnt = 0;
+
+    // 1. Load the Spawn Pipe
+    if (fd_spawn_r >= 0) {
+        pfds[p_cnt].fd = fd_spawn_r;
+        pfds[p_cnt].events = POLLIN;
+        meta[p_cnt].id = -1;
+        meta[p_cnt].type = 0;
+        p_cnt++;
+    }
+
+    // Helper macro to load Bash arrays dynamically
+    #define LOAD_ARRAY(arr_name, type_val) \
+        do { \
+            SHELL_VAR *v = find_variable(arr_name); \
+            if (v && array_p(v)) { \
+                ARRAY *arr = array_cell(v); \
+                if (arr) { \
+                    ARRAY_ELEMENT *ae; \
+                    for (ae = element_forw(arr->head); ae != arr->head; ae = element_forw(ae)) { \
+                        if (p_cnt >= max_poll) break; \
+                        char *val = element_value(ae); \
+                        if (val && val[0]) { \
+                            pfds[p_cnt].fd = atoi(val); \
+                            pfds[p_cnt].events = POLLHUP | POLLIN | POLLERR; \
+                            meta[p_cnt].id = element_index(ae); \
+                            meta[p_cnt].type = type_val; \
+                            p_cnt++; \
+                        } \
+                    } \
+                } \
+            } \
+        } while(0)
+
+    // 2. Load Scanner and Worker Death Pipes
+    LOAD_ARRAY(scan_arr_name, 1);
+    LOAD_ARRAY(work_arr_name, 2);
+
+    // If there is nothing left to poll (or only the dead spawn pipe), break the while loop
+    if (p_cnt == 0) {
+        free(pfds); free(meta);
+        return EXECUTION_FAILURE; 
+    }
+
+    int r;
+    do {
+        if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
+            free(pfds); free(meta);
+            return EXECUTION_FAILURE;
+        }
+        r = poll(pfds, p_cnt, 100); // 100ms timeout to continuously check for fire alarm
+    } while (r == 0 || (r < 0 && errno == EINTR));
+
+    if (r < 0) {
+        free(pfds); free(meta);
+        return EXECUTION_FAILURE;
+    }
+
+    // 3. Process the Events
+    for (int i = 0; i < p_cnt; i++) {
+        if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+            if (meta[i].type == 0) { 
+                // --- SPAWN PIPE (1-byte robust read to prevent truncation) ---
+                char buf[64];
+                int len = 0;
+                bool eof = false;
+                while (len < (int)sizeof(buf) - 1) {
+                    char c;
+                    ssize_t n = read(pfds[i].fd, &c, 1);
+                    if (n > 0) {
+                        if (c == '\n') break;
+                        buf[len++] = c;
+                    } else if (n == 0) {
+                        eof = true;
+                        break;
+                    } else {
+                        if (errno == EINTR) continue;
+                        break; // EAGAIN or error
+                    }
+                }
+                buf[len] = '\0';
+                
+                if (len > 0) {
+                    char *colon = strchr(buf, ':');
+                    int node = 0, count = 0;
+                    if (colon) {
+                        *colon = '\0';
+                        node = atoi(buf);
+                        count = atoi(colon + 1);
+                    } else {
+                        count = atoi(buf);
+                    }
+                    
+                    bind_variable("POLL_EVENT", "SPAWN", 0);
+                    char arg_buf[32];
+                    snprintf(arg_buf, sizeof(arg_buf), "%d", count);
+                    bind_variable("POLL_ARG1", arg_buf, 0);
+                    snprintf(arg_buf, sizeof(arg_buf), "%d", node);
+                    bind_variable("POLL_ARG2", arg_buf, 0);
+                    
+                    free(pfds); free(meta);
+                    return EXECUTION_SUCCESS;
+                } else if (eof || (pfds[i].revents & POLLHUP)) {
+                    bind_variable("POLL_EVENT", "EOF", 0);
+                    free(pfds); free(meta);
+                    return EXECUTION_SUCCESS;
+                } else {
+                    bind_variable("POLL_EVENT", "IGNORE", 0);
+                    free(pfds); free(meta);
+                    return EXECUTION_SUCCESS;
+                }
+            } else { 
+                // --- DEATH PIPES (Scanner or Worker) ---
+                bind_variable("POLL_EVENT", meta[i].type == 1 ? "SCAN_DEATH" : "WORKER_DEATH", 0);
+                char arg_buf[32];
+                snprintf(arg_buf, sizeof(arg_buf), "%lld", (long long)meta[i].id);
+                bind_variable("POLL_ARG1", arg_buf, 0);
+                
+                free(pfds); free(meta);
+                return EXECUTION_SUCCESS;
+            }
+        }
+    }
+
+    free(pfds); free(meta);
+    return EXECUTION_SUCCESS;
 }
 
 static int ring_version_main(int argc, char **argv) {

@@ -1,4 +1,5 @@
 #!/usr/bin/bash
+
 if shopt -q extglob; then
    extglob_was_set=true;
 else
@@ -21,7 +22,8 @@ frun() {
         (( ${#ring_funcs[@]} > 0 )) || ring_list 'ring_funcs'
         printf -v ring_enable '%s ' "${ring_funcs[@]}"
 
-        FORKRUN_FRUN_SRC="$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null)"
+        FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; [[ -n "${FORKRUN_EXTRA_VARS:-}" ]] && declare -p ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
+        [[ -n "${FORKRUN_EXTRA_SETUP}" ]] && FORKRUN_FRUN_SRC+=$'\n'"${FORKRUN_EXTRA_SETUP}"
 
         # EXEC into Clean Room
         # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
@@ -134,7 +136,7 @@ EOF
   -d, --delim <char>    : Use a custom single-character record delimiter.
 
 ### OUTPUT MODES
-  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes.
+  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes. 
   -k, --ordered         : Ordered mode. Same as buffered, but output is printed strictly in input-batch order.
   -u, --realtime        : Unbuffered / realtime mode. Workers output directly to stdout. (Can cause kernel lock contention on massive streams).
   -o, --order <mode>    : Explicitly set the mode (buffered, ordered, realtime).
@@ -166,9 +168,14 @@ EOF
 
 ### ENVIRONMENT VARS
 
-- `FORKRUN_EXTRA_FUNCS`           : Use this to specify required sub-functions.  EXAMPLE:  `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`.
-  - If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be.
-  - Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`
+- FORKRUN_EXTRA_FUNCS   : Use this to specify required sub-functions to pass into frun's environment.
+  - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`.
+
+- FORKRUN_EXTRA_VARS    : Use this to specify (environment) variables to pass into frun's environment
+  - EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
+
+- FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup
+  - EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
 
 EOF
                 ;;
@@ -273,7 +280,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.0.2';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.1.0';  return 0  ;;
 
             --) shift; break ;;
 
@@ -282,6 +289,41 @@ EOF
         shift
     done
     unset arg
+    # --- AST MANIPULATION FOR BASH FUNCTIONS ---
+    retry_errors_flag=false
+    if [[ -n "$1" ]] && declare -F "$1" >/dev/null 2>&1; then
+        local func_def body body_start body_trimmed test_body
+        func_def="$(declare -f "$1")"
+
+        # 1. Extract the contents inside the global { ... }
+        body="${func_def#*\{}"
+        body="${body%\}}"
+
+        # Trim leading and trailing whitespace
+        body_trimmed="${body##+([[:space:]])}"
+        body_trimmed="${body_trimmed%%+([[:space:]])}"
+
+        # 2. Check if it visually starts and ends with parentheses
+        if [[ "$body_trimmed" == \(*\) ]]; then
+            # Strip the very first '(' and the very last ')'
+            test_body="${body_trimmed#\(}"
+            test_body="${test_body%\)}"
+
+            # 3. THE GENIUS CHECK: Ask the Bash parser if this is valid!
+            # We run this in a subshell to keep the environment perfectly clean.
+            # Explicit newlines prevent trailing comments from breaking the brace.
+            if ( "${BASH:-bash}" -O extglob -n -c "function _frun_syntax_check() {"$'\n'"${test_body}"$'\n'"}" ) >/dev/null 2>&1; then
+                # It is a verified global subshell!
+                # Strip the last ')' and inject 'true' safely inside it.
+                retry_errors_flag=true
+                body_start="${body_trimmed%\)*}"
+                eval "${func_def%%\{*}"'{'$'\n'"${body_start}"$'\n''true'$'\n'')'$'\n''}'
+            fi
+        fi
+
+        unset func_def body body_start body_trimmed test_body
+    fi
+
     ${extglob_was_set} || shopt -u extglob
 
     if ${verbose_flag}; then
@@ -434,32 +476,40 @@ toc() { :; }
         ring_pipe fd_fallow_r fd_fallow_w
 
         # --- 2 & 3. THE PRODUCER PLUMBING ---
-        if (( FORKRUN_NUM_NODES > 1 )); then
-            # NUMA TOPOLOGICAL PIPELINE (No Pipes, Lock-Free Meta Ring)
-            ordered_flag=0
-            [[ "${order_mode}" == "ordered" ]] && ordered_flag=1
+            declare -a fd_scan_death_r fd_scan_death_w SCANNER_P
+        
+            if (( FORKRUN_NUM_NODES > 1 )); then
+                # NUMA TOPOLOGICAL PIPELINE (No Pipes, Lock-Free Meta Ring)
+                ordered_flag=0
+                [[ "${order_mode}" == "ordered" ]] && ordered_flag=1
 
-            ( ring_numa_ingest ${fd0} ${fd_write} $FORKRUN_NUM_NODES $ordered_flag ) &
+                ( ring_numa_ingest ${fd0} ${fd_write} $FORKRUN_NUM_NODES $ordered_flag ) &
 
-            for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                ( ring_indexer_numa ${fd_scan} $i ) &
-            done
+                for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
+                    ( ring_indexer_numa ${fd_scan} $i ) &
+                done
 
-            for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
+                for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
+                    ring_pipe fd_scan_death_r[$i] fd_scan_death_w[$i]
+                    (
+                        exec {fd_fallow_w}>&-
+                        ring_numa_scanner ${fd_scan} $i $fd_spawn_w $FORKRUN_NUM_NODES
+                    ) &
+                    SCANNER_P[$i]=$!
+                    exec {fd_scan_death_w[$i]}>&-
+                done
+
+            else
+                # LEGACY FLAT PIPELINE
+                ( ring_copy ${fd_write} ${fd0}; ring_signal ) &
+                ring_pipe fd_scan_death_r[0] fd_scan_death_w[0]
                 (
-                    exec {fd_fallow_w}>&-
-                    ring_numa_scanner ${fd_scan} $i $fd_spawn_w $FORKRUN_NUM_NODES
+                    exec {fd_spawn_r}<&-
+                    ring_scanner ${fd_scan} ${fd_spawn_w}
                 ) &
-            done
-
-        else
-            # LEGACY FLAT PIPELINE
-            ( ring_copy ${fd_write} ${fd0}; ring_signal ) &
-            (
-                exec {fd_spawn_r}<&-
-                ring_scanner ${fd_scan} ${fd_spawn_w}
-            ) &
-        fi
+                SCANNER_P[0]=$!
+                exec {fd_scan_death_w[0]}>&-
+            fi
 
         exec {fd_spawn_w}>&-
 
@@ -521,13 +571,17 @@ toc() { :; }
                 # FAST PATH (Synchronous)
                 # Note: ring_splice "close" closes $pw internally. We only close $pr.
                 ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || exec {pw}>&-
-                '"$cmdline_str"' <&$pr
+                '"$cmdline_str"' <&$pr'
+            ${retry_errors_flag} && pCode+=' || exit $?'
+            pCode+='
                 exec {pr}<&-
             else
                 # SLOW PATH (Asynchronous)
                 # Close both FDs so they do not leak into the pipeline
                 (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "" $REPLY "close" ) | ( '"$cmdline_str"' )
+                ( ring_splice $fd_read 1 "" $REPLY "close" ) | ( '"$cmdline_str"' )'
+            ${retry_errors_flag} && pCode+=' || exit $?'
+            pCode+='
             fi'
 
         elif ${byte_mode_flag}; then
@@ -571,76 +625,168 @@ toc() { :; }
         fi
 
         [[ "${order_mode}" == "realtime" ]] || {
-            pCode+=' >&${fd_out[$ID]}'
-            ring_ack_str+=' ${fd_out[$ID]}'
+            pCode+=' >&${fd_out[$RING_WID]}'
+            ring_ack_str+=' ${fd_out[$RING_WID]}'
         }
+
+        ${retry_errors_flag} && ! ${stdin_flag} && pCode+=' || exit $?'
 
         worker_func_src='spawn_worker() {
 (
   LC_ALL=C
   set +m
   export RING_NODE_ID="$2"
-  trap "ring_worker dec; ring_cleanup_waiter" EXIT
+  export RING_WID="$3"
+  
+  _ring_registered=false
+  
+  trap '"'"'
+    status=$?
+    ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
+    
+    # Only attempt recovery if we actually held an active batch
+    if (( status != 0 && RING_BATCH_SLOTS > 0 )); then
+        (( RING_NUM_KILLS++ ))
+        
+        # Revert partial corrupted output from this failed run (unless realtime)
+        if [[ "$order_mode" != "realtime" && -n "${fd_out[$RING_WID]:-}" ]]; then
+            ring_revert_output "${fd_out[$RING_WID]}"
+        fi
+
+        # Always throw it back into escrow. 
+        # If kills >= LIMIT, the NEXT worker will see RING_POISONED=1 and safely skip & ack it.
+        ring_escrow_put "$RING_NODE_ID" "$RING_BATCH_IDX" "$RING_BATCH_SLOTS" "$RING_NUM_KILLS"
+    fi
+    exit $status
+  '"'"' EXIT
 
   {
-    ID="$1"
+    ID="$1" # ID is passed purely for user payload compatibility/insertion
+    RING_BATCH_SLOTS=0
+    RING_NUM_KILLS=0
+    
+    # Initialize the output tracking for this specific worker slot
+    if [[ "$order_mode" != "realtime" && -n "${fd_out[$RING_WID]:-}" ]]; then
+        ring_ack_init "${fd_out[$RING_WID]}"
+    fi
     '
        ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
-        worker_func_src+='shift 2
+        worker_func_src+='shift 3
     ring_worker inc $fd_read
+    _ring_registered=true
     while ring_claim; do
-        if [[ "$REPLY" != "0" ]]; then
-            '
+        if [[ "${RING_POISONED:-0}" == "1" ]]; then
+            echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS:-?} times)." >&2
+        else
+            if [[ "$REPLY" != "0" ]]; then
+                '
          ${insert_id_flag:-false} && worker_func_src+='((W_BATCH++))
-            '
+                '
         worker_func_src+="${pCode}"'
+            fi
         fi
-        '"${ring_ack_str}"'
+        '"${ring_ack_str}"' || break
+        
+        # Clear the active claim flag so a sleep-death doesnt duplicate it
+        RING_BATCH_SLOTS=0
     done
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &
-P+=($!)
+P[$3]=$!
+W_NODE[$3]=$2
 }'
 
         eval "${worker_func_src}"
 
-        # --- SPAWN LOOP ---
+        # --- SPAWN LOOP REACTOR ---
         nWorkers=0
-        finished_scanners=0
-
-        declare -a node_workers
+        local -a node_workers W_NODE fd_worker_r fd_worker_w P wID_free
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
         (( node_worker_max < 1 )) && node_worker_max=1
 
-        while (( finished_scanners < FORKRUN_NUM_NODES )); do
-            # FIX: If the pipe hits EOF (all scanners dead/exited), break out safely
-            if ! read -r -u $fd_spawn_r msg; then
-                break
-            fi
+        fd_spawn_arg="$fd_spawn_r"
 
-            if [[ "$msg" == *'x'* ]]; then
-                ((finished_scanners++))
-                continue
-            fi
+        for (( nn=0; nn<($nWorkersMax+FORKRUN_NUM_NODES); nn++)); do
+            wID_free[$nn]=''
+        done
 
-            # Parse directed spawn "node:count" or legacy "count"
-            if [[ "$msg" == *:* ]]; then
-                node_idx="${msg%%:*}"
-                spawn_count="${msg#*:}"
-            else
-                node_idx=0
-                spawn_count="$msg"
-            fi
+        while ring_poll "$fd_spawn_arg" fd_scan_death_r fd_worker_r; do
+            case "$POLL_EVENT" in
+                IGNORE) ;;
+                SPAWN)
+                    spawn_count=$POLL_ARG1
+                    node_idx=$POLL_ARG2
+                    
+                    target=$(( node_workers[node_idx] + spawn_count ))
+                    (( target > node_worker_max )) && target=$node_worker_max
 
-            target=$(( node_workers[node_idx] + spawn_count ))
-            (( target > node_worker_max )) && target=$node_worker_max
-
-            for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
-                spawn_worker "$nWorkers" "$node_idx"
-                ((nWorkers++))
-            done
+                    for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
+                        # Find first empty wID slot
+                        for wID in "${!wID_free[@]}"; do break; done
+                        unset 'wID_free[$wID]'
+                        
+                        ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
+                        spawn_worker "$wID" "$node_idx" "$wID"
+                        exec {fd_worker_w[$wID]}>&-
+                        ((nWorkers++))
+                    done
+                    ;;
+                    
+                WORKER_DEATH)
+                    wID=$POLL_ARG1
+                    wait "${P[$wID]}" 2>/dev/null
+                    status=$?
+                    
+                    if (( status > 128 && status != 143 )); then
+                        echo "forkrun [FATAL]: Worker $wID killed by signal $((status - 128)). Aborting." >&2
+                        ring_abort
+                        exit 1
+                    fi
+                    
+                    exec {fd_worker_r[$wID]}<&-
+                    unset 'fd_worker_r[$wID]' 'fd_worker_w[$wID]' 'P[$wID]'
+                    
+                    node_idx=${W_NODE[$wID]:-0}
+                    unset 'W_NODE[$wID]'
+                    
+                    (( node_workers[node_idx]-- ))
+                    
+                    # ONLY respawn if the worker crashed. Clean exit (0) means no work left.
+                    if (( status != 0 )); then
+                        ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
+                        spawn_worker "$wID" "$node_idx" "$wID"
+                        exec {fd_worker_w[$wID]}>&-
+                        ((nWorkers++))
+                        (( node_workers[node_idx]++ ))
+                    else
+                        wID_free[$wID]=''
+                    fi
+                    ;;
+                    
+                SCAN_DEATH)
+                    sID=$POLL_ARG1
+                    wait "${SCANNER_P[$sID]}" 2>/dev/null
+                    status=$?
+                    
+                    if (( status > 128 && status != 143 )); then
+                        echo "forkrun [FATAL]: Scanner $sID killed by signal $((status - 128)). Aborting." >&2
+                        ring_abort
+                        exit 1
+                    elif (( status != 0 )); then
+                        echo "forkrun [WARN]: Scanner $sID exited early with status $status. Forcing graceful EOF." >&2
+                        ring_scanner_eof "$sID"
+                    fi
+                    
+                    exec {fd_scan_death_r[$sID]}<&-
+                    unset 'fd_scan_death_r[$sID]' 'SCANNER_P[$sID]'
+                    ;;
+                    
+                EOF)
+                    fd_spawn_arg="-1"
+                    ;;
+            esac
         done
 
         ${verbose_flag} && printf '\nSPAWNED %s workers\n' "${nWorkers}" >&2
@@ -1147,7 +1293,7 @@ _forkrun_file_to_base64() {
     { (( ${#FUNCNAME[@]} > 1 )) && [[ "${FUNCNAME[1]}" == *'frun'* ]]; } || shopt ${extglobState} extglob
 }
 
-FORKRUN_FRUN_SRC="$(declare -f frun)"
+FORKRUN_FRUN_SRC="ulimit -n $(ulimit -Hn)"$'\n'
 unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #

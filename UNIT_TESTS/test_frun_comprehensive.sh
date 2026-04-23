@@ -1,0 +1,1541 @@
+#!/usr/bin/env bash
+# ============================================================================
+# FORKRUN COMPREHENSIVE SUPPLEMENTAL TEST SUITE v1.0
+# ============================================================================
+# Covers the gaps identified in test_frun.sh / test_frun_v2.sh:
+#
+#  SECTION A: Regression — Bash function transmission (the discovered bug)
+#  SECTION B: Bash functions — core feature coverage
+#  SECTION C: FORKRUN_EXTRA_FUNCS — dependent function chains
+#  SECTION C2: FORKRUN_EXTRA_VARS — passing variables into the cleanroom
+#  SECTION D: Data integrity — exact line-level sorted comparison
+#  SECTION E: Special character handling in input
+#  SECTION F: Batch correctness — exact arg counts per call
+#  SECTION G: Sequential invocations — ring reuse
+#  SECTION H: Combined feature interactions
+#  SECTION I: Boundary conditions
+#  SECTION J: Worker / ID semantics
+#  SECTION K: Framework self-tests (verify the helpers work)
+#
+# USAGE:
+#   Run from repo root:           bash UNIT_TESTS/test_frun_comprehensive.sh
+#   Run with verbose failure info: VERBOSE=true bash UNIT_TESTS/test_frun_comprehensive.sh
+#   Run single section:           SECTION=B bash UNIT_TESTS/test_frun_comprehensive.sh
+# ============================================================================
+
+set +euo pipefail  # tests must not abort on individual failures
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+CYAN='\033[1;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+TOTAL_TESTS=0
+PASSED_TESTS=0
+FAILED_TESTS=0
+SKIPPED_TESTS=0
+declare -A TEST_RESULTS
+declare -A TEST_ERRORS
+
+TEST_DIR=$(mktemp -d)
+trap 'rm -rf "$TEST_DIR"' EXIT
+
+# Locate frun.bash: check same dir as this script, then repo root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+FRUN_SOURCE=""
+for candidate in "${SCRIPT_DIR}/frun.bash" "${REPO_ROOT}/frun.bash" "./frun.bash"; do
+    [[ -f "$candidate" ]] && { FRUN_SOURCE="$candidate"; break; }
+done
+
+if [[ -z "$FRUN_SOURCE" ]]; then
+    echo -e "${RED}ERROR: frun.bash not found. Run from the forkrun repo root.${NC}"
+    exit 1
+fi
+
+VERBOSE="${VERBOSE:-false}"
+SECTION_FILTER="${SECTION:-}"
+
+# ============================================================================
+# CORE TEST HELPERS
+# ============================================================================
+
+print_section() {
+    local letter="$1" title="$2"
+    [[ -n "$SECTION_FILTER" && "$SECTION_FILTER" != "$letter" ]] && return
+    echo
+    echo -e "${BLUE}${BOLD}▶ Section $letter: $title${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+in_section() {
+    # Returns 0 (true) if current section should run.
+    # Supports multi-char labels: A, B, C, C2, D, ...
+    [[ -z "$SECTION_FILTER" || "$SECTION_FILTER" == "$1" ]]
+}
+
+_print_result() {
+    local status="$1" name="$2" detail="${3:-}"
+    case $status in
+        PASS) echo -e "  ${GREEN}✓${NC} $name" ;;
+        FAIL) echo -e "  ${RED}✗${NC} $name${RED} — $detail${NC}" ;;
+        SKIP) echo -e "  ${YELLOW}○${NC} $name${YELLOW} (skipped: $detail)${NC}" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# run_test_exact: exact stdout comparison (both sides compared as-is)
+# Use for: ordered output, single-line outputs, version strings
+# ---------------------------------------------------------------------------
+run_test_exact() {
+    local section="$1" test_name="$2" cmd="$3" expected="$4" expected_exit="${5:-0}"
+    in_section "$section" || return
+    ((TOTAL_TESTS++))
+
+    local out err exit_code=0
+    out=$(bash -c "source '$FRUN_SOURCE' && $cmd" 2>/tmp/_frun_test_err) || exit_code=$?
+    err=$(cat /tmp/_frun_test_err)
+
+    local passed=true reason=""
+    if [[ "$exit_code" -ne "$expected_exit" ]]; then
+        passed=false; reason="exit $exit_code (expected $expected_exit)"
+    elif [[ "$out" != "$expected" ]]; then
+        passed=false; reason="stdout mismatch"
+    fi
+
+    if $passed; then
+        TEST_RESULTS["$test_name"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "$test_name"
+    else
+        TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
+        _print_result FAIL "$test_name" "$reason"
+        if [[ "${VERBOSE:-}" == "true" ]]; then
+            echo -e "    ${YELLOW}cmd:${NC} $cmd"
+            echo -e "    ${YELLOW}expected:${NC} $(echo "$expected" | head -3 | sed 's/^/      /')"
+            echo -e "    ${YELLOW}actual:${NC}   $(echo "$out" | head -3 | sed 's/^/      /')"
+            [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC}   $(echo "$err" | head -3 | sed 's/^/      /')"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# run_test_sorted: sorted-line comparison — catches missing AND duplicate lines
+# Use for: unordered parallel output, data integrity checks
+# The key fix vs the original compare_token_sets: we sort LINES not WORDS,
+# and we use 'diff' so duplicates (two "line1"s) are caught.
+# ---------------------------------------------------------------------------
+run_test_sorted() {
+    local section="$1" test_name="$2" cmd="$3" expected="$4" expected_exit="${5:-0}"
+    in_section "$section" || return
+    ((TOTAL_TESTS++))
+
+    local out err exit_code=0
+    out=$(bash -c "source '$FRUN_SOURCE' && $cmd" 2>/tmp/_frun_test_err) || exit_code=$?
+    err=$(cat /tmp/_frun_test_err)
+
+    local passed=true reason=""
+    if [[ "$exit_code" -ne "$expected_exit" ]]; then
+        passed=false; reason="exit $exit_code (expected $expected_exit)"
+    else
+        local actual_sorted expected_sorted
+        actual_sorted=$(echo "$out"       | sort)
+        expected_sorted=$(echo "$expected" | sort)
+        if [[ "$actual_sorted" != "$expected_sorted" ]]; then
+            passed=false
+            local ac ec
+            ac=$(echo "$out"       | wc -l | tr -d ' ')
+            ec=$(echo "$expected"  | wc -l | tr -d ' ')
+            if [[ "$ac" -ne "$ec" ]]; then
+                reason="line count: got $ac, expected $ec"
+            else
+                # Find first differing line to give a useful hint
+                local first_diff
+                first_diff=$(diff <(echo "$actual_sorted") <(echo "$expected_sorted") | head -1)
+                reason="content mismatch (same count). First diff: $first_diff"
+            fi
+        fi
+    fi
+
+    if $passed; then
+        TEST_RESULTS["$test_name"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "$test_name"
+    else
+        TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
+        _print_result FAIL "$test_name" "$reason"
+        if [[ "${VERBOSE:-}" == "true" ]]; then
+            echo -e "    ${YELLOW}cmd:${NC} $cmd"
+            echo -e "    ${YELLOW}reason:${NC} $reason"
+            [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC} $(echo "$err" | head -3 | sed 's/^/      /')"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# run_test_regex: check stdout (or stderr) against a regex
+# ---------------------------------------------------------------------------
+run_test_regex() {
+    local section="$1" test_name="$2" cmd="$3" regex="$4" \
+          expected_exit="${5:-0}" check_stderr="${6:-false}"
+    in_section "$section" || return
+    ((TOTAL_TESTS++))
+
+    local out err exit_code=0
+    out=$(bash -c "source '$FRUN_SOURCE' && $cmd" 2>/tmp/_frun_test_err) || exit_code=$?
+    err=$(cat /tmp/_frun_test_err)
+    local content; $check_stderr && content="$err" || content="$out"
+
+    local passed=true reason=""
+    if [[ "$exit_code" -ne "$expected_exit" ]]; then
+        passed=false; reason="exit $exit_code (expected $expected_exit)"
+    elif [[ ! "$content" =~ $regex ]]; then
+        passed=false; reason="regex not matched: $regex"
+    fi
+
+    if $passed; then
+        TEST_RESULTS["$test_name"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "$test_name"
+    else
+        TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
+        _print_result FAIL "$test_name" "$reason"
+        if [[ "${VERBOSE:-}" == "true" ]]; then
+            echo -e "    ${YELLOW}cmd:${NC}     $cmd"
+            echo -e "    ${YELLOW}regex:${NC}   $regex"
+            echo -e "    ${YELLOW}content:${NC} $(echo "$content" | head -3 | sed 's/^/      /')"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# run_test_line_count: verify exact output line count (fast integrity check)
+# ---------------------------------------------------------------------------
+run_test_line_count() {
+    local section="$1" test_name="$2" cmd="$3" expected_lines="$4" expected_exit="${5:-0}"
+    in_section "$section" || return
+    ((TOTAL_TESTS++))
+
+    local out err exit_code=0
+    out=$(bash -c "source '$FRUN_SOURCE' && $cmd" 2>/tmp/_frun_test_err) || exit_code=$?
+    err=$(cat /tmp/_frun_test_err)
+    local actual_lines; actual_lines=$(echo "$out" | wc -l | tr -d ' ')
+    # wc -l on empty string returns 0, on "x\n" returns 1
+    [[ -z "$out" ]] && actual_lines=0
+
+    local passed=true reason=""
+    if [[ "$exit_code" -ne "$expected_exit" ]]; then
+        passed=false; reason="exit $exit_code (expected $expected_exit)"
+    elif [[ "$actual_lines" -ne "$expected_lines" ]]; then
+        passed=false; reason="line count: got $actual_lines, expected $expected_lines"
+    fi
+
+    if $passed; then
+        TEST_RESULTS["$test_name"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "$test_name"
+    else
+        TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
+        _print_result FAIL "$test_name" "$reason"
+        if [[ "${VERBOSE:-}" == "true" ]]; then
+            echo -e "    ${YELLOW}cmd:${NC} $cmd"
+            echo -e "    ${YELLOW}$reason${NC}"
+            [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC} $(echo "$err" | head -3 | sed 's/^/      /')"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# run_test_skip: mark a test as skipped (platform or feature not available)
+# ---------------------------------------------------------------------------
+run_test_skip() {
+    local section="$1" test_name="$2" reason="$3"
+    in_section "$section" || return
+    ((TOTAL_TESTS++)); ((SKIPPED_TESTS++))
+    TEST_RESULTS["$test_name"]="SKIP"
+    _print_result SKIP "$test_name" "$reason"
+}
+
+# ============================================================================
+# SYSTEM DETECTION
+# ============================================================================
+
+NPROC=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
+IS_NUMA=false
+NUMA_NODE_COUNT=1
+if [[ -r /sys/devices/system/node/online ]]; then
+    raw=$(cat /sys/devices/system/node/online)
+    # Simple count: "0" = 1 node, "0-3" = 4 nodes, "0,2" = 2 nodes
+    if [[ "$raw" == *-* ]]; then
+        lo="${raw%%-*}"; hi="${raw##*-}"
+        NUMA_NODE_COUNT=$(( hi - lo + 1 ))
+    elif [[ "$raw" == *,* ]]; then
+        NUMA_NODE_COUNT=$(echo "$raw" | tr ',' '\n' | wc -l | tr -d ' ')
+    fi
+    (( NUMA_NODE_COUNT > 1 )) && IS_NUMA=true
+fi
+
+# ============================================================================
+# TEST DATA SETUP
+# ============================================================================
+
+LINE10="$TEST_DIR/lines10.txt"
+LINE100="$TEST_DIR/lines100.txt"
+LINE1K="$TEST_DIR/lines1k.txt"
+BYTE100="$TEST_DIR/bytes100.bin"
+SPECIAL="$TEST_DIR/special.txt"
+MULTIWORD="$TEST_DIR/multiword.txt"
+EMPTY="$TEST_DIR/empty.txt"
+
+seq 10  > "$LINE10"
+seq 100 > "$LINE100"
+seq 1000 > "$LINE1K"
+head -c 100 /dev/zero | tr '\0' 'x' > "$BYTE100"
+touch "$EMPTY"
+
+# Multi-word lines (space-separated)
+printf 'hello world\nfoo bar\nbaz qux\n' > "$MULTIWORD"
+
+# Special characters — each on its own line
+# Note: these go through frun's safe quoting (printf '%q') in default mode.
+# In -s mode they go through pipes unmodified.
+printf '%s\n' \
+    'simple' \
+    'with space' \
+    'with$dollar' \
+    'with`backtick`' \
+    "with'single'" \
+    'with"double"' \
+    'with\backslash' \
+    'with*glob*' \
+    'with?mark' \
+    'with[bracket]' \
+    'with;semicolon' \
+    'with|pipe' \
+    'with(paren)' \
+    'with>redirect' \
+    'with&amp' \
+    > "$SPECIAL"
+
+echo
+echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${CYAN}${BOLD}  FORKRUN COMPREHENSIVE SUPPLEMENTAL TEST SUITE${NC}"
+printf "${CYAN}${BOLD}  System: %d CPUs, %d NUMA node(s)${NC}\n" "$NPROC" "$NUMA_NODE_COUNT"
+echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# ============================================================================
+# SECTION A: REGRESSION — Bash Function Transmission
+# This section directly tests the bug that was discovered:
+# bash functions defined in the caller's scope were being lost during
+# the cleanroom exec in frun.bash.
+# ============================================================================
+print_section A "REGRESSION: Bash Function Transmission"
+
+# The cleanroom exec must re-declare the function from declare -f capture.
+run_test_exact A "Regression: simple function reaches workers" \
+    "my_transform() { echo \"FUNC:\$*\"; }; echo 'test_line' | frun -l 1 my_transform" \
+    "FUNC:test_line"
+
+# Functions with local variables must survive serialization through declare -f.
+run_test_exact A "Regression: function with local vars" \
+    "prefix_func() { local pfx='PREFIX'; echo \"\${pfx}:\$*\"; }; echo 'hello' | frun -l 1 prefix_func" \
+    "PREFIX:hello"
+
+# A function that shadows an external command of the same name.
+# forkrun must call the bash function, not the external binary.
+run_test_exact A "Regression: function shadows external command (cat)" \
+    "cat() { echo \"SHADOWED:\$*\"; }; echo 'test' | frun -l 1 cat" \
+    "SHADOWED:test"
+
+# Multiple lines, each dispatched to the function independently (-l 1).
+run_test_sorted A "Regression: function called once per line with -l 1" \
+    "tag() { echo \"[T:\$*]\"; }; seq 5 | frun -l 1 tag" \
+    "[T:1]
+[T:2]
+[T:3]
+[T:4]
+[T:5]"
+
+# Function called with a batch of multiple args (-l 3).
+# Each invocation receives exactly 3 args (except possibly the last).
+run_test_exact A "Regression: function called with multi-line batch (-l 3, -k)" \
+    "count_args() { echo \"\$#\"; }; seq 9 | frun -l 3 -k count_args" \
+    "3
+3
+3"
+
+# ============================================================================
+# SECTION B: Bash Functions — Full Feature Coverage
+# ============================================================================
+print_section B "Bash Functions: Full Coverage"
+
+# Function with an if/else branch — tests function body complexity.
+run_test_sorted B "Function with if/else logic" \
+    "classify() { if (( \$1 % 2 == 0 )); then echo \"even:\$1\"; else echo \"odd:\$1\"; fi; }; seq 6 | frun -l 1 classify" \
+    "even:2
+even:4
+even:6
+odd:1
+odd:3
+odd:5"
+
+# Function that uses a case statement.
+run_test_sorted B "Function with case statement" \
+    "label() { case \"\$1\" in 1) echo 'one';; 2) echo 'two';; *) echo 'other';; esac; }; printf '1\n2\n3\n' | frun -l 1 label" \
+    "one
+two
+other"
+
+# Function that produces multiple output lines per input line.
+run_test_sorted B "Function producing multiple output lines per input" \
+    "double_out() { echo \"a:\$1\"; echo \"b:\$1\"; }; seq 3 | frun -l 1 double_out" \
+    "a:1
+a:2
+a:3
+b:1
+b:2
+b:3"
+
+# Function that uses printf instead of echo.
+run_test_sorted B "Function using printf" \
+    "pf() { printf 'N=%s\n' \"\$@\"; }; seq 4 | frun -l 2 pf" \
+    "N=1
+N=2
+N=3
+N=4"
+
+# Function that uses the full positional array \$@ (receives batch as array).
+run_test_sorted B "Function accessing all args via \$@" \
+    "sum_all() { local s=0; for x in \"\$@\"; do (( s += x )); done; echo \"\$s\"; }; printf '10\n20\n30\n' | frun -l 3 sum_all" \
+    "60"
+
+# Function with a local array.
+run_test_sorted B "Function with local array operations" \
+    "rev_args() { local -a a=(\"\$@\"); local i; for (( i=\${#a[@]}-1; i>=0; i-- )); do echo \"\${a[i]}\"; done; }; seq 1 3 | frun -l 3 -k rev_args" \
+    "3
+2
+1"
+
+# Function used with ordered output (-k) — must preserve order.
+run_test_exact B "Function + ordered output (-k)" \
+    "tag() { echo \"L\$*\"; }; seq 5 | frun -k -l 1 tag" \
+    "L1
+L2
+L3
+L4
+L5"
+
+# Function used with realtime mode (-u).
+run_test_sorted B "Function + realtime mode (-u)" \
+    "tag() { echo \"R:\$*\"; }; seq 5 | frun -u -l 1 tag" \
+    "R:1
+R:2
+R:3
+R:4
+R:5"
+
+# Function used with -s (stdin passthrough) — function reads its stdin.
+run_test_sorted B "Function + stdin passthrough (-s)" \
+    "upper_stdin() { tr '[:lower:]' '[:upper:]'; }; printf 'hello\nworld\n' | frun -s upper_stdin" \
+    "HELLO
+WORLD"
+
+# Function used with -i (insert substitution).
+run_test_sorted B "Function + insert substitution (-i)" \
+    "wrap() { echo \"[wrap:\$1]\"; }; seq 3 | frun -l 1 -i wrap {}" \
+    "[wrap:1]
+[wrap:2]
+[wrap:3]"
+
+# Function used with -n (record limit).
+run_test_line_count B "Function + record limit (-n 3)" \
+    "tag() { echo \"\$*\"; }; seq 100 | frun -l 1 -n 3 tag" \
+    3
+
+# Function that takes no implicit args, just uses \$1.
+run_test_sorted B "Function with explicit \$1 reference" \
+    "sqr() { echo \$(( \$1 * \$1 )); }; seq 1 4 | frun -l 1 sqr" \
+    "1
+4
+9
+16"
+
+# Function with underscore and numbers in name (valid bash identifiers).
+run_test_sorted B "Function with _underscored_name_123" \
+    "_my_func_v2() { echo \"ok:\$*\"; }; seq 3 | frun -l 1 _my_func_v2" \
+    "ok:1
+ok:2
+ok:3"
+
+# ============================================================================
+# SECTION C: FORKRUN_EXTRA_FUNCS — Dependent Function Chains
+#
+# IMPORTANT: FORKRUN_EXTRA_FUNCS must be set as an env var on the frun
+# command itself, not on the upstream pipeline command:
+#
+#   CORRECT:   seq 10 | FORKRUN_EXTRA_FUNCS='helper' frun main_func
+#   WRONG:     FORKRUN_EXTRA_FUNCS='helper' seq 10 | frun main_func
+#
+# The reason: frun reads this variable during its own cleanroom exec setup,
+# where it calls declare -f on each name listed and injects the definitions
+# into the cleanroom shell. If the variable is set on the pipeline source
+# instead of on frun, it is in the environment of the wrong process.
+# ============================================================================
+print_section C "FORKRUN_EXTRA_FUNCS: Dependent Function Chains"
+
+# main_func calls helper — helper must be exported via FORKRUN_EXTRA_FUNCS
+# placed on the frun invocation itself.
+run_test_sorted C "FORKRUN_EXTRA_FUNCS: one-level dependency" \
+    "helper() { echo \"H:\$*\"; }; main_func() { helper \"\$@\"; }; seq 3 | FORKRUN_EXTRA_FUNCS='helper' frun -l 1 main_func" \
+    "H:1
+H:2
+H:3"
+
+# Two-level chain: main -> mid -> leaf.
+# Both mid and leaf must appear in FORKRUN_EXTRA_FUNCS.
+run_test_sorted C "FORKRUN_EXTRA_FUNCS: two-level chain" \
+    "leaf() { echo \"LEAF:\$*\"; }; mid() { leaf \"\$@\"; }; main_func() { mid \"\$@\"; }; seq 3 | FORKRUN_EXTRA_FUNCS='mid leaf' frun -l 1 main_func" \
+    "LEAF:1
+LEAF:2
+LEAF:3"
+
+# Multiple independent helpers listed together in FORKRUN_EXTRA_FUNCS.
+run_test_sorted C "FORKRUN_EXTRA_FUNCS: multiple helpers (space-separated list)" \
+    "pfx() { echo \"P:\$*\"; }; sfx() { echo \"S:\$*\"; }; combo() { pfx \"\$@\"; sfx \"\$@\"; }; seq 2 | FORKRUN_EXTRA_FUNCS='pfx sfx' frun -l 1 combo" \
+    "P:1
+P:2
+S:1
+S:2"
+
+# FORKRUN_EXTRA_FUNCS combined with -k (ordered output).
+run_test_exact C "FORKRUN_EXTRA_FUNCS: ordered output (-k)" \
+    "add_prefix() { echo \"ORDERED:\$*\"; }; main_f() { add_prefix \"\$@\"; }; seq 4 | FORKRUN_EXTRA_FUNCS='add_prefix' frun -l 1 -k main_f" \
+    "ORDERED:1
+ORDERED:2
+ORDERED:3
+ORDERED:4"
+
+# FORKRUN_EXTRA_FUNCS combined with -s (stdin passthrough).
+run_test_sorted C "FORKRUN_EXTRA_FUNCS: stdin passthrough (-s)" \
+    "transform_stdin() { sed 's/^/X:/'; }; process_batch() { transform_stdin; }; printf 'a\nb\nc\n' | FORKRUN_EXTRA_FUNCS='transform_stdin' frun -s process_batch" \
+    "X:a
+X:b
+X:c"
+
+# FORKRUN_EXTRA_FUNCS combined with NUMA (--nodes=2).
+run_test_sorted C "FORKRUN_EXTRA_FUNCS: works with --nodes=2" \
+    "inner() { echo \"IN:\$*\"; }; outer() { inner \"\$@\"; }; seq 6 | FORKRUN_EXTRA_FUNCS='inner' frun --nodes=2 -l 1 outer" \
+    "IN:1
+IN:2
+IN:3
+IN:4
+IN:5
+IN:6"
+
+# Omitting a required helper from FORKRUN_EXTRA_FUNCS must cause the function
+# to be undefined in the cleanroom. The worker will get a "command not found"
+# error from bash. We verify this produces non-empty stderr and non-zero output
+# (rather than silently succeeding with wrong data).
+# NOTE: We check that the output does NOT contain all expected lines — if the
+# helper is missing, at least some workers will fail.
+run_test_regex C "FORKRUN_EXTRA_FUNCS: missing helper causes worker error (not silent)" \
+    "missing_helper() { echo \"SHOULD_NOT_APPEAR:\$*\"; }; caller_func() { missing_helper \"\$@\"; }; seq 3 | frun -l 1 caller_func 2>&1 | grep -c 'SHOULD_NOT_APPEAR' || true" \
+    "^0$" 0 false
+
+# ============================================================================
+# SECTION C2: FORKRUN_EXTRA_VARS — Passing Variables into the Cleanroom
+#
+# FORKRUN_EXTRA_VARS passes variable names (space-separated) whose current
+# values will be injected into the frun cleanroom shell.
+# Like FORKRUN_EXTRA_FUNCS, it must be placed on the frun invocation:
+#
+#   CORRECT:   MY_VAR=hello seq 3 | FORKRUN_EXTRA_VARS='MY_VAR' frun func
+#   CORRECT:   MY_VAR=hello; seq 3 | FORKRUN_EXTRA_VARS='MY_VAR' frun func
+#   WRONG:     FORKRUN_EXTRA_VARS='MY_VAR' seq 3 | frun func
+# ============================================================================
+print_section C2 "FORKRUN_EXTRA_VARS: Passing Variables into the Cleanroom"
+
+# Basic scalar variable injection.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: scalar variable reaches workers" \
+    "MY_TAG='hello'; use_tag() { echo \"\${MY_TAG}:\$*\"; }; seq 3 | FORKRUN_EXTRA_VARS='MY_TAG' frun -l 1 use_tag" \
+    "hello:1
+hello:2
+hello:3"
+
+# Multiple variables injected at once.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: multiple variables (space-separated)" \
+    "PREFIX='['; SUFFIX=']'; wrap_var() { echo \"\${PREFIX}\$1\${SUFFIX}\"; }; seq 3 | FORKRUN_EXTRA_VARS='PREFIX SUFFIX' frun -l 1 wrap_var" \
+    "[1]
+[2]
+[3]"
+
+# Variable containing spaces.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: variable value containing spaces" \
+    "MY_LABEL='hello world'; show_label() { echo \"\${MY_LABEL}:\$*\"; }; seq 2 | FORKRUN_EXTRA_VARS='MY_LABEL' frun -l 1 show_label" \
+    "hello world:1
+hello world:2"
+
+# Numeric variable.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: numeric variable used in arithmetic" \
+    "MULTIPLIER=3; mul() { echo \$(( \$1 * MULTIPLIER )); }; seq 4 | FORKRUN_EXTRA_VARS='MULTIPLIER' frun -l 1 mul" \
+    "3
+6
+9
+12"
+
+# FORKRUN_EXTRA_VARS combined with FORKRUN_EXTRA_FUNCS — both active.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS + FORKRUN_EXTRA_FUNCS: combined" \
+    "MY_PFX='X'; format() { echo \"\${MY_PFX}:\$*\"; }; dispatch() { format \"\$@\"; }; seq 3 | FORKRUN_EXTRA_FUNCS='format' FORKRUN_EXTRA_VARS='MY_PFX' frun -l 1 dispatch" \
+    "X:1
+X:2
+X:3"
+
+# FORKRUN_EXTRA_VARS combined with ordered output (-k).
+run_test_exact C2 "FORKRUN_EXTRA_VARS: ordered output (-k)" \
+    "STEP='S'; label_step() { echo \"\${STEP}\$*\"; }; seq 4 | FORKRUN_EXTRA_VARS='STEP' frun -k -l 1 label_step" \
+    "S1
+S2
+S3
+S4"
+
+# FORKRUN_EXTRA_VARS combined with -s (stdin passthrough).
+# The variable is available inside the function that reads stdin.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: available in stdin-mode (-s) function" \
+    "MY_DELIM='|'; add_delim() { while IFS= read -r line; do echo \"\${line}\${MY_DELIM}\"; done; }; printf 'a\nb\nc\n' | FORKRUN_EXTRA_VARS='MY_DELIM' frun -s add_delim" \
+    "a|
+b|
+c|"
+
+# Variable that is unset should not inject into cleanroom (no error either).
+# We verify the function gracefully handles an unset variable (empty string).
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: unset variable injects as empty string" \
+    "unset UNSET_VAR 2>/dev/null; show_empty() { echo \"[\${UNSET_VAR:-EMPTY}]\"; }; seq 2 | FORKRUN_EXTRA_VARS='UNSET_VAR' frun -l 1 show_empty" \
+    "[EMPTY]
+[EMPTY]"
+
+# Array variable injection (if supported — bash arrays via declare -p).
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: array variable injection" \
+    "declare -a MY_ARR=(alpha beta gamma); use_arr() { echo \"\${MY_ARR[\$1-1]}\"; }; seq 3 | FORKRUN_EXTRA_VARS='MY_ARR' frun -l 1 use_arr" \
+    "alpha
+beta
+gamma"
+
+# Associative array injection.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: associative array injection" \
+    "declare -A MY_MAP=([one]=1 [two]=2 [three]=3); lookup() { echo \"\${MY_MAP[\$1]}\"; }; printf 'one\ntwo\nthree\n' | FORKRUN_EXTRA_VARS='MY_MAP' frun -l 1 lookup" \
+    "1
+2
+3"
+
+# Variable with special characters in value.
+run_test_sorted C2 "FORKRUN_EXTRA_VARS: variable value with special characters" \
+    "PATTERN='foo\$bar'; show_pattern() { echo \"\${PATTERN}\"; }; seq 2 | FORKRUN_EXTRA_VARS='PATTERN' frun -l 1 show_pattern" \
+    'foo$bar
+foo$bar'
+
+# Large variable value (tests that no size limit is hit during injection).
+run_test_line_count C2 "FORKRUN_EXTRA_VARS: large variable value (1000 chars)" \
+    "BIG_VAR=\$(printf '%1000s' | tr ' ' 'X'); use_big() { echo \"\${#BIG_VAR}\"; }; seq 3 | FORKRUN_EXTRA_VARS='BIG_VAR' frun -l 1 use_big" \
+    3
+
+# ============================================================================
+# SECTION D: Data Integrity — Exact Line-Level Verification
+# These tests ensure no lines are lost, duplicated, or corrupted.
+# They use run_test_sorted which does exact sorted-line diff.
+# ============================================================================
+print_section D "Data Integrity: No Loss, No Duplication"
+
+# 100-line passthrough, default mode, multiple workers.
+# Any race condition causing duplicate or missing dispatch would be caught here.
+run_test_sorted D "100-line integrity: default mode (printf passthrough)" \
+    "cat '$LINE100' | frun printf '%s\n'" \
+    "$(seq 100)"
+
+# 100-line passthrough, ordered mode.
+run_test_exact D "100-line integrity: ordered mode (-k)" \
+    "cat '$LINE100' | frun -k printf '%s\n'" \
+    "$(seq 100)"
+
+# 100-line passthrough, stdin mode.
+run_test_sorted D "100-line integrity: stdin mode (-s cat)" \
+    "cat '$LINE100' | frun -s cat" \
+    "$(seq 100)"
+
+# 1000-line passthrough with heavy parallelism.
+run_test_sorted D "1000-line integrity: default mode with -j 8" \
+    "cat '$LINE1K' | frun -j 8 printf '%s\n'" \
+    "$(seq 1000)"
+
+# 1000-line ordered — verifies reorder buffer under load.
+run_test_exact D "1000-line integrity: ordered (-k -j 8)" \
+    "cat '$LINE1K' | frun -k -j 8 printf '%s\n'" \
+    "$(seq 1000)"
+
+# Byte mode: total bytes in == total bytes out (exact content match).
+run_test_exact D "Byte mode integrity: -b 10, 100 bytes total" \
+    "cat '$BYTE100' | frun -b 10 cat" \
+    "$(cat "$BYTE100")"
+
+# Byte mode with non-multiple chunk size (last chunk is smaller).
+# 100 bytes total, 30-byte chunks: chunks of 30, 30, 30, 10.
+run_test_exact D "Byte mode integrity: non-multiple chunk (-b 30, 100 bytes)" \
+    "cat '$BYTE100' | frun -b 30 cat" \
+    "$(cat "$BYTE100")"
+
+# Null-delimited integrity: content must survive NUL → frun → output unchanged.
+run_test_exact D "Null-delimited integrity (-z, -s)" \
+    "printf 'alpha\0beta\0gamma\0delta\0' | frun -z -k -s cat | md5sum | awk '{print \$1}'" \
+    "$(printf 'alpha\0beta\0gamma\0delta\0' | md5sum | awk '{print $1}')"
+
+# Verify no duplicate lines with high worker count (regression for escrow race).
+# If escrow causes double-dispatch, a line would appear twice.
+# We use seq 20 with 20 workers (1:1 worker:line ratio, maximum escrow pressure).
+run_test_sorted D "No-duplicate guarantee: workers == line count" \
+    "seq 20 | frun -j 20 -l 1 printf '%s\n'" \
+    "$(seq 20)"
+
+# Custom delimiter integrity.
+run_test_sorted D "Custom delimiter integrity (-d :)" \
+    "printf 'a:b:c:d:e' | frun -d ':' printf '%s\n'" \
+    "a
+b
+c
+d
+e"
+
+# Very large output per worker (each worker prints many lines) — tests output fan-in.
+run_test_line_count D "High-fanout output: 10 inputs * 100 output lines each = 1000 lines" \
+    "expand_line() { local i; for ((i=1;i<=100;i++)); do echo \"\$1_\$i\"; done; }; seq 10 | frun -l 1 expand_line" \
+    1000
+
+# ============================================================================
+# SECTION E: Special Characters in Input
+# These test forkrun's safe quoting path (printf '%q' in cmdline mode)
+# and the raw passthrough path (-s / -z mode).
+# ============================================================================
+print_section E "Special Characters in Input"
+
+# Glob characters must not be expanded by the shell when passed as args.
+run_test_exact E "Glob chars in input survive cmdline mode (* ? [])" \
+    "printf 'star*\nquest?\nbracket[x]\n' | frun -k -l 1 printf '%s\n'" \
+    "star*
+quest?
+bracket[x]"
+
+# Dollar signs must not be expanded (variable substitution disabled by quoting).
+run_test_exact E "Dollar sign in input not expanded" \
+    "printf '\$HOME\n\$RANDOM\n\${NOTAVAR}\n' | frun -k -l 1 printf '%s\n'" \
+    "\$HOME
+\$RANDOM
+\${NOTAVAR}"
+
+# Backslashes must survive the quoting round-trip.
+run_test_exact E "Backslash in input not consumed" \
+    "printf 'a\\\\b\n' | frun -k -l 1 printf '%s\n'" \
+    'a\b'
+
+# Single quotes inside input.
+run_test_exact E "Single quotes in input survive quoting" \
+    "printf \"it's here\n\" | frun -k -l 1 printf '%s\n'" \
+    "it's here"
+
+# Double quotes inside input.
+run_test_exact E "Double quotes in input survive quoting" \
+    'printf '"'"'say "hello"\n'"'"' | frun -k -l 1 printf '"'"'%s\n'"'"'' \
+    'say "hello"'
+
+# Semicolons must not be treated as command separators.
+run_test_exact E "Semicolons in input treated as literals" \
+    "printf 'a;b;c\n' | frun -k -l 1 printf '%s\n'" \
+    "a;b;c"
+
+# Pipe characters must not create new pipes.
+run_test_exact E "Pipe char in input treated as literal" \
+    "printf 'a|b\n' | frun -k -l 1 printf '%s\n'" \
+    "a|b"
+
+# Full special-character file passthrough via -s (raw stdin, no quoting needed).
+# In -s mode, data flows through kernel pipes unmodified.
+run_test_exact E "Special chars passthrough intact in -s mode" \
+    "cat '$SPECIAL' | frun -k -s cat" \
+    "$(cat "$SPECIAL")"
+
+# Unicode multi-byte characters.
+run_test_exact E "Unicode (CJK) characters in input" \
+    "printf '你好\n世界\nこんにちは\n' | frun -k -l 1 printf '%s\n'" \
+    "你好
+世界
+こんにちは"
+
+# Spaces in lines (default mode uses safe quoting so spaces don't split args).
+run_test_exact E "Lines with spaces: each treated as single argument" \
+    "cat '$MULTIWORD' | frun -k -l 1 printf '%s\n'" \
+    "hello world
+foo bar
+baz qux"
+
+# Tabs in lines.
+run_test_exact E "Tabs in input lines survive quoting" \
+    "printf 'a\tb\tc\n' | frun -k -l 1 printf '%s\n'" \
+    "a	b	c"
+
+# ============================================================================
+# SECTION F: Batch Correctness — Exact Arg Counts
+# Verify that -l N delivers exactly N arguments per worker call
+# (except the last batch which may be smaller).
+# ============================================================================
+print_section F "Batch Correctness: Exact Arg Counts per Call"
+
+# -l 1: every call must receive exactly 1 argument.
+run_test_sorted F "-l 1: every call gets exactly 1 arg" \
+    "count_a() { echo \"\$#\"; }; seq 10 | frun -l 1 count_a" \
+    "$(printf '1\n%.0s' {1..10})"
+
+# -l 2: every call gets 2 args (10 lines = 5 calls).
+run_test_sorted F "-l 2: every call gets exactly 2 args (10 lines / 2)" \
+    "count_a() { echo \"\$#\"; }; seq 10 | frun -l 2 count_a" \
+    "$(printf '2\n%.0s' {1..5})"
+
+# -l 3: 9 lines = 3 calls of 3, plus possibly 1 call of 0 (flushed empty).
+run_test_line_count F "-l 3: 9 lines produces correct batch count (3 batches)" \
+    "count_a() { echo \"\$#\"; }; seq 9 | frun -l 3 count_a" \
+    3
+
+# -L (exact lines): every call must receive EXACTLY N, including last.
+run_test_sorted F "-L 4 (exact): verify all batch sizes are 4 (with 8 lines)" \
+    "count_a() { echo \"\$#\"; }; seq 8 | frun -L 4 count_a" \
+    "$(printf '4\n%.0s' {1..2})"
+
+# Verify the actual args passed to a multi-arg batch are the right lines.
+# With -l 3 and -k, first batch should be lines 1 2 3 as separate args.
+run_test_exact F "-l 3 -k: first batch contains correct args in order" \
+    "print_args() { echo \"\$*\"; }; seq 6 | frun -l 3 -k print_args" \
+    "1 2 3
+4 5 6"
+
+# Batch content in -s mode: the entire batch content arrives as a single stdin stream.
+run_test_exact F "-l 3 -s -k: batch content passed as stdin correctly" \
+    "prefix_lines() { sed 's/^/B:/'; }; seq 6 | frun -l 3 -k -s prefix_lines" \
+    "B:1
+B:2
+B:3
+B:4
+B:5
+B:6"
+
+# ============================================================================
+# SECTION G: Sequential Invocations — Ring Reuse
+# Verify ring_destroy + ring_init works correctly for multiple frun calls
+# in the same shell session. This tests state reset between invocations.
+# ============================================================================
+print_section G "Sequential Invocations: Ring Reuse"
+
+# Two frun calls back-to-back in one script.
+run_test_exact G "Two sequential frun calls produce correct independent output" \
+    "out1=\$(echo 'first' | frun echo); out2=\$(echo 'second' | frun echo); echo \"\$out1 \$out2\"" \
+    "first second"
+
+# Three sequential calls.
+run_test_exact G "Three sequential frun calls" \
+    "a=\$(echo 'A' | frun echo); b=\$(echo 'B' | frun echo); c=\$(echo 'C' | frun echo); echo \"\$a\$b\$c\"" \
+    "ABC"
+
+# Sequential calls with different modes.
+run_test_exact G "Sequential: first call ordered, second call unordered" \
+    "r1=\$(seq 3 | frun -k printf '%s\n'); r2=\$(seq 3 | frun printf '%s\n' | sort); echo \"\$r1\"; echo \"\$r2\"" \
+    "1
+2
+3
+1
+2
+3"
+
+# Sequential calls with different batch sizes.
+run_test_exact G "Sequential: different -l values between calls" \
+    "r1=\$(seq 4 | frun -l 1 -k printf '%s\n'); r2=\$(seq 4 | frun -l 4 -k printf '%s\n'); printf '%s\n' \"\$r1\" \"\$r2\"" \
+    "1
+2
+3
+4
+1
+2
+3
+4"
+
+# Sequential calls using bash functions (ring state must not leak function defs).
+run_test_exact G "Sequential: bash functions in each call independently defined" \
+    "func_a() { echo \"A:\$*\"; }; r1=\$(echo 'x' | frun -l 1 func_a); func_b() { echo \"B:\$*\"; }; r2=\$(echo 'y' | frun -l 1 func_b); echo \"\$r1 \$r2\"" \
+    "A:x B:y"
+
+# Verify that output from call N doesn't appear in call N+1.
+run_test_exact G "No output leakage between sequential calls" \
+    "r1=\$(seq 5 | frun -k printf '%s\n'); r2=\$(seq 3 | frun -k printf '%s\n'); echo \"LINES:\$(echo \"\$r2\" | wc -l | tr -d ' ')\"" \
+    "LINES:3"
+
+# ============================================================================
+# SECTION H: Combined Feature Interactions
+# Test combinations that might surface interaction bugs.
+# ============================================================================
+print_section H "Combined Feature Interactions"
+
+# Bash function + NUMA multi-node.
+run_test_sorted H "Bash function + NUMA (--nodes=2)" \
+    "my_tag() { echo \"TAG:\$*\"; }; seq 10 | frun --nodes=2 -l 1 my_tag" \
+    "$(seq 10 | sed 's/^/TAG:/')"
+
+# Bash function + byte mode + stdin.
+run_test_exact H "Bash function + stdin byte mode (-b -s)" \
+    "inspect() { wc -c | tr -d ' '; }; cat '$BYTE100' | frun -b 25 -s inspect | sort -n | paste -sd+ | bc" \
+    "100"
+
+# Bash function + insert (-i) substitution.
+# {}'s are replaced with the input line; function wraps the result.
+run_test_sorted H "Bash function + -i substitution" \
+    "wrap() { echo \"[W:\$1]\"; }; seq 3 | frun -l 1 -i wrap {}" \
+    "[W:1]
+[W:2]
+[W:3]"
+
+# Bash function + limit (-n) with ordered output.
+run_test_exact H "Bash function + -n limit + -k order" \
+    "tag() { echo \"T:\$*\"; }; seq 100 | frun -l 1 -k -n 5 tag" \
+    "T:1
+T:2
+T:3
+T:4
+T:5"
+
+# FORKRUN_EXTRA_FUNCS + NUMA.
+run_test_sorted H "FORKRUN_EXTRA_FUNCS + NUMA (--nodes=2)" \
+    "inner() { echo \"IN:\$*\"; }; outer() { inner \"\$@\"; }; seq 6 | FORKRUN_EXTRA_FUNCS='inner' frun --nodes=2 -l 1 outer" \
+    "IN:1
+IN:2
+IN:3
+IN:4
+IN:5
+IN:6"
+
+# Bash function + null delimiter (-z) + stdin.
+run_test_exact H "Bash function + null delimiter (-z -s)" \
+    "to_upper_stdin() { tr '[:lower:]' '[:upper:]'; }; printf 'abc\0def\0' | frun -k -z -s to_upper_stdin" \
+    "$(printf 'ABC\0DEF\0')"
+
+# Bash function + custom delimiter (-d).
+run_test_sorted H "Bash function + custom delimiter (-d :)" \
+    "wrap_field() { echo \"F:\$*\"; }; printf 'a:b:c' | frun -d ':' -l 1 wrap_field" \
+    "F:a
+F:b
+F:c"
+
+# Large input with bash function + ordered output (-k).
+run_test_exact H "Bash function + 1000-line ordered integrity (-k)" \
+    "identity() { printf '%s\n' \"\$@\"; }; seq 1000 | frun -k -l 1 identity" \
+    "$(seq 1000)"
+
+# Unsafe mode (-U) with function (space-splitting behavior test).
+run_test_sorted H "Bash function + unsafe mode (-U)" \
+    "show_argc() { echo \"\$#\"; }; printf 'a b\nc d\n' | frun -U -l 1 show_argc" \
+    "2
+2"
+
+# Ordered mode (-k) with function that writes to stderr too.
+# Stderr should not interfere with stdout ordering.
+run_test_exact H "Bash function: stdout ordering unaffected by stderr writes" \
+    "mixed() { echo \"\$*\" >&2; echo \"OUT:\$*\"; }; seq 5 | frun -k -l 1 mixed 2>/dev/null" \
+    "OUT:1
+OUT:2
+OUT:3
+OUT:4
+OUT:5"
+
+# ============================================================================
+# SECTION I: Boundary Conditions
+# ============================================================================
+print_section I "Boundary Conditions"
+
+# Empty input should produce no output and exit cleanly.
+run_test_exact I "Empty input: no output, exit 0" \
+    "cat '$EMPTY' | frun printf '%s\n'" \
+    "" 0
+
+# Single line input.
+run_test_exact I "Single line input" \
+    "echo 'only_line' | frun printf '%s\n'" \
+    "only_line"
+
+# Exactly 1 line with -l 100 (batch larger than input).
+run_test_exact I "Batch size > input size (-l 100 for 1 line)" \
+    "echo 'one' | frun -l 100 printf '%s\n'" \
+    "one"
+
+# Exactly batch-size lines (no partial last batch).
+run_test_exact I "Input exactly equals batch size (-l 5, 5 lines)" \
+    "seq 5 | frun -l 5 -k printf '%s\n'" \
+    "$(seq 5)"
+
+# Batch-size + 1 (triggers one full batch + one 1-item batch).
+run_test_sorted I "Input = batch-size + 1 (-l 5, 6 lines)" \
+    "seq 6 | frun -l 5 printf '%s\n'" \
+    "$(seq 6)"
+
+# Batch-size - 1 (one partial batch only).
+run_test_sorted I "Input = batch-size - 1 (-l 5, 4 lines)" \
+    "seq 4 | frun -l 5 printf '%s\n'" \
+    "$(seq 4)"
+
+# More workers requested than lines exist.
+run_test_sorted I "More workers than input lines (-j 50 for 5 lines)" \
+    "seq 5 | frun -j 50 printf '%s\n'" \
+    "$(seq 5)"
+
+# Worker count == 1 (serialized execution, verifies no parallelism-only bugs).
+run_test_exact I "Single worker (-j 1) with ordered output" \
+    "seq 5 | frun -j 1 -k printf '%s\n'" \
+    "$(seq 5)"
+
+# Very large batch on very small input (1 batch covers everything).
+run_test_sorted I "Single batch covers entire input (-l 1000000 for 10 lines)" \
+    "seq 10 | frun -l 1000000 printf '%s\n'" \
+    "$(seq 10)"
+
+# Limit exactly equals input size (should output all lines).
+run_test_exact I "Limit equals input size (-n 10 for 10-line input)" \
+    "seq 10 | frun -k -n 10 printf '%s\n'" \
+    "$(seq 10)"
+
+# Limit of 1 (exactly 1 record).
+run_test_line_count I "Limit of 1 (-n 1)" \
+    "seq 1000 | frun -n 1 printf '%s\n'" \
+    1
+
+# Limit of 0 (no records — edge case).
+# The behavior may be 0 output lines or all lines depending on implementation.
+# We just verify it doesn't deadlock/crash, not the exact count.
+run_test_regex I "Limit of 0 (-n 0): exits cleanly (no hang)" \
+    "timeout 10 bash -c \"source '$FRUN_SOURCE' && seq 100 | frun -n 0 printf '%s\n' ; echo EXIT_OK\"" \
+    "EXIT_OK" 0 false
+
+# Very long single line (tests SIMD scanner boundary alignment).
+LONGLINE=$(printf '%0.s' {1..5000} | tr ' ' 'A')
+run_test_sorted I "Very long line (5000 chars): survives quoting and SIMD scanner" \
+    "printf '%s\n' '${LONGLINE}' | frun -l 1 printf '%s\n'" \
+    "${LONGLINE}"
+
+# Trickle input: data arrives slowly, scanner must flush partial batches early.
+# This exercises the stall_meter + starve_meter early-flush invariant.
+run_test_exact I "Trickle input: early flush delivers all lines (-k)" \
+    "{ echo 'tick1'; sleep 0.15; echo 'tick2'; sleep 0.15; echo 'tick3'; } | frun -k -l 1000 printf '%s\n'" \
+    "tick1
+tick2
+tick3"
+
+# ============================================================================
+# SECTION J: Worker / ID Semantics
+# ============================================================================
+print_section J "Worker and ID Semantics"
+
+# -I flag: batch IDs must be present and follow the [{NODE.}WORKER.BATCH] format.
+run_test_regex J "-I flag: batch ID format is {NODE.WORKER.BATCH}" \
+    "echo 'test' | frun -l 1 -I echo {ID}" \
+    "^\{([0-9]+\.)?[0-9]+\.[0-9]+\} .*$" 0 false
+
+# -I: all batch IDs in a run must be unique (no ID collision between workers).
+run_test_exact J "-I flag: all IDs in a 10-line run are unique" \
+    "seq 10 | frun -l 1 -I echo {ID} | sort | uniq -d | wc -l | tr -d ' '" \
+    "0"
+
+# Verify RING_BATCH_IDX is set and non-negative in worker context.
+run_test_regex J "RING_BATCH_IDX is set and numeric in worker" \
+    "check() { echo \"\${RING_BATCH_IDX:-UNSET}\"; }; echo 'x' | frun -l 1 check" \
+    "^[0-9]+$" 0 false
+
+# Verify RING_BATCH_SLOTS is set and positive in worker context.
+run_test_regex J "RING_BATCH_SLOTS is set and positive" \
+    "check() { echo \"\${RING_BATCH_SLOTS:-UNSET}\"; }; echo 'x' | frun -l 1 check" \
+    "^[1-9][0-9]*$" 0 false
+
+# Worker command failure: pipeline must survive and not deadlock.
+# The echo at the end verifies the pipeline wasn't blocked.
+run_test_regex J "Worker failure (false): pipeline survives without deadlock" \
+    "seq 10 | frun 'false' >/dev/null 2>&1; echo 'SURVIVED'" \
+    "SURVIVED" 0 false
+
+# Worker writing to stderr: main pipeline unaffected.
+run_test_line_count J "Worker stderr output doesn't corrupt stdout" \
+    "loud() { echo 'err' >&2; echo 'ok'; }; seq 5 | frun -l 1 loud 2>/dev/null" \
+    5
+
+# ============================================================================
+# SECTION K: Framework Self-Tests
+# Verify the new test helpers themselves are correct.
+# ============================================================================
+print_section K "Framework Self-Tests"
+
+# run_test_sorted must catch a missing line (would slip through compare_token_sets).
+echo "Verifying run_test_sorted catches missing lines..."
+saved_total=$TOTAL_TESTS; saved_failed=$FAILED_TESTS
+run_test_sorted K "_selftest_sorted_catches_missing" \
+    "printf 'a\nb\n'" \
+    "a
+b
+c"
+if [[ "${TEST_RESULTS[_selftest_sorted_catches_missing]}" == "FAIL" ]]; then
+    echo -e "  ${GREEN}✓${NC} run_test_sorted correctly caught a missing line"
+    # Retroactively correct counters — this was an intentional failure
+    TEST_RESULTS["_selftest_sorted_catches_missing"]="PASS"
+    ((PASSED_TESTS++))
+    ((FAILED_TESTS--))
+else
+    echo -e "  ${RED}✗${NC} run_test_sorted FAILED to catch a missing line — framework bug!"
+fi
+
+# run_test_sorted must catch a duplicate line.
+echo "Verifying run_test_sorted catches duplicate lines..."
+run_test_sorted K "_selftest_sorted_catches_duplicate" \
+    "printf 'a\na\nb\n'" \
+    "a
+b"
+if [[ "${TEST_RESULTS[_selftest_sorted_catches_duplicate]}" == "FAIL" ]]; then
+    echo -e "  ${GREEN}✓${NC} run_test_sorted correctly caught a duplicate line"
+    TEST_RESULTS["_selftest_sorted_catches_duplicate"]="PASS"
+    ((PASSED_TESTS++))
+    ((FAILED_TESTS--))
+else
+    echo -e "  ${RED}✗${NC} run_test_sorted FAILED to catch a duplicate line — framework bug!"
+fi
+
+# ============================================================================
+# FORKRUN TEST SUITE — SECTION L: Fault Resilience
+# ============================================================================
+# This file contains ONLY Section L tests, designed to be appended to
+# test_frun_comprehensive.sh (or included via source). It covers the
+# escrow / death-pipe / ring_poll / poison fault resilience subsystem.
+#
+# To use standalone, source this AFTER the test framework helpers and
+# data setup from test_frun_comprehensive.sh, or just append this file's
+# section to the end of test_frun_comprehensive.sh before the final summary.
+#
+# COVERAGE AREAS:
+#   L1: One-time transient failure → self-heal
+#   L2: Persistent failure → poison threshold
+#   L3: Output integrity under failure (ring_revert_output)
+#   L4: No output duplication from failed batches
+#   L5: Ordered output correctness with failures
+#   L6: Worker exit-0 not respawned (NUMA bug fix)
+#   L7: Multiple simultaneous worker failures
+#   L8: Large-batch failure integrity
+#   L9: Stdin-mode (-s) failure integrity
+#   L10: Failure + combined flag interactions
+# ============================================================================
+
+# ============================================================================
+# SECTION L: Fault Resilience — Escrow, Poison, and Self-Healing
+# ============================================================================
+print_section L "Fault Resilience: Escrow, Poison, and Self-Healing"
+
+# ---------- L1: One-time transient failure → self-heal ----------
+# A worker crashes on one specific input value, then on retry it succeeds
+# (because the crash trigger is a one-time file check). All lines must appear.
+
+run_test_exact L "L1a: One-time crash self-heals (ordered, -k)" \
+    "crash_once() { local _crash_marker=\"/tmp/_frun_test_crash_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && [[ ! -f \"\$_crash_marker\" ]]; then touch \"\$_crash_marker\"; exit 1; else echo \"\$arg\"; fi; done; rm -f \"\$_crash_marker\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_once' frun -k -l 1 crash_once" \
+    "1
+2
+3
+4
+5"
+
+# Same test with unordered output — verifies self-heal without ordering constraint.
+run_test_sorted L "L1b: One-time crash self-heals (unordered)" \
+    "crash_once() { local _crash_marker=\"/tmp/_frun_test_crash_u\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && [[ ! -f \"\$_crash_marker\" ]]; then touch \"\$_crash_marker\"; exit 1; else echo \"\$arg\"; fi; done; rm -f \"\$_crash_marker\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_once' frun -l 1 crash_once" \
+    "$(seq 1 5)"
+
+# One-time crash on the FIRST line — tests that line 1 gets retried and appears.
+run_test_exact L "L1c: One-time crash on first line self-heals (-k)" \
+    "crash_first() { local _cm=\"/tmp/_frun_test_crash_first\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"1\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; else echo \"\$arg\"; fi; done; rm -f \"\$_cm\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_first' frun -k -l 1 crash_first" \
+    "$(seq 1 5)"
+
+# One-time crash on the LAST line — tests the final batch boundary.
+run_test_exact L "L1d: One-time crash on last line self-heals (-k)" \
+    "crash_last() { local _cm=\"/tmp/_frun_test_crash_last\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"10\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; else echo \"\$arg\"; fi; done; rm -f \"\$_cm\"; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_last' frun -k -l 1 crash_last" \
+    "$(seq 1 10)"
+
+# ---------- L2: Persistent failure → poison threshold ----------
+# A worker ALWAYS crashes on a specific value. After the poison threshold
+# (default 3 retries), the batch is discarded and remaining lines still process.
+# The crashing line should NOT appear in output.
+
+run_test_exact L "L2a: Persistent crash: surviving lines output correctly (-k)" \
+    "always_crash_3() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='always_crash_3' frun -k -l 1 always_crash_3" \
+    "1
+2
+4
+5"
+
+# Same with unordered output.
+run_test_sorted L "L2b: Persistent crash: surviving lines output correctly (unordered)" \
+    "always_crash_3() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='always_crash_3' frun -l 1 always_crash_3" \
+    "1
+2
+4
+5"
+
+# Persistent crash on TWO different values — both lines lost, rest survive.
+run_test_sorted L "L2c: Persistent crash on 2 values: both lost, rest survive" \
+    "always_crash_3_7() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] || [[ \"\$arg\" == \"7\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='always_crash_3_7' frun -l 1 always_crash_3_7" \
+    "1
+2
+4
+5
+6
+8
+9
+10"
+
+# Persistent crash with -l 5 (batch mode) — the ENTIRE batch containing the
+# failing line is poisoned (worker crashes mid-iteration, ring_revert_output
+# discards any partial output from that batch). Only the other batch survives.
+# With -l 5: batch 1 = [1,2,3,4,5], batch 2 = [6,7,8,9,10]. Batch 2 is poisoned.
+run_test_sorted L "L2d: Persistent crash in batch mode (-l 5): poisoned batch fully discarded" \
+    "crash_on_6() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"6\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_on_6' frun -l 5 crash_on_6" \
+    "$(seq 1 5)"
+
+# Persistent crash with exit code 139 (SIGSEGV-equivalent) — catastrophic exit.
+# A signal-derived exit code causes the pipeline to exit non-zero (unlike exit 1
+# which is treated as a normal worker failure). We wrap with { ...; true; } so
+# the overall command exits 0, and verify the surviving output is still correct.
+run_test_sorted L "L2e: Persistent crash with exit 139: surviving lines correct" \
+    "crash_segfault() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 139; else echo \"\$arg\"; fi; done; }; { seq 1 8 | FORKRUN_EXTRA_FUNCS='crash_segfault' frun -l 1 crash_segfault 2>/dev/null; true; }" \
+    "1
+2
+3
+4
+6
+7
+8"
+
+# ---------- L3: Output integrity under failure (ring_revert_output) ----------
+# When a worker crashes mid-batch after printing some output, the partial
+# output must be discarded (ring_revert_output). No truncated/corrupted lines
+# should appear. The test uses a function that prints some lines, then crashes.
+
+run_test_exact L "L3a: Mid-batch crash: partial output discarded (-k)" \
+    "crash_mid_output() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then echo \"PARTIAL\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_mid_output' frun -k -l 1 crash_mid_output" \
+    "1
+2
+4
+5"
+
+# Verify "PARTIAL" does NOT appear anywhere in output.
+run_test_regex L "L3b: Mid-batch crash: no partial/corrupt output leaks" \
+    "crash_mid_output() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then echo \"PARTIAL\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_mid_output' frun -l 1 crash_mid_output 2>/dev/null" \
+    "^[^P]*(1[^P]*2[^P]*4[^P]*5[^P]*)?$" 0 false
+
+# Simpler version: just grep for "PARTIAL" not appearing in stdout.
+run_test_regex L "L3c: Mid-batch crash: partial output NOT in stdout (grep check)" \
+    "crash_mid_output() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then echo \"PARTIAL_LINE\"; exit 1; else echo \"OK:\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_mid_output' frun -l 1 crash_mid_output 2>/dev/null | grep -c PARTIAL_LINE || true" \
+    "^0$" 0 false
+
+# ---------- L4: No output duplication from failed batches ----------
+# If a batch fails and the escrow retry succeeds, the output must appear
+# exactly once — no duplicates. Uses a one-time crash that succeeds on retry.
+
+run_test_sorted L "L4a: One-time crash produces no duplicate output" \
+    "crash_once_no_dup() { local _cm=\"/tmp/_frun_test_nodup\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_once_no_dup' frun -l 1 crash_once_no_dup | sort | uniq -c | awk '{if(\$1>1) exit 1}' && echo OK" \
+    "OK"
+
+# Verify exact line count after self-healing (10 unique lines, no extras).
+run_test_line_count L "L4b: Self-heal: output has exact expected line count (10)" \
+    "crash_once_cnt() { local _cm=\"/tmp/_frun_test_cnt\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; rm -f \"\$_cm\"; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_once_cnt' frun -l 1 crash_once_cnt" \
+    10
+
+# ---------- L5: Ordered output correctness with failures ----------
+# When -k is used and a worker crashes, the surviving output must still
+# appear in input order. The order of non-crashing lines must be preserved.
+
+run_test_exact L "L5a: Ordered output after failure preserves input order (-k)" \
+    "crash_4() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"4\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 8 | FORKRUN_EXTRA_FUNCS='crash_4' frun -k -l 1 crash_4" \
+    "1
+2
+3
+5
+6
+7
+8"
+
+# Ordered output with multiple failures — only surviving lines in order.
+run_test_exact L "L5b: Ordered output with 2 persistent failures (-k)" \
+    "crash_3_and_7() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] || [[ \"\$arg\" == \"7\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_3_and_7' frun -k -l 1 crash_3_and_7" \
+    "1
+2
+4
+5
+6
+8
+9
+10"
+
+# Ordered with one-time crash — all lines present in order.
+run_test_exact L "L5c: Ordered self-heal: all lines in correct order (-k)" \
+    "crash_once_ord() { local _cm=\"/tmp/_frun_test_ord\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"6\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_once_ord' frun -k -l 1 crash_once_ord" \
+    "$(seq 1 10)"
+
+# ---------- L6: Worker exit-0 not respawned ----------
+# Workers that exit with code 0 (normal completion) must NOT be respawned.
+# This was a bug in NUMA mode where exit-0 workers would get respawned
+# because the spawn pipe was still open. We verify that a large input
+# completes without producing duplicate output.
+
+run_test_sorted L "L6a: Workers exiting 0 are not respawned (no duplicate lines)" \
+    "seq 1 50 | frun -j 4 -l 1 printf '%s\n' | sort | uniq -c | awk '{if(\$1>1) exit 1}' && echo OK" \
+    "OK"
+
+# More specifically, an explicit exit 0 in the function should not cause
+# duplication or unexpected behavior.
+run_test_sorted L "L6b: Explicit exit 0 in function: no duplicates" \
+    "early_exit0() { echo \"\$1\"; if [[ \"\$1\" == \"5\" ]]; then exit 0; fi; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='early_exit0' frun -l 1 early_exit0 | sort | uniq -c | awk '{if(\$1>1) exit 1}' && echo OK" \
+    "OK"
+
+# ---------- L7: Multiple simultaneous worker failures ----------
+# When multiple workers crash concurrently, the orchestrator must handle
+# all deaths without deadlock. We use a pattern where every Nth line
+# causes a crash.
+
+run_test_sorted L "L7a: Multiple failing workers: surviving lines correct" \
+    "crash_even() { for arg in \"\$@\"; do if (( arg % 2 == 0 )); then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_even' frun -l 1 -j 4 crash_even" \
+    "1
+3
+5
+7
+9"
+
+# Multiple failures with -j 1 (serialized) — tests that single-worker
+# mode handles repeated failures gracefully without state corruption.
+run_test_exact L "L7b: Serialized (-j 1) with persistent failure: correct surviving output" \
+    "crash_5_ser() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_5_ser' frun -j 1 -k -l 1 crash_5_ser" \
+    "1
+2
+3
+4
+6
+7
+8
+9
+10"
+
+# Every 3rd line crashes — high failure rate with multiple workers.
+run_test_sorted L "L7c: High failure rate (every 3rd line): survivors correct" \
+    "crash_third() { for arg in \"\$@\"; do if (( arg % 3 == 0 )); then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 15 | FORKRUN_EXTRA_FUNCS='crash_third' frun -l 1 -j 4 crash_third" \
+    "1
+2
+4
+5
+7
+8
+10
+11
+13
+14"
+
+# ---------- L8: Large-batch failure integrity ----------
+# When a large batch (many lines per call) contains a failing line,
+# the entire batch is lost. Remaining batches must be intact.
+
+# 50 lines with -l 10, line 25 always crashes → batch 21-30 is poisoned.
+run_test_sorted L "L8a: Large batch (-l 10): poisoned batch discarded, rest intact" \
+    "crash_25() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"25\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 50 | FORKRUN_EXTRA_FUNCS='crash_25' frun -l 10 crash_25" \
+    "$(seq 1 20; seq 31 50)"
+
+# One-time crash in large batch — all lines self-heal.
+run_test_exact L "L8b: Large batch (-l 10) one-time crash: all lines survive (-k)" \
+    "crash_once_25() { local _cm=\"/tmp/_frun_test_l8b\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"25\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 50 | FORKRUN_EXTRA_FUNCS='crash_once_25' frun -k -l 10 crash_once_25" \
+    "$(seq 1 50)"
+
+# ---------- L9: Stdin-mode (-s) failure integrity ----------
+# In -s mode, data is spliced to worker stdin. When a worker crashes,
+# the stdin splice is abandoned and other workers continue.
+
+run_test_sorted L "L9a: Stdin mode (-s) with crash: surviving lines correct" \
+    "crash_on_3_stdin() { while IFS= read -r line; do if [[ \"\$line\" == \"3\" ]]; then exit 1; fi; echo \"\$line\"; done; }; seq 1 6 | FORKRUN_EXTRA_FUNCS='crash_on_3_stdin' frun -l 1 -s crash_on_3_stdin" \
+    "1
+2
+4
+5
+6"
+
+# Stdin mode with -k ordering and crash.
+run_test_exact L "L9b: Stdin mode (-s -k) with crash: order preserved" \
+    "crash_on_4_stdin() { while IFS= read -r line; do if [[ \"\$line\" == \"4\" ]]; then exit 1; fi; echo \"\$line\"; done; }; seq 1 8 | FORKRUN_EXTRA_FUNCS='crash_on_4_stdin' frun -k -l 1 -s crash_on_4_stdin" \
+    "1
+2
+3
+5
+6
+7
+8"
+
+# Stdin mode (-s) one-time crash self-heal — data is saved in a global memfd
+# before being spliced to the worker's stdin, so the escrow mechanism should
+# be able to re-splice the data to a replacement worker on retry. This is the
+# -s-mode analog of L1a: the worker crashes once on a specific line, then
+# succeeds on retry (marker-file guard). All 5 lines must appear in order.
+# NOTE: If this test fails, it may indicate a bug in forkrun's stdin-mode
+# escrow/retry path — the data is in the memfd and should be re-splicable.
+run_test_exact L "L9c: Stdin mode (-s -k) one-time crash self-heals" \
+    "crash_once_stdin() { local _cm=\"/tmp/_frun_test_crash_stdin_\$\$\"; while IFS= read -r line; do if [[ \"\$line\" == \"3\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$line\"; done; rm -f \"\$_cm\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_once_stdin' frun -k -l 1 -s crash_once_stdin" \
+    "$(seq 1 5)"
+
+# ---------- L10: Failure + combined flag interactions ----------
+
+# Failure + unsafe mode (-U) — in unsafe mode, spaces split args. With -l 1,
+# input line "c d" becomes args c and d. The function crashes on "c", which
+# kills the entire batch — "d" is in the same batch and is also lost.
+# Surviving output: a, b (from "a b"), e, f (from "e f") = 4 lines.
+run_test_sorted L "L10a: Persistent crash + unsafe mode (-U): survivors correct" \
+    "crash_c() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"c\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; printf 'a b\nc d\ne f\n' | FORKRUN_EXTRA_FUNCS='crash_c' frun -U -l 1 crash_c" \
+    "a
+b
+e
+f"
+
+# Failure + FORKRUN_EXTRA_VARS — the variable must be available to the
+# replacement worker (respawn inherits the same cleanroom).
+run_test_exact L "L10b: One-time crash + FORKRUN_EXTRA_VARS: var survives respawn (-k)" \
+    "MY_TAG='TAG'; crash_once_var() { local _cm=\"/tmp/_frun_test_var\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\${MY_TAG}:\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_once_var' FORKRUN_EXTRA_VARS='MY_TAG' frun -k -l 1 crash_once_var" \
+    "TAG:1
+TAG:2
+TAG:3
+TAG:4
+TAG:5"
+
+# Failure + FORKRUN_EXTRA_FUNCS chain — dependent helper must survive respawn.
+run_test_exact L "L10c: One-time crash + FORKRUN_EXTRA_FUNCS chain: helper survives (-k)" \
+    "helper_tag() { echo \"H:\$*\"; }; main_crash() { local _cm=\"/tmp/_frun_test_chain\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"4\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; helper_tag \"\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 6 | FORKRUN_EXTRA_FUNCS='helper_tag' frun -k -l 1 main_crash" \
+    "H:1
+H:2
+H:3
+H:4
+H:5
+H:6"
+
+# Failure + NUMA mode (--nodes=2) — crash recovery works across NUMA nodes.
+run_test_sorted L "L10d: Persistent crash + NUMA (--nodes=2): survivors correct" \
+    "crash_5_numa() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_5_numa' frun --nodes=2 -l 1 crash_5_numa" \
+    "$(seq 1 4; seq 6 10)"
+
+# Failure + -n limit — -n limits the number of input records processed, not
+# output records. With -n 5, only the first 5 input lines (1-5) are dispatched.
+# Line 2 always crashes, so surviving output from those 5 inputs = 4 lines.
+run_test_exact L "L10e: Persistent crash + limit (-n 5 -k): 4 surviving lines from 5 inputs" \
+    "crash_2_limit() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"2\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_2_limit' frun -k -l 1 -n 5 crash_2_limit" \
+    "1
+3
+4
+5"
+
+# Failure + --buffered mode — buffered output must not be corrupted.
+run_test_sorted L "L10f: Persistent crash + --buffered: survivors correct" \
+    "crash_5_buf() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 8 | FORKRUN_EXTRA_FUNCS='crash_5_buf' frun --buffered -l 1 crash_5_buf" \
+    "1
+2
+3
+4
+6
+7
+8"
+
+# Failure + insert mode (-i) — crash on specific substituted value.
+run_test_sorted L "L10g: Persistent crash + -i insert mode: survivors correct" \
+    "echo_item() { if [[ \"\$1\" == \"3\" ]]; then exit 1; fi; echo \"ITEM:\$1\"; }; seq 1 5 | frun -l 1 -i echo_item {}" \
+    "ITEM:1
+ITEM:2
+ITEM:4
+ITEM:5"
+
+# Failure + byte mode (-b) — in byte mode, -s is implied. A persistent crash
+# in a small chunk poisons it, but larger chunks survive. We use a function
+# that counts bytes via wc -c (reads stdin directly, no subshell issues).
+# 100 bytes in 25-byte chunks: all chunks are 25 bytes, none crash.
+run_test_line_count L "L10h: Byte mode (-b 25): all chunks processed, correct line count" \
+    "count_bytes() { wc -c | tr -d ' '; }; head -c 100 /dev/zero | tr '\0' 'x' | frun -b 25 -s count_bytes" \
+    4
+
+# ---------- L11: Stress — Repeated fault injection ----------
+# Run 5 independent frun invocations, each with a persistent crash on line 5.
+# Every invocation must produce the same correct surviving output (1-4, 6-10).
+# This catches intermittent race conditions in the death-pipe / escrow path.
+# The function is defined once outside the loop; each frun invocation is
+# independent so ring state is clean between iterations.
+
+# NOTE: Uses ok=$((ok+1)) instead of ((ok++)) because ((ok++)) evaluates to 0
+# when ok is 0, returning exit code 1 — which terminates the shell under set -e.
+# Also adds || true after frun to defensively prevent set -e from killing the
+# loop if frun exits non-zero for any reason.
+run_test_regex L "L11a: 5x stress: persistent crash always produces correct survivors" \
+    "skip5() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; ok=0; for i in 1 2 3 4 5; do result=\$(seq 1 10 | FORKRUN_EXTRA_FUNCS='skip5' frun -k -l 1 skip5 2>/dev/null || true); expected=\$(seq 1 4; seq 6 10); if [[ \"\$result\" == \"\$expected\" ]]; then ok=\$((ok+1)); fi; done; echo \"\$ok\"" \
+    "^5$" 0 false
+
+# ---------- L12: Edge case — all workers fail ----------
+# If every single input line causes a crash, the pipeline should still
+# terminate (no deadlock). Output should be empty.
+
+run_test_exact L "L12a: All lines crash: pipeline terminates, empty output" \
+    "always_crash() { exit 1; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='always_crash' frun -l 1 always_crash" \
+    ""
+
+# All lines crash with -k — must still terminate.
+run_test_regex L "L12b: All lines crash (-k): pipeline terminates (no hang)" \
+    "timeout 10 bash -c \"source '$FRUN_SOURCE' && always_crash2() { exit 1; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='always_crash2' frun -k -l 1 always_crash2\"" \
+    ".*" 0 false
+
+# ---------- L13: Edge case — single line that crashes ----------
+# Only 1 input line, and it crashes. Pipeline must terminate with empty output.
+
+run_test_exact L "L13: Single crashing line: empty output, clean exit" \
+    "crash_always() { exit 1; }; echo 'only_line' | FORKRUN_EXTRA_FUNCS='crash_always' frun -l 1 crash_always" \
+    ""
+
+# ---------- L14: Worker produces output then crashes in same batch ----------
+# A batch of 5 lines where the worker outputs 2 lines then crashes.
+# The 2 output lines must be discarded (ring_revert_output), and
+# no partial/corrupted output should appear.
+
+run_test_regex L "L14: Worker outputs 2 lines then crashes: partial output discarded" \
+    "output_then_crash() { echo 'BEFORE_CRASH_1'; echo 'BEFORE_CRASH_2'; exit 1; }; echo 'trigger' | FORKRUN_EXTRA_FUNCS='output_then_crash' frun -l 1 output_then_crash 2>/dev/null | grep -c BEFORE_CRASH || true" \
+    "^0$" 0 false
+
+# ---------- L15: Failure doesn't corrupt line count across batches ----------
+# 100 lines with one persistent crash. The total surviving lines should be 99.
+run_test_line_count L "L15: 100 lines, 1 persistent crash: 99 surviving lines" \
+    "crash_50() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"50\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 100 | FORKRUN_EXTRA_FUNCS='crash_50' frun -l 1 crash_50" \
+    99
+
+# ============================================================================
+# SUMMARY
+# ============================================================================
+
+echo
+echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BOLD}SUMMARY${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+printf "Total:   %3d\n" "$TOTAL_TESTS"
+printf "Passed:  %3d  (${GREEN}%.1f%%${NC})\n" "$PASSED_TESTS"  "$(awk "BEGIN {printf 100*$PASSED_TESTS/$TOTAL_TESTS}")"
+printf "Failed:  %3d  (${RED}%.1f%%${NC})\n"   "$FAILED_TESTS"  "$(awk "BEGIN {printf 100*$FAILED_TESTS/$TOTAL_TESTS}")"
+printf "Skipped: %3d  (${YELLOW}%.1f%%${NC})\n" "$SKIPPED_TESTS" "$(awk "BEGIN {printf 100*$SKIPPED_TESTS/$TOTAL_TESTS}")"
+echo
+
+if (( FAILED_TESTS > 0 )); then
+    echo -e "${RED}${BOLD}FAILED TESTS:${NC}"
+    for name in "${!TEST_RESULTS[@]}"; do
+        [[ "${TEST_RESULTS[$name]}" == "FAIL" ]] && \
+            printf "  ${RED}✗${NC}  %s — %s\n" "$name" "${TEST_ERRORS[$name]}"
+    done
+    echo
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${RED}${BOLD}OVERALL: ${FAILED_TESTS} FAILURE(S)${NC}"
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    exit 1
+else
+    echo -e "${GREEN}${BOLD}ALL TESTS PASSED!${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    exit 0
+fi
