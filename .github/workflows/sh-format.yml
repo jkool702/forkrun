@@ -17,7 +17,7 @@ jobs:
         uses: luizm/action-sh-checker@master
         env:
           SHELLCHECK_OPTS: -e SC1004 # exclude some shellcheck warnings.
-          SHFMT_OPTS: -s # arguments to shfmt.
+          SHFMT_OPTS: -s -ln bash -i 4 -ci # arguments to shfmt.
         with:
           sh_checker_checkbashisms_enable: false
           sh_checker_exclude: OLD LEGACY ring_loadables/OLD
