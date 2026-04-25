@@ -280,7 +280,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.1.1';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.1.2';  return 0  ;;
 
             --) shift; break ;;
 
@@ -706,6 +706,7 @@ W_NODE[$3]=$2
         
         local -A trap_ack_pending
         local _poll_timer_cmd=0
+        local _timer_armed=false
 
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
@@ -723,6 +724,7 @@ W_NODE[$3]=$2
             case "$POLL_EVENT" in
                 IGNORE) ;;
                 TIMEOUT)
+                    _timer_armed=false
                     if (( ${#trap_ack_pending[@]} > 0 )); then
                         echo "forkrun [FATAL]: Worker(s) [ ${!trap_ack_pending[@]} ] exited non-zero and EXIT trap did not confirm recovery within 3s grace period. Aborting." >&2
                         ring_abort
@@ -740,6 +742,7 @@ W_NODE[$3]=$2
                     
                     if (( ${#trap_ack_pending[@]} == 0 )); then
                         _poll_timer_cmd=-1 # Cancel timer cleanly
+                        _timer_armed=false
                     fi
                     ;;
                 SPAWN)
@@ -780,8 +783,11 @@ W_NODE[$3]=$2
                             unset 'trap_ack_pending[$wID]'
                         elif (( trap_ack_pending[$wID] > 0 )); then
                             # Death arrived before TRAP_ACK. Arm the 3-second deadline.
-                            _poll_timer_cmd=3000
-                            echo "forkrun [WARN]: Worker $wID (node ${node_idx}) exited with signal status $status. Waiting up to 3s for EXIT trap confirmation." >&2
+                            if ! $_timer_armed; then
+                                _poll_timer_cmd=3000
+                                _timer_armed=true
+                                echo "forkrun [WARN]: Worker $wID (node ${node_idx}) exited with status $status. Waiting up to 3s for EXIT trap confirmation." >&2
+                            fi
                         fi
                         
                         # Unconditionally respawn replacement worker

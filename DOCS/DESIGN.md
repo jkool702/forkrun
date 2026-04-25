@@ -1,6 +1,6 @@
 ### `DESIGN.md`
 
-# forkrun Ring Architecture – Design Overview (v9.8.0-NUMA Golden Master)
+# forkrun Ring Architecture – Design Overview
 
 ## 1. Purpose
 
