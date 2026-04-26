@@ -5336,7 +5336,7 @@ static int ring_poll_main(int argc, char **argv) {
     LOAD_ARRAY(work_arr_name, 2);
 
     // If there is no core infrastructure left to poll, exit
-    if (core_cnt == 0) {
+    if (core_cnt == 0 && g_poll_deadline_ms == 0) {
         free(pfds); free(meta);
         return EXECUTION_FAILURE; 
     }
