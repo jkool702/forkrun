@@ -1849,7 +1849,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
   uint64_t last_global_stolen = 0;
   uint32_t current_buffer_limit = 4; // 3 chunks ahead
-  uint32_t I_meter = 80;
+  uint32_t I_meter = 60;
 
   while (1) {
     NUMA_CHECK_SCANNERS_DONE();
@@ -2093,7 +2093,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (I_meter < 20 && current_buffer_limit > 4) {
             current_buffer_limit--;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
-            I_meter = 40; // Reset
+            I_meter = 60; // Reset
         } else if (I_meter > 100 && current_buffer_limit < 13) {
             current_buffer_limit++;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
