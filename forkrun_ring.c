@@ -2075,28 +2075,33 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
     // TELEMETRY & AUTO-TUNING
     if (current_major >= next_eval_major) {
-        uint64_t g_proc = 0, g_stolen = 0;
-        for (int i = 0; i < num_nodes; i++) {
-            g_proc += atomic_load_relaxed(&state[i].stats_chunks_processed);
-            g_stolen += atomic_load_relaxed(&state[i].stats_chunks_i_stole);
-        }
-        
-        uint64_t d_proc = g_proc - last_global_processed;
-        uint64_t d_stolen = g_stolen - last_global_stolen;
-        last_global_processed = g_proc;
-        last_global_stolen = g_stolen;
 
-        if (d_proc > 0) {
-            uint64_t current_rate = (d_stolen * 1000) / d_proc;
-            ewma_steal_permille = ((ewma_steal_permille * 3) + current_rate) / 4;
+        // ONLY tune dynamically if we are in Line Mode (genuine data variance).
+        // Byte mode has zero data variance; tuning it just amplifies OS scheduling jitter.
+        if (!state[0].mode_byte) {
+            uint64_t g_proc = 0, g_stolen = 0;
+            for (int i = 0; i < num_nodes; i++) {
+                g_proc += atomic_load_relaxed(&state[i].stats_chunks_processed);
+                g_stolen += atomic_load_relaxed(&state[i].stats_chunks_i_stole);
+            }
 
-            if (ewma_steal_permille > 50 && current_buffer_limit < 13) {
-                current_buffer_limit++;
-                atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
-            } 
-            else if (ewma_steal_permille < 10 && current_buffer_limit > 4) {
-                current_buffer_limit--;
-                atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+            uint64_t d_proc = g_proc - last_global_processed;
+            uint64_t d_stolen = g_stolen - last_global_stolen;
+            last_global_processed = g_proc;
+            last_global_stolen = g_stolen;
+
+            if (d_proc > 0) {
+                uint64_t current_rate = (d_stolen * 1000) / d_proc;
+                ewma_steal_permille = ((ewma_steal_permille * 3) + current_rate) / 4;
+
+                if (ewma_steal_permille > 50 && current_buffer_limit < 13) {
+                    current_buffer_limit++;
+                    atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+                }
+                else if (ewma_steal_permille < 10 && current_buffer_limit > 4) {
+                    current_buffer_limit--;
+                    atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+                }
             }
         }
 
