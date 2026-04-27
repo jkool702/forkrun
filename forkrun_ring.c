@@ -880,6 +880,7 @@ struct SharedState {
 
   // NEW: Dynamic Topology-Aware Steal Thresholds
   uint8_t steal_threshold[1024] ALIGNED(CACHE_LINE);
+  uint32_t chunk_buffer_limit; // Dynamic limit (Ingest -> Scanner)
 };
 
 static struct GlobalState *g_state = NULL;
@@ -1488,6 +1489,7 @@ static int ring_init_main(int argc, char **argv) {
     state[n].cfg_limit = parsed_limit;
     state[n].cfg_timeout_us = parsed_timeout;
     state[n].cfg_return_bytes = parsed_return_bytes;
+    atomic_store_relaxed(&state[n].chunk_buffer_limit, 4); // Default to 3 chunks active (limit = 4)
 
     if (byte_mode) {
       state[n].cfg_batch_start = vals[4];
@@ -1845,6 +1847,13 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   } \
 } while(0)
 
+  uint64_t last_global_processed = 0;
+  uint64_t last_global_stolen = 0;
+  uint32_t current_buffer_limit = 4; // 3 chunks ahead
+  uint32_t ewma_steal_permille = 0;
+  uint64_t ewma_chunk_size = chunk_size; // Initialize to our target
+  uint64_t next_eval_major = num_nodes;  // First eval after 1 round of chunks
+
   while (1) {
     NUMA_CHECK_SCANNERS_DONE();
     check_memory_pressure(&total_moved, &next_check, oom_threshold);
@@ -1862,11 +1871,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       }
     }
 
-    // INFINITE QUEUE WAIT GATE
+    // DYNAMIC LIMIT GATING
     while (1) {
       uint64_t h = atomic_load_relaxed(&state[target_node].chunk_queue_head);
       uint64_t t = atomic_load_acquire(&state[target_node].chunk_queue_tail);
-      if ((int64_t)(h - t) < 4)
+      if ((int64_t)(h - t) < current_buffer_limit)
         break;
 
       NUMA_CHECK_SCANNERS_DONE();
@@ -2059,6 +2068,45 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     current_offset += n;
     current_major++;
     total_moved += n;
+
+    // Update EWMA of chunk size (Weight: 7/8 old, 1/8 new)
+    ewma_chunk_size = ((ewma_chunk_size * 7) + n) / 8;
+    if (ewma_chunk_size == 0) ewma_chunk_size = 1; // Safety guard
+
+    // TELEMETRY & AUTO-TUNING
+    if (current_major >= next_eval_major) {
+        uint64_t g_proc = 0, g_stolen = 0;
+        for (int i = 0; i < num_nodes; i++) {
+            g_proc += atomic_load_relaxed(&state[i].stats_chunks_processed);
+            g_stolen += atomic_load_relaxed(&state[i].stats_chunks_i_stole);
+        }
+        
+        uint64_t d_proc = g_proc - last_global_processed;
+        uint64_t d_stolen = g_stolen - last_global_stolen;
+        last_global_processed = g_proc;
+        last_global_stolen = g_stolen;
+
+        if (d_proc > 0) {
+            uint64_t current_rate = (d_stolen * 1000) / d_proc;
+            ewma_steal_permille = ((ewma_steal_permille * 3) + current_rate) / 4;
+
+            if (ewma_steal_permille > 50 && current_buffer_limit < 13) {
+                current_buffer_limit++;
+                atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+            } 
+            else if (ewma_steal_permille < 10 && current_buffer_limit > 4) {
+                current_buffer_limit--;
+                atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+            }
+        }
+
+        // Calculate the next evaluation threshold dynamically
+        uint64_t N = 1 + (1048576 / ewma_chunk_size);
+        if (N > 4) N = 4;
+        uint64_t eval_gap = (uint64_t)num_nodes * N;
+        if (eval_gap < 4) eval_gap = 4;
+        next_eval_major = current_major + eval_gap;
+    }
   }
 
 ingest_done:
@@ -2332,8 +2380,13 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       bool limit_lines = (local_scan_idx > limit) &&                           \
                          ((local_scan_idx - limit) >= max_ahead);              \
                                                                                \
-      bool limit_chunks = is_numa && (cb_head >= 3) &&                         \
-                          (limit < chunk_bounds[(cb_head - 3) & 3]);           \
+      uint32_t dyn_limit = atomic_load_relaxed(&state[0].chunk_buffer_limit);  \
+      if (dyn_limit < 4) dyn_limit = 4;                                        \
+      if (dyn_limit > 16) dyn_limit = 16;                                      \
+      uint32_t scanner_shield = dyn_limit - 1;                                 \
+                                                                               \
+      bool limit_chunks = is_numa && (cb_head >= scanner_shield) &&            \
+                      (limit < chunk_bounds[(cb_head - scanner_shield) & 15]); \
                                                                                \
       if (!limit_lines && !limit_chunks)                                       \
         break;                                                                 \
@@ -2592,7 +2645,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   uint64_t first_wait_ts = 0;
   uint64_t limit_items = local_state->cfg_limit;
 
-  uint64_t chunk_bounds[4] = {0};
+  uint64_t chunk_bounds[16] = {0};
   uint32_t cb_head = 0;
 
   atomic_store_relaxed(&local_state->write_idx, 0);
@@ -2851,7 +2904,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         UNIFIED_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start,
                               false, false);
         if (is_numa) {
-          chunk_bounds[cb_head & 3] = local_scan_idx;
+          chunk_bounds[cb_head & 15] = local_scan_idx;
           cb_head++;
         }
         UNIFIED_ADAPTIVE_COMMIT(true);
@@ -3054,7 +3107,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           if (is_numa) {
             minor_idx++;
             if (is_last) {
-              chunk_bounds[cb_head & 3] = local_scan_idx;
+              chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
           }
@@ -3240,7 +3293,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           if (is_numa) {
             minor_idx++;
             if (is_last) {
-              chunk_bounds[cb_head & 3] = local_scan_idx;
+              chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
           }
@@ -3263,7 +3316,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       UNIFIED_SCANNER_FLUSH(pending_lines, stride, true, meta->major_id,
                             minor_idx, current_p_offset, return_bytes, false);
       minor_idx++;
-      chunk_bounds[cb_head & 3] = local_scan_idx;
+      chunk_bounds[cb_head & 15] = local_scan_idx;
       cb_head++;
       batch_start = current_p_offset;
       pending_lines = 0;
