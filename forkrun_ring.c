@@ -1847,12 +1847,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   } \
 } while(0)
 
-  uint64_t last_global_processed = 0;
   uint64_t last_global_stolen = 0;
   uint32_t current_buffer_limit = 4; // 3 chunks ahead
-  uint32_t ewma_steal_permille = 0;
-  uint64_t ewma_chunk_size = chunk_size; // Initialize to our target
-  uint64_t next_eval_major = num_nodes;  // First eval after 1 round of chunks
+  uint32_t I_meter = 80;
 
   while (1) {
     NUMA_CHECK_SCANNERS_DONE();
@@ -2069,48 +2066,39 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     current_major++;
     total_moved += n;
 
-    // Update EWMA of chunk size (Weight: 7/8 old, 1/8 new)
-    ewma_chunk_size = ((ewma_chunk_size * 7) + n) / 8;
-    if (ewma_chunk_size == 0) ewma_chunk_size = 1; // Safety guard
+    // TELEMETRY & AUTO-TUNING (Per-chunk evaluation)
+    if (!state[0].mode_byte) {
+        uint64_t current_global_stolen = 0;
+        for (int i = 0; i < num_nodes; i++) {
+            current_global_stolen += atomic_load_relaxed(&state[i].stats_chunks_i_stole);
+        }
+        
+        // S is 1 if any node stole a chunk since the last loop, 0 otherwise.
+        uint64_t S = (current_global_stolen > last_global_stolen) ? 1 : 0;
+        last_global_stolen = current_global_stolen;
 
-    // TELEMETRY & AUTO-TUNING
-    if (current_major >= next_eval_major) {
-
-        // ONLY tune dynamically if we are in Line Mode (genuine data variance).
-        // Byte mode has zero data variance; tuning it just amplifies OS scheduling jitter.
-        if (!state[0].mode_byte) {
-            uint64_t g_proc = 0, g_stolen = 0;
-            for (int i = 0; i < num_nodes; i++) {
-                g_proc += atomic_load_relaxed(&state[i].stats_chunks_processed);
-                g_stolen += atomic_load_relaxed(&state[i].stats_chunks_i_stole);
-            }
-
-            uint64_t d_proc = g_proc - last_global_processed;
-            uint64_t d_stolen = g_stolen - last_global_stolen;
-            last_global_processed = g_proc;
-            last_global_stolen = g_stolen;
-
-            if (d_proc > 0) {
-                uint64_t current_rate = (d_stolen * 1000) / d_proc;
-                ewma_steal_permille = ((ewma_steal_permille * 3) + current_rate) / 4;
-
-                if (ewma_steal_permille > 50 && current_buffer_limit < 13) {
-                    current_buffer_limit++;
-                    atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
-                }
-                else if (ewma_steal_permille < 10 && current_buffer_limit > 4) {
-                    current_buffer_limit--;
-                    atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
-                }
-            }
+        // Apply bounded IIR filter (Window = 32)
+        if (current_buffer_limit <= 4) {
+            // Floor bound: If at min limit, Base is 20 so it cannot drop below 20.
+            I_meter = ((I_meter * 31) + 20 + (980 * S)) >> 5;
+        } else if (current_buffer_limit >= 13) {
+            // Ceiling bound: If at max limit, Max Penalty is 100 so it cannot exceed 100.
+            I_meter = ((I_meter * 31) + (100 * S)) >> 5;
+        } else {
+            // Normal operation: approaches 0 on clean runs, 1000 on continuous steals.
+            I_meter = ((I_meter * 31) + (1000 * S)) >> 5;
         }
 
-        // Calculate the next evaluation threshold dynamically
-        uint64_t N = 1 + (1048576 / ewma_chunk_size);
-        if (N > 4) N = 4;
-        uint64_t eval_gap = (uint64_t)num_nodes * N;
-        if (eval_gap < 4) eval_gap = 4;
-        next_eval_major = current_major + eval_gap;
+        // Trigger buffer limits
+        if (I_meter < 20 && current_buffer_limit > 4) {
+            current_buffer_limit--;
+            atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+            I_meter = 40; // Reset
+        } else if (I_meter > 100 && current_buffer_limit < 13) {
+            current_buffer_limit++;
+            atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+            I_meter = 60; // Reset
+        }
     }
   }
 
