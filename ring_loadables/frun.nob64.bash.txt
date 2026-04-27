@@ -9,7 +9,7 @@ fi
 frun() {
 ## bash orchestrator function for forkrun, providing extremely fast shell streaming parallelization 
 # USAGE:  . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
-# FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
+# FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>] [-E] [-v] [-h]
 #  HELP:  . frun.bash && frun --help 
 (
     # 1. WRAPPER LOGIC (Current Shell)
@@ -116,7 +116,7 @@ frun __exec__ "$@"
                 cat <<'EOF' >&2
 
 USAGE: . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
-FLAGS: [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
+FLAGS: [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>] [-E] [-v] [-h]
 HELP:  . frun.bash && frun --help 
 
 EOF
@@ -166,7 +166,24 @@ EOF
   -V, --version         : Prints forkrun version number
   --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
 
+### ERROR HANDLING & RETRIES
+  -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
+  +E, --no-retry-nonzero-exit : (DEFAULT) Deactivate auto-retry for non-zero exit codes.
+  *Note on subshells*: When parallelizing functions that spawn subshells without -E active,
+  failures must be manually guarded to return 200 to trigger the retry machinery (along with
+  137 SIGKILL and 139 SIGSEGV). To protect the entire subshell, use the following pattern:
+      ff() {
+        # ...
+        (
+          # all subshell cmds
+          true   # <--- ADD THIS AT THE VERY END OF THE SUBSHELL
+        ) || return 200
+        # ...
+      }
+
 ### ENVIRONMENT VARS
+
+- FORKRUN_RETRY_LIMIT   : Controls how many times a batch will be retried before it is declared poisoned. 0 means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
 
 - FORKRUN_EXTRA_FUNCS   : Use this to specify required sub-functions to pass into frun's environment.
   - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`.
@@ -189,6 +206,8 @@ EOF
     verbose_flag=false
     stats_flag=false
     dry_run_flag=false
+    is_func_flag=false
+    retry_nonzero_exit_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
 
@@ -215,6 +234,10 @@ EOF
 
             -i|--insert)                       insert_args_flag=true  ;;
             -I|--insert-id|--INSERT|--INSERT-ID) insert_id_flag=true  ;;
+
+            -E|--retry-nonzero-exit)    retry_nonzero_exit_flag=true  ;;
+            +E|--no-retry-nonzero-exit) retry_nonzero_exit_flag=false ;;
+
 
             # --- LIMIT (-n 100) ---
             @(-n|--limit)?(?([= $'\t'])+([0-9+-])))
@@ -290,8 +313,8 @@ EOF
     done
     unset arg
     # --- AST MANIPULATION FOR BASH FUNCTIONS ---
-    retry_errors_flag=false
-    if [[ -n "$1" ]] && declare -F "$1" >/dev/null 2>&1; then
+    declare -F "$1" >/dev/null 2>&1 && is_func_flag=true
+    if [[ -n "$1" ]] && ${is_func_flag}; then
         local func_def body body_start body_trimmed test_body
         func_def="$(declare -f "$1")"
 
@@ -315,7 +338,7 @@ EOF
             if ( "${BASH:-bash}" -O extglob -n -c "function _frun_syntax_check() {"$'\n'"${test_body}"$'\n'"}" ) >/dev/null 2>&1; then
                 # It is a verified global subshell!
                 # Strip the last ')' and inject 'true' safely inside it.
-                retry_errors_flag=true
+                retry_nonzero_exit_flag=true
                 body_start="${body_trimmed%?}"
                 eval "${func_def%%\{*}"'{'$'\n'"${body_start}"$'\n''true'$'\n'')'$'\n''}'
             fi
@@ -573,7 +596,13 @@ toc() { :; }
                 # Note: ring_splice "close" closes $pw internally. We only close $pr.
                 ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || exec {pw}>&-
                 '"$cmdline_str"' <&$pr'
-            ${retry_errors_flag} && pCode+=' || exit $?'
+            if ${retry_nonzero_exit_flag}; then
+                pCode+=' || exit $?'
+            elif ${is_func_flag}; then
+                pCode+='
+                ret=$?
+                (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+            fi
             pCode+='
                 exec {pr}<&-
             else
@@ -581,7 +610,13 @@ toc() { :; }
                 # Close both FDs so they do not leak into the pipeline
                 (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
                 ( ring_splice $fd_read 1 "" $REPLY "close" ) | ( '"$cmdline_str"' )'
-            ${retry_errors_flag} && pCode+=' || exit $?'
+            if ${retry_nonzero_exit_flag}; then
+                pCode+=' || exit $?'
+            elif ${is_func_flag}; then
+                pCode+='
+                ret=$?
+                (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+            fi
             pCode+='
             fi'
 
@@ -630,7 +665,15 @@ toc() { :; }
             ring_ack_str+=' ${fd_out[$RING_WID]}'
         }
 
-        ${retry_errors_flag} && ! ${stdin_flag} && pCode+=' || exit $?'
+       ${stdin_flag} || {
+           if ${retry_nonzero_exit_flag}; then
+                pCode+=' || exit $?'
+            elif ${is_func_flag}; then
+                pCode+='
+            ret=$?
+            (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+            fi
+        }
 
         worker_func_src='spawn_worker() {
 (
@@ -647,10 +690,11 @@ toc() { :; }
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
     
     if (( status != 0 && RING_BATCH_SLOTS > 0 )); then
-        (( RING_NUM_KILLS++ ))
-        if [[ "$order_mode" != "realtime" && -n "${fd_out[$RING_WID]:-}" ]]; then
-            ring_revert_output "${fd_out[$RING_WID]}"
-        fi
+        (( RING_NUM_KILLS++ ))'
+        [[ "$order_mode" != "realtime" ]] && worker_func_src+='
+        [[ -n "${fd_out[$RING_WID]:-}" ]] && ring_revert_output "${fd_out[$RING_WID]}"
+        '
+        worker_func_src+='
         ring_escrow_put "$RING_NODE_ID" "$RING_BATCH_IDX" "$RING_BATCH_SLOTS" "$RING_NUM_KILLS"
     fi
     
@@ -665,13 +709,12 @@ toc() { :; }
     ID="$1" # ID is passed purely for user payload compatibility/insertion
     RING_BATCH_SLOTS=0
     RING_NUM_KILLS=0
-    
-    # Initialize the output tracking for this specific worker slot
-    if [[ "$order_mode" != "realtime" && -n "${fd_out[$RING_WID]:-}" ]]; then
-        ring_ack_init "${fd_out[$RING_WID]}"
-    fi
     '
-       ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
+   [[ "$order_mode" != "realtime" ]] && worker_func_src+='
+    # Initialize the output tracking for this specific worker slot
+    [[ -n "${fd_out[$RING_WID]:-}" ]] && ring_ack_init "${fd_out[$RING_WID]}"
+    '
+        ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
         worker_func_src+='shift 4
     ring_worker inc $fd_read
@@ -682,7 +725,7 @@ toc() { :; }
         else
             if [[ "$REPLY" != "0" ]]; then
                 '
-         ${insert_id_flag:-false} && worker_func_src+='((W_BATCH++))
+        ${insert_id_flag:-false} && worker_func_src+='((W_BATCH++))
                 '
         worker_func_src+="${pCode}"'
             fi
@@ -707,6 +750,7 @@ W_NODE[$3]=$2
         local -A trap_ack_pending
         local _poll_timer_cmd=0
         local _timer_armed=false
+        local _ret_val=0
 
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
@@ -728,7 +772,7 @@ W_NODE[$3]=$2
                     if (( ${#trap_ack_pending[@]} > 0 )); then
                         echo "forkrun [FATAL]: Worker(s) [ ${!trap_ack_pending[@]} ] exited non-zero and EXIT trap did not confirm recovery within 3s grace period. Aborting." >&2
                         ring_abort
-                        exit 1
+                        _ret_val=2
                     fi
                     ;;
                 TRAP_ACK)
@@ -808,7 +852,7 @@ W_NODE[$3]=$2
                     if (( status != 0 )); then
                         echo "forkrun [FATAL]: Scanner $sID exited with error status $status. Aborting to prevent data loss." >&2
                         ring_abort
-                        exit 1
+                        _ret_val=1
                     fi
                     
                     exec {fd_scan_death_r[$sID]}<&-
@@ -834,7 +878,7 @@ W_NODE[$3]=$2
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
 
     } {fd_write}>"/proc/${BASHPID}/fd/${ingress_memfd}" {fd_scan}<"/proc/${BASHPID}/fd/${ingress_memfd}" {fd0}<&0 {fd1}>&1 {fd2}>&2
-    exit 0
+    return $_ret_val
   ) {fd00}<&0 {fd11}>&1 {fd22}>&2
 }
 
@@ -851,6 +895,7 @@ _frun_complete() {
     opts="-k --keep-order --ordered -u --unbuffered --realtime --buffered --atomic \
           -U --unsafe +U --safe -s --stdin +s --no-stdin -v --verbose +v --no-verbose \
           -z --null -N --dry-run -i --insert -I --insert-id -n --limit -L --exact-lines \
+          -E --retry-nonzero-exit +E --no-retry-nonzero-exit \
           -l --lines --batchsize -b --bytes -j -P --workers -t --timeout --nodes --numa \
           -o --order -d --delim --delimiter -h --help --usage"
 
@@ -1329,6 +1374,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()   # removed base64
+declare -A b64=()   # remove base64
 
 _forkrun_bootstrap_setup --force

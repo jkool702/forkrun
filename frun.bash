@@ -9,7 +9,7 @@ fi
 frun() {
 ## bash orchestrator function for forkrun, providing extremely fast shell streaming parallelization 
 # USAGE:  . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
-# FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
+# FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>] [-E] [-v] [-h]
 #  HELP:  . frun.bash && frun --help 
 (
     # 1. WRAPPER LOGIC (Current Shell)
@@ -116,7 +116,7 @@ frun __exec__ "$@"
                 cat <<'EOF' >&2
 
 USAGE: . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
-FLAGS: [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>][-v] [-h]
+FLAGS: [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>] [-E] [-v] [-h]
 HELP:  . frun.bash && frun --help 
 
 EOF
@@ -166,7 +166,24 @@ EOF
   -V, --version         : Prints forkrun version number
   --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
 
+### ERROR HANDLING & RETRIES
+  -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
+  +E, --no-retry-nonzero-exit : (DEFAULT) Deactivate auto-retry for non-zero exit codes.
+  *Note on subshells*: When parallelizing functions that spawn subshells without -E active,
+  failures must be manually guarded to return 200 to trigger the retry machinery (along with
+  137 SIGKILL and 139 SIGSEGV). To protect the entire subshell, use the following pattern:
+      ff() {
+        # ...
+        (
+          # all subshell cmds
+          true   # <--- ADD THIS AT THE VERY END OF THE SUBSHELL
+        ) || return 200
+        # ...
+      }
+
 ### ENVIRONMENT VARS
+
+- FORKRUN_RETRY_LIMIT   : Controls how many times a batch will be retried before it is declared poisoned. 0 means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
 
 - FORKRUN_EXTRA_FUNCS   : Use this to specify required sub-functions to pass into frun's environment.
   - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`.
@@ -878,6 +895,7 @@ _frun_complete() {
     opts="-k --keep-order --ordered -u --unbuffered --realtime --buffered --atomic \
           -U --unsafe +U --safe -s --stdin +s --no-stdin -v --verbose +v --no-verbose \
           -z --null -N --dry-run -i --insert -I --insert-id -n --limit -L --exact-lines \
+          -E --retry-nonzero-exit +E --no-retry-nonzero-exit \
           -l --lines --batchsize -b --bytes -j -P --workers -t --timeout --nodes --numa \
           -o --order -d --delim --delimiter -h --help --usage"
 

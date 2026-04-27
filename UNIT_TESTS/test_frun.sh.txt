@@ -888,7 +888,7 @@ run_test "Worker transient failure mid-batch" \
 
 # Test 3: Worker command crashes once mid-batch
 # If a specific input crashes only once it should recover and the rest of the file should still process.
-\rm ./.crash
+[[ -f ./.crash ]] && \rm ./.crash &>/dev/null
 run_test "Worker one-time transient failure mid-batch" \
   "crash_func() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && ! [[ -f ./.crash  ]]; then : >./.crash; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 -k crash_func" \
   "1
@@ -896,7 +896,7 @@ run_test "Worker one-time transient failure mid-batch" \
 3
 4
 5"
-\rm ./.crash
+\rm ./.crash &>/dev/null
 
 print_section "Misc additional tests"
 

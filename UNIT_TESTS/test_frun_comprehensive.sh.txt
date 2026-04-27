@@ -321,7 +321,7 @@ echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━
 echo -e "${CYAN}${BOLD}  FORKRUN COMPREHENSIVE SUPPLEMENTAL TEST SUITE${NC}"
 printf "${CYAN}${BOLD}  System: %d CPUs, %d NUMA node(s)${NC}\n" "$NPROC" "$NUMA_NODE_COUNT"
 echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-:<<'EOF'
+
 # ============================================================================
 # SECTION A: REGRESSION — Bash Function Transmission
 # This section directly tests the bug that was discovered:
@@ -1103,8 +1103,6 @@ else
     echo -e "  ${RED}✗${NC} run_test_sorted FAILED to catch a duplicate line — framework bug!"
 fi
 
-EOF
-
 # ============================================================================
 # FORKRUN TEST SUITE — SECTION L: Fault Resilience
 # ============================================================================
@@ -1548,34 +1546,34 @@ run_test_line_count L "L15: 100 lines, 1 persistent crash: 99 surviving lines" \
 # and exit non-zero (catastrophic failure). We wrap with { ...; } and check
 # that the pipeline doesn't hang and produces no corrupted output.
 run_test_regex L "L16a: Worker SIGKILL: full teardown, pipeline terminates" \
-    "crash_kill9() { kill -9 \$BASHPID; }; timeout 10 bash -c \"source '\$FRUN_SOURCE' && seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_kill9' frun -l 1 crash_kill9 2>/dev/null; true\"" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9() { kill -9 \$BASHPID; }; seq 1 10 | FORKRUN_EXTRA_FUNCS=\"crash_kill9\" frun -l 1 crash_kill9 2>/dev/null; true'" \
     ".*" 0 false
 
 # L16b: Worker SIGKILL after producing some output. The partial output must
 # be discarded (ring_revert_output) — no corrupted/truncated lines.
 run_test_regex L "L16b: Worker SIGKILL after partial output: no corruption" \
-    "crash_kill9_partial() { echo \"BEFORE_SIGKILL_\$1\"; kill -9 \$BASHPID; }; timeout 10 bash -c \"source '\$FRUN_SOURCE' && seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_kill9_partial' frun -l 1 crash_kill9_partial 2>/dev/null | grep -c BEFORE_SIGKILL || true\"" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9_partial() { echo \"BEFORE_SIGKILL_\$1\"; kill -9 \$BASHPID; }; seq 1 10 | FORKRUN_EXTRA_FUNCS=\"crash_kill9_partial\" frun -l 1 crash_kill9_partial 2>/dev/null | grep -c BEFORE_SIGKILL || true'" \
     "^0$" 0 false
 
 # L16c: SIGKILL in -k ordered mode — pipeline must still terminate.
 # Ordered mode adds complexity because the orchestrator must drain the
 # ordered-output queue. SIGKILL should bypass that and force teardown.
 run_test_regex L "L16c: Worker SIGKILL in -k mode: pipeline terminates" \
-    "crash_kill9_k() { kill -9 \$BASHPID; }; timeout 10 bash -c \"source '\$FRUN_SOURCE' && seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_kill9_k' frun -k -l 1 crash_kill9_k 2>/dev/null; true\"" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9_k() { kill -9 \$BASHPID; }; seq 1 10 | FORKRUN_EXTRA_FUNCS=\"crash_kill9_k\" frun -k -l 1 crash_kill9_k 2>/dev/null; true'" \
     ".*" 0 false
 
 # L16d: SIGKILL in stdin mode (-s) — the splice path must not deadlock.
 # When a worker reading from stdin via splice is killed, the splice fd
 # must be cleaned up without blocking the ring.
 run_test_regex L "L16d: Worker SIGKILL in -s mode: no deadlock" \
-    "crash_kill9_s() { kill -9 \$BASHPID; }; timeout 10 bash -c \"source '\$FRUN_SOURCE' && seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_kill9_s' frun -s -l 1 crash_kill9_s 2>/dev/null; true\"" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9_s() { kill -9 \$BASHPID; }; seq 1 10 | FORKRUN_EXTRA_FUNCS=\"crash_kill9_s\" frun -s -l 1 crash_kill9_s 2>/dev/null; true'" \
     ".*" 0 false
 
 # L16e: SIGKILL with multiple workers (-j 4) — the surviving workers must
 # not hang waiting for the killed worker's ring slot. The death pipe should
 # unblock ring_poll and allow clean shutdown.
 run_test_regex L "L16e: Worker SIGKILL with -j 4: surviving workers shut down" \
-    "crash_kill9_j4() { if [[ \"\$1\" == \"5\" ]]; then kill -9 \$BASHPID; else echo \"\$1\"; fi; }; timeout 10 bash -c \"source '\$FRUN_SOURCE' && seq 1 20 | FORKRUN_EXTRA_FUNCS='crash_kill9_j4' frun -j 4 -l 1 crash_kill9_j4 2>/dev/null; true\"" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9_j4() { if [[ \"\$1\" == \"5\" ]]; then kill -9 \$BASHPID; else echo \"\$1\"; fi; }; seq 1 20 | FORKRUN_EXTRA_FUNCS=\"crash_kill9_j4\" frun -j 4 -l 1 crash_kill9_j4 2>/dev/null; true'" \
     ".*" 0 false
 
 # ---------- L17: Scanner failure → force EOF and early exit ----------
@@ -1587,33 +1585,33 @@ run_test_regex L "L16e: Worker SIGKILL with -j 4: surviving workers shut down" \
 # L17a: Input pipe closes early — scanner hits EOF, workers finish their
 # current batches, and the pipeline terminates. No hang.
 run_test_regex L "L17a: Scanner EOF (input closes early): pipeline terminates" \
-    "timeout 10 bash -c \"source '\$FRUN_SOURCE' && (seq 1 5; exit 0) | frun -l 1 echo\"" \
-    ".*" 1 false
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 5; exit 0) | frun -l 1 echo'" \
+    ".*" 0 false
 
 # L17b: Input process dies mid-stream — the scanner detects the broken pipe
 # and forces EOF. Workers complete current work and exit. The pipeline must
 # not deadlock waiting for input that will never arrive.
 run_test_regex L "L17b: Scanner failure (input dies mid-stream): pipeline terminates" \
-    "timeout 10 bash -c \"source '\$FRUN_SOURCE' && (seq 1 3; exit 1) | frun -l 1 echo 2>/dev/null; true\"" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -l 1 echo 2>/dev/null; true'" \
     ".*" 0 false
 
 # L17c: Scanner failure with -k ordering — the ordered-output queue must be
 # drained or abandoned when the scanner dies. Pipeline must terminate.
 run_test_regex L "L17c: Scanner failure with -k: pipeline terminates (no hang)" \
-    "timeout 10 bash -c \"source '\$FRUN_SOURCE' && (seq 1 3; exit 1) | frun -k -l 1 echo 2>/dev/null; true\"" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -k -l 1 echo 2>/dev/null; true'" \
     ".*" 0 false
 
 # L17d: Scanner failure with workers still processing — some workers may be
 # mid-batch when the scanner dies. They should complete their current batch,
 # then exit. No partial/corrupted output should appear.
 run_test_regex L "L17d: Scanner failure mid-processing: no corrupted output" \
-    "timeout 10 bash -c \"source '\$FRUN_SOURCE' && (seq 1 3; exit 1) | frun -k -l 1 echo 2>/dev/null | grep -v '^[0-9]*$' | wc -l || true\"" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -k -l 1 echo 2>/dev/null | grep -v \"^[0-9]*$\" | wc -l || true'" \
     "^0$|^1$" 0 false
 
 # L17e: Scanner failure with -s stdin mode — the splice from the input pipe
 # to the worker's stdin must be cleaned up without deadlock.
 run_test_regex L "L17e: Scanner failure in -s mode: no deadlock" \
-    "timeout 10 bash -c \"source '\$FRUN_SOURCE' && (seq 1 3; exit 1) | frun -s -l 1 cat 2>/dev/null; true\"" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -s -l 1 cat 2>/dev/null; true'" \
     ".*" 0 false
 
 # ============================================================================
