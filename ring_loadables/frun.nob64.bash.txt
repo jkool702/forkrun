@@ -954,7 +954,7 @@ _forkrun_get_arch() {
 
 
 _forkrun_base64_to_file() {
-    local b b0 b1 k kk fd0 fd1 out0 out outC outN outF outB outFile nnSum nnSum_md5 nnSum_sha256 noVerifyFlag doneFlag IFS extglobState
+    local b b0 b1 k kk fd0 fd1 out0 out outC outN outF outB outFile nnSum nnSum_md5 nnSum_sha256 noVerifyFlag doneFlag IFS extglobState legacyFlag noCompressFlag
     local -a compressV compressI outA
     #local LC_ALL=C
     local -I extglobState
@@ -970,6 +970,13 @@ _forkrun_base64_to_file() {
         fi
     }
     shopt -s extglob
+
+    if [[ "${1}" == '--force' ]]; then
+        noVerifyFlag=true
+        shift 1
+    else
+        noVerifyFlag=false
+    fi
 
     [[ -t 0 ]] && {
         printf '\nERROR: pass the base64-encoded sequence on stdin. ABORTING.\n'  >&2
@@ -989,7 +996,22 @@ _forkrun_base64_to_file() {
 
     # read dataheader and data
     read -r -d $'\034' -u "${fd0}" out0
-    read -r -d '' -u "${fd0}" out
+    read -r -d $'\035' -u "${fd0}" out
+    if [[ -z ${out} ]]; then
+        # first char of data section was $'\035' --> using standard base64(+gzip)
+        legacyFlag=false
+        read -r -d $'\036' -u "${fd0}" out
+        if [[ -z ${out} ]]; then
+            # second char of data section was $'\036' --> payload was gzip compressed
+            read -r -d $'' -u "${fd0}" out
+            noCompressFlag=false
+        else
+            noCompressFlag=true
+        fi
+    else
+        legacyFlag=true
+    fi
+
     exec {fd0}>&-
 
     if [[ -z ${out} ]]; then
@@ -1002,12 +1024,11 @@ _forkrun_base64_to_file() {
         nnSum=0
     else
         # parse the data header to get various parameters
-        noVerifyFlag=false
         {
             read -r outN outB
             read -r nnSum_md5
             read -r nnSum_sha256
-            mapfile -t compressV
+            ${legacyFlag} && mapfile -t compressV
 
         } <<<"${out0}"
 
@@ -1020,8 +1041,9 @@ _forkrun_base64_to_file() {
             noVerifyFlag=true
         fi
 
+
         # restore full base64 sequence
-        (( ${#compressV[@]} > 0 )) && {
+        ${legacyFlag} && (( ${#compressV[@]} > 0 )) && {
             compressI=('~' '`' '!' '#' '$' '%' '^' '&' '*' '(' ')' '-' '+' '=' '{' '[' '}' ']' ':' ';' '<' ',' '>' '.' '?' '/' '|')
 
             for (( kk=${#compressV[@]}-1; kk>=0; kk-- )); do
@@ -1029,6 +1051,8 @@ _forkrun_base64_to_file() {
             done
         }
     fi
+
+    if ${legacyFlag}; then
 
     # recreate binary from base64 sequence
     # this generates outF which is a string that contains the hex values formatted like: \x00\xFF\x9A\x...'
@@ -1052,15 +1076,25 @@ _forkrun_base64_to_file() {
     done <<<"${out}"
 
     printf '%b' "${outF}" >&"${fd1}"
+
+    elif ${noCompressFlag}; then
+        # using standard base64, no compression
+        base64 -d <<<"${out}" >&"${fd1}"
+
+    else
+        # using standard base64 + gzip compression
+        base64 -d <<<"${out}" | gzip -d -c >&"${fd1}"
+    fi
+
     exec {fd1}>&-
 
     # verify output file and make it executable
     if [[ ${outFile} ]] && [[ -f "${outFile}" ]]; then
         chmod +x "${outFile}"
         (( outB > 0 )) && type -p truncate &>/dev/null && truncate --size="${outB}" "${outFile}"
-        ${noVerifyFlag} || [[ "${nnSum}" == '0' ]] || { nnSumF="$("${nnSum%%\:*}" "${outFile}")"; nnSumF="${nnSumF%% *}"; grep -qF "${nnSum#*\:}" <<<"${nnSumF}" || { printf '\n\nWARNING FOR EXTRACTED LOADABLE:\n"%s"\n\nCHECKSUM DOES NOT MATCH EXPECTED VALUE!!!\nDO NOT CONTINUE UNLESS THIS WAS EXPECTED!!!\n\nEXPECTED: %s\nGOT: %s\n\nTHIS CODE WILL NOW REMOVE THE EXTRACTTED .SO FILE AND ABORT\nTO FORCE KEEPING THE [POTENTIALLY CORRUPT] .SO FILE, RE-RUN THIS CODE WITH THE "--force" FLAG'  "${outFile:-\(STDOUT\)}" "${nnSum}" "${nnSumF}" >&2; read -r -u ${fd_sleep} -t 2; \rm -f "${outFile}"; return 1; }; };
-    elif ! { ${noVerifyFlag} || [[ "${nnSum}" == '0' ]]; }; then
-        nnSumF="$("${nnSum%%\:*}" <(printf '%b' "${outF}"))"; nnSumF="${nnSumF%% *}"; grep -qF "${nnSum#*\:}" <<<"${nnSumF}" || { printf '\n\nWARNING FOR EXTRACTED LOADABLE:\n"%s"\n\nCHECKSUM DOES NOT MATCH EXPECTED VALUE!!!\nDO NOT CONTINUE UNLESS THIS WAS EXPECTED!!!\n\nEXPECTED: %s\nGOT: %s\n\nTHIS CODE WILL NOW REMOVE THE EXTRACTTED .SO FILE AND ABORT\nTO FORCE KEEPING THE [POTENTIALLY CORRUPT] .SO FILE, RE-RUN THIS CODE WITH THE "--force" FLAG'  "${outFile:-\(STDOUT\)}" "${nnSum}" "${nnSumF}" >&2; read -r -u ${fd_sleep} -t 2; \rm -f "${outFile}"; return 1; };
+        ${noVerifyFlag} || [[ "${nnSum}" == '0' ]] || { nnSumF="$("${nnSum%%\:*}" "${outFile}")"; nnSumF="${nnSumF%% *}"; grep -qF "${nnSum#*\:}" <<<"${nnSumF}" || { printf '\n\nWARNING FOR EXTRACTED LOADABLE:\n"%s"\n\nCHECKSUM DOES NOT MATCH EXPECTED VALUE!!!\nDO NOT CONTINUE UNLESS THIS WAS EXPECTED!!!\n\nEXPECTED: %s\nGOT: %s\n\nTHIS CODE WILL NOW REMOVE THE EXTRACTED .SO FILE AND ABORT\nTO FORCE KEEPING THE [POTENTIALLY CORRUPT] .SO FILE, RE-RUN THIS CODE WITH THE "--force" FLAG'  "${outFile:-\(STDOUT\)}" "${nnSum}" "${nnSumF}" >&2; read -r -u ${fd_sleep} -t 2; \rm -f "${outFile}"; return 1; }; };
+    elif ! { ${noVerifyFlag} || [[ "${nnSum}" == '0' ]] || ! ${legacyFlag}; }; then
+        nnSumF="$("${nnSum%%\:*}" <(printf '%b' "${outF}"))"; nnSumF="${nnSumF%% *}"; grep -qF "${nnSum#*\:}" <<<"${nnSumF}" || { printf '\n\nWARNING FOR EXTRACTED LOADABLE:\n"%s"\n\nCHECKSUM DOES NOT MATCH EXPECTED VALUE!!!\nDO NOT CONTINUE UNLESS THIS WAS EXPECTED!!!\n\nEXPECTED: %s\nGOT: %s\n\nTHIS CODE WILL NOW REMOVE THE EXTRACTED .SO FILE AND ABORT\nTO FORCE KEEPING THE [POTENTIALLY CORRUPT] .SO FILE, RE-RUN THIS CODE WITH THE "--force" FLAG'  "${outFile:-\(STDOUT\)}" "${nnSum}" "${nnSumF}" >&2; read -r -u ${fd_sleep} -t 2; \rm -f "${outFile}"; return 1; };
     fi
 
     } {fd1}>&1
@@ -1248,8 +1282,9 @@ _forkrun_file_to_base64() {
     shopt -s extglob
     # parse inputs
 
-    quoteFlag=false
-    noCompressFlag=false
+    local quoteFlag=false
+    local noCompressFlag=false
+    local legacyFlag=false
 
     while true; do
         case "${1}" in
@@ -1261,6 +1296,9 @@ _forkrun_file_to_base64() {
                 noCompressFlag=true
                 shift 1
             ;;
+            -l|--legacy)
+                legacyFlag=true
+            ;;
             *) break ;;
         esac
     done
@@ -1270,6 +1308,8 @@ _forkrun_file_to_base64() {
         printf '\nERROR: "%s" not found. ABORTING.\n' "${1}" >&2
         return 1
     }
+
+    ${legacyFlag} && {
 
     # define char mapping array that convero 0-63 --> [0-9][a-z][A-Z]@_ (bash 64# chars)
     charmap=($(printf '%s ' {0..9} {a..z} {A..Z} '@' '_'))
@@ -1296,11 +1336,13 @@ _forkrun_file_to_base64() {
         (( k1 = ( 16#${nn} >> 6 ) ));
         (( k2 = ( 16#${nn} % 64 ) ));
         outA+=("${charmap[$k1]}" "${charmap[$k2]}")
-  done < <(${hexProg} -v <"${1}" | head -n -1 | sed -E 's/^[0-9a-f]+[[:space:]]+//; s/([0-9a-f]{2})([0-9a-f]{2})/\2\1/g; s/[[:space:]]//g' | sed -zE 's/\n//g');
+    done < <(${hexProg} -v <"${1}" | head -n -1 | sed -E 's/^[0-9a-f]+[[:space:]]+//; s/([0-9a-f]{2})([0-9a-f]{2})/\2\1/g; s/[[:space:]]//g' | sed -zE 's/\n//g');
 
     IFS=
     out="${outA[*]}"
     unset IFS
+
+    }
 
     (( outN = ( outN >> 1 ) << 1 ))
 
@@ -1330,7 +1372,7 @@ _forkrun_file_to_base64() {
     fi
 
     # compress base64 and assemble the header
-    if ${noCompressFlag}; then
+    if ${noCompressFlag} || ! ${legacyFlag}; then
         printf -v out0 '%s\n' "${outN} ${outB}" "${nnSumA[@]}"
     else
         # initial compression run
@@ -1356,6 +1398,15 @@ _forkrun_file_to_base64() {
         printf -v out0 '%s\n' "${outN} ${outB}" "${nnSumA[@]}" "${compressV[@]}"
     fi
 
+    ${legacyFlag} || {
+        # new method using standard base64 and gzip
+        if ${noCompressFlag}; then
+            out=$'\035'"$(base64 -w 0 <"${1}")"
+        else
+            out=$'\035'$'\036'"$(gzip -9 -c <"${1}" | base64 -w 0)"
+        fi
+    }
+
     # combine header and base64
     printf -v outF '%s'$'\034''%s' "${out0%$'\n'}" "${out}"
 
@@ -1366,6 +1417,7 @@ _forkrun_file_to_base64() {
         printf '%s' "${outF}"
     fi
 
+
     { (( ${#FUNCNAME[@]} > 1 )) && [[ "${FUNCNAME[1]}" == *'frun'* ]]; } || shopt ${extglobState} extglob
 }
 
@@ -1374,6 +1426,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()   # remove base64
+declare -A b64=()    # removed base64
 
 _forkrun_bootstrap_setup --force
