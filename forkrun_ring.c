@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.1.1
+// forkrun_ring.c v3.1.2
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -298,7 +298,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.1.1"
+#define FORKRUN_RING_VERSION "v3.1.2"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -5248,14 +5248,35 @@ static int ring_abort_main(int argc, char **argv) {
 
 struct PollMeta {
     arrayind_t id;
-    int type; // 0 = spawn, 1 = scanner, 2 = worker
+    int type; // 0 = spawn, 1 = scanner, 2 = worker, 3 = trap_ack
 };
+
+static uint64_t g_poll_deadline_ms = 0;
+
+static inline uint64_t get_mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
 
 static int ring_poll_main(int argc, char **argv) {
     if (argc < 4) return EXECUTION_FAILURE;
     int fd_spawn_r = atoi(argv[1]);
     const char *scan_arr_name = argv[2];
     const char *work_arr_name = argv[3];
+
+    // Optional 4th arg: timer command.
+    if (argc >= 5 && argv[4][0] != '\0') {
+        int timer_arg = atoi(argv[4]);
+        if (timer_arg > 0) {
+            g_poll_deadline_ms = get_mono_ms() + (uint64_t)timer_arg;
+        } else if (timer_arg < 0) {
+            g_poll_deadline_ms = 0;
+        }
+    }
+
+    // Optional 5th arg: trap ack pipe
+    int fd_trap_ack_r = (argc >= 6 && argv[5][0] != '\0') ? atoi(argv[5]) : -1;
 
     int max_poll = 8192;
     struct pollfd *pfds = malloc(max_poll * sizeof(struct pollfd));
@@ -5264,6 +5285,7 @@ static int ring_poll_main(int argc, char **argv) {
     if (!meta) { free(pfds); return EXECUTION_FAILURE; }
 
     int p_cnt = 0;
+    int core_cnt = 0; // Tracks FDs that keep the loop alive
 
     // 1. Load the Spawn Pipe
     if (fd_spawn_r >= 0) {
@@ -5272,6 +5294,17 @@ static int ring_poll_main(int argc, char **argv) {
         meta[p_cnt].id = -1;
         meta[p_cnt].type = 0;
         p_cnt++;
+        core_cnt++;
+    }
+
+    // 2. Load the Trap Ack Pipe
+    if (fd_trap_ack_r >= 0) {
+        pfds[p_cnt].fd = fd_trap_ack_r;
+        pfds[p_cnt].events = POLLIN;
+        meta[p_cnt].id = -1;
+        meta[p_cnt].type = 3;
+        p_cnt++;
+        // Do NOT increment core_cnt. Trap ack pipe alone shouldn't prevent shutdown.
     }
 
     // Helper macro to load Bash arrays dynamically
@@ -5291,18 +5324,19 @@ static int ring_poll_main(int argc, char **argv) {
                             meta[p_cnt].id = element_index(ae); \
                             meta[p_cnt].type = type_val; \
                             p_cnt++; \
+                            core_cnt++; \
                         } \
                     } \
                 } \
             } \
         } while(0)
 
-    // 2. Load Scanner and Worker Death Pipes
+    // 3. Load Scanner and Worker Death Pipes
     LOAD_ARRAY(scan_arr_name, 1);
     LOAD_ARRAY(work_arr_name, 2);
 
-    // If there is nothing left to poll (or only the dead spawn pipe), break the while loop
-    if (p_cnt == 0) {
+    // If there is no core infrastructure left to poll, exit
+    if (core_cnt == 0 && g_poll_deadline_ms == 0) {
         free(pfds); free(meta);
         return EXECUTION_FAILURE; 
     }
@@ -5313,7 +5347,22 @@ static int ring_poll_main(int argc, char **argv) {
             free(pfds); free(meta);
             return EXECUTION_FAILURE;
         }
-        r = poll(pfds, p_cnt, 100); // 100ms timeout to continuously check for fire alarm
+        
+        int timeout_this_iter = 100; // 100ms default for fire alarm checks
+        if (g_poll_deadline_ms > 0) {
+            uint64_t now_ms = get_mono_ms();
+            if (now_ms >= g_poll_deadline_ms) {
+                g_poll_deadline_ms = 0;
+                bind_variable("POLL_EVENT", "TIMEOUT", 0);
+                free(pfds); free(meta);
+                return EXECUTION_SUCCESS;
+            }
+            uint64_t remaining_ms = g_poll_deadline_ms - now_ms;
+            timeout_this_iter = (remaining_ms < 100) ? (int)remaining_ms : 100;
+            if (timeout_this_iter < 1) timeout_this_iter = 1;
+        }
+        
+        r = poll(pfds, p_cnt, timeout_this_iter);
     } while (r == 0 || (r < 0 && errno == EINTR));
 
     if (r < 0) {
@@ -5321,11 +5370,11 @@ static int ring_poll_main(int argc, char **argv) {
         return EXECUTION_FAILURE;
     }
 
-    // 3. Process the Events
+    // 4. Process the Events
     for (int i = 0; i < p_cnt; i++) {
         if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
-            if (meta[i].type == 0) { 
-                // --- SPAWN PIPE (1-byte robust read to prevent truncation) ---
+            if (meta[i].type == 0 || meta[i].type == 3) { 
+                // --- SPAWN or TRAP_ACK PIPE (1-byte robust read) ---
                 char buf[64];
                 int len = 0;
                 bool eof = false;
@@ -5346,23 +5395,26 @@ static int ring_poll_main(int argc, char **argv) {
                 buf[len] = '\0';
                 
                 if (len > 0) {
-                    char *colon = strchr(buf, ':');
-                    int node = 0, count = 0;
-                    if (colon) {
-                        *colon = '\0';
-                        node = atoi(buf);
-                        count = atoi(colon + 1);
+                    if (meta[i].type == 0) {
+                        char *colon = strchr(buf, ':');
+                        int node = 0, count = 0;
+                        if (colon) {
+                            *colon = '\0';
+                            node = atoi(buf);
+                            count = atoi(colon + 1);
+                        } else {
+                            count = atoi(buf);
+                        }
+                        bind_variable("POLL_EVENT", "SPAWN", 0);
+                        char arg_buf[32];
+                        snprintf(arg_buf, sizeof(arg_buf), "%d", count);
+                        bind_variable("POLL_ARG1", arg_buf, 0);
+                        snprintf(arg_buf, sizeof(arg_buf), "%d", node);
+                        bind_variable("POLL_ARG2", arg_buf, 0);
                     } else {
-                        count = atoi(buf);
+                        bind_variable("POLL_EVENT", "TRAP_ACK", 0);
+                        bind_variable("POLL_ARG1", buf, 0);
                     }
-                    
-                    bind_variable("POLL_EVENT", "SPAWN", 0);
-                    char arg_buf[32];
-                    snprintf(arg_buf, sizeof(arg_buf), "%d", count);
-                    bind_variable("POLL_ARG1", arg_buf, 0);
-                    snprintf(arg_buf, sizeof(arg_buf), "%d", node);
-                    bind_variable("POLL_ARG2", arg_buf, 0);
-                    
                     free(pfds); free(meta);
                     return EXECUTION_SUCCESS;
                 } else if (eof || (pfds[i].revents & POLLHUP)) {
@@ -5387,9 +5439,11 @@ static int ring_poll_main(int argc, char **argv) {
         }
     }
 
+    bind_variable("POLL_EVENT", "IGNORE", 0);
     free(pfds); free(meta);
     return EXECUTION_SUCCESS;
 }
+#undef LOAD_ARRAY
 
 static int ring_version_main(int argc, char **argv) {
   bool show_all = false;
