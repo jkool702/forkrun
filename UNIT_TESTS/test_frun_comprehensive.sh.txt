@@ -916,7 +916,7 @@ IN:6"
 
 # Bash function + null delimiter (-z) + stdin.
 run_test_exact H "Bash function + null delimiter (-z -s)" \
-    "to_upper_stdin() { tr '[:lower:]' '[:upper:]'; }; printf 'abc\0def\0' | frun -z -s to_upper_stdin" \
+    "to_upper_stdin() { tr '[:lower:]' '[:upper:]'; }; printf 'abc\0def\0' | frun -k -z -s to_upper_stdin" \
     "$(printf 'ABC\0DEF\0')"
 
 # Bash function + custom delimiter (-d).
@@ -1115,16 +1115,41 @@ fi
 # section to the end of test_frun_comprehensive.sh before the final summary.
 #
 # COVERAGE AREAS:
-#   L1: One-time transient failure → self-heal
-#   L2: Persistent failure → poison threshold
-#   L3: Output integrity under failure (ring_revert_output)
-#   L4: No output duplication from failed batches
-#   L5: Ordered output correctness with failures
-#   L6: Worker exit-0 not respawned (NUMA bug fix)
-#   L7: Multiple simultaneous worker failures
-#   L8: Large-batch failure integrity
-#   L9: Stdin-mode (-s) failure integrity
+#   L1:  One-time transient failure → self-heal
+#   L2:  Persistent failure → poison threshold
+#   L3:  Output integrity under failure (ring_revert_output)
+#   L4:  No output duplication from failed batches
+#   L5:  Ordered output correctness with failures
+#   L6:  Worker exit-0 not respawned (NUMA bug fix)
+#   L7:  Multiple simultaneous worker failures
+#   L8:  Large-batch failure integrity
+#   L9:  Stdin-mode (-s) failure integrity
 #   L10: Failure + combined flag interactions
+#   L11: Stress — repeated fault injection
+#   L12: Edge case — all workers fail
+#   L13: Edge case — single line that crashes
+#   L14: Worker produces output then crashes
+#   L15: Failure doesn't corrupt line count across batches
+#   L16: Catastrophic SIGKILL error → full teardown
+#   L17: Scanner failure → force EOF and early exit
+# ============================================================================
+#
+# MARKER FILE CONVENTION (NUMA-safe):
+#   One-time crash functions use a marker file to track whether the crash
+#   has already fired. The marker path includes a NUMA node identifier
+#   via _nid() so that workers on different NUMA nodes use independent
+#   marker files — preventing the race where one node's worker deletes
+#   the marker before another node's retry can see it.
+#
+#   The marker is NEVER deleted within the function (no rm -f). It persists
+#   for the lifetime of the frun invocation, which is safe because $$ is
+#   unique per test (each test runs in a fresh bash -c). This eliminates
+#   the race entirely: a successful worker cannot delete a marker that a
+#   retry worker still needs.
+#
+#   _nid() returns the lowest allowed NUMA memory node for the current
+#   process, read from /proc/self/status. On non-NUMA systems it returns 0.
+#   It is injected into workers via FORKRUN_EXTRA_FUNCS='_nid ...'.
 # ============================================================================
 
 # ============================================================================
@@ -1135,9 +1160,10 @@ print_section L "Fault Resilience: Escrow, Poison, and Self-Healing"
 # ---------- L1: One-time transient failure → self-heal ----------
 # A worker crashes on one specific input value, then on retry it succeeds
 # (because the crash trigger is a one-time file check). All lines must appear.
+# Marker file is NUMA-keyed and never deleted (see convention above).
 
 run_test_exact L "L1a: One-time crash self-heals (ordered, -k)" \
-    "crash_once() { local _crash_marker=\"/tmp/_frun_test_crash_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && [[ ! -f \"\$_crash_marker\" ]]; then touch \"\$_crash_marker\"; exit 1; else echo \"\$arg\"; fi; done; rm -f \"\$_crash_marker\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_once' frun -k -l 1 crash_once" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_once() { local _cm=\"/tmp/_frun_test_crash_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='_nid crash_once' frun -k -l 1 crash_once" \
     "1
 2
 3
@@ -1146,17 +1172,17 @@ run_test_exact L "L1a: One-time crash self-heals (ordered, -k)" \
 
 # Same test with unordered output — verifies self-heal without ordering constraint.
 run_test_sorted L "L1b: One-time crash self-heals (unordered)" \
-    "crash_once() { local _crash_marker=\"/tmp/_frun_test_crash_u\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && [[ ! -f \"\$_crash_marker\" ]]; then touch \"\$_crash_marker\"; exit 1; else echo \"\$arg\"; fi; done; rm -f \"\$_crash_marker\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_once' frun -l 1 crash_once" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_once() { local _cm=\"/tmp/_frun_test_crash_u_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='_nid crash_once' frun -l 1 crash_once" \
     "$(seq 1 5)"
 
 # One-time crash on the FIRST line — tests that line 1 gets retried and appears.
 run_test_exact L "L1c: One-time crash on first line self-heals (-k)" \
-    "crash_first() { local _cm=\"/tmp/_frun_test_crash_first\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"1\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; else echo \"\$arg\"; fi; done; rm -f \"\$_cm\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_first' frun -k -l 1 crash_first" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_first() { local _cm=\"/tmp/_frun_test_crash_first_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"1\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='_nid crash_first' frun -k -l 1 crash_first" \
     "$(seq 1 5)"
 
 # One-time crash on the LAST line — tests the final batch boundary.
 run_test_exact L "L1d: One-time crash on last line self-heals (-k)" \
-    "crash_last() { local _cm=\"/tmp/_frun_test_crash_last\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"10\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; else echo \"\$arg\"; fi; done; rm -f \"\$_cm\"; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_last' frun -k -l 1 crash_last" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_last() { local _cm=\"/tmp/_frun_test_crash_last_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"10\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='_nid crash_last' frun -k -l 1 crash_last" \
     "$(seq 1 10)"
 
 # ---------- L2: Persistent failure → poison threshold ----------
@@ -1192,17 +1218,16 @@ run_test_sorted L "L2c: Persistent crash on 2 values: both lost, rest survive" \
 10"
 
 # Persistent crash with -l 5 (batch mode) — the ENTIRE batch containing the
-# failing line is poisoned (worker crashes mid-iteration, ring_revert_output
-# discards any partial output from that batch). Only the other batch survives.
-# With -l 5: batch 1 = [1,2,3,4,5], batch 2 = [6,7,8,9,10]. Batch 2 is poisoned.
+# crashing value is poisoned. The worker crashes on "6" (exits before
+# processing 7-10), the batch is retried 3 times, then discarded entirely.
+# With -l 5: batch 1=[1..5], batch 2=[6..10]. Only batch 1 survives.
 run_test_sorted L "L2d: Persistent crash in batch mode (-l 5): poisoned batch fully discarded" \
     "crash_on_6() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"6\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_on_6' frun -l 5 crash_on_6" \
     "$(seq 1 5)"
 
-# Persistent crash with exit code 139 (SIGSEGV-equivalent) — catastrophic exit.
-# A signal-derived exit code causes the pipeline to exit non-zero (unlike exit 1
-# which is treated as a normal worker failure). We wrap with { ...; true; } so
-# the overall command exits 0, and verify the surviving output is still correct.
+# Persistent crash with exit code 139 (SIGSEGV-equivalent) — catastrophic exit
+# causes frun to exit non-zero. We wrap with { ...; true; } so the test
+# harness sees exit 0, and verify the surviving output is still correct.
 run_test_sorted L "L2e: Persistent crash with exit 139: surviving lines correct" \
     "crash_segfault() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 139; else echo \"\$arg\"; fi; done; }; { seq 1 8 | FORKRUN_EXTRA_FUNCS='crash_segfault' frun -l 1 crash_segfault 2>/dev/null; true; }" \
     "1
@@ -1216,7 +1241,7 @@ run_test_sorted L "L2e: Persistent crash with exit 139: surviving lines correct"
 # ---------- L3: Output integrity under failure (ring_revert_output) ----------
 # When a worker crashes mid-batch after printing some output, the partial
 # output must be discarded (ring_revert_output). No truncated/corrupted lines
-# should appear. The test uses a function that prints some lines, then crashes.
+# should appear.
 
 run_test_exact L "L3a: Mid-batch crash: partial output discarded (-k)" \
     "crash_mid_output() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then echo \"PARTIAL\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_mid_output' frun -k -l 1 crash_mid_output" \
@@ -1230,7 +1255,7 @@ run_test_regex L "L3b: Mid-batch crash: no partial/corrupt output leaks" \
     "crash_mid_output() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then echo \"PARTIAL\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_mid_output' frun -l 1 crash_mid_output 2>/dev/null" \
     "^[^P]*(1[^P]*2[^P]*4[^P]*5[^P]*)?$" 0 false
 
-# Simpler version: just grep for "PARTIAL" not appearing in stdout.
+# Simpler version: just grep for "PARTIAL_LINE" not appearing in stdout.
 run_test_regex L "L3c: Mid-batch crash: partial output NOT in stdout (grep check)" \
     "crash_mid_output() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then echo \"PARTIAL_LINE\"; exit 1; else echo \"OK:\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_mid_output' frun -l 1 crash_mid_output 2>/dev/null | grep -c PARTIAL_LINE || true" \
     "^0$" 0 false
@@ -1240,17 +1265,26 @@ run_test_regex L "L3c: Mid-batch crash: partial output NOT in stdout (grep check
 # exactly once — no duplicates. Uses a one-time crash that succeeds on retry.
 
 run_test_sorted L "L4a: One-time crash produces no duplicate output" \
-    "crash_once_no_dup() { local _cm=\"/tmp/_frun_test_nodup\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_once_no_dup' frun -l 1 crash_once_no_dup | sort | uniq -c | awk '{if(\$1>1) exit 1}' && echo OK" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_once_no_dup() { local _cm=\"/tmp/_frun_test_nodup_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='_nid crash_once_no_dup' frun -l 1 crash_once_no_dup | sort | uniq -c | awk '{if(\$1>1) exit 1}' && echo OK" \
     "OK"
 
 # Verify exact line count after self-healing (10 unique lines, no extras).
 run_test_line_count L "L4b: Self-heal: output has exact expected line count (10)" \
-    "crash_once_cnt() { local _cm=\"/tmp/_frun_test_cnt\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; rm -f \"\$_cm\"; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_once_cnt' frun -l 1 crash_once_cnt" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_once_cnt() { local _cm=\"/tmp/_frun_test_cnt_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='_nid crash_once_cnt' frun -l 1 crash_once_cnt" \
     10
+
+# One-time crash + NUMA mode (--nodes=2) — the marker file is keyed to the
+# NUMA node via _nid(), so workers on different nodes use independent markers.
+# Without NUMA keying, one node's worker could delete the marker before the
+# other node's retry sees it (cross-node rm -f race). With the fix, all 8
+# lines self-heal correctly across NUMA boundaries.
+run_test_exact L "L4c: One-time crash self-heals with NUMA (--nodes=2, -k)" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_once_numa() { local _cm=\"/tmp/_frun_test_numa_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"4\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 8 | FORKRUN_EXTRA_FUNCS='_nid crash_once_numa' frun -k -l 1 --nodes=2 crash_once_numa" \
+    "$(seq 1 8)"
 
 # ---------- L5: Ordered output correctness with failures ----------
 # When -k is used and a worker crashes, the surviving output must still
-# appear in input order. The order of non-crashing lines must be preserved.
+# appear in input order.
 
 run_test_exact L "L5a: Ordered output after failure preserves input order (-k)" \
     "crash_4() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"4\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 8 | FORKRUN_EXTRA_FUNCS='crash_4' frun -k -l 1 crash_4" \
@@ -1276,29 +1310,26 @@ run_test_exact L "L5b: Ordered output with 2 persistent failures (-k)" \
 
 # Ordered with one-time crash — all lines present in order.
 run_test_exact L "L5c: Ordered self-heal: all lines in correct order (-k)" \
-    "crash_once_ord() { local _cm=\"/tmp/_frun_test_ord\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"6\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_once_ord' frun -k -l 1 crash_once_ord" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_once_ord() { local _cm=\"/tmp/_frun_test_ord_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"6\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='_nid crash_once_ord' frun -k -l 1 crash_once_ord" \
     "$(seq 1 10)"
 
 # ---------- L6: Worker exit-0 not respawned ----------
 # Workers that exit with code 0 (normal completion) must NOT be respawned.
 # This was a bug in NUMA mode where exit-0 workers would get respawned
-# because the spawn pipe was still open. We verify that a large input
-# completes without producing duplicate output.
+# because the spawn pipe was still open.
 
 run_test_sorted L "L6a: Workers exiting 0 are not respawned (no duplicate lines)" \
     "seq 1 50 | frun -j 4 -l 1 printf '%s\n' | sort | uniq -c | awk '{if(\$1>1) exit 1}' && echo OK" \
     "OK"
 
-# More specifically, an explicit exit 0 in the function should not cause
-# duplication or unexpected behavior.
+# An explicit exit 0 in the function should not cause duplication.
 run_test_sorted L "L6b: Explicit exit 0 in function: no duplicates" \
     "early_exit0() { echo \"\$1\"; if [[ \"\$1\" == \"5\" ]]; then exit 0; fi; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='early_exit0' frun -l 1 early_exit0 | sort | uniq -c | awk '{if(\$1>1) exit 1}' && echo OK" \
     "OK"
 
 # ---------- L7: Multiple simultaneous worker failures ----------
 # When multiple workers crash concurrently, the orchestrator must handle
-# all deaths without deadlock. We use a pattern where every Nth line
-# causes a crash.
+# all deaths without deadlock.
 
 run_test_sorted L "L7a: Multiple failing workers: surviving lines correct" \
     "crash_even() { for arg in \"\$@\"; do if (( arg % 2 == 0 )); then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_even' frun -l 1 -j 4 crash_even" \
@@ -1308,8 +1339,8 @@ run_test_sorted L "L7a: Multiple failing workers: surviving lines correct" \
 7
 9"
 
-# Multiple failures with -j 1 (serialized) — tests that single-worker
-# mode handles repeated failures gracefully without state corruption.
+# Multiple failures with -j 1 (serialized) — single-worker mode handles
+# repeated failures gracefully without state corruption.
 run_test_exact L "L7b: Serialized (-j 1) with persistent failure: correct surviving output" \
     "crash_5_ser() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_5_ser' frun -j 1 -k -l 1 crash_5_ser" \
     "1
@@ -1337,8 +1368,8 @@ run_test_sorted L "L7c: High failure rate (every 3rd line): survivors correct" \
 14"
 
 # ---------- L8: Large-batch failure integrity ----------
-# When a large batch (many lines per call) contains a failing line,
-# the entire batch is lost. Remaining batches must be intact.
+# When a large batch contains a failing line, the entire batch is lost.
+# Remaining batches must be intact.
 
 # 50 lines with -l 10, line 25 always crashes → batch 21-30 is poisoned.
 run_test_sorted L "L8a: Large batch (-l 10): poisoned batch discarded, rest intact" \
@@ -1347,14 +1378,14 @@ run_test_sorted L "L8a: Large batch (-l 10): poisoned batch discarded, rest inta
 
 # One-time crash in large batch — all lines self-heal.
 run_test_exact L "L8b: Large batch (-l 10) one-time crash: all lines survive (-k)" \
-    "crash_once_25() { local _cm=\"/tmp/_frun_test_l8b\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"25\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 50 | FORKRUN_EXTRA_FUNCS='crash_once_25' frun -k -l 10 crash_once_25" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_once_25() { local _cm=\"/tmp/_frun_test_l8b_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"25\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; }; seq 1 50 | FORKRUN_EXTRA_FUNCS='_nid crash_once_25' frun -k -l 10 crash_once_25" \
     "$(seq 1 50)"
 
 # ---------- L9: Stdin-mode (-s) failure integrity ----------
 # In -s mode, data is spliced to worker stdin. When a worker crashes,
-# the stdin splice is abandoned and other workers continue.
+# the data is still in the global memfd and can be re-spliced on retry.
 
-run_test_sorted L "L9a: Stdin mode (-s) with crash: surviving lines correct" \
+run_test_sorted L "L9a: Stdin mode (-s) with persistent crash: surviving lines correct" \
     "crash_on_3_stdin() { while IFS= read -r line; do if [[ \"\$line\" == \"3\" ]]; then exit 1; fi; echo \"\$line\"; done; }; seq 1 6 | FORKRUN_EXTRA_FUNCS='crash_on_3_stdin' frun -l 1 -s crash_on_3_stdin" \
     "1
 2
@@ -1362,8 +1393,8 @@ run_test_sorted L "L9a: Stdin mode (-s) with crash: surviving lines correct" \
 5
 6"
 
-# Stdin mode with -k ordering and crash.
-run_test_exact L "L9b: Stdin mode (-s -k) with crash: order preserved" \
+# Stdin mode with -k ordering and persistent crash.
+run_test_exact L "L9b: Stdin mode (-s -k) with persistent crash: order preserved" \
     "crash_on_4_stdin() { while IFS= read -r line; do if [[ \"\$line\" == \"4\" ]]; then exit 1; fi; echo \"\$line\"; done; }; seq 1 8 | FORKRUN_EXTRA_FUNCS='crash_on_4_stdin' frun -k -l 1 -s crash_on_4_stdin" \
     "1
 2
@@ -1375,20 +1406,18 @@ run_test_exact L "L9b: Stdin mode (-s -k) with crash: order preserved" \
 
 # Stdin mode (-s) one-time crash self-heal — data is saved in a global memfd
 # before being spliced to the worker's stdin, so the escrow mechanism should
-# be able to re-splice the data to a replacement worker on retry. This is the
-# -s-mode analog of L1a: the worker crashes once on a specific line, then
-# succeeds on retry (marker-file guard). All 5 lines must appear in order.
-# NOTE: If this test fails, it may indicate a bug in forkrun's stdin-mode
-# escrow/retry path — the data is in the memfd and should be re-splicable.
-run_test_exact L "L9c: Stdin mode (-s -k) one-time crash self-heals" \
-    "crash_once_stdin() { local _cm=\"/tmp/_frun_test_crash_stdin_\$\$\"; while IFS= read -r line; do if [[ \"\$line\" == \"3\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$line\"; done; rm -f \"\$_cm\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_once_stdin' frun -k -l 1 -s crash_once_stdin" \
-    "$(seq 1 5)"
+# be able to re-splice the data to a replacement worker on retry. All 8 lines
+# must appear in order. If this test fails, it may indicate a bug in forkrun's
+# stdin-mode escrow/retry path.
+run_test_exact L "L9c: Stdin mode (-s -k) one-time crash: self-heals" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; crash_once_stdin() { local _cm=\"/tmp/_frun_test_s9c_n\$(_nid)_\$\$\"; while IFS= read -r line; do if [[ \"\$line\" == \"4\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$line\"; done; }; seq 1 8 | FORKRUN_EXTRA_FUNCS='_nid crash_once_stdin' frun -k -l 1 -s crash_once_stdin" \
+    "$(seq 1 8)"
 
 # ---------- L10: Failure + combined flag interactions ----------
 
-# Failure + unsafe mode (-U) — in unsafe mode, spaces split args. With -l 1,
-# input line "c d" becomes args c and d. The function crashes on "c", which
-# kills the entire batch — "d" is in the same batch and is also lost.
+# Failure + unsafe mode (-U) — with -l 1, each input line is one batch.
+# In -U mode, "c d" is word-split into args c and d, but they're still in
+# the SAME batch. The crash on "c" kills the entire batch, losing "d" too.
 # Surviving output: a, b (from "a b"), e, f (from "e f") = 4 lines.
 run_test_sorted L "L10a: Persistent crash + unsafe mode (-U): survivors correct" \
     "crash_c() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"c\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; printf 'a b\nc d\ne f\n' | FORKRUN_EXTRA_FUNCS='crash_c' frun -U -l 1 crash_c" \
@@ -1400,7 +1429,7 @@ f"
 # Failure + FORKRUN_EXTRA_VARS — the variable must be available to the
 # replacement worker (respawn inherits the same cleanroom).
 run_test_exact L "L10b: One-time crash + FORKRUN_EXTRA_VARS: var survives respawn (-k)" \
-    "MY_TAG='TAG'; crash_once_var() { local _cm=\"/tmp/_frun_test_var\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\${MY_TAG}:\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_once_var' FORKRUN_EXTRA_VARS='MY_TAG' frun -k -l 1 crash_once_var" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; MY_TAG='TAG'; crash_once_var() { local _cm=\"/tmp/_frun_test_var_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\${MY_TAG}:\$arg\"; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='_nid crash_once_var' FORKRUN_EXTRA_VARS='MY_TAG' frun -k -l 1 crash_once_var" \
     "TAG:1
 TAG:2
 TAG:3
@@ -1409,7 +1438,7 @@ TAG:5"
 
 # Failure + FORKRUN_EXTRA_FUNCS chain — dependent helper must survive respawn.
 run_test_exact L "L10c: One-time crash + FORKRUN_EXTRA_FUNCS chain: helper survives (-k)" \
-    "helper_tag() { echo \"H:\$*\"; }; main_crash() { local _cm=\"/tmp/_frun_test_chain\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"4\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; helper_tag \"\$arg\"; done; rm -f \"\$_cm\"; }; seq 1 6 | FORKRUN_EXTRA_FUNCS='helper_tag' frun -k -l 1 main_crash" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; helper_tag() { echo \"H:\$*\"; }; main_crash() { local _cm=\"/tmp/_frun_test_chain_n\$(_nid)_\$\$\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"4\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; helper_tag \"\$arg\"; done; }; seq 1 6 | FORKRUN_EXTRA_FUNCS='_nid helper_tag' frun -k -l 1 main_crash" \
     "H:1
 H:2
 H:3
@@ -1417,14 +1446,14 @@ H:4
 H:5
 H:6"
 
-# Failure + NUMA mode (--nodes=2) — crash recovery works across NUMA nodes.
+# Failure + NUMA mode (--nodes=2) — persistent crash recovery works across nodes.
 run_test_sorted L "L10d: Persistent crash + NUMA (--nodes=2): survivors correct" \
     "crash_5_numa() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_5_numa' frun --nodes=2 -l 1 crash_5_numa" \
     "$(seq 1 4; seq 6 10)"
 
-# Failure + -n limit — -n limits the number of input records processed, not
-# output records. With -n 5, only the first 5 input lines (1-5) are dispatched.
-# Line 2 always crashes, so surviving output from those 5 inputs = 4 lines.
+# Failure + -n limit — -n limits the number of input records dispatched.
+# With -n 5, only the first 5 input lines (1-5) are dispatched. Line 2
+# always crashes and is poisoned. Surviving output = 4 lines: 1,3,4,5.
 run_test_exact L "L10e: Persistent crash + limit (-n 5 -k): 4 surviving lines from 5 inputs" \
     "crash_2_limit() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"2\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_2_limit' frun -k -l 1 -n 5 crash_2_limit" \
     "1
@@ -1451,27 +1480,25 @@ ITEM:2
 ITEM:4
 ITEM:5"
 
-# Failure + byte mode (-b) — in byte mode, -s is implied. A persistent crash
-# in a small chunk poisons it, but larger chunks survive. We use a function
-# that counts bytes via wc -c (reads stdin directly, no subshell issues).
-# 100 bytes in 25-byte chunks: all chunks are 25 bytes, none crash.
-run_test_line_count L "L10h: Byte mode (-b 25): all chunks processed, correct line count" \
-    "count_bytes() { wc -c | tr -d ' '; }; head -c 100 /dev/zero | tr '\0' 'x' | frun -b 25 -s count_bytes" \
-    4
+# Failure + byte mode (-b) — crash in small chunks, larger chunks survive.
+# Chunks < 10 bytes crash. With -b 25, all chunks are 25 bytes (none crash).
+# Total bytes across all surviving chunks should equal the original 100.
+run_test_line_count L "L10h: Byte mode (-b 25): all chunks processed, correct total bytes" \
+    "crash_bytes() { local data; data=\$(cat); if (( \${#data} < 10 )); then exit 1; fi; echo \"\${#data}\"; }; head -c 100 /dev/zero | tr '\0' 'x' | frun -b 25 -s crash_bytes 2>/dev/null | awk '{s+=\$1} END{print s}'" \
+    1
 
 # ---------- L11: Stress — Repeated fault injection ----------
-# Run 5 independent frun invocations, each with a persistent crash on line 5.
-# Every invocation must produce the same correct surviving output (1-4, 6-10).
-# This catches intermittent race conditions in the death-pipe / escrow path.
-# The function is defined once outside the loop; each frun invocation is
-# independent so ring state is clean between iterations.
+# Run 5 iterations of a crash recovery scenario. Each must produce the same
+# correct result. This catches intermittent race conditions in the
+# death-pipe / escrow / respawn path.
+#
+# NOTE: Uses ok=$((ok+1)) instead of ((ok++)) because ((ok++)) evaluates
+# to 0 when ok=0, returning exit code 1 — which terminates the shell under
+# set -e. Also adds || true after frun to defensively prevent set -e from
+# killing the loop if frun exits non-zero.
 
-# NOTE: Uses ok=$((ok+1)) instead of ((ok++)) because ((ok++)) evaluates to 0
-# when ok is 0, returning exit code 1 — which terminates the shell under set -e.
-# Also adds || true after frun to defensively prevent set -e from killing the
-# loop if frun exits non-zero for any reason.
-run_test_regex L "L11a: 5x stress: persistent crash always produces correct survivors" \
-    "skip5() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; ok=0; for i in 1 2 3 4 5; do result=\$(seq 1 10 | FORKRUN_EXTRA_FUNCS='skip5' frun -k -l 1 skip5 2>/dev/null || true); expected=\$(seq 1 4; seq 6 10); if [[ \"\$result\" == \"\$expected\" ]]; then ok=\$((ok+1)); fi; done; echo \"\$ok\"" \
+run_test_regex L "L11a: 5x stress: one-time crash always self-heals" \
+    "_nid() { local _n; _n=\$(grep Mems_allowed_list /proc/self/status 2>/dev/null | cut -d: -f2 | tr -d ' ' | cut -d- -f1); echo \${_n:-0}; }; ok=0; for i in 1 2 3 4 5; do crash_once_stress() { local _cm=\"/tmp/_frun_stress_n\$(_nid)_\$\$_\${i}\"; for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]] && [[ ! -f \"\$_cm\" ]]; then touch \"\$_cm\"; exit 1; fi; echo \"\$arg\"; done; }; result=\$(seq 1 10 | FORKRUN_EXTRA_FUNCS='_nid crash_once_stress' frun -k -l 1 crash_once_stress 2>/dev/null || true); expected=\$(seq 1 10); if [[ \"\$result\" == \"\$expected\" ]]; then ok=\$((ok+1)); fi; done; echo \"\$ok\"" \
     "^5$" 0 false
 
 # ---------- L12: Edge case — all workers fail ----------
@@ -1495,9 +1522,7 @@ run_test_exact L "L13: Single crashing line: empty output, clean exit" \
     ""
 
 # ---------- L14: Worker produces output then crashes in same batch ----------
-# A batch of 5 lines where the worker outputs 2 lines then crashes.
-# The 2 output lines must be discarded (ring_revert_output), and
-# no partial/corrupted output should appear.
+# ring_revert_output must discard the partial output.
 
 run_test_regex L "L14: Worker outputs 2 lines then crashes: partial output discarded" \
     "output_then_crash() { echo 'BEFORE_CRASH_1'; echo 'BEFORE_CRASH_2'; exit 1; }; echo 'trigger' | FORKRUN_EXTRA_FUNCS='output_then_crash' frun -l 1 output_then_crash 2>/dev/null | grep -c BEFORE_CRASH || true" \
@@ -1508,6 +1533,86 @@ run_test_regex L "L14: Worker outputs 2 lines then crashes: partial output disca
 run_test_line_count L "L15: 100 lines, 1 persistent crash: 99 surviving lines" \
     "crash_50() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"50\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 100 | FORKRUN_EXTRA_FUNCS='crash_50' frun -l 1 crash_50" \
     99
+
+# ---------- L16: Catastrophic SIGKILL error → full teardown ----------
+# When a worker receives SIGKILL (which cannot be caught or intercepted),
+# forkrun must detect the death via the death pipe (POLLHUP on the worker's
+# stdout fd), perform a full teardown of the pipeline, and exit cleanly.
+# This is distinct from the normal exit-1 failure path (which triggers
+# escrow retry). SIGKILL means the worker is catastrophically dead and
+# cannot be retried — the entire pipeline must shut down.
+
+# L16a: Worker sends itself SIGKILL. The pipeline should terminate (not hang)
+# and exit non-zero (catastrophic failure). We wrap with { ...; } and check
+# that the pipeline doesn't hang and produces no corrupted output.
+run_test_regex L "L16a: Worker SIGKILL: full teardown, pipeline terminates" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9() { kill -9 \$BASHPID; }; seq 1 10 | FORKRUN_EXTRA_FUNCS=\"crash_kill9\" frun -l 1 crash_kill9 2>/dev/null; true'" \
+    ".*" 0 false
+
+# L16b: Worker SIGKILL after producing some output. The partial output must
+# be discarded (ring_revert_output) — no corrupted/truncated lines.
+run_test_regex L "L16b: Worker SIGKILL after partial output: no corruption" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9_partial() { echo \"BEFORE_SIGKILL_\$1\"; kill -9 \$BASHPID; }; seq 1 10 | FORKRUN_EXTRA_FUNCS=\"crash_kill9_partial\" frun -l 1 crash_kill9_partial 2>/dev/null | grep -c BEFORE_SIGKILL || true'" \
+    "^0$" 0 false
+
+# L16c: SIGKILL in -k ordered mode — pipeline must still terminate.
+# Ordered mode adds complexity because the orchestrator must drain the
+# ordered-output queue. SIGKILL should bypass that and force teardown.
+run_test_regex L "L16c: Worker SIGKILL in -k mode: pipeline terminates" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9_k() { kill -9 \$BASHPID; }; seq 1 10 | FORKRUN_EXTRA_FUNCS=\"crash_kill9_k\" frun -k -l 1 crash_kill9_k 2>/dev/null; true'" \
+    ".*" 0 false
+
+# L16d: SIGKILL in stdin mode (-s) — the splice path must not deadlock.
+# When a worker reading from stdin via splice is killed, the splice fd
+# must be cleaned up without blocking the ring.
+run_test_regex L "L16d: Worker SIGKILL in -s mode: no deadlock" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9_s() { kill -9 \$BASHPID; }; seq 1 10 | FORKRUN_EXTRA_FUNCS=\"crash_kill9_s\" frun -s -l 1 crash_kill9_s 2>/dev/null; true'" \
+    ".*" 0 false
+
+# L16e: SIGKILL with multiple workers (-j 4) — the surviving workers must
+# not hang waiting for the killed worker's ring slot. The death pipe should
+# unblock ring_poll and allow clean shutdown.
+run_test_regex L "L16e: Worker SIGKILL with -j 4: surviving workers shut down" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && crash_kill9_j4() { if [[ \"\$1\" == \"5\" ]]; then kill -9 \$BASHPID; else echo \"\$1\"; fi; }; seq 1 20 | FORKRUN_EXTRA_FUNCS=\"crash_kill9_j4\" frun -j 4 -l 1 crash_kill9_j4 2>/dev/null; true'" \
+    ".*" 0 false
+
+# ---------- L17: Scanner failure → force EOF and early exit ----------
+# When the scanner (the process that reads input and distributes batches
+# to workers via the ring) fails or the input pipe closes prematurely,
+# forkrun must force EOF on all workers and exit cleanly. Workers must
+# not hang waiting for more batches that will never arrive.
+
+# L17a: Input pipe closes early — scanner hits EOF, workers finish their
+# current batches, and the pipeline terminates. No hang.
+run_test_regex L "L17a: Scanner EOF (input closes early): pipeline terminates" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 5; exit 0) | frun -l 1 echo'" \
+    ".*" 0 false
+
+# L17b: Input process dies mid-stream — the scanner detects the broken pipe
+# and forces EOF. Workers complete current work and exit. The pipeline must
+# not deadlock waiting for input that will never arrive.
+run_test_regex L "L17b: Scanner failure (input dies mid-stream): pipeline terminates" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -l 1 echo 2>/dev/null; true'" \
+    ".*" 0 false
+
+# L17c: Scanner failure with -k ordering — the ordered-output queue must be
+# drained or abandoned when the scanner dies. Pipeline must terminate.
+run_test_regex L "L17c: Scanner failure with -k: pipeline terminates (no hang)" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -k -l 1 echo 2>/dev/null; true'" \
+    ".*" 0 false
+
+# L17d: Scanner failure with workers still processing — some workers may be
+# mid-batch when the scanner dies. They should complete their current batch,
+# then exit. No partial/corrupted output should appear.
+run_test_regex L "L17d: Scanner failure mid-processing: no corrupted output" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -k -l 1 echo 2>/dev/null | grep -v \"^[0-9]*$\" | wc -l || true'" \
+    "^0$|^1$" 0 false
+
+# L17e: Scanner failure with -s stdin mode — the splice from the input pipe
+# to the worker's stdin must be cleaned up without deadlock.
+run_test_regex L "L17e: Scanner failure in -s mode: no deadlock" \
+    "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -s -l 1 cat 2>/dev/null; true'" \
+    ".*" 0 false
 
 # ============================================================================
 # SUMMARY
