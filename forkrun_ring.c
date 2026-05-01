@@ -2082,18 +2082,18 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint64_t S = (current_global_stolen > last_global_stolen) ? 1 : 0;
         last_global_stolen = current_global_stolen;
 
-        if (current_buffer_limit < 12) {
+        if (current_buffer_limit < 13) {
             a2 = (a2 << 1) | S;
             a3 = (a3 << 1) | S;
             a4 = (a4 << 1) | S;
             a5 = (a5 << 1) | S;
         }
 
-        if (current_buffer_limit > 3) {
+        if (current_buffer_limit > 4) {
             z = (S == 0 ? z + 1 : 0);
         }
 
-        if (current_buffer_limit < 12 &&
+        if (current_buffer_limit < 13 &&
             (__builtin_popcount(a2) > 2 ||
              __builtin_popcount(a3) > 3 ||
              __builtin_popcount(a4) > 4 ||
@@ -2107,7 +2107,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             a3 = 0;
             a4 = 0;
             a5 = 0;
-        } else if (current_buffer_limit > 3 && z > 16) {
+        } else if (current_buffer_limit > 4 && z > 16) {
             current_buffer_limit -= 1;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
             
