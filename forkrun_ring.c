@@ -1849,7 +1849,12 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
   uint64_t last_global_stolen = 0;
   uint32_t current_buffer_limit = 4; // 3 chunks ahead
-  uint32_t I_meter = 50;
+
+  uint8_t z = 0;
+  uint8_t a2 = 0;
+  uint16_t a3 = 0;
+  uint32_t a4 = 0;
+  uint64_t a5 = 0;
 
   while (1) {
     NUMA_CHECK_SCANNERS_DONE();
@@ -2077,27 +2082,40 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint64_t S = (current_global_stolen > last_global_stolen) ? 1 : 0;
         last_global_stolen = current_global_stolen;
 
-        // Apply bounded IIR filter (Window = 32)
-        if (current_buffer_limit <= 4) {
-            // Floor bound: If at min limit, Base is 20 so it cannot drop below 20.
-            I_meter = ((I_meter * 31) + 15 + (1985 * S)) >> 5;
-        } else if (current_buffer_limit >= 13) {
-            // Ceiling bound: If at max limit, Max Penalty is 100 so it cannot exceed 100.
-            I_meter = ((I_meter * 31) + (100 * S)) >> 5;
-        } else {
-            // Normal operation: approaches 0 on clean runs, 1000 on continuous steals.
-            I_meter = ((I_meter * 31) + (2000 * S)) >> 5;
+        if (current_buffer_limit < 12) {
+            a2 = (a2 << 1) | S;
+            a3 = (a3 << 1) | S;
+            a4 = (a4 << 1) | S;
+            a5 = (a5 << 1) | S;
         }
 
-        // Trigger buffer limits
-        if (I_meter < 15 && current_buffer_limit > 4) {
-            current_buffer_limit--;
+        if (current_buffer_limit > 3) {
+            z = (S == 0 ? z + 1 : 0);
+        }
+
+        if (current_buffer_limit < 12 &&
+            (__builtin_popcount(a2) > 2 ||
+             __builtin_popcount(a3) > 3 ||
+             __builtin_popcount(a4) > 4 ||
+             __builtin_popcountll(a5) > 5)) {
+            
+            current_buffer_limit += 1;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
-            I_meter = 50; // Reset
-        } else if (I_meter > 75 && current_buffer_limit < 13) {
-            current_buffer_limit++;
+            
+            z = 0;
+            a2 = 0;
+            a3 = 0;
+            a4 = 0;
+            a5 = 0;
+        } else if (current_buffer_limit > 3 && z > 16) {
+            current_buffer_limit -= 1;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
-            I_meter = 50; // Reset
+            
+            z = 0;
+            a2 = 0;
+            a3 = 0;
+            a4 = 0;
+            a5 = 0;
         }
     }
   }
