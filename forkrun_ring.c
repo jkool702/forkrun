@@ -2079,14 +2079,14 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         }
         
         // S is 1 if any node stole a chunk since the last loop, 0 otherwise.
-        uint64_t S = (current_global_stolen > last_global_stolen) ? 1 : 0;
+        uint64_t S = (current_global_stolen - last_global_stolen);
         last_global_stolen = current_global_stolen;
 
         if (current_buffer_limit < 13) {
-            a2 = (a2 << 1) | S;
-            a3 = (a3 << 1) | S;
-            a4 = (a4 << 1) | S;
-            a5 = (a5 << 1) | S;
+            a2 = (a2 << (S + 1)) | ((1 << S) - 1);
+            a3 = (a3 << (S + 1)) | ((1 << S) - 1);
+            a4 = (a4 << (S + 1)) | ((1 << S) - 1);
+            a5 = (a5 << (S + 1)) | ((1 << S) - 1);
         }
 
         if (current_buffer_limit > 4) {
