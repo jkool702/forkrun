@@ -2094,10 +2094,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         }
 
         if (current_buffer_limit < 13 &&
-            (__builtin_popcount(a2) > 2 ||
-             __builtin_popcount(a3) > 3 ||
-             __builtin_popcount(a4) > 4 ||
-             __builtin_popcountll(a5) > 5)) {
+            (__builtin_popcount(a2) > 1 ||
+             __builtin_popcount(a3) > 2 ||
+             __builtin_popcount(a4) > 3 ||
+             __builtin_popcountll(a5) > 4)) {
             
             current_buffer_limit += 1;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
