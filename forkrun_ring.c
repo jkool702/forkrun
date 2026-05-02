@@ -804,13 +804,13 @@ struct ChunkMeta {
   volatile uint64_t actual_end ALIGNED(CACHE_LINE);
 };
 
-// GlobalState: Contains cross-socket coordination for the pipeline,
 struct IntervalNode {
     uint64_t s;
     uint64_t e;
 };
 
 // GlobalState: Contains cross-socket coordination for the pipeline,
+struct GlobalState {
   uint64_t ingest_publish_idx ALIGNED(CACHE_LINE);
   uint64_t ingest_eof_idx ALIGNED(CACHE_LINE);
   uint64_t _pad_ingest_waiters[7];
