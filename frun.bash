@@ -39,9 +39,10 @@ frun __exec__ "$@"
     }
     # 2. WORKER LOGIC (Clean Shell)
     shift 1 # Remove __exec__
+    FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file NORMAL_EXIT_FLAG
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag LC_ALL
     local -a fallow_args
@@ -181,6 +182,11 @@ EOF
         # ...
       }
 
+### CHECKPOINT & RESUME
+  --resume <file>       : Resume a previously aborted pipeline using the specified checkpoint file.
+                          - Buffered/Ordered modes: Provides "Exactly-Once" semantics. Ensure you truncate your output file to the byte count specified in the crash message before resuming.
+                          - Realtime (-u) mode: Provides "At-Least-Once" semantics. Resuming may result in a few duplicate lines at the failure boundary.
+
 ### ENVIRONMENT VARS
 
 - FORKRUN_RETRY_LIMIT   : Controls how many times a batch will be retried before it is declared poisoned. 0 means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
@@ -237,6 +243,11 @@ EOF
 
             -E|--retry-nonzero-exit)    retry_nonzero_exit_flag=true  ;;
             +E|--no-retry-nonzero-exit) retry_nonzero_exit_flag=false ;;
+
+            --resume)
+                resume_file="$2"
+                shift
+                ;;
 
 
             # --- LIMIT (-n 100) ---
@@ -491,8 +502,43 @@ toc() { :; }
     # Create Data Memfd
     ring_memfd_create ingress_memfd
 
+    # NEW: Apply Checkpoint if Resuming
+    if [[ -n "${resume_file:-}" ]]; then
+        if [[ -f "$resume_file" ]]; then
+            source "$resume_file"
+            ring_set_resume "$FORKRUN_RESUME_HORIZON" "${FORKRUN_RESUME_JAGGED[@]}"
+        else
+            echo "forkrun [ERROR]: Resume file '$resume_file' not found." >&2
+            exit 1
+        fi
+    fi
+
     # # # # # MAIN # # # # #
     {
+        NORMAL_EXIT_FLAG=false
+        trap '
+            status=$?
+            if ! $NORMAL_EXIT_FLAG; then
+                echo "forkrun [FATAL]: Pipeline aborted. Generating checkpoint..." >&2
+                ring_abort
+
+                # ALWAYS write the resume file!
+                ring_dump_resume > .forkrun_resume
+                declare -p FORKRUN_ORIG_ARGS >> .forkrun_resume
+
+                if [[ "${order_mode}" != "realtime" ]]; then
+                    local safe_bytes=$(ring_dump_resume bytes)
+                    echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
+                    echo "         then re-run your exact command with: --resume .forkrun_resume" >&2
+                else
+                    echo "forkrun: Warning - Realtime mode (-u) checkpoint generated." >&2
+                    echo "         Resuming will result in some duplicate lines at the failure boundary (At-Least-Once semantics)." >&2
+                    echo "         Re-run your exact command with: --resume .forkrun_resume" >&2
+                fi
+            fi
+            # ... existing cleanup ...
+            exit $status
+        ' EXIT
         ring_pipe fd_spawn_r fd_spawn_w
 
         # --- 1. RING FALLOW ---
@@ -863,6 +909,7 @@ W_NODE[$3]=$2
                     ;;
             esac
         done
+        NORMAL_EXIT_FLAG=true
 
         ${verbose_flag} && printf '\nSPAWNED %s workers\n' "${nWorkers}" >&2
 

@@ -438,6 +438,59 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   return w;
 }
 
+// Qsort helper for the exporter
+static int cmp_interval(const void *a, const void *b) {
+    uint64_t sa = ((struct IntervalNode *)a)->s;
+    uint64_t sb = ((struct IntervalNode *)b)->s;
+    return (sa < sb) ? -1 : ((sa > sb) ? 1 : 0);
+}
+
+static int ring_dump_resume_main(int argc, char **argv) {
+    if (!g_state) return EXECUTION_FAILURE;
+    if (argc >= 2 && strcmp(argv[1], "bytes") == 0) {
+        printf("%llu\n", (unsigned long long)g_state->resume_stdout_bytes);
+        return EXECUTION_SUCCESS;
+    }
+
+    uint64_t horiz = g_state->resume_horizon;
+    if (horiz == 0 && g_state->fallow_horizon_bytes > 0) {
+        horiz = g_state->fallow_horizon_bytes; // Fallback for -u mode!
+    }
+    printf("FORKRUN_RESUME_HORIZON=%llu\n", (unsigned long long)horiz);
+    printf("FORKRUN_RESUME_STDOUT_BYTES=%llu\n", (unsigned long long)g_state->resume_stdout_bytes);
+
+    // Sort the jagged edge so the Ghost Scanner can do O(1) checks
+    int n = g_state->resume_jagged_count;
+    struct IntervalNode sorted[1024];
+    for (int i = 0; i < n; i++) sorted[i] = g_state->resume_jagged[i];
+    qsort(sorted, n, sizeof(struct IntervalNode), cmp_interval);
+
+    printf("FORKRUN_RESUME_JAGGED=(");
+    for (int i = 0; i < n; i++) {
+        printf("\"%llu:%llu\" ", (unsigned long long)sorted[i].s, (unsigned long long)sorted[i].e);
+    }
+    printf(")\n");
+    return EXECUTION_SUCCESS;
+}
+
+static int ring_set_resume_main(int argc, char **argv) {
+    if (!g_state || argc < 2) return EXECUTION_FAILURE;
+    g_state->is_resume_mode = 1;
+    g_state->resume_horizon = strtoull(argv[1], NULL, 10);
+    g_state->resume_jagged_count = 0;
+    
+    for (int i = 2; i < argc && g_state->resume_jagged_count < 1024; i++) {
+        char *colon = strchr(argv[i], ':');
+        if (colon) {
+            *colon = '\0';
+            g_state->resume_jagged[g_state->resume_jagged_count].s = strtoull(argv[i], NULL, 10);
+            g_state->resume_jagged[g_state->resume_jagged_count].e = strtoull(colon + 1, NULL, 10);
+            g_state->resume_jagged_count++;
+        }
+    }
+    return EXECUTION_SUCCESS;
+}
+
 // RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
   X(ring_init, ring_init_main, "ring_init [FLAGS]",                            \
@@ -487,6 +540,8 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
   X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
   X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow") \
+  X(ring_dump_resume, ring_dump_resume_main, "ring_dump_resume [bytes]", "Dump checkpoint state") \
+  X(ring_set_resume, ring_set_resume_main, "ring_set_resume <horizon> [jagged...]", "Set checkpoint state") \
   X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
@@ -780,6 +835,8 @@ struct OrderPacket {
   int32_t fd;
   uint64_t off;
   uint64_t len;
+  uint64_t in_off;   // NEW: Absolute input byte start
+  uint64_t in_len;   // NEW: Input byte length
 };
 
 #define FLAG_META_READY (1ULL << 63)
@@ -805,6 +862,15 @@ struct GlobalState {
   uint64_t ingest_publish_idx ALIGNED(CACHE_LINE);
   uint64_t ingest_eof_idx ALIGNED(CACHE_LINE);
   uint64_t _pad_ingest_waiters[7];
+
+  // NEW: Orderer Ledger (The Checkpoint)
+  uint8_t is_resume_mode ALIGNED(CACHE_LINE);
+  uint64_t resume_horizon;
+  uint64_t resume_stdout_bytes;
+  uint64_t fallow_horizon_bytes; // NEW: Fallback for realtime mode
+  uint32_t resume_jagged_count;
+  struct IntervalNode resume_jagged[1024];
+
   struct ChunkMeta meta_ring[META_RING_SIZE];
 };
 
@@ -2353,8 +2419,23 @@ static int ring_indexer_numa_main(int argc, char **argv) {
  */
 #define UNIFIED_SCANNER_FLUSH(_cnt_val, _stride_val, _is_last, _maj_id,        \
                               _minor_val, _batch_end_offset, _do_fencepost,    \
-                              _overwrite)                                      \
+                              _overwrite, _out_skipped)                        \
   do {                                                                         \
+    _out_skipped = false;                                                      \
+    if (__builtin_expect(g_state->is_resume_mode, 0)) {                        \
+        uint64_t _s_byte = batch_start;                                        \
+        uint64_t _e_byte = _batch_end_offset;                                  \
+        if (_s_byte >= g_state->resume_horizon) {                              \
+            for (uint32_t _i = 0; _i < g_state->resume_jagged_count; _i++) {   \
+                if (_s_byte >= g_state->resume_jagged[_i].s && _e_byte <= g_state->resume_jagged[_i].e) { \
+                    _out_skipped = true; break;                                \
+                }                                                              \
+            }                                                                  \
+        } else if (_e_byte <= g_state->resume_horizon) {                       \
+            _out_skipped = true;                                               \
+        }                                                                      \
+        if (_out_skipped) break; /* Bypasses everything below! */              \
+    }                                                                          \
     while (1) {                                                                \
       if (atomic_load_relaxed(&state[0].emergency_abort)) goto unified_scanner_eof; \
       uint64_t limit;                                                          \
@@ -2894,13 +2975,16 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
+        bool _skipped = false;
         UNIFIED_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start,
-                              false, false);
+                              false, false, _skipped);
         if (is_numa) {
-          chunk_bounds[cb_head & 15] = local_scan_idx;
-          cb_head++;
+          if (!_skipped) {
+            chunk_bounds[cb_head & 15] = local_scan_idx;
+            cb_head++;
+          }
         }
-        UNIFIED_ADAPTIVE_COMMIT(true);
+        if (!_skipped) UNIFIED_ADAPTIVE_COMMIT(true);
         continue;
       }
 
@@ -3092,14 +3176,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               is_numa ? (uint32_t)(current_p_offset - batch_start) : 1;
           uint32_t cv = is_numa ? take : 1;
 
+          bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(cv, stride, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, true, false);
+                                current_p_offset, true, false, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
             minor_idx++;
-            if (is_last) {
+            if (is_last && !_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
@@ -3278,14 +3363,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                                   : (uint32_t)pending_lines)
                   : 0;
 
+          bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(pending_lines, stride, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, return_bytes, false);
+                                current_p_offset, return_bytes, false, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
             minor_idx++;
-            if (is_last) {
+            if (is_last && !_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
@@ -3293,8 +3379,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           batch_start = current_p_offset;
           pending_lines = 0;
 
-          int node_arg = is_numa ? my_node_id : -1;
-          ADAPTIVE_FLOW_CONTROL(local_state, current_stall, node_arg);
+          if (!_skipped) {
+            int node_arg = is_numa ? my_node_id : -1;
+            ADAPTIVE_FLOW_CONTROL(local_state, current_stall, node_arg);
+          }
         } else if (!is_numa)
           force_refill = true;
       }
@@ -3306,11 +3394,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       uint32_t stride = return_bytes
                             ? (uint32_t)(current_p_offset - batch_start)
                             : (uint32_t)pending_lines;
+      bool _skipped = false;
       UNIFIED_SCANNER_FLUSH(pending_lines, stride, true, meta->major_id,
-                            minor_idx, current_p_offset, return_bytes, false);
+                            minor_idx, current_p_offset, return_bytes, false, _skipped);
       minor_idx++;
-      chunk_bounds[cb_head & 15] = local_scan_idx;
-      cb_head++;
+      if (!_skipped) {
+        chunk_bounds[cb_head & 15] = local_scan_idx;
+        cb_head++;
+      }
       batch_start = current_p_offset;
       pending_lines = 0;
     }
@@ -3474,8 +3565,9 @@ unified_scanner_eof:
         }
         if (lines_found > 0) {
           uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
+          bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(lines_found, 0, false, 0, 0, current_p_offset,
-                                true, true);
+                                true, true, _skipped);
           batch_start = current_p_offset;
           L_tail_done += lines_found;
         } else
@@ -4105,6 +4197,18 @@ static int ring_ack_main(int argc, char **argv) {
     }
   }
 
+  uint64_t in_start = 0, in_end = 0;
+  if (local_state && local_state->numa_enabled) {
+      in_start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+      in_end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
+  } else {
+      // In flat mode, the fencepost offset_ring[idx+cnt] perfectly marks the end
+      in_start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+      in_end = local_state->offset_ring[(my_idx + op.cnt) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+  }
+  op.in_off = in_start;
+  op.in_len = in_end - in_start;
+
   if (fd_target > 0) {
     if (fd_target != ack_cached_target_fd) {
       ack_cached_target_fd = fd_target;
@@ -4395,6 +4499,35 @@ static int ring_order_main(int argc, char **argv) {
   bool stdout_broken = false;
   void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
 
+  int tracker_cap = 1024;
+  int tracker_sz = 0;
+  struct IntervalNode *tracker_heap = malloc(tracker_cap * sizeof(struct IntervalNode));
+  uint64_t tracker_horizon = 0;
+  uint64_t tracker_bytes = 0;
+
+  // NEW: Macro to absorb a successfully written batch into the Ledger
+  #define TRACK_COMPLETED_BATCH(_op) do { \
+      tracker_bytes += (_op).len; \
+      uint64_t _s = (_op).in_off; \
+      uint64_t _e = (_op).in_off + (_op).in_len; \
+      if (_s <= tracker_horizon) { \
+          if (_e > tracker_horizon) tracker_horizon = _e; \
+          while (tracker_sz > 0 && tracker_heap[0].s <= tracker_horizon) { \
+              struct IntervalNode top; \
+              interval_heap_pop(tracker_heap, &tracker_sz, &top); \
+              if (top.e > tracker_horizon) tracker_horizon = top.e; \
+          } \
+      } else { \
+          interval_heap_push(&tracker_heap, &tracker_sz, &tracker_cap, _s, _e); \
+      } \
+      if (g_state) { \
+          g_state->resume_horizon = tracker_horizon; \
+          g_state->resume_stdout_bytes = tracker_bytes; \
+          g_state->resume_jagged_count = (tracker_sz < 1024) ? tracker_sz : 1024; \
+          for(int _i=0; _i<g_state->resume_jagged_count; _i++) g_state->resume_jagged[_i] = tracker_heap[_i]; \
+      } \
+  } while(0)
+
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break;
@@ -4424,6 +4557,7 @@ static int ring_order_main(int argc, char **argv) {
               break;
           }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
+          TRACK_COMPLETED_BATCH(*op);
 
         } else {
           char path[256];
@@ -4436,10 +4570,13 @@ static int ring_order_main(int argc, char **argv) {
           if (fd_file >= 0) {
             off_t offset = 0;
             struct stat st;
-            if (fstat(fd_file, &st) == 0 && st.st_size > 0)
-              robust_sendfile(1, fd_file, &offset, st.st_size);
+            if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
+              if (robust_sendfile(1, fd_file, &offset, st.st_size) < 0) stdout_broken = true;
+            }
             close(fd_file);
             unlink(path);
+            if (stdout_broken) { pull_fire_alarm(); break; }
+            TRACK_COMPLETED_BATCH(*op);
           }
         }
       }
@@ -4462,6 +4599,7 @@ static int ring_order_main(int argc, char **argv) {
                 break;
             }
             safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
+            TRACK_COMPLETED_BATCH(top.pkt);
 
           } else {
             char path[256];
@@ -4475,10 +4613,13 @@ static int ring_order_main(int argc, char **argv) {
             if (fd_file >= 0) {
               off_t offset = 0;
               struct stat st;
-              if (fstat(fd_file, &st) == 0 && st.st_size > 0)
-                robust_sendfile(1, fd_file, &offset, st.st_size);
+              if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
+                if (robust_sendfile(1, fd_file, &offset, st.st_size) < 0) stdout_broken = true;
+              }
               close(fd_file);
               unlink(path);
+              if (stdout_broken) { pull_fire_alarm(); break; }
+              TRACK_COMPLETED_BATCH(top.pkt);
             }
           }
           if (numa_mode) {
@@ -4542,6 +4683,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
           interval_heap_pop(heap, &heap_sz, &top);
           if (top.e > limit) limit = top.e;
         }
+        if (g_state) g_state->fallow_horizon_bytes = limit;
 
         off_t aligned = (off_t)((limit / 4096ULL) * 4096ULL);
         if (aligned > last_punched) {
@@ -5207,6 +5349,7 @@ static int ring_fallow_main(int argc, char **argv) {
         if (state) atomic_store_release(&state[0].min_idx, next_idx);
         if (!dry_run) {
           uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+          if (g_state) g_state->fallow_horizon_bytes = byte_limit;
           off_t aligned = (off_t)((byte_limit / 4096ULL) * 4096ULL);
           if (aligned > last_punched) {
             fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
