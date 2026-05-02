@@ -438,58 +438,6 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   return w;
 }
 
-// Qsort helper for the exporter
-static int cmp_interval(const void *a, const void *b) {
-    uint64_t sa = ((struct IntervalNode *)a)->s;
-    uint64_t sb = ((struct IntervalNode *)b)->s;
-    return (sa < sb) ? -1 : ((sa > sb) ? 1 : 0);
-}
-
-static int ring_dump_resume_main(int argc, char **argv) {
-    if (!g_state) return EXECUTION_FAILURE;
-    if (argc >= 2 && strcmp(argv[1], "bytes") == 0) {
-        printf("%llu\n", (unsigned long long)g_state->resume_stdout_bytes);
-        return EXECUTION_SUCCESS;
-    }
-
-    uint64_t horiz = g_state->resume_horizon;
-    if (horiz == 0 && g_state->fallow_horizon_bytes > 0) {
-        horiz = g_state->fallow_horizon_bytes; // Fallback for -u mode!
-    }
-    printf("FORKRUN_RESUME_HORIZON=%llu\n", (unsigned long long)horiz);
-    printf("FORKRUN_RESUME_STDOUT_BYTES=%llu\n", (unsigned long long)g_state->resume_stdout_bytes);
-
-    // Sort the jagged edge so the Ghost Scanner can do O(1) checks
-    int n = g_state->resume_jagged_count;
-    struct IntervalNode sorted[1024];
-    for (int i = 0; i < n; i++) sorted[i] = g_state->resume_jagged[i];
-    qsort(sorted, n, sizeof(struct IntervalNode), cmp_interval);
-
-    printf("FORKRUN_RESUME_JAGGED=(");
-    for (int i = 0; i < n; i++) {
-        printf("\"%llu:%llu\" ", (unsigned long long)sorted[i].s, (unsigned long long)sorted[i].e);
-    }
-    printf(")\n");
-    return EXECUTION_SUCCESS;
-}
-
-static int ring_set_resume_main(int argc, char **argv) {
-    if (!g_state || argc < 2) return EXECUTION_FAILURE;
-    g_state->is_resume_mode = 1;
-    g_state->resume_horizon = strtoull(argv[1], NULL, 10);
-    g_state->resume_jagged_count = 0;
-    
-    for (int i = 2; i < argc && g_state->resume_jagged_count < 1024; i++) {
-        char *colon = strchr(argv[i], ':');
-        if (colon) {
-            *colon = '\0';
-            g_state->resume_jagged[g_state->resume_jagged_count].s = strtoull(argv[i], NULL, 10);
-            g_state->resume_jagged[g_state->resume_jagged_count].e = strtoull(colon + 1, NULL, 10);
-            g_state->resume_jagged_count++;
-        }
-    }
-    return EXECUTION_SUCCESS;
-}
 
 // RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
@@ -857,8 +805,12 @@ struct ChunkMeta {
 };
 
 // GlobalState: Contains cross-socket coordination for the pipeline,
-// particularly the metadata ring written by Ingest and read by Indexers.
-struct GlobalState {
+struct IntervalNode {
+    uint64_t s;
+    uint64_t e;
+};
+
+// GlobalState: Contains cross-socket coordination for the pipeline,
   uint64_t ingest_publish_idx ALIGNED(CACHE_LINE);
   uint64_t ingest_eof_idx ALIGNED(CACHE_LINE);
   uint64_t _pad_ingest_waiters[7];
@@ -4366,10 +4318,6 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
 // ==============================================================================
 // INTERVAL MIN-HEAP (O(log N) out-of-order sequence assembly)
 // ==============================================================================
-struct IntervalNode {
-    uint64_t s;
-    uint64_t e;
-};
 
 static inline void interval_heap_push(struct IntervalNode **heap_ptr, int *sz, int *cap, uint64_t s, uint64_t e) {
     if (*sz >= *cap) {
@@ -4524,7 +4472,7 @@ static int ring_order_main(int argc, char **argv) {
           g_state->resume_horizon = tracker_horizon; \
           g_state->resume_stdout_bytes = tracker_bytes; \
           g_state->resume_jagged_count = (tracker_sz < 1024) ? tracker_sz : 1024; \
-          for(int _i=0; _i<g_state->resume_jagged_count; _i++) g_state->resume_jagged[_i] = tracker_heap[_i]; \
+          for(uint32_t _i=0; _i<g_state->resume_jagged_count; _i++) g_state->resume_jagged[_i] = tracker_heap[_i]; \
       } \
   } while(0)
 
@@ -4683,9 +4631,6 @@ static int ring_fallow_phys_main(int argc, char **argv) {
           interval_heap_pop(heap, &heap_sz, &top);
           if (top.e > limit) limit = top.e;
         }
-        if (g_state) g_state->fallow_horizon_bytes = limit;
-
-        off_t aligned = (off_t)((limit / 4096ULL) * 4096ULL);
         if (aligned > last_punched) {
           fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
           last_punched = aligned;
@@ -4693,6 +4638,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
       } else {
         interval_heap_push(&heap, &heap_sz, &heap_cap, pp->off, pp->off + pp->len);
       }
+      if (g_state) g_state->fallow_horizon_bytes = limit;
     }
     size_t consumed = count * pkt_sz;
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
@@ -5415,6 +5361,61 @@ static int ring_escrow_put_main(int argc, char **argv) {
 
     if (fd_escrow_w && fd_escrow_w[node] >= 0) {
         robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
+    }
+    return EXECUTION_SUCCESS;
+}
+
+
+// Qsort helper for the exporter
+static int cmp_interval(const void *a, const void *b) {
+    uint64_t sa = ((struct IntervalNode *)a)->s;
+    uint64_t sb = ((struct IntervalNode *)b)->s;
+    return (sa < sb) ? -1 : ((sa > sb) ? 1 : 0);
+}
+
+static int ring_dump_resume_main(int argc, char **argv) {
+    if (!g_state) return EXECUTION_FAILURE;
+    if (argc >= 2 && strcmp(argv[1], "bytes") == 0) {
+        printf("%llu\n", (unsigned long long)g_state->resume_stdout_bytes);
+        return EXECUTION_SUCCESS;
+    }
+
+    uint64_t horiz = g_state->resume_horizon;
+    if (horiz == 0 && g_state->fallow_horizon_bytes > 0) {
+        horiz = g_state->fallow_horizon_bytes; // Fallback for -u mode!
+    }
+
+    printf("FORKRUN_RESUME_HORIZON=%llu\n", (unsigned long long)horiz);
+    printf("FORKRUN_RESUME_STDOUT_BYTES=%llu\n", (unsigned long long)g_state->resume_stdout_bytes);
+
+    // Sort the jagged edge so the Ghost Scanner can do O(1) checks
+    int n = g_state->resume_jagged_count;
+    struct IntervalNode sorted[1024];
+    for (int i = 0; i < n; i++) sorted[i] = g_state->resume_jagged[i];
+    qsort(sorted, n, sizeof(struct IntervalNode), cmp_interval);
+
+    printf("FORKRUN_RESUME_JAGGED=(");
+    for (int i = 0; i < n; i++) {
+        printf("\"%llu:%llu\" ", (unsigned long long)sorted[i].s, (unsigned long long)sorted[i].e);
+    }
+    printf(")\n");
+    return EXECUTION_SUCCESS;
+}
+
+static int ring_set_resume_main(int argc, char **argv) {
+    if (!g_state || argc < 2) return EXECUTION_FAILURE;
+    g_state->is_resume_mode = 1;
+    g_state->resume_horizon = strtoull(argv[1], NULL, 10);
+    g_state->resume_jagged_count = 0;
+    
+    for (int i = 2; i < argc && g_state->resume_jagged_count < 1024; i++) {
+        char *colon = strchr(argv[i], ':');
+        if (colon) {
+            *colon = '\0';
+            g_state->resume_jagged[g_state->resume_jagged_count].s = strtoull(argv[i], NULL, 10);
+            g_state->resume_jagged[g_state->resume_jagged_count].e = strtoull(colon + 1, NULL, 10);
+            g_state->resume_jagged_count++;
+        }
     }
     return EXECUTION_SUCCESS;
 }
