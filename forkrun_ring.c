@@ -546,7 +546,7 @@ static int pin_to_numa_node(int node_id) {
 static SHELL_VAR *bind_var_or_array(const char *name, char *value, int flags) {
   if (!name)
     return NULL;
-  char *lb = strchr(name, '[');
+  const char *lb = strchr(name, '[');
   if (!lb || name[strlen(name) - 1] != ']')
     return bind_variable(name, value, flags);
 
@@ -1218,7 +1218,7 @@ static void apply_config(char type, char sub, const char *arg) {
       }
     }
   }
-  //cfg_state &= ~clear_mask;
+  cfg_state &= ~clear_mask;
   cfg_state |= set_mask;
 }
 
@@ -4631,6 +4631,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
           interval_heap_pop(heap, &heap_sz, &top);
           if (top.e > limit) limit = top.e;
         }
+        off_t aligned = (off_t)((limit / 4096ULL) * 4096ULL);
         if (aligned > last_punched) {
           fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
           last_punched = aligned;
@@ -5679,7 +5680,6 @@ static int ring_numa_stats_main(int argc, char **argv) {
   if (!g_state || !state)
     return EXECUTION_FAILURE;
 
-  uint64_t total_assigned = 0;
   uint64_t total_processed = 0;
   uint64_t total_stolen = 0;
 
@@ -5698,7 +5698,6 @@ static int ring_numa_stats_main(int argc, char **argv) {
         atomic_load_relaxed(&state[n].stats_chunks_stolen_from_me);
     uint32_t phys = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
 
-    total_assigned += assigned;
     total_processed += processed;
     total_stolen += i_stole;
 
