@@ -515,12 +515,11 @@ toc() { :; }
 
     # # # # # MAIN # # # # #
     {
-        NORMAL_EXIT_FLAG=false
         trap '
             status=$?
-            if ! $NORMAL_EXIT_FLAG; then
+            if ! ${NORMAL_EXIT_FLAG:-false}; then
                 echo "forkrun [FATAL]: Pipeline aborted. Generating checkpoint..." >&2
-                ring_abort
+                ${NORMAL_EXIT_FLAG:-true} || ring_abort
 
                 # ALWAYS write the resume file!
                 ring_dump_resume > .forkrun_resume
@@ -537,7 +536,7 @@ toc() { :; }
                 fi
             fi
             # ... existing cleanup ...
-            exit $status
+            return $status
         ' EXIT
         ring_pipe fd_spawn_r fd_spawn_w
 
@@ -818,6 +817,7 @@ W_NODE[$3]=$2
                     if (( ${#trap_ack_pending[@]} > 0 )); then
                         echo "forkrun [FATAL]: Worker(s) [ ${!trap_ack_pending[@]} ] exited non-zero and EXIT trap did not confirm recovery within 3s grace period. Aborting." >&2
                         ring_abort
+                        NORMAL_EXIT_FLAG=false
                         _ret_val=2
                     fi
                     ;;
@@ -898,6 +898,7 @@ W_NODE[$3]=$2
                     if (( status != 0 )); then
                         echo "forkrun [FATAL]: Scanner $sID exited with error status $status. Aborting to prevent data loss." >&2
                         ring_abort
+                        NORMAL_EXIT_FLAG=false
                         _ret_val=1
                     fi
                     
@@ -909,7 +910,7 @@ W_NODE[$3]=$2
                     ;;
             esac
         done
-        NORMAL_EXIT_FLAG=true
+        : "${NORMAL_EXIT_FLAG:=true}"
 
         ${verbose_flag} && printf '\nSPAWNED %s workers\n' "${nWorkers}" >&2
 
