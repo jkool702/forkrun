@@ -516,7 +516,8 @@ toc() { :; }
     # # # # # MAIN # # # # #
     {
         trap '
-            status=$?
+
+            status=${_ret_val:-$?}
             if ! ${NORMAL_EXIT_FLAG:-false}; then
                 echo "forkrun [FATAL]: Pipeline aborted. Generating checkpoint..." >&2
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
@@ -535,7 +536,8 @@ toc() { :; }
                     echo "         Re-run your exact command with: --resume .forkrun_resume" >&2
                 fi
             fi
-            # ... existing cleanup ...
+            # Clean up memory only AFTER the trap is done with it!
+            ring_destroy 2>/dev/null
             return $status
         ' EXIT
         ring_pipe fd_spawn_r fd_spawn_w
@@ -922,7 +924,6 @@ W_NODE[$3]=$2
 
         { ${stats_flag} || ${verbose_flag}; } && (( FORKRUN_NUM_NODES > 1 )) && ring_numa_stats
 
-        ring_destroy
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
 
     } {fd_write}>"/proc/${BASHPID}/fd/${ingress_memfd}" {fd_scan}<"/proc/${BASHPID}/fd/${ingress_memfd}" {fd0}<&0 {fd1}>&1 {fd2}>&2
