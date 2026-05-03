@@ -252,11 +252,12 @@ EOF
             --resume)
                 resume_file="$2"
                 shift
-                (( $# == 1 )) && {
+                source "${resume_file}"
+                (( $# == 1 )) && [[ ${FORKRUN_ORIG_ARGS} ]] && {
                     while IFS= read -r ; do
                         if [[ "$REPLY" == 'declare -a FORKRUN_ORIG_ARGS=('* ]]; then
                             eval "${REPLY}"
-                            set - "$1" "${FORKRUN_ORIG_ARGS[@]}"
+                            set -- "$1" "${FORKRUN_ORIG_ARGS[@]}"
                             while IFS= read -r ; do
                                 eval "${REPLY}"
                             done
