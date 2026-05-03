@@ -544,7 +544,7 @@ toc() { :; }
                     declare -F ${nn} 2>/dev/null && FORKRUN_EXTRA_SETUP+="
 $(declare -f ${nn})"
                 done
-                declare -p FORKRUN_ORIG_ARGS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP FORKRUN_RETRY_LIMIT >> .forkrun_resume
+                declare -p FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT ${FORKRUN_EXTRA_VARS} >> .forkrun_resume
 
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes=$(ring_dump_resume bytes)
