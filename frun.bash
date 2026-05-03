@@ -22,7 +22,12 @@ frun() {
         (( ${#ring_funcs[@]} > 0 )) || ring_list 'ring_funcs'
         printf -v ring_enable '%s ' "${ring_funcs[@]}"
 
-        FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun "$@" ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; [[ -n "${FORKRUN_EXTRA_VARS:-}" ]] && declare -p ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
+        for nn in "${@##\-*}"; do
+            [[ ${nn} ]] && declare -F "$nn" && FORKRUN_EXTRA_FUNCS+=" ${nn}"
+        done
+        FORKRUN_EXTRA_VARS+=' FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP'
+
+        FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; declare -p ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
         [[ -n "${FORKRUN_EXTRA_SETUP}" ]] && FORKRUN_FRUN_SRC+=$'\n'"${FORKRUN_EXTRA_SETUP}"
 
         # EXEC into Clean Room
@@ -247,8 +252,19 @@ EOF
             --resume)
                 resume_file="$2"
                 shift
-                ;;
-
+                (( $# == 1 )) && {
+                    while IFS= read -r ; do
+                        if [[ "$REPLY" == 'declare -a FORKRUN_ORIG_ARGS=('* ]]; then
+                            eval "${REPLY}"
+                            set - "$1" "${FORKRUN_ORIG_ARGS[@]}"
+                            while IFS= read -r ; do
+                                eval "${REPLY}"
+                            done
+                            [[ ${FORKRUN_EXTRA_SETUP} ]] && eval "${FORKRUN_EXTRA_SETUP}"
+                            break
+                        fi
+                    done <"${resume_file}"
+                } ;;
 
             # --- LIMIT (-n 100) ---
             @(-n|--limit)?(?([= $'\t'])+([0-9+-])))
@@ -524,7 +540,11 @@ toc() { :; }
 
                 # ALWAYS write the resume file!
                 ring_dump_resume > .forkrun_resume
-                declare -p FORKRUN_ORIG_ARGS >> .forkrun_resume
+                for nn in ${FORKRUN_EXTRA_FUNCS}; do
+                    declare -F ${nn} 2>/dev/null && FORKRUN_EXTRA_SETUP+="
+$(declare -f ${nn})"
+                done
+                declare -p FORKRUN_ORIG_ARGS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP FORKRUN_RETRY_LIMIT >> .forkrun_resume
 
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes=$(ring_dump_resume bytes)
@@ -539,7 +559,7 @@ toc() { :; }
             # Clean up memory only AFTER the trap is done with it!
             ring_destroy 2>/dev/null
             return $status
-        ' EXIT
+        ' EXIT SIGINT
         ring_pipe fd_spawn_r fd_spawn_w
 
         # --- 1. RING FALLOW ---

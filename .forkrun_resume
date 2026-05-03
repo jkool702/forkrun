@@ -1,4 +1,7 @@
-FORKRUN_RESUME_HORIZON=4
+FORKRUN_RESUME_HORIZON=8
 FORKRUN_RESUME_STDOUT_BYTES=55
-FORKRUN_RESUME_JAGGED=("6:8" "8:10" "10:12" "12:14" "14:16" "16:18" "18:21" "21:24" "24:27" "27:30" "30:33" "33:36" "36:39" "39:42" "42:45" "45:48" "48:51" "51:54" "54:57" "292:292" )
+FORKRUN_RESUME_JAGGED=("10:12" "12:14" "14:16" "16:18" "18:21" "21:24" "24:27" "27:30" "30:33" "33:36" "36:39" "39:42" "42:45" "45:48" "48:51" "51:54" "54:57" "292:292" )
 declare -a FORKRUN_ORIG_ARGS=([0]="-l" [1]="1" [2]="ff")
+declare -- FORKRUN_EXTRA_FUNCS=" ff"
+declare -- FORKRUN_EXTRA_VARS=" FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP"
+declare -- FORKRUN_EXTRA_SETUP=$'\nff () \n{ \n    if (( $1 == 5 )) && ! [[ -f ./.forkrun_resume ]]; then\n        kill -9 $BASHPID;\n    else\n        sleep 1;\n        echo "$1";\n    fi\n}'
