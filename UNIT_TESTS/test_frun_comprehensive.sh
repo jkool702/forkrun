@@ -1615,6 +1615,770 @@ run_test_regex L "L17e: Scanner failure in -s mode: no deadlock" \
     ".*" 0 false
 
 # ============================================================================
+# SECTION M: Checkpoint & Resume
+# ============================================================================
+
+print_section M "Checkpoint & Resume"
+
+# ============================================================================
+# Shared crash function: kills the worker on a specific input value.
+# Only crashes on the FIRST run (when checkpoint file doesn't exist yet).
+# On resume, the checkpoint file exists, so the function processes normally.
+#
+# IMPORTANT: Use printf '%s\n' (not echo) for 1:1 input→output line mapping.
+# ============================================================================
+
+_M_FUNCS="$TEST_DIR/resume_funcs.sh"
+
+# ============================================================================
+# M1: Checkpoint file created on worker SIGKILL (-k, ordered)
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M1"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_func() {
+    for a in "$@"; do
+        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
+        > /dev/null 2>"$_MD/err1.txt"
+
+    if [[ -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M1: Checkpoint file created on worker SIGKILL (-k)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "M1: Checkpoint file created on worker SIGKILL (-k)"
+    else
+        TEST_RESULTS["M1: Checkpoint file created on worker SIGKILL (-k)"]="FAIL"
+        TEST_ERRORS["M1: Checkpoint file created on worker SIGKILL (-k)"]="no checkpoint file"
+        ((FAILED_TESTS++)); _print_result FAIL "M1: Checkpoint file created on worker SIGKILL (-k)" "no checkpoint file"
+    fi
+fi
+
+# ============================================================================
+# M2: Checkpoint contains FORKRUN_RESUME_HORIZON or equivalent resume state
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    if [[ -f "${_MD:-}/.forkrun_resume" ]]; then
+        # Check for any resume-related variable (name may vary)
+        if grep -qE '(FORKRUN_RESUME_HORIZON|RESUME_HORIZON|resume_horizon|RING_RESUME)' "$_MD/.forkrun_resume" 2>/dev/null; then
+            TEST_RESULTS["M2: Checkpoint contains resume horizon state"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M2: Checkpoint contains resume horizon state"
+        else
+            # Dump what IS in the file for debugging
+            _MCONTENTS=$(head -5 "$_MD/.forkrun_resume" 2>/dev/null | tr '\n' ' ')
+            TEST_RESULTS["M2: Checkpoint contains resume horizon state"]="FAIL"
+            TEST_ERRORS["M2: Checkpoint contains resume horizon state"]="no horizon var found. Contents: $_MCONTENTS"
+            ((FAILED_TESTS++)); _print_result FAIL "M2: Checkpoint contains resume horizon state" "no horizon var"
+        fi
+    else
+        TEST_RESULTS["M2: Checkpoint contains resume horizon state"]="SKIP"; ((SKIPPED_TESTS++))
+        _print_result SKIP "M2: Checkpoint contains resume horizon state" "no checkpoint from M1"
+    fi
+fi
+
+# ============================================================================
+# M3: Checkpoint contains FORKRUN_ORIG_ARGS
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    if [[ -f "${_MD:-}/.forkrun_resume" ]]; then
+        if grep -q 'FORKRUN_ORIG_ARGS' "$_MD/.forkrun_resume" 2>/dev/null; then
+            TEST_RESULTS["M3: Checkpoint contains FORKRUN_ORIG_ARGS"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M3: Checkpoint contains FORKRUN_ORIG_ARGS"
+        else
+            TEST_RESULTS["M3: Checkpoint contains FORKRUN_ORIG_ARGS"]="FAIL"
+            TEST_ERRORS["M3: Checkpoint contains FORKRUN_ORIG_ARGS"]="variable not found"
+            ((FAILED_TESTS++)); _print_result FAIL "M3: Checkpoint contains FORKRUN_ORIG_ARGS" "variable not found"
+        fi
+    else
+        TEST_RESULTS["M3: Checkpoint contains FORKRUN_ORIG_ARGS"]="SKIP"; ((SKIPPED_TESTS++))
+        _print_result SKIP "M3: Checkpoint contains FORKRUN_ORIG_ARGS" "no checkpoint from M1"
+    fi
+fi
+
+# ============================================================================
+# M4: Resume after SIGKILL produces complete output (-k, exactly-once)
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M4"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_func() {
+    for a in "$@"; do
+        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    # Run 1: crash
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M4: Resume produces complete output (-k)"]="FAIL"
+        TEST_ERRORS["M4: Resume produces complete output (-k)"]="no checkpoint after crash"
+        ((FAILED_TESTS++)); _print_result FAIL "M4: Resume produces complete output (-k)" "no checkpoint"
+    else
+        # Extract truncation byte count from stderr message
+        _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+
+        # Truncate output1 to the valid byte count
+        if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+            head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+            mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+        fi
+
+        # Run 2: resume
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 --resume '.forkrun_resume' crash_func" \
+            > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+        # Combine truncated output1 + output2
+        cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+        _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
+        _MDUP=$(sort "$_MD/combined.txt" | uniq -d | wc -l | tr -d ' ')
+        _MMISS=$(comm -23 <(seq 1000 | sort) <(sort "$_MD/combined.txt") | wc -l | tr -d ' ')
+
+        if (( _ML == 1000 && _MDUP == 0 && _MMISS == 0 )); then
+            # Also verify exact order for -k mode
+            if diff -q <(seq 1000) "$_MD/combined.txt" &>/dev/null; then
+                TEST_RESULTS["M4: Resume produces complete output (-k)"]="PASS"; ((PASSED_TESTS++))
+                _print_result PASS "M4: Resume produces complete output (-k)"
+            else
+                TEST_RESULTS["M4: Resume produces complete output (-k)"]="FAIL"
+                TEST_ERRORS["M4: Resume produces complete output (-k)"]="all lines present but order wrong"
+                ((FAILED_TESTS++)); _print_result FAIL "M4: Resume produces complete output (-k)" "order wrong"
+            fi
+        else
+            _MREASON="lines=$_ML dupes=$_MDUP missing=$_MMISS"
+            TEST_RESULTS["M4: Resume produces complete output (-k)"]="FAIL"
+            TEST_ERRORS["M4: Resume produces complete output (-k)"]="$_MREASON"
+            ((FAILED_TESTS++)); _print_result FAIL "M4: Resume produces complete output (-k)" "$_MREASON"
+        fi
+    fi
+fi
+
+# ============================================================================
+# M5: Resume with buffered/unordered mode (default)
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M5"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_func() {
+    for a in "$@"; do
+        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 crash_func" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M5: Resume with buffered mode"]="FAIL"
+        TEST_ERRORS["M5: Resume with buffered mode"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M5: Resume with buffered mode" "no checkpoint"
+    else
+        _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+        if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+            head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+            mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+        fi
+
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 --resume '.forkrun_resume' crash_func" \
+            > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+        cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+        _MUNIQ=$(sort -u "$_MD/combined.txt" | wc -l | tr -d ' ')
+        _MDUP=$(sort "$_MD/combined.txt" | uniq -d | wc -l | tr -d ' ')
+
+        if (( _MUNIQ == 1000 && _MDUP == 0 )); then
+            TEST_RESULTS["M5: Resume with buffered mode"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M5: Resume with buffered mode"
+        else
+            TEST_RESULTS["M5: Resume with buffered mode"]="FAIL"
+            TEST_ERRORS["M5: Resume with buffered mode"]="unique=$_MUNIQ dupes=$_MDUP"
+            ((FAILED_TESTS++)); _print_result FAIL "M5: Resume with buffered mode" "unique=$_MUNIQ dupes=$_MDUP"
+        fi
+    fi
+fi
+
+# ============================================================================
+# M6: Resume with realtime mode (-u, at-least-once semantics)
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M6"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_func() {
+    for a in "$@"; do
+        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -u -l 1 crash_func" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M6: Resume with realtime mode (-u)"]="FAIL"
+        TEST_ERRORS["M6: Resume with realtime mode (-u)"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M6: Resume with realtime mode (-u)" "no checkpoint"
+    else
+        # Realtime mode: resume to a FRESH file, then check combined coverage
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -u -l 1 --resume '.forkrun_resume' crash_func" \
+            > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+        # At-least-once: every input line should appear in at least one output
+        _MUNIQ=$( { cat "$_MD/output1.txt"; cat "$_MD/output2.txt"; } | sort -u | wc -l | tr -d ' ')
+
+        if (( _MUNIQ >= 1000 )); then
+            TEST_RESULTS["M6: Resume with realtime mode (-u)"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M6: Resume with realtime mode (-u)" "(at-least-once: $_MUNIQ unique)"
+        else
+            TEST_RESULTS["M6: Resume with realtime mode (-u)"]="FAIL"
+            TEST_ERRORS["M6: Resume with realtime mode (-u)"]="only $_MUNIQ unique lines"
+            ((FAILED_TESTS++)); _print_result FAIL "M6: Resume with realtime mode (-u)" "only $_MUNIQ unique lines"
+        fi
+    fi
+fi
+
+# ============================================================================
+# M7: Resume with stdin mode (-s)
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M7"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    # -s mode: data comes via stdin, not cmdline args. Function reads stdin.
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_stdin() {
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" == "50" ]] && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$line"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_stdin' frun -k -s crash_stdin" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M7: Resume with stdin mode (-s)"]="FAIL"
+        TEST_ERRORS["M7: Resume with stdin mode (-s)"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M7: Resume with stdin mode (-s)" "no checkpoint"
+    else
+        _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+        if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+            head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+            mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+        fi
+
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_stdin' frun -k -s --resume '.forkrun_resume' crash_stdin" \
+            > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+        cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+        _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
+        _MDUP=$(sort "$_MD/combined.txt" | uniq -d | wc -l | tr -d ' ')
+        _MMISS=$(comm -23 <(seq 1000 | sort) <(sort "$_MD/combined.txt") | wc -l | tr -d ' ')
+
+        if (( _ML == 1000 && _MDUP == 0 && _MMISS == 0 )); then
+            TEST_RESULTS["M7: Resume with stdin mode (-s)"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M7: Resume with stdin mode (-s)"
+        else
+            TEST_RESULTS["M7: Resume with stdin mode (-s)"]="FAIL"
+            TEST_ERRORS["M7: Resume with stdin mode (-s)"]="lines=$_ML dupes=$_MDUP missing=$_MMISS"
+            ((FAILED_TESTS++)); _print_result FAIL "M7: Resume with stdin mode (-s)" "lines=$_ML dupes=$_MDUP missing=$_MMISS"
+        fi
+    fi
+fi
+
+# ============================================================================
+# M8: Resume with byte mode (-b)
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M8"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    _MEXP=$(wc -c < "$_MD/input.txt" | tr -d ' ')
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_cat() {
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" == "50" ]] && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$line"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_cat' frun -k -b 4096 -s crash_cat" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M8: Resume with byte mode (-b)"]="FAIL"
+        TEST_ERRORS["M8: Resume with byte mode (-b)"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M8: Resume with byte mode (-b)" "no checkpoint"
+    else
+        _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+        if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+            head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+            mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+        fi
+
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_cat' frun -k -b 4096 -s --resume '.forkrun_resume' crash_cat" \
+            > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+        cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+        _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
+        _MMISS=$(comm -23 <(seq 1000 | sort) <(sort "$_MD/combined.txt") | wc -l | tr -d ' ')
+
+        if (( _ML == 1000 && _MMISS == 0 )); then
+            TEST_RESULTS["M8: Resume with byte mode (-b)"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M8: Resume with byte mode (-b)"
+        else
+            TEST_RESULTS["M8: Resume with byte mode (-b)"]="FAIL"
+            TEST_ERRORS["M8: Resume with byte mode (-b)"]="lines=$_ML missing=$_MMISS"
+            ((FAILED_TESTS++)); _print_result FAIL "M8: Resume with byte mode (-b)" "lines=$_ML missing=$_MMISS"
+        fi
+    fi
+fi
+
+# ============================================================================
+# M9: Resume preserves FORKRUN_EXTRA_VARS
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M9"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+label_func() {
+    for a in "$@"; do
+        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "${MY_LABEL}:${a}"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; MY_LABEL='VAR_OK'; cat input.txt | FORKRUN_EXTRA_FUNCS='label_func' FORKRUN_EXTRA_VARS='MY_LABEL' frun -k -l 1 label_func" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M9: Resume preserves FORKRUN_EXTRA_VARS"]="FAIL"
+        TEST_ERRORS["M9: Resume preserves FORKRUN_EXTRA_VARS"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M9: Resume preserves FORKRUN_EXTRA_VARS" "no checkpoint"
+    else
+        # Check that MY_LABEL is in the checkpoint
+        if ! grep -q 'MY_LABEL' "$_MD/.forkrun_resume" 2>/dev/null; then
+            TEST_RESULTS["M9: Resume preserves FORKRUN_EXTRA_VARS"]="FAIL"
+            TEST_ERRORS["M9: Resume preserves FORKRUN_EXTRA_VARS"]="MY_LABEL not in checkpoint"
+            ((FAILED_TESTS++)); _print_result FAIL "M9: Resume preserves FORKRUN_EXTRA_VARS" "MY_LABEL not in checkpoint"
+        else
+            _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+            if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+                head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+                mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+            fi
+
+            bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; MY_LABEL='VAR_OK'; cat input.txt | FORKRUN_EXTRA_FUNCS='label_func' FORKRUN_EXTRA_VARS='MY_LABEL' frun -k -l 1 --resume '.forkrun_resume' label_func" \
+                > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+            cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+            _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
+            _MLAB=$(grep -c '^VAR_OK:' "$_MD/combined.txt" 2>/dev/null || echo 0)
+
+            if (( _ML == 1000 && _MLAB == 1000 )); then
+                TEST_RESULTS["M9: Resume preserves FORKRUN_EXTRA_VARS"]="PASS"; ((PASSED_TESTS++))
+                _print_result PASS "M9: Resume preserves FORKRUN_EXTRA_VARS"
+            else
+                TEST_RESULTS["M9: Resume preserves FORKRUN_EXTRA_VARS"]="FAIL"
+                TEST_ERRORS["M9: Resume preserves FORKRUN_EXTRA_VARS"]="lines=$_ML with_label=$_MLAB"
+                ((FAILED_TESTS++)); _print_result FAIL "M9: Resume preserves FORKRUN_EXTRA_VARS" "lines=$_ML with_label=$_MLAB"
+            fi
+        fi
+    fi
+fi
+
+# ============================================================================
+# M10: Resume preserves FORKRUN_EXTRA_FUNCS
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M10"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+helper_fn() { printf 'H:%s\n' "$1"; }
+main_fn() {
+    for a in "$@"; do
+        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            helper_fn "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='helper_fn main_fn' frun -k -l 1 main_fn" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M10: Resume preserves FORKRUN_EXTRA_FUNCS"]="FAIL"
+        TEST_ERRORS["M10: Resume preserves FORKRUN_EXTRA_FUNCS"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M10: Resume preserves FORKRUN_EXTRA_FUNCS" "no checkpoint"
+    else
+        if ! grep -q 'helper_fn' "$_MD/.forkrun_resume" 2>/dev/null; then
+            TEST_RESULTS["M10: Resume preserves FORKRUN_EXTRA_FUNCS"]="FAIL"
+            TEST_ERRORS["M10: Resume preserves FORKRUN_EXTRA_FUNCS"]="helper_fn not in checkpoint"
+            ((FAILED_TESTS++)); _print_result FAIL "M10: Resume preserves FORKRUN_EXTRA_FUNCS" "helper_fn not in checkpoint"
+        else
+            _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+            if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+                head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+                mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+            fi
+
+            bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='helper_fn main_fn' frun -k -l 1 --resume '.forkrun_resume' main_fn" \
+                > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+            cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+            _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
+            _MH=$(grep -c '^H:' "$_MD/combined.txt" 2>/dev/null || echo 0)
+
+            if (( _ML == 1000 && _MH == 1000 )); then
+                TEST_RESULTS["M10: Resume preserves FORKRUN_EXTRA_FUNCS"]="PASS"; ((PASSED_TESTS++))
+                _print_result PASS "M10: Resume preserves FORKRUN_EXTRA_FUNCS"
+            else
+                TEST_RESULTS["M10: Resume preserves FORKRUN_EXTRA_FUNCS"]="FAIL"
+                TEST_ERRORS["M10: Resume preserves FORKRUN_EXTRA_FUNCS"]="lines=$_ML H:lines=$_MH"
+                ((FAILED_TESTS++)); _print_result FAIL "M10: Resume preserves FORKRUN_EXTRA_FUNCS" "lines=$_ML H:=$_MH"
+            fi
+        fi
+    fi
+fi
+
+# ============================================================================
+# M11: Missing resume file produces error
+# ============================================================================
+run_test_regex M "M11: Missing resume file error" \
+    "echo 'test' | frun --resume /nonexistent/path/.forkrun_resume printf '%s'" \
+    "Resume file.*not found|not found" \
+    1 true
+
+# ============================================================================
+# M12: Resume with NUMA (--nodes=2)
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M12"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_func() {
+    for a in "$@"; do
+        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k --nodes=2 -l 1 crash_func" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M12: Resume with NUMA (--nodes=2)"]="FAIL"
+        TEST_ERRORS["M12: Resume with NUMA (--nodes=2)"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M12: Resume with NUMA (--nodes=2)" "no checkpoint"
+    else
+        _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+        if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+            head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+            mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+        fi
+
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k --nodes=2 -l 1 --resume '.forkrun_resume' crash_func" \
+            > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+        cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+        _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
+        _MDUP=$(sort "$_MD/combined.txt" | uniq -d | wc -l | tr -d ' ')
+        _MMISS=$(comm -23 <(seq 1000 | sort) <(sort "$_MD/combined.txt") | wc -l | tr -d ' ')
+
+        if (( _ML == 1000 && _MDUP == 0 && _MMISS == 0 )); then
+            TEST_RESULTS["M12: Resume with NUMA (--nodes=2)"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M12: Resume with NUMA (--nodes=2)"
+        else
+            TEST_RESULTS["M12: Resume with NUMA (--nodes=2)"]="FAIL"
+            TEST_ERRORS["M12: Resume with NUMA (--nodes=2)"]="lines=$_ML dupes=$_MDUP missing=$_MMISS"
+            ((FAILED_TESTS++)); _print_result FAIL "M12: Resume with NUMA (--nodes=2)" "lines=$_ML dupes=$_MDUP missing=$_MMISS"
+        fi
+    fi
+fi
+
+# ============================================================================
+# M13: Ordered output sequence correct after resume (-k)
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M13"; mkdir -p "$_MD"
+    seq 500 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_func() {
+    for a in "$@"; do
+        if (( a == 30 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M13: Ordered output correct after resume (-k)"]="FAIL"
+        TEST_ERRORS["M13: Ordered output correct after resume (-k)"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M13: Ordered output correct after resume (-k)" "no checkpoint"
+    else
+        _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+        if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+            head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+            mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+        fi
+
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 --resume '.forkrun_resume' crash_func" \
+            > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+        cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+        # Verify exact sequence matches input
+        if diff -q <(seq 500) "$_MD/combined.txt" &>/dev/null; then
+            TEST_RESULTS["M13: Ordered output correct after resume (-k)"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M13: Ordered output correct after resume (-k)"
+        else
+            _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
+            _MFIRST=$(diff <(seq 500) "$_MD/combined.txt" | head -5)
+            TEST_RESULTS["M13: Ordered output correct after resume (-k)"]="FAIL"
+            TEST_ERRORS["M13: Ordered output correct after resume (-k)"]="$_ML lines. Diff: $_MFIRST"
+            ((FAILED_TESTS++)); _print_result FAIL "M13: Ordered output correct after resume (-k)" "$_ML lines, sequence mismatch"
+        fi
+    fi
+fi
+
+# ============================================================================
+# M14: No duplicate lines after resume (exactly-once, large input)
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M14"; mkdir -p "$_MD"
+    seq 5000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_func() {
+    for a in "$@"; do
+        if (( a == 200 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M14: No duplicates after resume (exactly-once)"]="FAIL"
+        TEST_ERRORS["M14: No duplicates after resume (exactly-once)"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M14: No duplicates after resume (exactly-once)" "no checkpoint"
+    else
+        _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+        if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+            head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+            mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+        fi
+
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 --resume '.forkrun_resume' crash_func" \
+            > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+        cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+        _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
+        _MDUP=$(sort "$_MD/combined.txt" | uniq -d | wc -l | tr -d ' ')
+        _MMISS=$(comm -23 <(seq 5000 | sort) <(sort "$_MD/combined.txt") | wc -l | tr -d ' ')
+
+        if (( _ML == 5000 && _MDUP == 0 && _MMISS == 0 )); then
+            TEST_RESULTS["M14: No duplicates after resume (exactly-once)"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M14: No duplicates after resume (exactly-once)"
+        else
+            TEST_RESULTS["M14: No duplicates after resume (exactly-once)"]="FAIL"
+            TEST_ERRORS["M14: No duplicates after resume (exactly-once)"]="lines=$_ML dupes=$_MDUP missing=$_MMISS"
+            ((FAILED_TESTS++)); _print_result FAIL "M14: No duplicates after resume (exactly-once)" "lines=$_ML dupes=$_MDUP missing=$_MMISS"
+        fi
+    fi
+fi
+
+# ============================================================================
+# M15: Resume with -i insert mode
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M15"; mkdir -p "$_MD"
+    seq 500 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+wrap_func() {
+    for a in "$@"; do
+        if (( a == 30 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '[%s]\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='wrap_func' frun -k -l 1 -i wrap_func {}" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M15: Resume with -i insert mode"]="FAIL"
+        TEST_ERRORS["M15: Resume with -i insert mode"]="no checkpoint"
+        ((FAILED_TESTS++)); _print_result FAIL "M15: Resume with -i insert mode" "no checkpoint"
+    else
+        _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+        if [[ -n "$_MBYTES" ]] && (( _MBYTES > 0 )); then
+            head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+            mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
+        fi
+
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='wrap_func' frun -k -l 1 -i --resume '.forkrun_resume' wrap_func {}" \
+            > "$_MD/output2.txt" 2>"$_MD/err2.txt"
+
+        cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
+
+        _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
+        _MWRAP=$(grep -c '^\[[0-9]*\]$' "$_MD/combined.txt" 2>/dev/null || echo 0)
+
+        if (( _ML == 500 && _MWRAP == 500 )); then
+            TEST_RESULTS["M15: Resume with -i insert mode"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M15: Resume with -i insert mode"
+        else
+            TEST_RESULTS["M15: Resume with -i insert mode"]="FAIL"
+            TEST_ERRORS["M15: Resume with -i insert mode"]="lines=$_ML wrapped=$_MWRAP"
+            ((FAILED_TESTS++)); _print_result FAIL "M15: Resume with -i insert mode" "lines=$_ML wrapped=$_MWRAP"
+        fi
+    fi
+fi
+
+# ============================================================================
+# M16: Checkpoint stdout bytes matches truncated output size
+# ============================================================================
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M16"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_func() {
+    for a in "$@"; do
+        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
+            kill -9 $BASHPID
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+
+    _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+
+    if [[ -n "$_MBYTES" ]]; then
+        # Verify that truncating to the specified bytes produces valid output
+        # (no partial lines at the boundary)
+        head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
+
+        # The truncated output should end with a newline (no partial lines)
+        _MLAST=$(tail -c 1 "$_MD/output1_trunc.txt" | xxd -p)
+        _MLINES=$(wc -l < "$_MD/output1_trunc.txt" | tr -d ' ')
+
+        if [[ "$_MLAST" == "0a" ]] && (( _MLINES > 0 )); then
+            TEST_RESULTS["M16: Checkpoint byte count produces clean truncation"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "M16: Checkpoint byte count produces clean truncation" "($_MBYTES bytes → $_MLINES clean lines)"
+        else
+            TEST_RESULTS["M16: Checkpoint byte count produces clean truncation"]="FAIL"
+            TEST_ERRORS["M16: Checkpoint byte count produces clean truncation"]="truncated output doesn't end with newline (last byte: $_MLAST, lines: $_MLINES)"
+            ((FAILED_TESTS++)); _print_result FAIL "M16: Checkpoint byte count produces clean truncation" "doesn't end with newline"
+        fi
+    elif [[ -f "$_MD/.forkrun_resume" ]]; then
+        TEST_RESULTS["M16: Checkpoint byte count produces clean truncation"]="FAIL"
+        TEST_ERRORS["M16: Checkpoint byte count produces clean truncation"]="no truncation message found in stderr"
+        ((FAILED_TESTS++)); _print_result FAIL "M16: Checkpoint byte count produces clean truncation" "no truncation message in stderr"
+    else
+        TEST_RESULTS["M16: Checkpoint byte count produces clean truncation"]="SKIP"; ((SKIPPED_TESTS++))
+        _print_result SKIP "M16: Checkpoint byte count produces clean truncation" "no checkpoint"
+    fi
+fi
+
+# ============================================================================
 # SUMMARY
 # ============================================================================
 

@@ -47,9 +47,9 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file NORMAL_EXIT_FLAG
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag NORMAL_EXIT_FLAG
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
-    local -gx order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag LC_ALL
+    local -gx  LC_ALL
     local -a fallow_args
     local -ga fd_out P order_args ring_init_opts
 
@@ -544,7 +544,7 @@ toc() { :; }
                 # ALWAYS write the resume file!
                 ring_dump_resume > .forkrun_resume
                 for nn in ${FORKRUN_EXTRA_FUNCS}; do
-                    declare -F -- "${nn}" 2>/dev/null && FORKRUN_EXTRA_SETUP+="
+                    declare -F -- "${nn}" &>/dev/null && ! [[ "${FORKRUN_EXTRA_SETUP}" == *$'"'"'\n'"'"'"${nn}"$'"'"' () \n{'"'"'*'"'"'}'"'"'* ]] && FORKRUN_EXTRA_SETUP+="
 $(declare -f -- "${nn}")"
                 done
                 declare -p -- FORKRUN_ORIG_ARGS ${FORKRUN_RETRY_LIMIT:+${FORKRUN_RETRY_LIMIT}} ${FORKRUN_EXTRA_VARS} 2>/dev/null >> .forkrun_resume
@@ -562,7 +562,7 @@ $(declare -f -- "${nn}")"
             # Clean up memory only AFTER the trap is done with it!
             ring_destroy 2>/dev/null
             return $status
-        ' EXIT SIGINT
+        ' EXIT INT
         ring_pipe fd_spawn_r fd_spawn_w
 
         # --- 1. RING FALLOW ---
@@ -774,6 +774,9 @@ $(declare -f -- "${nn}")"
     fi
     exit $status
   '"'"' EXIT
+
+  trap '"'"'ring_abort
+  kill -INT '"${BASHPID}'"' INT
 
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion

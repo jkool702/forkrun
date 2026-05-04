@@ -4,4 +4,4 @@ FORKRUN_RESUME_JAGGED=("10:51" )
 declare -a FORKRUN_ORIG_ARGS=([0]="-j" [1]="4" [2]="-l" [3]="1" [4]="crash_kill9_j4")
 declare -x FORKRUN_EXTRA_FUNCS="crash_kill9_j4 crash_kill9_j4"
 declare -- FORKRUN_EXTRA_VARS=" FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP"
-declare -- FORKRUN_EXTRA_SETUP=$'\ncrash_kill9_j4 () \n{ \n    if [[ "$1" == "5" ]]; then\n        kill -9 $BASHPID;\n    else\n        echo "$1";\n    fi\n}\ncrash_kill9_j4 () \n{ \n    if [[ "$1" == "5" ]]; then\n        kill -9 $BASHPID;\n    else\n        echo "$1";\n    fi\n}'
+declare -- FORKRUN_EXTRA_SETUP=$'\ncrash_kill9_j4 () \n{ \n    if [[ "$1" == "5" ]]; then\n        kill -9 $BASHPID;\n    else\n        echo "$1";\n    fi\n}'
