@@ -2459,7 +2459,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       if (_do_fencepost) {                                                     \
         local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] =           \
             (_batch_end_offset);                                               \
-        if ((pk & FLAG_PARTIAL_BATCH) || (_overwrite)) {                       \
+        if ((pk & FLAG_PARTIAL_BATCH) || (_overwrite) || __builtin_expect(g_state->is_resume_mode, 0)) { \
           local_state->offset_ring[local_scan_idx & RING_MASK] = pk;           \
         }                                                                      \
       } else {                                                                 \

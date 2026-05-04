@@ -218,6 +218,7 @@ EOF
     stats_flag=false
     dry_run_flag=false
     is_func_flag=false
+    resume_flag=false
     retry_nonzero_exit_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
@@ -252,20 +253,29 @@ EOF
             --resume)
                 resume_file="$2"
                 shift
-                source "${resume_file}"
-                (( $# == 1 )) && [[ ${FORKRUN_ORIG_ARGS} ]] && {
-                    while IFS= read -r ; do
-                        if [[ "$REPLY" == 'declare -a FORKRUN_ORIG_ARGS=('* ]]; then
-                            eval "${REPLY}"
-                            set -- "$1" "${FORKRUN_ORIG_ARGS[@]}"
-                            while IFS= read -r ; do
-                                eval "${REPLY}"
-                            done
-                            [[ ${FORKRUN_EXTRA_SETUP} ]] && eval "${FORKRUN_EXTRA_SETUP}"
-                            break
-                        fi
-                    done <"${resume_file}"
-                } ;;
+                if [[ -f "$resume_file" ]]; then
+                    source "$resume_file"
+                    resume_flag=true
+
+                    # If the user only provided the resume file (no extra args), inject the original ones
+                    if (( $# == 1 )) && (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
+
+                        # Set positional parameters: keep resume_file at $1 so the bottom
+                        # 'shift' safely drops it, then append the original arguments.
+                        set -- "" "${FORKRUN_ORIG_ARGS[@]}"
+
+                        # Resurrect the bash functions into the current shell environment
+                        [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && eval "${FORKRUN_EXTRA_SETUP}"
+                    fi
+
+                    # We intentionally do NOT call 'continue' here!
+                    # This allows the loop to hit the 'shift' at the bottom of the case statement,
+                    # which will drop $1 (the resume_file) and smoothly begin parsing the
+                    # newly injected FORKRUN_ORIG_ARGS on the next iteration.
+                else
+                    echo "forkrun [ERROR]: Resume file '$resume_file' not found." >&2
+                    return 1
+                fi ;;
 
             # --- LIMIT (-n 100) ---
             @(-n|--limit)?(?([= $'\t'])+([0-9+-])))
@@ -520,15 +530,7 @@ toc() { :; }
     ring_memfd_create ingress_memfd
 
     # NEW: Apply Checkpoint if Resuming
-    if [[ -n "${resume_file:-}" ]]; then
-        if [[ -f "$resume_file" ]]; then
-            source "$resume_file"
-            ring_set_resume "$FORKRUN_RESUME_HORIZON" "${FORKRUN_RESUME_JAGGED[@]}"
-        else
-            echo "forkrun [ERROR]: Resume file '$resume_file' not found." >&2
-            exit 1
-        fi
-    fi
+     ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "${FORKRUN_RESUME_JAGGED[@]}"
 
     # # # # # MAIN # # # # #
     {
@@ -545,7 +547,7 @@ toc() { :; }
                     declare -F ${nn} 2>/dev/null && FORKRUN_EXTRA_SETUP+="
 $(declare -f ${nn})"
                 done
-                declare -p FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT ${FORKRUN_EXTRA_VARS} >> .forkrun_resume
+                declare -p FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT ${FORKRUN_EXTRA_VARS} 2>/dev/null >> .forkrun_resume
 
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes=$(ring_dump_resume bytes)
@@ -1496,6 +1498,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()   # removed base64
+declare -A b64=()    # removed base64
 
 _forkrun_bootstrap_setup --force
