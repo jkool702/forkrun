@@ -8,8 +8,11 @@ fi
 
 [[ -f "$frun_path" ]] || return 1
 
-
-sed -i -E 's/^(declare -A b64=\().*$/\1)   # removed base64/' "${frun_path}"
+if [[ "$2" ]]; then
+    sed -E 's/^(declare -A b64=\().*$/\1)   # removed base64/' "${frun_path}" >"${2}"
+else
+    sed -i -E 's/^(declare -A b64=\().*$/\1)   # removed base64/' "${frun_path}"
+fi
 
 }
 
