@@ -382,13 +382,33 @@ Verifying run_test_sorted catches duplicate lines...
   ✓ L17d: Scanner failure mid-processing: no corrupted output
   ✓ L17e: Scanner failure in -s mode: no deadlock
 
+▶ Section M: Checkpoint & Resume
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓ M1: Checkpoint file created on worker SIGKILL (-k)
+  ✓ M2: Checkpoint contains resume horizon state
+  ✓ M3: Checkpoint contains FORKRUN_ORIG_ARGS
+  ✓ M4: Resume produces complete output (-k)
+  ✓ M5: Resume with buffered mode
+  ✓ M6: Resume with realtime mode (-u)
+  ✓ M7: Resume with stdin mode (-s)
+  ✓ M8: Resume with byte mode (-b)
+  ✓ M9: Resume preserves FORKRUN_EXTRA_VARS
+  ✓ M10: Resume preserves FORKRUN_EXTRA_FUNCS
+  ✓ M11: Missing resume file error
+  ✓ M12: Resume with NUMA (--nodes=2)
+  ✓ M13: Ordered output correct after resume (-k)
+  ✓ M14: No duplicates after resume (exactly-once)
+  ✓ M15: Resume with -i insert mode
+  ✓ M16: Checkpoint byte count produces clean truncation
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SUMMARY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:   155
-Passed:  155  (100.0%)
+Total:   171
+Passed:  171  (100.0%)
 Failed:    0  (0.0%)
 Skipped:   0  (0.0%)
 
 ALL TESTS PASSED!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+

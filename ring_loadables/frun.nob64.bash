@@ -47,9 +47,9 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file NORMAL_EXIT_FLAG
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file NORMAL_EXIT_FLAG
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
-    local -gx order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag LC_ALL
+    local -gx LC_ALL
     local -a fallow_args
     local -ga fd_out P order_args ring_init_opts
 
@@ -222,6 +222,7 @@ EOF
     retry_nonzero_exit_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
+    checkpoint_file='.forkrun_resume'
 
     # Parse Arguments
     while true; do
@@ -250,11 +251,17 @@ EOF
             -E|--retry-nonzero-exit)    retry_nonzero_exit_flag=true  ;;
             +E|--no-retry-nonzero-exit) retry_nonzero_exit_flag=false ;;
 
-            --resume)
-                resume_file="$2"
-                shift
+            @(--checkpoint-file)?(?([= $'\t'])*))
+                arg="${1##@(--checkpoint-file)?([= $'\t'])}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && checkpoint_file="${arg}" ;;
+
+            @(--resume)?(?([= $'\t'])*))
+                arg="${1##@(--resume)?([= $'\t'])}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && resume_file="${arg}"
                 if [[ -f "$resume_file" ]]; then
-                    source "$resume_file"
+                    eval "$(PATH='' exec -c "${BASH:-bash}" --norc --noprofile --restricted -c 'eval "$1"; builtin declare -p FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES FORKRUN_RESUME_JAGGED FORKRUN_ORIG_ARGS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP FORKRUN_RETRY_LIMIT' _ "$(< "$resume_file")" 2>/dev/null)"
                     resume_flag=true
 
                     # If the user only provided the resume file (no extra args), inject the original ones
@@ -542,27 +549,27 @@ toc() { :; }
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
 
                 # ALWAYS write the resume file!
-                ring_dump_resume > .forkrun_resume
+                ring_dump_resume > "'"${checkpoint_file}"'"
                 for nn in ${FORKRUN_EXTRA_FUNCS}; do
-                    declare -F -- "${nn}" 2>/dev/null && FORKRUN_EXTRA_SETUP+="
+                    declare -F -- "${nn}" &>/dev/null && ! [[ "${FORKRUN_EXTRA_SETUP}" == *$'"'"'\n'"'"'"${nn}"$'"'"' () \n{'"'"'*'"'"'}'"'"'* ]] && FORKRUN_EXTRA_SETUP+="
 $(declare -f -- "${nn}")"
                 done
-                declare -p -- FORKRUN_ORIG_ARGS ${FORKRUN_RETRY_LIMIT:+${FORKRUN_RETRY_LIMIT}} ${FORKRUN_EXTRA_VARS} 2>/dev/null >> .forkrun_resume
+                declare -p -- FORKRUN_ORIG_ARGS ${FORKRUN_RETRY_LIMIT:+${FORKRUN_RETRY_LIMIT}} ${FORKRUN_EXTRA_VARS} 2>/dev/null >> "'"${checkpoint_file}"'"
 
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes=$(ring_dump_resume bytes)
                     echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
-                    echo "         then re-run your exact command with: --resume .forkrun_resume" >&2
+                    echo "         then re-run your exact command with: --resume '"${checkpoint_file}"'" >&2
                 else
                     echo "forkrun: Warning - Realtime mode (-u) checkpoint generated." >&2
                     echo "         Resuming will result in some duplicate lines at the failure boundary (At-Least-Once semantics)." >&2
-                    echo "         Re-run your exact command with: --resume .forkrun_resume" >&2
+                    echo "         Re-run your exact command with: --resume '"${checkpoint_file}"'" >&2
                 fi
             fi
             # Clean up memory only AFTER the trap is done with it!
             ring_destroy 2>/dev/null
             return $status
-        ' EXIT SIGINT
+        ' EXIT INT
         ring_pipe fd_spawn_r fd_spawn_w
 
         # --- 1. RING FALLOW ---
@@ -774,6 +781,9 @@ $(declare -f -- "${nn}")"
     fi
     exit $status
   '"'"' EXIT
+
+  trap '"'"'ring_abort
+  kill -INT '"${BASHPID}'"' INT
 
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion
