@@ -23,11 +23,11 @@ frun() {
         printf -v ring_enable '%s ' "${ring_funcs[@]}"
 
         for nn in "${@##\-*}"; do
-            [[ ${nn} ]] && declare -F "$nn" && FORKRUN_EXTRA_FUNCS+=" ${nn}"
+            [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
         FORKRUN_EXTRA_VARS+=' FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP'
 
-        FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; declare -p ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
+        FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; declare -p -- ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
         [[ -n "${FORKRUN_EXTRA_SETUP}" ]] && FORKRUN_FRUN_SRC+=$'\n'"${FORKRUN_EXTRA_SETUP}"
 
         # EXEC into Clean Room
@@ -351,10 +351,10 @@ EOF
     done
     unset arg
     # --- AST MANIPULATION FOR BASH FUNCTIONS ---
-    declare -F "$1" >/dev/null 2>&1 && is_func_flag=true
+    declare -F -- "$1" &>/dev/null 2>&1 && is_func_flag=true
     if [[ -n "$1" ]] && ${is_func_flag}; then
         local func_def body body_start body_trimmed test_body
-        func_def="$(declare -f "$1")"
+        func_def="$(declare -f -- "$1")"
 
         # 1. Extract the contents inside the global { ... }
         body="${func_def#*\{}"
@@ -544,10 +544,10 @@ toc() { :; }
                 # ALWAYS write the resume file!
                 ring_dump_resume > .forkrun_resume
                 for nn in ${FORKRUN_EXTRA_FUNCS}; do
-                    declare -F ${nn} 2>/dev/null && FORKRUN_EXTRA_SETUP+="
-$(declare -f ${nn})"
+                    declare -F -- "${nn}" 2>/dev/null && FORKRUN_EXTRA_SETUP+="
+$(declare -f -- "${nn}")"
                 done
-                declare -p FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT ${FORKRUN_EXTRA_VARS} 2>/dev/null >> .forkrun_resume
+                declare -p -- FORKRUN_ORIG_ARGS ${FORKRUN_RETRY_LIMIT:+${FORKRUN_RETRY_LIMIT}} ${FORKRUN_EXTRA_VARS} 2>/dev/null >> .forkrun_resume
 
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes=$(ring_dump_resume bytes)
@@ -1498,6 +1498,6 @@ unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
-declare -A b64=()    # removed base64
+declare -A b64=()   # removed base64
 
 _forkrun_bootstrap_setup --force
