@@ -549,21 +549,21 @@ toc() { :; }
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
 
                 # ALWAYS write the resume file!
-                ring_dump_resume > '"${checkpoint_file}"'
+                ring_dump_resume > "'"${checkpoint_file}"'"
                 for nn in ${FORKRUN_EXTRA_FUNCS}; do
                     declare -F -- "${nn}" &>/dev/null && ! [[ "${FORKRUN_EXTRA_SETUP}" == *$'"'"'\n'"'"'"${nn}"$'"'"' () \n{'"'"'*'"'"'}'"'"'* ]] && FORKRUN_EXTRA_SETUP+="
 $(declare -f -- "${nn}")"
                 done
-                declare -p -- FORKRUN_ORIG_ARGS ${FORKRUN_RETRY_LIMIT:+${FORKRUN_RETRY_LIMIT}} ${FORKRUN_EXTRA_VARS} 2>/dev/null >> '"${checkpoint_file}"'
+                declare -p -- FORKRUN_ORIG_ARGS ${FORKRUN_RETRY_LIMIT:+${FORKRUN_RETRY_LIMIT}} ${FORKRUN_EXTRA_VARS} 2>/dev/null >> "'"${checkpoint_file}"'"
 
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes=$(ring_dump_resume bytes)
                     echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
-                    echo "         then re-run your exact command with: --resume '"${checkpoint_file}"'" >&2
+                    echo "         then re-run your exact command with: --resume \""'"${checkpoint_file}"'\"" >&2
                 else
                     echo "forkrun: Warning - Realtime mode (-u) checkpoint generated." >&2
                     echo "         Resuming will result in some duplicate lines at the failure boundary (At-Least-Once semantics)." >&2
-                    echo "         Re-run your exact command with: --resume '"${checkpoint_file}"'" >&2
+                    echo "         Re-run your exact command with: --resume \""'"${checkpoint_file}"'\"" >&2
                 fi
             fi
             # Clean up memory only AFTER the trap is done with it!
