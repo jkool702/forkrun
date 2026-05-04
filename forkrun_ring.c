@@ -3318,7 +3318,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(pending_lines, stride, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, return_bytes, false, _skipped);
+                                current_p_offset, true, false, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
@@ -4447,6 +4447,12 @@ static int ring_order_main(int argc, char **argv) {
   bool stdout_broken = false;
   void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
 
+  // NEW: Sync flag for Ordered Resume
+  bool resume_synced = true;
+  if (g_state && g_state->is_resume_mode) {
+      resume_synced = false;
+  }
+
   int tracker_cap = 1024;
   int tracker_sz = 0;
   struct IntervalNode *tracker_heap = malloc(tracker_cap * sizeof(struct IntervalNode));
@@ -4492,6 +4498,16 @@ static int ring_order_main(int argc, char **argv) {
 
       if (!unordered_mode) {
         heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
+
+        // NEW: Dynamic Sequence Bootstrapping!
+        // If we are resuming, wait for the packet that perfectly aligns with the horizon
+        if (__builtin_expect(!resume_synced, 0)) {
+            if (op->in_off == g_state->resume_horizon) {
+                expected_major = op->major_idx;
+                expected_minor = actual_minor;
+                resume_synced = true;
+            }
+        }
       } else {
         if (memfd_mode) {
           off_t offset = (off_t)op->off;
@@ -4529,7 +4545,7 @@ static int ring_order_main(int argc, char **argv) {
         }
       }
 
-      if (!unordered_mode && !stdout_broken) {
+      if (!unordered_mode && !stdout_broken && resume_synced) {
         while (heap_sz > 0) {
           uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
           if (heap[0].key != expected_key) break;
@@ -5389,15 +5405,33 @@ static int ring_dump_resume_main(int argc, char **argv) {
     printf("FORKRUN_RESUME_HORIZON=%llu\n", (unsigned long long)horiz);
     printf("FORKRUN_RESUME_STDOUT_BYTES=%llu\n", (unsigned long long)g_state->resume_stdout_bytes);
 
-    // Sort the jagged edge so the Ghost Scanner can do O(1) checks
+    // Sort the jagged edge
     int n = g_state->resume_jagged_count;
     struct IntervalNode sorted[1024];
     for (int i = 0; i < n; i++) sorted[i] = g_state->resume_jagged[i];
     qsort(sorted, n, sizeof(struct IntervalNode), cmp_interval);
 
+    // NEW: Collapse continuous/overlapping intervals
+    struct IntervalNode collapsed[1024];
+    int c_idx = 0;
+    if (n > 0) {
+        collapsed[0] = sorted[0];
+        for (int i = 1; i < n; i++) {
+            if (sorted[i].s <= collapsed[c_idx].e) { // Contiguous or overlapping
+                if (sorted[i].e > collapsed[c_idx].e) {
+                    collapsed[c_idx].e = sorted[i].e;
+                }
+            } else {
+                c_idx++;
+                collapsed[c_idx] = sorted[i];
+            }
+        }
+        c_idx++; // Convert index to count
+    }
+
     printf("FORKRUN_RESUME_JAGGED=(");
-    for (int i = 0; i < n; i++) {
-        printf("\"%llu:%llu\" ", (unsigned long long)sorted[i].s, (unsigned long long)sorted[i].e);
+    for (int i = 0; i < c_idx; i++) {
+        printf("\"%llu:%llu\" ", (unsigned long long)collapsed[i].s, (unsigned long long)collapsed[i].e);
     }
     printf(")\n");
     return EXECUTION_SUCCESS;
