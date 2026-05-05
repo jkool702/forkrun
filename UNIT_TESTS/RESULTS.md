@@ -400,12 +400,50 @@ Verifying run_test_sorted catches duplicate lines...
   ✓ M14: No duplicates after resume (exactly-once)
   ✓ M15: Resume with -i insert mode
   ✓ M16: Checkpoint byte count produces clean truncation
+  
+▶ Section N: Property-Based Invariants (Randomized)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓ N1: Default sorted == Ordered, random inputs
+  ✓ N2: No data loss, random inputs
+  ✓ N3: No duplication, random inputs
+  ✓ N4: Stdin sorted == Ordered stdin, random inputs
+  ✓ N5: Byte mode byte count integrity, various sizes
+
+▶ Section O: Configuration Edge Cases
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓ O1: -b 1k (1000 bytes)
+  ✓ O2: -b 1Ki (1024 bytes)
+  ✓ O3: -b 1M (1,000,000 bytes)
+  ✓ O4: -l 1k (1000 lines per batch)
+  ✓ O5: -j 1:4 worker range
+  ✓ O6: Negative limit value handled
+  ✓ O7: Zero batch size defaults correctly
+  ✓ O8: -b 1G large chunk size works
+  ✓ O9: -b 16E overflow clamps with warning
+
+▶ Section P: Exit Code Correctness
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓ P1: Successful run exits 0
+  ✓ P2: Missing resume file exits non-zero
+  ✓ P3: Worker failure without -E exits 0
+  ✓ P4: Poisoned batch exits non-zero
+  ✓ P5: Poisoned batch produces stderr warning
+  ✓ P6: Partial poisoning: 99/100 lines + non-zero exit
+  ✓ P7: Setup failure propagates exit 42
+  ✓ P8: SIGPIPE exits cleanly
+
+▶ Section Q: Concurrent Invocation Stress
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓ Q1: Two concurrent frun calls independent
+  ✓ Q2: Concurrent frun with different modes
+  ✓ Q3: Concurrent frun with separate checkpoints
+  ✓ Q4: Sequential frun reuse, 10 iterations
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SUMMARY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:   171
-Passed:  171  (100.0%)
+Total:   197
+Passed:  197  (100.0%)
 Failed:    0  (0.0%)
 Skipped:   0  (0.0%)
 
