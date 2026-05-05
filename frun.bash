@@ -558,7 +558,8 @@ $(declare -f -- "${nn}")"
                 declare -p -- FORKRUN_ORIG_ARGS ${FORKRUN_RETRY_LIMIT:+${FORKRUN_RETRY_LIMIT}} ${FORKRUN_EXTRA_VARS} 2>/dev/null >> "'"${checkpoint_file}"'"
 
                 if [[ "${order_mode}" != "realtime" ]]; then
-                    local safe_bytes=$(ring_dump_resume bytes)
+                    local safe_bytes="$(grep -E '"'"'^FORKRUN_RESUME_STDOUT_BYTES='"'"' "${checkpoint_file}")"
+                    safe_bytes="${safe_bytes#*=}"
                     echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
                     echo "         then re-run your exact command with: --resume '"${checkpoint_file}"'" >&2
                 else

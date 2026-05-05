@@ -817,6 +817,7 @@ struct GlobalState {
 
   // NEW: Orderer Ledger (The Checkpoint)
   uint8_t is_resume_mode ALIGNED(CACHE_LINE);
+  volatile uint32_t resume_seq; // NEW: Seqlock counter
   uint64_t resume_horizon;
   uint64_t resume_stdout_bytes;
   uint64_t fallow_horizon_bytes; // NEW: Fallback for realtime mode
@@ -2385,6 +2386,8 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             }                                                                  \
         } else if (_e_byte <= g_state->resume_horizon) {                       \
             _out_skipped = true;                                               \
+        } else {                                                               \
+            /* Unreachable: Invariants guarantee horizon perfectly aligns with batch boundaries. */ \
         }                                                                      \
         if (_out_skipped) break; /* Bypasses everything below! */              \
     }                                                                          \
@@ -4475,10 +4478,12 @@ static int ring_order_main(int argc, char **argv) {
           interval_heap_push(&tracker_heap, &tracker_sz, &tracker_cap, _s, _e); \
       } \
       if (g_state) { \
+          __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_ACQ_REL); \
           g_state->resume_horizon = tracker_horizon; \
           g_state->resume_stdout_bytes = tracker_bytes; \
           g_state->resume_jagged_count = (tracker_sz < 1024) ? tracker_sz : 1024; \
           for(uint32_t _i=0; _i<g_state->resume_jagged_count; _i++) g_state->resume_jagged[_i] = tracker_heap[_i]; \
+          __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_RELEASE); \
       } \
   } while(0)
 
@@ -4609,6 +4614,7 @@ static int ring_order_main(int argc, char **argv) {
   }
   free(fd_states);
   free(heap);
+  free(tracker_heap);
   signal(SIGPIPE, old_handler);
   return EXECUTION_SUCCESS;
 }
@@ -5392,23 +5398,39 @@ static int cmp_interval(const void *a, const void *b) {
 
 static int ring_dump_resume_main(int argc, char **argv) {
     if (!g_state) return EXECUTION_FAILURE;
+
+    // NEW: Safe Seqlock read into local variables
+    uint32_t seq1, seq2;
+    uint64_t snap_horizon, snap_bytes;
+    uint32_t snap_count;
+    struct IntervalNode snap_jagged[1024];
+
+    do {
+        seq1 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+        snap_horizon = g_state->resume_horizon;
+        snap_bytes = g_state->resume_stdout_bytes;
+        snap_count = g_state->resume_jagged_count;
+        for (uint32_t i = 0; i < snap_count; i++) snap_jagged[i] = g_state->resume_jagged[i];
+        seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+    } while (seq1 != seq2 || (seq1 & 1));
+
     if (argc >= 2 && strcmp(argv[1], "bytes") == 0) {
-        printf("%llu\n", (unsigned long long)g_state->resume_stdout_bytes);
+        printf("%llu\n", (unsigned long long)snap_bytes);
         return EXECUTION_SUCCESS;
     }
 
-    uint64_t horiz = g_state->resume_horizon;
+    uint64_t horiz = snap_horizon;
     if (horiz == 0 && g_state->fallow_horizon_bytes > 0) {
         horiz = g_state->fallow_horizon_bytes; // Fallback for -u mode!
     }
 
     printf("FORKRUN_RESUME_HORIZON=%llu\n", (unsigned long long)horiz);
-    printf("FORKRUN_RESUME_STDOUT_BYTES=%llu\n", (unsigned long long)g_state->resume_stdout_bytes);
+    printf("FORKRUN_RESUME_STDOUT_BYTES=%llu\n", (unsigned long long)snap_bytes);
 
     // Sort the jagged edge
-    int n = g_state->resume_jagged_count;
+    int n = snap_count;
     struct IntervalNode sorted[1024];
-    for (int i = 0; i < n; i++) sorted[i] = g_state->resume_jagged[i];
+    for (int i = 0; i < n; i++) sorted[i] = snap_jagged[i];
     qsort(sorted, n, sizeof(struct IntervalNode), cmp_interval);
 
     // NEW: Collapse continuous/overlapping intervals
