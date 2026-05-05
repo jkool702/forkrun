@@ -79,6 +79,7 @@ frun __exec__ "$@"
             *k*) p=1 ;; *m*) p=2 ;; *g*) p=3 ;; *t*) p=4 ;; *p*) p=5 ;; *e*) p=6 ;;
         esac
         if ${iec}; then REPLY="${val[0]//[^-]/}$(( num << (10 * p) ))"; else REPLY="${val[0]//[^-]/}$(( num * (1000 ** p) ))"; fi
+        (( REPLY < 0 )) && { REPLY=$(( (1<<63) - 1 )); printf '\nWARNING: value expanded to larger than maximum int64. truncated to %s \n' "$REPLY" >&2; }
         return 0
     }
 
@@ -804,6 +805,7 @@ $(declare -f -- "${nn}")"
     while ring_claim; do
         if [[ "${RING_POISONED:-0}" == "1" ]]; then
             echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS:-?} times)." >&2
+            echo "P:${RING_BATCH_IDX}:${RING_NUM_KILLS:-?}" >&"${FD_TRAP_ACK_W}" 2>/dev/null
         else
             if [[ "$REPLY" != "0" ]]; then
                 '
@@ -833,6 +835,7 @@ W_NODE[$3]=$2
         local _poll_timer_cmd=0
         local _timer_armed=false
         local _ret_val=0
+        local -a POISONED_BATCHES=()
 
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
@@ -859,6 +862,13 @@ W_NODE[$3]=$2
                     fi
                     ;;
                 TRAP_ACK)
+                    # NEW: Catch Poisoned Batch Signals
+                    if [[ "$POLL_ARG1" == P:* ]]; then
+                        local p_data="${POLL_ARG1#P:}"
+                        POISONED_BATCHES+=("Index ${p_data%:*} (failed ${p_data##*:} times)")
+                        continue
+                    fi
+
                     wID=$POLL_ARG1
                     (( trap_ack_pending[$wID]-- ))
                     
@@ -958,6 +968,21 @@ W_NODE[$3]=$2
         wait
 
         { ${stats_flag} || ${verbose_flag}; } && (( FORKRUN_NUM_NODES > 1 )) && ring_numa_stats
+
+        if (( ${#POISONED_BATCHES[@]} > 0 )); then
+            echo -e "\n=================================================================" >&2
+            echo "forkrun [ERROR]: POISONED BATCH SUMMARY" >&2
+            echo "=================================================================" >&2
+            echo "The pipeline completed, but ${#POISONED_BATCHES[@]} batch(es) failed repeatedly" >&2
+            echo "and were permanently skipped:" >&2
+            for b in "${POISONED_BATCHES[@]}"; do
+                echo "  - Batch $b" >&2
+            done
+            echo "=================================================================" >&2
+
+            # If we were going to exit 0, change it to exit 3 to signal data loss
+            (( _ret_val == 0 )) && _ret_val=3
+        fi
 
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
 
@@ -1176,9 +1201,9 @@ _forkrun_base64_to_file() {
     if [[ ${outFile} ]] && [[ -f "${outFile}" ]]; then
         chmod +x "${outFile}"
         (( outB > 0 )) && type -p truncate &>/dev/null && truncate --size="${outB}" "${outFile}"
-        ${noVerifyFlag} || [[ "${nnSum}" == '0' ]] || { nnSumF="$("${nnSum%%\:*}" "${outFile}")"; nnSumF="${nnSumF%% *}"; grep -qF "${nnSum#*\:}" <<<"${nnSumF}" || { printf '\n\nWARNING FOR EXTRACTED LOADABLE:\n"%s"\n\nCHECKSUM DOES NOT MATCH EXPECTED VALUE!!!\nDO NOT CONTINUE UNLESS THIS WAS EXPECTED!!!\n\nEXPECTED: %s\nGOT: %s\n\nTHIS CODE WILL NOW REMOVE THE EXTRACTED .SO FILE AND ABORT\nTO FORCE KEEPING THE [POTENTIALLY CORRUPT] .SO FILE, RE-RUN THIS CODE WITH THE "--force" FLAG'  "${outFile:-\(STDOUT\)}" "${nnSum}" "${nnSumF}" >&2; read -r -u ${fd_sleep} -t 2; \rm -f "${outFile}"; return 1; }; };
+        ${noVerifyFlag} || [[ "${nnSum}" == '0' ]] || { nnSumF="$("${nnSum%%\:*}" "${outFile}")"; nnSumF="${nnSumF%% *}"; grep -qF "${nnSum#*\:}" <<<"${nnSumF}" || { printf '\n\nWARNING FOR EXTRACTED LOADABLE:\n"%s"\n\nCHECKSUM DOES NOT MATCH EXPECTED VALUE!!!\nDO NOT CONTINUE UNLESS THIS WAS EXPECTED!!!\n\nEXPECTED: %s\nGOT: %s\n\nTHIS CODE WILL NOW REMOVE THE EXTRACTED .SO FILE AND ABORT\nTO FORCE KEEPING THE [POTENTIALLY CORRUPT] .SO FILE, RE-RUN THIS CODE WITH THE "--force" FLAG'  "${outFile:-\(STDOUT\)}" "${nnSum}" "${nnSumF}" >&2; ( read -r -u ${fd_sleep} -t 2 ) {fd_sleep}<><(:); \rm -f "${outFile}"; return 1; }; };
     elif ! { ${noVerifyFlag} || [[ "${nnSum}" == '0' ]] || ! ${legacyFlag}; }; then
-        nnSumF="$("${nnSum%%\:*}" <(printf '%b' "${outF}"))"; nnSumF="${nnSumF%% *}"; grep -qF "${nnSum#*\:}" <<<"${nnSumF}" || { printf '\n\nWARNING FOR EXTRACTED LOADABLE:\n"%s"\n\nCHECKSUM DOES NOT MATCH EXPECTED VALUE!!!\nDO NOT CONTINUE UNLESS THIS WAS EXPECTED!!!\n\nEXPECTED: %s\nGOT: %s\n\nTHIS CODE WILL NOW REMOVE THE EXTRACTED .SO FILE AND ABORT\nTO FORCE KEEPING THE [POTENTIALLY CORRUPT] .SO FILE, RE-RUN THIS CODE WITH THE "--force" FLAG'  "${outFile:-\(STDOUT\)}" "${nnSum}" "${nnSumF}" >&2; read -r -u ${fd_sleep} -t 2; \rm -f "${outFile}"; return 1; };
+        nnSumF="$("${nnSum%%\:*}" <(printf '%b' "${outF}"))"; nnSumF="${nnSumF%% *}"; grep -qF "${nnSum#*\:}" <<<"${nnSumF}" || { printf '\n\nWARNING FOR EXTRACTED LOADABLE:\n"%s"\n\nCHECKSUM DOES NOT MATCH EXPECTED VALUE!!!\nDO NOT CONTINUE UNLESS THIS WAS EXPECTED!!!\n\nEXPECTED: %s\nGOT: %s\n\nTHIS CODE WILL NOW REMOVE THE EXTRACTED .SO FILE AND ABORT\nTO FORCE KEEPING THE [POTENTIALLY CORRUPT] .SO FILE, RE-RUN THIS CODE WITH THE "--force" FLAG'  "${outFile:-\(STDOUT\)}" "${nnSum}" "${nnSumF}" >&2; ( read -r -u ${fd_sleep} -t 2 ) {fd_sleep}<><(:); \rm -f "${outFile}"; return 1; };
     fi
 
     } {fd1}>&1

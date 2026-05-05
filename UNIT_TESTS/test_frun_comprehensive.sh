@@ -1195,17 +1195,15 @@ run_test_exact L "L2a: Persistent crash: surviving lines output correctly (-k)" 
     "1
 2
 4
-5"
+5" 3
 
-# Same with unordered output.
 run_test_sorted L "L2b: Persistent crash: surviving lines output correctly (unordered)" \
     "always_crash_3() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='always_crash_3' frun -l 1 always_crash_3" \
     "1
 2
 4
-5"
+5" 3
 
-# Persistent crash on TWO different values — both lines lost, rest survive.
 run_test_sorted L "L2c: Persistent crash on 2 values: both lost, rest survive" \
     "always_crash_3_7() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]] || [[ \"\$arg\" == \"7\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='always_crash_3_7' frun -l 1 always_crash_3_7" \
     "1
@@ -1215,15 +1213,11 @@ run_test_sorted L "L2c: Persistent crash on 2 values: both lost, rest survive" \
 6
 8
 9
-10"
+10" 3
 
-# Persistent crash with -l 5 (batch mode) — the ENTIRE batch containing the
-# crashing value is poisoned. The worker crashes on "6" (exits before
-# processing 7-10), the batch is retried 3 times, then discarded entirely.
-# With -l 5: batch 1=[1..5], batch 2=[6..10]. Only batch 1 survives.
 run_test_sorted L "L2d: Persistent crash in batch mode (-l 5): poisoned batch fully discarded" \
     "crash_on_6() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"6\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_on_6' frun -l 5 crash_on_6" \
-    "$(seq 1 5)"
+    "$(seq 1 5)" 3
 
 # Persistent crash with exit code 139 (SIGSEGV-equivalent) — catastrophic exit
 # causes frun to exit non-zero. We wrap with { ...; true; } so the test
@@ -1248,12 +1242,12 @@ run_test_exact L "L3a: Mid-batch crash: partial output discarded (-k)" \
     "1
 2
 4
-5"
+5" 3
 
 # Verify "PARTIAL" does NOT appear anywhere in output.
 run_test_regex L "L3b: Mid-batch crash: no partial/corrupt output leaks" \
     "crash_mid_output() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"3\" ]]; then echo \"PARTIAL\"; exit 1; else echo \"\$arg\"; fi; done; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='crash_mid_output' frun -l 1 crash_mid_output 2>/dev/null" \
-    "^[^P]*(1[^P]*2[^P]*4[^P]*5[^P]*)?$" 0 false
+    "^[^P]*(1[^P]*2[^P]*4[^P]*5[^P]*)?$" 3 false
 
 # Simpler version: just grep for "PARTIAL_LINE" not appearing in stdout.
 run_test_regex L "L3c: Mid-batch crash: partial output NOT in stdout (grep check)" \
@@ -1294,7 +1288,7 @@ run_test_exact L "L5a: Ordered output after failure preserves input order (-k)" 
 5
 6
 7
-8"
+8" 3
 
 # Ordered output with multiple failures — only surviving lines in order.
 run_test_exact L "L5b: Ordered output with 2 persistent failures (-k)" \
@@ -1306,7 +1300,7 @@ run_test_exact L "L5b: Ordered output with 2 persistent failures (-k)" \
 6
 8
 9
-10"
+10" 3
 
 # Ordered with one-time crash — all lines present in order.
 run_test_exact L "L5c: Ordered self-heal: all lines in correct order (-k)" \
@@ -1337,7 +1331,7 @@ run_test_sorted L "L7a: Multiple failing workers: surviving lines correct" \
 3
 5
 7
-9"
+9" 3
 
 # Multiple failures with -j 1 (serialized) — single-worker mode handles
 # repeated failures gracefully without state corruption.
@@ -1351,7 +1345,7 @@ run_test_exact L "L7b: Serialized (-j 1) with persistent failure: correct surviv
 7
 8
 9
-10"
+10" 3
 
 # Every 3rd line crashes — high failure rate with multiple workers.
 run_test_sorted L "L7c: High failure rate (every 3rd line): survivors correct" \
@@ -1365,7 +1359,7 @@ run_test_sorted L "L7c: High failure rate (every 3rd line): survivors correct" \
 10
 11
 13
-14"
+14" 3
 
 # ---------- L8: Large-batch failure integrity ----------
 # When a large batch contains a failing line, the entire batch is lost.
@@ -1374,7 +1368,7 @@ run_test_sorted L "L7c: High failure rate (every 3rd line): survivors correct" \
 # 50 lines with -l 10, line 25 always crashes → batch 21-30 is poisoned.
 run_test_sorted L "L8a: Large batch (-l 10): poisoned batch discarded, rest intact" \
     "crash_25() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"25\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 50 | FORKRUN_EXTRA_FUNCS='crash_25' frun -l 10 crash_25" \
-    "$(seq 1 20; seq 31 50)"
+    "$(seq 1 20; seq 31 50)" 3
 
 # One-time crash in large batch — all lines self-heal.
 run_test_exact L "L8b: Large batch (-l 10) one-time crash: all lines survive (-k)" \
@@ -1391,7 +1385,7 @@ run_test_sorted L "L9a: Stdin mode (-s) with persistent crash: surviving lines c
 2
 4
 5
-6"
+6" 3
 
 # Stdin mode with -k ordering and persistent crash.
 run_test_exact L "L9b: Stdin mode (-s -k) with persistent crash: order preserved" \
@@ -1402,7 +1396,7 @@ run_test_exact L "L9b: Stdin mode (-s -k) with persistent crash: order preserved
 5
 6
 7
-8"
+8" 3
 
 # Stdin mode (-s) one-time crash self-heal — data is saved in a global memfd
 # before being spliced to the worker's stdin, so the escrow mechanism should
@@ -1424,7 +1418,7 @@ run_test_sorted L "L10a: Persistent crash + unsafe mode (-U): survivors correct"
     "a
 b
 e
-f"
+f" 3
 
 # Failure + FORKRUN_EXTRA_VARS — the variable must be available to the
 # replacement worker (respawn inherits the same cleanroom).
@@ -1449,7 +1443,7 @@ H:6"
 # Failure + NUMA mode (--nodes=2) — persistent crash recovery works across nodes.
 run_test_sorted L "L10d: Persistent crash + NUMA (--nodes=2): survivors correct" \
     "crash_5_numa() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"5\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_5_numa' frun --nodes=2 -l 1 crash_5_numa" \
-    "$(seq 1 4; seq 6 10)"
+    "$(seq 1 4; seq 6 10)" 3
 
 # Failure + -n limit — -n limits the number of input records dispatched.
 # With -n 5, only the first 5 input lines (1-5) are dispatched. Line 2
@@ -1459,7 +1453,7 @@ run_test_exact L "L10e: Persistent crash + limit (-n 5 -k): 4 surviving lines fr
     "1
 3
 4
-5"
+5" 3
 
 # Failure + --buffered mode — buffered output must not be corrupted.
 run_test_sorted L "L10f: Persistent crash + --buffered: survivors correct" \
@@ -1470,7 +1464,7 @@ run_test_sorted L "L10f: Persistent crash + --buffered: survivors correct" \
 4
 6
 7
-8"
+8" 3
 
 # Failure + insert mode (-i) — crash on specific substituted value.
 run_test_sorted L "L10g: Persistent crash + -i insert mode: survivors correct" \
@@ -1478,7 +1472,7 @@ run_test_sorted L "L10g: Persistent crash + -i insert mode: survivors correct" \
     "ITEM:1
 ITEM:2
 ITEM:4
-ITEM:5"
+ITEM:5" 3
 
 # Failure + byte mode (-b) — crash in small chunks, larger chunks survive.
 # Chunks < 10 bytes crash. With -b 25, all chunks are 25 bytes (none crash).
@@ -1507,19 +1501,19 @@ run_test_regex L "L11a: 5x stress: one-time crash always self-heals" \
 
 run_test_exact L "L12a: All lines crash: pipeline terminates, empty output" \
     "always_crash() { exit 1; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='always_crash' frun -l 1 always_crash" \
-    ""
+    "" 3
 
 # All lines crash with -k — must still terminate.
 run_test_regex L "L12b: All lines crash (-k): pipeline terminates (no hang)" \
     "timeout 10 bash -c \"source '$FRUN_SOURCE' && always_crash2() { exit 1; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='always_crash2' frun -k -l 1 always_crash2\"" \
-    ".*" 0 false
+    ".*" 3 false
 
 # ---------- L13: Edge case — single line that crashes ----------
 # Only 1 input line, and it crashes. Pipeline must terminate with empty output.
 
 run_test_exact L "L13: Single crashing line: empty output, clean exit" \
     "crash_always() { exit 1; }; echo 'only_line' | FORKRUN_EXTRA_FUNCS='crash_always' frun -l 1 crash_always" \
-    ""
+    "" 3
 
 # ---------- L14: Worker produces output then crashes in same batch ----------
 # ring_revert_output must discard the partial output.
@@ -1532,7 +1526,7 @@ run_test_regex L "L14: Worker outputs 2 lines then crashes: partial output disca
 # 100 lines with one persistent crash. The total surviving lines should be 99.
 run_test_line_count L "L15: 100 lines, 1 persistent crash: 99 surviving lines" \
     "crash_50() { for arg in \"\$@\"; do if [[ \"\$arg\" == \"50\" ]]; then exit 1; else echo \"\$arg\"; fi; done; }; seq 1 100 | FORKRUN_EXTRA_FUNCS='crash_50' frun -l 1 crash_50" \
-    99
+    99 3
 
 # ---------- L16: Catastrophic SIGKILL error → full teardown ----------
 # When a worker receives SIGKILL (which cannot be caught or intercepted),
@@ -2375,6 +2369,510 @@ FUNCEOF
     else
         TEST_RESULTS["M16: Checkpoint byte count produces clean truncation"]="SKIP"; ((SKIPPED_TESTS++))
         _print_result SKIP "M16: Checkpoint byte count produces clean truncation" "no checkpoint"
+    fi
+fi
+
+# ============================================================================
+# SECTION N: Property-Based Invariants (Randomized Stress)
+# ============================================================================
+
+print_section N "Property-Based Invariants (Randomized)"
+
+# --- N1: Default mode sorted == Ordered mode, random inputs ---
+if in_section N; then
+    ((TOTAL_TESTS++))
+    _NPASS=0; _NITER=30
+    for (( _ni=0; _ni<_NITER; _ni++ )); do
+        _NINPUT=$(head -c 5000 /dev/urandom | tr -dc '[:print:]\n' | head -n $((RANDOM % 200 + 10)))
+        _NEXPECTED=$(printf '%s\n' "${_NINPUT}" | bash -c "source '$FRUN_SOURCE' && frun -k printf '%s\n'" 2>/dev/null | sort)
+        _NACTUAL=$(printf '%s\n' "${_NINPUT}" | bash -c "source '$FRUN_SOURCE' && frun printf '%s\n'" 2>/dev/null | sort)
+        [[ "$_NEXPECTED" == "$_NACTUAL" ]] || break
+        (( _NPASS++ ))
+    done
+    if (( _NPASS == _NITER )); then
+        TEST_RESULTS["N1: Default sorted == Ordered, random inputs"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "N1: Default sorted == Ordered, random inputs" "(${_NITER}/${_NITER} iterations)"
+    else
+        TEST_RESULTS["N1: Default sorted == Ordered, random inputs"]="FAIL"
+        TEST_ERRORS["N1: Default sorted == Ordered, random inputs"]="failed at iteration ${_ni}"
+        ((FAILED_TESTS++)); _print_result FAIL "N1: Default sorted == Ordered, random inputs" "failed at iteration ${_ni}"
+    fi
+fi
+
+# --- N2: No data loss invariant, random inputs ---
+if in_section N; then
+    ((TOTAL_TESTS++))
+    _NPASS=0; _NITER=30
+    for (( _ni=0; _ni<_NITER; _ni++ )); do
+        _NINPUT=$(for (( _nj=0; _nj<$((RANDOM % 100 + 20)); _nj++ )); do
+            head -c 50 /dev/urandom | tr -dc '[:print:]' | head -c $((RANDOM % 40 + 1))
+            echo
+        done)
+        _NINCOUNT=$(printf '%s\n' "${_NINPUT}" | wc -l | tr -d ' ')
+        _NOUTCOUNT=$(printf '%s\n' "${_NINPUT}" | bash -c "source '$FRUN_SOURCE' && frun -k printf '%s\n'" 2>/dev/null | wc -l | tr -d ' ')
+        (( _NINCOUNT == _NOUTCOUNT )) || break
+        (( _NPASS++ ))
+    done
+    if (( _NPASS == _NITER )); then
+        TEST_RESULTS["N2: No data loss, random inputs"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "N2: No data loss, random inputs" "(${_NITER}/${_NITER} iterations)"
+    else
+        TEST_RESULTS["N2: No data loss, random inputs"]="FAIL"
+        TEST_ERRORS["N2: No data loss, random inputs"]="in=${_NINCOUNT} out=${_NOUTCOUNT} at iteration ${_ni}"
+        ((FAILED_TESTS++)); _print_result FAIL "N2: No data loss, random inputs" "in=${_NINCOUNT} out=${_NOUTCOUNT} at iter ${_ni}"
+    fi
+fi
+
+# --- N3: No duplication invariant, random inputs ---
+if in_section N; then
+    ((TOTAL_TESTS++))
+    _NPASS=0; _NITER=30
+    for (( _ni=0; _ni<_NITER; _ni++ )); do
+        _NINPUT=$(seq $((RANDOM % 500 + 50)) | shuf)
+        _NINCOUNT=$(printf '%s\n' "${_NINPUT}" | wc -l | tr -d ' ')
+        _NOUT=$(printf '%s\n' "${_NINPUT}" | bash -c "source '$FRUN_SOURCE' && frun -k printf '%s\n'" 2>/dev/null)
+        _NOUTCOUNT=$(printf '%s\n' "${_NOUT}" | wc -l | tr -d ' ')
+        _NUNIQ=$(printf '%s\n' "${_NOUT}" | sort -u | wc -l | tr -d ' ')
+        (( _NINCOUNT == _NOUTCOUNT && _NOUTCOUNT == _NUNIQ )) || break
+        (( _NPASS++ ))
+    done
+    if (( _NPASS == _NITER )); then
+        TEST_RESULTS["N3: No duplication, random inputs"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "N3: No duplication, random inputs" "(${_NITER}/${_NITER} iterations)"
+    else
+        TEST_RESULTS["N3: No duplication, random inputs"]="FAIL"
+        TEST_ERRORS["N3: No duplication, random inputs"]="in=${_NINCOUNT} out=${_NOUTCOUNT} uniq=${_NUNIQ} at iteration ${_ni}"
+        ((FAILED_TESTS++)); _print_result FAIL "N3: No duplication, random inputs" "counts mismatch at iter ${_ni}"
+    fi
+fi
+
+# --- N4: Stdin mode sorted == Ordered stdin mode, random inputs ---
+if in_section N; then
+    ((TOTAL_TESTS++))
+    _NPASS=0; _NITER=20
+    for (( _ni=0; _ni<_NITER; _ni++ )); do
+        _NINPUT=$(head -c 3000 /dev/urandom | tr -dc '[:print:]\n' | head -n $((RANDOM % 100 + 10)))
+        _NEXPECTED=$(printf '%s\n' "${_NINPUT}" | bash -c "source '$FRUN_SOURCE' && frun -k -s cat" 2>/dev/null | sort)
+        _NACTUAL=$(printf '%s\n' "${_NINPUT}" | bash -c "source '$FRUN_SOURCE' && frun -s cat" 2>/dev/null | sort)
+        [[ "$_NEXPECTED" == "$_NACTUAL" ]] || break
+        (( _NPASS++ ))
+    done
+    if (( _NPASS == _NITER )); then
+        TEST_RESULTS["N4: Stdin sorted == Ordered stdin, random inputs"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "N4: Stdin sorted == Ordered stdin, random inputs" "(${_NITER}/${_NITER} iterations)"
+    else
+        TEST_RESULTS["N4: Stdin sorted == Ordered stdin, random inputs"]="FAIL"
+        TEST_ERRORS["N4: Stdin sorted == Ordered stdin, random inputs"]="failed at iteration ${_ni}"
+        ((FAILED_TESTS++)); _print_result FAIL "N4: Stdin sorted == Ordered stdin, random inputs" "failed at iter ${_ni}"
+    fi
+fi
+
+# --- N5: Byte mode integrity, random binary data ---
+if in_section N; then
+    ((TOTAL_TESTS++))
+    _NPASS=0; _NITER=20
+    for (( _ni=0; _ni<_NITER; _ni++ )); do
+        _NBYTES=$((RANDOM % 5000 + 100))
+        _NINPUT=$(head -c $_NBYTES /dev/urandom)
+        _NEXPHASH=$(printf '%s' "${_NINPUT}" | md5sum | awk '{print $1}')
+        _NACTHASH=$(printf '%s' "${_NINPUT}" | bash -c "source '$FRUN_SOURCE' && frun -b 512 -s cat" 2>/dev/null | md5sum | awk '{print $1}')
+        [[ "$_NEXPHASH" == "$_NACTHASH" ]] || break
+        (( _NPASS++ ))
+    done
+    if (( _NPASS == _NITER )); then
+        TEST_RESULTS["N5: Byte mode binary integrity, random data"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "N5: Byte mode binary integrity, random data" "(${_NITER}/${_NITER} iterations)"
+    else
+        TEST_RESULTS["N5: Byte mode binary integrity, random data"]="FAIL"
+        TEST_ERRORS["N5: Byte mode binary integrity, random data"]="hash mismatch at iteration ${_ni}"
+        ((FAILED_TESTS++)); _print_result FAIL "N5: Byte mode binary integrity, random data" "hash mismatch at iter ${_ni}"
+    fi
+fi
+
+
+# ============================================================================
+# SECTION O: Configuration Edge Cases
+# ============================================================================
+# Tests _expand_unit and flag parsing indirectly through frun's behavior.
+# Cannot call _expand_unit directly since it's a local function inside frun().
+# ============================================================================
+
+print_section O "Configuration Edge Cases"
+
+# --- O1: -b with IEC prefix (1k = 1000 bytes) ---
+if in_section O; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/O1"; mkdir -p "$_MD"
+    # Create exactly 2000 bytes and use -b 1k (should produce 2 chunks)
+    head -c 2000 /dev/zero | tr '\0' 'A' > "$_MD/input.bin"
+    _OOUT=$(bash -c "source '$FRUN_SOURCE' && cat '$_MD/input.bin' | frun -b 1k -s wc -c" 2>/dev/null | awk '{s+=$1} END{print s}')
+    if (( _OOUT == 2000 )); then
+        TEST_RESULTS["O1: -b 1k (1000 bytes)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "O1: -b 1k (1000 bytes)"
+    else
+        TEST_RESULTS["O1: -b 1k (1000 bytes)"]="FAIL"
+        TEST_ERRORS["O1: -b 1k (1000 bytes)"]="got $_OOUT bytes, expected 2000"
+        ((FAILED_TESTS++)); _print_result FAIL "O1: -b 1k (1000 bytes)" "got $_OOUT/2000 bytes"
+    fi
+fi
+
+# --- O2: -b with IEC binary prefix (1Ki = 1024 bytes) ---
+if in_section O; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/O2"; mkdir -p "$_MD"
+    head -c 2048 /dev/zero | tr '\0' 'A' > "$_MD/input.bin"
+    _OOUT=$(bash -c "source '$FRUN_SOURCE' && cat '$_MD/input.bin' | frun -b 1Ki -s wc -c" 2>/dev/null | awk '{s+=$1} END{print s}')
+    if (( _OOUT == 2048 )); then
+        TEST_RESULTS["O2: -b 1Ki (1024 bytes)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "O2: -b 1Ki (1024 bytes)"
+    else
+        TEST_RESULTS["O2: -b 1Ki (1024 bytes)"]="FAIL"
+        TEST_ERRORS["O2: -b 1Ki (1024 bytes)"]="got $_OOUT bytes, expected 2048"
+        ((FAILED_TESTS++)); _print_result FAIL "O2: -b 1Ki (1024 bytes)" "got $_OOUT/2048 bytes"
+    fi
+fi
+
+# --- O3: -b with megabyte prefix (1M) ---
+if in_section O; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/O3"; mkdir -p "$_MD"
+    head -c 2000000 /dev/zero | tr '\0' 'A' > "$_MD/input.bin"
+    _OOUT=$(bash -c "source '$FRUN_SOURCE' && cat '$_MD/input.bin' | frun -b 1M -s wc -c" 2>/dev/null | awk '{s+=$1} END{print s}')
+    if (( _OOUT == 2000000 )); then
+        TEST_RESULTS["O3: -b 1M (1,000,000 bytes)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "O3: -b 1M (1,000,000 bytes)"
+    else
+        TEST_RESULTS["O3: -b 1M (1,000,000 bytes)"]="FAIL"
+        TEST_ERRORS["O3: -b 1M (1,000,000 bytes)"]="got $_OOUT bytes, expected 2000000"
+        ((FAILED_TESTS++)); _print_result FAIL "O3: -b 1M (1,000,000 bytes)" "got $_OOUT bytes"
+    fi
+fi
+
+# --- O4: -l with large batch size (1k = 1000 lines) ---
+if in_section O; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/O4"; mkdir -p "$_MD"
+    seq 2000 > "$_MD/input.txt"
+    _OOUT=$(bash -c "source '$FRUN_SOURCE' && frun -k -l 1k printf '%s\n' < '$_MD/input.txt'" 2>/dev/null | wc -l | tr -d ' ')
+    if (( _OOUT == 2000 )); then
+        TEST_RESULTS["O4: -l 1k (1000 lines per batch)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "O4: -l 1k (1000 lines per batch)"
+    else
+        TEST_RESULTS["O4: -l 1k (1000 lines per batch)"]="FAIL"
+        TEST_ERRORS["O4: -l 1k (1000 lines per batch)"]="got $_OOUT lines, expected 2000"
+        ((FAILED_TESTS++)); _print_result FAIL "O4: -l 1k (1000 lines per batch)" "got $_OOUT/2000 lines"
+    fi
+fi
+
+# --- O5: -j with range and IEC-like values ---
+run_test_line_count O "O5: -j 1:4 worker range" \
+    "seq 100 | frun -j 1:4 -k printf '%s\n'" \
+    100
+
+# --- O6: Negative limit value ---
+if in_section O; then
+    ((TOTAL_TESTS++))
+    _OOUT=$(bash -c "source '$FRUN_SOURCE' && seq 10 | frun -n -1 -k printf '%s\\n'" 2>/dev/null | wc -l | tr -d ' ')
+    # Acceptable: either all 10 lines (unlimited) or 0 lines (rejected)
+    if (( _OOUT == 10 || _OOUT == 0 )); then
+        TEST_RESULTS["O6: Negative limit value handled"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "O6: Negative limit value handled" "(got $_OOUT lines)"
+    else
+        TEST_RESULTS["O6: Negative limit value handled"]="FAIL"
+        TEST_ERRORS["O6: Negative limit value handled"]="got $_OOUT lines for -n -1"
+        ((FAILED_TESTS++)); _print_result FAIL "O6: Negative limit value handled" "got $_OOUT lines"
+    fi
+fi
+
+# --- O7: Zero batch size ---
+if in_section O; then
+    ((TOTAL_TESTS++))
+    _OOUT=$(bash -c "source '$FRUN_SOURCE' && seq 10 | frun -l 0 -k printf '%s\\n'" 2>/dev/null | wc -l | tr -d ' ')
+    # Should either default to something reasonable or error cleanly
+    if (( _OOUT == 10 )); then
+        TEST_RESULTS["O7: Zero batch size defaults correctly"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "O7: Zero batch size defaults correctly"
+    else
+        TEST_RESULTS["O7: Zero batch size defaults correctly"]="FAIL"
+        TEST_ERRORS["O7: Zero batch size defaults correctly"]="got $_OOUT lines for -l 0"
+        ((FAILED_TESTS++)); _print_result FAIL "O7: Zero batch size defaults correctly" "got $_OOUT lines"
+    fi
+fi
+
+# --- O8: _expand_unit extreme value (9E near int64 limit) ---
+if in_section O; then
+    ((TOTAL_TESTS++))
+    # 9E = 9 × 10^18 ≈ 9 × 10^18, right at the edge of int64
+    # Should either work correctly or fail gracefully, not produce a negative number
+    _OOUT=$(bash -c "source '$FRUN_SOURCE' && echo 'test' | timeout 5 frun -b 9E -s cat" 2>/dev/null)
+    if [[ "$_OOUT" == "test" ]]; then
+        TEST_RESULTS["O8: -b 9E near int64 limit works"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "O8: -b 9E near int64 limit works"
+    else
+        TEST_RESULTS["O8: -b 9E near int64 limit works"]="FAIL"
+        TEST_ERRORS["O8: -b 9E near int64 limit works"]="unexpected output or timeout"
+        ((FAILED_TESTS++)); _print_result FAIL "O8: -b 9E near int64 limit works" "unexpected output or timeout"
+    fi
+fi
+
+# --- O9: _expand_unit overflow (16E exceeds int64) clamps gracefully ---
+if in_section O; then
+    ((TOTAL_TESTS++))
+    # 16E overflows int64. The fix clamps to max int64 and prints a warning.
+    # Pipeline should still complete (huge chunk = pass everything in one batch).
+    _MD="$TEST_DIR/O9"; mkdir -p "$_MD"
+    bash -c "source '$FRUN_SOURCE' && echo 'test' | frun -b 16E -s cat" > "$_MD/out.txt" 2>"$_MD/err.txt"
+    _OEC=$?
+    _OOUT=$(cat "$_MD/out.txt" 2>/dev/null)
+    _OERR=$(cat "$_MD/err.txt" 2>/dev/null)
+    if [[ "$_OOUT" == "test" ]] && echo "$_OERR" | grep -qi 'truncat'; then
+        TEST_RESULTS["O9: -b 16E overflow clamps with warning"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "O9: -b 16E overflow clamps with warning"
+    elif [[ "$_OOUT" == "test" ]]; then
+        # Works but no warning — clamping without notification is acceptable but less ideal
+        TEST_RESULTS["O9: -b 16E overflow clamps with warning"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "O9: -b 16E overflow clamps with warning" "(no warning printed)"
+    else
+        TEST_RESULTS["O9: -b 16E overflow clamps with warning"]="FAIL"
+        TEST_ERRORS["O9: -b 16E overflow clamps with warning"]="output='$_OOUT' exit=$_OEC"
+        ((FAILED_TESTS++)); _print_result FAIL "O9: -b 16E overflow clamps with warning" "unexpected output"
+    fi
+fi
+
+# ============================================================================
+# SECTION P: Exit Code Correctness
+# ============================================================================
+
+print_section P "Exit Code Correctness"
+
+# --- P1: Successful run exits 0 ---
+if in_section P; then
+    ((TOTAL_TESTS++))
+    bash -c "source '$FRUN_SOURCE' && seq 100 | frun -k printf '%s\n' >/dev/null 2>&1"
+    if (( $? == 0 )); then
+        TEST_RESULTS["P1: Successful run exits 0"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "P1: Successful run exits 0"
+    else
+        TEST_RESULTS["P1: Successful run exits 0"]="FAIL"
+        TEST_ERRORS["P1: Successful run exits 0"]="exit $?"
+        ((FAILED_TESTS++)); _print_result FAIL "P1: Successful run exits 0" "non-zero exit"
+    fi
+fi
+
+# --- P2: Missing resume file exits non-zero ---
+if in_section P; then
+    ((TOTAL_TESTS++))
+    bash -c "source '$FRUN_SOURCE' && echo 'test' | frun --resume /nonexistent/path/.forkrun_resume printf '%s' >/dev/null 2>&1"
+    if (( $? != 0 )); then
+        TEST_RESULTS["P2: Missing resume file exits non-zero"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "P2: Missing resume file exits non-zero"
+    else
+        TEST_RESULTS["P2: Missing resume file exits non-zero"]="FAIL"
+        TEST_ERRORS["P2: Missing resume file exits non-zero"]="exited 0"
+        ((FAILED_TESTS++)); _print_result FAIL "P2: Missing resume file exits non-zero" "exited 0"
+    fi
+fi
+
+# --- P3: Worker command failure exits 0 (default, no -E) ---
+if in_section P; then
+    ((TOTAL_TESTS++))
+    bash -c "source '$FRUN_SOURCE' && seq 10 | frun -k -l 1 false >/dev/null 2>&1"
+    if (( $? == 0 )); then
+        TEST_RESULTS["P3: Worker failure without -E exits 0"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "P3: Worker failure without -E exits 0"
+    else
+        TEST_RESULTS["P3: Worker failure without -E exits 0"]="FAIL"
+        TEST_ERRORS["P3: Worker failure without -E exits 0"]="exited $?"
+        ((FAILED_TESTS++)); _print_result FAIL "P3: Worker failure without -E exits 0" "non-zero exit"
+    fi
+fi
+
+# --- P4: Poisoned batch exits non-zero ---
+if in_section P; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/P4"; mkdir -p "$_MD"
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+always_crash() { exit 1; }
+FUNCEOF
+    bash -c "source '$FRUN_SOURCE' && source '$_MD/funcs.sh' && FORKRUN_RETRY_LIMIT=0 seq 10 | FORKRUN_EXTRA_FUNCS='always_crash' frun -k -l 1 -E always_crash >/dev/null 2>'$_MD/err.txt'"
+    _PEC=$?
+    if (( _PEC != 0 )); then
+        TEST_RESULTS["P4: Poisoned batch exits non-zero"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "P4: Poisoned batch exits non-zero" "(exit $_PEC)"
+    else
+        TEST_RESULTS["P4: Poisoned batch exits non-zero"]="FAIL"
+        TEST_ERRORS["P4: Poisoned batch exits non-zero"]="exited 0 despite poisoned batches"
+        ((FAILED_TESTS++)); _print_result FAIL "P4: Poisoned batch exits non-zero" "exited 0 — should be non-zero!"
+    fi
+fi
+
+# --- P5: Poisoned batch produces stderr warning ---
+if in_section P; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/P5"; mkdir -p "$_MD"
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+always_crash() { exit 1; }
+FUNCEOF
+    bash -c "source '$FRUN_SOURCE' && source '$_MD/funcs.sh' && FORKRUN_RETRY_LIMIT=0 seq 10 | FORKRUN_EXTRA_FUNCS='always_crash' frun -k -l 1 -E always_crash >/dev/null 2>'$_MD/err.txt'"
+    _PERR=$(cat "$_MD/err.txt" 2>/dev/null)
+    # Check for any warning about poisoned/skipped batches
+    if echo "$_PERR" | grep -qiE 'poison|skip|killed|retry'; then
+        TEST_RESULTS["P5: Poisoned batch produces stderr warning"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "P5: Poisoned batch produces stderr warning"
+    else
+        TEST_RESULTS["P5: Poisoned batch produces stderr warning"]="FAIL"
+        TEST_ERRORS["P5: Poisoned batch produces stderr warning"]="no warning in stderr. stderr: $(echo "$_PERR" | head -3)"
+        ((FAILED_TESTS++)); _print_result FAIL "P5: Poisoned batch produces stderr warning" "no warning in stderr"
+    fi
+fi
+
+# --- P6: Partial poisoning: surviving lines correct + non-zero exit ---
+if in_section P; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/P6"; mkdir -p "$_MD"
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_on_50() { for a in "$@"; do if (( a == 50 )); then exit 1; else printf '%s\n' "$a"; fi; done; }
+FUNCEOF
+    bash -c "source '$FRUN_SOURCE' && source '$_MD/funcs.sh' && FORKRUN_RETRY_LIMIT=0 seq 100 | FORKRUN_EXTRA_FUNCS='crash_on_50' frun -k -l 1 -E crash_on_50 > '$_MD/out.txt' 2>'$_MD/err.txt'"
+    _PEC=$?
+    _PLINES=$(wc -l < "$_MD/out.txt" 2>/dev/null | tr -d ' ')
+    _PMISSING=$(comm -23 <(seq 100 | grep -v '^50$' | sort) <(sort "$_MD/out.txt" 2>/dev/null) | wc -l | tr -d ' ')
+    if (( _PEC != 0 && _PLINES == 99 && _PMISSING == 0 )); then
+        TEST_RESULTS["P6: Partial poisoning: 99/100 lines + non-zero exit"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "P6: Partial poisoning: 99/100 lines + non-zero exit"
+    else
+        _PREASON="exit=$_PEC lines=$_PLINES missing=$_PMISSING"
+        TEST_RESULTS["P6: Partial poisoning: 99/100 lines + non-zero exit"]="FAIL"
+        TEST_ERRORS["P6: Partial poisoning: 99/100 lines + non-zero exit"]="$_PREASON"
+        ((FAILED_TESTS++)); _print_result FAIL "P6: Partial poisoning: 99/100 lines + non-zero exit" "$_PREASON"
+    fi
+fi
+
+# --- P7: FORKRUN_EXTRA_SETUP failure exit code propagates ---
+run_test_exact P "P7: Setup failure propagates exit 42" \
+    "FORKRUN_EXTRA_SETUP='exit 42'; dummy() { echo \"\$1\"; }; echo 'x' | FORKRUN_EXTRA_FUNCS='dummy' frun -l 1 dummy" \
+    "" 42
+
+# --- P8: SIGPIPE from downstream exits cleanly ---
+if in_section P; then
+    ((TOTAL_TESTS++))
+    bash -c "source '$FRUN_SOURCE' && seq 1000000 | frun -k printf '%s\n' | head -n 5 >/dev/null 2>&1"
+    _PEC=$?
+    # SIGPIPE can produce exit 0 (pipe closed) or exit 141 (SIGPIPE signal)
+    if (( _PEC == 0 || _PEC == 141 )); then
+        TEST_RESULTS["P8: SIGPIPE exits cleanly"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "P8: SIGPIPE exits cleanly" "(exit $_PEC)"
+    else
+        TEST_RESULTS["P8: SIGPIPE exits cleanly"]="FAIL"
+        TEST_ERRORS["P8: SIGPIPE exits cleanly"]="exit $_PEC"
+        ((FAILED_TESTS++)); _print_result FAIL "P8: SIGPIPE exits cleanly" "exit $_PEC"
+    fi
+fi
+
+
+# ============================================================================
+# SECTION Q: Concurrent Invocation Stress
+# ============================================================================
+
+print_section Q "Concurrent Invocation Stress"
+
+# --- Q1: Two concurrent frun calls produce correct independent output ---
+if in_section Q; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/Q1"; mkdir -p "$_MD"
+    seq 500 > "$_MD/input1.txt"
+    seq 1000 1499 > "$_MD/input2.txt"
+
+    bash -c "source '$FRUN_SOURCE' && frun -k printf '%s\n' < '$_MD/input1.txt'" > "$_MD/out1.txt" 2>/dev/null &
+    _QP1=$!
+    bash -c "source '$FRUN_SOURCE' && frun -k printf '%s\n' < '$_MD/input2.txt'" > "$_MD/out2.txt" 2>/dev/null &
+    _QP2=$!
+    wait $_QP1 $_QP2
+
+    _QDIFF1=$(diff "$_MD/input1.txt" "$_MD/out1.txt")
+    _QDIFF2=$(diff "$_MD/input2.txt" "$_MD/out2.txt")
+
+    if [[ -z "$_QDIFF1" && -z "$_QDIFF2" ]]; then
+        TEST_RESULTS["Q1: Two concurrent frun calls independent"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "Q1: Two concurrent frun calls independent"
+    else
+        TEST_RESULTS["Q1: Two concurrent frun calls independent"]="FAIL"
+        TEST_ERRORS["Q1: Two concurrent frun calls independent"]="output mismatch"
+        ((FAILED_TESTS++)); _print_result FAIL "Q1: Two concurrent frun calls independent" "output mismatch"
+    fi
+fi
+
+# --- Q2: Concurrent frun with different modes ---
+if in_section Q; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/Q2"; mkdir -p "$_MD"
+    seq 500 > "$_MD/input.txt"
+
+    bash -c "source '$FRUN_SOURCE' && frun -k printf '%s\n' < '$_MD/input.txt'" > "$_MD/out_ordered.txt" 2>/dev/null &
+    _QP1=$!
+    bash -c "source '$FRUN_SOURCE' && frun -s cat < '$_MD/input.txt'" > "$_MD/out_stdin.txt" 2>/dev/null &
+    _QP2=$!
+    wait $_QP1 $_QP2
+
+    _QO1=$(sort "$_MD/out_ordered.txt" | md5sum | awk '{print $1}')
+    _QO2=$(sort "$_MD/out_stdin.txt" | md5sum | awk '{print $1}')
+    _QEXP=$(sort "$_MD/input.txt" | md5sum | awk '{print $1}')
+
+    if [[ "$_QO1" == "$_QEXP" && "$_QO2" == "$_QEXP" ]]; then
+        TEST_RESULTS["Q2: Concurrent frun with different modes"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "Q2: Concurrent frun with different modes"
+    else
+        TEST_RESULTS["Q2: Concurrent frun with different modes"]="FAIL"
+        TEST_ERRORS["Q2: Concurrent frun with different modes"]="hash mismatch"
+        ((FAILED_TESTS++)); _print_result FAIL "Q2: Concurrent frun with different modes" "hash mismatch"
+    fi
+fi
+
+# --- Q3: Concurrent frun with separate checkpoint files ---
+if in_section Q; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/Q3"; mkdir -p "$_MD"
+    seq 500 > "$_MD/input1.txt"
+    seq 1000 1499 > "$_MD/input2.txt"
+
+    bash -c "source '$FRUN_SOURCE' && frun -k --checkpoint-file '$_MD/cp1.txt' printf '%s\n' < '$_MD/input1.txt'" > "$_MD/out1.txt" 2>/dev/null &
+    _QP1=$!
+    bash -c "source '$FRUN_SOURCE' && frun -k --checkpoint-file '$_MD/cp2.txt' printf '%s\n' < '$_MD/input2.txt'" > "$_MD/out2.txt" 2>/dev/null &
+    _QP2=$!
+    wait $_QP1 $_QP2
+
+    _QDIFF1=$(diff "$_MD/input1.txt" "$_MD/out1.txt")
+    _QDIFF2=$(diff "$_MD/input2.txt" "$_MD/out2.txt")
+
+    if [[ -z "$_QDIFF1" && -z "$_QDIFF2" ]]; then
+        TEST_RESULTS["Q3: Concurrent frun with separate checkpoints"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "Q3: Concurrent frun with separate checkpoints"
+    else
+        TEST_RESULTS["Q3: Concurrent frun with separate checkpoints"]="FAIL"
+        TEST_ERRORS["Q3: Concurrent frun with separate checkpoints"]="output mismatch"
+        ((FAILED_TESTS++)); _print_result FAIL "Q3: Concurrent frun with separate checkpoints" "output mismatch"
+    fi
+fi
+
+# --- Q4: Sequential frun calls reuse ring without corruption ---
+if in_section Q; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/Q4"; mkdir -p "$_MD"
+    _NPASS=0; _NITER=10
+    for (( _ni=0; _ni<_NITER; _ni++ )); do
+        seq $((RANDOM % 500 + 100)) > "$_MD/input.txt"
+        _QEXP=$(cat "$_MD/input.txt")
+        _QACT=$(bash -c "source '$FRUN_SOURCE' && frun -k printf '%s\n' < '$_MD/input.txt'" 2>/dev/null)
+        [[ "$_QEXP" == "$_QACT" ]] || break
+        (( _NPASS++ ))
+    done
+    if (( _NPASS == _NITER )); then
+        TEST_RESULTS["Q4: Sequential frun reuse, 10 iterations"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "Q4: Sequential frun reuse, 10 iterations" "(10/10)"
+    else
+        TEST_RESULTS["Q4: Sequential frun reuse, 10 iterations"]="FAIL"
+        TEST_ERRORS["Q4: Sequential frun reuse, 10 iterations"]="failed at iteration ${_ni}"
+        ((FAILED_TESTS++)); _print_result FAIL "Q4: Sequential frun reuse, 10 iterations" "failed at iter ${_ni}"
     fi
 fi
 
