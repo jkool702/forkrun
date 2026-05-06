@@ -79,7 +79,7 @@ frun __exec__ "$@"
             *k*) p=1 ;; *m*) p=2 ;; *g*) p=3 ;; *t*) p=4 ;; *p*) p=5 ;; *e*) p=6 ;;
         esac
         if ${iec}; then REPLY="${val[0]//[^-]/}$(( num << (10 * p) ))"; else REPLY="${val[0]//[^-]/}$(( num * (1000 ** p) ))"; fi
-        (( REPLY < 0 )) && { REPLY=$(( (1<<63) - 1 )); printf '\nWARNING: value expanded to larger than maximum int64. truncated to %s \n' "$REPLY" >&2; }
+        (( REPLY < -1 )) && { REPLY=$(( (1<<63) - 1 )); printf '\nWARNING: value expanded to larger than maximum int64. truncated to %s \n' "$REPLY" >&2; }
         return 0
     }
 
