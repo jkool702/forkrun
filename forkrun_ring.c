@@ -2092,26 +2092,26 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             current_global_stolen += atomic_load_relaxed(&state[i].stats_chunks_i_stole);
         }
         
-        if (current_buffer_limit >= 13) {
-            // we are at maximum buffer size already. limit steal count to 1 to ensure IIR filter never exceeds upper limit.
-            // S is 1 if any node stole a chunk since the last loop, 0 otherwise
-            uint64_t S = (current_global_stolen > last_global_stolen) ? 1 : 0;
-        } else {
-            // S is number of steals since the last loop
-            uint64_t S = (current_global_stolen - last_global_stolen);
-        }
+        // S is 1 if any node stole a chunk since the last loop, 0 otherwise
+        uint64_t S = (current_global_stolen > last_global_stolen) ? 1 : 0;
+
+        // Si is number of steals since the last loop (min value 1)
+        int Si = (S == 0) ? 1 : (current_global_stolen - last_global_stolen);
+
         last_global_stolen = current_global_stolen;
 
         // Apply bounded IIR filter (Window = 32)
-        if (current_buffer_limit <= 4) {
-            // Floor bound: If at min limit, Base is 15 so it cannot drop below 15.
-            I_meter = ((I_meter * 31) + 15 + (2000 * S)) >> 5;
-        } else if (current_buffer_limit >= 13) {
-            // Ceiling bound: If at max limit, Max Penalty is 75 so it cannot exceed 75.
-            I_meter = ((I_meter * 31) + (75 * S)) >> 5;
-        } else {
-            // Normal operation: approaches 0 on clean runs, 1000 on continuous steals.
-            I_meter = ((I_meter * 31) + (2000 * S)) >> 5;
+        for (int i = 0; i < Si; i++) {
+            if (current_buffer_limit <= 4) {
+                // Floor bound: If at min limit, Base is 15 so it cannot drop below 15.
+                I_meter = ((I_meter * 31) + 15 + (2000 * S)) >> 5;
+            } else if (current_buffer_limit >= 13) {
+                // Ceiling bound: If at max limit, Max Penalty is 75 so it cannot exceed 75.
+                I_meter = ((I_meter * 31) + (75 * S)) >> 5;
+            } else {
+                // Normal operation: approaches 0 on clean runs, 1000 on continuous steals.
+                I_meter = ((I_meter * 31) + (2000 * S)) >> 5;
+            }
         }
 
         // Trigger buffer limits
