@@ -11,7 +11,7 @@
                 #. "${frun_path%%$'\n'*}"
 
                 # setup test files
-                fLines=100000000
+                fLines=1000000
                 [[ -f ./f1 ]] || yes $'\n' | head -n $fLines >f1
                 [[ -f ./f2 ]] || seq $fLines >f2
                 [[ -f ./f3 ]] || find /usr /etc /opt /var /home -type f >f3
