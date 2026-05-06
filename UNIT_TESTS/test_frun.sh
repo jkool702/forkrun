@@ -884,7 +884,7 @@ run_test "Worker transient failure mid-batch" \
   "1
 2
 4
-5"
+5" 3
 
 # Test 3: Worker command crashes once mid-batch
 # If a specific input crashes only once it should recover and the rest of the file should still process.
