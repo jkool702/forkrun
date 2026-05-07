@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.1.2
+// forkrun_ring.c v3.1.3
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -298,7 +298,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.1.2"
+#define FORKRUN_RING_VERSION "v3.1.3"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -438,6 +438,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   return w;
 }
 
+
 // RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
   X(ring_init, ring_init_main, "ring_init [FLAGS]",                            \
@@ -487,6 +488,8 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
   X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
   X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow") \
+  X(ring_dump_resume, ring_dump_resume_main, "ring_dump_resume [bytes]", "Dump checkpoint state") \
+  X(ring_set_resume, ring_set_resume_main, "ring_set_resume <horizon> [jagged...]", "Set checkpoint state") \
   X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
@@ -543,7 +546,7 @@ static int pin_to_numa_node(int node_id) {
 static SHELL_VAR *bind_var_or_array(const char *name, char *value, int flags) {
   if (!name)
     return NULL;
-  char *lb = strchr(name, '[');
+  const char *lb = strchr(name, '[');
   if (!lb || name[strlen(name) - 1] != ']')
     return bind_variable(name, value, flags);
 
@@ -780,6 +783,8 @@ struct OrderPacket {
   int32_t fd;
   uint64_t off;
   uint64_t len;
+  uint64_t in_off;   // NEW: Absolute input byte start
+  uint64_t in_len;   // NEW: Input byte length
 };
 
 #define FLAG_META_READY (1ULL << 63)
@@ -799,12 +804,26 @@ struct ChunkMeta {
   volatile uint64_t actual_end ALIGNED(CACHE_LINE);
 };
 
+struct IntervalNode {
+    uint64_t s;
+    uint64_t e;
+};
+
 // GlobalState: Contains cross-socket coordination for the pipeline,
-// particularly the metadata ring written by Ingest and read by Indexers.
 struct GlobalState {
   uint64_t ingest_publish_idx ALIGNED(CACHE_LINE);
   uint64_t ingest_eof_idx ALIGNED(CACHE_LINE);
   uint64_t _pad_ingest_waiters[7];
+
+  // NEW: Orderer Ledger (The Checkpoint)
+  uint8_t is_resume_mode ALIGNED(CACHE_LINE);
+  volatile uint32_t resume_seq; // NEW: Seqlock counter
+  uint64_t resume_horizon;
+  uint64_t resume_stdout_bytes;
+  uint64_t fallow_horizon_bytes; // NEW: Fallback for realtime mode
+  uint32_t resume_jagged_count;
+  struct IntervalNode resume_jagged[1024];
+
   struct ChunkMeta meta_ring[META_RING_SIZE];
 };
 
@@ -1200,7 +1219,7 @@ static void apply_config(char type, char sub, const char *arg) {
       }
     }
   }
-  //cfg_state &= ~clear_mask;
+  //cfg_state &= ~clear_mask;   // DO NOT UN-COMMENT!!!
   cfg_state |= set_mask;
 }
 
@@ -2353,8 +2372,25 @@ static int ring_indexer_numa_main(int argc, char **argv) {
  */
 #define UNIFIED_SCANNER_FLUSH(_cnt_val, _stride_val, _is_last, _maj_id,        \
                               _minor_val, _batch_end_offset, _do_fencepost,    \
-                              _overwrite)                                      \
+                              _overwrite, _out_skipped)                        \
   do {                                                                         \
+    _out_skipped = false;                                                      \
+    if (__builtin_expect(g_state->is_resume_mode, 0)) {                        \
+        uint64_t _s_byte = batch_start;                                        \
+        uint64_t _e_byte = _batch_end_offset;                                  \
+        if (_s_byte >= g_state->resume_horizon) {                              \
+            for (uint32_t _i = 0; _i < g_state->resume_jagged_count; _i++) {   \
+                if (_s_byte >= g_state->resume_jagged[_i].s && _e_byte <= g_state->resume_jagged[_i].e) { \
+                    _out_skipped = true; break;                                \
+                }                                                              \
+            }                                                                  \
+        } else if (_e_byte <= g_state->resume_horizon) {                       \
+            _out_skipped = true;                                               \
+        } else {                                                               \
+            /* Unreachable: Invariants guarantee horizon perfectly aligns with batch boundaries. */ \
+        }                                                                      \
+        if (_out_skipped) break; /* Bypasses everything below! */              \
+    }                                                                          \
     while (1) {                                                                \
       if (atomic_load_relaxed(&state[0].emergency_abort)) goto unified_scanner_eof; \
       uint64_t limit;                                                          \
@@ -2426,7 +2462,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       if (_do_fencepost) {                                                     \
         local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] =           \
             (_batch_end_offset);                                               \
-        if ((pk & FLAG_PARTIAL_BATCH) || (_overwrite)) {                       \
+        if ((pk & FLAG_PARTIAL_BATCH) || (_overwrite) || __builtin_expect(g_state->is_resume_mode, 0)) { \
           local_state->offset_ring[local_scan_idx & RING_MASK] = pk;           \
         }                                                                      \
       } else {                                                                 \
@@ -2894,13 +2930,16 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
+        bool _skipped = false;
         UNIFIED_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start,
-                              false, false);
+                              false, false, _skipped);
         if (is_numa) {
-          chunk_bounds[cb_head & 15] = local_scan_idx;
-          cb_head++;
+          if (!_skipped) {
+            chunk_bounds[cb_head & 15] = local_scan_idx;
+            cb_head++;
+          }
         }
-        UNIFIED_ADAPTIVE_COMMIT(true);
+        if (!_skipped) UNIFIED_ADAPTIVE_COMMIT(true);
         continue;
       }
 
@@ -3092,14 +3131,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               is_numa ? (uint32_t)(current_p_offset - batch_start) : 1;
           uint32_t cv = is_numa ? take : 1;
 
+          bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(cv, stride, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, true, false);
+                                current_p_offset, true, false, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
             minor_idx++;
-            if (is_last) {
+            if (is_last && !_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
@@ -3278,14 +3318,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                                   : (uint32_t)pending_lines)
                   : 0;
 
+          bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(pending_lines, stride, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, return_bytes, false);
+                                current_p_offset, true, false, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
             minor_idx++;
-            if (is_last) {
+            if (is_last && !_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
@@ -3293,8 +3334,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           batch_start = current_p_offset;
           pending_lines = 0;
 
-          int node_arg = is_numa ? my_node_id : -1;
-          ADAPTIVE_FLOW_CONTROL(local_state, current_stall, node_arg);
+          if (!_skipped) {
+            int node_arg = is_numa ? my_node_id : -1;
+            ADAPTIVE_FLOW_CONTROL(local_state, current_stall, node_arg);
+          }
         } else if (!is_numa)
           force_refill = true;
       }
@@ -3306,11 +3349,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       uint32_t stride = return_bytes
                             ? (uint32_t)(current_p_offset - batch_start)
                             : (uint32_t)pending_lines;
+      bool _skipped = false;
       UNIFIED_SCANNER_FLUSH(pending_lines, stride, true, meta->major_id,
-                            minor_idx, current_p_offset, return_bytes, false);
+                            minor_idx, current_p_offset, return_bytes, false, _skipped);
       minor_idx++;
-      chunk_bounds[cb_head & 15] = local_scan_idx;
-      cb_head++;
+      if (!_skipped) {
+        chunk_bounds[cb_head & 15] = local_scan_idx;
+        cb_head++;
+      }
       batch_start = current_p_offset;
       pending_lines = 0;
     }
@@ -3474,8 +3520,9 @@ unified_scanner_eof:
         }
         if (lines_found > 0) {
           uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
+          bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(lines_found, 0, false, 0, 0, current_p_offset,
-                                true, true);
+                                true, true, _skipped);
           batch_start = current_p_offset;
           L_tail_done += lines_found;
         } else
@@ -4105,6 +4152,18 @@ static int ring_ack_main(int argc, char **argv) {
     }
   }
 
+  uint64_t in_start = 0, in_end = 0;
+  if (local_state && local_state->numa_enabled) {
+      in_start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+      in_end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
+  } else {
+      // In flat mode, the fencepost offset_ring[idx+cnt] perfectly marks the end
+      in_start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+      in_end = local_state->offset_ring[(my_idx + op.cnt) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+  }
+  op.in_off = in_start;
+  op.in_len = in_end - in_start;
+
   if (fd_target > 0) {
     if (fd_target != ack_cached_target_fd) {
       ack_cached_target_fd = fd_target;
@@ -4262,10 +4321,6 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
 // ==============================================================================
 // INTERVAL MIN-HEAP (O(log N) out-of-order sequence assembly)
 // ==============================================================================
-struct IntervalNode {
-    uint64_t s;
-    uint64_t e;
-};
 
 static inline void interval_heap_push(struct IntervalNode **heap_ptr, int *sz, int *cap, uint64_t s, uint64_t e) {
     if (*sz >= *cap) {
@@ -4395,6 +4450,43 @@ static int ring_order_main(int argc, char **argv) {
   bool stdout_broken = false;
   void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
 
+  // NEW: Sync flag for Ordered Resume
+  bool resume_synced = true;
+  if (g_state && g_state->is_resume_mode) {
+      resume_synced = false;
+  }
+
+  int tracker_cap = 1024;
+  int tracker_sz = 0;
+  struct IntervalNode *tracker_heap = malloc(tracker_cap * sizeof(struct IntervalNode));
+  uint64_t tracker_horizon = 0;
+  uint64_t tracker_bytes = 0;
+
+  // NEW: Macro to absorb a successfully written batch into the Ledger
+  #define TRACK_COMPLETED_BATCH(_op) do { \
+      tracker_bytes += (_op).len; \
+      uint64_t _s = (_op).in_off; \
+      uint64_t _e = (_op).in_off + (_op).in_len; \
+      if (_s <= tracker_horizon) { \
+          if (_e > tracker_horizon) tracker_horizon = _e; \
+          while (tracker_sz > 0 && tracker_heap[0].s <= tracker_horizon) { \
+              struct IntervalNode top; \
+              interval_heap_pop(tracker_heap, &tracker_sz, &top); \
+              if (top.e > tracker_horizon) tracker_horizon = top.e; \
+          } \
+      } else { \
+          interval_heap_push(&tracker_heap, &tracker_sz, &tracker_cap, _s, _e); \
+      } \
+      if (g_state) { \
+          __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_ACQ_REL); \
+          g_state->resume_horizon = tracker_horizon; \
+          g_state->resume_stdout_bytes = tracker_bytes; \
+          g_state->resume_jagged_count = (tracker_sz < 1024) ? tracker_sz : 1024; \
+          for(uint32_t _i=0; _i<g_state->resume_jagged_count; _i++) g_state->resume_jagged[_i] = tracker_heap[_i]; \
+          __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_RELEASE); \
+      } \
+  } while(0)
+
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break;
@@ -4411,6 +4503,16 @@ static int ring_order_main(int argc, char **argv) {
 
       if (!unordered_mode) {
         heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
+
+        // NEW: Dynamic Sequence Bootstrapping!
+        // If we are resuming, wait for the packet that perfectly aligns with the horizon
+        if (__builtin_expect(!resume_synced, 0)) {
+            if (op->in_off == g_state->resume_horizon) {
+                expected_major = op->major_idx;
+                expected_minor = actual_minor;
+                resume_synced = true;
+            }
+        }
       } else {
         if (memfd_mode) {
           off_t offset = (off_t)op->off;
@@ -4424,6 +4526,7 @@ static int ring_order_main(int argc, char **argv) {
               break;
           }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
+          TRACK_COMPLETED_BATCH(*op);
 
         } else {
           char path[256];
@@ -4436,15 +4539,18 @@ static int ring_order_main(int argc, char **argv) {
           if (fd_file >= 0) {
             off_t offset = 0;
             struct stat st;
-            if (fstat(fd_file, &st) == 0 && st.st_size > 0)
-              robust_sendfile(1, fd_file, &offset, st.st_size);
+            if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
+              if (robust_sendfile(1, fd_file, &offset, st.st_size) < 0) stdout_broken = true;
+            }
             close(fd_file);
             unlink(path);
+            if (stdout_broken) { pull_fire_alarm(); break; }
+            TRACK_COMPLETED_BATCH(*op);
           }
         }
       }
 
-      if (!unordered_mode && !stdout_broken) {
+      if (!unordered_mode && !stdout_broken && resume_synced) {
         while (heap_sz > 0) {
           uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
           if (heap[0].key != expected_key) break;
@@ -4462,6 +4568,7 @@ static int ring_order_main(int argc, char **argv) {
                 break;
             }
             safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
+            TRACK_COMPLETED_BATCH(top.pkt);
 
           } else {
             char path[256];
@@ -4475,10 +4582,13 @@ static int ring_order_main(int argc, char **argv) {
             if (fd_file >= 0) {
               off_t offset = 0;
               struct stat st;
-              if (fstat(fd_file, &st) == 0 && st.st_size > 0)
-                robust_sendfile(1, fd_file, &offset, st.st_size);
+              if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
+                if (robust_sendfile(1, fd_file, &offset, st.st_size) < 0) stdout_broken = true;
+              }
               close(fd_file);
               unlink(path);
+              if (stdout_broken) { pull_fire_alarm(); break; }
+              TRACK_COMPLETED_BATCH(top.pkt);
             }
           }
           if (numa_mode) {
@@ -4504,6 +4614,7 @@ static int ring_order_main(int argc, char **argv) {
   }
   free(fd_states);
   free(heap);
+  free(tracker_heap);
   signal(SIGPIPE, old_handler);
   return EXECUTION_SUCCESS;
 }
@@ -4542,7 +4653,6 @@ static int ring_fallow_phys_main(int argc, char **argv) {
           interval_heap_pop(heap, &heap_sz, &top);
           if (top.e > limit) limit = top.e;
         }
-
         off_t aligned = (off_t)((limit / 4096ULL) * 4096ULL);
         if (aligned > last_punched) {
           fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
@@ -4551,6 +4661,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
       } else {
         interval_heap_push(&heap, &heap_sz, &heap_cap, pp->off, pp->off + pp->len);
       }
+      if (g_state) g_state->fallow_horizon_bytes = limit;
     }
     size_t consumed = count * pkt_sz;
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
@@ -5207,6 +5318,7 @@ static int ring_fallow_main(int argc, char **argv) {
         if (state) atomic_store_release(&state[0].min_idx, next_idx);
         if (!dry_run) {
           uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+          if (g_state) g_state->fallow_horizon_bytes = byte_limit;
           off_t aligned = (off_t)((byte_limit / 4096ULL) * 4096ULL);
           if (aligned > last_punched) {
             fallocate(fd_file, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, last_punched, aligned - last_punched);
@@ -5272,6 +5384,95 @@ static int ring_escrow_put_main(int argc, char **argv) {
 
     if (fd_escrow_w && fd_escrow_w[node] >= 0) {
         robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
+    }
+    return EXECUTION_SUCCESS;
+}
+
+
+// Qsort helper for the exporter
+static int cmp_interval(const void *a, const void *b) {
+    uint64_t sa = ((struct IntervalNode *)a)->s;
+    uint64_t sb = ((struct IntervalNode *)b)->s;
+    return (sa < sb) ? -1 : ((sa > sb) ? 1 : 0);
+}
+
+static int ring_dump_resume_main(int argc, char **argv) {
+    if (!g_state) return EXECUTION_FAILURE;
+
+    // NEW: Safe Seqlock read into local variables
+    uint32_t seq1, seq2;
+    uint64_t snap_horizon, snap_bytes;
+    uint32_t snap_count;
+    struct IntervalNode snap_jagged[1024];
+
+    do {
+        seq1 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+        snap_horizon = g_state->resume_horizon;
+        snap_bytes = g_state->resume_stdout_bytes;
+        snap_count = g_state->resume_jagged_count;
+        for (uint32_t i = 0; i < snap_count; i++) snap_jagged[i] = g_state->resume_jagged[i];
+        seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+    } while (seq1 != seq2 || (seq1 & 1));
+
+    if (argc >= 2 && strcmp(argv[1], "bytes") == 0) {
+        printf("%llu\n", (unsigned long long)snap_bytes);
+        return EXECUTION_SUCCESS;
+    }
+
+    uint64_t horiz = snap_horizon;
+    if (horiz == 0 && g_state->fallow_horizon_bytes > 0) {
+        horiz = g_state->fallow_horizon_bytes; // Fallback for -u mode!
+    }
+
+    printf("FORKRUN_RESUME_HORIZON=%llu\n", (unsigned long long)horiz);
+    printf("FORKRUN_RESUME_STDOUT_BYTES=%llu\n", (unsigned long long)snap_bytes);
+
+    // Sort the jagged edge
+    int n = snap_count;
+    struct IntervalNode sorted[1024];
+    for (int i = 0; i < n; i++) sorted[i] = snap_jagged[i];
+    qsort(sorted, n, sizeof(struct IntervalNode), cmp_interval);
+
+    // NEW: Collapse continuous/overlapping intervals
+    struct IntervalNode collapsed[1024];
+    int c_idx = 0;
+    if (n > 0) {
+        collapsed[0] = sorted[0];
+        for (int i = 1; i < n; i++) {
+            if (sorted[i].s <= collapsed[c_idx].e) { // Contiguous or overlapping
+                if (sorted[i].e > collapsed[c_idx].e) {
+                    collapsed[c_idx].e = sorted[i].e;
+                }
+            } else {
+                c_idx++;
+                collapsed[c_idx] = sorted[i];
+            }
+        }
+        c_idx++; // Convert index to count
+    }
+
+    printf("FORKRUN_RESUME_JAGGED=(");
+    for (int i = 0; i < c_idx; i++) {
+        printf("\"%llu:%llu\" ", (unsigned long long)collapsed[i].s, (unsigned long long)collapsed[i].e);
+    }
+    printf(")\n");
+    return EXECUTION_SUCCESS;
+}
+
+static int ring_set_resume_main(int argc, char **argv) {
+    if (!g_state || argc < 2) return EXECUTION_FAILURE;
+    g_state->is_resume_mode = 1;
+    g_state->resume_horizon = strtoull(argv[1], NULL, 10);
+    g_state->resume_jagged_count = 0;
+    
+    for (int i = 2; i < argc && g_state->resume_jagged_count < 1024; i++) {
+        char *colon = strchr(argv[i], ':');
+        if (colon) {
+            *colon = '\0';
+            g_state->resume_jagged[g_state->resume_jagged_count].s = strtoull(argv[i], NULL, 10);
+            g_state->resume_jagged[g_state->resume_jagged_count].e = strtoull(colon + 1, NULL, 10);
+            g_state->resume_jagged_count++;
+        }
     }
     return EXECUTION_SUCCESS;
 }
@@ -5535,7 +5736,6 @@ static int ring_numa_stats_main(int argc, char **argv) {
   if (!g_state || !state)
     return EXECUTION_FAILURE;
 
-  uint64_t total_assigned = 0;
   uint64_t total_processed = 0;
   uint64_t total_stolen = 0;
 
@@ -5554,7 +5754,6 @@ static int ring_numa_stats_main(int argc, char **argv) {
         atomic_load_relaxed(&state[n].stats_chunks_stolen_from_me);
     uint32_t phys = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
 
-    total_assigned += assigned;
     total_processed += processed;
     total_stolen += i_stole;
 

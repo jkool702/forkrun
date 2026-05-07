@@ -549,7 +549,7 @@ run_test_regex "Dry run (-N)" \
 
 run_test "Version (-V)" \
   "frun -V" \
-  "forkrun v3.1.2"
+  "forkrun v3.1.3"
 
 # FIXED: Check for USAGE string explicitly without exact match
 run_test_regex "Help (--help)" \
@@ -884,7 +884,7 @@ run_test "Worker transient failure mid-batch" \
   "1
 2
 4
-5"
+5" 3
 
 # Test 3: Worker command crashes once mid-batch
 # If a specific input crashes only once it should recover and the rest of the file should still process.
