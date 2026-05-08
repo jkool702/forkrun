@@ -1790,7 +1790,7 @@ FUNCEOF
 
     bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 crash_func" \
         > "$_MD/output1.txt" 2>"$_MD/err1.txt"
-
+cat "$_MD/output1.txt" "$_MD/err1.txt" "$_MD/.forkrun_resume"
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M5: Resume with buffered mode"]="FAIL"
         TEST_ERRORS["M5: Resume with buffered mode"]="no checkpoint"
@@ -1810,6 +1810,8 @@ FUNCEOF
         _MUNIQ=$(sort -u "$_MD/combined.txt" | wc -l | tr -d ' ')
         _MDUP=$(sort "$_MD/combined.txt" | uniq -d | wc -l | tr -d ' ')
 
+       cat "$_MD/output2.txt" "$_MD/err2.txt"
+
         if (( _MUNIQ == 1000 && _MDUP == 0 )); then
             TEST_RESULTS["M5: Resume with buffered mode"]="PASS"; ((PASSED_TESTS++))
             _print_result PASS "M5: Resume with buffered mode"
@@ -1820,6 +1822,7 @@ FUNCEOF
         fi
     fi
 fi
+exit
 
 # ============================================================================
 # M6: Resume with realtime mode (-u, at-least-once semantics)

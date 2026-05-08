@@ -2432,8 +2432,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
  * 2. Chunk-based memory shield boundary is hit (applies ONLY to NUMA)
  */
 #define UNIFIED_SCANNER_FLUSH(_cnt_val, _stride_val, _is_last, _maj_id,        \
-                              _minor_val, _batch_end_offset, _do_fencepost,    \
-                              _overwrite, _out_skipped)                        \
+                              _minor_val, _batch_end_offset, _out_skipped)     \
   do {                                                                         \
     _out_skipped = false;                                                      \
     if (__builtin_expect(g_state->is_resume_mode, 0)) {                        \
@@ -2517,18 +2516,8 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
           (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
     } else {                                                                   \
-      if (!byte_mode)                                                          \
-        local_state->stride_ring[local_scan_idx & RING_MASK] =                 \
-            (uint32_t)(_cnt_val);                                              \
-      if (_do_fencepost) {                                                     \
-        local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] =           \
-            (_batch_end_offset);                                               \
-        if ((pk & FLAG_PARTIAL_BATCH) || (_overwrite) || __builtin_expect(g_state->is_resume_mode, 0)) { \
-          local_state->offset_ring[local_scan_idx & RING_MASK] = pk;           \
-        }                                                                      \
-      } else {                                                                 \
-        local_state->offset_ring[local_scan_idx & RING_MASK] = pk;             \
-      }                                                                        \
+      local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
+      local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
     }                                                                          \
     local_scan_idx++;                                                          \
     UNIFIED_ADAPTIVE_COMMIT(false);                                            \
@@ -2992,7 +2981,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         batch_start = actual_start;
         bool _skipped = false;
         UNIFIED_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start,
-                              false, false, _skipped);
+                              _skipped);
         if (is_numa) {
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
@@ -3194,7 +3183,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(cv, stride, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, true, false, _skipped);
+                                current_p_offset, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
@@ -3377,7 +3366,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(pending_lines, stride, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, true, false, _skipped);
+                                current_p_offset, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
@@ -3405,7 +3394,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       uint32_t stride = (uint32_t)(current_p_offset - batch_start);
       bool _skipped = false;
       UNIFIED_SCANNER_FLUSH(pending_lines, stride, true, meta->major_id,
-                            minor_idx, current_p_offset, true, false, _skipped);
+                            minor_idx, current_p_offset, _skipped);
       minor_idx++;
       if (!_skipped) {
         chunk_bounds[cb_head & 15] = local_scan_idx;
@@ -3576,7 +3565,7 @@ unified_scanner_eof:
           uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
           bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(lines_found, 0, false, 0, 0, current_p_offset,
-                                true, true, _skipped);
+                                _skipped);
           batch_start = current_p_offset;
           L_tail_done += lines_found;
         } else
@@ -3588,7 +3577,7 @@ tail_abort:
     uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
     local_state->offset_ring[local_scan_idx & RING_MASK] =
         (uint64_t)final_sentinel | FLAG_PARTIAL_BATCH;
-    local_state->offset_ring[(local_scan_idx + 1) & RING_MASK] =
+    local_state->end_ring[local_scan_idx & RING_MASK] =
         (uint64_t)final_sentinel;
     local_scan_idx++;
 
@@ -4052,15 +4041,9 @@ check_boundaries:
   uint64_t final_val = 0;
 
   // We ALWAYS return bytes now. Line count is exported via RING_BATCH_SLOTS.
-  if (local_state->numa_enabled) {
-      uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-      uint64_t end = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
-      final_val = end - start;
-  } else {
-      uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-      uint64_t end = local_state->offset_ring[(my_read_idx + claim_count) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-      final_val = end - start;
-  }
+  uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+  uint64_t end = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
+  final_val = end - start;
 
   // The number of ring slots claimed is ALWAYS the logical line/chunk count
   __atomic_fetch_add(&local_state->total_lines_consumed, claim_count, __ATOMIC_SEQ_CST);
@@ -4170,15 +4153,8 @@ static int ring_ack_main(int argc, char **argv) {
     }
   }
 
-  uint64_t in_start = 0, in_end = 0;
-  if (local_state && local_state->numa_enabled) {
-      in_start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-      in_end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
-  } else {
-      // In flat mode, the fencepost offset_ring[idx+cnt] perfectly marks the end
-      in_start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-      in_end = local_state->offset_ring[(my_idx + op.cnt) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-  }
+  uint64_t in_start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+  uint64_t in_end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
   op.in_off = in_start;
   op.in_len = in_end - in_start;
 
