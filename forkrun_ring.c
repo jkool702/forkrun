@@ -446,11 +446,17 @@ static int ring_map_main(int argc, char **argv) {
     int fd = atoi(argv[1]);
     size_t length = (size_t)atoll(argv[2]);
     const char *arr_name = argv[3];
-    
-    // If empty string is passed (e.g. -z mode), argv[4][0] will safely be '\0'
-    char delim = (argc >= 5) ? argv[4][0] : '\n';
 
-    if (length == 0) return EXECUTION_SUCCESS;
+    // If empty string is passed (e.g. -z mode), argv[4][0] will safely be '\0'
+    char delim = (argc >= 5 && argv[4][0] != '\0') ? argv[4][0] : '\n';
+
+    // FIX: Safely clear the target array if length is 0 (empty flush)
+    if (length == 0) {
+        SHELL_VAR *v = find_variable(arr_name);
+        if (v) unbind_variable(arr_name);
+        v = make_new_array_variable(arr_name);
+        return v ? EXECUTION_SUCCESS : EXECUTION_FAILURE;
+    }
 
     // Persistent thread-local buffer to eliminate malloc/free overhead per batch
     static __thread char *tls_map_buf = NULL;
@@ -2446,8 +2452,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             }                                                                  \
         } else if (_e_byte <= g_state->resume_horizon) {                       \
             _out_skipped = true;                                               \
-        } else {                                                               \
-            /* Unreachable: Invariants guarantee horizon perfectly aligns with batch boundaries. */ \
         }                                                                      \
         if (_out_skipped) break; /* Bypasses everything below! */              \
     }                                                                          \
@@ -2516,6 +2520,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
           (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
     } else {                                                                   \
+      local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)(_cnt_val); \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
     }                                                                          \
