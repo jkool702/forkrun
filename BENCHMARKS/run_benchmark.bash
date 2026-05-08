@@ -57,7 +57,7 @@
             declare -i K=0
             ## RUN BENCHMARK
             for Fk in "${F[@]}"; do
-                for GCk in {,-k,-u,-U}\ {,-l\ 1:0}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,cat,tee}$'\n'; do
+                for GCk in {,-k,-u,-U}\ {,-l\ 1:1024}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,cat,tee}$'\n'; do
 
                     GCk="${GCk%$'\n'}"
 
