@@ -438,6 +438,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
   return w;
 }
 
+static __thread off_t tls_batch_offset = 0;
 
 static int ring_map_main(int argc, char **argv) {
     if (argc < 4) return EXECUTION_FAILURE;
@@ -797,7 +798,6 @@ static __thread uint32_t worker_last_minor = 0;
 static __thread uint64_t tl_remainder_idx = 0;
 static __thread uint64_t tl_remainder_cnt = 0;
 static __thread bool tl_recently_escrowed = false;
-static __thread off_t tls_batch_offset = 0;
 
 static int *evfd_data_arr = NULL;
 static int *evfd_eof_arr = NULL;
@@ -1286,6 +1286,7 @@ static void apply_config(char type, char sub, const char *arg) {
     }
   }
   //cfg_state &= ~clear_mask;   // DO NOT UN-COMMENT!!!
+  (void)clear_mask;
   cfg_state |= set_mask;
 }
 

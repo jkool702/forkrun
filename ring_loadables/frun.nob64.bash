@@ -308,7 +308,7 @@ EOF
             @(-b|--bytes)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-b|--bytes)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                _parse_count "bytes" "${arg:-}" && ring_init_opts+=("--return-bytes") ;;
+                _parse_count "bytes" "${arg:-}" ;;
 
             # --- WORKERS (-j 4 or -j 1:8) ---
             @(-j|-P|--workers)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
@@ -418,10 +418,10 @@ toc() { :; }
 
     if ${stdin_flag:-false}; then
         unsafe_flag=false
-        ring_init_opts+=('--stdin' '--return-bytes')
+        ring_init_opts+=('--stdin')
     elif ${byte_mode_flag:-false}; then
         : "${stdin_flag:=true}"
-        ring_init_opts+=('--stdin' '--return-bytes')
+        ring_init_opts+=('--stdin')
     elif ${unsafe_flag:-false}; then
         stdin_flag=false
     fi
@@ -674,7 +674,7 @@ $(declare -f -- "${nn}")"
             if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
                 # FAST PATH (Synchronous)
                 # Note: ring_splice "close" closes $pw internally. We only close $pr.
-                ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || exec {pw}>&-
+                ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
                 '"$cmdline_str"' <&$pr'
             if ${retry_nonzero_exit_flag}; then
                 pCode+=' || exit $?'
@@ -689,7 +689,7 @@ $(declare -f -- "${nn}")"
                 # SLOW PATH (Asynchronous)
                 # Close both FDs so they do not leak into the pipeline
                 (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "" $REPLY "close" ) | ( '"$cmdline_str"' )'
+                ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$cmdline_str"' )'
             if ${retry_nonzero_exit_flag}; then
                 pCode+=' || exit $?'
             elif ${is_func_flag}; then
@@ -735,8 +735,9 @@ $(declare -f -- "${nn}")"
                 delimiter_str="''"
             fi
 
+            # FAST PATH: Bypassing mapfile entirely!
             pCode='
-            mapfile -t -u $fd_read -n $REPLY -d '"${delimiter_str}"' A
+            ring_map $fd_read $REPLY A '"${delimiter_str}"'
             '"$cmdline_str"
         fi
 
@@ -800,7 +801,7 @@ $(declare -f -- "${nn}")"
         ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
         worker_func_src+='shift 4
-    ring_worker inc $fd_read
+    ring_worker inc -1
     _ring_registered=true
     while ring_claim; do
         if [[ "${RING_POISONED:-0}" == "1" ]]; then
