@@ -439,8 +439,74 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
 }
 
 
+static int ring_map_main(int argc, char **argv) {
+    if (argc < 4) return EXECUTION_FAILURE;
+
+    int fd = atoi(argv[1]);
+    size_t length = (size_t)atoll(argv[2]);
+    const char *arr_name = argv[3];
+    
+    // If empty string is passed (e.g. -z mode), argv[4][0] will safely be '\0'
+    char delim = (argc >= 5) ? argv[4][0] : '\n';
+
+    if (length == 0) return EXECUTION_SUCCESS;
+
+    // Persistent thread-local buffer to eliminate malloc/free overhead per batch
+    static __thread char *tls_map_buf = NULL;
+    static __thread size_t tls_map_buf_cap = 0;
+
+    if (length + 1 > tls_map_buf_cap) {
+        size_t new_cap = length + 65536; // Add padding to avoid constant reallocs
+        char *new_buf = realloc(tls_map_buf, new_cap);
+        if (!new_buf) return EXECUTION_FAILURE;
+        tls_map_buf = new_buf;
+        tls_map_buf_cap = new_cap;
+    }
+
+    // 1. Single Zero-Cursor Syscall
+    ssize_t n = pread(fd, tls_map_buf, length, tls_batch_offset);
+    if (n <= 0) return EXECUTION_FAILURE;
+
+    tls_map_buf[n] = '\0'; // Safety terminator
+
+    // 2. Clear the target array safely
+    SHELL_VAR *v = find_variable(arr_name);
+    if (v && !array_p(v)) {
+        unbind_variable(arr_name);
+        v = NULL;
+    }
+    if (v) {
+        unbind_variable(arr_name); // Destroy old array to prevent ghost elements
+    }
+    v = make_new_array_variable(arr_name);
+    if (!v) return EXECUTION_FAILURE;
+
+    // 3. Fast In-Memory Tokenization
+    char *ptr = tls_map_buf;
+    char *end = tls_map_buf + n;
+    int array_idx = 0;
+
+    while (ptr < end) {
+        char *next = memchr(ptr, delim, end - ptr);
+        if (next) {
+            *next = '\0'; // Swap delimiter for null terminator
+            bind_array_element(v, array_idx++, ptr, 0);
+            ptr = next + 1;
+        } else {
+            // Trailing data without a delimiter
+            if (ptr < end && *ptr != '\0') {
+                bind_array_element(v, array_idx++, ptr, 0);
+            }
+            break;
+        }
+    }
+
+    return EXECUTION_SUCCESS;
+}
+
 // RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
+  X(ring_map, ring_map_main, "ring_map <fd> <len> <array> [delim]", "Fast user-space mapfile") \
   X(ring_init, ring_init_main, "ring_init [FLAGS]",                            \
     "Initialize ring with config")                                             \
   X(ring_destroy, ring_destroy_main, "ring_destroy", "Destroy ring")           \
@@ -882,7 +948,6 @@ struct SharedState {
   uint8_t mode_byte;
   uint8_t fixed_workers;
   uint8_t fixed_batch;
-  uint8_t cfg_return_bytes;
   uint8_t numa_enabled;
   uint8_t exact_lines;
   uint8_t cfg_delim; // Record delimiter character (default '\n')
@@ -1379,7 +1444,6 @@ static int ring_init_main(int argc, char **argv) {
   const char *out_array_name = NULL;
   uint64_t parsed_limit = 0;
   int64_t parsed_timeout = -1;
-  uint8_t parsed_return_bytes = 0;
   uint8_t parsed_exact_lines = 0;
   uint8_t parsed_delim = '\n';
 
@@ -1409,8 +1473,6 @@ static int ring_init_main(int argc, char **argv) {
       parsed_timeout = atoll(arg + 10);
     else if (strncmp(arg, "--greedy", 8) == 0)
       parsed_timeout = 0;
-    else if (strncmp(arg, "--return-bytes", 14) == 0)
-      parsed_return_bytes = 1;
     else if (strncmp(arg, "--exact-lines", 13) == 0)
       parsed_exact_lines = 1;
     else if (strncmp(arg, "--out=", 6) == 0)
@@ -1508,7 +1570,6 @@ static int ring_init_main(int argc, char **argv) {
     state[n].cfg_delim = parsed_delim;
     state[n].cfg_limit = parsed_limit;
     state[n].cfg_timeout_us = parsed_timeout;
-    state[n].cfg_return_bytes = parsed_return_bytes;
     atomic_store_relaxed(&state[n].chunk_buffer_limit, 4); // Default to 3 chunks active (limit = 4)
 
     if (byte_mode) {
@@ -1516,8 +1577,6 @@ static int ring_init_main(int argc, char **argv) {
       state[n].cfg_batch_max = vals[5];
       state[n].cfg_chunk_bytes = vals[5];
       state[n].cfg_line_max = vals[5];
-      if (state[n].cfg_return_bytes == 0)
-        state[n].cfg_return_bytes = 1;
     } else {
       state[n].cfg_batch_start = vals[2];
       state[n].cfg_batch_max = vals[3];
@@ -2630,7 +2689,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   bool byte_mode = local_state->mode_byte;
   bool fixed_batch = local_state->fixed_batch;
   bool fixed_workers = local_state->fixed_workers;
-  bool return_bytes = local_state->cfg_return_bytes;
   bool exact_lines = local_state->exact_lines;
   char delim = (char)local_state->cfg_delim;
 
@@ -3313,11 +3371,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           bool is_last = is_numa
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
-          uint32_t stride =
-              is_numa
-                  ? (return_bytes ? (uint32_t)(current_p_offset - batch_start)
-                                  : (uint32_t)pending_lines)
-                  : 0;
+          uint32_t stride = is_numa ? (uint32_t)(current_p_offset - batch_start) : 0;
 
           bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(pending_lines, stride, is_last,
@@ -3347,12 +3401,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     if (is_numa && !chunk_eof_flushed) {
-      uint32_t stride = return_bytes
-                            ? (uint32_t)(current_p_offset - batch_start)
-                            : (uint32_t)pending_lines;
+      uint32_t stride = (uint32_t)(current_p_offset - batch_start);
       bool _skipped = false;
       UNIFIED_SCANNER_FLUSH(pending_lines, stride, true, meta->major_id,
-                            minor_idx, current_p_offset, return_bytes, false, _skipped);
+                            minor_idx, current_p_offset, true, false, _skipped);
       minor_idx++;
       if (!_skipped) {
         chunk_bounds[cb_head & 15] = local_scan_idx;
@@ -3728,24 +3780,7 @@ restart_loop:
             atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
           }
         } else {
-          if (local_state->cfg_return_bytes) {
-            claim_count = 1;
-          } else {
-            uint32_t L0 = local_state->stride_ring[r_curr & RING_MASK];
-            if (L0 == 0)
-              L0 = 1;
-            uint64_t Wmax = atomic_load_relaxed(&local_state->active_workers);
-            if (Wmax == 0)
-              Wmax = 1;
-            uint64_t B = ((uint64_t)(-sbatch)) / L0;
-            if (B > Wmax)
-              B = Wmax;
-            if (B < 1)
-              B = 1;
-            claim_count = B;
-            if (claim_count > 64)
-              claim_count = 64;
-          }
+          claim_count = 1;
         }
       }
 
@@ -3912,10 +3947,6 @@ restart_loop:
       if ((uint64_t)diff < claim_count)
         claim_count = (uint64_t)diff;
 
-      if (local_state->cfg_return_bytes && claim_count > 1) {
-        claim_count = 1;
-      }
-
       if (claim_count == 0) {
         spin = 0;
         goto restart_loop;
@@ -3951,10 +3982,6 @@ restart_loop:
             diff = 0;
           if ((uint64_t)diff < claim_count)
             claim_count = (uint64_t)diff;
-
-          if (local_state->cfg_return_bytes && claim_count > 1) {
-            claim_count = 1;
-          }
 
           break;
         }
@@ -4023,32 +4050,19 @@ check_boundaries:
 
   uint64_t final_val = 0;
 
-  if (local_state->cfg_return_bytes) {
-    if (local_state->numa_enabled) {
-      uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] &
-                       ~FLAG_PARTIAL_BATCH;
-      uint64_t end =
-          local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
+  // We ALWAYS return bytes now. Line count is exported via RING_BATCH_SLOTS.
+  if (local_state->numa_enabled) {
+      uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+      uint64_t end = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
       final_val = end - start;
-    } else {
-      uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] &
-                       ~FLAG_PARTIAL_BATCH;
-      uint64_t end =
-          local_state->offset_ring[(my_read_idx + claim_count) & RING_MASK] &
-          ~FLAG_PARTIAL_BATCH;
-      final_val = end - start;
-    }
   } else {
-    if (claim_count == 1)
-      final_val = local_state->stride_ring[my_read_idx & RING_MASK];
-    else
-      for (uint64_t i = 0; i < claim_count; i++)
-        final_val += local_state->stride_ring[(my_read_idx + i) & RING_MASK];
+      uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+      uint64_t end = local_state->offset_ring[(my_read_idx + claim_count) & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+      final_val = end - start;
   }
 
-  __atomic_fetch_add(&local_state->total_lines_consumed,
-                     (local_state->cfg_return_bytes) ? claim_count : final_val,
-                     __ATOMIC_SEQ_CST);
+  // The number of ring slots claimed is ALWAYS the logical line/chunk count
+  __atomic_fetch_add(&local_state->total_lines_consumed, claim_count, __ATOMIC_SEQ_CST);
 
   worker_last_idx = my_read_idx;
   worker_last_cnt = claim_count;

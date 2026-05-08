@@ -308,7 +308,7 @@ EOF
             @(-b|--bytes)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-b|--bytes)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                _parse_count "bytes" "${arg:-}" && ring_init_opts+=("--return-bytes") ;;
+                _parse_count "bytes" "${arg:-}" ;;
 
             # --- WORKERS (-j 4 or -j 1:8) ---
             @(-j|-P|--workers)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
@@ -418,10 +418,10 @@ toc() { :; }
 
     if ${stdin_flag:-false}; then
         unsafe_flag=false
-        ring_init_opts+=('--stdin' '--return-bytes')
+        ring_init_opts+=('--stdin')
     elif ${byte_mode_flag:-false}; then
         : "${stdin_flag:=true}"
-        ring_init_opts+=('--stdin' '--return-bytes')
+        ring_init_opts+=('--stdin')
     elif ${unsafe_flag:-false}; then
         stdin_flag=false
     fi
@@ -735,8 +735,9 @@ $(declare -f -- "${nn}")"
                 delimiter_str="''"
             fi
 
+            # FAST PATH: Bypassing mapfile entirely!
             pCode='
-            mapfile -t -u $fd_read -n $REPLY -d '"${delimiter_str}"' A
+            ring_map $fd_read $REPLY A '"${delimiter_str}"'
             '"$cmdline_str"
         fi
 
@@ -800,15 +801,8 @@ $(declare -f -- "${nn}")"
         ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
         worker_func_src+='shift 4
-    '
-        if ${stdin_flag}; then
-            worker_func_src+='ring_worker inc -1
-    '
-        else
-            worker_func_src+='ring_worker inc $fd_read
-    '
-        fi
-        worker_func_src+='_ring_registered=true
+    ring_worker inc -1
+    _ring_registered=true
     while ring_claim; do
         if [[ "${RING_POISONED:-0}" == "1" ]]; then
             echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS:-?} times)." >&2
