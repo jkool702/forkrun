@@ -2167,7 +2167,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         // Apply bounded IIR filter (Window = 32)
         if (current_buffer_limit >= 13) {
             // Ceiling bound: If at max limit, Max Penalty is 75 so it cannot exceed 75.
-            I_meter = ((I_meter * 31) + (75 * S)) >> 5;
+            I_meter = ((I_meter * 30) + (200 * S)) >> 5;
         } else {
             uint64_t add0 = (current_buffer_limit <= 4) ? 15 : 0;
 
@@ -2177,7 +2177,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             uint64_t add1 = (1ULL << (Si_clamped + 1)) - 1;
 
             // Floor bound: If at min limit, Base is 20 so it cannot drop below 20.
-            I_meter = ((I_meter * 31) + add0 + ((2000ULL * S * add1) >> Si_clamped)) >> 5;
+            I_meter = ((I_meter * 30) + add0 + ((2000ULL * S * add1) >> Si_clamped)) >> 5;
         }
 
         // Trigger buffer limits
