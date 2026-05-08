@@ -731,6 +731,7 @@ static __thread uint32_t worker_last_minor = 0;
 static __thread uint64_t tl_remainder_idx = 0;
 static __thread uint64_t tl_remainder_cnt = 0;
 static __thread bool tl_recently_escrowed = false;
+static __thread off_t tls_batch_offset = 0;
 
 static int *evfd_data_arr = NULL;
 static int *evfd_eof_arr = NULL;
@@ -4077,10 +4078,12 @@ check_boundaries:
     bind_variable("RING_MINOR", buf, 0);
   }
 
+  uint64_t start_offset =
+      local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+  tls_batch_offset = (off_t)start_offset;
+
   if (fd_read >= 0) {
-    uint64_t start_offset =
-        local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
-    if (lseek(fd_read, (off_t)start_offset, SEEK_SET) == (off_t)-1) {
+    if (lseek(fd_read, tls_batch_offset, SEEK_SET) == (off_t)-1) {
       if (g_debug)
         fprintf(stderr, "forkrun [DEBUG] ring_claim lseek failed: %s\n",
                 strerror(errno));
@@ -4858,10 +4861,14 @@ static int ring_splice_main(int argc, char **argv) {
   off_t off = 0;
   off_t *p_off = NULL;
   if (argv[3][0] != '\0') {
-    off_t parsed = (off_t)atoll(argv[3]);
-    if (parsed != -1) {
-      off = parsed;
-      p_off = &off;
+    if (argv[3][0] == '-' && argv[3][1] == '\0') {
+      p_off = &tls_batch_offset;
+    } else {
+      off_t parsed = (off_t)atoll(argv[3]);
+      if (parsed != -1) {
+        off = parsed;
+        p_off = &off;
+      }
     }
   }
   size_t len = (size_t)atoll(argv[4]);

@@ -674,7 +674,7 @@ $(declare -f -- "${nn}")"
             if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
                 # FAST PATH (Synchronous)
                 # Note: ring_splice "close" closes $pw internally. We only close $pr.
-                ring_splice $fd_read $pw "" $REPLY "close" 2>/dev/null || exec {pw}>&-
+                ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
                 '"$cmdline_str"' <&$pr'
             if ${retry_nonzero_exit_flag}; then
                 pCode+=' || exit $?'
@@ -689,7 +689,7 @@ $(declare -f -- "${nn}")"
                 # SLOW PATH (Asynchronous)
                 # Close both FDs so they do not leak into the pipeline
                 (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "" $REPLY "close" ) | ( '"$cmdline_str"' )'
+                ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$cmdline_str"' )'
             if ${retry_nonzero_exit_flag}; then
                 pCode+=' || exit $?'
             elif ${is_func_flag}; then
@@ -800,8 +800,15 @@ $(declare -f -- "${nn}")"
         ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
         worker_func_src+='shift 4
-    ring_worker inc $fd_read
-    _ring_registered=true
+    '
+        if ${stdin_flag}; then
+            worker_func_src+='ring_worker inc -1
+    '
+        else
+            worker_func_src+='ring_worker inc $fd_read
+    '
+        fi
+        worker_func_src+='_ring_registered=true
     while ring_claim; do
         if [[ "${RING_POISONED:-0}" == "1" ]]; then
             echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS:-?} times)." >&2
