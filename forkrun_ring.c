@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.2.0
+`// forkrun_ring.c v3.2.0
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -2158,21 +2158,26 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         for (int i = 0; i < num_nodes; i++) {
             current_global_stolen += atomic_load_relaxed(&state[i].stats_chunks_i_stole);
         }
-        
+
         // S is 1 if any node stole a chunk since the last loop, 0 otherwise.
         uint64_t S = (current_global_stolen > last_global_stolen) ? 1 : 0;
+        uint64_t Si = current_global_stolen - last_global_stolen - S;
         last_global_stolen = current_global_stolen;
 
         // Apply bounded IIR filter (Window = 32)
-        if (current_buffer_limit <= 4) {
-            // Floor bound: If at min limit, Base is 20 so it cannot drop below 20.
-            I_meter = ((I_meter * 31) + 15 + (1985 * S)) >> 5;
-        } else if (current_buffer_limit >= 13) {
-            // Ceiling bound: If at max limit, Max Penalty is 100 so it cannot exceed 100.
-            I_meter = ((I_meter * 31) + (100 * S)) >> 5;
+        if (current_buffer_limit >= 13) {
+            // Ceiling bound: If at max limit, Max Penalty is 75 so it cannot exceed 75.
+            I_meter = ((I_meter * 31) + (75 * S)) >> 5;
         } else {
-            // Normal operation: approaches 0 on clean runs, 1000 on continuous steals.
-            I_meter = ((I_meter * 31) + (2000 * S)) >> 5;
+            uint64_t add0 = (current_buffer_limit <= 4) ? 15 : 0;
+
+            // PHYSICS FIX: Clamp Si to 10 to prevent Undefined Behavior bit-shifts.
+            // At Si = 10 (11 total steals), the geometric penalty is already 3998.
+            uint64_t Si_clamped = (Si > 10) ? 10 : Si;
+            uint64_t add1 = (1ULL << (Si_clamped + 1)) - 1;
+
+            // Floor bound: If at min limit, Base is 20 so it cannot drop below 20.
+            I_meter = ((I_meter * 31) + add0 + ((2000ULL * S * add1) >> Si_clamped)) >> 5;
         }
 
         // Trigger buffer limits
@@ -2184,7 +2189,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             current_buffer_limit++;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
             I_meter = 50; // Reset
-        }
+       }
     }
   }
 
