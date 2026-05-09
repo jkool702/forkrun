@@ -2161,7 +2161,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
         // S is 1 if any node stole a chunk since the last loop, 0 otherwise.
         uint64_t S = (current_global_stolen > last_global_stolen) ? 1 : 0;
-        uint64_t Si = current_global_stolen - last_global_stolen + 1 - S;
+        uint64_t Si = current_global_stolen - last_global_stolen - S;
         last_global_stolen = current_global_stolen;
 
         // Apply bounded IIR filter (Window = 32)
@@ -2173,7 +2173,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
             // PHYSICS FIX: Clamp Si to 10 to prevent Undefined Behavior bit-shifts.
             uint64_t Si_clamped = (Si > 10) ? 10 : Si;
-            uint64_t add1 = (1ULL << Si_clamped) - 1;
+            uint64_t add1 = (1ULL << (Si_clamped + 1)) - 1;
 
             // Floor bound: Steady state max is P/2.
             I_meter = ((I_meter * 31) + add0 * (1 - S) + S * (1000ULL + ((1000ULL * add1) >> Si_clamped))) >> 5;
