@@ -2161,22 +2161,22 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
         // S is 1 if any node stole a chunk since the last loop, 0 otherwise.
         uint64_t S = (current_global_stolen > last_global_stolen) ? 1 : 0;
-        uint64_t Si = current_global_stolen - last_global_stolen - S;
+        uint64_t Si = current_global_stolen - last_global_stolen + 1 - S;
         last_global_stolen = current_global_stolen;
 
         // Apply bounded IIR filter (Window = 32)
         if (current_buffer_limit >= 13) {
             // Ceiling bound: Steady state max is 100 (200 / 2).
-            I_meter = ((I_meter * 30) + (150 * S)) >> 5;
+            I_meter = ((I_meter * 31) + (75 * S)) >> 5;
         } else {
-            uint64_t add0 = (current_buffer_limit <= 4) ? 30 : 0;
+            uint64_t add0 = (current_buffer_limit <= 4) ? 15 : 0;
 
             // PHYSICS FIX: Clamp Si to 10 to prevent Undefined Behavior bit-shifts.
             uint64_t Si_clamped = (Si > 10) ? 10 : Si;
-            uint64_t add1 = (1ULL << (Si_clamped + 1)) - 1;
+            uint64_t add1 = (1ULL << Si_clamped) - 1;
 
             // Floor bound: Steady state max is P/2.
-            I_meter = ((I_meter * 30) + add0 + ((2000ULL * S * add1) >> Si_clamped)) >> 5;
+            I_meter = ((I_meter * 31) + add0 * (1 - S) + S * (1000ULL + ((1000ULL * add1) >> Si_clamped))) >> 5;
         }
 
         // PHYSICS FIX: Is the buffer actually the bottleneck?
