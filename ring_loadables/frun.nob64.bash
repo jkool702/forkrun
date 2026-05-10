@@ -23,7 +23,7 @@ frun() {
         printf -v ring_enable '%s ' "${ring_funcs[@]}"
 
         for nn in "${@##\-*}"; do
-            [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && FORKRUN_EXTRA_FUNCS+=" ${nn}"
+            [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && ! [[ " ${FORKRUN_EXTRA_FUNCS} " == *" ${nn} "* ]] && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
         FORKRUN_EXTRA_VARS+=' FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP'
 
