@@ -479,7 +479,7 @@ static int do_tokenize(int fd, size_t length, char delim, SHELL_VAR *arr, int fi
     while (ptr < end) {
         // Dynamic capacity doubling for argv mode (prevents segfaults on tiny records)
         if (!arr) {
-            if (fixed_argc + idx + 2 > tls_argv_cap) {
+            if ((size_t)(fixed_argc + idx + 2) > tls_argv_cap) {
                 tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
                 char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
                 if (!new_argv) return EXECUTION_FAILURE;
