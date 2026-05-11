@@ -527,7 +527,7 @@ static int ring_map_main(int argc, char **argv) {
     int fd = atoi(argv[1]);
     size_t length = (size_t)atoll(argv[2]);
     const char *arr_name = argv[3];
-    char delim = (argc >= 5 && argv[4][0] != '\0') ? argv[4][0] : '\n';
+    char delim = (argc >= 5) ? argv[4][0] : '\n';
 
     // Clear the target array safely
     SHELL_VAR *v = find_variable(arr_name);
@@ -581,7 +581,7 @@ static int ring_exec_main(int argc, char **argv) {
 
     int fd = atoi(argv[1]);
     size_t length = (size_t)atoll(argv[2]);
-    char delim = (argv[3][0] != '\0') ? argv[3][0] : '\n';
+    char delim = argv[3][0];
     
     int fixed_argc = argc - 4;
 
