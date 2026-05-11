@@ -654,14 +654,35 @@ $(declare -f -- "${nn}")"
 
         ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"
 
-
         ring_ack_str="ring_ack $fd_fallow_w"
+
+        # Determine if the target command is safe for direct posix_spawn
+        local cmd_type=$(type -t "$1" 2>/dev/null)
+        local use_ultra_fast_path=false
+
+        # Only use the fast path if it's an external file, safe mode, and no {} insertions
+        if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag} && ! ${insert_args_flag:-false}; then
+            # Resolve absolute path (e.g., "grep" -> "/usr/bin/grep")
+            local cmd_path=$(type -P "$1" 2>/dev/null)
+            
+            if [[ -n "$cmd_path" ]]; then
+                # Check if it's a compiled binary or has a shebang
+                if ring_is_spawnable "$cmd_path"; then
+                    use_ultra_fast_path=true
+                fi
+            fi
+        fi
 
         if ${stdin_flag}; then
             # STDIN PAYLOAD
             : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
 
-            # opportunistically probe the kernel's granted capacity
+            local exec_cmd_str="$cmdline_str"
+            if $use_ultra_fast_path; then
+                # Length 0 bypasses do_tokenize. Acts as a pure vfork() wrapper.
+                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
+            fi
+
             pCode='
             pipe_open_flag=0
             if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
@@ -671,11 +692,12 @@ $(declare -f -- "${nn}")"
                 RING_PIPE_CAPACITY_CUR=0
             fi
 
+            # opportunistically probe the kernels granted capacity    
             if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
                 # FAST PATH (Synchronous)
                 # Note: ring_splice "close" closes $pw internally. We only close $pr.
                 ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
-                '"$cmdline_str"' <&$pr'
+                '"$exec_cmd_str"' <&$pr'
             if ${retry_nonzero_exit_flag}; then
                 pCode+=' || exit $?'
             elif ${is_func_flag}; then
@@ -689,7 +711,7 @@ $(declare -f -- "${nn}")"
                 # SLOW PATH (Asynchronous)
                 # Close both FDs so they do not leak into the pipeline
                 (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$cmdline_str"' )'
+                ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$exec_cmd_str"' )'
             if ${retry_nonzero_exit_flag}; then
                 pCode+=' || exit $?'
             elif ${is_func_flag}; then
@@ -710,29 +732,18 @@ $(declare -f -- "${nn}")"
                 cmdline_str+=" $array_var"
             fi
 
+            local exec_cmd_str="$cmdline_str"
+            if $use_ultra_fast_path; then
+                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
+            fi
+
             pCode='
             ring_lseek $fd_read - SEEK_SET '"''"'
             read -r -u $fd_read -N $REPLY A
-            '"$cmdline_str"
+            '"$exec_cmd_str"
 
         else
             # LINE ARGS PAYLOAD (Default)
-
-            # Determine if the target command is safe for direct posix_spawn
-            local cmd_type=$(type -t "$1" 2>/dev/null)
-            local use_ultra_fast_path=false
-
-            if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag} && ! ${insert_args_flag:-false}; then
-                # Resolve absolute path (e.g., "grep" -> "/usr/bin/grep")
-                local cmd_path=$(type -P "$1" 2>/dev/null)
-                
-                if [[ -n "$cmd_path" ]]; then
-                    # Check if it's a compiled binary or has a shebang
-                    if ring_is_spawnable "$cmd_path"; then
-                        use_ultra_fast_path=true
-                    fi
-                fi
-            fi
 
             if $use_ultra_fast_path; then
                 # ULTRA-FAST PATH: Bypass Bash AST entirely!
