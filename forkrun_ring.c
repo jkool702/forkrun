@@ -453,11 +453,14 @@ static __thread size_t tls_argv_cap = 0;
 // Shared tokenizer core.
 // If `arr` is non-NULL, it populates the Bash array.
 // If `arr` is NULL, it populates `tls_argv` starting at `fixed_argc`.
-static int do_tokenize(int fd, size_t length, char delim, SHELL_VAR *arr, int fixed_argc, int *out_batch_argc) {
+static int do_tokenize(int fd, size_t length, char delim, SHELL_VAR *arr, int fixed_argc, size_t *out_batch_argc) {
     if (length == 0) {
         if (out_batch_argc) *out_batch_argc = 0;
         return EXECUTION_SUCCESS;
     }
+
+    // Shield against integer overflow and POSIX pread limits
+    if (length > SSIZE_MAX - 65536) return EXECUTION_FAILURE;
 
     if (length + 1 > tls_map_buf_cap) {
         size_t new_cap = length + 65536; // Add padding to avoid constant reallocs
@@ -474,12 +477,12 @@ static int do_tokenize(int fd, size_t length, char delim, SHELL_VAR *arr, int fi
 
     char *ptr = tls_map_buf;
     char *end = tls_map_buf + n;
-    int idx = 0;
+    size_t idx = 0;
 
     while (ptr < end) {
         // Dynamic capacity doubling for argv mode (prevents segfaults on tiny records)
         if (!arr) {
-            if ((size_t)(fixed_argc + idx + 2) > tls_argv_cap) {
+            if ((size_t)fixed_argc + idx + 2 > tls_argv_cap) {
                 tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
                 char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
                 if (!new_argv) return EXECUTION_FAILURE;
@@ -491,7 +494,7 @@ static int do_tokenize(int fd, size_t length, char delim, SHELL_VAR *arr, int fi
         if (next) {
             *next = '\0'; // Swap delimiter for null terminator
             if (arr) {
-                bind_array_element(arr, idx, ptr, 0);
+                bind_array_element(arr, (arrayind_t)idx, ptr, 0);
             } else {
                 tls_argv[fixed_argc + idx] = ptr;
             }
@@ -501,7 +504,7 @@ static int do_tokenize(int fd, size_t length, char delim, SHELL_VAR *arr, int fi
             // Trailing data without a delimiter
             if (ptr < end && *ptr != '\0') {
                 if (arr) {
-                    bind_array_element(arr, idx, ptr, 0);
+                    bind_array_element(arr, (arrayind_t)idx, ptr, 0);
                 } else {
                     tls_argv[fixed_argc + idx] = ptr;
                 }
@@ -596,7 +599,7 @@ static int ring_exec_main(int argc, char **argv) {
     }
 
     // 3. Tokenize batch directly into tls_argv
-    int batch_argc = 0;
+    size_t batch_argc = 0;
     int ret = do_tokenize(fd, length, delim, NULL, fixed_argc, &batch_argc);
     if (ret != EXECUTION_SUCCESS) return ret;
 
@@ -654,8 +657,8 @@ static int ring_exec_main(int argc, char **argv) {
   X(ring_numa_scanner, ring_numa_scanner_main,                                 \
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
-  X(ring_claim, ring_claim_main, "ring_claim [VAR] [FD]", "Claim batch")       \
-  X(ring_worker, ring_worker_main, "ring_worker [inc|dec] [FD]",               \
+  X(ring_claim, ring_claim_main, "ring_claim [VAR]", "Claim batch")            \
+  X(ring_worker, ring_worker_main, "ring_worker [inc|dec]",                    \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
@@ -667,7 +670,7 @@ static int ring_exec_main(int argc, char **argv) {
     "Reorder output")                                                          \
   X(ring_copy, ring_copy_main, "ring_copy <OUT> <IN>", "Zero-copy ingest")     \
   X(ring_signal, ring_signal_main, "ring_signal <FD>", "Signal eventfd")       \
-  X(lseek, lseek_main, "lseek <FD> <OFF> [WHENCE] [VAR]", "Seek fd")           \
+  X(ring_lseek, ring_lseek_main, "ring_lseek <FD> <OFF> [WHENCE] [VAR]", "Seek fd")    \
   X(ring_indexer, ring_indexer_main, "ring_indexer", "NUMA Indexer")           \
   X(ring_fetcher, ring_fetcher_main, "ring_fetcher", "NUMA Fetcher")           \
   X(ring_fallow_phys, ring_fallow_phys_main, "ring_fallow_phys",               \
@@ -920,7 +923,6 @@ static inline uint64_t fast_log2(uint64_t v) {
 
 static __thread int my_numa_node = -1;
 static __thread bool is_waiting_on_ring = false;
-static __thread int worker_cached_fd = -1;
 static __thread off_t last_ack_offset = 0;
 static __thread int ack_cached_target_fd = -1;
 static __thread int ack_cached_mode = 0;
@@ -3777,19 +3779,9 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 // progress is guaranteed by strictly monotonic indices.
 static int ring_claim_main(int argc, char **argv) {
   const char *v_target = "REPLY";
-  int fd_read = -1;
 
-  if (argc >= 4 && isdigit(argv[argc - 1][0]) && !isdigit(argv[argc - 2][0])) {
-    v_target = argv[2];
-    fd_read = atoi(argv[3]);
-  } else if (argc >= 2) {
-    if (isdigit(argv[1][0])) {
-      fd_read = atoi(argv[1]);
-    } else {
-      v_target = argv[1];
-      if (argc >= 3)
-        fd_read = atoi(argv[2]);
-    }
+  if (argc >= 2) {
+    v_target = argv[1];
   }
 
   if (my_numa_node == -1) {
@@ -3824,9 +3816,6 @@ static int ring_claim_main(int argc, char **argv) {
   uint64_t my_read_idx;
   uint64_t claim_count = 1;
   int spin = 0;
-
-  if (fd_read < 0)
-    fd_read = worker_cached_fd;
 
   // --- UNIVERSAL SIGPIPE / TEARDOWN SHIELD ---
   if (state) {
@@ -4205,6 +4194,9 @@ check_boundaries:
   u64toa(claim_count, buf);
   bind_variable("RING_BATCH_SLOTS", buf, 0);
 
+  uint64_t start_offset =
+      local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+
   if (local_state->numa_enabled) {
     worker_last_major = local_state->major_ring[my_read_idx & RING_MASK];
     worker_last_minor =
@@ -4221,17 +4213,7 @@ check_boundaries:
     bind_variable("RING_MINOR", buf, 0);
   }
 
-  uint64_t start_offset =
-      local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
   tls_batch_offset = (off_t)start_offset;
-
-  if (fd_read >= 0) {
-    if (lseek(fd_read, tls_batch_offset, SEEK_SET) == (off_t)-1) {
-      if (g_debug)
-        fprintf(stderr, "forkrun [DEBUG] ring_claim lseek failed: %s\n",
-                strerror(errno));
-    }
-  }
   return 0;
 }
 
@@ -4851,12 +4833,9 @@ static int ring_worker_main(int argc, char **argv) {
       }
     }
     __atomic_fetch_add(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);
-    if (argc >= 3 && isdigit(argv[2][0]))
-      worker_cached_fd = atoi(argv[2]);
   } else if (!strcmp(argv[1], "dec")) {
     cleanup_waiter_state();
     __atomic_fetch_sub(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);
-    worker_cached_fd = -1;
   }
   return EXECUTION_SUCCESS;
 }
@@ -4874,11 +4853,19 @@ static int ring_ingest_main(int argc, char **argv) {
     atomic_store_release(&state[0].ingest_complete, 1);
   return EXECUTION_SUCCESS;
 }
-static int lseek_main(int argc, char **argv) {
+static int ring_lseek_main(int argc, char **argv) {
   if (argc < 3 || argc > 5)
     return EXECUTION_FAILURE;
   int fd = atoi(argv[1]);
-  off_t off = atoll(argv[2]);
+  
+  // ZERO-OVERHEAD TLS INJECTION: Support '-' to auto-grab the batch offset
+  off_t off;
+  if (argv[2][0] == '-' && argv[2][1] == '\0') {
+    off = tls_batch_offset;
+  } else {
+    off = atoll(argv[2]);
+  }
+  
   int whence = SEEK_CUR;
   if (argc > 3) {
     if (!strcmp(argv[3], "SEEK_SET"))
@@ -4893,8 +4880,9 @@ static int lseek_main(int argc, char **argv) {
     char buf[32];
     snprintf(buf, 32, "%lld", (long long)no);
     bind_var_or_array(argv[argc - 1], buf, 0);
-  } else
+  } else if (argc < 4) {
     printf("%lld\n", (long long)no);
+  }
   return EXECUTION_SUCCESS;
 }
 

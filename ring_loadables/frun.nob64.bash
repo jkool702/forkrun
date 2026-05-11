@@ -711,6 +711,7 @@ $(declare -f -- "${nn}")"
             fi
 
             pCode='
+            ring_lseek $fd_read - SEEK_SET '"''"'
             read -r -u $fd_read -N $REPLY A
             '"$cmdline_str"
 
@@ -831,7 +832,7 @@ $(declare -f -- "${nn}")"
         ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
         worker_func_src+='shift 4
-    ring_worker inc -1
+    ring_worker inc
     _ring_registered=true
     while ring_claim; do
         if [[ "${RING_POISONED:-0}" == "1" ]]; then
