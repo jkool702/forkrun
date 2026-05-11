@@ -116,7 +116,7 @@
 
         for f in "${!outA[@]}"; do
             v="${outA[$f]}"
-            printf '\ntotal %s = %s ms\n' "$f" "$v" >&$fd2
+            printf '\ntotal %s = %s ms\n' "${f//sys/sys }" "$v" >&$fd2
         done
 
         cpu=$((1000 * (10#0${outA[user]} + 10#0${outA[sys]}) / 10#0${outA[real]}))
