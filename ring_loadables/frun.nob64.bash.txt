@@ -716,29 +716,59 @@ $(declare -f -- "${nn}")"
 
         else
             # LINE ARGS PAYLOAD (Default)
-            array_var='"${A[@]}"'
-            ${unsafe_flag} && array_var='${A[*]}'
 
-            if ${insert_args_flag:-false}; then
-                cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
+            # Determine if the target command is safe for direct posix_spawn
+            local cmd_type=$(type -t "$1" 2>/dev/null)
+            local use_ultra_fast_path=false
+
+            if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag} && ! ${insert_args_flag:-false}; then
+                # Resolve absolute path (e.g., "grep" -> "/usr/bin/grep")
+                local cmd_path=$(type -P "$1" 2>/dev/null)
+                
+                if [[ -n "$cmd_path" ]]; then
+                    # Check if it's a compiled binary or has a shebang
+                    if ring_is_spawnable "$cmd_path"; then
+                        use_ultra_fast_path=true
+                    fi
+                fi
+            fi
+
+            if $use_ultra_fast_path; then
+                # ULTRA-FAST PATH: Bypass Bash AST entirely!
+                if [[ ${delimiter_val} ]]; then
+                    printf -v delimiter_str '%q' "${delimiter_val}"
+                else
+                    delimiter_str="''"
+                fi
+                
+                # $cmdline_str already contains the quoted command and fixed args
+                pCode='
+            ring_exec $fd_read $REPLY '"${delimiter_str}"' '"$cmdline_str"
             else
-                cmdline_str+=" $array_var"
-            fi
+                # STANDARD FAST PATH: Mapfile replacement for Shell Functions & Builtins
+                array_var='"${A[@]}"'
+                ${unsafe_flag} && array_var='${A[*]}'
 
-            if ${unsafe_flag}; then
-                cmdline_str="IFS=' ' ${cmdline_str}"
-            fi
+                if ${insert_args_flag:-false}; then
+                    cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
+                else
+                    cmdline_str+=" $array_var"
+                fi
 
-            if [[ ${delimiter_val} ]]; then
-                printf -v delimiter_str '%q' "${delimiter_val}"
-            else
-                delimiter_str="''"
-            fi
+                if ${unsafe_flag}; then
+                    cmdline_str="IFS=' ' ${cmdline_str}"
+                fi
 
-            # FAST PATH: Bypassing mapfile entirely!
-            pCode='
+                if [[ ${delimiter_val} ]]; then
+                    printf -v delimiter_str '%q' "${delimiter_val}"
+                else
+                    delimiter_str="''"
+                fi
+
+                pCode='
             ring_map $fd_read $REPLY A '"${delimiter_str}"'
             '"$cmdline_str"
+            fi
         fi
 
         [[ "${order_mode}" == "realtime" ]] || {
