@@ -47,7 +47,7 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file NORMAL_EXIT_FLAG
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -222,6 +222,7 @@ EOF
     is_func_flag=false
     resume_flag=false
     retry_nonzero_exit_flag=false
+    prefer_external_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
     checkpoint_file='.forkrun_resume'
@@ -252,6 +253,9 @@ EOF
 
             -E|--retry-nonzero-exit)    retry_nonzero_exit_flag=true  ;;
             +E|--no-retry-nonzero-exit) retry_nonzero_exit_flag=false ;;
+
+            -X|--external|--EXTERNAL)      prefer_external_flag=true  ;;
+            +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL)  prefer_external_flag=false ;;
 
             @(--checkpoint-file)?(?([= $'\t'])*))
                 arg="${1##@(--checkpoint-file)?([= $'\t'])}";
@@ -657,11 +661,16 @@ $(declare -f -- "${nn}")"
         ring_ack_str="ring_ack $fd_fallow_w"
 
         # Determine if the target command is safe for direct posix_spawn
-        local cmd_type=$(type -t "$1" 2>/dev/null)
+        local cmd_type
+        if ${prefer_external_flag:-false}; then
+            cmd_type=$(type -Pt "$1" 2>/dev/null)
+        else
+            cmd_type=$(type -t "$1" 2>/dev/null)
+        fi
         local use_ultra_fast_path=false
 
         # Only use the fast path if it's an external file, safe mode, and no {} insertions
-        if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag} && ! ${insert_args_flag:-false}; then
+        if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag:-false} && ! ${insert_args_flag:-false}; then
             # Resolve absolute path (e.g., "grep" -> "/usr/bin/grep")
             local cmd_path=$(type -P "$1" 2>/dev/null)
             

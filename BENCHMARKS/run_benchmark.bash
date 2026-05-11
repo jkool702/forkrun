@@ -57,8 +57,8 @@
             declare -i K=0
             ## RUN BENCHMARK
             for Fk in "${F[@]}"; do
-                #for GCk in {,-k,-u,-U}\ {,-l\ 1:1024}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,cat,tee}$'\n'; do
-                for GCk in {,-k,-u}\ {,-l\ 1:-1}\ {/usr/bin/true,/usr/bin/echo,/usr/bin/printf\ '%s\n'}$'\n' -U\ {,-l\ 1:1024}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,/usr/bin/cat,/usr/bin/tee}$'\n'; do
+                for GCk in {,-k,-u,-U}\ \-X\ {,-l\ 1:1024}\ {true,echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,cat,tee}$'\n'; do
+                #for GCk in {,-k,-u}\ {,-l\ 1:-1}\ {/usr/bin/true,/usr/bin/echo,/usr/bin/printf\ '%s\n'}$'\n' -U\ {,-l\ 1:1024}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,/usr/bin/cat,/usr/bin/tee}$'\n'; do
 
                     GCk="${GCk%$'\n'}"
 
