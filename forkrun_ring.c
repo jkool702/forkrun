@@ -470,13 +470,24 @@ static int do_tokenize(int fd, size_t length, char delim, SHELL_VAR *arr, int fi
         tls_map_buf_cap = new_cap;
     }
 
-    ssize_t n = pread(fd, tls_map_buf, length, tls_batch_offset);
-    if (n <= 0) return EXECUTION_FAILURE;
+    size_t total_read = 0;
+    while (total_read < length) {
+        ssize_t n = pread(fd, tls_map_buf + total_read, length - total_read, tls_batch_offset + total_read);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return EXECUTION_FAILURE;
+        }
+        if (n == 0) break; // EOF reached before expected length
+        total_read += n;
+    }
+    
+    // If we couldn't fulfill the exact claimed length, the batch is broken.
+    if (total_read < length) return EXECUTION_FAILURE;
 
-    tls_map_buf[n] = '\0'; // Safety terminator
+    tls_map_buf[total_read] = '\0'; // Safety terminator
 
     char *ptr = tls_map_buf;
-    char *end = tls_map_buf + n;
+    char *end = tls_map_buf + total_read;
     size_t idx = 0;
 
     while (ptr < end) {
@@ -530,14 +541,11 @@ static int ring_map_main(int argc, char **argv) {
     char delim = (argc >= 5) ? argv[4][0] : '\n';
 
     // Clear the target array safely
-    SHELL_VAR *v = find_variable(arr_name);
-    if (v && !array_p(v)) {
+    if (find_variable(arr_name)) {
         unbind_variable(arr_name);
-        v = NULL;
     }
-    if (v) unbind_variable(arr_name); // Destroy old array
     
-    v = make_new_array_variable(arr_name);
+    SHELL_VAR *v = make_new_array_variable(arr_name);
     if (!v) return EXECUTION_FAILURE;
 
     return do_tokenize(fd, length, delim, v, 0, NULL);
@@ -620,7 +628,10 @@ static int ring_exec_main(int argc, char **argv) {
     int status = 0;
     if (ret == 0) {
         while (waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) break;
+            if (errno != EINTR) {
+                ret = -1; // Mark the execution as failed!
+                break;
+            }
         }
     }
 
