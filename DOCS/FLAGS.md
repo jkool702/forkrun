@@ -3,7 +3,8 @@
 ### DATA PASSING & DELIMITERS
 
 - `<default>`                 : Pass arguments fully quoted via cmdline (`"${A[@]}"`). (no flag needed)
-- `-U`, `--unsafe`            : Pass arguments unquoted via cmdline (`${A[*]}`).
+- `-U`, `--unsafe`            : Pass arguments unquoted via cmdline (`${A[*]}`). *(WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the zero-copy C-execution fast-path!)*
+- `-X`, `--external`          : Force external binary execution. If a command (like `echo` or `printf`) exists as both a Bash builtin and a disk binary, this forces the use of the disk binary. *(NOTE: Due to forkrun's C-level vfork engine, external binaries are now drastically FASTER than Bash builtins).*
 - `-s`, `--stdin`             : Pass data to the worker via its `stdin` (instead of via cmdline arguments).
 - `-b`, `--bytes <N>`         : Byte mode. Split the stream into `<N>`-byte chunks instead of using delimiters (implies `-s`). Supports standard prefixes (e.g., `-b 1M`).
 - `-z`, `--null`              : Use NULL (`\0`) as the record delimiter instead of newline.
