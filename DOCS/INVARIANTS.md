@@ -1,6 +1,6 @@
 ### `INVARIANTS.md`
 
-# FORKRUN INVARIANTS (v9.8.0-NUMA Golden Master)
+# FORKRUN INVARIANTS
 
 These are the rules that **must never be broken**. If they hold, the system is correct regardless of batching heuristics, NUMA count, or workload shape.
 
