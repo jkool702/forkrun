@@ -193,7 +193,11 @@ struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
                          {.fd = evfd_ingest_eof, .events = POLLIN}};
 poll(pfds, 2, poll_timeout);
 
+bool data_fired = (pfds[0].revents & POLLIN) != 0;
+bool eof_fired = (pfds[1].revents & POLLIN) != 0;
+
 if (data_fired) {
+    uint64_t v;
     sys_read(evfd_ingest_data, &v, 8);     // Priority 1: consume data signal
 }
 else if (eof_fired) {
