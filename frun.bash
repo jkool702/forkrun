@@ -47,7 +47,7 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -225,6 +225,7 @@ EOF
     delimiter_val=$'\n'
     ring_init_opts=()
     checkpoint_file='.forkrun_resume'
+    c_plugin_arg=""
 
     # Parse Arguments
     while true; do
@@ -255,6 +256,11 @@ EOF
 
             -X|--external|--EXTERNAL)      prefer_external_flag=true  ;;
             +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL) prefer_external_flag=false ;;
+
+            -C|--plugin|--PLUGIN)
+                arg="${1##@(-C|--plugin|--PLUGIN)?([= $'\t'])}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && c_plugin_arg="${arg}" ;;
 
             -v|--verbose)        verbose_flag=true;  stats_flag=true  ;;
             +v|--no-verbose)     verbose_flag=false; stats_flag=false ;;
@@ -687,7 +693,21 @@ $(declare -f -- "${nn}")"
             fi
         fi
 
-        if ${stdin_flag}; then
+        if [[ -n "${c_plugin_arg:-}" ]]; then
+            # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
+            local plugin_so="${c_plugin_arg%:*}"
+            local plugin_fn="${c_plugin_arg#*:}"
+
+            if [[ ${delimiter_val} ]]; then
+                printf -v delimiter_str '%q' "${delimiter_val}"
+            else
+                delimiter_str="''"
+            fi
+
+            pCode='
+            ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so@Q} ${plugin_fn@Q}"
+
+        elif ${stdin_flag}; then
             # STDIN PAYLOAD
             : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
 
