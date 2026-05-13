@@ -63,6 +63,8 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <spawn.h>
+#include <sys/wait.h>
 
 // ==============================================================================
 // AVX2 FAST DELIMITER SCANNER
@@ -440,27 +442,25 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
 
 static __thread off_t tls_batch_offset = 0;
 
-static int ring_map_main(int argc, char **argv) {
-    if (argc < 4) return EXECUTION_FAILURE;
+extern char **environ; // Required for posix_spawnp
 
-    int fd = atoi(argv[1]);
-    size_t length = (size_t)atoll(argv[2]);
-    const char *arr_name = argv[3];
+// Thread-local arrays to eliminate malloc/free overhead on the hot path
+static __thread char *tls_map_buf = NULL;
+static __thread size_t tls_map_buf_cap = 0;
+static __thread char **tls_argv = NULL;
+static __thread size_t tls_argv_cap = 0;
 
-    // If empty string is passed (e.g. -z mode), argv[4][0] will safely be '\0'
-    char delim = (argc >= 5 && argv[4][0] != '\0') ? argv[4][0] : '\n';
-
-    // FIX: Safely clear the target array if length is 0 (empty flush)
+// Shared tokenizer core.
+// If `arr` is non-NULL, it populates the Bash array.
+// If `arr` is NULL, it populates `tls_argv` starting at `fixed_argc`.
+static int do_tokenize(int fd, size_t length, char delim, SHELL_VAR *arr, int fixed_argc, size_t *out_batch_argc) {
     if (length == 0) {
-        SHELL_VAR *v = find_variable(arr_name);
-        if (v) unbind_variable(arr_name);
-        v = make_new_array_variable(arr_name);
-        return v ? EXECUTION_SUCCESS : EXECUTION_FAILURE;
+        if (out_batch_argc) *out_batch_argc = 0;
+        return EXECUTION_SUCCESS;
     }
 
-    // Persistent thread-local buffer to eliminate malloc/free overhead per batch
-    static __thread char *tls_map_buf = NULL;
-    static __thread size_t tls_map_buf_cap = 0;
+    // Shield against integer overflow and POSIX pread limits
+    if (length > SSIZE_MAX - 65536) return EXECUTION_FAILURE;
 
     if (length + 1 > tls_map_buf_cap) {
         size_t new_cap = length + 65536; // Add padding to avoid constant reallocs
@@ -470,50 +470,191 @@ static int ring_map_main(int argc, char **argv) {
         tls_map_buf_cap = new_cap;
     }
 
-    // 1. Single Zero-Cursor Syscall
-    ssize_t n = pread(fd, tls_map_buf, length, tls_batch_offset);
-    if (n <= 0) return EXECUTION_FAILURE;
-
-    tls_map_buf[n] = '\0'; // Safety terminator
-
-    // 2. Clear the target array safely
-    SHELL_VAR *v = find_variable(arr_name);
-    if (v && !array_p(v)) {
-        unbind_variable(arr_name);
-        v = NULL;
+    size_t total_read = 0;
+    while (total_read < length) {
+        ssize_t n = pread(fd, tls_map_buf + total_read, length - total_read, tls_batch_offset + total_read);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return EXECUTION_FAILURE;
+        }
+        if (n == 0) break; // EOF reached before expected length
+        total_read += n;
     }
-    if (v) {
-        unbind_variable(arr_name); // Destroy old array to prevent ghost elements
-    }
-    v = make_new_array_variable(arr_name);
-    if (!v) return EXECUTION_FAILURE;
+    
+    // If we couldn't fulfill the exact claimed length, the batch is broken.
+    if (total_read < length) return EXECUTION_FAILURE;
 
-    // 3. Fast In-Memory Tokenization
+    tls_map_buf[total_read] = '\0'; // Safety terminator
+
     char *ptr = tls_map_buf;
-    char *end = tls_map_buf + n;
-    int array_idx = 0;
+    char *end = tls_map_buf + total_read;
+    size_t idx = 0;
 
     while (ptr < end) {
+        // Dynamic capacity doubling for argv mode (prevents segfaults on tiny records)
+        if (!arr) {
+            if ((size_t)fixed_argc + idx + 2 > tls_argv_cap) {
+                tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
+                char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+                if (!new_argv) return EXECUTION_FAILURE;
+                tls_argv = new_argv;
+            }
+        }
+
         char *next = memchr(ptr, delim, end - ptr);
         if (next) {
             *next = '\0'; // Swap delimiter for null terminator
-            bind_array_element(v, array_idx++, ptr, 0);
+            if (arr) {
+                bind_array_element(arr, (arrayind_t)idx, ptr, 0);
+            } else {
+                tls_argv[fixed_argc + idx] = ptr;
+            }
+            idx++;
             ptr = next + 1;
         } else {
             // Trailing data without a delimiter
             if (ptr < end && *ptr != '\0') {
-                bind_array_element(v, array_idx++, ptr, 0);
+                if (arr) {
+                    bind_array_element(arr, (arrayind_t)idx, ptr, 0);
+                } else {
+                    tls_argv[fixed_argc + idx] = ptr;
+                }
+                idx++;
             }
             break;
         }
     }
 
+    if (out_batch_argc) *out_batch_argc = idx;
     return EXECUTION_SUCCESS;
+}
+
+// ---------------------------------------------------------
+// ring_map: For Bash functions, Builtins, and -U/-i/-I modes
+// ---------------------------------------------------------
+static int ring_map_main(int argc, char **argv) {
+    if (argc < 4) return EXECUTION_FAILURE;
+
+    int fd = atoi(argv[1]);
+    size_t length = (size_t)atoll(argv[2]);
+    const char *arr_name = argv[3];
+    char delim = (argc >= 5) ? argv[4][0] : '\n';
+
+    // Clear the target array safely
+    if (find_variable(arr_name)) {
+        unbind_variable(arr_name);
+    }
+    
+    SHELL_VAR *v = make_new_array_variable(arr_name);
+    if (!v) return EXECUTION_FAILURE;
+
+    return do_tokenize(fd, length, delim, v, 0, NULL);
+}
+
+// Returns 0 (true) if safe to execute directly via posix_spawnp (Binary or Shebang)
+// Returns 1 (false) if it is a text script without a shebang (needs Bash AST parsing)
+static int ring_is_spawnable_main(int argc, char **argv) {
+    if (argc < 2) return EXECUTION_FAILURE;
+    
+    int fd = open(argv[1], O_RDONLY);
+    if (fd < 0) return EXECUTION_FAILURE; // File not found/unreadable -> Let Bash handle it
+    
+    unsigned char buf[1024];
+    ssize_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+    
+    if (n <= 0) return EXECUTION_FAILURE;
+    
+    // 1. Shebang: The kernel handles this perfectly via binfmt_script
+    if (n >= 2 && buf[0] == '#' && buf[1] == '!') return EXECUTION_SUCCESS;
+    
+    // 2. Binary Heuristic: Any file containing a NULL byte in the first 1KB is a compiled binary.
+    // Text scripts cannot contain NULL bytes. This catches ELF, Mach-O, WASM, etc., instantly.
+    for (ssize_t i = 0; i < n; i++) {
+        if (buf[i] == '\0') return EXECUTION_SUCCESS;
+    }
+    
+    // 3. Pure text without a shebang. 
+    // posix_spawnp might choke or pass it to /bin/sh (breaking Bashisms).
+    // Return failure to enforce ring_map fallback!
+    return EXECUTION_FAILURE;
+}
+
+// ---------------------------------------------------------
+// ring_exec: Ultra-fast path for external binaries
+// ---------------------------------------------------------
+static int ring_exec_main(int argc, char **argv) {
+    // Usage: ring_exec <fd> <length> <delim> <cmd> [fixed_args...]
+    if (argc < 5) return EXECUTION_FAILURE;
+
+    int fd = atoi(argv[1]);
+    size_t length = (size_t)atoll(argv[2]);
+    char delim = argv[3][0];
+    
+    int fixed_argc = argc - 4;
+
+    // 1. Ensure baseline capacity for fixed arguments
+    if (tls_argv_cap < (size_t)(fixed_argc + 1024)) {
+        tls_argv_cap = fixed_argc + 1024;
+        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+        if (!new_argv) return EXECUTION_FAILURE;
+        tls_argv = new_argv;
+    }
+
+    // 2. Load fixed command and args directly from Bash's parsed argv
+    for (int i = 0; i < fixed_argc; i++) {
+        tls_argv[i] = argv[4 + i];
+    }
+
+    // 3. Tokenize batch directly into tls_argv
+    size_t batch_argc = 0;
+    int ret = do_tokenize(fd, length, delim, NULL, fixed_argc, &batch_argc);
+    if (ret != EXECUTION_SUCCESS) return ret;
+
+    // 4. Terminate argv array for execve
+    tls_argv[fixed_argc + batch_argc] = NULL;
+
+    // 5. SHIELD AGAINST BASH'S JOB CONTROL (Block SIGCHLD)
+    sigset_t set, oset;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &set, &oset);
+
+    // 6. Spawn the child (inherits FDs natively)
+    pid_t pid;
+    ret = posix_spawnp(&pid, tls_argv[0], NULL, NULL, tls_argv, environ);
+
+    // 7. Wait for the child synchronously
+    int status = 0;
+    if (ret == 0) {
+        while (waitpid(pid, &status, 0) == -1) {
+            if (errno != EINTR) {
+                ret = -1; // Mark the execution as failed!
+                break;
+            }
+        }
+    }
+
+    // 8. Restore signal mask
+    sigprocmask(SIG_SETMASK, &oset, NULL);
+
+    if (ret != 0) return EXECUTION_FAILURE;
+
+    // Return exact status correctness (crucial for -E auto-retry)
+    if (WIFEXITED(status)) {
+        return (WEXITSTATUS(status) == 0) ? EXECUTION_SUCCESS : WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status); // Standard shell convention for fatal signals
+    }
+    return EXECUTION_FAILURE;
 }
 
 // RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
   X(ring_map, ring_map_main, "ring_map <fd> <len> <array> [delim]", "Fast user-space mapfile") \
+  X(ring_exec, ring_exec_main, "ring_exec <fd> <len> <delim> <cmd> [args...]", "Ultra-fast execution of external binaries") \
+  X(ring_is_spawnable, ring_is_spawnable_main, "ring_is_spawnable <file>", "Check if file is binary or has shebang") \
   X(ring_init, ring_init_main, "ring_init [FLAGS]",                            \
     "Initialize ring with config")                                             \
   X(ring_destroy, ring_destroy_main, "ring_destroy", "Destroy ring")           \
@@ -527,8 +668,8 @@ static int ring_map_main(int argc, char **argv) {
   X(ring_numa_scanner, ring_numa_scanner_main,                                 \
     "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",                  \
     "Run unified NUMA scanner")                                                \
-  X(ring_claim, ring_claim_main, "ring_claim [VAR] [FD]", "Claim batch")       \
-  X(ring_worker, ring_worker_main, "ring_worker [inc|dec] [FD]",               \
+  X(ring_claim, ring_claim_main, "ring_claim [VAR]", "Claim batch")            \
+  X(ring_worker, ring_worker_main, "ring_worker [inc|dec]",                    \
     "Worker control")                                                          \
   X(ring_cleanup_waiter, ring_cleanup_waiter_main, "ring_cleanup_waiter",      \
     "Cleanup waiter")                                                          \
@@ -540,7 +681,7 @@ static int ring_map_main(int argc, char **argv) {
     "Reorder output")                                                          \
   X(ring_copy, ring_copy_main, "ring_copy <OUT> <IN>", "Zero-copy ingest")     \
   X(ring_signal, ring_signal_main, "ring_signal <FD>", "Signal eventfd")       \
-  X(lseek, lseek_main, "lseek <FD> <OFF> [WHENCE] [VAR]", "Seek fd")           \
+  X(ring_lseek, ring_lseek_main, "ring_lseek <FD> <OFF> [WHENCE] [VAR]", "Seek fd")    \
   X(ring_indexer, ring_indexer_main, "ring_indexer", "NUMA Indexer")           \
   X(ring_fetcher, ring_fetcher_main, "ring_fetcher", "NUMA Fetcher")           \
   X(ring_fallow_phys, ring_fallow_phys_main, "ring_fallow_phys",               \
@@ -793,7 +934,6 @@ static inline uint64_t fast_log2(uint64_t v) {
 
 static __thread int my_numa_node = -1;
 static __thread bool is_waiting_on_ring = false;
-static __thread int worker_cached_fd = -1;
 static __thread off_t last_ack_offset = 0;
 static __thread int ack_cached_target_fd = -1;
 static __thread int ack_cached_mode = 0;
@@ -3650,19 +3790,9 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 // progress is guaranteed by strictly monotonic indices.
 static int ring_claim_main(int argc, char **argv) {
   const char *v_target = "REPLY";
-  int fd_read = -1;
 
-  if (argc >= 4 && isdigit(argv[argc - 1][0]) && !isdigit(argv[argc - 2][0])) {
-    v_target = argv[2];
-    fd_read = atoi(argv[3]);
-  } else if (argc >= 2) {
-    if (isdigit(argv[1][0])) {
-      fd_read = atoi(argv[1]);
-    } else {
-      v_target = argv[1];
-      if (argc >= 3)
-        fd_read = atoi(argv[2]);
-    }
+  if (argc >= 2) {
+    v_target = argv[1];
   }
 
   if (my_numa_node == -1) {
@@ -3697,9 +3827,6 @@ static int ring_claim_main(int argc, char **argv) {
   uint64_t my_read_idx;
   uint64_t claim_count = 1;
   int spin = 0;
-
-  if (fd_read < 0)
-    fd_read = worker_cached_fd;
 
   // --- UNIVERSAL SIGPIPE / TEARDOWN SHIELD ---
   if (state) {
@@ -4078,6 +4205,9 @@ check_boundaries:
   u64toa(claim_count, buf);
   bind_variable("RING_BATCH_SLOTS", buf, 0);
 
+  uint64_t start_offset =
+      local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+
   if (local_state->numa_enabled) {
     worker_last_major = local_state->major_ring[my_read_idx & RING_MASK];
     worker_last_minor =
@@ -4094,17 +4224,7 @@ check_boundaries:
     bind_variable("RING_MINOR", buf, 0);
   }
 
-  uint64_t start_offset =
-      local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
   tls_batch_offset = (off_t)start_offset;
-
-  if (fd_read >= 0) {
-    if (lseek(fd_read, tls_batch_offset, SEEK_SET) == (off_t)-1) {
-      if (g_debug)
-        fprintf(stderr, "forkrun [DEBUG] ring_claim lseek failed: %s\n",
-                strerror(errno));
-    }
-  }
   return 0;
 }
 
@@ -4724,12 +4844,9 @@ static int ring_worker_main(int argc, char **argv) {
       }
     }
     __atomic_fetch_add(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);
-    if (argc >= 3 && isdigit(argv[2][0]))
-      worker_cached_fd = atoi(argv[2]);
   } else if (!strcmp(argv[1], "dec")) {
     cleanup_waiter_state();
     __atomic_fetch_sub(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);
-    worker_cached_fd = -1;
   }
   return EXECUTION_SUCCESS;
 }
@@ -4747,11 +4864,19 @@ static int ring_ingest_main(int argc, char **argv) {
     atomic_store_release(&state[0].ingest_complete, 1);
   return EXECUTION_SUCCESS;
 }
-static int lseek_main(int argc, char **argv) {
+static int ring_lseek_main(int argc, char **argv) {
   if (argc < 3 || argc > 5)
     return EXECUTION_FAILURE;
   int fd = atoi(argv[1]);
-  off_t off = atoll(argv[2]);
+  
+  // ZERO-OVERHEAD TLS INJECTION: Support '-' to auto-grab the batch offset
+  off_t off;
+  if (argv[2][0] == '-' && argv[2][1] == '\0') {
+    off = tls_batch_offset;
+  } else {
+    off = atoll(argv[2]);
+  }
+  
   int whence = SEEK_CUR;
   if (argc > 3) {
     if (!strcmp(argv[3], "SEEK_SET"))
@@ -4766,8 +4891,9 @@ static int lseek_main(int argc, char **argv) {
     char buf[32];
     snprintf(buf, 32, "%lld", (long long)no);
     bind_var_or_array(argv[argc - 1], buf, 0);
-  } else
+  } else if (argc < 4) {
     printf("%lld\n", (long long)no);
+  }
   return EXECUTION_SUCCESS;
 }
 
