@@ -3,7 +3,8 @@
 ### DATA PASSING & DELIMITERS
 
 - `<default>`                 : Pass arguments fully quoted via cmdline (`"${A[@]}"`). (no flag needed)
-- `-U`, `--unsafe`            : Pass arguments unquoted via cmdline (`${A[*]}`).
+- `-U`, `--unsafe`            : Pass arguments unquoted via cmdline (`${A[*]}`). *(WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the ultra-fast C-level vfork engine!)*
+- `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. *(NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).*
 - `-s`, `--stdin`             : Pass data to the worker via its `stdin` (instead of via cmdline arguments).
 - `-b`, `--bytes <N>`         : Byte mode. Split the stream into `<N>`-byte chunks instead of using delimiters (implies `-s`). Supports standard prefixes (e.g., `-b 1M`).
 - `-z`, `--null`              : Use NULL (`\0`) as the record delimiter instead of newline.
@@ -67,15 +68,16 @@
   - **Realtime (-u) mode**: Provides "At-Least-Once" semantics. Resuming may result in a few duplicate lines at the failure boundary.
 - `--checkpoint-file <file>`  : Specify a custom filename for the checkpoint file written in case of failure. (Default: .forkrun_resume)
 
+### UNSETTING FLAGS
+
+  - +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed is used.
+
 ### ENVIRONMENT VARS
 
 - `FORKRUN_RETRY_LIMIT` : Controls how many times a batch will be retried before it is declared poisoned. `0` means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
-
 - `FORKRUN_EXTRA_FUNCS` : Use this to specify required sub-functions to pass into frun's environment.
   - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`.
-
 - `FORKRUN_EXTRA_VARS`  : Use this to specify (environment) variables to pass into frun's environment
   - EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
-
 - `FORKRUN_EXTRA_SETUP` : Use this to specify raw commands that need to be run in frun's environment during setup
   - EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
