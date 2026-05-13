@@ -136,8 +136,8 @@ EOF
 
 ### DATA PASSING & DELIMITERS
   <default>             : Pass arguments fully quoted via cmdline ("${A[@]}"). (no flag needed)
-  -U, --unsafe          : Pass arguments unquoted via cmdline (${A[*]}). (WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the zero-copy C-execution fast-path!)
-  -X, --external        : Force external binary execution. If a command (like echo or printf) exists as both a Bash builtin and a disk binary, this forces the use of the disk binary. (NOTE: Due to forkrun's C-level vfork engine, external binaries are now drastically FASTER than Bash builtins).
+  -U, --unsafe          : Pass arguments unquoted via cmdline (${A[*]}). (WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the ultra-fast C-level vfork engine!)
+  -X, --external        : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. (NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).
   -s, --stdin           : Pass data to the worker via its stdin (instead of via cmdline arguments).
   -b, --bytes <N>       : Byte mode. Split the stream into N-byte chunks instead of using delimiters (implies -s). Supports standard prefixes (e.g., -b 1M).
   -z, --null            : Use NULL (\0) as the record delimiter instead of newline.
@@ -176,7 +176,6 @@ EOF
 
 ### ERROR HANDLING & RETRIES
   -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
-  +E, --no-retry-nonzero-exit : (DEFAULT) Deactivate auto-retry for non-zero exit codes.
   *Note on subshells*: When parallelizing functions that spawn subshells without -E active,
   failures must be manually guarded to return 200 to trigger the retry machinery (along with
   137 SIGKILL and 139 SIGSEGV). To protect the entire subshell, use the following pattern:
@@ -195,18 +194,17 @@ EOF
                           - Realtime (-u) mode: Provides "At-Least-Once" semantics. Resuming may result in a few duplicate lines at the failure boundary.
   --checkpoint-file <f> : Specify a custom filename for the checkpoint file written on failure. (Default: .forkrun_resume)
 
+### UNSETTING FLAGS
+  +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed is used.
+
 ### ENVIRONMENT VARS
-
-- FORKRUN_RETRY_LIMIT   : Controls how many times a batch will be retried before it is declared poisoned. 0 means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
-
-- FORKRUN_EXTRA_FUNCS   : Use this to specify required sub-functions to pass into frun's environment.
-  - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`.
-
-- FORKRUN_EXTRA_VARS    : Use this to specify (environment) variables to pass into frun's environment
-  - EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
-
-- FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup
-  - EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
+  FORKRUN_RETRY_LIMIT   : Controls how many times a batch will be retried before it is declared poisoned. 0 means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
+  FORKRUN_EXTRA_FUNCS   : Use this to specify required sub-functions to pass into frun's environment.
+      EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`.
+  FORKRUN_EXTRA_VARS    : Use this to specify (environment) variables to pass into frun's environment
+      EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
+  FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup
+      EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
 
 EOF
                 ;;
@@ -235,28 +233,34 @@ EOF
             -u|--unbuffered|--realtime)         order_mode='realtime' ;;
             --buffered|--atomic)                order_mode='buffered' ;;
 
+            -z|--null)                              delimiter_val=''  ;;
+
             -U|--unsafe|--UNSAFE)                   unsafe_flag=true  ;;
             +U|--safe|--SAFE)                       unsafe_flag=false ;;
 
             -s|--stdin)                              stdin_flag=true  ;;
             +s|--no-stdin)                           stdin_flag=false ;;
 
-            --stats)                                 stats_flag=true  ;;
-            -v|--verbose)        verbose_flag=true;  stats_flag=true  ;;
-            +v|--no-verbose)     verbose_flag=false; stats_flag=false ;;
-
-            -z|--null)                            delimiter_val=''    ;;
-
             -N|--dry-run|--DRY-RUN)                dry_run_flag=true  ;;
+            +N|--no-dry-run|--NO-DRY-RUN)          dry_run_flag=false ;;
 
             -i|--insert)                       insert_args_flag=true  ;;
+            +i|--no-insert)                    insert_args_flag=false ;;
+
             -I|--insert-id|--INSERT|--INSERT-ID) insert_id_flag=true  ;;
+            +I|--no-insert-id|--NO-INSERT|--NO-INSERT-ID) insert_id_flag=false ;;
 
             -E|--retry-nonzero-exit)    retry_nonzero_exit_flag=true  ;;
             +E|--no-retry-nonzero-exit) retry_nonzero_exit_flag=false ;;
 
             -X|--external|--EXTERNAL)      prefer_external_flag=true  ;;
-            +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL)  prefer_external_flag=false ;;
+            +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL) prefer_external_flag=false ;;
+
+            -v|--verbose)        verbose_flag=true;  stats_flag=true  ;;
+            +v|--no-verbose)     verbose_flag=false; stats_flag=false ;;
+
+            --stats)                                 stats_flag=true  ;;
+            --no-stats)                              stats_flag=false ;;
 
             @(--checkpoint-file)?(?([= $'\t'])*))
                 arg="${1##@(--checkpoint-file)?([= $'\t'])}";
