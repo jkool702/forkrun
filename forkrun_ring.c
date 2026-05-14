@@ -73,7 +73,7 @@
 
 #if defined(__x86_64__) || defined(__i386__)
 #pragma GCC push_options
-#pragma GCC target("avx2,popcnt")
+#pragma GCC target("avx2,popcnt,bmi1,bmi2")
 #include <immintrin.h>
 
 // High-throughput AVX2 SIMD scanner. Scans 32 bytes at a time for delimiters.
@@ -81,7 +81,7 @@
 // matches to instantly skip ahead by multiple records rather than branching per
 // character. If the batch 'target' constraint is met inside the 32-byte vector,
 // `__builtin_ctz` finds the exact boundary.
-__attribute__((target("avx2,popcnt"))) static inline char *
+__attribute__((target("avx2,popcnt,bmi1,bmi2"))) static inline char *
 scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
   uint64_t remaining = target;
   const __m256i d_vec = _mm256_set1_epi8(delim);
@@ -104,12 +104,19 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
       continue;
     }
 
-    uint32_t to_drop = (uint32_t)(remaining - 1);
-    for (uint32_t i = 0; i < to_drop; i++) {
-      mask &= mask - 1;
-    }
+        // We crossed the target in this vector — find exact position
+        // O(1) Branchless finding of the N-th set bit
+        uint32_t isolated_bit = _pdep_u32(1U << (remaining - 1), mask);
+        int exact_idx = __builtin_ctz(isolated_bit);
 
-    int exact_idx = __builtin_ctz(mask);
+        /*
+        // O(N) Fallback for older AMD CPUs without fast PDEP
+        uint32_t to_drop = (uint32_t)(remaining - 1);
+        for (uint32_t i = 0; i < to_drop; i++) {
+            mask &= mask - 1; // BLSR
+        }
+        int exact_idx = __builtin_ctz(mask); // TZCNT
+        */
     return p + exact_idx + 1;
   }
 
