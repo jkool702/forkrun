@@ -63,6 +63,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <dlfcn.h>      // <--- ADD THIS for dynamic plugins
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -72,7 +73,7 @@
 
 #if defined(__x86_64__) || defined(__i386__)
 #pragma GCC push_options
-#pragma GCC target("avx2,popcnt")
+#pragma GCC target("avx2,popcnt,bmi")
 #include <immintrin.h>
 
 // High-throughput AVX2 SIMD scanner. Scans 32 bytes at a time for delimiters.
@@ -80,7 +81,7 @@
 // matches to instantly skip ahead by multiple records rather than branching per
 // character. If the batch 'target' constraint is met inside the 32-byte vector,
 // `__builtin_ctz` finds the exact boundary.
-__attribute__((target("avx2,popcnt"))) static inline char *
+__attribute__((target("avx2,popcnt,bmi"))) static inline char *
 scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
   uint64_t remaining = target;
   const __m256i d_vec = _mm256_set1_epi8(delim);
@@ -103,12 +104,20 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
       continue;
     }
 
-    uint32_t to_drop = (uint32_t)(remaining - 1);
-    for (uint32_t i = 0; i < to_drop; i++) {
-      mask &= mask - 1;
-    }
+        /*
+        // note: add bmi2 to target
+        // We crossed the target in this vector — find exact position
+        // O(1) Branchless finding of the N-th set bit
+        uint32_t isolated_bit = _pdep_u32(1U << (remaining - 1), mask);
+        int exact_idx = __builtin_ctz(isolated_bit);
+        */
 
-    int exact_idx = __builtin_ctz(mask);
+        // O(N) Fallback for older AMD CPUs without fast PDEP
+        uint32_t to_drop = (uint32_t)(remaining - 1);
+        for (uint32_t i = 0; i < to_drop; i++) {
+            mask &= mask - 1; // BLSR
+        }
+        int exact_idx = __builtin_ctz(mask); // TZCNT
     return p + exact_idx + 1;
   }
 
@@ -650,10 +659,68 @@ static int ring_exec_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
 }
 
+// ---------------------------------------------------------
+// ring_call: Zero-Tax C Plugin Callback Execution
+// ---------------------------------------------------------
+
+// Define the user's expected function signature
+typedef int (*forkrun_cb_t)(int argc, char **argv);
+
+// Cache the loaded plugin per-worker in Thread-Local Storage
+static __thread void *tls_dl_handle = NULL;
+static __thread forkrun_cb_t tls_callback = NULL;
+
+static int ring_call_main(int argc, char **argv) {
+    // Usage: ring_call <fd> <length> <delim> <plugin.so> <func_name>
+    if (argc < 6) return EXECUTION_FAILURE;
+
+    int fd = atoi(argv[1]);
+    size_t length = (size_t)atoll(argv[2]);
+    char delim = argv[3][0];
+    const char *plugin_path = argv[4];
+    const char *func_name = argv[5];
+
+    // 1. Lazy-load the plugin (Only happens on the first batch for this worker)
+    if (!tls_callback) {
+        tls_dl_handle = dlopen(plugin_path, RTLD_LAZY | RTLD_LOCAL);
+        if (!tls_dl_handle) {
+            fprintf(stderr, "forkrun [ERROR]: dlopen failed: %s\n", dlerror());
+            return EXECUTION_FAILURE;
+        }
+        
+        tls_callback = (forkrun_cb_t)dlsym(tls_dl_handle, func_name);
+        if (!tls_callback) {
+            fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
+            return EXECUTION_FAILURE;
+        }
+    }
+
+    // 2. Tokenize the batch directly into tls_argv (starting at index 0)
+    size_t batch_argc = 0;
+    int ret = do_tokenize(fd, length, delim, NULL, 0, &batch_argc);
+    if (ret != EXECUTION_SUCCESS) return ret;
+
+    // 3. Ensure capacity and terminate argv array (standard C convention)
+    if (batch_argc + 1 > tls_argv_cap) {
+        tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
+        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+        if (!new_argv) return EXECUTION_FAILURE;
+        tls_argv = new_argv;
+    }
+    tls_argv[batch_argc] = NULL;
+
+    // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
+    int cb_ret = tls_callback((int)batch_argc, tls_argv);
+
+    // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
+    return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;
+}
+
 // RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
   X(ring_map, ring_map_main, "ring_map <fd> <len> <array> [delim]", "Fast user-space mapfile") \
   X(ring_exec, ring_exec_main, "ring_exec <fd> <len> <delim> <cmd> [args...]", "Ultra-fast execution of external binaries") \
+  X(ring_call, ring_call_main, "ring_call <fd> <len> <delim> <so> <fn>", "Zero-Tax C Plugin Execution") \
   X(ring_is_spawnable, ring_is_spawnable_main, "ring_is_spawnable <file>", "Check if file is binary or has shebang") \
   X(ring_init, ring_init_main, "ring_init [FLAGS]",                            \
     "Initialize ring with config")                                             \

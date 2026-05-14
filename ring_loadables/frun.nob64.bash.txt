@@ -32,7 +32,7 @@ frun() {
 
         # EXEC into Clean Room
         # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
-        exec  "${BASH:-bash}" --norc --noprofile -c 'enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
+        exec "${BASH:-bash}" --norc --noprofile -c 'enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
 export LC_ALL=C
 set +m
 shopt -s extglob
@@ -47,7 +47,7 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file NORMAL_EXIT_FLAG
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -136,7 +136,8 @@ EOF
 
 ### DATA PASSING & DELIMITERS
   <default>             : Pass arguments fully quoted via cmdline ("${A[@]}"). (no flag needed)
-  -U, --unsafe          : Pass arguments unquoted via cmdline (${A[*]}).
+  -U, --unsafe          : Pass arguments unquoted via cmdline (${A[*]}). (WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the ultra-fast C-level vfork engine!)
+  -X, --external        : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. (NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).
   -s, --stdin           : Pass data to the worker via its stdin (instead of via cmdline arguments).
   -b, --bytes <N>       : Byte mode. Split the stream into N-byte chunks instead of using delimiters (implies -s). Supports standard prefixes (e.g., -b 1M).
   -z, --null            : Use NULL (\0) as the record delimiter instead of newline.
@@ -175,7 +176,6 @@ EOF
 
 ### ERROR HANDLING & RETRIES
   -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
-  +E, --no-retry-nonzero-exit : (DEFAULT) Deactivate auto-retry for non-zero exit codes.
   *Note on subshells*: When parallelizing functions that spawn subshells without -E active,
   failures must be manually guarded to return 200 to trigger the retry machinery (along with
   137 SIGKILL and 139 SIGSEGV). To protect the entire subshell, use the following pattern:
@@ -194,18 +194,17 @@ EOF
                           - Realtime (-u) mode: Provides "At-Least-Once" semantics. Resuming may result in a few duplicate lines at the failure boundary.
   --checkpoint-file <f> : Specify a custom filename for the checkpoint file written on failure. (Default: .forkrun_resume)
 
+### UNSETTING FLAGS
+  +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed is used.
+
 ### ENVIRONMENT VARS
-
-- FORKRUN_RETRY_LIMIT   : Controls how many times a batch will be retried before it is declared poisoned. 0 means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
-
-- FORKRUN_EXTRA_FUNCS   : Use this to specify required sub-functions to pass into frun's environment.
-  - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`.
-
-- FORKRUN_EXTRA_VARS    : Use this to specify (environment) variables to pass into frun's environment
-  - EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
-
-- FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup
-  - EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
+  FORKRUN_RETRY_LIMIT   : Controls how many times a batch will be retried before it is declared poisoned. 0 means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
+  FORKRUN_EXTRA_FUNCS   : Use this to specify required sub-functions to pass into frun's environment.
+      EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_REQ_FUNCS='gg hh' frun ff <inputs`.
+  FORKRUN_EXTRA_VARS    : Use this to specify (environment) variables to pass into frun's environment
+      EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
+  FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup
+      EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
 
 EOF
                 ;;
@@ -222,9 +221,11 @@ EOF
     is_func_flag=false
     resume_flag=false
     retry_nonzero_exit_flag=false
+    prefer_external_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
     checkpoint_file='.forkrun_resume'
+    c_plugin_arg=""
 
     # Parse Arguments
     while true; do
@@ -233,25 +234,39 @@ EOF
             -u|--unbuffered|--realtime)         order_mode='realtime' ;;
             --buffered|--atomic)                order_mode='buffered' ;;
 
+            -z|--null)                              delimiter_val=''  ;;
+
             -U|--unsafe|--UNSAFE)                   unsafe_flag=true  ;;
             +U|--safe|--SAFE)                       unsafe_flag=false ;;
 
             -s|--stdin)                              stdin_flag=true  ;;
             +s|--no-stdin)                           stdin_flag=false ;;
 
-            --stats)                                 stats_flag=true  ;;
-            -v|--verbose)        verbose_flag=true;  stats_flag=true  ;;
-            +v|--no-verbose)     verbose_flag=false; stats_flag=false ;;
-
-            -z|--null)                            delimiter_val=''    ;;
-
             -N|--dry-run|--DRY-RUN)                dry_run_flag=true  ;;
+            +N|--no-dry-run|--NO-DRY-RUN)          dry_run_flag=false ;;
 
             -i|--insert)                       insert_args_flag=true  ;;
+            +i|--no-insert)                    insert_args_flag=false ;;
+
             -I|--insert-id|--INSERT|--INSERT-ID) insert_id_flag=true  ;;
+            +I|--no-insert-id|--NO-INSERT|--NO-INSERT-ID) insert_id_flag=false ;;
 
             -E|--retry-nonzero-exit)    retry_nonzero_exit_flag=true  ;;
             +E|--no-retry-nonzero-exit) retry_nonzero_exit_flag=false ;;
+
+            -X|--external|--EXTERNAL)      prefer_external_flag=true  ;;
+            +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL) prefer_external_flag=false ;;
+
+            -C|--plugin|--PLUGIN)
+                arg="${1##@(-C|--plugin|--PLUGIN)?([= $'\t'])}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && c_plugin_arg="${arg}" ;;
+
+            -v|--verbose)        verbose_flag=true;  stats_flag=true  ;;
+            +v|--no-verbose)     verbose_flag=false; stats_flag=false ;;
+
+            --stats)                                 stats_flag=true  ;;
+            --no-stats)                              stats_flag=false ;;
 
             @(--checkpoint-file)?(?([= $'\t'])*))
                 arg="${1##@(--checkpoint-file)?([= $'\t'])}";
@@ -654,14 +669,54 @@ $(declare -f -- "${nn}")"
 
         ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"
 
-
         ring_ack_str="ring_ack $fd_fallow_w"
 
-        if ${stdin_flag}; then
+        # Determine if the target command is safe for direct posix_spawn
+        local cmd_type
+        if ${prefer_external_flag:-false}; then
+            cmd_type=$(type -Pt "$1" 2>/dev/null)
+        else
+            cmd_type=$(type -t "$1" 2>/dev/null)
+        fi
+        local use_ultra_fast_path=false
+
+        # Only use the fast path if it's an external file, safe mode, and no {} insertions
+        if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag:-false} && ! ${insert_args_flag:-false}; then
+            # Resolve absolute path (e.g., "grep" -> "/usr/bin/grep")
+            local cmd_path=$(type -P "$1" 2>/dev/null)
+            
+            if [[ -n "$cmd_path" ]]; then
+                # Check if it's a compiled binary or has a shebang
+                if ring_is_spawnable "$cmd_path"; then
+                    use_ultra_fast_path=true
+                fi
+            fi
+        fi
+
+        if [[ -n "${c_plugin_arg:-}" ]]; then
+            # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
+            local plugin_so="${c_plugin_arg%:*}"
+            local plugin_fn="${c_plugin_arg#*:}"
+
+            if [[ ${delimiter_val} ]]; then
+                printf -v delimiter_str '%q' "${delimiter_val}"
+            else
+                delimiter_str="''"
+            fi
+
+            pCode='
+            ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so@Q} ${plugin_fn@Q}"
+
+        elif ${stdin_flag}; then
             # STDIN PAYLOAD
             : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
 
-            # opportunistically probe the kernel's granted capacity
+            local exec_cmd_str="$cmdline_str"
+            if $use_ultra_fast_path; then
+                # Length 0 bypasses do_tokenize. Acts as a pure vfork() wrapper.
+                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
+            fi
+
             pCode='
             pipe_open_flag=0
             if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
@@ -671,11 +726,12 @@ $(declare -f -- "${nn}")"
                 RING_PIPE_CAPACITY_CUR=0
             fi
 
+            # opportunistically probe the kernels granted capacity    
             if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
                 # FAST PATH (Synchronous)
                 # Note: ring_splice "close" closes $pw internally. We only close $pr.
                 ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
-                '"$cmdline_str"' <&$pr'
+                '"$exec_cmd_str"' <&$pr'
             if ${retry_nonzero_exit_flag}; then
                 pCode+=' || exit $?'
             elif ${is_func_flag}; then
@@ -689,7 +745,7 @@ $(declare -f -- "${nn}")"
                 # SLOW PATH (Asynchronous)
                 # Close both FDs so they do not leak into the pipeline
                 (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$cmdline_str"' )'
+                ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$exec_cmd_str"' )'
             if ${retry_nonzero_exit_flag}; then
                 pCode+=' || exit $?'
             elif ${is_func_flag}; then
@@ -710,35 +766,55 @@ $(declare -f -- "${nn}")"
                 cmdline_str+=" $array_var"
             fi
 
+            local exec_cmd_str="$cmdline_str"
+            if $use_ultra_fast_path; then
+                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
+            fi
+
             pCode='
+            ring_lseek $fd_read - SEEK_SET '"''"'
             read -r -u $fd_read -N $REPLY A
-            '"$cmdline_str"
+            '"$exec_cmd_str"
 
         else
             # LINE ARGS PAYLOAD (Default)
-            array_var='"${A[@]}"'
-            ${unsafe_flag} && array_var='${A[*]}'
 
-            if ${insert_args_flag:-false}; then
-                cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
+            if $use_ultra_fast_path; then
+                # ULTRA-FAST PATH: Bypass Bash AST entirely!
+                if [[ ${delimiter_val} ]]; then
+                    printf -v delimiter_str '%q' "${delimiter_val}"
+                else
+                    delimiter_str="''"
+                fi
+                
+                # $cmdline_str already contains the quoted command and fixed args
+                pCode='
+            ring_exec $fd_read $REPLY '"${delimiter_str}"' '"$cmdline_str"
             else
-                cmdline_str+=" $array_var"
-            fi
+                # STANDARD FAST PATH: Mapfile replacement for Shell Functions & Builtins
+                array_var='"${A[@]}"'
+                ${unsafe_flag} && array_var='${A[*]}'
 
-            if ${unsafe_flag}; then
-                cmdline_str="IFS=' ' ${cmdline_str}"
-            fi
+                if ${insert_args_flag:-false}; then
+                    cmdline_str="${cmdline_str//\\\{\\\}/$array_var}"
+                else
+                    cmdline_str+=" $array_var"
+                fi
 
-            if [[ ${delimiter_val} ]]; then
-                printf -v delimiter_str '%q' "${delimiter_val}"
-            else
-                delimiter_str="''"
-            fi
+                if ${unsafe_flag}; then
+                    cmdline_str="IFS=' ' ${cmdline_str}"
+                fi
 
-            # FAST PATH: Bypassing mapfile entirely!
-            pCode='
+                if [[ ${delimiter_val} ]]; then
+                    printf -v delimiter_str '%q' "${delimiter_val}"
+                else
+                    delimiter_str="''"
+                fi
+
+                pCode='
             ring_map $fd_read $REPLY A '"${delimiter_str}"'
             '"$cmdline_str"
+            fi
         fi
 
         [[ "${order_mode}" == "realtime" ]] || {
@@ -801,7 +877,7 @@ $(declare -f -- "${nn}")"
         ${insert_id_flag:-false} && worker_func_src+='W_BATCH=0
     '
         worker_func_src+='shift 4
-    ring_worker inc -1
+    ring_worker inc
     _ring_registered=true
     while ring_claim; do
         if [[ "${RING_POISONED:-0}" == "1" ]]; then
