@@ -73,7 +73,7 @@
 
 #if defined(__x86_64__) || defined(__i386__)
 #pragma GCC push_options
-#pragma GCC target("avx2,popcnt,bmi1")
+#pragma GCC target("avx2,popcnt,bmi")
 #include <immintrin.h>
 
 // High-throughput AVX2 SIMD scanner. Scans 32 bytes at a time for delimiters.
@@ -81,7 +81,7 @@
 // matches to instantly skip ahead by multiple records rather than branching per
 // character. If the batch 'target' constraint is met inside the 32-byte vector,
 // `__builtin_ctz` finds the exact boundary.
-__attribute__((target("avx2,popcnt,bmi1"))) static inline char *
+__attribute__((target("avx2,popcnt,bmi"))) static inline char *
 scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
   uint64_t remaining = target;
   const __m256i d_vec = _mm256_set1_epi8(delim);
