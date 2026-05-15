@@ -709,52 +709,53 @@ $(declare -f -- "${nn}")"
 
         elif ${stdin_flag}; then
             # STDIN PAYLOAD
-            : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
-
-            local exec_cmd_str="$cmdline_str"
             if $use_ultra_fast_path; then
-                # Length 0 bypasses do_tokenize. Acts as a pure vfork() wrapper.
-                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
-            fi
-
-            pCode='
-            pipe_open_flag=0
-            if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
-                ring_pipe pr pw
-                pipe_open_flag=1
+                # ALL-IN-C ZERO-COPY PIPELINE
+                pCode='ring_exec_splice $fd_read $REPLY '"$cmdline_str"
             else
-                RING_PIPE_CAPACITY_CUR=0
-            fi
+                # STANDARD BASH PIPE PIPELINE
+                : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+                
+                local exec_cmd_str="$cmdline_str"
+                pCode='
+                pipe_open_flag=0
+                if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
+                    ring_pipe pr pw
+                    pipe_open_flag=1
+                else
+                    RING_PIPE_CAPACITY_CUR=0
+                fi
 
-            # opportunistically probe the kernels granted capacity    
-            if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
-                # FAST PATH (Synchronous)
-                # Note: ring_splice "close" closes $pw internally. We only close $pr.
-                ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
-                '"$exec_cmd_str"' <&$pr'
-            if ${retry_nonzero_exit_flag}; then
-                pCode+=' || exit $?'
-            elif ${is_func_flag}; then
+                # opportunistically probe the kernels granted capacity    
+                if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
+                    # FAST PATH (Synchronous)
+                    # Note: ring_splice "close" closes $pw internally. We only close $pr.
+                    ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
+                    '"$exec_cmd_str"' <&$pr'
+                if ${retry_nonzero_exit_flag}; then
+                    pCode+=' || exit $?'
+                elif ${is_func_flag}; then
+                    pCode+='
+                    ret=$?
+                    (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                fi
                 pCode+='
-                ret=$?
-                (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
-            fi
-            pCode+='
-                exec {pr}<&-
-            else
-                # SLOW PATH (Asynchronous)
-                # Close both FDs so they do not leak into the pipeline
-                (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$exec_cmd_str"' )'
-            if ${retry_nonzero_exit_flag}; then
-                pCode+=' || exit $?'
-            elif ${is_func_flag}; then
+                    exec {pr}<&-
+                else
+                    # SLOW PATH (Asynchronous)
+                    # Close both FDs so they do not leak into the pipeline
+                    (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
+                    ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$exec_cmd_str"' )'
+                if ${retry_nonzero_exit_flag}; then
+                    pCode+=' || exit $?'
+                elif ${is_func_flag}; then
+                    pCode+='
+                    ret=$?
+                    (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                fi
                 pCode+='
-                ret=$?
-                (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                fi'
             fi
-            pCode+='
-            fi'
 
         elif ${byte_mode_flag}; then
             # BYTE MODE WITHOUT PASS-BY-STDIN
@@ -766,15 +767,15 @@ $(declare -f -- "${nn}")"
                 cmdline_str+=" $array_var"
             fi
 
-            local exec_cmd_str="$cmdline_str"
             if $use_ultra_fast_path; then
-                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
+                # Length 0 bypasses do_tokenize and acts as pure vfork wrapper
+                pCode='ring_exec 0 0 '\'''\'' '"$cmdline_str"
+            else
+                pCode='
+                ring_lseek $fd_read - SEEK_SET _dummy
+                read -r -u $fd_read -N $REPLY A
+                '"$cmdline_str"
             fi
-
-            pCode='
-            ring_lseek $fd_read - SEEK_SET '"''"'
-            read -r -u $fd_read -N $REPLY A
-            '"$exec_cmd_str"
 
         else
             # LINE ARGS PAYLOAD (Default)
