@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.2.0
+// forkrun_ring.c v3.2.1
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -272,6 +272,9 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #ifndef MFD_ALLOW_SEALING
 #define MFD_ALLOW_SEALING 0x0002U
 #endif
+#ifndef MFD_HUGETLB
+#define MFD_HUGETLB 0x0004U
+#endif
 #ifndef O_TMPFILE
 #define O_TMPFILE 020200000
 #endif
@@ -309,7 +312,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.2.0"
+#define FORKRUN_RING_VERSION "v3.2.1"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -1031,7 +1034,14 @@ static int xcreate_anon_file(const char *name) {
   if (force_fallback && (strcmp(force_fallback, "1") == 0))
     use_memfd = false;
   if (use_memfd) {
-    int fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
+    int fd = -1;
+    const char *use_hugetlb = get_string_value("FORKRUN_USE_HUGETLB");
+    if (use_hugetlb && strcmp(use_hugetlb, "1") == 0) {
+      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_HUGETLB);
+    }
+    if (fd < 0) {
+      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
+    }
     if (fd >= 0)
       return fd;
     if (errno == EINVAL) {

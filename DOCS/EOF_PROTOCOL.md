@@ -1,6 +1,6 @@
 ### `EOF_PROTOCOL.md`
 
-# FORKRUN EOF PROTOCOL (v3.2.0)
+# FORKRUN EOF PROTOCOL
 
 This document defines the formal protocol by which forkrun detects end-of-input and guarantees clean termination without lost wakeups, premature exits, or deadlocks. This protocol is a first-principles design, not derived from existing systems.
 
@@ -173,7 +173,7 @@ if (tl_recently_escrowed) {          // TLS flag, set when depositing into escro
 // ... fall through to normal priority: ring first, then escrow
 ```
 
-**Reference:** `ring_claim_main()` in `forkrun_ring.c`, lines 3861–3898.
+**Reference:** `ring_claim_main()` in `forkrun_ring.c`.
 
 ---
 

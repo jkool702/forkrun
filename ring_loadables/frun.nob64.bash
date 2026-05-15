@@ -47,7 +47,7 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -205,6 +205,7 @@ EOF
       EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
   FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup
       EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
+  FORKRUN_USE_HUGETLB   : Set to '1' to have forkrun attempt to use hugepages for memfd backing. WARNING: only enable this if you have sufficient available hugepages so that forkrun does NOT run out of memory to use.
 
 EOF
                 ;;
@@ -225,6 +226,7 @@ EOF
     delimiter_val=$'\n'
     ring_init_opts=()
     checkpoint_file='.forkrun_resume'
+    c_plugin_arg=""
 
     # Parse Arguments
     while true; do
@@ -255,6 +257,11 @@ EOF
 
             -X|--external|--EXTERNAL)      prefer_external_flag=true  ;;
             +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL) prefer_external_flag=false ;;
+
+            -C|--plugin|--PLUGIN)
+                arg="${1##@(-C|--plugin|--PLUGIN)?([= $'\t'])}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && c_plugin_arg="${arg}" ;;
 
             -v|--verbose)        verbose_flag=true;  stats_flag=true  ;;
             +v|--no-verbose)     verbose_flag=false; stats_flag=false ;;
@@ -359,7 +366,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.2.0';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.2.1';  return 0  ;;
 
             --) shift; break ;;
 
@@ -687,54 +694,69 @@ $(declare -f -- "${nn}")"
             fi
         fi
 
-        if ${stdin_flag}; then
-            # STDIN PAYLOAD
-            : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+        if [[ -n "${c_plugin_arg:-}" ]]; then
+            # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
+            local plugin_so="${c_plugin_arg%:*}"
+            local plugin_fn="${c_plugin_arg#*:}"
 
-            local exec_cmd_str="$cmdline_str"
-            if $use_ultra_fast_path; then
-                # Length 0 bypasses do_tokenize. Acts as a pure vfork() wrapper.
-                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
+            if [[ ${delimiter_val} ]]; then
+                printf -v delimiter_str '%q' "${delimiter_val}"
+            else
+                delimiter_str="''"
             fi
 
             pCode='
-            pipe_open_flag=0
-            if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
-                ring_pipe pr pw
-                pipe_open_flag=1
-            else
-                RING_PIPE_CAPACITY_CUR=0
-            fi
+            ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so@Q} ${plugin_fn@Q}"
 
-            # opportunistically probe the kernels granted capacity    
-            if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
-                # FAST PATH (Synchronous)
-                # Note: ring_splice "close" closes $pw internally. We only close $pr.
-                ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
-                '"$exec_cmd_str"' <&$pr'
-            if ${retry_nonzero_exit_flag}; then
-                pCode+=' || exit $?'
-            elif ${is_func_flag}; then
-                pCode+='
-                ret=$?
-                (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
-            fi
-            pCode+='
-                exec {pr}<&-
+        elif ${stdin_flag}; then
+            # STDIN PAYLOAD
+            if $use_ultra_fast_path; then
+                # ALL-IN-C ZERO-COPY PIPELINE
+                pCode='ring_exec_splice $fd_read $REPLY '"$cmdline_str"
             else
-                # SLOW PATH (Asynchronous)
-                # Close both FDs so they do not leak into the pipeline
-                (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$exec_cmd_str"' )'
-            if ${retry_nonzero_exit_flag}; then
-                pCode+=' || exit $?'
-            elif ${is_func_flag}; then
+                # STANDARD BASH PIPE PIPELINE
+                : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+                
+                local exec_cmd_str="$cmdline_str"
+                pCode='
+                pipe_open_flag=0
+                if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
+                    ring_pipe pr pw
+                    pipe_open_flag=1
+                else
+                    RING_PIPE_CAPACITY_CUR=0
+                fi
+
+                # opportunistically probe the kernels granted capacity    
+                if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
+                    # FAST PATH (Synchronous)
+                    # Note: ring_splice "close" closes $pw internally. We only close $pr.
+                    ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
+                    '"$exec_cmd_str"' <&$pr'
+                if ${retry_nonzero_exit_flag}; then
+                    pCode+=' || exit $?'
+                elif ${is_func_flag}; then
+                    pCode+='
+                    ret=$?
+                    (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                fi
                 pCode+='
-                ret=$?
-                (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                    exec {pr}<&-
+                else
+                    # SLOW PATH (Asynchronous)
+                    # Close both FDs so they do not leak into the pipeline
+                    (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
+                    ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$exec_cmd_str"' )'
+                if ${retry_nonzero_exit_flag}; then
+                    pCode+=' || exit $?'
+                elif ${is_func_flag}; then
+                    pCode+='
+                    ret=$?
+                    (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                fi
+                pCode+='
+                fi'
             fi
-            pCode+='
-            fi'
 
         elif ${byte_mode_flag}; then
             # BYTE MODE WITHOUT PASS-BY-STDIN
@@ -746,15 +768,15 @@ $(declare -f -- "${nn}")"
                 cmdline_str+=" $array_var"
             fi
 
-            local exec_cmd_str="$cmdline_str"
             if $use_ultra_fast_path; then
-                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
+                # Length 0 bypasses do_tokenize and acts as pure vfork wrapper
+                pCode='ring_exec 0 0 '\'''\'' '"$cmdline_str"
+            else
+                pCode='
+                ring_lseek $fd_read - SEEK_SET _dummy
+                read -r -u $fd_read -N $REPLY A
+                '"$cmdline_str"
             fi
-
-            pCode='
-            ring_lseek $fd_read - SEEK_SET '"''"'
-            read -r -u $fd_read -N $REPLY A
-            '"$exec_cmd_str"
 
         else
             # LINE ARGS PAYLOAD (Default)
