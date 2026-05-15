@@ -660,6 +660,98 @@ static int ring_exec_main(int argc, char **argv) {
 }
 
 // ---------------------------------------------------------
+// ring_exec_splice: Spawn binary and splice data to its stdin
+// ---------------------------------------------------------
+static int ring_exec_splice_main(int argc, char **argv) {
+    // Usage: ring_exec_splice <fd> <length> <cmd> [args...]
+    if (argc < 4) return EXECUTION_FAILURE;
+
+    int fd = atoi(argv[1]);
+    size_t length = (size_t)atoll(argv[2]);
+    int fixed_argc = argc - 3;
+
+    // 1. Load command and args into tls_argv
+    if (tls_argv_cap < (size_t)(fixed_argc + 1)) {
+        tls_argv_cap = fixed_argc + 1;
+        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+        if (!new_argv) return EXECUTION_FAILURE;
+        tls_argv = new_argv;
+    }
+    for (int i = 0; i < fixed_argc; i++) {
+        tls_argv[i] = argv[3 + i];
+    }
+    tls_argv[fixed_argc] = NULL;
+
+    // 2. Create the pipe
+    int pfd[2];
+    if (pipe(pfd) != 0) return EXECUTION_FAILURE;
+    
+    // Optional: Maximize pipe buffer size for throughput
+    fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
+
+    // 3. Map pfd[0] to the child's STDIN
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, pfd[0], STDIN_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pfd[1]); // Child doesn't need write end
+
+    // 4. Block SIGCHLD
+    sigset_t set, oset;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &set, &oset);
+
+    // 5. Spawn the child!
+    pid_t pid;
+    int ret = posix_spawnp(&pid, tls_argv[0], &actions, NULL, tls_argv, environ);
+
+    // 6. Close the read end in the parent (child owns it now)
+    close(pfd[0]);
+    posix_spawn_file_actions_destroy(&actions);
+
+    // 7. Feed the child concurrently via splice
+    if (ret == 0) {
+        // IGNORE SIGPIPE so 'head -n' doesn't kill the worker!
+        void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+        
+        size_t written = 0;
+        off_t offset = tls_batch_offset;
+        while (written < length) {
+            ssize_t s = splice(fd, &offset, pfd[1], NULL, length - written, 0);
+            if (s < 0) {
+                if (errno == EINTR) continue;
+                break; // Broken pipe (EPIPE) or error
+            }
+            if (s == 0) break;
+            written += s;
+        }
+        
+        // Restore previous SIGPIPE handler
+        signal(SIGPIPE, old_handler);
+    }
+    
+    // 8. Close the write end to send EOF to the child
+    close(pfd[1]);
+
+    // 9. Wait for the child to finish
+    int status = 0;
+    if (ret == 0) {
+        while (waitpid(pid, &status, 0) == -1) {
+            if (errno != EINTR) { ret = -1; break; }
+        }
+    }
+
+    // 10. Restore signal mask
+    sigprocmask(SIG_SETMASK, &oset, NULL);
+
+    if (ret != 0) return EXECUTION_FAILURE;
+
+    if (WIFEXITED(status)) return (WEXITSTATUS(status) == 0) ? EXECUTION_SUCCESS : WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return EXECUTION_FAILURE;
+}
+
+// ---------------------------------------------------------
 // ring_call: Zero-Tax C Plugin Callback Execution
 // ---------------------------------------------------------
 
@@ -720,6 +812,7 @@ static int ring_call_main(int argc, char **argv) {
 #define FORKRUN_LOADABLES(X)                                                   \
   X(ring_map, ring_map_main, "ring_map <fd> <len> <array> [delim]", "Fast user-space mapfile") \
   X(ring_exec, ring_exec_main, "ring_exec <fd> <len> <delim> <cmd> [args...]", "Ultra-fast execution of external binaries") \
+  X(ring_exec_splice, ring_exec_splice_main, "ring_exec_splice <fd> <len> <cmd> [args...]", "Spawn binary and splice to its stdin") \
   X(ring_call, ring_call_main, "ring_call <fd> <len> <delim> <so> <fn>", "Zero-Tax C Plugin Execution") \
   X(ring_is_spawnable, ring_is_spawnable_main, "ring_is_spawnable <file>", "Check if file is binary or has shebang") \
   X(ring_init, ring_init_main, "ring_init [FLAGS]",                            \
