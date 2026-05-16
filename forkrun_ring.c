@@ -4107,11 +4107,7 @@ restart_loop:
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
                                        __ATOMIC_SEQ_CST);
 
-      // --- NEW: Reset poison tracking for fresh main-ring batches ---
-      bind_variable("RING_NUM_KILLS", "0", 0);
-      bind_variable("RING_POISONED", "0", 0);
-      // --------------------------------------------------------------
-
+      // --- NEW: Export state ---
       if (!local_state->numa_enabled) {
         int64_t sbatch_check =
             atomic_load_relaxed(&local_state->signed_batch_size);
@@ -4142,6 +4138,9 @@ restart_loop:
         char buf[32];
         snprintf(buf, sizeof(buf), "%u", ep.num_kills);
         bind_variable("RING_NUM_KILLS", buf, 0);
+
+        u64toa(ep.idx, buf);
+        bind_variable("RING_BATCH_IDX", buf, 0);
 
         int limit = 3; // Default to 3 retries
         const char *s_lim = get_string_value("FORKRUN_RETRY_LIMIT");
@@ -4370,11 +4369,6 @@ check_boundaries:
   u64toa(final_val, buf);
   bind_var_or_array(v_target, buf, 0);
 
-  u64toa(my_read_idx, buf);
-  bind_variable("RING_BATCH_IDX", buf, 0);
-  u64toa(claim_count, buf);
-  bind_variable("RING_BATCH_SLOTS", buf, 0);
-
   uint64_t start_offset =
       local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
 
@@ -4387,11 +4381,6 @@ check_boundaries:
         FLAG_MAJOR_EOF) {
       worker_last_minor |= FLAG_MAJOR_EOF;
     }
-
-    sprintf(buf, "%u", worker_last_major);
-    bind_variable("RING_MAJOR", buf, 0);
-    sprintf(buf, "%u", worker_last_minor & ~FLAG_MAJOR_EOF);
-    bind_variable("RING_MINOR", buf, 0);
   }
 
   tls_batch_offset = (off_t)start_offset;
@@ -5686,8 +5675,13 @@ static int ring_ack_init_main(int argc, char **argv) {
 static int ring_escrow_put_main(int argc, char **argv) {
     if (argc < 5) return EXECUTION_FAILURE;
     int node = atoi(argv[1]);
-    uint64_t idx = strtoull(argv[2], NULL, 10);
-    uint64_t cnt = strtoull(argv[3], NULL, 10);
+    uint64_t idx;
+    if (argv[2][0] == '-' && argv[2][1] == '\0') idx = worker_last_idx;
+    else idx = strtoull(argv[2], NULL, 10);
+    
+    uint64_t cnt;
+    if (argv[3][0] == '-' && argv[3][1] == '\0') cnt = worker_last_cnt;
+    else cnt = strtoull(argv[3], NULL, 10);
     uint32_t kills = (uint32_t)atoi(argv[4]);
 
     if (node < 0 || node >= (int)global_num_nodes) node = 0;
