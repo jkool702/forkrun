@@ -703,7 +703,7 @@ $(declare -f -- "${nn}")"
             local plugin_c="${plugin_so%.so}.c"
             
             # Recompile if .so is missing, or if .c is newer than .so
-            if [[ ! -f "$plugin_so" ]] || { [[ -f "$plugin_c" ]] && [[ "$plugin_c" -nt "$plugin_so" ]]; }; then
+            if  [[ -f "$plugin_c" ]] && { ! [[ -f "$plugin_so" ]] || [[ "$plugin_c" -nt "$plugin_so" ]]; }; then
                 if type -P gcc >/dev/null; then
                     local target_so="$plugin_so"
                     local use_memfd=false

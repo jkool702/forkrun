@@ -698,6 +698,47 @@ $(declare -f -- "${nn}")"
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
             local plugin_so="${c_plugin_arg%:*}"
             local plugin_fn="${c_plugin_arg#*:}"
+            
+            # --- JIT C-COMPILER LOGIC (With Fileless Execution) ---
+            local plugin_c="${plugin_so%.so}.c"
+            
+            # Recompile if .so is missing, or if .c is newer than .so
+            if [[ ! -f "$plugin_so" ]] || { [[ -f "$plugin_c" ]] && [[ "$plugin_c" -nt "$plugin_so" ]]; }; then
+                if type -P gcc >/dev/null; then
+                    local target_so="$plugin_so"
+                    local use_memfd=false
+                    
+                    # Check if we have write access to the directory
+                    local so_dir="$(dirname "$plugin_so")"
+                    if [[ ! -w "$so_dir" ]]; then
+                        use_memfd=true
+                    fi
+
+                    if $use_memfd; then
+                        ${verbose_flag} && echo "forkrun [INFO]: Read-only filesystem detected. Compiling $plugin_c to memory (memfd)..." >&2
+                        ring_memfd_create plugin_memfd
+                        target_so="/proc/self/fd/$plugin_memfd"
+                    else
+                        ${verbose_flag} && echo "forkrun [INFO]: Auto-compiling $plugin_c -> $plugin_so" >&2
+                    fi
+
+                    # Compile directly to the target (Disk or RAM)
+                    gcc -O3 -shared -fPIC -march=native "$plugin_c" -o "$target_so" || {
+                        echo "forkrun [FATAL]: Auto-compilation of $plugin_c failed." >&2
+                        return 1
+                    }
+
+                    if $use_memfd; then
+                        # Seal the memfd to prevent tampering, and override the plugin_so path
+                        ring_seal "$plugin_memfd"
+                        plugin_so="$target_so"
+                    fi
+                else
+                    echo "forkrun [FATAL]: $plugin_so not found, and 'gcc' is not installed to compile $plugin_c." >&2
+                    return 1
+                fi
+            fi
+            # ------------------------------------------------------
 
             if [[ ${delimiter_val} ]]; then
                 printf -v delimiter_str '%q' "${delimiter_val}"
@@ -1373,33 +1414,82 @@ _forkrun_base64_to_file() {
             "/tmp"                       # Universal fallback
             "${HOME}/.cache"             # User disk fallback
             "$PWD"                       # Last resort
+            "python"                     # Fileless fallback via python
+            "perl"                       # Fileless fallback via perl
         )
+
+        local py_script='import os,sys,time; fd=-1
+try: fd=os.memfd_create("b",0)
+except:
+ try: import ctypes; fd=ctypes.CDLL(None).memfd_create(b"b",0)
+ except: sys.exit(1)
+sys.stdout.write(str(os.getpid())+" "+str(fd)+"\n"); sys.stdout.flush()
+while True: time.sleep(60)'
+
+        local pl_script='my $a=$ARGV[0]; my $s=($a=~/^x86_64/)?319:($a eq "aarch64"||$a eq "riscv64")?279:($a=~/^ppc64/)?360:($a eq "s390x")?356:0; exit 1 unless $s; my $fd=syscall($s,"b",0); exit 1 if $fd<0; print "$$ $fd\n"; $|=1; while(1){sleep 60;}'
 
         # try various places to make the tmp .so file to bootstrap
         for dir in "${candidates[@]}"; do
-            # Skip empty, non-existent, or non-writable directories
-            { [[ $dir ]] && [[ -d "$dir" ]] && [[ -w "$dir" ]]; } || continue
+            local helper_fd="" helper_pid="" helper_out_fd=""
+            
+            if [[ "$dir" == "python" ]]; then
+                if type -P python3 >/dev/null 2>&1; then
+                    exec {helper_fd}< <(python3 -c "$py_script" 2>/dev/null)
+                elif type -P python >/dev/null 2>&1; then
+                    exec {helper_fd}< <(python -c "$py_script" 2>/dev/null)
+                else
+                    continue
+                fi
+                read helper_pid helper_out_fd <&$helper_fd
+                if [[ -n "$helper_pid" && -n "$helper_out_fd" ]]; then
+                    tmp_so="/proc/$helper_pid/fd/$helper_out_fd"
+                else
+                    [[ -n "$helper_fd" ]] && exec {helper_fd}<&-
+                    continue
+                fi
+            elif [[ "$dir" == "perl" ]]; then
+                if type -P perl >/dev/null 2>&1; then
+                    exec {helper_fd}< <(perl -e "$pl_script" "$ARCH" 2>/dev/null)
+                    read helper_pid helper_out_fd <&$helper_fd
+                    if [[ -n "$helper_pid" && -n "$helper_out_fd" ]]; then
+                        tmp_so="/proc/$helper_pid/fd/$helper_out_fd"
+                    else
+                        [[ -n "$helper_fd" ]] && exec {helper_fd}<&-
+                        continue
+                    fi
+                else
+                    continue
+                fi
+            else
+                # Skip empty, non-existent, or non-writable directories
+                { [[ $dir ]] && [[ -d "$dir" ]] && [[ -w "$dir" ]]; } || continue
 
-            # Generate path with high entropy (30-bit random hex)
-            printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
+                # Generate path with high entropy (30-bit random hex)
+                printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
+            fi
 
             # Try to extract loadable
-                truncate -s "${b64[$ARCH]%% *}" "${tmp_so}" && if _forkrun_base64_to_file <<<"${b64[$ARCH]}" "$tmp_so"; then
-                chmod +x "$tmp_so"
+            if truncate -s "${b64[$ARCH]%% *}" "${tmp_so}" 2>/dev/null && _forkrun_base64_to_file <<<"${b64[$ARCH]}" "$tmp_so" 2>/dev/null; then
+                chmod +x "$tmp_so" 2>/dev/null
 
                 # CRITICAL TEST: Try to Enable loadable
                 # This verifies the filesystem allows execution (noexec check)
-                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe >/dev/null; then
-                    # SUCCESS! The builtin is loaded. Delete disk artifact immediately.
+                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe 2>/dev/null; then
+                    # SUCCESS! The builtin is loaded. 
                     need_memfd_create_flag=false
-                else
-                    # If enable failed, clean up and try next candidate
-                    \rm -f "$tmp_so"
                 fi
-
-                # break outof loop if we found someplace that works
-                ${need_memfd_create_flag} || break
             fi
+
+            # Clean up
+            if [[ -n "$helper_pid" ]]; then
+                kill "$helper_pid" 2>/dev/null
+                [[ -n "$helper_fd" ]] && exec {helper_fd}<&-
+            else
+                \rm -f "$tmp_so" 2>/dev/null
+            fi
+
+            # break out of loop if we found someplace that works
+            ${need_memfd_create_flag} || break
         done
 
         # If we get here and stil dont have memfd_create we failed --> couldnt find a writable location
