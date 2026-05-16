@@ -698,6 +698,8 @@ $(declare -f -- "${nn}")"
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
             local plugin_so="${c_plugin_arg%:*}"
             local plugin_fn="${c_plugin_arg#*:}"
+
+            type -P realpath &>/dev/null && plugin_so="$(realpath "$plugin_so")"
             
             # --- JIT C-COMPILER LOGIC (With Fileless Execution) ---
             local plugin_c="${plugin_so%.so}.c"
@@ -709,8 +711,7 @@ $(declare -f -- "${nn}")"
                     local use_memfd=false
 
                     # Check if we have write access to the directory
-                    local so_dir="$(dirname "$plugin_so")"
-                    if [[ ! -w "$so_dir" ]]; then
+                    if [[ ! -w "${plugin_so%/*}/" ]]; then
                         use_memfd=true
                     fi
 
