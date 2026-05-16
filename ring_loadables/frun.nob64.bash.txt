@@ -698,24 +698,25 @@ $(declare -f -- "${nn}")"
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
             local plugin_so="${c_plugin_arg%:*}"
             local plugin_fn="${c_plugin_arg#*:}"
+
+            type -P realpath &>/dev/null && plugin_so="$(realpath "$plugin_so")"
             
             # --- JIT C-COMPILER LOGIC (With Fileless Execution) ---
             local plugin_c="${plugin_so%.so}.c"
             
             # Recompile if .so is missing, or if .c is newer than .so
-            if [[ ! -f "$plugin_so" ]] || { [[ -f "$plugin_c" ]] && [[ "$plugin_c" -nt "$plugin_so" ]]; }; then
+            if [[ -f "$plugin_c" && ( ! -f "$plugin_so" || "$plugin_c" -nt "$plugin_so" ) ]]; then
                 if type -P gcc >/dev/null; then
                     local target_so="$plugin_so"
                     local use_memfd=false
-                    
+
                     # Check if we have write access to the directory
-                    local so_dir="$(dirname "$plugin_so")"
-                    if [[ ! -w "$so_dir" ]]; then
+                    if [[ ! -w "${plugin_so%/*}/" ]]; then
                         use_memfd=true
                     fi
 
                     if $use_memfd; then
-                        ${verbose_flag} && echo "forkrun [INFO]: Read-only filesystem detected. Compiling $plugin_c to memory (memfd)..." >&2
+                        ${verbose_flag} && echo "forkrun [INFO]: Read-only filesystem detected. Compiling $plugin_c to memfd..." >&2
                         ring_memfd_create plugin_memfd
                         target_so="/proc/self/fd/$plugin_memfd"
                     else
@@ -734,11 +735,16 @@ $(declare -f -- "${nn}")"
                         plugin_so="$target_so"
                     fi
                 else
-                    echo "forkrun [FATAL]: $plugin_so not found, and 'gcc' is not installed to compile $plugin_c." >&2
+                    echo "forkrun [FATAL]: 'gcc' is not installed to compile $plugin_c." >&2
                     return 1
                 fi
             fi
-            # ------------------------------------------------------
+
+            # Sanity check: Ensure we actually have a target to execute before spawning workers
+            if [[ ! -f "$plugin_so" ]]; then
+                echo "forkrun [FATAL]: Plugin '$plugin_so' not found or could not be compiled." >&2
+                return 1
+            fi
 
             if [[ ${delimiter_val} ]]; then
                 printf -v delimiter_str '%q' "${delimiter_val}"
