@@ -695,6 +695,12 @@ $(declare -f -- "${nn}")"
         fi
 
         if [[ -n "${c_plugin_arg:-}" ]]; then
+            # Ensure the user actually passed a colon!
+            if [[ "$c_plugin_arg" != *:* ]]; then
+                echo "forkrun [FATAL]: -C requires format 'path/to/plugin.so:function_name'" >&2
+                return 1
+            fi
+
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
             local plugin_so="${c_plugin_arg%:*}"
             local plugin_fn="${c_plugin_arg#*:}"

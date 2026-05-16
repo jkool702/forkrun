@@ -765,6 +765,13 @@ typedef int (*forkrun_cb_t)(int argc, char **argv);
 static __thread void *tls_dl_handle = NULL;
 static __thread forkrun_cb_t tls_callback = NULL;
 
+// ---------------------------------------------------------
+// ring_call: Zero-Tax C Plugin Callback Execution
+// ---------------------------------------------------------
+// NOTE FOR PLUGIN AUTHORS:
+// The `argv` array and the string pointers it contains are backed by 
+// Thread-Local Storage. They are ONLY valid for the duration of the 
+// function call. Do not store these pointers across batches!
 static int ring_call_main(int argc, char **argv) {
     // Usage: ring_call <fd> <length> <delim> <plugin.so> <func_name>
     if (argc < 6) return EXECUTION_FAILURE;
@@ -786,6 +793,8 @@ static int ring_call_main(int argc, char **argv) {
         tls_callback = (forkrun_cb_t)dlsym(tls_dl_handle, func_name);
         if (!tls_callback) {
             fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
+            dlclose(tls_dl_handle);   // <--- Add this
+            tls_dl_handle = NULL;     // <--- Add this
             return EXECUTION_FAILURE;
         }
     }
