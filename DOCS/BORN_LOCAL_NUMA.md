@@ -16,7 +16,7 @@ The NUMA pipeline begins with a single Ingest thread that divides the input stre
 In NUMA mode, the Ingress thread bypasses zero-copy `splice()` and explicitly uses standard `read()` and `write()` syscalls. 
 Before writing a chunk to the shared `memfd`, the thread calls `set_mempolicy(MPOL_BIND)` to bind itself to a specific physical NUMA node. In Linux, the "First-Touch" memory policy dictates that physical RAM pages are instantiated on the node of the thread that first writes to them. By pinning itself, writing the chunk, and then re-pinning itself to the next node, the Ingress thread effectively stripes the `memfd` across the physical topography of the motherboard.
 
-### 1.2 Backpressure & The IIR PID Controller
+### 1.2 Backpressure & The IIR-Smoothed Adaptive Buffer Controller
 Chunks are not distributed blindly. 
 1. **Initial State:** The Ingress thread distributes an initial buffer of 3 chunks per node.
 2. **Backpressure Routing:** Subsequent chunks are routed dynamically to the node with the lowest current backlog (`chunk_queue_head - chunk_queue_tail`).
