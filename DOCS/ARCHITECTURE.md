@@ -19,29 +19,33 @@ forkrun achieves extreme performance by:
 ```mermaid
 flowchart TD
     Input[Input Stream\nstdin or file] 
-    --> Ingest[Ingress Chunker\nZero-Copy + Born-Local Placement]
+    --> Ingest[Ingress Thread\nsplice / write + MPOL_BIND]
 
-    Ingest --> Indexer[Per-Node Indexer\nNUMA-aware chunking]
-    Indexer --> Scanner[Scanner Threads\nSIMD + AVX2 Boundary Detection]
+    Ingest --> Memfd[(Shared memfd\nBorn-Local Pages)]
+
+    Memfd --> Indexer[Per-Node Indexer\nSIMD Boundary Alignment]
+    Indexer --> Scanner[Per-Node Scanners\nAVX2 / NEON Batching]
 
     Scanner --> Ring[Lock-Free Ring Buffer\nPer-NUMA Node]
     Ring --> Workers[Worker Threads\nPinned to Node]
 
-    Workers --> Backend1[Bash Builtins / Functions]
-    Workers --> Backend2[posix_spawnp External Binaries\n-X flag]
-    Workers --> Backend3[C Plugin Callback\n-C plugin.so:func\nZero Tax Path]
+    Workers --> Backend1[Bash Builtins / Functions\nring_map]
+    Workers --> Backend2[External Binaries / -X\nring_exec + posix_spawnp]
+    Workers --> Backend3[C Plugin Callback / -C\nZero-Tax Execution]
 
     Backend1 & Backend2 & Backend3 --> Output[Output Handler\nOrdered / Buffered / Realtime]
-    Output --> Checkpoint[Checkpoint / Resume\n.forkrun_resume]
+    Output --> Checkpoint[Seqlock Ledger\n.forkrun_resume]
 
-    Ring -.-> Escrow[Escrow / Work Stealing\nRare Cross-Socket]
-    Ring -.-> DeathPipe[Death Pipe + POLLHUP\nFast Failure Detection]
+    Ring -.-> Escrow[Escrow Pipe\nOvershoot / Work Stealing]
+    Workers -.-> DeathPipe[Death Pipe + POLLHUP\nZero-Cost Failure Detection]
 
     classDef core fill:#1e3a8a,stroke:#60a5fa,color:white
-    classDef path fill:#166534,stroke:#4ade80,color:white
+    classDef memory fill:#065f46,stroke:#34d399,color:white
+    classDef path fill:#701a75,stroke:#f472b6,color:white
     classDef output fill:#4338ca,stroke:#a5b4fc,color:white
 
     class Ingest,Indexer,Scanner,Ring core
+    class Memfd memory
     class Workers,Backend1,Backend2,Backend3 path
     class Output,Checkpoint output
 ```
