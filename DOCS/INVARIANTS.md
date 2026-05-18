@@ -1,6 +1,6 @@
 ### `INVARIANTS.md`
 
-# FORKRUN INVARIANTS (v9.8.0-NUMA Golden Master)
+# FORKRUN INVARIANTS
 
 These are the rules that **must never be broken**. If they hold, the system is correct regardless of batching heuristics, NUMA count, or workload shape.
 
@@ -14,7 +14,7 @@ Each ring slot is claimed exactly once, by at most one worker.
 **Enforced by**  
 `read_idx` advanced **only** via atomic `fetch_add`. No CAS retry loops on the fast path. No decrement or rollback logic anywhere.
 
-**v9 NUMA note**  
+**NUMA note**  
 Each `SharedState` (one per node) maintains its own `read_idx` / `write_idx`.
 
 **Audit Rule**  
@@ -156,7 +156,7 @@ Per-batch logical index + reorder buffer + emit only contiguous prefix.
 
 ---
 
-## 10. NUMA-Specific Invariants (v9.8+)
+## 10. NUMA-Specific Invariants
 
 * Data is born-local to its target node (`set_mempolicy` at ingest).  
 * Scanner pinned to its node.  
@@ -208,7 +208,7 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 
 ## 13. Checklist Summary
 
-If all sections above remain true, **v9.8.0-NUMA is correct** — regardless of:
+If all sections above remain true, **forkrun is correct** — regardless of:
 * batching heuristics
 * wake frequency
 * NUMA placement

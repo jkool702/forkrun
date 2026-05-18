@@ -172,7 +172,7 @@ This keeps the design robust and simple.
 
 ## 7. Scanner Control Logic (Three-Phase Model)
 
-The scanner operates in a three-phase control loop (restored and formalized in v6.63 and still present in v9.8):
+The scanner operates in a three-phase control loop:
 
 ### Phase 0: Warmup (Fairness & Producer Startup)
 
@@ -225,7 +225,7 @@ Both meters use the same EWMA kernel (`meter = (meter + xLim) >> 1` to grow, `me
 
 ---
 
-## 8. NUMA Topology Pipeline (v9.8+)
+## 8. NUMA Topology Pipeline
 
 When multiple NUMA nodes are present:
 
