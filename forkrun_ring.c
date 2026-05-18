@@ -758,12 +758,32 @@ static int ring_exec_splice_main(int argc, char **argv) {
 // ring_call: Zero-Tax C Plugin Callback Execution
 // ---------------------------------------------------------
 
-// Define the user's expected function signature
+struct forkrun_ctx {
+    uint64_t batch_index;       // global batch sequence number
+    uint64_t batch_offset;      // byte offset in input stream
+    uint64_t batch_byte_length; // length of current batch in bytes
+    uint32_t version;           // struct version, currently 1
+    uint32_t worker_id;         // RING_WID
+    uint32_t node_id;           // NUMA node
+    uint32_t num_kills;         // retry count for this batch
+    uint32_t numa_major;        // NUMA major sequence (0 if not NUMA)
+    uint32_t numa_minor;        // NUMA minor sequence (0 if not NUMA)
+    int32_t  fd_in;             // input file descriptor
+    char     delimiter;         // batch delimiter
+    char     _pad[3];           // alignment padding
+};
+
+// Define the user's expected function signatures
 typedef int (*forkrun_cb_t)(int argc, char **argv);
+typedef int (*forkrun_cb_ctx_t)(int argc, char **argv, void *ctx);
 
 // Cache the loaded plugin per-worker in Thread-Local Storage
 static __thread void *tls_dl_handle = NULL;
 static __thread forkrun_cb_t tls_callback = NULL;
+static __thread forkrun_cb_ctx_t tls_callback_ctx = NULL;
+static __thread int tls_use_ctx = 0;
+static __thread int tls_numa_enabled = 0;
+static __thread struct forkrun_ctx tls_fctx;
 
 // ---------------------------------------------------------
 // ring_call: Zero-Tax C Plugin Callback Execution
@@ -783,19 +803,39 @@ static int ring_call_main(int argc, char **argv) {
     const char *func_name = argv[5];
 
     // 1. Lazy-load the plugin (Only happens on the first batch for this worker)
-    if (!tls_callback) {
+    if (!tls_dl_handle) {
         tls_dl_handle = dlopen(plugin_path, RTLD_LAZY | RTLD_LOCAL);
         if (!tls_dl_handle) {
             fprintf(stderr, "forkrun [ERROR]: dlopen failed: %s\n", dlerror());
             return EXECUTION_FAILURE;
         }
-        
-        tls_callback = (forkrun_cb_t)dlsym(tls_dl_handle, func_name);
-        if (!tls_callback) {
-            fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
-            dlclose(tls_dl_handle);   // <--- Add this
-            tls_dl_handle = NULL;     // <--- Add this
-            return EXECUTION_FAILURE;
+
+        int *has_ctx = (int *)dlsym(tls_dl_handle, "forkrun_use_ctx");
+        if (has_ctx && *has_ctx == 1) {
+            tls_use_ctx = 1;
+            tls_callback_ctx = (forkrun_cb_ctx_t)dlsym(tls_dl_handle, func_name);
+            if (!tls_callback_ctx) {
+                fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
+                dlclose(tls_dl_handle);
+                tls_dl_handle = NULL;
+                return EXECUTION_FAILURE;
+            }
+            tls_fctx.version = 1;
+            const char *wid_str = get_string_value("RING_WID");
+            tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
+            tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
+            tls_fctx.fd_in = fd;
+            tls_fctx.delimiter = delim;
+            tls_numa_enabled = (state && state[0].numa_enabled) ? 1 : 0;
+        } else {
+            tls_use_ctx = 0;
+            tls_callback = (forkrun_cb_t)dlsym(tls_dl_handle, func_name);
+            if (!tls_callback) {
+                fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
+                dlclose(tls_dl_handle);
+                tls_dl_handle = NULL;
+                return EXECUTION_FAILURE;
+            }
         }
     }
 
@@ -814,7 +854,23 @@ static int ring_call_main(int argc, char **argv) {
     tls_argv[batch_argc] = NULL;
 
     // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
-    int cb_ret = tls_callback((int)batch_argc, tls_argv);
+    int cb_ret;
+    if (tls_use_ctx) {
+        tls_fctx.batch_index = worker_last_idx;
+        tls_fctx.batch_offset = (uint64_t)tls_batch_offset;
+        tls_fctx.num_kills = worker_last_num_kills;
+        tls_fctx.batch_byte_length = (uint64_t)length;
+        if (tls_numa_enabled) {
+            tls_fctx.numa_major = worker_last_major;
+            tls_fctx.numa_minor = worker_last_minor;
+        } else {
+            tls_fctx.numa_major = 0;
+            tls_fctx.numa_minor = 0;
+        }
+        cb_ret = tls_callback_ctx((int)batch_argc, tls_argv, &tls_fctx);
+    } else {
+        cb_ret = tls_callback((int)batch_argc, tls_argv);
+    }
 
     // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
     return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;
@@ -1120,8 +1176,10 @@ static __thread uint64_t worker_last_idx = 0;
 static __thread uint64_t worker_last_cnt = 0;
 static __thread uint32_t worker_last_major = 0;
 static __thread uint32_t worker_last_minor = 0;
+static __thread uint32_t worker_last_num_kills = 0;
 static __thread uint64_t tl_remainder_idx = 0;
 static __thread uint64_t tl_remainder_cnt = 0;
+static __thread uint32_t tl_remainder_kills = 0;
 static __thread bool tl_recently_escrowed = false;
 
 static int *evfd_data_arr = NULL;
@@ -4005,6 +4063,7 @@ static int ring_claim_main(int argc, char **argv) {
 
   uint64_t my_read_idx;
   uint64_t claim_count = 1;
+  uint32_t current_kills = 0;
   int spin = 0;
 
   // --- UNIVERSAL SIGPIPE / TEARDOWN SHIELD ---
@@ -4031,6 +4090,7 @@ static int ring_claim_main(int argc, char **argv) {
   if (tl_remainder_cnt > 0) {
     my_read_idx = tl_remainder_idx;
     claim_count = tl_remainder_cnt;
+    current_kills = tl_remainder_kills;
     tl_remainder_cnt = 0;
     goto check_boundaries;
   }
@@ -4051,6 +4111,7 @@ restart_loop:
           if (er == sizeof(ep)) {
               my_read_idx = ep.idx;
               claim_count = ep.cnt;
+              current_kills = ep.num_kills;
               
               // --- NEW: Export state ---
               char buf[32];
@@ -4142,6 +4203,7 @@ restart_loop:
       if (er == sizeof(ep)) {
         my_read_idx = ep.idx;
         claim_count = ep.cnt;
+        current_kills = ep.num_kills;
 
         // --- NEW: Export state ---
         char buf[32];
@@ -4273,7 +4335,8 @@ restart_loop:
           uint64_t avail = w_curr - my_read_idx;
           if (avail < claim_count) {
             struct EscrowPacket ep = {.idx = my_read_idx + avail,
-                                      .cnt = claim_count - avail};
+                                      .cnt = claim_count - avail,
+                                      .num_kills = current_kills};
             ssize_t ew;
             do {
               ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep));
@@ -4340,7 +4403,8 @@ check_boundaries:
     if (safe_count < claim_count) {
       uint64_t remainder = claim_count - safe_count;
       struct EscrowPacket ep = {.idx = my_read_idx + safe_count,
-                                .cnt = remainder};
+                                .cnt = remainder,
+                                .num_kills = current_kills};
       ssize_t ew;
       do {
         ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep));
@@ -4349,6 +4413,7 @@ check_boundaries:
       if (ew < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         tl_remainder_idx = ep.idx;
         tl_remainder_cnt = ep.cnt;
+        tl_remainder_kills = ep.num_kills;
       } else if (ew == sizeof(ep)) {
         uint64_t one = 1;
         sys_write(evfd_data_arr[my_numa_node], &one, 8);
@@ -4373,6 +4438,7 @@ check_boundaries:
 
   worker_last_idx = my_read_idx;
   worker_last_cnt = claim_count;
+  worker_last_num_kills = current_kills;
 
   char buf[64];
   u64toa(final_val, buf);
