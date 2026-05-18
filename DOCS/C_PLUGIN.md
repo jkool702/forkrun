@@ -44,7 +44,7 @@ gcc -O3 -shared -fPIC plugin.c -o plugin.so
 Use the `-C` flag and pass the path to your shared object. Append `:function_name` so `forkrun` knows which symbol to load.
 
 ```bash
-# Syntax: frun -C /path/to/plugin.so[:function_name] < inputs
+# Syntax: frun -C /path/to/plugin.so:<function_name> < inputs
 
 # Example:
 frun -C ./plugin.so:my_plugin < massive_dataset.txt
@@ -68,8 +68,7 @@ Download `forkrun_plugin.h` from the repository and include it in your project.
 int forkrun_use_ctx = 1;
 
 // 2. Define your function with the 3-argument signature
-int my_func(int argc, char **argv, void *ctx_ptr) {
-    struct forkrun_ctx *ctx = (struct forkrun_ctx *)ctx_ptr;
+int my_func(int argc, char **argv, const struct forkrun_ctx *ctx) {
     
     printf("Worker %u processing batch %lu\n", ctx->worker_id, ctx->batch_index);
     return 0;
@@ -103,8 +102,7 @@ struct forkrun_ctx {
 };
 
 // 3. Process the data
-int my_func(int argc, char **argv, void *ctx_ptr) {
-    struct forkrun_ctx *ctx = (struct forkrun_ctx *)ctx_ptr;
+int my_func(int argc, char **argv, const struct forkrun_ctx *ctx) {
     
     // Safely check ABI version before accessing newer fields
     if (ctx->version >= 1) {
