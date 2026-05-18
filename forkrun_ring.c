@@ -757,124 +757,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
 // ---------------------------------------------------------
 // ring_call: Zero-Tax C Plugin Callback Execution
 // ---------------------------------------------------------
-
-struct forkrun_ctx {
-    uint64_t batch_index;       // global batch sequence number
-    uint64_t batch_offset;      // byte offset in input stream
-    uint64_t batch_byte_length; // length of current batch in bytes
-    uint32_t version;           // struct version, currently 1
-    uint32_t worker_id;         // RING_WID
-    uint32_t node_id;           // NUMA node
-    uint32_t num_kills;         // retry count for this batch
-    uint32_t numa_major;        // NUMA major sequence (0 if not NUMA)
-    uint32_t numa_minor;        // NUMA minor sequence (0 if not NUMA)
-    int32_t  fd_in;             // input file descriptor
-    char     delimiter;         // batch delimiter
-    char     _pad[3];           // alignment padding
-};
-
-// Define the user's expected function signatures
-typedef int (*forkrun_cb_t)(int argc, char **argv);
-typedef int (*forkrun_cb_ctx_t)(int argc, char **argv, void *ctx);
-
-// Cache the loaded plugin per-worker in Thread-Local Storage
-static __thread void *tls_dl_handle = NULL;
-static __thread forkrun_cb_t tls_callback = NULL;
-static __thread forkrun_cb_ctx_t tls_callback_ctx = NULL;
-static __thread int tls_use_ctx = 0;
-static __thread int tls_numa_enabled = 0;
-static __thread struct forkrun_ctx tls_fctx;
-
-// ---------------------------------------------------------
-// ring_call: Zero-Tax C Plugin Callback Execution
-// ---------------------------------------------------------
-// NOTE FOR PLUGIN AUTHORS:
-// The `argv` array and the string pointers it contains are backed by 
-// Thread-Local Storage. They are ONLY valid for the duration of the 
-// function call. Do not store these pointers across batches!
-static int ring_call_main(int argc, char **argv) {
-    // Usage: ring_call <fd> <length> <delim> <plugin.so> <func_name>
-    if (argc < 6) return EXECUTION_FAILURE;
-
-    int fd = atoi(argv[1]);
-    size_t length = (size_t)atoll(argv[2]);
-    char delim = argv[3][0];
-    const char *plugin_path = argv[4];
-    const char *func_name = argv[5];
-
-    // 1. Lazy-load the plugin (Only happens on the first batch for this worker)
-    if (!tls_dl_handle) {
-        tls_dl_handle = dlopen(plugin_path, RTLD_LAZY | RTLD_LOCAL);
-        if (!tls_dl_handle) {
-            fprintf(stderr, "forkrun [ERROR]: dlopen failed: %s\n", dlerror());
-            return EXECUTION_FAILURE;
-        }
-
-        int *has_ctx = (int *)dlsym(tls_dl_handle, "forkrun_use_ctx");
-        if (has_ctx && *has_ctx == 1) {
-            tls_use_ctx = 1;
-            tls_callback_ctx = (forkrun_cb_ctx_t)dlsym(tls_dl_handle, func_name);
-            if (!tls_callback_ctx) {
-                fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
-                dlclose(tls_dl_handle);
-                tls_dl_handle = NULL;
-                return EXECUTION_FAILURE;
-            }
-            tls_fctx.version = 1;
-            const char *wid_str = get_string_value("RING_WID");
-            tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
-            tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
-            tls_fctx.fd_in = fd;
-            tls_fctx.delimiter = delim;
-            tls_numa_enabled = (state && state[0].numa_enabled) ? 1 : 0;
-        } else {
-            tls_use_ctx = 0;
-            tls_callback = (forkrun_cb_t)dlsym(tls_dl_handle, func_name);
-            if (!tls_callback) {
-                fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
-                dlclose(tls_dl_handle);
-                tls_dl_handle = NULL;
-                return EXECUTION_FAILURE;
-            }
-        }
-    }
-
-    // 2. Tokenize the batch directly into tls_argv (starting at index 0)
-    size_t batch_argc = 0;
-    int ret = do_tokenize(fd, length, delim, NULL, 0, &batch_argc);
-    if (ret != EXECUTION_SUCCESS) return ret;
-
-    // 3. Ensure capacity and terminate argv array (standard C convention)
-    if (batch_argc + 1 > tls_argv_cap) {
-        tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
-        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-        if (!new_argv) return EXECUTION_FAILURE;
-        tls_argv = new_argv;
-    }
-    tls_argv[batch_argc] = NULL;
-
-    // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
-    int cb_ret;
-    if (tls_use_ctx) {
-        tls_fctx.batch_index = worker_last_idx;
-        tls_fctx.batch_offset = (uint64_t)tls_batch_offset;
-        tls_fctx.num_kills = worker_last_num_kills;
-        tls_fctx.batch_byte_length = (uint64_t)length;
-        if (tls_numa_enabled) {
-            tls_fctx.numa_major = worker_last_major;
-            tls_fctx.numa_minor = worker_last_minor;
-        } else {
-            tls_fctx.numa_major = 0;
-            tls_fctx.numa_minor = 0;
-        }
-        cb_ret = tls_callback_ctx((int)batch_argc, tls_argv, &tls_fctx);
-    } else {
-        cb_ret = tls_callback((int)batch_argc, tls_argv);
-    }
-
-    // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
-    return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;
-}
+// Note: ring_call_main has been moved to the bottom of the file to resolve definition ordering.
 
 // RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
@@ -6179,6 +6062,128 @@ FORKRUN_LOADABLES(DEFINE_DISPATCHER_X)
       #name, dispatch_##name, BUILTIN_ENABLED, name##_doc, usage, 0};
 FORKRUN_LOADABLES(DEFINE_STRUCT_X)
 #undef DEFINE_STRUCT_X
+
+// ---------------------------------------------------------
+// ring_call: Zero-Tax C Plugin Callback Execution
+// ---------------------------------------------------------
+
+struct forkrun_ctx {
+    uint64_t batch_index;       // global batch sequence number
+    uint64_t batch_offset;      // byte offset in input stream
+    uint64_t batch_byte_length; // length of current batch in bytes
+    uint32_t version;           // struct version, currently 1
+    uint32_t worker_id;         // RING_WID
+    uint32_t node_id;           // NUMA node
+    uint32_t num_kills;         // retry count for this batch
+    uint32_t numa_major;        // NUMA major sequence (0 if not NUMA)
+    uint32_t numa_minor;        // NUMA minor sequence (0 if not NUMA)
+    int32_t  fd_in;             // input file descriptor
+    char     delimiter;         // batch delimiter
+    char     _pad[3];           // alignment padding
+};
+
+// Define the user's expected function signatures
+typedef int (*forkrun_cb_t)(int argc, char **argv);
+typedef int (*forkrun_cb_ctx_t)(int argc, char **argv, void *ctx);
+
+// Cache the loaded plugin per-worker in Thread-Local Storage
+static __thread void *tls_dl_handle = NULL;
+static __thread forkrun_cb_t tls_callback = NULL;
+static __thread forkrun_cb_ctx_t tls_callback_ctx = NULL;
+static __thread int tls_use_ctx = 0;
+static __thread int tls_numa_enabled = 0;
+static __thread struct forkrun_ctx tls_fctx;
+
+// ---------------------------------------------------------
+// ring_call: Zero-Tax C Plugin Callback Execution
+// ---------------------------------------------------------
+// NOTE FOR PLUGIN AUTHORS:
+// The `argv` array and the string pointers it contains are backed by 
+// Thread-Local Storage. They are ONLY valid for the duration of the 
+// function call. Do not store these pointers across batches!
+static int ring_call_main(int argc, char **argv) {
+    // Usage: ring_call <fd> <length> <delim> <plugin.so> <func_name>
+    if (argc < 6) return EXECUTION_FAILURE;
+
+    int fd = atoi(argv[1]);
+    size_t length = (size_t)atoll(argv[2]);
+    char delim = argv[3][0];
+    const char *plugin_path = argv[4];
+    const char *func_name = argv[5];
+
+    // 1. Lazy-load the plugin (Only happens on the first batch for this worker)
+    if (!tls_dl_handle) {
+        tls_dl_handle = dlopen(plugin_path, RTLD_LAZY | RTLD_LOCAL);
+        if (!tls_dl_handle) {
+            fprintf(stderr, "forkrun [ERROR]: dlopen failed: %s\n", dlerror());
+            return EXECUTION_FAILURE;
+        }
+
+        int *has_ctx = (int *)dlsym(tls_dl_handle, "forkrun_use_ctx");
+        if (has_ctx && *has_ctx == 1) {
+            tls_use_ctx = 1;
+            tls_callback_ctx = (forkrun_cb_ctx_t)dlsym(tls_dl_handle, func_name);
+            if (!tls_callback_ctx) {
+                fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
+                dlclose(tls_dl_handle);
+                tls_dl_handle = NULL;
+                return EXECUTION_FAILURE;
+            }
+            tls_fctx.version = 1;
+            const char *wid_str = get_string_value("RING_WID");
+            tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
+            tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
+            tls_fctx.fd_in = fd;
+            tls_fctx.delimiter = delim;
+            tls_numa_enabled = (state && state[0].numa_enabled) ? 1 : 0;
+        } else {
+            tls_use_ctx = 0;
+            tls_callback = (forkrun_cb_t)dlsym(tls_dl_handle, func_name);
+            if (!tls_callback) {
+                fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
+                dlclose(tls_dl_handle);
+                tls_dl_handle = NULL;
+                return EXECUTION_FAILURE;
+            }
+        }
+    }
+
+    // 2. Tokenize the batch directly into tls_argv (starting at index 0)
+    size_t batch_argc = 0;
+    int ret = do_tokenize(fd, length, delim, NULL, 0, &batch_argc);
+    if (ret != EXECUTION_SUCCESS) return ret;
+
+    // 3. Ensure capacity and terminate argv array (standard C convention)
+    if (batch_argc + 1 > tls_argv_cap) {
+        tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
+        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+        if (!new_argv) return EXECUTION_FAILURE;
+        tls_argv = new_argv;
+    }
+    tls_argv[batch_argc] = NULL;
+
+    // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
+    int cb_ret;
+    if (tls_use_ctx) {
+        tls_fctx.batch_index = worker_last_idx;
+        tls_fctx.batch_offset = (uint64_t)tls_batch_offset;
+        tls_fctx.num_kills = worker_last_num_kills;
+        tls_fctx.batch_byte_length = (uint64_t)length;
+        if (tls_numa_enabled) {
+            tls_fctx.numa_major = worker_last_major;
+            tls_fctx.numa_minor = worker_last_minor;
+        } else {
+            tls_fctx.numa_major = 0;
+            tls_fctx.numa_minor = 0;
+        }
+        cb_ret = tls_callback_ctx((int)batch_argc, tls_argv, &tls_fctx);
+    } else {
+        cb_ret = tls_callback((int)batch_argc, tls_argv);
+    }
+
+    // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
+    return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;
+}
 
 static int ring_list_main(int argc, char **argv) {
   if (argc >= 2) {

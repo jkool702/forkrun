@@ -22,4 +22,15 @@ struct forkrun_ctx {
     char     _pad[3];           // alignment padding
 };
 
+
+/* === FUNCTION DEFINITION TEMPLATES ===
+ *
+ * 1. Standard Fast Path (2-arg):
+ *    int my_func(int argc, char **argv) { ... }
+ *
+ * 2. Context-Aware Path (3-arg):
+ *    int forkrun_use_ctx = 1;
+ *    int my_func(int argc, char **argv, const struct forkrun_ctx *ctx) { ... }
+ */
+
 #endif // FORKRUN_PLUGIN_H
