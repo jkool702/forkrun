@@ -1913,12 +1913,28 @@ static int ring_init_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
   }
 
+  for (uint32_t i = 0; i < global_num_nodes; i++) {
+    evfd_data_arr[i] = -1;
+    evfd_eof_arr[i] = -1;
+    evfd_indexer_arr[i] = -1;
+    evfd_meta_arr[i] = -1;
+    fd_escrow_r[i] = -1;
+    fd_escrow_w[i] = -1;
+  }
+
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     evfd_data_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     evfd_eof_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     evfd_indexer_arr[n] =
         eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     evfd_meta_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+
+    if (evfd_data_arr[n] < 0 || evfd_eof_arr[n] < 0 || 
+        evfd_indexer_arr[n] < 0 || evfd_meta_arr[n] < 0) {
+        builtin_error("forkrun: eventfd creation failed (FD limit reached?)");
+        return EXECUTION_FAILURE;
+    }
+
     int pfd[2];
     if (pipe(pfd) == 0) {
       fcntl(pfd[0], F_SETFL, O_NONBLOCK);
@@ -1937,6 +1953,11 @@ static int ring_init_main(int argc, char **argv) {
   evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+
+  if (evfd_ingest_data < 0 || evfd_ingest_eof < 0 || evfd_chunk_done < 0) {
+      builtin_error("forkrun: eventfd creation failed");
+      return EXECUTION_FAILURE;
+  }
 
   evfd_data = evfd_data_arr[0];
   fd_escrow[0] = fd_escrow_r[0];
