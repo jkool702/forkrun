@@ -1043,15 +1043,17 @@ run_test_exact J "-I flag: all IDs in a 10-line run are unique" \
     "seq 10 | frun -l 1 -I echo {ID} | sort | uniq -d | wc -l | tr -d ' '" \
     "0"
 
+# TESTS REMOVED - frun NO LONGER EXPORTS THESE VARS TO BASH
+#
 # Verify RING_BATCH_IDX is set and non-negative in worker context.
-run_test_regex J "RING_BATCH_IDX is set and numeric in worker" \
-    "check() { echo \"\${RING_BATCH_IDX:-UNSET}\"; }; echo 'x' | frun -l 1 check" \
-    "^[0-9]+$" 0 false
-
+#run_test_regex J "RING_BATCH_IDX is set and numeric in worker" \
+#    "check() { echo \"\${RING_BATCH_IDX:-UNSET}\"; }; echo 'x' | frun -l 1 check" \
+#    "^[0-9]+$" 0 false
+#
 # Verify RING_BATCH_SLOTS is set and positive in worker context.
-run_test_regex J "RING_BATCH_SLOTS is set and positive" \
-    "check() { echo \"\${RING_BATCH_SLOTS:-UNSET}\"; }; echo 'x' | frun -l 1 check" \
-    "^[1-9][0-9]*$" 0 false
+#run_test_regex J "RING_BATCH_SLOTS is set and positive" \
+#    "check() { echo \"\${RING_BATCH_SLOTS:-UNSET}\"; }; echo 'x' | frun -l 1 check" \
+#    "^[1-9][0-9]*$" 0 false
 
 # Worker command failure: pipeline must survive and not deadlock.
 # The echo at the end verifies the pipeline wasn't blocked.
