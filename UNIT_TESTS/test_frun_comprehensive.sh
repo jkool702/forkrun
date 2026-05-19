@@ -1791,7 +1791,7 @@ FUNCEOF
     bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 crash_func" \
         > "$_MD/output1.txt" 2>"$_MD/err1.txt"
 
-    if [[ ! -f "$_MD/.forkrun_resume" ]]; then
+        if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M5: Resume with buffered mode"]="FAIL"
         TEST_ERRORS["M5: Resume with buffered mode"]="no checkpoint"
         ((FAILED_TESTS++)); _print_result FAIL "M5: Resume with buffered mode" "no checkpoint"
