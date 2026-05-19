@@ -2132,6 +2132,18 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
   uint64_t chunk_size = 2 * 1024 * 1024ULL;
 
+  // PHYSICS FIX: Small File NUMA Starvation Prevention
+  // If the input is a regular file, scale the chunk size down to ensure every
+  // NUMA socket receives at least 2 chunks during initial distribution.
+  struct stat st;
+  if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+      uint64_t ideal = (uint64_t)st.st_size / (uint64_t)(num_nodes * 2);
+      if (ideal < chunk_size) {
+          uint64_t p2 = 1ULL << fast_log2(ideal);
+          chunk_size = (p2 < 4096) ? 4096 : p2;
+      }
+  }
+
   if (state[0].mode_byte) {
     uint64_t L = state[0].cfg_batch_start;
     if (L > 0) {
