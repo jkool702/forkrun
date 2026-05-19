@@ -6079,7 +6079,7 @@ struct forkrun_ctx {
     uint32_t numa_minor;        // NUMA minor sequence (0 if not NUMA)
     int32_t  fd_in;             // input file descriptor
     char     delimiter;         // batch delimiter
-    char     _pad[3];           // alignment padding
+    uint8_t  cfg_state[3];      // global configuration state
 };
 
 // Define the user's expected function signatures
@@ -6135,6 +6135,9 @@ static int ring_call_main(int argc, char **argv) {
             tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
             tls_fctx.fd_in = fd;
             tls_fctx.delimiter = delim;
+            tls_fctx.cfg_state[0] = (cfg_state >> 16) & 0xFF;
+            tls_fctx.cfg_state[1] = (cfg_state >> 8) & 0xFF;
+            tls_fctx.cfg_state[2] = cfg_state & 0xFF;
             tls_numa_enabled = (state && state[0].numa_enabled) ? 1 : 0;
         } else {
             tls_use_ctx = 0;

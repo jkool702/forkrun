@@ -98,7 +98,7 @@ struct forkrun_ctx {
     uint32_t numa_minor;        // NUMA minor sequence (0 if UMA)
     int32_t  fd_in;             // Read-only file descriptor to the memfd
     char     delimiter;         // The record delimiter character
-    char     _pad[3];           // Internal memory alignment padding
+    uint8_t  cfg_state[3];      // Global configuration state (unpacked from 24-bit cfg_state)
 };
 
 // 3. Process the data
@@ -124,4 +124,4 @@ If you are a systems hacker, you might wonder how `forkrun` handles dynamically 
 * If it finds the flag and it equals `1`, `forkrun` executes the callback using the 3-argument signature, passing the context pointer. 
 * If it does not find the flag, it falls back to the standard 2-argument signature.
 
-This guarantees total POSIX compliance and avoids Undefined Behavior, while giving power-users zero-overhead access to `forkrun`'s internal ring metadata. Furthermore, the `_pad[3]` buffer ensures strictly aligned 8-byte memory boundaries regardless of underlying hardware architecture, and the `version` tag allows us to expand the context in future v3.x releases without breaking older plugins.
+This guarantees total POSIX compliance and avoids Undefined Behavior, while giving power-users zero-overhead access to `forkrun`'s internal ring metadata. Furthermore, the `cfg_state[3]` array exposes the engine's internal configuration state while maintaining strictly aligned 8-byte memory boundaries regardless of underlying hardware architecture, and the `version` tag allows us to expand the context in future v3.x releases without breaking older plugins.

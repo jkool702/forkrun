@@ -19,7 +19,7 @@ struct forkrun_ctx {
     uint32_t numa_minor;        // NUMA minor sequence (0 if not NUMA)
     int32_t  fd_in;             // input memfd file descriptor
     char     delimiter;         // batch delimiter character
-    char     _pad[3];           // alignment padding
+    uint8_t  cfg_state[3];      // global configuration state
 };
 
 
