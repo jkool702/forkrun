@@ -918,7 +918,7 @@ $(declare -f -- "${nn}")"
     status=$?
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
     
-    if (( status != 0 && REPLY > 0 )); then
+    if (( status != 0 && ${FRUN_CLAIM_BYTES:-0} > 0 )); then
         (( RING_NUM_KILLS++ ))'
         [[ "$order_mode" != "realtime" ]] && worker_func_src+='
         [[ -n "${fd_out[$RING_WID]:-}" ]] && ring_revert_output "${fd_out[$RING_WID]}"
@@ -941,6 +941,7 @@ $(declare -f -- "${nn}")"
     ID="$1" # ID is passed purely for user payload compatibility/insertion
     RING_NUM_KILLS=0
     RING_POISONED=0
+    FRUN_CLAIM_BYTES=0
     REPLY=0
     '
    [[ "$order_mode" != "realtime" ]] && worker_func_src+='
@@ -952,11 +953,12 @@ $(declare -f -- "${nn}")"
         worker_func_src+='shift 4
     ring_worker inc
     _ring_registered=true
-    while ring_claim; do
+    while ring_claim FRUN_CLAIM_BYTES; do
         if [[ "${RING_POISONED}" == "1" ]]; then
             echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS} times)." >&2
             echo "P:${RING_BATCH_IDX}:${RING_NUM_KILLS}" >&"${FD_TRAP_ACK_W}" 2>/dev/null
         else
+            REPLY=$FRUN_CLAIM_BYTES
             if [[ "$REPLY" != "0" ]]; then
                 '
         ${insert_id_flag:-false} && worker_func_src+='((W_BATCH++))
@@ -969,6 +971,7 @@ $(declare -f -- "${nn}")"
         # Reset variables natively in Bash so C does not have to allocate them
         RING_POISONED=0
         RING_NUM_KILLS=0
+        FRUN_CLAIM_BYTES=0
         REPLY=0
     done
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}

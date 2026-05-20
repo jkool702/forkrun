@@ -1942,6 +1942,7 @@ static int ring_init_main(int argc, char **argv) {
     if (evfd_data_arr[n] < 0 || evfd_eof_arr[n] < 0 || 
         evfd_indexer_arr[n] < 0 || evfd_meta_arr[n] < 0) {
         builtin_error("forkrun: eventfd creation failed (FD limit reached?)");
+        ring_destroy_main(0, NULL);
         return EXECUTION_FAILURE;
     }
 
@@ -1966,6 +1967,7 @@ static int ring_init_main(int argc, char **argv) {
 
   if (evfd_ingest_data < 0 || evfd_ingest_eof < 0 || evfd_chunk_done < 0) {
       builtin_error("forkrun: eventfd creation failed");
+      ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
   }
 
@@ -1989,8 +1991,10 @@ static int ring_init_main(int argc, char **argv) {
     }
     if (!v)
       v = make_new_array_variable(out_array_name);
-    if (!v)
+    if (!v) {
+      ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
+    }
 
     // Calculate true total max workers across all nodes to prevent out-of-bounds
     uint64_t actual_total_w_max = 0;
@@ -2001,8 +2005,10 @@ static int ring_init_main(int argc, char **argv) {
     }
 
     int *created_fds = malloc(sizeof(int) * actual_total_w_max);
-    if (!created_fds)
+    if (!created_fds) {
+      ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
+    }
     int created_cnt = 0;
     int failure = 0;
     for (uint64_t i = 0; i < actual_total_w_max; i++) {
@@ -2021,6 +2027,7 @@ static int ring_init_main(int argc, char **argv) {
       for (int k = 0; k < created_cnt; k++)
         close(created_fds[k]);
       free(created_fds);
+      ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
     }
     free(created_fds);
