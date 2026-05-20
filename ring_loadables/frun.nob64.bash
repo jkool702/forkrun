@@ -523,6 +523,23 @@ toc() { :; }
     local numa_map_str
      _forkrun_build_numa_map "$parsed_numa_nodes_arg"
 
+    # PHYSICS FIX: Small File NUMA Starvation Prevention
+    # If the input is a regular file and is too small to benefit from NUMA,
+    # downgrade to UMA (unless the user explicitly specified --nodes list).
+    if [[ "${parsed_numa_nodes_arg}" == "auto" ]] && [[ -f /dev/stdin ]] && (( FORKRUN_NUM_NODES > 1 )); then
+        local orig_pos file_size
+        if ring_lseek 0 0 SEEK_CUR orig_pos; then
+            if ring_lseek 0 0 SEEK_END file_size; then
+                local remaining_bytes=$(( file_size - orig_pos ))
+                if (( remaining_bytes > 0 && remaining_bytes < FORKRUN_NUM_NODES * 8192 )); then
+                    parsed_numa_nodes_arg="1"
+                    _forkrun_build_numa_map "1"
+                fi
+            fi
+            ring_lseek 0 "${orig_pos}" SEEK_SET orig_pos
+        fi
+    fi
+
     # --- Feature 2: -L vs NUMA Conflict Resolution ---
     if [[ -n "${exact_lines_val:-}" ]] && (( FORKRUN_NUM_NODES > 1 )); then
         if [[ "$last_conflict" == "exact_lines" ]]; then
@@ -695,6 +712,12 @@ $(declare -f -- "${nn}")"
         fi
 
         if [[ -n "${c_plugin_arg:-}" ]]; then
+            # Ensure the user actually passed a colon!
+            if [[ "$c_plugin_arg" != *:* ]]; then
+                echo "forkrun [FATAL]: -C requires format 'path/to/plugin.so:function_name'" >&2
+                return 1
+            fi
+
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
             local plugin_so="${c_plugin_arg%:*}"
             local plugin_fn="${c_plugin_arg#*:}"
@@ -895,13 +918,13 @@ $(declare -f -- "${nn}")"
     status=$?
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
     
-    if (( status != 0 && RING_BATCH_SLOTS > 0 )); then
+    if (( status != 0 && REPLY > 0 )); then
         (( RING_NUM_KILLS++ ))'
         [[ "$order_mode" != "realtime" ]] && worker_func_src+='
         [[ -n "${fd_out[$RING_WID]:-}" ]] && ring_revert_output "${fd_out[$RING_WID]}"
         '
         worker_func_src+='
-        ring_escrow_put "$RING_NODE_ID" "$RING_BATCH_IDX" "$RING_BATCH_SLOTS" "$RING_NUM_KILLS"
+        ring_escrow_put "$RING_NODE_ID" "-" "-" "$RING_NUM_KILLS"
     fi
     
     # Notify parent that the trap successfully fired
@@ -916,8 +939,9 @@ $(declare -f -- "${nn}")"
 
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion
-    RING_BATCH_SLOTS=0
     RING_NUM_KILLS=0
+    RING_POISONED=0
+    REPLY=0
     '
    [[ "$order_mode" != "realtime" ]] && worker_func_src+='
     # Initialize the output tracking for this specific worker slot
@@ -929,9 +953,9 @@ $(declare -f -- "${nn}")"
     ring_worker inc
     _ring_registered=true
     while ring_claim; do
-        if [[ "${RING_POISONED:-0}" == "1" ]]; then
-            echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS:-?} times)." >&2
-            echo "P:${RING_BATCH_IDX}:${RING_NUM_KILLS:-?}" >&"${FD_TRAP_ACK_W}" 2>/dev/null
+        if [[ "${RING_POISONED}" == "1" ]]; then
+            echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS} times)." >&2
+            echo "P:${RING_BATCH_IDX}:${RING_NUM_KILLS}" >&"${FD_TRAP_ACK_W}" 2>/dev/null
         else
             if [[ "$REPLY" != "0" ]]; then
                 '
@@ -942,8 +966,10 @@ $(declare -f -- "${nn}")"
         fi
         '"${ring_ack_str}"' || break
         
-        # Clear the active claim flag so a sleep-death doesnt duplicate it
-        RING_BATCH_SLOTS=0
+        # Reset variables natively in Bash so C does not have to allocate them
+        RING_POISONED=0
+        RING_NUM_KILLS=0
+        REPLY=0
     done
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &
