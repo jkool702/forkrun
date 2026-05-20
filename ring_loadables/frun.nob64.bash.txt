@@ -523,6 +523,23 @@ toc() { :; }
     local numa_map_str
      _forkrun_build_numa_map "$parsed_numa_nodes_arg"
 
+    # PHYSICS FIX: Small File NUMA Starvation Prevention
+    # If the input is a regular file and is too small to benefit from NUMA,
+    # downgrade to UMA (unless the user explicitly specified --nodes list).
+    if [[ "${parsed_numa_nodes_arg}" == "auto" ]] && [[ -f /dev/stdin ]] && (( FORKRUN_NUM_NODES > 1 )); then
+        local orig_pos file_size
+        if ring_lseek 0 0 SEEK_CUR orig_pos; then
+            if ring_lseek 0 0 SEEK_END file_size; then
+                local remaining_bytes=$(( file_size - orig_pos ))
+                if (( remaining_bytes > 0 && remaining_bytes < FORKRUN_NUM_NODES * 8192 )); then
+                    parsed_numa_nodes_arg="1"
+                    _forkrun_build_numa_map "1"
+                fi
+            fi
+            ring_lseek 0 "${orig_pos}" SEEK_SET orig_pos
+        fi
+    fi
+
     # --- Feature 2: -L vs NUMA Conflict Resolution ---
     if [[ -n "${exact_lines_val:-}" ]] && (( FORKRUN_NUM_NODES > 1 )); then
         if [[ "$last_conflict" == "exact_lines" ]]; then
