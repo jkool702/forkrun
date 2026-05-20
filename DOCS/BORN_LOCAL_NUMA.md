@@ -52,16 +52,16 @@ Scanners in NUMA mode differ from standard UMA scanners in three ways:
 
 Workers are pinned to specific NUMA nodes and consume work exclusively from their local Scanner's ring buffer (or Escrow pipe). 
 
-### 4.1 The `FLAG_PARTIAL_BATCH` Barrier
-To ensure workers never cross a chunk boundary, the Scanner applies a `FLAG_PARTIAL_BATCH` bitmask to the ring offset of the final batch in every chunk. 
+### 4.1 The `FLAG_CHUNK_BOUNDARY` Barrier
+To ensure workers never cross a chunk boundary, the Scanner applies a `FLAG_CHUNK_BOUNDARY` bitmask to the stride (line count) entry of the final batch in every chunk. 
 
-When a worker executes a lock-free claim (`atomic_fetch_add`), it may speculatively claim multiple batches. However, as it resolves the pointers for its claim, it checks for the `FLAG_PARTIAL_BATCH` bit. If it detects this flag mid-claim, it immediately truncates its batch exactly at the boundary, processing the contiguous data and depositing the remaining claimed slots into the Escrow pipe.
+When a worker executes a lock-free claim (`atomic_fetch_add`), it may speculatively claim multiple batches. However, as it resolves the pointers for its claim, it checks for the `FLAG_CHUNK_BOUNDARY` bit in the `stride_ring`. If it detects this flag mid-claim, it immediately truncates its batch exactly at the boundary, processing the contiguous data and depositing the remaining claimed slots into the Escrow pipe.
 
 ### 4.2 The Ultimate Structural Guarantee
 Because:
 1. Indexers perfectly align chunk boundaries with record delimiters.
-2. Scanners cap chunks with the `FLAG_PARTIAL_BATCH` barrier.
-3. Workers are forbidden from claiming data across a `FLAG_PARTIAL_BATCH` barrier.
+2. Scanners cap chunks with the `FLAG_CHUNK_BOUNDARY` barrier.
+3. Workers are forbidden from claiming data across a `FLAG_CHUNK_BOUNDARY` barrier.
 
 ...`forkrun` provides a **mathematical, structural guarantee that no worker will ever receive a batch that spans two non-contiguous chunks.** 
 
@@ -75,7 +75,8 @@ This architecture enforces one strict limitation: **`forkrun` cannot guarantee e
 
 Because the Ingress chunker carves the stream based on physical byte sizes (2 MB) rather than logical line counts, a chunk will contain an arbitrary number of lines. Guaranteeing exactly *N* lines per batch would require every chunk to magically contain an integer multiple of *N* lines. 
 
-If a worker is assigned to process exactly *N* lines, but reaches the `FLAG_PARTIAL_BATCH` boundary after *M* lines (where $M < N$), fulfilling the exact-batch contract would require the worker to reach across the chunk boundary to pull the remaining $N - M$ lines from the next chunk. This next chunk physically resides on a different NUMA socket. Doing so would violate the Born-Local structural guarantee and trigger heavy cross-socket memory traffic.
+If a worker is assigned to process exactly *N* lines, but reaches the `FLAG_CHUNK_BOUNDARY` boundary after *M* lines (where $M < N$), fulfilling the exact-batch contract would require the worker to reach across the chunk boundary to pull the remaining $N - M$ lines from the next chunk. This next chunk physically resides on a different NUMA socket. Doing so would violate the Born-Local structural guarantee and trigger heavy cross-socket memory traffic.
 
 **The Resolution:** 
 If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), `forkrun` automatically demotes the pipeline to the traditional UMA (Uniform Memory Access) architecture. While UMA mode still benefits from the ultra-fast C-ring and zero-copy `posix_spawnp` execution paths, it will incur the standard cross-socket memory migration tax inherent to all traditional shell parallelizers. 
+

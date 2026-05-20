@@ -53,15 +53,15 @@ This allows:
 
 ### 3.2 Ring Entry Encoding
 
-Each ring slot (`offset_ring`) is an **unsigned** 64-bit value:
+Each ring slot has two main associated rings:
+* `offset_ring`: Holds pure 64-bit byte offsets in the backing file (no flags).
+* `stride_ring`: An unsigned 16-bit value:
+  * **Low 15 bits**: line count in the batch.
+  * **High bit (bit 15, `FLAG_CHUNK_BOUNDARY = 1U << 15`)**:
+    * 0 → standard batch (or mid-chunk).
+    * 1 → chunk boundary (or partial batch where the scanner hit a NUMA/EOF boundary).
 
-* **Low 63 bits**: byte offset in the backing file
-* **High bit (bit 63, `FLAG_PARTIAL_BATCH = 1ULL << 63`)**:
-
-  * 0 → complete batch
-  * 1 → partial batch (scanner hit EOF or boundary)
-
-This encoding avoids extra metadata, keeps entries atomic, and supports offsets up to 2⁶³ bytes. The high bit is a flag, not an arithmetic sign — readers must mask it before using the offset as an address (`offset & ~FLAG_PARTIAL_BATCH`).
+This encoding avoids bit pollution in the 64-bit offsets and separates spatial address info from logical block boundaries.
 
 ### 3.3 Atomic Invariants
 
