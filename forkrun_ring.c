@@ -1459,7 +1459,7 @@ static uint64_t get_v_max(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
     return sysconf(_SC_NPROCESSORS_ONLN) * 2;
   if (!strcmp(type, "lines"))
-    return 65535;
+    return MAX_BATCH_LINES;
   if (!strcmp(type, "bytes")) {
     if (stdin_mode) {
       uint64_t l2 = get_cache_bytes();
