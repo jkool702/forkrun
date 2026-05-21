@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.2.0
+// forkrun_ring.c v3.2.1
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -63,6 +63,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <dlfcn.h>      // <--- ADD THIS for dynamic plugins
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -72,7 +73,7 @@
 
 #if defined(__x86_64__) || defined(__i386__)
 #pragma GCC push_options
-#pragma GCC target("avx2,popcnt")
+#pragma GCC target("avx2,popcnt,bmi")
 #include <immintrin.h>
 
 // High-throughput AVX2 SIMD scanner. Scans 32 bytes at a time for delimiters.
@@ -80,7 +81,7 @@
 // matches to instantly skip ahead by multiple records rather than branching per
 // character. If the batch 'target' constraint is met inside the 32-byte vector,
 // `__builtin_ctz` finds the exact boundary.
-__attribute__((target("avx2,popcnt"))) static inline char *
+__attribute__((target("avx2,popcnt,bmi"))) static inline char *
 scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
   uint64_t remaining = target;
   const __m256i d_vec = _mm256_set1_epi8(delim);
@@ -103,12 +104,20 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
       continue;
     }
 
-    uint32_t to_drop = (uint32_t)(remaining - 1);
-    for (uint32_t i = 0; i < to_drop; i++) {
-      mask &= mask - 1;
-    }
+        /*
+        // note: add bmi2 to target
+        // We crossed the target in this vector — find exact position
+        // O(1) Branchless finding of the N-th set bit
+        uint32_t isolated_bit = _pdep_u32(1U << (remaining - 1), mask);
+        int exact_idx = __builtin_ctz(isolated_bit);
+        */
 
-    int exact_idx = __builtin_ctz(mask);
+        // O(N) Fallback for older AMD CPUs without fast PDEP
+        uint32_t to_drop = (uint32_t)(remaining - 1);
+        for (uint32_t i = 0; i < to_drop; i++) {
+            mask &= mask - 1; // BLSR
+        }
+        int exact_idx = __builtin_ctz(mask); // TZCNT
     return p + exact_idx + 1;
   }
 
@@ -263,6 +272,9 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #ifndef MFD_ALLOW_SEALING
 #define MFD_ALLOW_SEALING 0x0002U
 #endif
+#ifndef MFD_HUGETLB
+#define MFD_HUGETLB 0x0004U
+#endif
 #ifndef O_TMPFILE
 #define O_TMPFILE 020200000
 #endif
@@ -285,7 +297,9 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define F_SETPIPE_SZ 1031
 #endif
 
-#define FLAG_PARTIAL_BATCH (1ULL << 63)
+#define FLAG_CHUNK_BOUNDARY ((uint16_t)(1U << 15))
+#define STRIDE_MASK        ((uint16_t)~FLAG_CHUNK_BOUNDARY)   /* 0x7FFF */
+#define MAX_BATCH_LINES    32767
 #define FLAG_MAJOR_EOF (1U << 31)
 #define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
 
@@ -300,7 +314,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.2.0"
+#define FORKRUN_RING_VERSION "v3.2.1"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -316,6 +330,14 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define atomic_compare_exchange(ptr, exp, des)                                 \
   __atomic_compare_exchange_n(ptr, exp, des, 0, __ATOMIC_ACQ_REL,              \
                               __ATOMIC_RELAXED)
+
+#define PUBLISH_BATCH_SIZE(ptr, new_L) do {                                    \
+    int64_t _cur = atomic_load_relaxed(&(ptr)->signed_batch_size);             \
+    int64_t _abs = (_cur < 0) ? -_cur : _cur;                                  \
+    atomic_store_release(&(ptr)->batch_change_idx, local_scan_idx);            \
+    atomic_store_release(&(ptr)->signed_batch_size,                            \
+        ((int64_t)(new_L) > _abs * 2) ? -(int64_t)(new_L) : (int64_t)(new_L));  \
+} while(0)
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -650,10 +672,109 @@ static int ring_exec_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
 }
 
+// ---------------------------------------------------------
+// ring_exec_splice: Spawn binary and splice data to its stdin
+// ---------------------------------------------------------
+static int ring_exec_splice_main(int argc, char **argv) {
+    // Usage: ring_exec_splice <fd> <length> <cmd> [args...]
+    if (argc < 4) return EXECUTION_FAILURE;
+
+    int fd = atoi(argv[1]);
+    size_t length = (size_t)atoll(argv[2]);
+    int fixed_argc = argc - 3;
+
+    // 1. Load command and args into tls_argv
+    if (tls_argv_cap < (size_t)(fixed_argc + 1)) {
+        tls_argv_cap = fixed_argc + 1;
+        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+        if (!new_argv) return EXECUTION_FAILURE;
+        tls_argv = new_argv;
+    }
+    for (int i = 0; i < fixed_argc; i++) {
+        tls_argv[i] = argv[3 + i];
+    }
+    tls_argv[fixed_argc] = NULL;
+
+    // 2. Create the pipe
+    int pfd[2];
+    if (pipe(pfd) != 0) return EXECUTION_FAILURE;
+    
+    // Optional: Maximize pipe buffer size for throughput
+    fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
+
+    // 3. Map pfd[0] to the child's STDIN
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, pfd[0], STDIN_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pfd[1]); // Child doesn't need write end
+
+    // 4. Block SIGCHLD
+    sigset_t set, oset;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &set, &oset);
+
+    // 5. Spawn the child!
+    pid_t pid;
+    int ret = posix_spawnp(&pid, tls_argv[0], &actions, NULL, tls_argv, environ);
+
+    // 6. Close the read end in the parent (child owns it now)
+    close(pfd[0]);
+    posix_spawn_file_actions_destroy(&actions);
+
+    // 7. Feed the child concurrently via splice
+    if (ret == 0) {
+        // IGNORE SIGPIPE so 'head -n' doesn't kill the worker!
+        void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+        
+        size_t written = 0;
+        off_t offset = tls_batch_offset;
+        while (written < length) {
+            ssize_t s = splice(fd, &offset, pfd[1], NULL, length - written, 0);
+            if (s < 0) {
+                if (errno == EINTR) continue;
+                break; // Broken pipe (EPIPE) or error
+            }
+            if (s == 0) break;
+            written += s;
+        }
+        
+        // Restore previous SIGPIPE handler
+        signal(SIGPIPE, old_handler);
+    }
+    
+    // 8. Close the write end to send EOF to the child
+    close(pfd[1]);
+
+    // 9. Wait for the child to finish
+    int status = 0;
+    if (ret == 0) {
+        while (waitpid(pid, &status, 0) == -1) {
+            if (errno != EINTR) { ret = -1; break; }
+        }
+    }
+
+    // 10. Restore signal mask
+    sigprocmask(SIG_SETMASK, &oset, NULL);
+
+    if (ret != 0) return EXECUTION_FAILURE;
+
+    if (WIFEXITED(status)) return (WEXITSTATUS(status) == 0) ? EXECUTION_SUCCESS : WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return EXECUTION_FAILURE;
+}
+
+// ---------------------------------------------------------
+// ring_call: Zero-Tax C Plugin Callback Execution
+// ---------------------------------------------------------
+// Note: ring_call_main has been moved to the bottom of the file to resolve definition ordering.
+
 // RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
   X(ring_map, ring_map_main, "ring_map <fd> <len> <array> [delim]", "Fast user-space mapfile") \
   X(ring_exec, ring_exec_main, "ring_exec <fd> <len> <delim> <cmd> [args...]", "Ultra-fast execution of external binaries") \
+  X(ring_exec_splice, ring_exec_splice_main, "ring_exec_splice <fd> <len> <cmd> [args...]", "Spawn binary and splice to its stdin") \
+  X(ring_call, ring_call_main, "ring_call <fd> <len> <delim> <so> <fn>", "Zero-Tax C Plugin Execution") \
   X(ring_is_spawnable, ring_is_spawnable_main, "ring_is_spawnable <file>", "Check if file is binary or has shebang") \
   X(ring_init, ring_init_main, "ring_init [FLAGS]",                            \
     "Initialize ring with config")                                             \
@@ -871,7 +992,14 @@ static int xcreate_anon_file(const char *name) {
   if (force_fallback && (strcmp(force_fallback, "1") == 0))
     use_memfd = false;
   if (use_memfd) {
-    int fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
+    int fd = -1;
+    const char *use_hugetlb = get_string_value("FORKRUN_USE_HUGETLB");
+    if (use_hugetlb && strcmp(use_hugetlb, "1") == 0) {
+      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_HUGETLB);
+    }
+    if (fd < 0) {
+      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
+    }
     if (fd >= 0)
       return fd;
     if (errno == EINVAL) {
@@ -941,8 +1069,10 @@ static __thread uint64_t worker_last_idx = 0;
 static __thread uint64_t worker_last_cnt = 0;
 static __thread uint32_t worker_last_major = 0;
 static __thread uint32_t worker_last_minor = 0;
+static __thread uint32_t worker_last_num_kills = 0;
 static __thread uint64_t tl_remainder_idx = 0;
 static __thread uint64_t tl_remainder_cnt = 0;
+static __thread uint32_t tl_remainder_kills = 0;
 static __thread bool tl_recently_escrowed = false;
 
 static int *evfd_data_arr = NULL;
@@ -1103,7 +1233,7 @@ struct SharedState {
   uint64_t stats_chunks_i_stole;
   uint64_t stats_chunks_stolen_from_me;
 
-  uint32_t stride_ring[RING_SIZE] ALIGNED(4096);
+  uint16_t stride_ring[RING_SIZE] ALIGNED(4096);
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
   uint32_t major_ring[RING_SIZE] ALIGNED(4096);
@@ -1329,7 +1459,7 @@ static uint64_t get_v_max(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
     return sysconf(_SC_NPROCESSORS_ONLN) * 2;
   if (!strcmp(type, "lines"))
-    return 65535;
+    return MAX_BATCH_LINES;
   if (!strcmp(type, "bytes")) {
     if (stdin_mode) {
       uint64_t l2 = get_cache_bytes();
@@ -1721,12 +1851,12 @@ static int ring_init_main(int argc, char **argv) {
 
     if (byte_mode) {
       state[n].cfg_batch_start = vals[4];
-      state[n].cfg_batch_max = vals[5];
+      state[n].cfg_batch_max = (vals[5] > MAX_BATCH_LINES) ? MAX_BATCH_LINES : vals[5];
       state[n].cfg_chunk_bytes = vals[5];
       state[n].cfg_line_max = vals[5];
     } else {
       state[n].cfg_batch_start = vals[2];
-      state[n].cfg_batch_max = vals[3];
+      state[n].cfg_batch_max = (vals[3] > MAX_BATCH_LINES) ? MAX_BATCH_LINES : vals[3];
       int bb_code = (cfg_state >> SH_B_B) & 0xF;
       if (bb_code != S_DIS)
         state[n].cfg_line_max = vals[5];
@@ -1793,12 +1923,29 @@ static int ring_init_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
   }
 
+  for (uint32_t i = 0; i < global_num_nodes; i++) {
+    evfd_data_arr[i] = -1;
+    evfd_eof_arr[i] = -1;
+    evfd_indexer_arr[i] = -1;
+    evfd_meta_arr[i] = -1;
+    fd_escrow_r[i] = -1;
+    fd_escrow_w[i] = -1;
+  }
+
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     evfd_data_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     evfd_eof_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     evfd_indexer_arr[n] =
         eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
     evfd_meta_arr[n] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+
+    if (evfd_data_arr[n] < 0 || evfd_eof_arr[n] < 0 || 
+        evfd_indexer_arr[n] < 0 || evfd_meta_arr[n] < 0) {
+        builtin_error("forkrun: eventfd creation failed (FD limit reached?)");
+        ring_destroy_main(0, NULL);
+        return EXECUTION_FAILURE;
+    }
+
     int pfd[2];
     if (pipe(pfd) == 0) {
       fcntl(pfd[0], F_SETFL, O_NONBLOCK);
@@ -1817,6 +1964,12 @@ static int ring_init_main(int argc, char **argv) {
   evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_ingest_eof = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   evfd_chunk_done = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE);
+
+  if (evfd_ingest_data < 0 || evfd_ingest_eof < 0 || evfd_chunk_done < 0) {
+      builtin_error("forkrun: eventfd creation failed");
+      ring_destroy_main(0, NULL);
+      return EXECUTION_FAILURE;
+  }
 
   evfd_data = evfd_data_arr[0];
   fd_escrow[0] = fd_escrow_r[0];
@@ -1838,8 +1991,10 @@ static int ring_init_main(int argc, char **argv) {
     }
     if (!v)
       v = make_new_array_variable(out_array_name);
-    if (!v)
+    if (!v) {
+      ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
+    }
 
     // Calculate true total max workers across all nodes to prevent out-of-bounds
     uint64_t actual_total_w_max = 0;
@@ -1850,8 +2005,10 @@ static int ring_init_main(int argc, char **argv) {
     }
 
     int *created_fds = malloc(sizeof(int) * actual_total_w_max);
-    if (!created_fds)
+    if (!created_fds) {
+      ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
+    }
     int created_cnt = 0;
     int failure = 0;
     for (uint64_t i = 0; i < actual_total_w_max; i++) {
@@ -1870,6 +2027,7 @@ static int ring_init_main(int argc, char **argv) {
       for (int k = 0; k < created_cnt; k++)
         close(created_fds[k]);
       free(created_fds);
+      ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
     }
     free(created_fds);
@@ -1990,6 +2148,18 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     num_nodes = 1024;
 
   uint64_t chunk_size = 2 * 1024 * 1024ULL;
+
+  // PHYSICS FIX: Small File NUMA Starvation Prevention
+  // If the input is a regular file, scale the chunk size down to ensure every
+  // NUMA socket receives at least 2 chunks during initial distribution.
+  struct stat st;
+  if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+      uint64_t ideal = (uint64_t)st.st_size / (uint64_t)(num_nodes * 2);
+      if (ideal < chunk_size) {
+          uint64_t p2 = 1ULL << fast_log2(ideal);
+          chunk_size = (p2 < 4096) ? 4096 : p2;
+      }
+  }
 
   if (state[0].mode_byte) {
     uint64_t L = state[0].cfg_batch_start;
@@ -2662,18 +2832,21 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       usleep(100);                                                             \
     }                                                                          \
     uint64_t pk = (uint64_t)batch_start;                                       \
-    if ((_cnt_val) != L || (is_numa && (_is_last)))                            \
-      pk |= FLAG_PARTIAL_BATCH;                                                \
     if (is_numa) {                                                             \
-      local_state->stride_ring[local_scan_idx & RING_MASK] =                   \
-          (uint32_t)(_stride_val);                                             \
+      uint16_t _sv = (uint16_t)((_stride_val) > MAX_BATCH_LINES ? MAX_BATCH_LINES : (_stride_val)); \
+      if ((_stride_val) != L || (_is_last))                                    \
+        _sv |= FLAG_CHUNK_BOUNDARY;                                            \
+      local_state->stride_ring[local_scan_idx & RING_MASK] = _sv;              \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
       local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id);         \
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
           (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
     } else {                                                                   \
-      local_state->stride_ring[local_scan_idx & RING_MASK] = (uint32_t)(_cnt_val); \
+      uint16_t _sv = (uint16_t)((_cnt_val) > MAX_BATCH_LINES ? MAX_BATCH_LINES : (_cnt_val)); \
+      if ((_cnt_val) != L)                                                     \
+        _sv |= FLAG_CHUNK_BOUNDARY;                                            \
+      local_state->stride_ring[local_scan_idx & RING_MASK] = _sv;              \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
     }                                                                          \
@@ -2727,9 +2900,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
               atomic_store_relaxed(&(state_ptr)->active_workers, W);           \
             }                                                                  \
           }                                                                    \
-          atomic_store_release(&(state_ptr)->batch_change_idx,                 \
-                               local_scan_idx);                                \
-          atomic_store_release(&(state_ptr)->signed_batch_size, -(int64_t)L);  \
+          PUBLISH_BATCH_SIZE(state_ptr, L);                                    \
           batch_counter = 0;                                                   \
         }                                                                      \
       }                                                                        \
@@ -2799,18 +2970,14 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           _l_target = 1;                                                       \
         if (_l_target > L) {                                                   \
           L = _l_target;                                                       \
-          atomic_store_release(&(state_ptr)->batch_change_idx,                 \
-                               local_scan_idx);                                \
-          atomic_store_release(&(state_ptr)->signed_batch_size, -(int64_t)L);  \
+          PUBLISH_BATCH_SIZE(state_ptr, L);                                    \
         } else if (_l_target < L &&                                            \
                    starve_meter >= (W + DAMPING_OFFSET - 3) &&                 \
                    stall_meter >= (W + DAMPING_OFFSET - 3)) {                  \
           L = (L + _l_target) / 2;                                             \
           if (L < 1)                                                           \
             L = 1;                                                             \
-          atomic_store_release(&(state_ptr)->batch_change_idx,                 \
-                               local_scan_idx);                                \
-          atomic_store_release(&(state_ptr)->signed_batch_size, -(int64_t)L);  \
+          PUBLISH_BATCH_SIZE(state_ptr, L);                                    \
           starve_meter = 0;                                                    \
           stall_meter = 0;                                                     \
         }                                                                      \
@@ -3604,7 +3771,7 @@ unified_scanner_eof:
 
   if (is_numa) {
     if (!byte_mode && !fixed_batch) {
-      atomic_store_release(&local_state->signed_batch_size, -(int64_t)Lmax);
+      PUBLISH_BATCH_SIZE(local_state, Lmax);
     }
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
@@ -3635,13 +3802,12 @@ unified_scanner_eof:
       }
       if (local_scan_idx > local_write_idx) {
         for (uint64_t i = local_write_idx; i < local_scan_idx; i++)
-          L_tail += state[0].stride_ring[i & RING_MASK];
+          L_tail += state[0].stride_ring[i & RING_MASK] & STRIDE_MASK;
       }
 
       uint64_t tail_start_offset =
           (local_scan_idx > local_write_idx)
-              ? (state[0].offset_ring[local_write_idx & RING_MASK] &
-                 ~FLAG_PARTIAL_BATCH)
+              ? state[0].offset_ring[local_write_idx & RING_MASK]
               : batch_start;
       local_scan_idx = local_write_idx;
       int64_t buf_rel = (int64_t)tail_start_offset - (int64_t)buf_base_offset;
@@ -3733,11 +3899,19 @@ unified_scanner_eof:
 
 tail_abort:
     uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
+    local_state->stride_ring[local_scan_idx & RING_MASK] = 0;
     local_state->offset_ring[local_scan_idx & RING_MASK] =
-        (uint64_t)final_sentinel | FLAG_PARTIAL_BATCH;
+        (uint64_t)final_sentinel;
     local_state->end_ring[local_scan_idx & RING_MASK] =
         (uint64_t)final_sentinel;
     local_scan_idx++;
+
+    // Ensure batch size is positive so workers claim 1 at a time in tail
+    {
+      int64_t _sb = atomic_load_relaxed(&local_state->signed_batch_size);
+      if (_sb < 0)
+        atomic_store_release(&local_state->signed_batch_size, -_sb);
+    }
 
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
@@ -3826,6 +4000,7 @@ static int ring_claim_main(int argc, char **argv) {
 
   uint64_t my_read_idx;
   uint64_t claim_count = 1;
+  uint32_t current_kills = 0;
   int spin = 0;
 
   // --- UNIVERSAL SIGPIPE / TEARDOWN SHIELD ---
@@ -3852,6 +4027,7 @@ static int ring_claim_main(int argc, char **argv) {
   if (tl_remainder_cnt > 0) {
     my_read_idx = tl_remainder_idx;
     claim_count = tl_remainder_cnt;
+    current_kills = tl_remainder_kills;
     tl_remainder_cnt = 0;
     goto check_boundaries;
   }
@@ -3872,6 +4048,7 @@ restart_loop:
           if (er == sizeof(ep)) {
               my_read_idx = ep.idx;
               claim_count = ep.cnt;
+              current_kills = ep.num_kills;
               
               // --- NEW: Export state ---
               char buf[32];
@@ -3891,9 +4068,9 @@ restart_loop:
               }
               // ------------------------
 
-              // We successfully reclaimed our (or someone else's) escrow.
-              // Bypass the ring check entirely.
-              goto check_boundaries;
+              // Safely jump to the write_idx check block. If this is an
+              // overshoot packet, we MUST wait for the scanner to publish it!
+              goto evaluate_claim;
           }
       }
   }
@@ -3925,8 +4102,8 @@ restart_loop:
       if (claim_count > 1) {
         uint64_t safe_count = claim_count; // <--- CRITICAL FIX: Default to full claim
         for (uint64_t i = 0; i < claim_count; i++) {
-          if (local_state->offset_ring[(r_curr + i) & RING_MASK] &
-              FLAG_PARTIAL_BATCH) {
+          if (local_state->stride_ring[(r_curr + i) & RING_MASK] &
+              FLAG_CHUNK_BOUNDARY) {
             safe_count = i + 1;
             break;
           }
@@ -3937,11 +4114,7 @@ restart_loop:
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
                                        __ATOMIC_SEQ_CST);
 
-      // --- NEW: Reset poison tracking for fresh main-ring batches ---
-      bind_variable("RING_NUM_KILLS", "0", 0);
-      bind_variable("RING_POISONED", "0", 0);
-      // --------------------------------------------------------------
-
+      // --- NEW: Export state ---
       if (!local_state->numa_enabled) {
         int64_t sbatch_check =
             atomic_load_relaxed(&local_state->signed_batch_size);
@@ -3967,11 +4140,15 @@ restart_loop:
       if (er == sizeof(ep)) {
         my_read_idx = ep.idx;
         claim_count = ep.cnt;
+        current_kills = ep.num_kills;
 
         // --- NEW: Export state ---
         char buf[32];
         snprintf(buf, sizeof(buf), "%u", ep.num_kills);
         bind_variable("RING_NUM_KILLS", buf, 0);
+
+        u64toa(ep.idx, buf);
+        bind_variable("RING_BATCH_IDX", buf, 0);
 
         int limit = 3; // Default to 3 retries
         const char *s_lim = get_string_value("FORKRUN_RETRY_LIMIT");
@@ -4072,6 +4249,7 @@ restart_loop:
     spin = 0;
   }
 
+evaluate_claim:
   uint64_t w_curr = atomic_load_acquire(&local_state->write_idx);
   if (my_read_idx + claim_count > w_curr) {
     if (atomic_load_acquire(&local_state->scanner_finished)) {
@@ -4095,7 +4273,8 @@ restart_loop:
           uint64_t avail = w_curr - my_read_idx;
           if (avail < claim_count) {
             struct EscrowPacket ep = {.idx = my_read_idx + avail,
-                                      .cnt = claim_count - avail};
+                                      .cnt = claim_count - avail,
+                                      .num_kills = current_kills};
             ssize_t ew;
             do {
               ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep));
@@ -4153,8 +4332,8 @@ check_boundaries:
   if (claim_count > 1) {
     uint64_t safe_count = claim_count; // <--- CRITICAL FIX: Default to full claim
     for (uint64_t i = 0; i < claim_count; i++) {
-      if (local_state->offset_ring[(my_read_idx + i) & RING_MASK] &
-          FLAG_PARTIAL_BATCH) {
+      if (local_state->stride_ring[(my_read_idx + i) & RING_MASK] &
+          FLAG_CHUNK_BOUNDARY) {
         safe_count = i + 1;
         break;
       }
@@ -4162,7 +4341,8 @@ check_boundaries:
     if (safe_count < claim_count) {
       uint64_t remainder = claim_count - safe_count;
       struct EscrowPacket ep = {.idx = my_read_idx + safe_count,
-                                .cnt = remainder};
+                                .cnt = remainder,
+                                .num_kills = current_kills};
       ssize_t ew;
       do {
         ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep));
@@ -4171,6 +4351,7 @@ check_boundaries:
       if (ew < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         tl_remainder_idx = ep.idx;
         tl_remainder_cnt = ep.cnt;
+        tl_remainder_kills = ep.num_kills;
       } else if (ew == sizeof(ep)) {
         uint64_t one = 1;
         sys_write(evfd_data_arr[my_numa_node], &one, 8);
@@ -4186,7 +4367,7 @@ check_boundaries:
   uint64_t final_val = 0;
 
   // We ALWAYS return bytes now. Line count is exported via RING_BATCH_SLOTS.
-  uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+  uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK];
   uint64_t end = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
   final_val = end - start;
 
@@ -4195,18 +4376,14 @@ check_boundaries:
 
   worker_last_idx = my_read_idx;
   worker_last_cnt = claim_count;
+  worker_last_num_kills = current_kills;
 
   char buf[64];
   u64toa(final_val, buf);
   bind_var_or_array(v_target, buf, 0);
 
-  u64toa(my_read_idx, buf);
-  bind_variable("RING_BATCH_IDX", buf, 0);
-  u64toa(claim_count, buf);
-  bind_variable("RING_BATCH_SLOTS", buf, 0);
-
   uint64_t start_offset =
-      local_state->offset_ring[my_read_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+      local_state->offset_ring[my_read_idx & RING_MASK];
 
   if (local_state->numa_enabled) {
     worker_last_major = local_state->major_ring[my_read_idx & RING_MASK];
@@ -4217,11 +4394,6 @@ check_boundaries:
         FLAG_MAJOR_EOF) {
       worker_last_minor |= FLAG_MAJOR_EOF;
     }
-
-    sprintf(buf, "%u", worker_last_major);
-    bind_variable("RING_MAJOR", buf, 0);
-    sprintf(buf, "%u", worker_last_minor & ~FLAG_MAJOR_EOF);
-    bind_variable("RING_MINOR", buf, 0);
   }
 
   tls_batch_offset = (off_t)start_offset;
@@ -4275,7 +4447,7 @@ static int ring_ack_main(int argc, char **argv) {
   if (fd_fallow > 0) {
     if (local_state && local_state->numa_enabled) {
       uint64_t start =
-          local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+          local_state->offset_ring[my_idx & RING_MASK];
       uint64_t end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
       struct PhysPacket pp = {.off = start, .len = end - start};
       if (robust_pipe_write(fd_fallow, &pp, sizeof(pp)) < 0) {
@@ -4291,7 +4463,7 @@ static int ring_ack_main(int argc, char **argv) {
     }
   }
 
-  uint64_t in_start = local_state->offset_ring[my_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+  uint64_t in_start = local_state->offset_ring[my_idx & RING_MASK];
   uint64_t in_end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
   op.in_off = in_start;
   op.in_len = in_end - in_start;
@@ -5459,7 +5631,7 @@ static int ring_fallow_main(int argc, char **argv) {
 
         if (state) atomic_store_release(&state[0].min_idx, next_idx);
         if (!dry_run) {
-          uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK] & ~FLAG_PARTIAL_BATCH;
+          uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK];
           if (g_state) g_state->fallow_horizon_bytes = byte_limit;
           off_t aligned = (off_t)((byte_limit / 4096ULL) * 4096ULL);
           if (aligned > last_punched) {
@@ -5516,8 +5688,13 @@ static int ring_ack_init_main(int argc, char **argv) {
 static int ring_escrow_put_main(int argc, char **argv) {
     if (argc < 5) return EXECUTION_FAILURE;
     int node = atoi(argv[1]);
-    uint64_t idx = strtoull(argv[2], NULL, 10);
-    uint64_t cnt = strtoull(argv[3], NULL, 10);
+    uint64_t idx;
+    if (argv[2][0] == '-' && argv[2][1] == '\0') idx = worker_last_idx;
+    else idx = strtoull(argv[2], NULL, 10);
+    
+    uint64_t cnt;
+    if (argv[3][0] == '-' && argv[3][1] == '\0') cnt = worker_last_cnt;
+    else cnt = strtoull(argv[3], NULL, 10);
     uint32_t kills = (uint32_t)atoi(argv[4]);
 
     if (node < 0 || node >= (int)global_num_nodes) node = 0;
@@ -5940,6 +6117,131 @@ FORKRUN_LOADABLES(DEFINE_DISPATCHER_X)
       #name, dispatch_##name, BUILTIN_ENABLED, name##_doc, usage, 0};
 FORKRUN_LOADABLES(DEFINE_STRUCT_X)
 #undef DEFINE_STRUCT_X
+
+// ---------------------------------------------------------
+// ring_call: Zero-Tax C Plugin Callback Execution
+// ---------------------------------------------------------
+
+struct forkrun_ctx {
+    uint64_t batch_index;       // global batch sequence number
+    uint64_t batch_offset;      // byte offset in input stream
+    uint64_t batch_byte_length; // length of current batch in bytes
+    uint32_t version;           // struct version, currently 1
+    uint32_t worker_id;         // RING_WID
+    uint32_t node_id;           // NUMA node
+    uint32_t num_kills;         // retry count for this batch
+    uint32_t numa_major;        // NUMA major sequence (0 if not NUMA)
+    uint32_t numa_minor;        // NUMA minor sequence (0 if not NUMA)
+    int32_t  fd_in;             // input file descriptor
+    char     delimiter;         // batch delimiter
+    uint8_t  cfg_state[3];      // global configuration state
+};
+
+// Define the user's expected function signatures
+typedef int (*forkrun_cb_t)(int argc, char **argv);
+typedef int (*forkrun_cb_ctx_t)(int argc, char **argv, void *ctx);
+
+// Cache the loaded plugin per-worker in Thread-Local Storage
+static __thread void *tls_dl_handle = NULL;
+static __thread forkrun_cb_t tls_callback = NULL;
+static __thread forkrun_cb_ctx_t tls_callback_ctx = NULL;
+static __thread int tls_use_ctx = 0;
+static __thread int tls_numa_enabled = 0;
+static __thread struct forkrun_ctx tls_fctx;
+
+// ---------------------------------------------------------
+// ring_call: Zero-Tax C Plugin Callback Execution
+// ---------------------------------------------------------
+// NOTE FOR PLUGIN AUTHORS:
+// The `argv` array and the string pointers it contains are backed by 
+// Thread-Local Storage. They are ONLY valid for the duration of the 
+// function call. Do not store these pointers across batches!
+static int ring_call_main(int argc, char **argv) {
+    // Usage: ring_call <fd> <length> <delim> <plugin.so> <func_name>
+    if (argc < 6) return EXECUTION_FAILURE;
+
+    int fd = atoi(argv[1]);
+    size_t length = (size_t)atoll(argv[2]);
+    char delim = argv[3][0];
+    const char *plugin_path = argv[4];
+    const char *func_name = argv[5];
+
+    // 1. Lazy-load the plugin (Only happens on the first batch for this worker)
+    if (!tls_dl_handle) {
+        tls_dl_handle = dlopen(plugin_path, RTLD_LAZY | RTLD_LOCAL);
+        if (!tls_dl_handle) {
+            fprintf(stderr, "forkrun [ERROR]: dlopen failed: %s\n", dlerror());
+            return EXECUTION_FAILURE;
+        }
+
+        int *has_ctx = (int *)dlsym(tls_dl_handle, "forkrun_use_ctx");
+        if (has_ctx && *has_ctx == 1) {
+            tls_use_ctx = 1;
+            tls_callback_ctx = (forkrun_cb_ctx_t)dlsym(tls_dl_handle, func_name);
+            if (!tls_callback_ctx) {
+                fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
+                dlclose(tls_dl_handle);
+                tls_dl_handle = NULL;
+                return EXECUTION_FAILURE;
+            }
+            tls_fctx.version = 1;
+            const char *wid_str = get_string_value("RING_WID");
+            tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
+            tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
+            tls_fctx.fd_in = fd;
+            tls_fctx.delimiter = delim;
+            tls_fctx.cfg_state[0] = (cfg_state >> 16) & 0xFF;
+            tls_fctx.cfg_state[1] = (cfg_state >> 8) & 0xFF;
+            tls_fctx.cfg_state[2] = cfg_state & 0xFF;
+            tls_numa_enabled = (state && state[0].numa_enabled) ? 1 : 0;
+        } else {
+            tls_use_ctx = 0;
+            tls_callback = (forkrun_cb_t)dlsym(tls_dl_handle, func_name);
+            if (!tls_callback) {
+                fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
+                dlclose(tls_dl_handle);
+                tls_dl_handle = NULL;
+                return EXECUTION_FAILURE;
+            }
+        }
+    }
+
+    // 2. Tokenize the batch directly into tls_argv (starting at index 0)
+    size_t batch_argc = 0;
+    int ret = do_tokenize(fd, length, delim, NULL, 0, &batch_argc);
+    if (ret != EXECUTION_SUCCESS) return ret;
+
+    // 3. Ensure capacity and terminate argv array (standard C convention)
+    if (batch_argc + 1 > tls_argv_cap) {
+        tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
+        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+        if (!new_argv) return EXECUTION_FAILURE;
+        tls_argv = new_argv;
+    }
+    tls_argv[batch_argc] = NULL;
+
+    // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
+    int cb_ret;
+    if (tls_use_ctx) {
+        tls_fctx.batch_index = worker_last_idx;
+        tls_fctx.batch_offset = (uint64_t)tls_batch_offset;
+        tls_fctx.num_kills = worker_last_num_kills;
+        tls_fctx.batch_byte_length = (uint64_t)length;
+        if (tls_numa_enabled) {
+            tls_fctx.numa_major = worker_last_major;
+            tls_fctx.numa_minor = worker_last_minor;
+        } else {
+            tls_fctx.numa_major = 0;
+            tls_fctx.numa_minor = 0;
+        }
+        cb_ret = tls_callback_ctx((int)batch_argc, tls_argv, &tls_fctx);
+    } else {
+        cb_ret = tls_callback((int)batch_argc, tls_argv);
+    }
+
+    // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
+    return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;
+}
 
 static int ring_list_main(int argc, char **argv) {
   if (argc >= 2) {

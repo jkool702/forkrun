@@ -549,7 +549,7 @@ run_test_regex "Dry run (-N)" \
 
 run_test "Version (-V)" \
   "frun -V" \
-  "forkrun v3.2.0"
+  "forkrun v3.2.1"
 
 # FIXED: Check for USAGE string explicitly without exact match
 run_test_regex "Help (--help)" \

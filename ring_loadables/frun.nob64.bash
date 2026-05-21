@@ -47,7 +47,7 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -205,6 +205,7 @@ EOF
       EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
   FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup
       EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
+  FORKRUN_USE_HUGETLB   : Set to '1' to have forkrun attempt to use hugepages for memfd backing. WARNING: only enable this if you have sufficient available hugepages so that forkrun does NOT run out of memory to use.
 
 EOF
                 ;;
@@ -225,6 +226,7 @@ EOF
     delimiter_val=$'\n'
     ring_init_opts=()
     checkpoint_file='.forkrun_resume'
+    c_plugin_arg=""
 
     # Parse Arguments
     while true; do
@@ -255,6 +257,11 @@ EOF
 
             -X|--external|--EXTERNAL)      prefer_external_flag=true  ;;
             +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL) prefer_external_flag=false ;;
+
+            -C|--plugin|--PLUGIN)
+                arg="${1##@(-C|--plugin|--PLUGIN)?([= $'\t'])}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && c_plugin_arg="${arg}" ;;
 
             -v|--verbose)        verbose_flag=true;  stats_flag=true  ;;
             +v|--no-verbose)     verbose_flag=false; stats_flag=false ;;
@@ -359,7 +366,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.2.0';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.2.1';  return 0  ;;
 
             --) shift; break ;;
 
@@ -515,6 +522,23 @@ toc() { :; }
 
     local numa_map_str
      _forkrun_build_numa_map "$parsed_numa_nodes_arg"
+
+    # PHYSICS FIX: Small File NUMA Starvation Prevention
+    # If the input is a regular file and is too small to benefit from NUMA,
+    # downgrade to UMA (unless the user explicitly specified --nodes list).
+    if [[ "${parsed_numa_nodes_arg}" == "auto" ]] && [[ -f /dev/stdin ]] && (( FORKRUN_NUM_NODES > 1 )); then
+        local orig_pos file_size
+        if ring_lseek 0 0 SEEK_CUR orig_pos; then
+            if ring_lseek 0 0 SEEK_END file_size; then
+                local remaining_bytes=$(( file_size - orig_pos ))
+                if (( remaining_bytes > 0 && remaining_bytes < FORKRUN_NUM_NODES * 8192 )); then
+                    parsed_numa_nodes_arg="1"
+                    _forkrun_build_numa_map "1"
+                fi
+            fi
+            ring_lseek 0 "${orig_pos}" SEEK_SET orig_pos
+        fi
+    fi
 
     # --- Feature 2: -L vs NUMA Conflict Resolution ---
     if [[ -n "${exact_lines_val:-}" ]] && (( FORKRUN_NUM_NODES > 1 )); then
@@ -687,54 +711,122 @@ $(declare -f -- "${nn}")"
             fi
         fi
 
-        if ${stdin_flag}; then
-            # STDIN PAYLOAD
-            : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+        if [[ -n "${c_plugin_arg:-}" ]]; then
+            # Ensure the user actually passed a colon!
+            if [[ "$c_plugin_arg" != *:* ]]; then
+                echo "forkrun [FATAL]: -C requires format 'path/to/plugin.so:function_name'" >&2
+                return 1
+            fi
 
-            local exec_cmd_str="$cmdline_str"
-            if $use_ultra_fast_path; then
-                # Length 0 bypasses do_tokenize. Acts as a pure vfork() wrapper.
-                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
+            # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
+            local plugin_so="${c_plugin_arg%:*}"
+            local plugin_fn="${c_plugin_arg#*:}"
+
+            type -P realpath &>/dev/null && plugin_so="$(realpath "$plugin_so")"
+            
+            # --- JIT C-COMPILER LOGIC (With Fileless Execution) ---
+            local plugin_c="${plugin_so%.so}.c"
+            
+            # Recompile if .so is missing, or if .c is newer than .so
+            if [[ -f "$plugin_c" && ( ! -f "$plugin_so" || "$plugin_c" -nt "$plugin_so" ) ]]; then
+                if type -P gcc >/dev/null; then
+                    local target_so="$plugin_so"
+                    local use_memfd=false
+
+                    # Check if we have write access to the directory
+                    if [[ ! -w "${plugin_so%/*}/" ]]; then
+                        use_memfd=true
+                    fi
+
+                    if $use_memfd; then
+                        ${verbose_flag} && echo "forkrun [INFO]: Read-only filesystem detected. Compiling $plugin_c to memfd..." >&2
+                        ring_memfd_create plugin_memfd
+                        target_so="/proc/self/fd/$plugin_memfd"
+                    else
+                        ${verbose_flag} && echo "forkrun [INFO]: Auto-compiling $plugin_c -> $plugin_so" >&2
+                    fi
+
+                    # Compile directly to the target (Disk or RAM)
+                    gcc -O3 -shared -fPIC -march=native "$plugin_c" -o "$target_so" || {
+                        echo "forkrun [FATAL]: Auto-compilation of $plugin_c failed." >&2
+                        return 1
+                    }
+
+                    if $use_memfd; then
+                        # Seal the memfd to prevent tampering, and override the plugin_so path
+                        ring_seal "$plugin_memfd"
+                        plugin_so="$target_so"
+                    fi
+                else
+                    echo "forkrun [FATAL]: 'gcc' is not installed to compile $plugin_c." >&2
+                    return 1
+                fi
+            fi
+
+            # Sanity check: Ensure we actually have a target to execute before spawning workers
+            if [[ ! -f "$plugin_so" ]]; then
+                echo "forkrun [FATAL]: Plugin '$plugin_so' not found or could not be compiled." >&2
+                return 1
+            fi
+
+            if [[ ${delimiter_val} ]]; then
+                printf -v delimiter_str '%q' "${delimiter_val}"
+            else
+                delimiter_str="''"
             fi
 
             pCode='
-            pipe_open_flag=0
-            if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
-                ring_pipe pr pw
-                pipe_open_flag=1
-            else
-                RING_PIPE_CAPACITY_CUR=0
-            fi
+            ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so@Q} ${plugin_fn@Q}"
 
-            # opportunistically probe the kernels granted capacity    
-            if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
-                # FAST PATH (Synchronous)
-                # Note: ring_splice "close" closes $pw internally. We only close $pr.
-                ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
-                '"$exec_cmd_str"' <&$pr'
-            if ${retry_nonzero_exit_flag}; then
-                pCode+=' || exit $?'
-            elif ${is_func_flag}; then
-                pCode+='
-                ret=$?
-                (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
-            fi
-            pCode+='
-                exec {pr}<&-
+        elif ${stdin_flag}; then
+            # STDIN PAYLOAD
+            if $use_ultra_fast_path; then
+                # ALL-IN-C ZERO-COPY PIPELINE
+                pCode='ring_exec_splice $fd_read $REPLY '"$cmdline_str"
             else
-                # SLOW PATH (Asynchronous)
-                # Close both FDs so they do not leak into the pipeline
-                (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$exec_cmd_str"' )'
-            if ${retry_nonzero_exit_flag}; then
-                pCode+=' || exit $?'
-            elif ${is_func_flag}; then
+                # STANDARD BASH PIPE PIPELINE
+                : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+                
+                local exec_cmd_str="$cmdline_str"
+                pCode='
+                pipe_open_flag=0
+                if (( REPLY <= RING_PIPE_CAPACITY - 4096 )); then
+                    ring_pipe pr pw
+                    pipe_open_flag=1
+                else
+                    RING_PIPE_CAPACITY_CUR=0
+                fi
+
+                # opportunistically probe the kernels granted capacity    
+                if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
+                    # FAST PATH (Synchronous)
+                    # Note: ring_splice "close" closes $pw internally. We only close $pr.
+                    ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
+                    '"$exec_cmd_str"' <&$pr'
+                if ${retry_nonzero_exit_flag}; then
+                    pCode+=' || exit $?'
+                elif ${is_func_flag}; then
+                    pCode+='
+                    ret=$?
+                    (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                fi
                 pCode+='
-                ret=$?
-                (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                    exec {pr}<&-
+                else
+                    # SLOW PATH (Asynchronous)
+                    # Close both FDs so they do not leak into the pipeline
+                    (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
+                    ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$exec_cmd_str"' )'
+                if ${retry_nonzero_exit_flag}; then
+                    pCode+=' || exit $?'
+                elif ${is_func_flag}; then
+                    pCode+='
+                    ret=$?
+                    (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                fi
+                pCode+='
+                fi'
             fi
-            pCode+='
-            fi'
 
         elif ${byte_mode_flag}; then
             # BYTE MODE WITHOUT PASS-BY-STDIN
@@ -746,15 +838,15 @@ $(declare -f -- "${nn}")"
                 cmdline_str+=" $array_var"
             fi
 
-            local exec_cmd_str="$cmdline_str"
             if $use_ultra_fast_path; then
-                exec_cmd_str="ring_exec 0 0 '' $cmdline_str"
+                # Length 0 bypasses do_tokenize and acts as pure vfork wrapper
+                pCode='ring_exec 0 0 '\'''\'' '"$cmdline_str"
+            else
+                pCode='
+                ring_lseek $fd_read - SEEK_SET _dummy
+                read -r -u $fd_read -N $REPLY A
+                '"$cmdline_str"
             fi
-
-            pCode='
-            ring_lseek $fd_read - SEEK_SET '"''"'
-            read -r -u $fd_read -N $REPLY A
-            '"$exec_cmd_str"
 
         else
             # LINE ARGS PAYLOAD (Default)
@@ -826,13 +918,13 @@ $(declare -f -- "${nn}")"
     status=$?
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
     
-    if (( status != 0 && RING_BATCH_SLOTS > 0 )); then
+    if (( status != 0 && ${FRUN_CLAIM_BYTES:-0} > 0 )); then
         (( RING_NUM_KILLS++ ))'
         [[ "$order_mode" != "realtime" ]] && worker_func_src+='
         [[ -n "${fd_out[$RING_WID]:-}" ]] && ring_revert_output "${fd_out[$RING_WID]}"
         '
         worker_func_src+='
-        ring_escrow_put "$RING_NODE_ID" "$RING_BATCH_IDX" "$RING_BATCH_SLOTS" "$RING_NUM_KILLS"
+        ring_escrow_put "$RING_NODE_ID" "-" "-" "$RING_NUM_KILLS"
     fi
     
     # Notify parent that the trap successfully fired
@@ -847,8 +939,10 @@ $(declare -f -- "${nn}")"
 
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion
-    RING_BATCH_SLOTS=0
     RING_NUM_KILLS=0
+    RING_POISONED=0
+    FRUN_CLAIM_BYTES=0
+    REPLY=0
     '
    [[ "$order_mode" != "realtime" ]] && worker_func_src+='
     # Initialize the output tracking for this specific worker slot
@@ -859,11 +953,12 @@ $(declare -f -- "${nn}")"
         worker_func_src+='shift 4
     ring_worker inc
     _ring_registered=true
-    while ring_claim; do
-        if [[ "${RING_POISONED:-0}" == "1" ]]; then
-            echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS:-?} times)." >&2
-            echo "P:${RING_BATCH_IDX}:${RING_NUM_KILLS:-?}" >&"${FD_TRAP_ACK_W}" 2>/dev/null
+    while ring_claim FRUN_CLAIM_BYTES; do
+        if [[ "${RING_POISONED}" == "1" ]]; then
+            echo "forkrun [WARN]: Skipping poisoned batch $RING_BATCH_IDX (killed ${RING_NUM_KILLS} times)." >&2
+            echo "P:${RING_BATCH_IDX}:${RING_NUM_KILLS}" >&"${FD_TRAP_ACK_W}" 2>/dev/null
         else
+            REPLY=$FRUN_CLAIM_BYTES
             if [[ "$REPLY" != "0" ]]; then
                 '
         ${insert_id_flag:-false} && worker_func_src+='((W_BATCH++))
@@ -873,8 +968,11 @@ $(declare -f -- "${nn}")"
         fi
         '"${ring_ack_str}"' || break
         
-        # Clear the active claim flag so a sleep-death doesnt duplicate it
-        RING_BATCH_SLOTS=0
+        # Reset variables natively in Bash so C does not have to allocate them
+        RING_POISONED=0
+        RING_NUM_KILLS=0
+        FRUN_CLAIM_BYTES=0
+        REPLY=0
     done
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
 ) &
@@ -1351,33 +1449,82 @@ _forkrun_base64_to_file() {
             "/tmp"                       # Universal fallback
             "${HOME}/.cache"             # User disk fallback
             "$PWD"                       # Last resort
+            "python"                     # Fileless fallback via python
+            "perl"                       # Fileless fallback via perl
         )
+
+        local py_script='import os,sys,time; fd=-1
+try: fd=os.memfd_create("b",0)
+except:
+ try: import ctypes; fd=ctypes.CDLL(None).memfd_create(b"b",0)
+ except: sys.exit(1)
+sys.stdout.write(str(os.getpid())+" "+str(fd)+"\n"); sys.stdout.flush()
+while True: time.sleep(60)'
+
+        local pl_script='my $a=$ARGV[0]; my $s=($a=~/^x86_64/)?319:($a eq "aarch64"||$a eq "riscv64")?279:($a=~/^ppc64/)?360:($a eq "s390x")?356:0; exit 1 unless $s; my $fd=syscall($s,"b",0); exit 1 if $fd<0; print "$$ $fd\n"; $|=1; while(1){sleep 60;}'
 
         # try various places to make the tmp .so file to bootstrap
         for dir in "${candidates[@]}"; do
-            # Skip empty, non-existent, or non-writable directories
-            { [[ $dir ]] && [[ -d "$dir" ]] && [[ -w "$dir" ]]; } || continue
+            local helper_fd="" helper_pid="" helper_out_fd=""
+            
+            if [[ "$dir" == "python" ]]; then
+                if type -P python3 >/dev/null 2>&1; then
+                    exec {helper_fd}< <(python3 -c "$py_script" 2>/dev/null)
+                elif type -P python >/dev/null 2>&1; then
+                    exec {helper_fd}< <(python -c "$py_script" 2>/dev/null)
+                else
+                    continue
+                fi
+                read helper_pid helper_out_fd <&$helper_fd
+                if [[ -n "$helper_pid" && -n "$helper_out_fd" ]]; then
+                    tmp_so="/proc/$helper_pid/fd/$helper_out_fd"
+                else
+                    [[ -n "$helper_fd" ]] && exec {helper_fd}<&-
+                    continue
+                fi
+            elif [[ "$dir" == "perl" ]]; then
+                if type -P perl >/dev/null 2>&1; then
+                    exec {helper_fd}< <(perl -e "$pl_script" "$ARCH" 2>/dev/null)
+                    read helper_pid helper_out_fd <&$helper_fd
+                    if [[ -n "$helper_pid" && -n "$helper_out_fd" ]]; then
+                        tmp_so="/proc/$helper_pid/fd/$helper_out_fd"
+                    else
+                        [[ -n "$helper_fd" ]] && exec {helper_fd}<&-
+                        continue
+                    fi
+                else
+                    continue
+                fi
+            else
+                # Skip empty, non-existent, or non-writable directories
+                { [[ $dir ]] && [[ -d "$dir" ]] && [[ -w "$dir" ]]; } || continue
 
-            # Generate path with high entropy (30-bit random hex)
-            printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
+                # Generate path with high entropy (30-bit random hex)
+                printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
+            fi
 
             # Try to extract loadable
-                truncate -s "${b64[$ARCH]%% *}" "${tmp_so}" && if _forkrun_base64_to_file <<<"${b64[$ARCH]}" "$tmp_so"; then
-                chmod +x "$tmp_so"
+            if truncate -s "${b64[$ARCH]%% *}" "${tmp_so}" 2>/dev/null && _forkrun_base64_to_file <<<"${b64[$ARCH]}" "$tmp_so" 2>/dev/null; then
+                chmod +x "$tmp_so" 2>/dev/null
 
                 # CRITICAL TEST: Try to Enable loadable
                 # This verifies the filesystem allows execution (noexec check)
-                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe >/dev/null; then
-                    # SUCCESS! The builtin is loaded. Delete disk artifact immediately.
+                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe 2>/dev/null; then
+                    # SUCCESS! The builtin is loaded. 
                     need_memfd_create_flag=false
-                else
-                    # If enable failed, clean up and try next candidate
-                    \rm -f "$tmp_so"
                 fi
-
-                # break outof loop if we found someplace that works
-                ${need_memfd_create_flag} || break
             fi
+
+            # Clean up
+            if [[ -n "$helper_pid" ]]; then
+                kill "$helper_pid" 2>/dev/null
+                [[ -n "$helper_fd" ]] && exec {helper_fd}<&-
+            else
+                \rm -f "$tmp_so" 2>/dev/null
+            fi
+
+            # break out of loop if we found someplace that works
+            ${need_memfd_create_flag} || break
         done
 
         # If we get here and stil dont have memfd_create we failed --> couldnt find a writable location
