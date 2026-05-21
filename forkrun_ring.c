@@ -1013,7 +1013,6 @@ struct WorkerBatchState {
 static __thread struct WorkerBatchState prefetched_batch;
 static __thread bool have_prefetch = false;
 static __thread bool prefetch_tokens_ready = false;
-static __thread size_t prefetch_batch_argc = 0;
 static __thread bool tl_drain_escrow = true;
 
 static __thread int my_numa_node = -1;
