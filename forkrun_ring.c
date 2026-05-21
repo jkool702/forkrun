@@ -4241,16 +4241,13 @@ dlc_check_boundaries:
 //                 (e) waits for child N,
 //                 (f) shadow-orphan-rescues N+1 if child N failed.
 static int ring_exec_main(int argc, char **argv) {
-    // Usage: ring_exec <fd> <length> <delim> <cmd> [fixed_args...]
     if (argc < 5) return EXECUTION_FAILURE;
 
     int fd = atoi(argv[1]);
     size_t length = (size_t)atoll(argv[2]);
     char delim = argv[3][0];
-
     int fixed_argc = argc - 4;
 
-    // 1. Ensure baseline capacity for fixed arguments
     if (tls_argv_cap < (size_t)(fixed_argc + 1024)) {
         tls_argv_cap = fixed_argc + 1024;
         char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
@@ -4258,15 +4255,11 @@ static int ring_exec_main(int argc, char **argv) {
         tls_argv = new_argv;
     }
 
-    // 2. Load fixed command and args directly from Bash's parsed argv
     for (int i = 0; i < fixed_argc; i++) {
         tls_argv[i] = argv[4 + i];
     }
 
-    // 3. TOKENIZE BATCH N
-    // If the previous cycle's overlap already tokenized this batch, skip parsing
-    // entirely — the kernel copied argv into the child at spawn, so tls_argv and
-    // tls_map_buf still hold N+1's data from last cycle, which IS batch N now.
+    // 1. TOKENIZE BATCH N (If not already done by the prefetcher)
     if (!prefetch_tokens_ready) {
         size_t batch_argc = 0;
         int tok = do_tokenize(fd, length, tls_batch_offset, delim, NULL, fixed_argc, &batch_argc);
@@ -4277,40 +4270,33 @@ static int ring_exec_main(int argc, char **argv) {
         prefetch_tokens_ready = false;
     }
 
-    // 4. SHIELD AGAINST BASH'S JOB CONTROL (Block SIGCHLD)
+    // 2. SHIELD AGAINST BASH'S JOB CONTROL (Block SIGCHLD)
     sigset_t set, oset;
     sigemptyset(&set);
     sigaddset(&set, SIGCHLD);
     sigprocmask(SIG_BLOCK, &set, &oset);
 
-    // 5. SPAWN CHILD N (returns immediately; child runs concurrently with prefetch below)
+    // 3. SPAWN CHILD N (returns immediately; child runs concurrently)
     pid_t pid;
     int ret = posix_spawnp(&pid, tls_argv[0], NULL, NULL, tls_argv, environ);
 
-    // 6. THE LATENCY HIDING OVERLAP
-    // Child N is now running. Use its execution time to prefetch and pre-tokenize
-    // Batch N+1. This is non-blocking: if the ring has no data yet (scanner is still
-    // ingesting), do_lockfree_claim returns 1 and we degrade gracefully to zero overhead.
+    // 4. THE LATENCY HIDING OVERLAP (Fetch N+1)
     if (ret == 0 && state && !atomic_load_relaxed(&state[0].emergency_abort)) {
+        // Use non-blocking mode: if the ring is empty, gracefully fall back to zero overhead
         if (do_lockfree_claim(&prefetched_batch, false) == 0) {
             have_prefetch = true;
-            // Pre-tokenize N+1 directly into tls_argv. Safe because posix_spawnp
-            // already copied argv into the child's address space — the parent's
-            // tls_argv is free to be overwritten.
+            // Pre-tokenize N+1 directly into tls_argv.
+            // Safe because posix_spawnp already copied argv into the child's address space.
             size_t next_argc = 0;
             if (do_tokenize(fd, prefetched_batch.length, (off_t)prefetched_batch.offset,
                             delim, NULL, fixed_argc, &next_argc) == EXECUTION_SUCCESS) {
                 tls_argv[fixed_argc + next_argc] = NULL;
                 prefetch_tokens_ready = true;
             }
-            // If tokenize failed, have_prefetch stays true but prefetch_tokens_ready
-            // stays false. ring_exec will re-tokenize next cycle (safe fallback).
         }
-        // ret 1 = no data yet, ret 2 = EOF: have_prefetch stays false.
-        // ring_claim_main will do a synchronous blocking claim next iteration.
     }
 
-    // 7. WAIT FOR CHILD N
+    // 5. WAIT FOR CHILD N
     int status = 0;
     if (ret == 0) {
         while (waitpid(pid, &status, 0) == -1) {
@@ -4318,13 +4304,9 @@ static int ring_exec_main(int argc, char **argv) {
         }
     }
 
-    // 8. Restore signal mask
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
-    // 9. THE SHADOW ORPHAN RESCUE
-    // Child N failed. We already atomically claimed N+1 from the ring — if we just
-    // return failure, that batch is gone forever. Escrow it so the Bash retry trap
-    // can safely reprocess N while N+1 waits in the pipe for the next worker.
+    // 6. THE SHADOW ORPHAN RESCUE
     bool child_failed = (ret != 0) ||
                         (WIFEXITED(status) && WEXITSTATUS(status) != 0) ||
                         WIFSIGNALED(status);
@@ -4335,7 +4317,7 @@ static int ring_exec_main(int argc, char **argv) {
             struct EscrowPacket ep = {
                 .idx       = prefetched_batch.idx,
                 .cnt       = prefetched_batch.cnt,
-                .num_kills = prefetched_batch.num_kills
+                .num_kills = 0 // Must be 0 for the orphaned batch!
             };
             ssize_t ew;
             do {
@@ -4351,7 +4333,6 @@ static int ring_exec_main(int argc, char **argv) {
         prefetch_tokens_ready = false;
     }
 
-    // 10. RETURN
     if (ret != 0) return EXECUTION_FAILURE;
     if (WIFEXITED(status)) return (WEXITSTATUS(status) == 0) ? EXECUTION_SUCCESS : WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
