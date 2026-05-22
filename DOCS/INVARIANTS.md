@@ -86,7 +86,7 @@ The tail ramp-down begins at `tail_idx` (EOF). Remaining data may not cleanly sa
 
 **Worker Responsibilities at Tail**  
 When `read_idx >= tail_idx` and `batch_size < 0` (e.g., catching a race condition before the scanner's EOF force-flip):  
-1. Finalize immediately (`-N → +N`).  
+1. Finalize immediately (`-N → +N` via CAS).  
 2. Bypass all slow paths (no waiting, no escrow).  
 3. Process exactly one claim using stride metadata.
 

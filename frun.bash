@@ -1204,7 +1204,7 @@ _forkrun_get_arch() {
             ARCH='x86_64_v2'
         fi
         ;;
-    aarch64|armv7|riscv64|s390x|ppc64le)
+    aarch64|riscv64|s390x|ppc64le)
         ARCH="$ARCH0"
         ;;
     *)
