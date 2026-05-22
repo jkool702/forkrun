@@ -1193,7 +1193,7 @@ _forkrun_get_arch() {
 
     case "$ARCH0" in
     x86_64[-_]v[2-4])
-        ARCH="${ARCH0//_v/-v}"
+        ARCH="${ARCH0//-v/_v}"
         ;;
     x86_64)
         if grep -qE '( avx512[cdbwdqvlf].*){5}' </proc/cpuinfo; then
@@ -1204,7 +1204,7 @@ _forkrun_get_arch() {
             ARCH='x86_64_v2'
         fi
         ;;
-    aarch64|armv7|riscv64|s390x|ppcle64)
+    aarch64|armv7|riscv64|s390x|ppc64le)
         ARCH="$ARCH0"
         ;;
     *)
