@@ -297,8 +297,6 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define F_SETPIPE_SZ 1031
 #endif
 
-#define FLAG_CHUNK_BOUNDARY ((uint16_t)(1U << 15))
-#define STRIDE_MASK        ((uint16_t)~FLAG_CHUNK_BOUNDARY)   /* 0x7FFF */
 #define MAX_BATCH_LINES    32767
 #define FLAG_MAJOR_EOF (1U << 31)
 #define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
@@ -332,8 +330,12 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
                               __ATOMIC_RELAXED)
 
 #define PUBLISH_BATCH_SIZE(ptr, new_L) do {                                    \
+    uint64_t _r_idx = atomic_load_relaxed(&(ptr)->read_idx);                   \
+    uint16_t _cur_stride = (ptr)->stride_ring[_r_idx & RING_MASK];             \
+    int64_t _abs = _cur_stride ? _cur_stride : 1;                              \
     atomic_store_release(&(ptr)->batch_change_idx, local_scan_idx);            \
-    atomic_store_release(&(ptr)->signed_batch_size, (int64_t)(new_L));         \
+    atomic_store_release(&(ptr)->signed_batch_size,                            \
+        ((int64_t)(new_L) >= _abs * 2) ? -(int64_t)(new_L) : (int64_t)(new_L)); \
 } while(0)
 
 #ifndef GIT_HASH
@@ -1247,6 +1249,7 @@ struct SharedState {
   uint64_t stats_chunks_stolen_from_me;
 
   uint16_t stride_ring[RING_SIZE] ALIGNED(4096);
+  uint8_t boundary_ring[RING_SIZE + 8] ALIGNED(4096);
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
   uint32_t major_ring[RING_SIZE] ALIGNED(4096);
@@ -1854,7 +1857,7 @@ static int ring_init_main(int argc, char **argv) {
 
     state[n].cfg_w_start = w_start_balanced;
     state[n].cfg_w_max = w_max_balanced;
-    state[n].speculative_max_claim = (w_max_balanced > 32) ? 32 : (uint32_t)w_max_balanced;
+    state[n].speculative_max_claim = (w_max_balanced > 8) ? 8 : (uint32_t)w_max_balanced;
     state[n].mode_byte = byte_mode ? 1 : 0;
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
     state[n].exact_lines = parsed_exact_lines;
@@ -2847,19 +2850,20 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }                                                                          \
     uint64_t pk = (uint64_t)batch_start;                                       \
     if (is_numa) {                                                             \
-      uint16_t _sv = (uint16_t)((_stride_val) > MAX_BATCH_LINES ? MAX_BATCH_LINES : (_stride_val)); \
-      if ((_stride_val) != L || (_is_last))                                    \
-        _sv |= FLAG_CHUNK_BOUNDARY;                                            \
+      uint16_t _sv = (uint16_t)((_stride_val) > 65535 ? 65535 : (_stride_val));\
       local_state->stride_ring[local_scan_idx & RING_MASK] = _sv;              \
+      uint8_t b_val = (_is_last) ? 1 : 0;                                      \
+      local_state->boundary_ring[local_scan_idx & RING_MASK] = b_val;          \
+      if ((local_scan_idx & RING_MASK) < 8) {                                  \
+          local_state->boundary_ring[RING_SIZE + (local_scan_idx & RING_MASK)] = b_val; \
+      }                                                                        \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
       local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id);         \
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
           (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
     } else {                                                                   \
-      uint16_t _sv = (uint16_t)((_cnt_val) > MAX_BATCH_LINES ? MAX_BATCH_LINES : (_cnt_val)); \
-      if ((_cnt_val) != L)                                                     \
-        _sv |= FLAG_CHUNK_BOUNDARY;                                            \
+      uint16_t _sv = (uint16_t)((_cnt_val) > 65535 ? 65535 : (_cnt_val));      \
       local_state->stride_ring[local_scan_idx & RING_MASK] = _sv;              \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
@@ -3816,7 +3820,7 @@ unified_scanner_eof:
       }
       if (local_scan_idx > local_write_idx) {
         for (uint64_t i = local_write_idx; i < local_scan_idx; i++)
-          L_tail += state[0].stride_ring[i & RING_MASK] & STRIDE_MASK;
+          L_tail += state[0].stride_ring[i & RING_MASK];
       }
 
       uint64_t tail_start_offset =
@@ -4043,7 +4047,7 @@ dlc_restart_loop:
           int64_t abs_L = -sbatch;
           atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
         } else {
-          uint32_t cur_stride = local_state->stride_ring[r_curr & RING_MASK] & STRIDE_MASK;
+          uint32_t cur_stride = local_state->stride_ring[r_curr & RING_MASK];
           if (cur_stride == 0) cur_stride = 1;
           
           claim_count = (uint64_t)(-sbatch) / cur_stride;
@@ -4059,17 +4063,7 @@ dlc_restart_loop:
       if (r_curr + claim_count > w_snap)
         claim_count = w_snap - r_curr;
 
-      if (claim_count > 1) {
-        uint64_t safe_count = claim_count;
-        for (uint64_t i = 0; i < claim_count; i++) {
-          if (local_state->stride_ring[(r_curr + i) & RING_MASK] &
-              FLAG_CHUNK_BOUNDARY) {
-            safe_count = i + 1;
-            break;
-          }
-        }
-        claim_count = safe_count;
-      }
+
 
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
                                        __ATOMIC_SEQ_CST);
@@ -4249,31 +4243,22 @@ dlc_evaluate_claim:
   }
 
 dlc_check_boundaries:
-  if (claim_count > 1) {
+  if (claim_count > 1 && local_state->numa_enabled) {
     uint64_t safe_count = claim_count;
-    uint64_t accumulated_lines = 0;
+    uint64_t flags;
     
-    // Get the logical target to calculate the overclaim threshold (1.5x)
-    int64_t sbatch = atomic_load_relaxed(&local_state->signed_batch_size);
-    uint64_t target = (sbatch < 0) ? (uint64_t)(-sbatch) : (uint64_t)sbatch;
-    uint64_t overclaim_threshold = (target * 3) / 2;
-
-    for (uint64_t i = 0; i < claim_count; i++) {
-      uint16_t stride_val = local_state->stride_ring[(my_read_idx + i) & RING_MASK];
-      accumulated_lines += (stride_val & STRIDE_MASK);
-      
-      // 1. Truncate if we hit a physical chunk boundary
-      if (stride_val & FLAG_CHUNK_BOUNDARY) {
-        safe_count = i + 1;
-        break;
-      }
-      
-      // 2. Truncate if we significantly overshot the logical line count
-      // (Ensure i > 0 so we always process at least 1 slot)
-      if (i > 0 && accumulated_lines > overclaim_threshold) {
-        safe_count = i + 1;
-        break;
-      }
+    // O(1) SWAR Read: Grab the next 8 slots in a single instruction
+    memcpy(&flags, &local_state->boundary_ring[my_read_idx & RING_MASK], 8);
+    
+    // Mask out the bits that are beyond our claim_count
+    // (If claim_count == 8, shifting by 64 is UB, so we use a ternary)
+    uint64_t valid_mask = (claim_count == 8) ? ~0ULL : (1ULL << (claim_count * 8)) - 1;
+    flags &= valid_mask;
+    
+    if (flags != 0) {
+        // Find the index of the first boundary (0 to 7)
+        uint32_t first_boundary_idx = __builtin_ctzll(flags) / 8;
+        safe_count = first_boundary_idx + 1;
     }
     if (safe_count < claim_count) {
       uint64_t remainder = claim_count - safe_count;
