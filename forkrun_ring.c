@@ -2925,7 +2925,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             uint8_t _wp = atomic_load_relaxed(&(state_ptr)->write_pow2);       \
             if (_wp < 64) {                                                    \
               (state_ptr)->ring_pow2[_wp] = local_scan_idx;                    \
-              atomic_store_release(&(state_ptr)->write_pow2, _wp + 1);         \
+              atomic_store_release(&(state_ptr)->write_pow2, _wp);         \
             }                                                                  \
           }                                                                    \
           batch_counter = 0;                                                   \
