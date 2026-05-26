@@ -332,11 +332,12 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
                               __ATOMIC_RELAXED)
 
 #define PUBLISH_BATCH_SIZE(ptr, new_L) do {                                    \
-    int64_t _cur = atomic_load_relaxed(&(ptr)->signed_batch_size);             \
-    int64_t _abs = (_cur < 0) ? -_cur : _cur;                                  \
+    uint64_t _r_idx = atomic_load_relaxed(&(ptr)->read_idx);                   \
+    uint16_t _cur_stride = (ptr)->stride_ring[_r_idx & RING_MASK] & STRIDE_MASK; \
+    int64_t _abs = _cur_stride ? _cur_stride : 1;                              \
     atomic_store_release(&(ptr)->batch_change_idx, local_scan_idx);            \
     atomic_store_release(&(ptr)->signed_batch_size,                            \
-        ((int64_t)(new_L) > _abs * 2) ? -(int64_t)(new_L) : (int64_t)(new_L));  \
+        ((int64_t)(new_L) >= _abs * 2) ? -(int64_t)(new_L) : (int64_t)(new_L)); \
 } while(0)
 
 #ifndef GIT_HASH
@@ -605,9 +606,72 @@ static int ring_is_spawnable_main(int argc, char **argv) {
 // ---------------------------------------------------------
 // ring_exec: Ultra-fast path for external binaries
 // ---------------------------------------------------------
-// Note: ring_exec_main has been moved after do_lockfree_claim to resolve
-// definition ordering (it references WorkerBatchState, EscrowPacket,
-// prefetched_batch, have_prefetch, state, tl_drain_escrow, etc.).
+static int ring_exec_main(int argc, char **argv) {
+    // Usage: ring_exec <fd> <length> <delim> <cmd> [fixed_args...]
+    if (argc < 5) return EXECUTION_FAILURE;
+
+    int fd = atoi(argv[1]);
+    size_t length = (size_t)atoll(argv[2]);
+    char delim = argv[3][0];
+
+    int fixed_argc = argc - 4;
+
+    // 1. Ensure baseline capacity for fixed arguments
+    if (tls_argv_cap < (size_t)(fixed_argc + 1024)) {
+        tls_argv_cap = fixed_argc + 1024;
+        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+        if (!new_argv) return EXECUTION_FAILURE;
+        tls_argv = new_argv;
+    }
+
+    // 2. Load fixed command and args directly from Bash's parsed argv
+    for (int i = 0; i < fixed_argc; i++) {
+        tls_argv[i] = argv[4 + i];
+    }
+
+    // 3. Tokenize batch directly into tls_argv
+    size_t batch_argc = 0;
+    int ret = do_tokenize(fd, length, tls_batch_offset, delim, NULL, fixed_argc, &batch_argc);
+    if (ret != EXECUTION_SUCCESS) return ret;
+
+    // 4. Terminate argv array for execve
+    tls_argv[fixed_argc + batch_argc] = NULL;
+
+    // 5. SHIELD AGAINST BASH'S JOB CONTROL (Block SIGCHLD)
+    sigset_t set, oset;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &set, &oset);
+
+    // 6. Spawn the child (inherits FDs natively)
+    pid_t pid;
+    ret = posix_spawnp(&pid, tls_argv[0], NULL, NULL, tls_argv, environ);
+
+    // 7. Wait for the child synchronously
+    int status = 0;
+    if (ret == 0) {
+        while (waitpid(pid, &status, 0) == -1) {
+            if (errno != EINTR) {
+                ret = -1; // Mark the execution as failed!
+                break;
+            }
+        }
+    }
+
+    // 8. Restore signal mask
+    sigprocmask(SIG_SETMASK, &oset, NULL);
+
+    if (ret != 0) return EXECUTION_FAILURE;
+
+    // Return exact status correctness (crucial for -E auto-retry)
+    if (WIFEXITED(status)) {
+        return (WEXITSTATUS(status) == 0) ? EXECUTION_SUCCESS : WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status); // Standard shell convention for fatal signals
+    }
+    return EXECUTION_FAILURE;
+}
 
 // ---------------------------------------------------------
 // ring_exec_splice: Spawn binary and splice data to its stdin
@@ -997,24 +1061,6 @@ static inline uint64_t fast_log2(uint64_t v) {
 // 2. TLS AND SHARED STATE
 // ==============================================================================
 
-// ------------------------------------------------------------------
-// SUPERSCALAR PREFETCH STATE
-// ------------------------------------------------------------------
-struct WorkerBatchState {
-    uint64_t idx;
-    uint64_t cnt;
-    uint32_t num_kills;
-    uint64_t offset;
-    uint64_t length;
-    uint32_t major;
-    uint32_t minor;
-};
-
-static __thread struct WorkerBatchState prefetched_batch;
-static __thread bool have_prefetch = false;
-static __thread bool prefetch_tokens_ready = false;
-static __thread bool tl_drain_escrow = true;
-
 static __thread int my_numa_node = -1;
 static __thread bool is_waiting_on_ring = false;
 static __thread off_t last_ack_offset = 0;
@@ -1028,6 +1074,22 @@ static __thread uint32_t worker_last_num_kills = 0;
 static __thread uint64_t tl_remainder_idx = 0;
 static __thread uint64_t tl_remainder_cnt = 0;
 static __thread uint32_t tl_remainder_kills = 0;
+static __thread bool tl_drain_escrow = true;
+
+// ------------------------------------------------------------------
+// WorkerBatchState: Pure value struct returned by do_lockfree_claim.
+// Contains everything ring_claim_main needs to bind Bash variables,
+// without any side-effects during the claim itself.
+// ------------------------------------------------------------------
+struct WorkerBatchState {
+    uint64_t idx;
+    uint64_t cnt;
+    uint32_t num_kills;
+    uint64_t offset;
+    uint64_t length;
+    uint32_t major;
+    uint32_t minor;
+};
 
 static int *evfd_data_arr = NULL;
 static int *evfd_eof_arr = NULL;
@@ -1175,6 +1237,7 @@ struct SharedState {
   uint64_t cfg_chunk_bytes;
   uint64_t cfg_line_max;
   int64_t cfg_timeout_us;
+  uint32_t speculative_max_claim;
   uint8_t mode_byte;
   uint8_t fixed_workers;
   uint8_t fixed_batch;
@@ -1795,6 +1858,7 @@ static int ring_init_main(int argc, char **argv) {
 
     state[n].cfg_w_start = w_start_balanced;
     state[n].cfg_w_max = w_max_balanced;
+    state[n].speculative_max_claim = (w_max_balanced > 32) ? 32 : (uint32_t)w_max_balanced;
     state[n].mode_byte = byte_mode ? 1 : 0;
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
     state[n].exact_lines = parsed_exact_lines;
@@ -3911,20 +3975,31 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 
 // ------------------------------------------------------------------
 // do_lockfree_claim: Pure side-effect-free batch claim helper.
-// Populates `out` with batch metadata without touching Bash variables.
-// Returns: 0=success, 1=no data now (non-blocking), 2=EOF, EXECUTION_FAILURE=error
+// Populates `out` with batch metadata without touching any Bash
+// variables. ring_claim_main is the only caller and handles all
+// variable binding after the fact.
+//
+// Returns:
+//   0               = success, `out` is populated
+//   1               = no data available (non-blocking mode only)
+//   2               = EOF — all data consumed, terminate worker
+//   EXECUTION_FAILURE = emergency abort or fatal error
+//
+// Precondition: my_numa_node must be initialized by the caller.
 // ------------------------------------------------------------------
 static int do_lockfree_claim(struct WorkerBatchState *out, bool blocking) {
+  if (atomic_load_relaxed(&state[0].emergency_abort))
+    return EXECUTION_FAILURE;
+
   struct SharedState *local_state = &state[my_numa_node];
+
   uint64_t my_read_idx;
   uint64_t claim_count = 1;
   uint32_t current_kills = 0;
   int spin = 0;
 
-  if (atomic_load_relaxed(&state[0].emergency_abort))
-    return EXECUTION_FAILURE;
-
-  // TLS remainder fast-path
+  // TLS remainder fast-path: leftover from a prior boundary split that
+  // couldn't fit into the escrow pipe.
   if (tl_remainder_cnt > 0) {
     my_read_idx = tl_remainder_idx;
     claim_count = tl_remainder_cnt;
@@ -3935,9 +4010,10 @@ static int do_lockfree_claim(struct WorkerBatchState *out, bool blocking) {
 
 dlc_restart_loop:
 
-  // Escrow continuous drain: vacuums the pipe until it is empty, then snaps
-  // back to the lock-free fast path. tl_drain_escrow stays true as long as
-  // packets keep arriving; only set false on EAGAIN (pipe empty).
+  // Escrow continuous drain: vacuums the pipe completely before touching the
+  // lock-free ring. tl_drain_escrow stays true as long as packets keep
+  // arriving; only snaps false on EAGAIN (pipe empty). This enforces the
+  // Priority Inversion invariant more aggressively than the old one-shot flag.
   if (tl_drain_escrow && fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
     struct EscrowPacket ep;
     ssize_t er;
@@ -3951,7 +4027,7 @@ dlc_restart_loop:
       // Do NOT clear tl_drain_escrow here — keep draining until pipe is empty.
       goto dlc_evaluate_claim;
     } else if (er < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      // Pipe is fully drained. Snap back to zero-overhead fast path.
+      // Pipe fully drained. Snap back to zero-overhead fast path.
       tl_drain_escrow = false;
     }
   }
@@ -3968,12 +4044,19 @@ dlc_restart_loop:
         uint64_t t_start = atomic_load_acquire(&local_state->tail_idx);
         if (t_start != 0 && r_curr >= t_start) {
           claim_count = 1;
-          if (sbatch < 0) {
-            int64_t abs_L = -sbatch;
-            atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
-          }
+          int64_t abs_L = -sbatch;
+          atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
         } else {
-          claim_count = 1;
+          uint32_t cur_stride = local_state->stride_ring[r_curr & RING_MASK] & STRIDE_MASK;
+          if (cur_stride == 0) cur_stride = 1;
+          
+          claim_count = (uint64_t)(-sbatch) / cur_stride;
+          
+          if (claim_count < 1) {
+              claim_count = 1;
+          } else if (claim_count > local_state->speculative_max_claim) {
+              claim_count = local_state->speculative_max_claim;
+          }
         }
       }
 
@@ -4025,7 +4108,7 @@ dlc_restart_loop:
       }
     }
 
-    // 3. Scanner finished check (EOF)
+    // 3. Scanner finished check (The 3 Sequential Conditions for EOF)
     if (atomic_load_acquire(&local_state->scanner_finished)) {
       if (atomic_load_acquire(&local_state->read_idx) <
           atomic_load_acquire(&local_state->write_idx)) {
@@ -4037,10 +4120,11 @@ dlc_restart_loop:
           continue;
         }
       }
-      return 2; // EOF
+      // All 3 physical conditions met in order. Consensus achieved. Terminate.
+      return 2;
     }
 
-    // Non-blocking mode: return immediately if no data
+    // Non-blocking mode: return immediately if no data is available now.
     if (!blocking) return 1;
 
     // 4. Spin
@@ -4050,7 +4134,7 @@ dlc_restart_loop:
       continue;
     }
 
-    // 5. Poll
+    // 5. Poll (3-way simultaneous: local data evfd, escrow pipe, EOF evfd)
     __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
     is_waiting_on_ring = true;
 
@@ -4075,18 +4159,19 @@ dlc_restart_loop:
         return EXECUTION_FAILURE;
       }
 
-      bool data_fired = (pfds[0].revents & POLLIN) != 0;
+      bool data_fired   = (pfds[0].revents & POLLIN) != 0;
       bool escrow_fired = (pfds[1].fd >= 0 && (pfds[1].revents & POLLIN) != 0);
-      bool eof_fired = (pfds[2].revents & POLLIN) != 0;
+      bool eof_fired    = (pfds[2].revents & POLLIN) != 0;
 
+      // Strict priority: data > escrow > EOF
       if (data_fired) {
         uint64_t v;
         sys_read(pfds[0].fd, &v, 8);
         continue;
       } else if (escrow_fired) {
-        break;
+        break; // outer loop section 2 will read the packet
       } else if (eof_fired && !data_fired && !escrow_fired) {
-        break;
+        break; // outer loop section 3 will confirm EOF
       }
     }
 
@@ -4170,9 +4255,26 @@ dlc_evaluate_claim:
 dlc_check_boundaries:
   if (claim_count > 1) {
     uint64_t safe_count = claim_count;
+    uint64_t accumulated_lines = 0;
+    
+    // Get the logical target to calculate the overclaim threshold (1.5x)
+    int64_t sbatch = atomic_load_relaxed(&local_state->signed_batch_size);
+    uint64_t target = (sbatch < 0) ? (uint64_t)(-sbatch) : (uint64_t)sbatch;
+    uint64_t overclaim_threshold = (target * 3) / 2;
+
     for (uint64_t i = 0; i < claim_count; i++) {
-      if (local_state->stride_ring[(my_read_idx + i) & RING_MASK] &
-          FLAG_CHUNK_BOUNDARY) {
+      uint16_t stride_val = local_state->stride_ring[(my_read_idx + i) & RING_MASK];
+      accumulated_lines += (stride_val & STRIDE_MASK);
+      
+      // 1. Truncate if we hit a physical chunk boundary
+      if (stride_val & FLAG_CHUNK_BOUNDARY) {
+        safe_count = i + 1;
+        break;
+      }
+      
+      // 2. Truncate if we significantly overshot the logical line count
+      // (Ensure i > 0 so we always process at least 1 slot)
+      if (i > 0 && accumulated_lines > overclaim_threshold) {
         safe_count = i + 1;
         break;
       }
@@ -4194,6 +4296,7 @@ dlc_check_boundaries:
       } else if (ew == sizeof(ep)) {
         uint64_t one = 1;
         sys_write(evfd_data_arr[my_numa_node], &one, 8);
+        // Signal the continuous drain to pick this up on the next claim.
         tl_drain_escrow = true;
       }
 
@@ -4201,12 +4304,15 @@ dlc_check_boundaries:
     }
   }
 
-  // Populate output struct
+  // Populate output struct (no Bash variable side-effects below this line)
   uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK];
-  uint64_t end = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
+  uint64_t end   = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
 
-  out->idx = my_read_idx;
-  out->cnt = claim_count;
+  // The number of ring slots claimed is ALWAYS the logical line/chunk count
+  __atomic_fetch_add(&local_state->total_lines_consumed, claim_count, __ATOMIC_SEQ_CST);
+
+  out->idx    = my_read_idx;
+  out->cnt    = claim_count;
   out->num_kills = current_kills;
   out->offset = start;
   out->length = end - start;
@@ -4223,125 +4329,20 @@ dlc_check_boundaries:
     out->minor = 0;
   }
 
-  __atomic_fetch_add(&local_state->total_lines_consumed, claim_count, __ATOMIC_SEQ_CST);
-
   return 0;
 }
 
-// ---------------------------------------------------------
-// ring_exec: Ultra-fast path for external binaries
-// ---------------------------------------------------------
-// Superscalar prefetch pipeline:
-//   ring_claim  → commits prefetched_batch to TLS globals (or blocks for N)
-//   ring_exec   → (a) tokenizes N (or skips if pre-tokenized),
-//                 (b) spawns child N,
-//                 (c) non-blocking claims N+1 while child runs,
-//                 (d) pre-tokenizes N+1 (overwriting tls_argv safely),
-//                 (e) waits for child N,
-//                 (f) shadow-orphan-rescues N+1 if child N failed.
-static int ring_exec_main(int argc, char **argv) {
-    if (argc < 5) return EXECUTION_FAILURE;
-
-    int fd = atoi(argv[1]);
-    size_t length = (size_t)atoll(argv[2]);
-    char delim = argv[3][0];
-    int fixed_argc = argc - 4;
-
-    if (tls_argv_cap < (size_t)(fixed_argc + 1024)) {
-        tls_argv_cap = fixed_argc + 1024;
-        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-        if (!new_argv) return EXECUTION_FAILURE;
-        tls_argv = new_argv;
-    }
-
-    for (int i = 0; i < fixed_argc; i++) {
-        tls_argv[i] = argv[4 + i];
-    }
-
-    // 1. TOKENIZE BATCH N (If not already done by the prefetcher)
-    if (!prefetch_tokens_ready) {
-        size_t batch_argc = 0;
-        int tok = do_tokenize(fd, length, tls_batch_offset, delim, NULL, fixed_argc, &batch_argc);
-        if (tok != EXECUTION_SUCCESS) return tok;
-        tls_argv[fixed_argc + batch_argc] = NULL;
-    } else {
-        // Perfect cache hit — bypass tokenization entirely.
-        prefetch_tokens_ready = false;
-    }
-
-    // 2. SHIELD AGAINST BASH'S JOB CONTROL (Block SIGCHLD)
-    sigset_t set, oset;
-    sigemptyset(&set);
-    sigaddset(&set, SIGCHLD);
-    sigprocmask(SIG_BLOCK, &set, &oset);
-
-    // 3. SPAWN CHILD N (returns immediately; child runs concurrently)
-    pid_t pid;
-    int ret = posix_spawnp(&pid, tls_argv[0], NULL, NULL, tls_argv, environ);
-
-    // 4. THE LATENCY HIDING OVERLAP (Fetch N+1)
-    if (ret == 0 && state && !atomic_load_relaxed(&state[0].emergency_abort)) {
-        // Use non-blocking mode: if the ring is empty, gracefully fall back to zero overhead
-        if (do_lockfree_claim(&prefetched_batch, false) == 0) {
-            have_prefetch = true;
-            // Pre-tokenize N+1 directly into tls_argv.
-            // Safe because posix_spawnp already copied argv into the child's address space.
-            size_t next_argc = 0;
-            if (do_tokenize(fd, prefetched_batch.length, (off_t)prefetched_batch.offset,
-                            delim, NULL, fixed_argc, &next_argc) == EXECUTION_SUCCESS) {
-                tls_argv[fixed_argc + next_argc] = NULL;
-                prefetch_tokens_ready = true;
-            }
-        }
-    }
-
-    // 5. WAIT FOR CHILD N
-    int status = 0;
-    if (ret == 0) {
-        while (waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) { ret = -1; break; }
-        }
-    }
-
-    sigprocmask(SIG_SETMASK, &oset, NULL);
-
-    // 6. THE SHADOW ORPHAN RESCUE
-    bool child_failed = (ret != 0) ||
-                        (WIFEXITED(status) && WEXITSTATUS(status) != 0) ||
-                        WIFSIGNALED(status);
-
-    if (child_failed && have_prefetch) {
-        int node = (my_numa_node >= 0) ? my_numa_node : 0;
-        if (fd_escrow_w && fd_escrow_w[node] >= 0) {
-            struct EscrowPacket ep = {
-                .idx       = prefetched_batch.idx,
-                .cnt       = prefetched_batch.cnt,
-                .num_kills = 0 // Must be 0 for the orphaned batch!
-            };
-            ssize_t ew;
-            do {
-                ew = write(fd_escrow_w[node], &ep, sizeof(ep));
-            } while (ew < 0 && errno == EINTR);
-            if (ew == sizeof(ep)) {
-                uint64_t one = 1;
-                sys_write(evfd_data_arr[node], &one, 8);
-                tl_drain_escrow = true;
-            }
-        }
-        have_prefetch = false;
-        prefetch_tokens_ready = false;
-    }
-
-    if (ret != 0) return EXECUTION_FAILURE;
-    if (WIFEXITED(status)) return (WEXITSTATUS(status) == 0) ? EXECUTION_SUCCESS : WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-    return EXECUTION_FAILURE;
-}
-
-// ring_claim: Superscalar-aware batch claim with prefetch consumption.
-// If a prefetched batch is available from the previous ring_exec overlap,
-// consumes it directly. Otherwise, calls do_lockfree_claim synchronously.
-// All Bash variable bindings are centralized here.
+// Workers Claiming Data (Inertial Particles):
+// The fast path is a single lock-free `atomic_fetch_add` to claim a batch of
+// records. There are NO CAS retry loops on the fast path. If a worker
+// overshoots and claims records that haven't arrived yet (inertia), it
+// processes the available ones and deposits the remainder into an escrow pipe
+// for other idle workers to steal. Escrow is pure advisory capability; forward
+// progress is guaranteed by strictly monotonic indices.
+//
+// This function is now a thin wrapper: do_lockfree_claim handles all ring
+// physics, and this function handles NUMA init, the SIGPIPE shield, and all
+// Bash variable bindings.
 static int ring_claim_main(int argc, char **argv) {
   const char *v_target = "REPLY";
 
@@ -4379,14 +4380,18 @@ static int ring_claim_main(int argc, char **argv) {
 
   // --- UNIVERSAL SIGPIPE / TEARDOWN SHIELD ---
   if (state) {
+      // 1. Did someone else pull the fire alarm? (e.g., ring_order, or Fallow dying)
       if (atomic_load_relaxed(&state[0].emergency_abort)) {
           return EXECUTION_FAILURE;
       }
 
+      // 2. Sentry duty: Check if stdout is broken (Crucial for -u realtime mode)
+      // We only poll every 64 claims to ensure absolute zero overhead on the fast path.
       static __thread int claim_calls = 0;
       if ((claim_calls++ & 63) == 0) {
           struct pollfd pfd_stdout = {.fd = 1, .events = POLLOUT};
           if (poll(&pfd_stdout, 1, 0) > 0 && (pfd_stdout.revents & (POLLERR | POLLHUP))) {
+              // The downstream pipe was cut (e.g., head -n 5). Pull the fire alarm!
               pull_fire_alarm();
               return EXECUTION_FAILURE;
           }
@@ -4395,34 +4400,25 @@ static int ring_claim_main(int argc, char **argv) {
   // -------------------------------------------
 
   struct WorkerBatchState batch;
-  int rc;
-
-  if (have_prefetch) {
-    // Consume the prefetched batch from the previous ring_exec overlap
-    batch = prefetched_batch;
-    have_prefetch = false;
-    rc = 0;
-  } else {
-    // Synchronous blocking claim
-    rc = do_lockfree_claim(&batch, true);
-  }
-
+  int rc = do_lockfree_claim(&batch, true);
   if (rc != 0) return rc;
 
   // --- Publish metadata to TLS globals ---
-  worker_last_idx = batch.idx;
-  worker_last_cnt = batch.cnt;
+  worker_last_idx       = batch.idx;
+  worker_last_cnt       = batch.cnt;
   worker_last_num_kills = batch.num_kills;
-  worker_last_major = batch.major;
-  worker_last_minor = batch.minor;
-  tls_batch_offset = (off_t)batch.offset;
+  worker_last_major     = batch.major;
+  worker_last_minor     = batch.minor;
+  tls_batch_offset      = (off_t)batch.offset;
 
   // --- Bind the byte-length to the target Bash variable ---
   char buf[64];
   u64toa(batch.length, buf);
   bind_var_or_array(v_target, buf, 0);
 
-  // --- Export escrow/poison metadata if this was a recycled batch ---
+  // --- Export retry/poison metadata only for recycled (escrow) batches ---
+  // For fresh batches (num_kills == 0) these variables retain their previous
+  // values; the Bash layer only inspects them after a non-zero retry count.
   if (batch.num_kills > 0) {
     snprintf(buf, sizeof(buf), "%u", batch.num_kills);
     bind_variable("RING_NUM_KILLS", buf, 0);
@@ -4430,10 +4426,12 @@ static int ring_claim_main(int argc, char **argv) {
     u64toa(batch.idx, buf);
     bind_variable("RING_BATCH_IDX", buf, 0);
 
-    int limit = 3;
+    int limit = 3; // Default to 3 retries
     const char *s_lim = get_string_value("FORKRUN_RETRY_LIMIT");
     if (s_lim) limit = atoi(s_lim);
 
+    // limit < 0  → infinite retries (never poison)
+    // limit >= 0 → poison when kill count reaches the limit
     if (limit >= 0 && batch.num_kills >= (uint32_t)limit) {
       bind_variable("RING_POISONED", "1", 0);
     } else {
