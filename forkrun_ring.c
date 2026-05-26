@@ -1859,7 +1859,7 @@ static int ring_init_main(int argc, char **argv) {
 
     state[n].cfg_w_start = w_start_balanced;
     state[n].cfg_w_max = w_max_balanced;
-    state[n].speculative_max_claim = (w_max_balanced > 8) ? 8 : (uint32_t)w_max_balanced;
+    state[n].speculative_max_claim = ((2 * w_max_balanced) > 8) ? 8 : (uint32_t)(2 * w_max_balanced);
     state[n].mode_byte = byte_mode ? 1 : 0;
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
     state[n].exact_lines = parsed_exact_lines;
@@ -4050,25 +4050,20 @@ dlc_restart_loop:
       claim_count = 1;
 
       // UPDATED TWEAK: Bypasses slow path if r_pow is lagging by only 1 level
-      if (__builtin_expect(r_pow + 1 < w_pow, 0)) {
+      if (__builtin_expect(r_pow != w_pow, 0)) {
 
         // Slow path: geometric ramp-up.
-        // Claim up to 2^(w_pow-r_pow) slots — one "tier" of doublings —
-        // but never past the next doubling boundary and (in NUMA mode) never > 8.
+        // Claim up to 2^(w_pow-r_pow) slots, capped at min(8, 2 * max_workers)
         uint8_t diff = w_pow - r_pow;
         uint64_t spec = (diff < 63) ? (1ULL << diff) : (uint64_t)UINT32_MAX;
 
-        if (local_state->numa_enabled && spec > 8)
-          spec = 8;
-
-        // Clamp to boundary: ring_pow2[r_pow] is the scan_idx where doubling r_pow
-        // occurred; workers must not cross it without first CAS-promoting read_pow2.
-        uint64_t boundary = local_state->ring_pow2[r_pow];
-        if (boundary > r_curr) {
-          uint64_t dist = boundary - r_curr;
-          if (dist < spec) spec = dist;
+        uint64_t max_spec = local_state->speculative_max_claim;
+        if (spec > max_spec) {
+            spec = max_spec;
         }
-        if (spec > 1) claim_count = spec;
+        if (spec > 1) {
+            claim_count = spec;
+        }
       }
 
       if (r_curr + claim_count > w_snap)
@@ -4081,7 +4076,7 @@ dlc_restart_loop:
       // that our claim crossed.  Self-correcting: if a concurrent worker already
       // advanced read_pow2 past our boundary, expected is refreshed and we re-check.
       // UPDATED TWEAK: Bypasses slow path if r_pow is lagging by only 1 level
-      if (__builtin_expect(r_pow + 1 < w_pow, 0)) {
+      if (__builtin_expect(r_pow != w_pow, 0)) {
         uint64_t claim_end = my_read_idx + claim_count;
         uint8_t curr_pow = __atomic_load_n(&local_state->read_pow2, __ATOMIC_ACQUIRE);
         uint8_t wp_snap  = __atomic_load_n(&local_state->write_pow2, __ATOMIC_ACQUIRE);
