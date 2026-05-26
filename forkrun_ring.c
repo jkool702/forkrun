@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.2.1
+// forkrun_ring.c v3.2.2
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -312,7 +312,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.2.1"
+#define FORKRUN_RING_VERSION "v3.2.2"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -329,14 +329,9 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
   __atomic_compare_exchange_n(ptr, exp, des, 0, __ATOMIC_ACQ_REL,              \
                               __ATOMIC_RELAXED)
 
-#define PUBLISH_BATCH_SIZE(ptr, new_L) do {                                    \
-    uint64_t _r_idx = atomic_load_relaxed(&(ptr)->read_idx);                   \
-    uint16_t _cur_stride = (ptr)->stride_ring[_r_idx & RING_MASK];             \
-    int64_t _abs = _cur_stride ? _cur_stride : 1;                              \
-    atomic_store_release(&(ptr)->batch_change_idx, local_scan_idx);            \
-    atomic_store_release(&(ptr)->signed_batch_size,                            \
-        ((int64_t)(new_L) >= _abs * 2) ? -(int64_t)(new_L) : (int64_t)(new_L)); \
-} while(0)
+// PUBLISH_BATCH_SIZE removed in v3.2.2: replaced by ring_pow2 doubling records.
+// In steady state (read_pow2 == write_pow2), workers claim 1 slot per atomic_fetch_add
+// with no per-claim signalling overhead. Batch size changes are invisible to workers.
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -1219,13 +1214,16 @@ struct SharedState {
   uint8_t fallow_active;
   uint8_t ingest_complete;
   uint8_t emergency_abort;
+  // ring_pow2 state machine (v3.2.2): bimodal slow/fast claim path.
+  // write_pow2 is advanced by the scanner each time L doubles during ramp-up.
+  // read_pow2 is advanced by workers (via CAS) as they consume past each boundary.
+  // Steady state: read_pow2 == write_pow2 → workers hit the unconditional fast path.
+  uint8_t read_pow2;
+  uint8_t write_pow2;
 
   uint32_t indexer_waiters ALIGNED(CACHE_LINE);
   uint32_t meta_waiters ALIGNED(CACHE_LINE);
   uint64_t min_idx;
-
-  int64_t signed_batch_size;
-  uint64_t batch_change_idx;
 
   uint64_t cfg_w_start ALIGNED(CACHE_LINE);
   uint64_t cfg_w_max;
@@ -1248,7 +1246,13 @@ struct SharedState {
   uint64_t stats_chunks_i_stole;
   uint64_t stats_chunks_stolen_from_me;
 
-  uint16_t stride_ring[RING_SIZE] ALIGNED(4096);
+  // ring_pow2[k] = local_scan_idx at which the k-th batch size doubling occurred.
+  // Sized for fast_log2(MAX_BATCH_LINES-1)+1 ~ 15 slots; 64 handles arbitrarily
+  // large user-configured Lmax values with room to spare.
+  uint64_t ring_pow2[64] ALIGNED(CACHE_LINE);
+
+  // stride_ring removed in v3.2.2: its only consumers were PUBLISH_BATCH_SIZE and
+  // the UMA tail L_tail sum, both of which are eliminated by ring_pow2.
   uint8_t boundary_ring[RING_SIZE + 8] ALIGNED(4096);
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
@@ -1689,12 +1693,10 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].meta_waiters, 0);
 
       // Reset PID Controller / Flow State
-      atomic_store_relaxed(&state[n].batch_change_idx, 0);
       atomic_store_relaxed(&state[n].active_workers, state[n].cfg_w_start);
-      if (state[n].mode_byte)
-        atomic_store_relaxed(&state[n].signed_batch_size, 1);
-      else
-        atomic_store_relaxed(&state[n].signed_batch_size, (int64_t)state[n].cfg_batch_start);
+      // v3.2.2: reset ring_pow2 bimodal claim state machine
+      atomic_store_relaxed(&state[n].read_pow2, 0);
+      atomic_store_relaxed(&state[n].write_pow2, 0);
 
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
@@ -1883,12 +1885,11 @@ static int ring_init_main(int argc, char **argv) {
 
     state[n].fixed_workers = (state[n].cfg_w_start == state[n].cfg_w_max);
     state[n].fixed_batch = (state[n].cfg_batch_start == state[n].cfg_batch_max);
-
-    if (byte_mode)
-      atomic_store_relaxed(&state[n].signed_batch_size, 1);
-    else
-      atomic_store_relaxed(&state[n].signed_batch_size,
-                           (int64_t)state[n].cfg_batch_start);
+    // v3.2.2: read_pow2 and write_pow2 start at 0 (equal → fast path from the
+    // beginning; scanner advances write_pow2 as L doubles during ramp-up).
+    // memset already zeroed these fields; explicit stores here for documentation.
+    atomic_store_relaxed(&state[n].read_pow2, 0);
+    atomic_store_relaxed(&state[n].write_pow2, 0);
 
     // Dynamic Topology-Aware Steal Thresholds from ACPI SRAT Table
     uint32_t phys_n = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
@@ -2777,7 +2778,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
  * 1. Slot-based wrap-around shield boundary is hit (applies to BOTH UMA and NUMA)
  * 2. Chunk-based memory shield boundary is hit (applies ONLY to NUMA)
  */
-#define UNIFIED_SCANNER_FLUSH(_cnt_val, _stride_val, _is_last, _maj_id,        \
+#define UNIFIED_SCANNER_FLUSH(_cnt_val, _is_last, _maj_id,                     \
                               _minor_val, _batch_end_offset, _out_skipped)     \
   do {                                                                         \
     _out_skipped = false;                                                      \
@@ -2850,8 +2851,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }                                                                          \
     uint64_t pk = (uint64_t)batch_start;                                       \
     if (is_numa) {                                                             \
-      uint16_t _sv = (uint16_t)((_stride_val) > 65535 ? 65535 : (_stride_val));\
-      local_state->stride_ring[local_scan_idx & RING_MASK] = _sv;              \
       uint8_t b_val = (_is_last) ? 1 : 0;                                      \
       local_state->boundary_ring[local_scan_idx & RING_MASK] = b_val;          \
       if ((local_scan_idx & RING_MASK) < 8) {                                  \
@@ -2863,8 +2862,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
           (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
     } else {                                                                   \
-      uint16_t _sv = (uint16_t)((_cnt_val) > 65535 ? 65535 : (_cnt_val));      \
-      local_state->stride_ring[local_scan_idx & RING_MASK] = _sv;              \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
     }                                                                          \
@@ -2918,7 +2915,16 @@ static int ring_indexer_numa_main(int argc, char **argv) {
               atomic_store_relaxed(&(state_ptr)->active_workers, W);           \
             }                                                                  \
           }                                                                    \
-          PUBLISH_BATCH_SIZE(state_ptr, L);                                    \
+          // v3.2.2: Record this batch-size doubling boundary in ring_pow2.
+          // Workers observing read_pow2 < write_pow2 will multi-claim up to
+          // ring_pow2[read_pow2]-read_idx slots and then CAS-promote read_pow2.
+          {                                                                     \
+            uint8_t _wp = atomic_load_relaxed(&(state_ptr)->write_pow2);       \
+            if (_wp < 64) {                                                    \
+              (state_ptr)->ring_pow2[_wp] = local_scan_idx;                    \
+              atomic_store_release(&(state_ptr)->write_pow2, _wp + 1);         \
+            }                                                                  \
+          }                                                                    \
           batch_counter = 0;                                                   \
         }                                                                      \
       }                                                                        \
@@ -2986,16 +2992,16 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           _l_target = Lmax;                                                    \
         if (_l_target < 1)                                                     \
           _l_target = 1;                                                       \
+        // v3.2.2: In steady state workers claim 1 slot/op regardless of L.
+        // L is updated here to tune scanner batch size only; no publish needed.
         if (_l_target > L) {                                                   \
           L = _l_target;                                                       \
-          PUBLISH_BATCH_SIZE(state_ptr, L);                                    \
         } else if (_l_target < L &&                                            \
                    starve_meter >= (W + DAMPING_OFFSET - 3) &&                 \
                    stall_meter >= (W + DAMPING_OFFSET - 3)) {                  \
           L = (L + _l_target) / 2;                                             \
           if (L < 1)                                                           \
             L = 1;                                                             \
-          PUBLISH_BATCH_SIZE(state_ptr, L);                                    \
           starve_meter = 0;                                                    \
           stall_meter = 0;                                                     \
         }                                                                      \
@@ -3323,7 +3329,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
         bool _skipped = false;
-        UNIFIED_SCANNER_FLUSH(0, 0, true, meta->major_id, 0, actual_start,
+        UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, 0, actual_start,
                               _skipped);
         if (is_numa) {
           if (!_skipped) {
@@ -3519,12 +3525,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             pending_lines = 0;
 
           bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
-          uint32_t stride =
-              is_numa ? (uint32_t)(current_p_offset - batch_start) : 1;
           uint32_t cv = is_numa ? take : 1;
 
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(cv, stride, is_last,
+          UNIFIED_SCANNER_FLUSH(cv, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
@@ -3704,10 +3708,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           bool is_last = is_numa
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
-          uint32_t stride = is_numa ? (uint32_t)(current_p_offset - batch_start) : 0;
-
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(pending_lines, stride, is_last,
+          UNIFIED_SCANNER_FLUSH(pending_lines, is_last,
                                 is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
@@ -3734,9 +3736,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     if (is_numa && !chunk_eof_flushed) {
-      uint32_t stride = (uint32_t)(current_p_offset - batch_start);
       bool _skipped = false;
-      UNIFIED_SCANNER_FLUSH(pending_lines, stride, true, meta->major_id,
+      UNIFIED_SCANNER_FLUSH(pending_lines, true, meta->major_id,
                             minor_idx, current_p_offset, _skipped);
       minor_idx++;
       if (!_skipped) {
@@ -3788,9 +3789,9 @@ unified_scanner_eof:
   }
 
   if (is_numa) {
-    if (!byte_mode && !fixed_batch) {
-      PUBLISH_BATCH_SIZE(local_state, Lmax);
-    }
+    // v3.2.2: No PUBLISH_BATCH_SIZE needed at EOF. Once write_pow2 stops advancing,
+    // workers drain read_pow2 up to write_pow2 via the CAS loop and then permanently
+    // enter the fast path (claim_count == 1).
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
 
@@ -3804,6 +3805,21 @@ unified_scanner_eof:
     bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
 
     if (!byte_mode && !limit_hit && !atomic_load_relaxed(&state[0].emergency_abort)) {
+      // v3.2.2 tail: Force-commit all locally-written ring slots before computing
+      // L_tail.  This eliminates the old stride_ring sum over [local_write_idx,
+      // local_scan_idx) by ensuring local_write_idx == local_scan_idx here.
+      atomic_store_release(&local_state->write_idx, local_scan_idx);
+      local_write_idx = local_scan_idx;
+      __atomic_thread_fence(__ATOMIC_SEQ_CST);
+      uint32_t _aw_tail = atomic_load_acquire(&local_state->active_waiters);
+      if (_aw_tail > 0) {
+        uint64_t _v_tail = _aw_tail;
+        sys_write(evfd_eof_arr[0], &_v_tail, 8);
+      }
+
+      // L_tail = lines pending in current batch (not yet in a ring slot)
+      //        + lines remaining in the current read buffer (not yet scanned)
+      // Lines in already-committed ring slots are counted separately by workers.
       uint64_t L_tail = pending_lines;
       char *p_scan = p;
 
@@ -3818,10 +3834,7 @@ unified_scanner_eof:
           break;
         }
       }
-      if (local_scan_idx > local_write_idx) {
-        for (uint64_t i = local_write_idx; i < local_scan_idx; i++)
-          L_tail += state[0].stride_ring[i & RING_MASK];
-      }
+      // No stride_ring sum needed: force-commit above ensures no uncommitted slots.
 
       uint64_t tail_start_offset =
           (local_scan_idx > local_write_idx)
@@ -3906,7 +3919,7 @@ unified_scanner_eof:
         if (lines_found > 0) {
           uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(lines_found, 0, false, 0, 0, current_p_offset,
+          UNIFIED_SCANNER_FLUSH(lines_found, false, 0, 0, current_p_offset,
                                 _skipped);
           batch_start = current_p_offset;
           L_tail_done += lines_found;
@@ -3917,19 +3930,11 @@ unified_scanner_eof:
 
 tail_abort:
     uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
-    local_state->stride_ring[local_scan_idx & RING_MASK] = 0;
     local_state->offset_ring[local_scan_idx & RING_MASK] =
         (uint64_t)final_sentinel;
     local_state->end_ring[local_scan_idx & RING_MASK] =
         (uint64_t)final_sentinel;
     local_scan_idx++;
-
-    // Ensure batch size is positive so workers claim 1 at a time in tail
-    {
-      int64_t _sb = atomic_load_relaxed(&local_state->signed_batch_size);
-      if (_sb < 0)
-        atomic_store_release(&local_state->signed_batch_size, -_sb);
-    }
 
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
@@ -4038,26 +4043,31 @@ dlc_restart_loop:
     uint64_t r_curr = atomic_load_relaxed(&local_state->read_idx);
 
     if (r_curr < w_snap) {
-      int64_t sbatch = atomic_load_relaxed(&local_state->signed_batch_size);
+      // v3.2.2 bimodal fast/slow claim path.
+      // Fast path (steady state):  read_pow2 == write_pow2  → claim exactly 1.
+      // Slow path (ramp-up phase): read_pow2  < write_pow2  → multi-slot speculative claim.
+      uint8_t r_pow = atomic_load_relaxed(&local_state->read_pow2);
+      uint8_t w_pow = atomic_load_relaxed(&local_state->write_pow2);
       claim_count = 1;
-      if (sbatch < 0) {
-        uint64_t t_start = atomic_load_acquire(&local_state->tail_idx);
-        if (t_start != 0 && r_curr >= t_start) {
-          claim_count = 1;
-          int64_t abs_L = -sbatch;
-          atomic_store_relaxed(&local_state->signed_batch_size, abs_L);
-        } else {
-          uint32_t cur_stride = local_state->stride_ring[r_curr & RING_MASK];
-          if (cur_stride == 0) cur_stride = 1;
-          
-          claim_count = (uint64_t)(-sbatch) / cur_stride;
-          
-          if (claim_count < 1) {
-              claim_count = 1;
-          } else if (claim_count > local_state->speculative_max_claim) {
-              claim_count = local_state->speculative_max_claim;
-          }
+
+      if (__builtin_expect(r_pow != w_pow, 0)) {
+        // Slow path: geometric ramp-up.
+        // Claim up to 2^(w_pow-r_pow) slots — one "tier" of doublings —
+        // but never past the next doubling boundary and (in NUMA mode) never > 8.
+        uint8_t diff = w_pow - r_pow;
+        uint64_t spec = (diff < 63) ? (1ULL << diff) : (uint64_t)UINT32_MAX;
+
+        if (local_state->numa_enabled && spec > 8)
+          spec = 8;
+
+        // Clamp to boundary: ring_pow2[r_pow] is the scan_idx where doubling r_pow
+        // occurred; workers must not cross it without first CAS-promoting read_pow2.
+        uint64_t boundary = local_state->ring_pow2[r_pow];
+        if (boundary > r_curr) {
+          uint64_t dist = boundary - r_curr;
+          if (dist < spec) spec = dist;
         }
+        if (spec > 1) claim_count = spec;
       }
 
       if (r_curr + claim_count > w_snap)
@@ -4066,18 +4076,26 @@ dlc_restart_loop:
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
                                        __ATOMIC_SEQ_CST);
 
-      if (!local_state->numa_enabled) {
-        int64_t sbatch_check =
-            atomic_load_relaxed(&local_state->signed_batch_size);
-        if (sbatch_check < 0) {
-          uint64_t Ib = atomic_load_relaxed(&local_state->batch_change_idx);
-          if (my_read_idx > Ib) {
-            int64_t target = -sbatch_check;
-            atomic_compare_exchange(&local_state->signed_batch_size,
-                                    &sbatch_check, target);
+      // CAS promotion loop: advance read_pow2 past every doubling boundary
+      // that our claim crossed.  Self-correcting: if a concurrent worker already
+      // advanced read_pow2 past our boundary, expected is refreshed and we re-check.
+      if (__builtin_expect(r_pow != w_pow, 0)) {
+        uint64_t claim_end = my_read_idx + claim_count;
+        uint8_t curr_pow = __atomic_load_n(&local_state->read_pow2, __ATOMIC_ACQUIRE);
+        uint8_t wp_snap  = __atomic_load_n(&local_state->write_pow2, __ATOMIC_ACQUIRE);
+        while (curr_pow < wp_snap && local_state->ring_pow2[curr_pow] <= claim_end) {
+          uint8_t expected = curr_pow;
+          uint8_t desired  = curr_pow + 1;
+          if (__atomic_compare_exchange_n(&local_state->read_pow2,
+                                          &expected, desired, false,
+                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            curr_pow = desired;
+          } else {
+            curr_pow = expected; // CAS failed: expected now holds current memory value
           }
         }
       }
+
       break;
     }
 
