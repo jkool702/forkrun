@@ -332,12 +332,8 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
                               __ATOMIC_RELAXED)
 
 #define PUBLISH_BATCH_SIZE(ptr, new_L) do {                                    \
-    uint64_t _r_idx = atomic_load_relaxed(&(ptr)->read_idx);                   \
-    uint16_t _cur_stride = (ptr)->stride_ring[_r_idx & RING_MASK] & STRIDE_MASK; \
-    int64_t _abs = _cur_stride ? _cur_stride : 1;                              \
     atomic_store_release(&(ptr)->batch_change_idx, local_scan_idx);            \
-    atomic_store_release(&(ptr)->signed_batch_size,                            \
-        ((int64_t)(new_L) >= _abs * 2) ? -(int64_t)(new_L) : (int64_t)(new_L)); \
+    atomic_store_release(&(ptr)->signed_batch_size, (int64_t)(new_L));         \
 } while(0)
 
 #ifndef GIT_HASH
