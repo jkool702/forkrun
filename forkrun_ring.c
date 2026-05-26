@@ -4063,8 +4063,6 @@ dlc_restart_loop:
       if (r_curr + claim_count > w_snap)
         claim_count = w_snap - r_curr;
 
-
-
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
                                        __ATOMIC_SEQ_CST);
 
@@ -4251,15 +4249,32 @@ dlc_check_boundaries:
     memcpy(&flags, &local_state->boundary_ring[my_read_idx & RING_MASK], 8);
     
     // Mask out the bits that are beyond our claim_count
-    // (If claim_count == 8, shifting by 64 is UB, so we use a ternary)
     uint64_t valid_mask = (claim_count == 8) ? ~0ULL : (1ULL << (claim_count * 8)) - 1;
+    
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+    // --- BIG-ENDIAN PATH (s390x, legacy ppc64) ---
+    // On Big-Endian, Byte 0 (lowest address) is at the MSB (bits 56-63).
+    // We mask out the trailing bytes that exceed our claim count by shifting.
+    if (claim_count < 8) {
+        flags &= (valid_mask << (64 - (claim_count * 8)));
+    }
+    
+    if (flags != 0) {
+        // Search from MSB downwards using Count Leading Zeroes
+        uint32_t first_boundary_idx = __builtin_clzll(flags) / 8;
+        safe_count = first_boundary_idx + 1;
+    }
+#else
+    // --- LITTLE-ENDIAN PATH (x86_64, aarch64, ppc64le, riscv64) ---
+    // On Little-Endian, Byte 0 (lowest address) is at the LSB (bits 0-7).
     flags &= valid_mask;
     
     if (flags != 0) {
-        // Find the index of the first boundary (0 to 7)
+        // Search from LSB upwards using Count Trailing Zeroes
         uint32_t first_boundary_idx = __builtin_ctzll(flags) / 8;
         safe_count = first_boundary_idx + 1;
     }
+#endif
     if (safe_count < claim_count) {
       uint64_t remainder = claim_count - safe_count;
       struct EscrowPacket ep = {.idx = my_read_idx + safe_count,
