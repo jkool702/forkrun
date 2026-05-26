@@ -48,56 +48,54 @@ Workers claim ranges, never individual slots. Overshoot handled *after* claim, n
 
 ---
 
-## 4. Signed Batch Size Protocol
+## 4. Signed Batch Size Protocol (Hysteresis & Fast-Path Routing)
 
 **Meaning of Sign**  
-* `batch_size < 0` → **Provisional policy** (scanner may still change its mind)  
-* `batch_size > 0` → **Finalized contract** (matches stream reality)
+* `batch_size < 0` → **Catch-Up / Speculative Mode**. The scanner has geometrically ramped the target batch size (≥ 2x). Workers must speculatively claim multiple older, smaller slots to quickly reach the new magnitude.
+* `batch_size > 0` → **Steady-State / Fast-Path Mode**. The scanner is shrinking the batch size or making PID micro-adjustments (< 2x growth). Workers stay on the lock-free fast path and claim exactly 1 slot.
 
 **Scanner Responsibilities**  
 * May update batch size at any time.  
-* Must **always** publish negative values (`-abs(N)`).  
-* Must never publish a positive batch size.
+* Must publish a **negative** value (`-N`) ONLY if the new target is at least double the absolute value of the current batch size (`N >= 2 * current`).  
+* Must publish a **positive** value (`+N`) for all other adjustments (shrinking, or growing by less than 2x). This introduces hysteresis, shielding workers from PID jitter.
 
 **Worker Responsibilities**  
-* Observe the published (negative) batch size.  
-* May finalize **only** when stream count equals `abs(published_batch_size)`.  
-* Must use **CAS** to flip `-N → +N`.  
-* If CAS fails (scanner changed policy), re-evaluate under new policy.
+* Observe the published batch size.  
+* If positive (`> 0`): Bypass all speculative arithmetic and claim exactly 1 ring slot.
+* If negative (`< 0`): Enter the speculative slow path to calculate how many older slots satisfy the new magnitude. 
+* Must use **CAS** to flip `-N → +N` (finalization) once their `read_idx` successfully crosses the `batch_change_idx` boundary where the new size was published. 
 
 **Forbidden Transitions**  
-* Scanner publishing positive batch size  
-* Worker changing magnitude  
-* Any positive → negative transition  
-* Non-CAS sign flip
+* Worker changing the magnitude.  
+* Any positive → negative transition initiated by a worker.  
+* Non-CAS sign flip by workers (except during explicit Tail Override).
 
 **Correctness Guarantee**  
-Batch size reflects scanner intent until finalized. Finalization occurs exactly once. Scanner policy changes cannot resurrect stale batch sizes.
+Because a worker cannot claim "half a slot," forcing workers into speculative arithmetic when a batch shrinks or slightly grows is a waste of CPU cycles. The signed protocol mathematically guarantees that workers only pay the slow-path cost when a massive geometric ramp actually necessitates combining multiple slots.
 
 ---
 
 ## 5. Tail-Aware Batch Size Rules
 
 **Definition**  
-The tail ramp-down begins at `tail_idx`. Remaining data may not satisfy the current batch size.
+The tail ramp-down begins at `tail_idx` (EOF). Remaining data may not cleanly satisfy the current batch size.
 
 **Scanner Responsibilities**  
 * Must not publish batch sizes that correspond to tail batches.  
-* Once `tail_idx` is established, scanner must not modify batch size.
+* When the tail is reached, the scanner must force the batch size to **positive** (`+N`) so that workers naturally downshift to claiming 1 slot at a time without overshooting.
 
 **Worker Responsibilities at Tail**  
-When `read_idx ≥ tail_idx` and `batch_size < 0`:  
+When `read_idx >= tail_idx` and `batch_size < 0` (e.g., catching a race condition before the scanner's EOF force-flip):  
 1. Finalize immediately (`-N → +N` via CAS).  
 2. Bypass all slow paths (no waiting, no escrow).  
 3. Process exactly one claim using stride metadata.
 
 **Why This Rule Exists**  
-Guarantees exactly one claim per tail batch, no policy leakage, no duplicate claims.
+Guarantees exactly one claim per tail batch, prevents policy leakage, eliminates duplicate claims, and perfectly drains the ring without unnecessary escrow bouncing.
 
 **Forbidden**  
-* Scanner publishing after entering tail  
-* Workers applying ramp-down logic based on batch size  
-* Slow path in tail
+* Scanner publishing batch changes after entering the tail.  
+* Workers applying speculative multi-claim logic in the tail.
 
 **Key Insight**  
 Batch size is a *policy*, not a property of the tail. Once the tail begins, policy ends and structure takes over.
