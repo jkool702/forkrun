@@ -4050,7 +4050,8 @@ dlc_restart_loop:
       claim_count = 1;
 
       // UPDATED TWEAK: Bypasses slow path if r_pow is lagging by only 1 level
-      if (__builtin_expect(r_pow + 1 < w_pow, 0)) {
+      if (__builtin_expect(r_pow != w_pow, 0)) {
+
         // Slow path: geometric ramp-up.
         // Claim up to 2^(w_pow-r_pow) slots, capped at min(8, 2 * max_workers)
         uint8_t diff = w_pow - r_pow;
@@ -4075,7 +4076,7 @@ dlc_restart_loop:
       // that our claim crossed.  Self-correcting: if a concurrent worker already
       // advanced read_pow2 past our boundary, expected is refreshed and we re-check.
       // UPDATED TWEAK: Bypasses slow path if r_pow is lagging by only 1 level
-      if (__builtin_expect(r_pow + 1 < w_pow, 0)) {
+      if (__builtin_expect(r_pow != w_pow, 0)) {
         uint64_t claim_end = my_read_idx + claim_count;
         uint8_t curr_pow = __atomic_load_n(&local_state->read_pow2, __ATOMIC_ACQUIRE);
         uint8_t wp_snap  = __atomic_load_n(&local_state->write_pow2, __ATOMIC_ACQUIRE);
