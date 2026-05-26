@@ -2794,7 +2794,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         } else if (_e_byte <= g_state->resume_horizon) {                       \
             _out_skipped = true;                                               \
         }                                                                      \
-        if (_out_skipped) break; /* Bypasses everything below! */              \
+        if (_out_skipped) break;                                               \
     }                                                                          \
     while (1) {                                                                \
       if (atomic_load_relaxed(&state[0].emergency_abort)) goto unified_scanner_eof; \
@@ -2869,6 +2869,12 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     UNIFIED_ADAPTIVE_COMMIT(false);                                            \
   } while (0)
 
+// v3.2.2: Record this batch-size doubling boundary in ring_pow2.
+// Workers observing read_pow2 < write_pow2 will multi-claim up to
+// ring_pow2[read_pow2]-read_idx slots and then CAS-promote read_pow2.
+//
+// v3.2.2: In steady state workers claim 1 slot/op regardless of L.
+// L is updated here to tune scanner batch size only; no publish needed.
 #define ADAPTIVE_FLOW_CONTROL(state_ptr, is_stalled, _node_id_arg)             \
   do {                                                                         \
     batch_counter++;                                                           \
@@ -2915,10 +2921,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
               atomic_store_relaxed(&(state_ptr)->active_workers, W);           \
             }                                                                  \
           }                                                                    \
-          // v3.2.2: Record this batch-size doubling boundary in ring_pow2.
-          // Workers observing read_pow2 < write_pow2 will multi-claim up to
-          // ring_pow2[read_pow2]-read_idx slots and then CAS-promote read_pow2.
-          {                                                                     \
+          {                                                                    \
             uint8_t _wp = atomic_load_relaxed(&(state_ptr)->write_pow2);       \
             if (_wp < 64) {                                                    \
               (state_ptr)->ring_pow2[_wp] = local_scan_idx;                    \
@@ -2992,8 +2995,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           _l_target = Lmax;                                                    \
         if (_l_target < 1)                                                     \
           _l_target = 1;                                                       \
-        // v3.2.2: In steady state workers claim 1 slot/op regardless of L.
-        // L is updated here to tune scanner batch size only; no publish needed.
         if (_l_target > L) {                                                   \
           L = _l_target;                                                       \
         } else if (_l_target < L &&                                            \
@@ -4047,7 +4048,7 @@ dlc_restart_loop:
       // Fast path (steady state):  read_pow2 == write_pow2  → claim exactly 1.
       // Slow path (ramp-up phase): read_pow2  < write_pow2  → multi-slot speculative claim.
       uint8_t r_pow = atomic_load_relaxed(&local_state->read_pow2);
-      uint8_t w_pow = atomic_load_relaxed(&local_state->write_pow2);
+      uint8_t w_pow = atomic_load_acquire(&local_state->write_pow2);
       claim_count = 1;
 
       if (__builtin_expect(r_pow != w_pow, 0)) {
