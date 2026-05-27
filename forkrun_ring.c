@@ -330,7 +330,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
                               __ATOMIC_RELAXED)
 
 // PUBLISH_BATCH_SIZE removed in v3.2.2: replaced by ring_pow2 doubling records.
-// In steady state (read_pow2 == write_pow2), workers claim 1 slot per atomic_fetch_add
+// In steady state (tls_read_pow2 == write_pow2), workers claim 1 slot per atomic_fetch_add
 // with no per-claim signalling overhead. Batch size changes are invisible to workers.
 
 #ifndef GIT_HASH
@@ -1068,6 +1068,11 @@ static __thread uint64_t tl_remainder_idx = 0;
 static __thread uint64_t tl_remainder_cnt = 0;
 static __thread uint32_t tl_remainder_kills = 0;
 static __thread bool tl_drain_escrow = true;
+// Per-worker state-machine cursor for the ring_pow2 geometric ramp-up.
+// Replaces the global CAS-contended read_pow2 field with zero-contention TLS.
+// Workers read write_pow2/ring_pow2[] (acquire, read-only → S-state in all L1
+// caches) and write only to their own private tls_read_pow2 (never shared).
+static __thread uint8_t tls_read_pow2 = 0;
 
 // ------------------------------------------------------------------
 // WorkerBatchState: Pure value struct returned by do_lockfree_claim.
@@ -1214,11 +1219,11 @@ struct SharedState {
   uint8_t fallow_active;
   uint8_t ingest_complete;
   uint8_t emergency_abort;
-  // ring_pow2 state machine (v3.2.2): bimodal slow/fast claim path.
+  // ring_pow2 state machine (v3.2.2 → v3.2.3+): bimodal slow/fast claim path.
   // write_pow2 is advanced by the scanner each time L doubles during ramp-up.
-  // read_pow2 is advanced by workers (via CAS) as they consume past each boundary.
-  // Steady state: read_pow2 == write_pow2 → workers hit the unconditional fast path.
-  uint8_t read_pow2;
+  // Workers track their own cursor in tls_read_pow2 (TLS), so write_pow2 and
+  // ring_pow2[] stay permanently in the Shared (S) cache state on every core.
+  // Steady state: tls_read_pow2 == write_pow2 → workers hit the fast path.
   uint8_t write_pow2;
 
   uint32_t indexer_waiters ALIGNED(CACHE_LINE);
@@ -1694,8 +1699,7 @@ static int ring_init_main(int argc, char **argv) {
 
       // Reset PID Controller / Flow State
       atomic_store_relaxed(&state[n].active_workers, state[n].cfg_w_start);
-      // v3.2.2: reset ring_pow2 bimodal claim state machine
-      atomic_store_relaxed(&state[n].read_pow2, 0);
+      // Reset ring_pow2 scanner state machine; workers reset tls_read_pow2 at claim time.
       atomic_store_relaxed(&state[n].write_pow2, 0);
 
       state[n].offset_ring[0] = 0;
@@ -1885,10 +1889,8 @@ static int ring_init_main(int argc, char **argv) {
 
     state[n].fixed_workers = (state[n].cfg_w_start == state[n].cfg_w_max);
     state[n].fixed_batch = (state[n].cfg_batch_start == state[n].cfg_batch_max);
-    // v3.2.2: read_pow2 and write_pow2 start at 0 (equal → fast path from the
-    // beginning; scanner advances write_pow2 as L doubles during ramp-up).
-    // memset already zeroed these fields; explicit stores here for documentation.
-    atomic_store_relaxed(&state[n].read_pow2, 0);
+    // write_pow2 starts at 0; scanner advances it as L doubles during ramp-up.
+    // memset already zeroed this field; explicit store here for documentation.
     atomic_store_relaxed(&state[n].write_pow2, 0);
 
     // Dynamic Topology-Aware Steal Thresholds from ACPI SRAT Table
@@ -2870,8 +2872,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   } while (0)
 
 // v3.2.2: Record this batch-size doubling boundary in ring_pow2.
-// Workers observing read_pow2 < write_pow2 will multi-claim up to
-// ring_pow2[read_pow2]-read_idx slots and then CAS-promote read_pow2.
+// Workers observing tls_read_pow2 < write_pow2 will multi-claim up to
+// 2^(write_pow2 - tls_read_pow2) slots; tls_read_pow2 is advanced locally
+// (no CAS) via catch-up + eager advance in do_lockfree_claim.
 //
 // v3.2.2: In steady state workers claim 1 slot/op regardless of L.
 // L is updated here to tune scanner batch size only; no publish needed.
@@ -2925,7 +2928,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             uint8_t _wp = atomic_load_relaxed(&(state_ptr)->write_pow2);       \
             if (_wp < 64) {                                                    \
               (state_ptr)->ring_pow2[_wp] = local_scan_idx;                    \
-              atomic_store_release(&(state_ptr)->write_pow2, _wp);         \
+              atomic_store_release(&(state_ptr)->write_pow2, _wp + 1);         \
             }                                                                  \
           }                                                                    \
           batch_counter = 0;                                                   \
@@ -3788,9 +3791,9 @@ unified_scanner_eof:
   }
 
   if (is_numa) {
-    // v3.2.2: No PUBLISH_BATCH_SIZE needed at EOF. Once write_pow2 stops advancing,
-    // workers drain read_pow2 up to write_pow2 via the CAS loop and then permanently
-    // enter the fast path (claim_count == 1).
+    // v3.2.2+: No PUBLISH_BATCH_SIZE needed at EOF. Once write_pow2 stops advancing,
+    // workers' tls_read_pow2 catch-up loop fully converges on the next claim and
+    // they permanently enter the fast path (claim_count == 1).
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
 
@@ -4042,55 +4045,64 @@ dlc_restart_loop:
     uint64_t r_curr = atomic_load_relaxed(&local_state->read_idx);
 
     if (r_curr < w_snap) {
-      // v3.2.2 bimodal fast/slow claim path.
-      // Fast path (steady state):  read_pow2 == write_pow2  → claim exactly 1.
-      // Slow path (ramp-up phase): read_pow2  < write_pow2  → multi-slot speculative claim.
-      uint8_t r_pow = atomic_load_relaxed(&local_state->read_pow2);
+      // v3.2.3+ TLS-local bimodal fast/slow claim path.
+      //
+      // write_pow2 and ring_pow2[] are written only by the scanner (release
+      // store) and read here under acquire.  Because no worker ever writes
+      // these fields, they sit permanently in the Shared (S) cache state on
+      // every core — zero cross-core invalidations.
+      //
+      // tls_read_pow2 is private to this worker: no CAS, no coherence traffic.
+      //
+      // Memory-ordering guarantee: the acquire load of write_pow2 creates a
+      // happens-before edge that covers all preceding plain writes to
+      // ring_pow2[] (paired with the scanner's release store), so the plain
+      // reads of ring_pow2[tls_read_pow2] below are safe.
+
       uint8_t w_pow = atomic_load_acquire(&local_state->write_pow2);
-      claim_count = 1;
 
-      // UPDATED TWEAK: Bypasses slow path if r_pow is lagging by only 1 level
-      if (__builtin_expect(r_pow != w_pow, 0)) {
+      // SAFETY CLAMP: guard against stale tls_read_pow2 from a prior
+      // invocation (in the common case of fresh worker forks this never
+      // fires, but keeps us correct if workers are ever recycled).
+      if (__builtin_expect(tls_read_pow2 > w_pow, 0))
+        tls_read_pow2 = 0;
 
-        // Slow path: geometric ramp-up.
-        // Claim up to 2^(w_pow-r_pow) slots, capped at min(8, 2 * max_workers)
-        uint8_t diff = w_pow - r_pow;
-        uint64_t spec = (diff < 63) ? (1ULL << diff) : (uint64_t)UINT32_MAX;
-
-        uint64_t max_spec = local_state->speculative_max_claim;
-        if (spec > max_spec) {
-            spec = max_spec;
-        }
-        if (spec > 1) {
-            claim_count = spec;
-        }
+      // CATCH-UP: fast-forward our local cursor to global progress.
+      // If this worker was preempted or is a late starter, this instantly
+      // advances tls_read_pow2 past any doubling boundaries that r_curr has
+      // already consumed — zero CAS, purely read-only shared state.
+      while (tls_read_pow2 < w_pow &&
+             local_state->ring_pow2[tls_read_pow2] <= r_curr) {
+        tls_read_pow2++;
       }
 
-      if (r_curr + claim_count > w_snap)
-        claim_count = w_snap - r_curr;
+      claim_count = 1;
+      if (__builtin_expect(tls_read_pow2 < w_pow, 0)) {
+        // Slow path: geometric ramp-up.
+        // Claim up to 2^(w_pow - tls_read_pow2) slots, capped by
+        // speculative_max_claim and the number of actually available slots.
+        uint8_t diff = w_pow - tls_read_pow2;
+        uint64_t spec = (diff < 63) ? (1ULL << diff) : (uint64_t)UINT32_MAX;
+        if (spec > local_state->speculative_max_claim)
+          spec = local_state->speculative_max_claim;
+        uint64_t avail = w_snap - r_curr;
+        if (spec > avail)
+          spec = avail;
+        if (spec > 1)
+          claim_count = spec;
+      }
 
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
                                        __ATOMIC_SEQ_CST);
 
-      // CAS promotion loop: advance read_pow2 past every doubling boundary
-      // that our claim crossed.  Self-correcting: if a concurrent worker already
-      // advanced read_pow2 past our boundary, expected is refreshed and we re-check.
-      // UPDATED TWEAK: Bypasses slow path if r_pow is lagging by only 1 level
-      if (__builtin_expect(r_pow != w_pow, 0)) {
-        uint64_t claim_end = my_read_idx + claim_count;
-        uint8_t curr_pow = __atomic_load_n(&local_state->read_pow2, __ATOMIC_ACQUIRE);
-        uint8_t wp_snap  = __atomic_load_n(&local_state->write_pow2, __ATOMIC_ACQUIRE);
-        while (curr_pow < wp_snap && local_state->ring_pow2[curr_pow] <= claim_end) {
-          uint8_t expected = curr_pow;
-          uint8_t desired  = curr_pow + 1;
-          if (__atomic_compare_exchange_n(&local_state->read_pow2,
-                                          &expected, desired, false,
-                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            curr_pow = desired;
-          } else {
-            curr_pow = expected; // CAS failed: expected now holds current memory value
-          }
-        }
+      // EAGER ADVANCE: advance our cursor past every boundary our claim crossed.
+      // This primes the next iteration: if we consumed the last slots before a
+      // doubling boundary, the next claim sees tls_read_pow2 already at w_pow
+      // and takes the fast path immediately.
+      uint64_t claim_end = my_read_idx + claim_count;
+      while (tls_read_pow2 < w_pow &&
+             local_state->ring_pow2[tls_read_pow2] <= claim_end) {
+        tls_read_pow2++;
       }
 
       break;
@@ -4259,13 +4271,13 @@ dlc_check_boundaries:
   if (claim_count > 1 && local_state->numa_enabled) {
     uint64_t safe_count = claim_count;
     uint64_t flags;
-    
+
     // O(1) SWAR Read: Grab the next 8 slots in a single instruction
     memcpy(&flags, &local_state->boundary_ring[my_read_idx & RING_MASK], 8);
-    
+
     // Mask out the bits that are beyond our claim_count
     uint64_t valid_mask = (claim_count == 8) ? ~0ULL : (1ULL << (claim_count * 8)) - 1;
-    
+
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
     // --- BIG-ENDIAN PATH (s390x, legacy ppc64) ---
     // On Big-Endian, Byte 0 (lowest address) is at the MSB (bits 56-63).
@@ -4273,7 +4285,7 @@ dlc_check_boundaries:
     if (claim_count < 8) {
         flags &= (valid_mask << (64 - (claim_count * 8)));
     }
-    
+
     if (flags != 0) {
         // Search from MSB downwards using Count Leading Zeroes
         uint32_t first_boundary_idx = __builtin_clzll(flags) / 8;
@@ -4283,7 +4295,7 @@ dlc_check_boundaries:
     // --- LITTLE-ENDIAN PATH (x86_64, aarch64, ppc64le, riscv64) ---
     // On Little-Endian, Byte 0 (lowest address) is at the LSB (bits 0-7).
     flags &= valid_mask;
-    
+
     if (flags != 0) {
         // Search from LSB upwards using Count Trailing Zeroes
         uint32_t first_boundary_idx = __builtin_ctzll(flags) / 8;
