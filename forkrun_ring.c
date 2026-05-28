@@ -361,7 +361,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define F_SETPIPE_SZ 1031
 #endif
 
-#define MAX_BATCH_LINES    65535
+#define MAX_BATCH_LINES  281474976710656ULL
 #define FLAG_MAJOR_EOF (1U << 31)
 #define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
 
@@ -1278,12 +1278,6 @@ struct SharedState {
   uint8_t fallow_active;
   uint8_t ingest_complete;
   uint8_t emergency_abort;
-  // v3.3: set to 1 (release) by ring_escrow_put_main whenever a packet is
-  // deposited; cleared to 0 (release) by the first worker that drains the
-  // pipe to EAGAIN.  Workers check this with a relaxed acquire on every
-  // dlc_restart_loop iteration to re-arm tl_drain_escrow — zero syscall cost
-  // on the hot path (stays 0 in cache for 99.9% of the run).
-  uint8_t escrow_pending;
 
   uint32_t indexer_waiters ALIGNED(CACHE_LINE);
   uint32_t meta_waiters ALIGNED(CACHE_LINE);
@@ -1356,7 +1350,6 @@ static inline void pull_fire_alarm() {
     int _oom_sleep_us = 1000;                                                  \
     int _oom_waited_us = 0;                                                    \
     while ((free_b_var) < (threshold) && _oom_waited_us < 30000000) {          \
-      if (state && atomic_load_relaxed(&state[0].emergency_abort)) break;      \
       usleep(_oom_sleep_us);                                                   \
       _oom_waited_us += _oom_sleep_us;                                         \
       sysinfo(&(si_var));                                                      \
@@ -1455,7 +1448,6 @@ static inline void check_memory_pressure(uint64_t *total_moved,
         int _oom_sleep_us = 1000;
         int _oom_waited_us = 0;
         while (free_b < oom_threshold && _oom_waited_us < 30000000) {
-          if (atomic_load_relaxed(&state[0].emergency_abort)) break;
           usleep(_oom_sleep_us);
           _oom_waited_us += _oom_sleep_us;
           get_cgroup_free_memory(&free_b);
@@ -1472,7 +1464,6 @@ static inline void check_memory_pressure(uint64_t *total_moved,
           int _oom_sleep_us = 1000;
           int _oom_waited_us = 0;
           while (free_b < oom_threshold && _oom_waited_us < 30000000) {
-            if (atomic_load_relaxed(&state[0].emergency_abort)) break;
             usleep(_oom_sleep_us);
             _oom_waited_us += _oom_sleep_us;
             sysinfo(&si);
@@ -1537,7 +1528,7 @@ static uint64_t get_v_max(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
     return sysconf(_SC_NPROCESSORS_ONLN) * 2;
   if (!strcmp(type, "lines"))
-    return MAX_BATCH_LINES;
+    return 65536;
   if (!strcmp(type, "bytes")) {
     if (stdin_mode) {
       uint64_t l2 = get_cache_bytes();
@@ -1738,7 +1729,6 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].min_idx, 0);
       atomic_store_relaxed(&state[n].fallow_active, 0);
       atomic_store_relaxed(&state[n].emergency_abort, 0);
-      atomic_store_relaxed(&state[n].escrow_pending, 0);
       atomic_store_relaxed(&state[n].tail_idx, 0);
       atomic_store_relaxed(&state[n].scanner_finished, 0);
       atomic_store_relaxed(&state[n].stats_chunks_assigned, 0);
@@ -1940,8 +1930,6 @@ static int ring_init_main(int argc, char **argv) {
 
     state[n].fixed_workers = (state[n].cfg_w_start == state[n].cfg_w_max);
     state[n].fixed_batch = (state[n].cfg_batch_start == state[n].cfg_batch_max);
-    // memset already zeroed escrow_pending; explicit store for documentation.
-    atomic_store_relaxed(&state[n].escrow_pending, 0);
 
     // Dynamic Topology-Aware Steal Thresholds from ACPI SRAT Table
     uint32_t phys_n = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
@@ -3167,26 +3155,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t sim_W          = W;
     uint64_t sim_L          = (L > 0) ? L : 1;
     uint64_t sim_lines_base = 0; // lines_accum at start of current L level
-    bool hit_real_eof       = false;
 
     while (pre_lines < target_pre) {
-      // EMERGENCY BYPASS FIX: Prevent infinite hang if downstream pipe breaks
-      if (atomic_load_relaxed(&state[0].emergency_abort)) {
-          goto unified_scanner_eof;
-      }
-
       // BAIL: first worker arrived — stop scanning and let the ring fill
       if (atomic_load_relaxed(&local_state->active_waiters) > 0)
         break;
 
-      // PHYSICS FIX: Correct EOF detection for NUMA vs UMA topologies
-      bool ingest_done;
-      if (is_numa) {
-          ingest_done = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
-      } else {
-          ingest_done = atomic_load_acquire(&local_state->ingest_complete);
-      }
-
+      bool ingest_done = atomic_load_acquire(&local_state->ingest_complete);
       ssize_t n;
       do {
         n = pread(fd_or_memfd, buf, chunk_sz, (off_t)pre_offset);
@@ -3235,8 +3210,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           }
         }
       } else if (n == 0 && ingest_done) {
-        hit_real_eof = true;
-        break; // reached real EOF — pre_lines is the exact total line count
+        break; // EOF during pre-flight
       } else {
         usleep(100);
       }
@@ -3245,10 +3219,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     // Transition (v3.3): Commit simulation results to live execution state.
     W = (sim_W > 0) ? sim_W : 1;
 
-    if (pre_lines >= target_pre || hit_real_eof) {
-      // CASE A: Pre-flight completed OR reached real EOF of a small/medium file.
-      // In both cases pre_lines is an exact (or sufficient) total line count,
-      // so we can compute the globally optimal L and jump straight to PID.
+    if (pre_lines >= target_pre) {
+      // CASE A: Pre-flight completed — we scanned enough lines to compute the
+      // globally optimal L.  Jump straight to PID steady-state.
       if (pre_lines > 0 && W > 0) {
         uint64_t optimal_L = pre_lines / W;
         L = (optimal_L > 0) ? (1ULL << fast_log2(optimal_L)) : 1;
@@ -3738,20 +3711,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             (!is_numa ? status != 1 : true))
           scan_target = 1;
 
-        // NEW: Actively shield Bash AST and kernel stacks by weighting elements 
-        // at 128 bytes (Pointer + AST struct overhead). Clamp the target so we 
-        // don't disable the SIMD scanner by starving the payload capacity.
-        if (BytesMax > 0) {
-            uint64_t max_safe_items = BytesMax / 256; // Leaves 50% for payload
-            if (max_safe_items < 1) max_safe_items = 1;
-            if (scan_target > max_safe_items) scan_target = max_safe_items;
-        }
-
         uint64_t lines_found = 0;
 
         char *safe_end = end;
         if (BytesMax > 0) {
-          uint64_t max_overhead = (scan_target + 1) * 128;
+          uint64_t max_overhead = (scan_target + 1) * 8;
           if (BytesMax <= max_overhead)
             safe_end = p;
           else {
@@ -3806,7 +3770,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 uint64_t line_end_offset =
                     buf_base_offset + (uint64_t)((nl + 1) - buf);
                 uint64_t payload = line_end_offset - batch_start;
-                uint64_t overhead = (lines_found + 1) * 128;
+                uint64_t overhead = (lines_found + 1) * 8;
                 if ((payload + overhead) > BytesMax) {
                   // WORMHOLE FIX 8: The BytesMax Continuation
                   // Do NOT set limit_reached (which triggers global EOF).
@@ -4180,12 +4144,6 @@ static int do_lockfree_claim(struct WorkerBatchState *out, bool blocking) {
 
 dlc_restart_loop:
 
-  // Re-arm tl_drain_escrow if ring_escrow_put_main has deposited since we
-  // last drained.  Costs one relaxed load (≤1 cycle, stays in local cache).
-  if (__builtin_expect(
-        __atomic_load_n(&local_state->escrow_pending, __ATOMIC_ACQUIRE), 0))
-    tl_drain_escrow = true;
-
   // Escrow continuous drain: vacuums the pipe completely before touching the
   // lock-free ring. tl_drain_escrow stays true as long as packets keep
   // arriving; only snaps false on EAGAIN (pipe empty). This enforces the
@@ -4198,15 +4156,13 @@ dlc_restart_loop:
     } while (er < 0 && errno == EINTR);
     if (er == sizeof(ep)) {
       my_read_idx   = ep.idx;
-      claim_count   = ep.cnt; // respect the actual packet count (fix 2)
+      claim_count   = 1; // v3.3: escrow always carries exactly 1 slot
       current_kills = ep.num_kills;
       // Do NOT clear tl_drain_escrow here — keep draining until pipe is empty.
       goto dlc_evaluate_claim;
     } else if (er < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      // Pipe fully drained. Snap back to zero-overhead fast path and clear
-      // the shared pending flag so other workers stop polling unnecessarily.
+      // Pipe fully drained. Snap back to zero-overhead fast path.
       tl_drain_escrow = false;
-      __atomic_store_n(&local_state->escrow_pending, 0, __ATOMIC_RELEASE);
     }
   }
 
@@ -4235,7 +4191,7 @@ dlc_restart_loop:
       } while (er < 0 && errno == EINTR);
       if (er == sizeof(ep)) {
         my_read_idx   = ep.idx;
-        claim_count   = ep.cnt; // respect actual packet count
+        claim_count   = 1; // v3.3: always 1
         current_kills = ep.num_kills;
         break;
       }
@@ -5796,8 +5752,6 @@ static int ring_escrow_put_main(int argc, char **argv) {
 
     if (fd_escrow_w && fd_escrow_w[node] >= 0) {
         robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
-        // Signal workers to re-arm tl_drain_escrow on their next iteration.
-        __atomic_store_n(&state[node].escrow_pending, 1, __ATOMIC_RELEASE);
     }
     return EXECUTION_SUCCESS;
 }
