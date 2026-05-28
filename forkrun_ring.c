@@ -4138,6 +4138,7 @@ static int do_lockfree_claim(struct WorkerBatchState *out, bool blocking) {
   struct SharedState *local_state = &state[my_numa_node];
 
   uint64_t my_read_idx;
+  uint64_t claim_count = 1;
   uint32_t current_kills = 0;
   int spin = 0;
 
