@@ -3216,17 +3216,33 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       }
     }
 
-    // Transition: commit simulation results and jump straight to PID steady-state
+    // Transition (v3.3): Commit simulation results to live execution state.
     W = (sim_W > 0) ? sim_W : 1;
-    if (pre_lines > 0 && W > 0) {
-      uint64_t optimal_L = pre_lines / W;
-      L = (optimal_L > 0) ? (1ULL << fast_log2(optimal_L)) : 1;
+
+    if (pre_lines >= target_pre) {
+      // CASE A: Pre-flight completed — we scanned enough lines to compute the
+      // globally optimal L.  Jump straight to PID steady-state.
+      if (pre_lines > 0 && W > 0) {
+        uint64_t optimal_L = pre_lines / W;
+        L = (optimal_L > 0) ? (1ULL << fast_log2(optimal_L)) : 1;
+      } else {
+        L = 1;
+      }
+      phase = 2; // skip geometric ramp-up entirely
     } else {
-      L = 1;
+      // CASE B: Pre-flight was cut short (a worker spawned before we finished).
+      // We don't have enough line-count data to compute the optimal L, so
+      // hot-swap sim_L (the batch size the simulation had reached) into the
+      // live scanner state and resume the geometric doubling phase from there.
+      // ADAPTIVE_FLOW_CONTROL will continue doubling L → Lmax at the same
+      // exponential rate as a normal ramp-up, while workers remain on the
+      // claim_count=1 fast path, completely oblivious to the phase.
+      L = sim_L;
+      phase = 1; // resume geometric ramp-up from the simulation's checkpoint
     }
+
     if (L > Lmax) L = Lmax;
     if (L < 1)    L = 1;
-    phase = 2; // skip ramp-up in ADAPTIVE_FLOW_CONTROL
   }
   // -----------------------------------------------------------------
 
