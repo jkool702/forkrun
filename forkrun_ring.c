@@ -132,6 +132,25 @@ scan_batch_avx2(char *p, char *end, uint64_t target, char delim) {
 
   return NULL;
 }
+
+// Pure popcount over a buffer — no position extraction needed.
+// Used by the pre-flight scan to count total delimiters at AVX2 speed.
+__attribute__((target("avx2,popcnt"))) static inline uint64_t
+fast_count_delim_avx2(const char *p, const char *end, char delim) {
+  uint64_t count = 0;
+  const __m256i d_vec = _mm256_set1_epi8(delim);
+  while (p + 32 <= end) {
+    __m256i v   = _mm256_loadu_si256((const __m256i *)p);
+    __m256i cmp = _mm256_cmpeq_epi8(v, d_vec);
+    count += (uint64_t)__builtin_popcount((uint32_t)_mm256_movemask_epi8(cmp));
+    p += 32;
+  }
+  while (p < end) {
+    if (*p == delim) count++;
+    p++;
+  }
+  return count;
+}
 #pragma GCC pop_options
 #endif
 
@@ -195,6 +214,27 @@ static inline char *scan_batch_neon(char *p, char *end, uint64_t target,
 
   return NULL;
 }
+
+// Pure popcount over a buffer using NEON — no position extraction needed.
+static inline uint64_t
+fast_count_delim_neon(const char *p, const char *end, char delim) {
+  uint64_t count = 0;
+  uint8x16_t d_vec = vdupq_n_u8((uint8_t)delim);
+  while (p + 16 <= end) {
+    uint8x16_t v   = vld1q_u8((const uint8_t *)p);
+    uint8x16_t cmp = vceqq_u8(v, d_vec);
+    uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 0);
+    uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(cmp), 1);
+    count += (uint64_t)(__builtin_popcountll(lo) / 8);
+    count += (uint64_t)(__builtin_popcountll(hi) / 8);
+    p += 16;
+  }
+  while (p < end) {
+    if (*p == delim) count++;
+    p++;
+  }
+  return count;
+}
 #endif
 
 static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
@@ -218,6 +258,30 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #endif
 
   return NULL;
+}
+
+// Architecture-dispatched delimiter popcount. O(N) over the buffer, no
+// per-delimiter position extraction. Used exclusively by the pre-flight scan.
+static inline uint64_t
+fast_count_delim(const char *p, const char *end, char delim) {
+#if defined(__x86_64__) || defined(__i386__)
+  static int avx2_supported = -1;
+  if (__builtin_expect(avx2_supported == -1, 0)) {
+    __builtin_cpu_init();
+    avx2_supported = __builtin_cpu_supports("avx2") &&
+                     __builtin_cpu_supports("popcnt");
+  }
+  if (avx2_supported)
+    return fast_count_delim_avx2(p, end, delim);
+#elif defined(__aarch64__)
+  return fast_count_delim_neon(p, end, delim);
+#endif
+  uint64_t count = 0;
+  while (p < end) {
+    if (*p == delim) count++;
+    p++;
+  }
+  return count;
 }
 
 // --- Architecture Specific Pause Logic ---
@@ -297,7 +361,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 #define F_SETPIPE_SZ 1031
 #endif
 
-#define MAX_BATCH_LINES    32767
+#define MAX_BATCH_LINES    65535
 #define FLAG_MAJOR_EOF (1U << 31)
 #define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
 
@@ -329,9 +393,11 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
   __atomic_compare_exchange_n(ptr, exp, des, 0, __ATOMIC_ACQ_REL,              \
                               __ATOMIC_RELAXED)
 
-// PUBLISH_BATCH_SIZE removed in v3.2.2: replaced by ring_pow2 doubling records.
-// In steady state (tls_read_pow2 == write_pow2), workers claim 1 slot per atomic_fetch_add
-// with no per-claim signalling overhead. Batch size changes are invisible to workers.
+// v3.3: Pre-flight popcount replaces the geometric ramp-up entirely.
+// The scanner does a pure delimiter count at AVX2 speed before committing any
+// ring slots, computes the optimal L = total_lines / W, and enters PID steady-
+// state directly. Workers always claim exactly 1 slot — no multi-claim logic,
+// no TLS cursor state machine, no speculative escrow splits.
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -1064,15 +1130,8 @@ static __thread uint64_t worker_last_cnt = 0;
 static __thread uint32_t worker_last_major = 0;
 static __thread uint32_t worker_last_minor = 0;
 static __thread uint32_t worker_last_num_kills = 0;
-static __thread uint64_t tl_remainder_idx = 0;
-static __thread uint64_t tl_remainder_cnt = 0;
-static __thread uint32_t tl_remainder_kills = 0;
 static __thread bool tl_drain_escrow = true;
-// Per-worker state-machine cursor for the ring_pow2 geometric ramp-up.
-// Replaces the global CAS-contended read_pow2 field with zero-contention TLS.
-// Workers read write_pow2/ring_pow2[] (acquire, read-only → S-state in all L1
-// caches) and write only to their own private tls_read_pow2 (never shared).
-static __thread uint8_t tls_read_pow2 = 0;
+
 
 // ------------------------------------------------------------------
 // WorkerBatchState: Pure value struct returned by do_lockfree_claim.
@@ -1219,12 +1278,6 @@ struct SharedState {
   uint8_t fallow_active;
   uint8_t ingest_complete;
   uint8_t emergency_abort;
-  // ring_pow2 state machine (v3.2.2 → v3.2.3+): bimodal slow/fast claim path.
-  // write_pow2 is advanced by the scanner each time L doubles during ramp-up.
-  // Workers track their own cursor in tls_read_pow2 (TLS), so write_pow2 and
-  // ring_pow2[] stay permanently in the Shared (S) cache state on every core.
-  // Steady state: tls_read_pow2 == write_pow2 → workers hit the fast path.
-  uint8_t write_pow2;
 
   uint32_t indexer_waiters ALIGNED(CACHE_LINE);
   uint32_t meta_waiters ALIGNED(CACHE_LINE);
@@ -1238,7 +1291,6 @@ struct SharedState {
   uint64_t cfg_chunk_bytes;
   uint64_t cfg_line_max;
   int64_t cfg_timeout_us;
-  uint32_t speculative_max_claim;
   uint8_t mode_byte;
   uint8_t fixed_workers;
   uint8_t fixed_batch;
@@ -1251,14 +1303,6 @@ struct SharedState {
   uint64_t stats_chunks_i_stole;
   uint64_t stats_chunks_stolen_from_me;
 
-  // ring_pow2[k] = local_scan_idx at which the k-th batch size doubling occurred.
-  // Sized for fast_log2(MAX_BATCH_LINES-1)+1 ~ 15 slots; 64 handles arbitrarily
-  // large user-configured Lmax values with room to spare.
-  uint64_t ring_pow2[64] ALIGNED(CACHE_LINE);
-
-  // stride_ring removed in v3.2.2: its only consumers were PUBLISH_BATCH_SIZE and
-  // the UMA tail L_tail sum, both of which are eliminated by ring_pow2.
-  uint8_t boundary_ring[RING_SIZE + 8] ALIGNED(4096);
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
   uint32_t major_ring[RING_SIZE] ALIGNED(4096);
@@ -1699,8 +1743,6 @@ static int ring_init_main(int argc, char **argv) {
 
       // Reset PID Controller / Flow State
       atomic_store_relaxed(&state[n].active_workers, state[n].cfg_w_start);
-      // Reset ring_pow2 scanner state machine; workers reset tls_read_pow2 at claim time.
-      atomic_store_relaxed(&state[n].write_pow2, 0);
 
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
@@ -1863,7 +1905,6 @@ static int ring_init_main(int argc, char **argv) {
 
     state[n].cfg_w_start = w_start_balanced;
     state[n].cfg_w_max = w_max_balanced;
-    state[n].speculative_max_claim = ((2 * w_max_balanced) > 8) ? 8 : (uint32_t)(2 * w_max_balanced);
     state[n].mode_byte = byte_mode ? 1 : 0;
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
     state[n].exact_lines = parsed_exact_lines;
@@ -1889,9 +1930,6 @@ static int ring_init_main(int argc, char **argv) {
 
     state[n].fixed_workers = (state[n].cfg_w_start == state[n].cfg_w_max);
     state[n].fixed_batch = (state[n].cfg_batch_start == state[n].cfg_batch_max);
-    // write_pow2 starts at 0; scanner advances it as L doubles during ramp-up.
-    // memset already zeroed this field; explicit store here for documentation.
-    atomic_store_relaxed(&state[n].write_pow2, 0);
 
     // Dynamic Topology-Aware Steal Thresholds from ACPI SRAT Table
     uint32_t phys_n = g_logical_to_phys_map ? g_logical_to_phys_map[n] : 0;
@@ -2853,11 +2891,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }                                                                          \
     uint64_t pk = (uint64_t)batch_start;                                       \
     if (is_numa) {                                                             \
-      uint8_t b_val = (_is_last) ? 1 : 0;                                      \
-      local_state->boundary_ring[local_scan_idx & RING_MASK] = b_val;          \
-      if ((local_scan_idx & RING_MASK) < 8) {                                  \
-          local_state->boundary_ring[RING_SIZE + (local_scan_idx & RING_MASK)] = b_val; \
-      }                                                                        \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
       local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id);         \
@@ -2871,13 +2904,11 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     UNIFIED_ADAPTIVE_COMMIT(false);                                            \
   } while (0)
 
-// v3.2.2: Record this batch-size doubling boundary in ring_pow2.
-// Workers observing tls_read_pow2 < write_pow2 will multi-claim up to
-// 2^(write_pow2 - tls_read_pow2) slots; tls_read_pow2 is advanced locally
-// (no CAS) via catch-up + eager advance in do_lockfree_claim.
-//
-// v3.2.2: In steady state workers claim 1 slot/op regardless of L.
-// L is updated here to tune scanner batch size only; no publish needed.
+// v3.3: ADAPTIVE_FLOW_CONTROL still runs the phase==1 geometric ramp for L and
+// worker spawning, but only when the pre-flight scan didn't complete (e.g.
+// byte_mode, exact_lines, or fixed_batch). In the common case phase is already
+// 2 when the scanner loop starts so this macro reduces to the PID steady-state
+// block only. ring_pow2 recording is removed — workers always claim 1 slot.
 #define ADAPTIVE_FLOW_CONTROL(state_ptr, is_stalled, _node_id_arg)             \
   do {                                                                         \
     batch_counter++;                                                           \
@@ -2922,13 +2953,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                 robust_pipe_write(fd_spawn, _sbuf, _slen);                     \
               W += _n_spawn;                                                   \
               atomic_store_relaxed(&(state_ptr)->active_workers, W);           \
-            }                                                                  \
-          }                                                                    \
-          {                                                                    \
-            uint8_t _wp = atomic_load_relaxed(&(state_ptr)->write_pow2);       \
-            if (_wp < 64) {                                                    \
-              (state_ptr)->ring_pow2[_wp] = local_scan_idx;                    \
-              atomic_store_release(&(state_ptr)->write_pow2, _wp + 1);         \
             }                                                                  \
           }                                                                    \
           batch_counter = 0;                                                   \
@@ -3108,6 +3132,103 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
   bool experienced_stall = false;
   uint64_t pending_lines = 0;
+
+  // -----------------------------------------------------------------
+  // PHASE 1 (v3.3): PRE-FLIGHT POPCOUNT — Latency Hiding
+  // -----------------------------------------------------------------
+  // During the Bash fork latency (workers spinning up), do a pure
+  // delimiter popcount at AVX2 speed to learn the total line count.
+  // This lets us compute the optimal L = total_lines / W before we
+  // write a single ring slot, eliminating the geometric ramp-up
+  // entirely and letting workers always claim exactly 1 batch.
+  //
+  // We also simulate the original control-theory spawning formula so
+  // that Bash receives fd_spawn requests at the same smoothly-
+  // decelerating rate as before — no fork storms.
+  //
+  // Fallback: skip if exact_lines, byte_mode, or fixed_batch are set,
+  // or if the first worker arrives before we finish scanning.
+  if (!exact_lines && !byte_mode && !fixed_batch) {
+    uint64_t pre_lines      = 0;
+    uint64_t pre_offset     = buf_base_offset;
+    uint64_t target_pre     = W_max_val * Lmax;
+    uint64_t sim_W          = W;
+    uint64_t sim_L          = (L > 0) ? L : 1;
+    uint64_t sim_lines_base = 0; // lines_accum at start of current L level
+
+    while (pre_lines < target_pre) {
+      // BAIL: first worker arrived — stop scanning and let the ring fill
+      if (atomic_load_relaxed(&local_state->active_waiters) > 0)
+        break;
+
+      bool ingest_done = atomic_load_acquire(&local_state->ingest_complete);
+      ssize_t n;
+      do {
+        n = pread(fd_or_memfd, buf, chunk_sz, (off_t)pre_offset);
+      } while (n < 0 && errno == EINTR);
+
+      if (n > 0) {
+        pre_lines   += fast_count_delim(buf, buf + (size_t)n, delim);
+        pre_offset  += (uint64_t)n;
+
+        // Simulate the geometric spawn curve using the exact same formula
+        // as ADAPTIVE_FLOW_CONTROL phase==1, translated from batches to lines.
+        while (sim_W < W_max_val && sim_L < Lmax && !fixed_workers) {
+          uint64_t _tc          = sim_W * 4;
+          if (_tc < 4) _tc      = 4;
+          uint64_t lines_needed = _tc * sim_L;
+
+          if (pre_lines - sim_lines_base >= lines_needed) {
+            sim_lines_base += lines_needed;
+            sim_L          *= 2;
+            if (sim_L >= Lmax)
+              sim_L = Lmax;
+
+            // Exact reuse of original spawn formula
+            uint64_t _l_log  = fast_log2(sim_L);
+            uint64_t _den    = X_const * (L2 + _l_log);
+            if (_den == 0) _den = 1;
+            uint64_t _n_spawn = (6 * (W_max_val - sim_W) * L2) / _den;
+            if (_n_spawn < 1)              _n_spawn = 1;
+            if (_n_spawn > W_max_val - sim_W) _n_spawn = W_max_val - sim_W;
+
+            if (fd_spawn >= 0) {
+              char _sbuf[64];
+              int  _slen;
+              if (is_numa)
+                _slen = snprintf(_sbuf, sizeof(_sbuf), "%d:%lu\n",
+                                 my_node_id, _n_spawn);
+              else
+                _slen = snprintf(_sbuf, sizeof(_sbuf), "%lu\n", _n_spawn);
+              if (_slen > 0)
+                robust_pipe_write(fd_spawn, _sbuf, _slen);
+            }
+            sim_W += _n_spawn;
+            atomic_store_relaxed(&local_state->active_workers, sim_W);
+          } else {
+            break; // not enough lines yet for the next geometric step
+          }
+        }
+      } else if (n == 0 && ingest_done) {
+        break; // EOF during pre-flight
+      } else {
+        usleep(100);
+      }
+    }
+
+    // Transition: commit simulation results and jump straight to PID steady-state
+    W = (sim_W > 0) ? sim_W : 1;
+    if (pre_lines > 0 && W > 0) {
+      uint64_t optimal_L = pre_lines / W;
+      L = (optimal_L > 0) ? (1ULL << fast_log2(optimal_L)) : 1;
+    } else {
+      L = 1;
+    }
+    if (L > Lmax) L = Lmax;
+    if (L < 1)    L = 1;
+    phase = 2; // skip ramp-up in ADAPTIVE_FLOW_CONTROL
+  }
+  // -----------------------------------------------------------------
 
   int status = 0;
   bool force_refill = false;
@@ -4005,16 +4126,6 @@ static int do_lockfree_claim(struct WorkerBatchState *out, bool blocking) {
   uint32_t current_kills = 0;
   int spin = 0;
 
-  // TLS remainder fast-path: leftover from a prior boundary split that
-  // couldn't fit into the escrow pipe.
-  if (tl_remainder_cnt > 0) {
-    my_read_idx = tl_remainder_idx;
-    claim_count = tl_remainder_cnt;
-    current_kills = tl_remainder_kills;
-    tl_remainder_cnt = 0;
-    goto dlc_check_boundaries;
-  }
-
 dlc_restart_loop:
 
   // Escrow continuous drain: vacuums the pipe completely before touching the
@@ -4028,8 +4139,8 @@ dlc_restart_loop:
       er = read(fd_escrow_r[my_numa_node], &ep, sizeof(ep));
     } while (er < 0 && errno == EINTR);
     if (er == sizeof(ep)) {
-      my_read_idx = ep.idx;
-      claim_count = ep.cnt;
+      my_read_idx   = ep.idx;
+      claim_count   = 1; // v3.3: escrow always carries exactly 1 slot
       current_kills = ep.num_kills;
       // Do NOT clear tl_drain_escrow here — keep draining until pipe is empty.
       goto dlc_evaluate_claim;
@@ -4045,66 +4156,13 @@ dlc_restart_loop:
     uint64_t r_curr = atomic_load_relaxed(&local_state->read_idx);
 
     if (r_curr < w_snap) {
-      // v3.2.3+ TLS-local bimodal fast/slow claim path.
-      //
-      // write_pow2 and ring_pow2[] are written only by the scanner (release
-      // store) and read here under acquire.  Because no worker ever writes
-      // these fields, they sit permanently in the Shared (S) cache state on
-      // every core — zero cross-core invalidations.
-      //
-      // tls_read_pow2 is private to this worker: no CAS, no coherence traffic.
-      //
-      // Memory-ordering guarantee: the acquire load of write_pow2 creates a
-      // happens-before edge that covers all preceding plain writes to
-      // ring_pow2[] (paired with the scanner's release store), so the plain
-      // reads of ring_pow2[tls_read_pow2] below are safe.
-
-      uint8_t w_pow = atomic_load_acquire(&local_state->write_pow2);
-
-      // SAFETY CLAMP: guard against stale tls_read_pow2 from a prior
-      // invocation (in the common case of fresh worker forks this never
-      // fires, but keeps us correct if workers are ever recycled).
-      if (__builtin_expect(tls_read_pow2 > w_pow, 0))
-        tls_read_pow2 = 0;
-
-      // CATCH-UP: fast-forward our local cursor to global progress.
-      // If this worker was preempted or is a late starter, this instantly
-      // advances tls_read_pow2 past any doubling boundaries that r_curr has
-      // already consumed — zero CAS, purely read-only shared state.
-      while (tls_read_pow2 < w_pow &&
-             local_state->ring_pow2[tls_read_pow2] <= r_curr) {
-        tls_read_pow2++;
-      }
-
-      claim_count = 1;
-      if (__builtin_expect(tls_read_pow2 < w_pow, 0)) {
-        // Slow path: geometric ramp-up.
-        // Claim up to 2^(w_pow - tls_read_pow2) slots, capped by
-        // speculative_max_claim and the number of actually available slots.
-        uint8_t diff = w_pow - tls_read_pow2;
-        uint64_t spec = (diff < 63) ? (1ULL << diff) : (uint64_t)UINT32_MAX;
-        if (spec > local_state->speculative_max_claim)
-          spec = local_state->speculative_max_claim;
-        uint64_t avail = w_snap - r_curr;
-        if (spec > avail)
-          spec = avail;
-        if (spec > 1)
-          claim_count = spec;
-      }
-
-      my_read_idx = __atomic_fetch_add(&local_state->read_idx, claim_count,
+      // v3.3: THE FAST PATH — always claim exactly 1 slot.
+      // Pre-flight popcount ensures L is already optimal when the first worker
+      // arrives, so no geometric ramp-up is needed here. Zero state machine,
+      // zero TLS cursor, zero speculative splitting.
+      my_read_idx = __atomic_fetch_add(&local_state->read_idx, 1,
                                        __ATOMIC_SEQ_CST);
-
-      // EAGER ADVANCE: advance our cursor past every boundary our claim crossed.
-      // This primes the next iteration: if we consumed the last slots before a
-      // doubling boundary, the next claim sees tls_read_pow2 already at w_pow
-      // and takes the fast path immediately.
-      uint64_t claim_end = my_read_idx + claim_count;
-      while (tls_read_pow2 < w_pow &&
-             local_state->ring_pow2[tls_read_pow2] <= claim_end) {
-        tls_read_pow2++;
-      }
-
+      claim_count = 1;
       break;
     }
 
@@ -4116,8 +4174,8 @@ dlc_restart_loop:
         er = read(fd_escrow_r[my_numa_node], &ep, sizeof(ep));
       } while (er < 0 && errno == EINTR);
       if (er == sizeof(ep)) {
-        my_read_idx = ep.idx;
-        claim_count = ep.cnt;
+        my_read_idx   = ep.idx;
+        claim_count   = 1; // v3.3: always 1
         current_kills = ep.num_kills;
         break;
       }
@@ -4196,157 +4254,67 @@ dlc_restart_loop:
 
 dlc_evaluate_claim:
   {
+    // With claim_count == 1 always: either we have the slot or we overshot.
     uint64_t w_curr = atomic_load_acquire(&local_state->write_idx);
-    if (my_read_idx + claim_count > w_curr) {
+    if (my_read_idx >= w_curr) {
+      // Overshot: the ring advanced past us (scanner hasn't filled this slot yet,
+      // or we raced with EOF). Wait for the slot to be committed.
       if (atomic_load_acquire(&local_state->scanner_finished)) {
+        // Scanner done and we overshot → nothing left for us.
+        spin = 0;
+        goto dlc_restart_loop;
+      }
+      // Scanner still running — wait for write_idx to cover our slot.
+      __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
+      is_waiting_on_ring = true;
+      while (1) {
         w_curr = atomic_load_acquire(&local_state->write_idx);
-        int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
-        if (diff < 0) diff = 0;
-        if ((uint64_t)diff < claim_count) claim_count = (uint64_t)diff;
-
-        if (claim_count == 0) {
-          spin = 0;
-          goto dlc_restart_loop;
-        }
-      } else {
-        __atomic_fetch_add(&local_state->active_waiters, 1, __ATOMIC_SEQ_CST);
-        is_waiting_on_ring = true;
-        while (1) {
+        if (w_curr > my_read_idx)
+          break; // slot is ready
+        if (atomic_load_acquire(&local_state->scanner_finished)) {
           w_curr = atomic_load_acquire(&local_state->write_idx);
-          if (w_curr > my_read_idx) {
-            uint64_t avail = w_curr - my_read_idx;
-            if (avail < claim_count) {
-              struct EscrowPacket ep = {.idx = my_read_idx + avail,
-                                        .cnt = claim_count - avail,
-                                        .num_kills = current_kills};
-              ssize_t ew;
-              do {
-                ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep));
-              } while (ew < 0 && errno == EINTR);
-              if (ew == sizeof(ep)) {
-                claim_count = avail;
-                uint64_t one = 1;
-                sys_write(evfd_data_arr[my_numa_node], &one, 8);
-                break;
-              }
-            } else {
-              break;
-            }
-          }
-          if (atomic_load_acquire(&local_state->scanner_finished)) {
-            w_curr = atomic_load_acquire(&local_state->write_idx);
-            int64_t diff = (int64_t)w_curr - (int64_t)my_read_idx;
-            if (diff < 0) diff = 0;
-            if ((uint64_t)diff < claim_count) claim_count = (uint64_t)diff;
-            break;
-          }
-
-          struct pollfd pfds[2] = {
-              {.fd = evfd_data_arr[my_numa_node], .events = POLLIN},
-              {.fd = evfd_eof_arr[my_numa_node], .events = POLLIN}};
-
-          poll(pfds, 2, -1);
-
-          if (atomic_load_relaxed(&state[0].emergency_abort)) {
-            cleanup_waiter_state();
-            return EXECUTION_FAILURE;
-          }
-
-          bool data_fired = (pfds[0].revents & POLLIN) != 0;
-          if (data_fired) {
-            uint64_t v;
-            sys_read(evfd_data_arr[my_numa_node], &v, 8);
-          }
+          break;
         }
-        cleanup_waiter_state();
-        if (claim_count == 0) {
-          spin = 0;
-          goto dlc_restart_loop;
+        struct pollfd pfds[2] = {
+            {.fd = evfd_data_arr[my_numa_node],  .events = POLLIN},
+            {.fd = evfd_eof_arr[my_numa_node],   .events = POLLIN}};
+        poll(pfds, 2, -1);
+        if (atomic_load_relaxed(&state[0].emergency_abort)) {
+          cleanup_waiter_state();
+          return EXECUTION_FAILURE;
         }
+        if (pfds[0].revents & POLLIN) {
+          uint64_t v;
+          sys_read(evfd_data_arr[my_numa_node], &v, 8);
+        }
+      }
+      cleanup_waiter_state();
+      if (my_read_idx >= w_curr) {
+        // Still overshot after waiting — EOF consumed us
+        spin = 0;
+        goto dlc_restart_loop;
       }
     }
   }
 
-dlc_check_boundaries:
-  if (claim_count > 1 && local_state->numa_enabled) {
-    uint64_t safe_count = claim_count;
-    uint64_t flags;
-
-    // O(1) SWAR Read: Grab the next 8 slots in a single instruction
-    memcpy(&flags, &local_state->boundary_ring[my_read_idx & RING_MASK], 8);
-
-    // Mask out the bits that are beyond our claim_count
-    uint64_t valid_mask = (claim_count == 8) ? ~0ULL : (1ULL << (claim_count * 8)) - 1;
-
-#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
-    // --- BIG-ENDIAN PATH (s390x, legacy ppc64) ---
-    // On Big-Endian, Byte 0 (lowest address) is at the MSB (bits 56-63).
-    // We mask out the trailing bytes that exceed our claim count by shifting.
-    if (claim_count < 8) {
-        flags &= (valid_mask << (64 - (claim_count * 8)));
-    }
-
-    if (flags != 0) {
-        // Search from MSB downwards using Count Leading Zeroes
-        uint32_t first_boundary_idx = __builtin_clzll(flags) / 8;
-        safe_count = first_boundary_idx + 1;
-    }
-#else
-    // --- LITTLE-ENDIAN PATH (x86_64, aarch64, ppc64le, riscv64) ---
-    // On Little-Endian, Byte 0 (lowest address) is at the LSB (bits 0-7).
-    flags &= valid_mask;
-
-    if (flags != 0) {
-        // Search from LSB upwards using Count Trailing Zeroes
-        uint32_t first_boundary_idx = __builtin_ctzll(flags) / 8;
-        safe_count = first_boundary_idx + 1;
-    }
-#endif
-    if (safe_count < claim_count) {
-      uint64_t remainder = claim_count - safe_count;
-      struct EscrowPacket ep = {.idx = my_read_idx + safe_count,
-                                .cnt = remainder,
-                                .num_kills = current_kills};
-      ssize_t ew;
-      do {
-        ew = write(fd_escrow_w[my_numa_node], &ep, sizeof(ep));
-      } while (ew < 0 && errno == EINTR);
-
-      if (ew < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        tl_remainder_idx = ep.idx;
-        tl_remainder_cnt = ep.cnt;
-        tl_remainder_kills = ep.num_kills;
-      } else if (ew == sizeof(ep)) {
-        uint64_t one = 1;
-        sys_write(evfd_data_arr[my_numa_node], &one, 8);
-        // Signal the continuous drain to pick this up on the next claim.
-        tl_drain_escrow = true;
-      }
-
-      claim_count = safe_count;
-    }
-  }
-
-  // Populate output struct (no Bash variable side-effects below this line)
+  // Populate output struct — claim_count is always 1
   uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK];
-  uint64_t end   = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
+  uint64_t end   = local_state->end_ring[my_read_idx & RING_MASK];
 
-  // The number of ring slots claimed is ALWAYS the logical line/chunk count
-  __atomic_fetch_add(&local_state->total_lines_consumed, claim_count, __ATOMIC_SEQ_CST);
+  __atomic_fetch_add(&local_state->total_lines_consumed, 1, __ATOMIC_SEQ_CST);
 
-  out->idx    = my_read_idx;
-  out->cnt    = claim_count;
+  out->idx       = my_read_idx;
+  out->cnt       = 1;
   out->num_kills = current_kills;
-  out->offset = start;
-  out->length = end - start;
+  out->offset    = start;
+  out->length    = end - start;
 
   if (local_state->numa_enabled) {
     out->major = local_state->major_ring[my_read_idx & RING_MASK];
     out->minor = local_state->minor_ring[my_read_idx & RING_MASK] & ~FLAG_MAJOR_EOF;
-    if (local_state->minor_ring[(my_read_idx + claim_count - 1) & RING_MASK] &
-        FLAG_MAJOR_EOF) {
+    // With cnt==1 the start and end slot are the same slot, so a single read suffices.
+    if (local_state->minor_ring[my_read_idx & RING_MASK] & FLAG_MAJOR_EOF)
       out->minor |= FLAG_MAJOR_EOF;
-    }
   } else {
     out->major = 0;
     out->minor = 0;
