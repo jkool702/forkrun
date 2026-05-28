@@ -3738,11 +3738,20 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             (!is_numa ? status != 1 : true))
           scan_target = 1;
 
+        // NEW: Actively shield Bash AST and kernel stacks by weighting elements 
+        // at 128 bytes (Pointer + AST struct overhead). Clamp the target so we 
+        // don't disable the SIMD scanner by starving the payload capacity.
+        if (BytesMax > 0) {
+            uint64_t max_safe_items = BytesMax / 256; // Leaves 50% for payload
+            if (max_safe_items < 1) max_safe_items = 1;
+            if (scan_target > max_safe_items) scan_target = max_safe_items;
+        }
+
         uint64_t lines_found = 0;
 
         char *safe_end = end;
         if (BytesMax > 0) {
-          uint64_t max_overhead = (scan_target + 1) * 8;
+          uint64_t max_overhead = (scan_target + 1) * 128;
           if (BytesMax <= max_overhead)
             safe_end = p;
           else {
@@ -3797,7 +3806,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 uint64_t line_end_offset =
                     buf_base_offset + (uint64_t)((nl + 1) - buf);
                 uint64_t payload = line_end_offset - batch_start;
-                uint64_t overhead = (lines_found + 1) * 8;
+                uint64_t overhead = (lines_found + 1) * 128;
                 if ((payload + overhead) > BytesMax) {
                   // WORMHOLE FIX 8: The BytesMax Continuation
                   // Do NOT set limit_reached (which triggers global EOF).
