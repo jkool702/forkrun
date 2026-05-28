@@ -361,7 +361,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define F_SETPIPE_SZ 1031
 #endif
 
-#define MAX_BATCH_LINES    65535
+#define MAX_BATCH_LINES  281474976710656ULL
 #define FLAG_MAJOR_EOF (1U << 31)
 #define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
 
@@ -4138,7 +4138,6 @@ static int do_lockfree_claim(struct WorkerBatchState *out, bool blocking) {
   struct SharedState *local_state = &state[my_numa_node];
 
   uint64_t my_read_idx;
-  uint64_t claim_count = 1;
   uint32_t current_kills = 0;
   int spin = 0;
 
