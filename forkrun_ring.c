@@ -1356,6 +1356,7 @@ static inline void pull_fire_alarm() {
     int _oom_sleep_us = 1000;                                                  \
     int _oom_waited_us = 0;                                                    \
     while ((free_b_var) < (threshold) && _oom_waited_us < 30000000) {          \
+      if (state && atomic_load_relaxed(&state[0].emergency_abort)) break;      \
       usleep(_oom_sleep_us);                                                   \
       _oom_waited_us += _oom_sleep_us;                                         \
       sysinfo(&(si_var));                                                      \
@@ -1454,6 +1455,7 @@ static inline void check_memory_pressure(uint64_t *total_moved,
         int _oom_sleep_us = 1000;
         int _oom_waited_us = 0;
         while (free_b < oom_threshold && _oom_waited_us < 30000000) {
+          if (atomic_load_relaxed(&state[0].emergency_abort)) break;
           usleep(_oom_sleep_us);
           _oom_waited_us += _oom_sleep_us;
           get_cgroup_free_memory(&free_b);
@@ -1470,6 +1472,7 @@ static inline void check_memory_pressure(uint64_t *total_moved,
           int _oom_sleep_us = 1000;
           int _oom_waited_us = 0;
           while (free_b < oom_threshold && _oom_waited_us < 30000000) {
+            if (atomic_load_relaxed(&state[0].emergency_abort)) break;
             usleep(_oom_sleep_us);
             _oom_waited_us += _oom_sleep_us;
             sysinfo(&si);
@@ -3167,11 +3170,23 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     bool hit_real_eof       = false;
 
     while (pre_lines < target_pre) {
+      // EMERGENCY BYPASS FIX: Prevent infinite hang if downstream pipe breaks
+      if (atomic_load_relaxed(&state[0].emergency_abort)) {
+          goto unified_scanner_eof;
+      }
+
       // BAIL: first worker arrived — stop scanning and let the ring fill
       if (atomic_load_relaxed(&local_state->active_waiters) > 0)
         break;
 
-      bool ingest_done = atomic_load_acquire(&local_state->ingest_complete);
+      // PHYSICS FIX: Correct EOF detection for NUMA vs UMA topologies
+      bool ingest_done;
+      if (is_numa) {
+          ingest_done = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
+      } else {
+          ingest_done = atomic_load_acquire(&local_state->ingest_complete);
+      }
+
       ssize_t n;
       do {
         n = pread(fd_or_memfd, buf, chunk_sz, (off_t)pre_offset);
