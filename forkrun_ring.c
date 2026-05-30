@@ -4166,10 +4166,11 @@ dlc_restart_loop:
 
   // Re-arm tl_drain_escrow if ring_escrow_put_main has deposited since we
   // last drained.  Costs one relaxed load (≤1 cycle, stays in local cache).
-  // PHYSICS FIX: Atomic Exchange prevents lost-wakeup race condition.
-  if (__builtin_expect(
-        __atomic_exchange_n(&local_state->escrow_pending, 0, __ATOMIC_ACQ_REL), 0))
-    tl_drain_escrow = true;
+  // PHYSICS FIX: Test-and-Test-and-Set prevents RMW cache-line ping-pong.
+  if (__builtin_expect(__atomic_load_n(&local_state->escrow_pending, __ATOMIC_ACQUIRE), 0)) {
+    if (__atomic_exchange_n(&local_state->escrow_pending, 0, __ATOMIC_ACQ_REL))
+        tl_drain_escrow = true;
+}
 
   // Escrow continuous drain: vacuums the pipe completely before touching the
   // lock-free ring. tl_drain_escrow stays true as long as packets keep
