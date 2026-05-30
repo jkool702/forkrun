@@ -4166,8 +4166,9 @@ dlc_restart_loop:
 
   // Re-arm tl_drain_escrow if ring_escrow_put_main has deposited since we
   // last drained.  Costs one relaxed load (≤1 cycle, stays in local cache).
+  // PHYSICS FIX: Atomic Exchange prevents lost-wakeup race condition.
   if (__builtin_expect(
-        __atomic_load_n(&local_state->escrow_pending, __ATOMIC_ACQUIRE), 0))
+        __atomic_exchange_n(&local_state->escrow_pending, 0, __ATOMIC_ACQ_REL), 0))
     tl_drain_escrow = true;
 
   // Escrow continuous drain: vacuums the pipe completely before touching the
@@ -4187,10 +4188,8 @@ dlc_restart_loop:
       // Do NOT clear tl_drain_escrow here — keep draining until pipe is empty.
       goto dlc_evaluate_claim;
     } else if (er < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      // Pipe fully drained. Snap back to zero-overhead fast path and clear
-      // the shared pending flag so other workers stop polling unnecessarily.
+      // Pipe fully drained. Snap back to zero-overhead fast path.
       tl_drain_escrow = false;
-      __atomic_store_n(&local_state->escrow_pending, 0, __ATOMIC_RELEASE);
     }
   }
 
@@ -4298,9 +4297,9 @@ dlc_restart_loop:
 
 dlc_evaluate_claim:
   {
-    // With claim_count == 1 always: either we have the slot or we overshot.
     uint64_t w_curr = atomic_load_acquire(&local_state->write_idx);
-    if (my_read_idx >= w_curr) {
+    // Verify the scanner has published ALL slots within this claim
+    if (my_read_idx + claim_count > w_curr) {
       // Overshot: the ring advanced past us (scanner hasn't filled this slot yet,
       // or we raced with EOF). Wait for the slot to be committed.
       if (atomic_load_acquire(&local_state->scanner_finished)) {
@@ -4313,7 +4312,7 @@ dlc_evaluate_claim:
       is_waiting_on_ring = true;
       while (1) {
         w_curr = atomic_load_acquire(&local_state->write_idx);
-        if (w_curr > my_read_idx)
+        if (w_curr >= my_read_idx + claim_count)
           break; // slot is ready
         if (atomic_load_acquire(&local_state->scanner_finished)) {
           w_curr = atomic_load_acquire(&local_state->write_idx);
@@ -4333,7 +4332,7 @@ dlc_evaluate_claim:
         }
       }
       cleanup_waiter_state();
-      if (my_read_idx >= w_curr) {
+      if (my_read_idx + claim_count > w_curr) {
         // Still overshot after waiting — EOF consumed us
         spin = 0;
         goto dlc_restart_loop;
@@ -4345,7 +4344,7 @@ dlc_evaluate_claim:
   uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK];
   uint64_t end   = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
 
-  __atomic_fetch_add(&local_state->total_lines_consumed, 1, __ATOMIC_SEQ_CST);
+  __atomic_fetch_add(&local_state->total_lines_consumed, claim_count, __ATOMIC_SEQ_CST);
 
   out->idx       = my_read_idx;
   out->cnt       = claim_count;
