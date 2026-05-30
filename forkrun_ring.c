@@ -3948,9 +3948,9 @@ unified_scanner_eof:
   }
 
   if (is_numa) {
-    // v3.2.2+: No PUBLISH_BATCH_SIZE needed at EOF. Once write_pow2 stops advancing,
-    // workers' tls_read_pow2 catch-up loop fully converges on the next claim and
-    // they permanently enter the fast path (claim_count == 1).
+    // v3.2.2+: No PUBLISH_BATCH_SIZE needed at EOF. Workers always claim exactly
+    // 1 slot (single atomic_fetch_add); once write_idx stops advancing they
+    // observe read_idx >= write_idx and proceed to the EOF condition check.
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
 
@@ -3965,8 +3965,8 @@ unified_scanner_eof:
 
     if (!byte_mode && !limit_hit && !atomic_load_relaxed(&state[0].emergency_abort)) {
       // v3.2.2 tail: Force-commit all locally-written ring slots before computing
-      // L_tail.  This eliminates the old stride_ring sum over [local_write_idx,
-      // local_scan_idx) by ensuring local_write_idx == local_scan_idx here.
+      // L_tail, ensuring local_write_idx == local_scan_idx here so that only
+      // pending_lines and the current read buffer need to be counted below.
       atomic_store_release(&local_state->write_idx, local_scan_idx);
       local_write_idx = local_scan_idx;
       __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -3993,7 +3993,8 @@ unified_scanner_eof:
           break;
         }
       }
-      // No stride_ring sum needed: force-commit above ensures no uncommitted slots.
+      // No uncommitted slots to count: force-commit above guarantees
+      // local_write_idx == local_scan_idx before this point.
 
       uint64_t tail_start_offset =
           (local_scan_idx > local_write_idx)
