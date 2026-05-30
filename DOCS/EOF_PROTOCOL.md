@@ -138,7 +138,7 @@ There is exactly one exception to the standard priority ordering defined in §3.
 
 ### The Exception
 
-When a worker deposits a partial batch into the escrow pipe (due to overshoot or `FLAG_CHUNK_BOUNDARY` boundary detection), **that specific worker** should temporarily **invert its priority** to check escrow **before** the local ring on its next claim attempt.
+When a worker deposits a partial batch into the escrow pipe (due to overshoot), **that specific worker** should temporarily **invert its priority** to check escrow **before** the local ring on its next claim attempt.
 
 ### Rationale
 

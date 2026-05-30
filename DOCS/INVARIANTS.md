@@ -77,7 +77,7 @@ Even when the Pre-Flight Popcount is interrupted by an early worker spawn — ca
 The tail begins when the scanner approaches EOF. Remaining data may not cleanly fill the current batch size `L`.
 
 **Scanner Responsibilities**  
-When the tail is reached, the scanner publishes the final partial batch as a normal single-slot claim bounded by the EOF/chunk boundaries and sets the `FLAG_CHUNK_BOUNDARY` / `FLAG_MAJOR_EOF` metadata. The scanner stops changing batch-size policy once the tail begins.
+When the tail is reached, the scanner publishes the final partial batch as a normal single-slot claim bounded by the EOF/chunk boundaries and sets `FLAG_MAJOR_EOF` in `minor_ring` (NUMA mode) or relies on `scanner_finished` / `write_idx` reaching EOF (UMA mode). The scanner stops changing batch-size policy once the tail begins.
 
 **Worker Responsibilities at Tail**  
 Workers do nothing differently. They claim exactly 1 slot. Because the scanner has already bounded the slot to the exact remaining bytes/lines, the worker processes it and moves on. There is no overshoot to correct at the tail boundary — a single-slot claim never reaches past what the scanner has published.

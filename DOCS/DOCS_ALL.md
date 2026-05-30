@@ -147,7 +147,7 @@ To resolve this, each NUMA node has a dedicated Indexer thread pinned to its soc
 Once the Indexers establish the exact logical boundaries, the per-node Scanners (also pinned to their respective sockets) find the internal record boundaries and publish work batches.
 
 Scanners in NUMA mode differ from standard UMA scanners in three ways:
-1. **No Tail Cooldown:** NUMA scanners do not artificially ramp down batch sizes at the end of a chunk. They operate at maximum throughput until the chunk boundary is hit, at which point the final partial batch is published as a normal single-slot entry with `FLAG_CHUNK_BOUNDARY` set. Workers claim it identically to any other slot.
+1. **No Tail Cooldown:** NUMA scanners do not artificially ramp down batch sizes at the end of a chunk. They operate at maximum throughput until the chunk boundary is hit, at which point the final partial batch is published as a normal single-slot entry with `FLAG_MAJOR_EOF` set in `minor_ring`. Workers claim it identically to any other slot.
 2. **The Scanner Shield:** Scanners are strictly limited in how far they can read ahead of the worker pool. This prevents a fast scanner from blowing out the L2/L3 cache with metadata while workers are still processing older batches.
 3. **Topology-Aware Stealing:** If a Scanner runs out of local chunks, it is allowed to steal an unprocessed chunk from another NUMA node. However, to prevent thrashing, it will only steal if the victim node has a backlog exceeding a topological threshold: `1 + (NUMA_distance / 10)`. Under extreme starvation (e.g., EOF is reached and no new data will ever arrive), this threshold collapses to `1`, allowing full cluster drain.
 
@@ -157,18 +157,21 @@ Scanners in NUMA mode differ from standard UMA scanners in three ways:
 
 Workers are pinned to specific NUMA nodes and consume work exclusively from their local Scanner's ring buffer (or Escrow pipe). 
 
-### 4.1 The `FLAG_CHUNK_BOUNDARY` Barrier
-To ensure workers never cross a chunk boundary, the Scanner applies a `FLAG_CHUNK_BOUNDARY` bitmask to the stride (line count) entry of the final batch in every chunk. Because the Scanner determines batch boundaries before publishing to the ring, the final slot of a chunk is always bounded exactly at the chunk boundary — no worker ever needs to detect or truncate mid-claim.
+### 4.1 The `FLAG_MAJOR_EOF` Chunk-End Marker
 
-When a worker executes its lock-free claim (`atomic_fetch_add` of exactly 1), it receives a single ring slot. If that slot carries `FLAG_CHUNK_BOUNDARY`, the worker simply processes up to the marked boundary and is done. Because a single-slot claim by definition cannot span two slots, the mid-claim truncation and Escrow deposit that was required by the old speculative multi-batch claiming path is no longer needed for the chunk-boundary case.
+To ensure workers and the ordering subsystem can detect the end of each NUMA chunk, the Scanner sets bit 31 (`FLAG_MAJOR_EOF = 1U << 31`) in the `minor_ring` entry of the **last batch in every chunk**. The `minor_ring` field otherwise holds the batch's within-chunk sequence number (bits 30–0), used by `ring_order` for global merge ordering.
+
+The old `stride_ring` / `FLAG_CHUNK_BOUNDARY` mechanism (which embedded line counts and a boundary flag in a 16-bit field) has been replaced by the `offset_ring` + `end_ring` pair (explicit start/end byte offsets) and `FLAG_MAJOR_EOF` in `minor_ring`. The Scanner now fully determines all batch boundaries before publishing to the ring, so workers never need to detect a boundary mid-claim.
+
+When a worker executes its lock-free claim (`atomic_fetch_add` of exactly 1), it receives a single ring slot covering a byte range `[offset_ring[slot], end_ring[slot])`. A slot marked with `FLAG_MAJOR_EOF` is processed identically to any other slot — the flag is only consumed by the `ring_order` output-ordering thread to advance its major sequence counter.
 
 ### 4.2 The Ultimate Structural Guarantee
 Because:
 1. Indexers perfectly align chunk boundaries with record delimiters.
-2. Scanners cap chunks with the `FLAG_CHUNK_BOUNDARY` barrier.
-3. Workers are forbidden from claiming data across a `FLAG_CHUNK_BOUNDARY` barrier.
+2. Scanners bound every batch within a single chunk and mark the final batch with `FLAG_MAJOR_EOF` in `minor_ring`.
+3. Workers claim exactly one slot at a time; a single-slot claim by definition cannot span two chunks.
 
-...`forkrun` provides a **mathematical, structural guarantee that no worker will ever receive a batch that spans two non-contiguous chunks.** 
+...`forkrun` provides a **mathematical, structural guarantee that no worker will ever receive a batch that spans two non-contiguous chunks.**
 
 Because chunks are guaranteed to be isolated to a single physical NUMA socket via the Ingress thread's `MPOL_BIND` First-Touch allocation, **a worker will never execute a memory read that physically crosses a NUMA boundary** (unless explicitly stealing due to starvation). 
 
@@ -180,7 +183,7 @@ This architecture enforces one strict limitation: **`forkrun` cannot guarantee e
 
 Because the Ingress chunker carves the stream based on physical byte sizes (2 MB) rather than logical line counts, a chunk will contain an arbitrary number of lines. Guaranteeing exactly *N* lines per batch would require every chunk to magically contain an integer multiple of *N* lines. 
 
-If a worker is assigned to process exactly *N* lines, but reaches the `FLAG_CHUNK_BOUNDARY` boundary after *M* lines (where $M < N$), fulfilling the exact-batch contract would require the worker to reach across the chunk boundary to pull the remaining $N - M$ lines from the next chunk. This next chunk physically resides on a different NUMA socket. Doing so would violate the Born-Local structural guarantee and trigger heavy cross-socket memory traffic.
+If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), fulfilling the exact-batch contract at a chunk boundary would require the worker to pull the remaining $N - M$ lines from the next chunk (which physically resides on a different NUMA socket), violating the Born-Local structural guarantee and triggering heavy cross-socket memory traffic.
 
 **The Resolution:** 
 If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), `forkrun` automatically demotes the pipeline to the traditional UMA (Uniform Memory Access) architecture. While UMA mode still benefits from the ultra-fast C-ring and zero-copy `posix_spawnp` execution paths, it will incur the standard cross-socket memory migration tax inherent to all traditional shell parallelizers. 
@@ -375,15 +378,16 @@ This allows:
 
 ### 3.2 Ring Entry Encoding
 
-Each ring slot has two main associated rings:
-* `offset_ring`: Holds pure 64-bit byte offsets in the backing file (no flags).
-* `stride_ring`: An unsigned 16-bit value:
-  * **Low 15 bits**: line count in the batch.
-  * **High bit (bit 15, `FLAG_CHUNK_BOUNDARY = 1U << 15`)**:
-    * 0 → standard batch (or mid-chunk).
-    * 1 → chunk boundary (or partial batch where the scanner hit a NUMA/EOF boundary).
+Each ring slot is described by up to four parallel arrays:
 
-This encoding avoids bit pollution in the 64-bit offsets and separates spatial address info from logical block boundaries.
+* `offset_ring` (64-bit): Start byte offset of the batch in the backing memfd.
+* `end_ring` (64-bit): End byte offset of the batch. The worker's data range is `[offset_ring[slot], end_ring[slot])`. No line count is stored; the byte range is sufficient.
+* `major_ring` (32-bit, NUMA only): The NUMA chunk sequence number this batch belongs to, used by `ring_order` to merge per-node streams into global output order.
+* `minor_ring` (32-bit, NUMA only): The batch's sequence number within its chunk.
+  * **Bit 31 (`FLAG_MAJOR_EOF = 1U << 31`)**: Set on the *last* batch of a NUMA chunk, signaling the ordering subsystem to advance to the next major sequence. Clear on all other batches.
+  * **Bits 30–0**: The minor (within-chunk) batch index.
+
+The old `stride_ring` (16-bit line count + `FLAG_CHUNK_BOUNDARY` high bit) has been removed. Chunk-boundary and EOF signaling is now entirely handled by `FLAG_MAJOR_EOF` in `minor_ring` (NUMA mode) or by `write_idx` / `scanner_finished` reaching EOF (UMA mode).
 
 ### 3.3 Atomic Invariants
 
@@ -813,7 +817,7 @@ There is exactly one exception to the standard priority ordering defined in §3.
 
 ### The Exception
 
-When a worker deposits a partial batch into the escrow pipe (due to overshoot or `FLAG_CHUNK_BOUNDARY` boundary detection), **that specific worker** should temporarily **invert its priority** to check escrow **before** the local ring on its next claim attempt.
+When a worker deposits a partial batch into the escrow pipe (due to overshoot), **that specific worker** should temporarily **invert its priority** to check escrow **before** the local ring on its next claim attempt.
 
 ### Rationale
 
@@ -1203,7 +1207,7 @@ Even when the Pre-Flight Popcount is interrupted by an early worker spawn — ca
 The tail begins when the scanner approaches EOF. Remaining data may not cleanly fill the current batch size `L`.
 
 **Scanner Responsibilities**  
-When the tail is reached, the scanner publishes the final partial batch as a normal single-slot claim bounded by the EOF/chunk boundaries and sets the `FLAG_CHUNK_BOUNDARY` / `FLAG_MAJOR_EOF` metadata. The scanner stops changing batch-size policy once the tail begins.
+When the tail is reached, the scanner publishes the final partial batch as a normal single-slot claim bounded by the EOF/chunk boundaries and sets `FLAG_MAJOR_EOF` in `minor_ring` (NUMA mode) or relies on `scanner_finished` / `write_idx` reaching EOF (UMA mode). The scanner stops changing batch-size policy once the tail begins.
 
 **Worker Responsibilities at Tail**  
 Workers do nothing differently. They claim exactly 1 slot. Because the scanner has already bounded the slot to the exact remaining bytes/lines, the worker processes it and moves on. There is no overshoot to correct at the tail boundary — a single-slot claim never reaches past what the scanner has published.

@@ -53,15 +53,16 @@ This allows:
 
 ### 3.2 Ring Entry Encoding
 
-Each ring slot has two main associated rings:
-* `offset_ring`: Holds pure 64-bit byte offsets in the backing file (no flags).
-* `stride_ring`: An unsigned 16-bit value:
-  * **Low 15 bits**: line count in the batch.
-  * **High bit (bit 15, `FLAG_CHUNK_BOUNDARY = 1U << 15`)**:
-    * 0 → standard batch (or mid-chunk).
-    * 1 → chunk boundary (or partial batch where the scanner hit a NUMA/EOF boundary).
+Each ring slot is described by up to four parallel arrays:
 
-This encoding avoids bit pollution in the 64-bit offsets and separates spatial address info from logical block boundaries.
+* `offset_ring` (64-bit): Start byte offset of the batch in the backing memfd.
+* `end_ring` (64-bit): End byte offset of the batch. The worker's data range is `[offset_ring[slot], end_ring[slot])`. No line count is stored; the byte range is sufficient.
+* `major_ring` (32-bit, NUMA only): The NUMA chunk sequence number this batch belongs to, used by `ring_order` to merge per-node streams into global output order.
+* `minor_ring` (32-bit, NUMA only): The batch's sequence number within its chunk.
+  * **Bit 31 (`FLAG_MAJOR_EOF = 1U << 31`)**: Set on the *last* batch of a NUMA chunk, signaling the ordering subsystem to advance to the next major sequence. Clear on all other batches.
+  * **Bits 30–0**: The minor (within-chunk) batch index.
+
+The old `stride_ring` (16-bit line count + `FLAG_CHUNK_BOUNDARY` high bit) has been removed. Chunk-boundary and EOF signaling is now entirely handled by `FLAG_MAJOR_EOF` in `minor_ring` (NUMA mode) or by `write_idx` / `scanner_finished` reaching EOF (UMA mode).
 
 ### 3.3 Atomic Invariants
 
