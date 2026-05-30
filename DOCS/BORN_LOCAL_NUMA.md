@@ -42,7 +42,7 @@ To resolve this, each NUMA node has a dedicated Indexer thread pinned to its soc
 Once the Indexers establish the exact logical boundaries, the per-node Scanners (also pinned to their respective sockets) find the internal record boundaries and publish work batches.
 
 Scanners in NUMA mode differ from standard UMA scanners in three ways:
-1. **No Tail Cooldown:** NUMA scanners do not artificially ramp down batch sizes at the end of a chunk. They operate at maximum throughput until the chunk boundary is hit.
+1. **No Tail Cooldown:** NUMA scanners do not artificially ramp down batch sizes at the end of a chunk. They operate at maximum throughput until the chunk boundary is hit, at which point the final partial batch is published as a normal single-slot entry with `FLAG_CHUNK_BOUNDARY` set. Workers claim it identically to any other slot.
 2. **The Scanner Shield:** Scanners are strictly limited in how far they can read ahead of the worker pool. This prevents a fast scanner from blowing out the L2/L3 cache with metadata while workers are still processing older batches.
 3. **Topology-Aware Stealing:** If a Scanner runs out of local chunks, it is allowed to steal an unprocessed chunk from another NUMA node. However, to prevent thrashing, it will only steal if the victim node has a backlog exceeding a topological threshold: `1 + (NUMA_distance / 10)`. Under extreme starvation (e.g., EOF is reached and no new data will ever arrive), this threshold collapses to `1`, allowing full cluster drain.
 
@@ -53,9 +53,9 @@ Scanners in NUMA mode differ from standard UMA scanners in three ways:
 Workers are pinned to specific NUMA nodes and consume work exclusively from their local Scanner's ring buffer (or Escrow pipe). 
 
 ### 4.1 The `FLAG_CHUNK_BOUNDARY` Barrier
-To ensure workers never cross a chunk boundary, the Scanner applies a `FLAG_CHUNK_BOUNDARY` bitmask to the stride (line count) entry of the final batch in every chunk. 
+To ensure workers never cross a chunk boundary, the Scanner applies a `FLAG_CHUNK_BOUNDARY` bitmask to the stride (line count) entry of the final batch in every chunk. Because the Scanner determines batch boundaries before publishing to the ring, the final slot of a chunk is always bounded exactly at the chunk boundary — no worker ever needs to detect or truncate mid-claim.
 
-When a worker executes a lock-free claim (`atomic_fetch_add`), it may speculatively claim multiple batches. However, as it resolves the pointers for its claim, it checks for the `FLAG_CHUNK_BOUNDARY` bit in the `stride_ring`. If it detects this flag mid-claim, it immediately truncates its batch exactly at the boundary, processing the contiguous data and depositing the remaining claimed slots into the Escrow pipe.
+When a worker executes its lock-free claim (`atomic_fetch_add` of exactly 1), it receives a single ring slot. If that slot carries `FLAG_CHUNK_BOUNDARY`, the worker simply processes up to the marked boundary and is done. Because a single-slot claim by definition cannot span two slots, the mid-claim truncation and Escrow deposit that was required by the old speculative multi-batch claiming path is no longer needed for the chunk-boundary case.
 
 ### 4.2 The Ultimate Structural Guarantee
 Because:

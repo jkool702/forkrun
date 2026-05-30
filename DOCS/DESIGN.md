@@ -86,13 +86,11 @@ In NUMA mode each socket has its own independent `SharedState` ring; the invaria
 The fast path is intentionally simple:
 
 1. Load `write_idx`
-2. Atomically increment `read_idx` by batch size
-3. Compute offsets from ring
+2. Atomically increment `read_idx` by exactly **1**
+3. Compute offsets from the single claimed ring slot
 4. Execute batch
 
-No polling, no blocking, no branching beyond bounds checks.
-
-If sufficient data exists, the worker never sleeps.
+No polling, no blocking, no branching beyond bounds checks. The scanner has already pre-calculated the byte/line boundaries for this slot. If sufficient data exists, the worker never sleeps.
 
 ### 4.2 Waiting (Case 1)
 
@@ -170,22 +168,21 @@ This keeps the design robust and simple.
 
 ---
 
-## 7. Scanner Control Logic (Three-Phase Model)
+## 7. Scanner Control Logic (Two-Phase Model with Geometric Fallback)
 
-The scanner operates in a three-phase control loop:
+The scanner operates in two primary phases, with a geometric fallback if the preferred pre-flight path is interrupted.
 
-### Phase 0: Warmup (Fairness & Producer Startup)
+### Phase 0: Pre-Flight Popcount (Latency Hiding)
 
-* Batch size `L = 1`
-* Exactly ~N batches are emitted (N ≈ number of workers)
-* Intent: Ensure every worker receives work early. Prevent large initial batches from being monopolized by the first worker.
+During the Bash orchestrator's fork latency window — while workers are being spawned — the scanner uses a SIMD `fast_count_delim` (AVX2/NEON) pass to count the total lines already present in the backing file. If it reaches `Wmax * Lmax` lines (or EOF arrives first), it computes the globally optimal initial batch size `L = total_lines / W` and jumps directly to Phase 2 (PID steady-state).
 
-### Phase 1: Geometric Ramp-Up (Fast Discovery)
+This converts orchestrator latency from dead time into useful calibration work. When workers begin claiming, the batch size is already at its optimal value.
 
-* Batch size doubles geometrically (`L *= 2`)
-* Each size is held for a fixed number of batches
-* Ramp halts immediately on input stall
-* O(log L) convergence, no oscillation, scanner-only logic
+### Phase 1: Geometric Fallback (Interrupted Pre-Flight)
+
+If a worker spawns before the pre-flight scan reaches `Wmax * Lmax` lines, the scanner hot-swaps its simulated batch size `sim_L` into the live state and resumes doubling (`L *= 2`) to quickly converge on the optimal size. This achieves O(log L) convergence and halts immediately on input stall.
+
+**Workers are completely oblivious to this phase.** The scanner changes the contents of ring slots (larger batches per slot); workers always claim exactly 1 slot regardless.
 
 ### Phase 2: PID-like Steady State (Adaptive Equilibrium)
 
@@ -197,12 +194,7 @@ Scanner periodically measures:
 
 Batch size is adjusted conservatively toward a target. Adjustments are slow to avoid oscillation.
 
-**Signed batch size protocol** (see INVARIANTS.md for full formal rules):
-* Scanner always publishes negative values (`-abs(N)`)
-* Only workers may flip to positive via CAS (finalization)
-* In full NUMA mode the protocol is simplified but the negative-advisory rule remains
-
-**Tail ramp-down** is a distinct phase: once `tail_idx` is published the scanner stops changing batch size and all remaining batches become self-describing (sign bit + stride metadata).
+**Tail handling**: once EOF is imminent, the scanner stops changing batch size and publishes final partial batches as normal single-slot entries bounded by chunk/EOF boundaries. Workers drain the tail identically to normal operation — no special-case logic required.
 
 ### Phase 2b: Early Partial Flush (Low-Latency Trickle Mode)
 
@@ -283,7 +275,7 @@ Key properties of the architecture:
 
 **Mental model** (from PHYSICS.md):
 
-> A speculative, cooperative work-stealing engine where correctness is enforced by monotonic progress, not locks — and where data is physically born on the correct socket.
+> A speculative, cooperative work-stealing engine where correctness is enforced by monotonic progress, not locks — where the optimal batch size is computed during fork latency by a SIMD pre-flight scan — and where data is physically born on the correct socket.
 
 Once that model clicks, the rest of the design follows naturally.
 
