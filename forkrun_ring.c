@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.2.2
+// forkrun_ring.c v3.3.0
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -376,7 +376,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.2.2"
+#define FORKRUN_RING_VERSION "v3.3.0"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -3179,13 +3179,22 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       if (atomic_load_relaxed(&local_state->active_waiters) > 0)
         break;
 
-      bool ingest_done = atomic_load_acquire(&local_state->ingest_complete);
+      // PHYSICS FIX: Correct EOF detection for NUMA vs UMA topologies
+      bool ingest_done;
+      if (is_numa) {
+          ingest_done = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
+      } else {
+          ingest_done = atomic_load_acquire(&local_state->ingest_complete);
+      }
+
       ssize_t n;
       do {
         n = pread(fd_or_memfd, buf, chunk_sz, (off_t)pre_offset);
       } while (n < 0 && errno == EINTR);
 
-      if (n > 0) {
+      if (n < 0) {
+        break; // Hard error (e.g. EIO, EBADF) — abort pre-flight safely
+      } else if (n > 0) {
         pre_lines   += fast_count_delim(buf, buf + (size_t)n, delim);
         pre_offset  += (uint64_t)n;
 
@@ -3948,9 +3957,9 @@ unified_scanner_eof:
   }
 
   if (is_numa) {
-    // v3.2.2+: No PUBLISH_BATCH_SIZE needed at EOF. Once write_pow2 stops advancing,
-    // workers' tls_read_pow2 catch-up loop fully converges on the next claim and
-    // they permanently enter the fast path (claim_count == 1).
+    // v3.3.0+: No PUBLISH_BATCH_SIZE needed at EOF. Workers always claim exactly
+    // 1 slot (single atomic_fetch_add); once write_idx stops advancing they
+    // observe read_idx >= write_idx and proceed to the EOF condition check.
     atomic_store_release(&local_state->write_idx, local_scan_idx);
     atomic_store_release(&local_state->scanner_finished, 1);
 
@@ -3964,9 +3973,9 @@ unified_scanner_eof:
     bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
 
     if (!byte_mode && !limit_hit && !atomic_load_relaxed(&state[0].emergency_abort)) {
-      // v3.2.2 tail: Force-commit all locally-written ring slots before computing
-      // L_tail.  This eliminates the old stride_ring sum over [local_write_idx,
-      // local_scan_idx) by ensuring local_write_idx == local_scan_idx here.
+      // v3.3.0 tail: Force-commit all locally-written ring slots before computing
+      // L_tail, ensuring local_write_idx == local_scan_idx here so that only
+      // pending_lines and the current read buffer need to be counted below.
       atomic_store_release(&local_state->write_idx, local_scan_idx);
       local_write_idx = local_scan_idx;
       __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -3993,7 +4002,8 @@ unified_scanner_eof:
           break;
         }
       }
-      // No stride_ring sum needed: force-commit above ensures no uncommitted slots.
+      // No uncommitted slots to count: force-commit above guarantees
+      // local_write_idx == local_scan_idx before this point.
 
       uint64_t tail_start_offset =
           (local_scan_idx > local_write_idx)
@@ -4158,7 +4168,6 @@ static int do_lockfree_claim(struct WorkerBatchState *out, bool blocking) {
   struct SharedState *local_state = &state[my_numa_node];
 
   uint64_t my_read_idx;
-  uint64_t claim_count = 1;
   uint32_t current_kills = 0;
   int spin = 0;
 
@@ -4184,7 +4193,6 @@ dlc_restart_loop:
     } while (er < 0 && errno == EINTR);
     if (er == sizeof(ep)) {
       my_read_idx   = ep.idx;
-      claim_count   = ep.cnt; // respect the actual packet count (fix 2)
       current_kills = ep.num_kills;
       // Do NOT clear tl_drain_escrow here — keep draining until pipe is empty.
       goto dlc_evaluate_claim;
@@ -4206,7 +4214,6 @@ dlc_restart_loop:
       // zero TLS cursor, zero speculative splitting.
       my_read_idx = __atomic_fetch_add(&local_state->read_idx, 1,
                                        __ATOMIC_SEQ_CST);
-      claim_count = 1;
       break;
     }
 
@@ -4219,7 +4226,6 @@ dlc_restart_loop:
       } while (er < 0 && errno == EINTR);
       if (er == sizeof(ep)) {
         my_read_idx   = ep.idx;
-        claim_count   = ep.cnt; // respect actual packet count
         current_kills = ep.num_kills;
         break;
       }
@@ -4299,8 +4305,7 @@ dlc_restart_loop:
 dlc_evaluate_claim:
   {
     uint64_t w_curr = atomic_load_acquire(&local_state->write_idx);
-    // Verify the scanner has published ALL slots within this claim
-    if (my_read_idx + claim_count > w_curr) {
+    if (my_read_idx >= w_curr) {
       // Overshot: the ring advanced past us (scanner hasn't filled this slot yet,
       // or we raced with EOF). Wait for the slot to be committed.
       if (atomic_load_acquire(&local_state->scanner_finished)) {
@@ -4313,7 +4318,7 @@ dlc_evaluate_claim:
       is_waiting_on_ring = true;
       while (1) {
         w_curr = atomic_load_acquire(&local_state->write_idx);
-        if (w_curr >= my_read_idx + claim_count)
+        if (w_curr > my_read_idx)
           break; // slot is ready
         if (atomic_load_acquire(&local_state->scanner_finished)) {
           w_curr = atomic_load_acquire(&local_state->write_idx);
@@ -4333,7 +4338,7 @@ dlc_evaluate_claim:
         }
       }
       cleanup_waiter_state();
-      if (my_read_idx + claim_count > w_curr) {
+      if (my_read_idx >= w_curr) {
         // Still overshot after waiting — EOF consumed us
         spin = 0;
         goto dlc_restart_loop;
@@ -4343,12 +4348,12 @@ dlc_evaluate_claim:
 
   // Populate output struct
   uint64_t start = local_state->offset_ring[my_read_idx & RING_MASK];
-  uint64_t end   = local_state->end_ring[(my_read_idx + claim_count - 1) & RING_MASK];
+  uint64_t end   = local_state->end_ring[my_read_idx & RING_MASK];
 
-  __atomic_fetch_add(&local_state->total_lines_consumed, claim_count, __ATOMIC_SEQ_CST);
+  __atomic_fetch_add(&local_state->total_lines_consumed, 1, __ATOMIC_SEQ_CST);
 
   out->idx       = my_read_idx;
-  out->cnt       = claim_count;
+  out->cnt       = 1;
   out->num_kills = current_kills;
   out->offset    = start;
   out->length    = end - start;
@@ -4356,7 +4361,7 @@ dlc_evaluate_claim:
   if (local_state->numa_enabled) {
     out->major = local_state->major_ring[my_read_idx & RING_MASK];
     out->minor = local_state->minor_ring[my_read_idx & RING_MASK] & ~FLAG_MAJOR_EOF;
-    if (local_state->minor_ring[(my_read_idx + claim_count - 1) & RING_MASK] & FLAG_MAJOR_EOF)
+    if (local_state->minor_ring[my_read_idx & RING_MASK] & FLAG_MAJOR_EOF)
       out->minor |= FLAG_MAJOR_EOF;
   } else {
     out->major = 0;
