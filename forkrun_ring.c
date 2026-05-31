@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.2.2
+// forkrun_ring.c v3.3.0
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -376,7 +376,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.2.2"
+#define FORKRUN_RING_VERSION "v3.3.0"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -3948,7 +3948,7 @@ unified_scanner_eof:
   }
 
   if (is_numa) {
-    // v3.2.2+: No PUBLISH_BATCH_SIZE needed at EOF. Workers always claim exactly
+    // v3.3.0+: No PUBLISH_BATCH_SIZE needed at EOF. Workers always claim exactly
     // 1 slot (single atomic_fetch_add); once write_idx stops advancing they
     // observe read_idx >= write_idx and proceed to the EOF condition check.
     atomic_store_release(&local_state->write_idx, local_scan_idx);
@@ -3964,7 +3964,7 @@ unified_scanner_eof:
     bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
 
     if (!byte_mode && !limit_hit && !atomic_load_relaxed(&state[0].emergency_abort)) {
-      // v3.2.2 tail: Force-commit all locally-written ring slots before computing
+      // v3.3.0 tail: Force-commit all locally-written ring slots before computing
       // L_tail, ensuring local_write_idx == local_scan_idx here so that only
       // pending_lines and the current read buffer need to be counted below.
       atomic_store_release(&local_state->write_idx, local_scan_idx);

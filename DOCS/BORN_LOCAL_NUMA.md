@@ -1,6 +1,6 @@
 ### `BORN_LOCAL_NUMA.md`
 
-# FORKRUN BORN-LOCAL NUMA ARCHITECTURE (v3.2.1)
+# FORKRUN BORN-LOCAL NUMA ARCHITECTURE
 
 This document defines the physical memory-routing architecture of `forkrun`. 
 
