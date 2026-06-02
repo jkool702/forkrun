@@ -764,8 +764,8 @@ $(declare -f -- "${nn}")"
             fi
 
             # Sanity check: Ensure we actually have a target to execute before spawning workers
-            if [[ ! -f "$plugin_so" ]]; then
-                echo "forkrun [FATAL]: Plugin '$plugin_so' not found or could not be compiled." >&2
+            if [[ ! -f "$plugin_so" ]] && [[ ! -r "$plugin_so" ]]; then
+                echo "forkrun [FATAL]: Plugin '$plugin_so' not found/readable or could not be compiled." >&2
                 return 1
             fi
 
