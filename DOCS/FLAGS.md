@@ -70,7 +70,7 @@
 
 ### UNSETTING FLAGS
 
-  - +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed is used.
+  - +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed wins.
 
 ### ENVIRONMENT VARS
 

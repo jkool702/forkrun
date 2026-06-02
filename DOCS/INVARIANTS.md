@@ -48,57 +48,46 @@ Workers claim ranges, never individual slots. Overshoot handled *after* claim, n
 
 ---
 
-## 4. Signed Batch Size Protocol (Hysteresis & Fast-Path Routing)
+## 4. Single-Slot Claim Invariant
 
-**Meaning of Sign**  
-* `batch_size < 0` → **Catch-Up / Speculative Mode**. The scanner has geometrically ramped the target batch size (≥ 2x). Workers must speculatively claim multiple older, smaller slots to quickly reach the new magnitude.
-* `batch_size > 0` → **Steady-State / Fast-Path Mode**. The scanner is shrinking the batch size or making PID micro-adjustments (< 2x growth). Workers stay on the lock-free fast path and claim exactly 1 slot.
+**Invariant**  
+Workers always claim exactly 1 ring slot via a single `atomic_fetch_add`. The Scanner is solely responsible for determining the batch size (`L`) and publishing the byte/line boundaries for that batch into the slot before advancing `write_idx`.
 
-**Scanner Responsibilities**  
-* May update batch size at any time.  
-* Must publish a **negative** value (`-N`) ONLY if the new target is at least double the absolute value of the current batch size (`N >= 2 * current`).  
-* Must publish a **positive** value (`+N`) for all other adjustments (shrinking, or growing by less than 2x). This introduces hysteresis, shielding workers from PID jitter.
+**Enforced by**  
+The worker fast path is unconditional:
+```c
+my_read_idx = __atomic_fetch_add(&local_state->read_idx, 1, __ATOMIC_SEQ_CST);
+claim_count = 1;
+```
+No CAS retry loops. No sign-bit checks. No speculative multi-slot arithmetic. The Scanner changes the *contents* of slots (larger or smaller batches); workers never see the policy, only the slot.
 
-**Worker Responsibilities**  
-* Observe the published batch size.  
-* If positive (`> 0`): Bypass all speculative arithmetic and claim exactly 1 ring slot.
-* If negative (`< 0`): Enter the speculative slow path to calculate how many older slots satisfy the new magnitude. 
-* Must use **CAS** to flip `-N → +N` (finalization) once their `read_idx` successfully crosses the `batch_change_idx` boundary where the new size was published. 
+**The Fallback Guarantee**  
+Even when the Pre-Flight Popcount is interrupted by an early worker spawn — causing the Scanner to fall back to the Phase 1 Geometric Ramp-Up — the worker hot-path is identical. The Scanner publishes larger batches into single slots. Workers remain completely oblivious.
 
-**Forbidden Transitions**  
-* Worker changing the magnitude.  
-* Any positive → negative transition initiated by a worker.  
-* Non-CAS sign flip by workers (except during explicit Tail Override).
-
-**Correctness Guarantee**  
-Because a worker cannot claim "half a slot," forcing workers into speculative arithmetic when a batch shrinks or slightly grows is a waste of CPU cycles. The signed protocol mathematically guarantees that workers only pay the slow-path cost when a massive geometric ramp actually necessitates combining multiple slots.
+**Audit Rule**  
+❌ Never introduce logic where a worker claims more than 1 slot in a single atomic operation.  
+❌ Never introduce CAS retry loops on `read_idx`.  
+❌ Never route workers through different code paths based on a sign bit or advisory batch-size value.
 
 ---
 
-## 5. Tail-Aware Batch Size Rules
+## 5. Tail-Aware Drain Rules
 
 **Definition**  
-The tail ramp-down begins at `tail_idx` (EOF). Remaining data may not cleanly satisfy the current batch size.
+The tail begins when the scanner approaches EOF. Remaining data may not cleanly fill the current batch size `L`.
 
 **Scanner Responsibilities**  
-* Must not publish batch sizes that correspond to tail batches.  
-* When the tail is reached, the scanner must force the batch size to **positive** (`+N`) so that workers naturally downshift to claiming 1 slot at a time without overshooting.
+When the tail is reached, the scanner publishes the final partial batch as a normal single-slot claim bounded by the EOF/chunk boundaries and sets `FLAG_MAJOR_EOF` in `minor_ring` (NUMA mode) or relies on `scanner_finished` / `write_idx` reaching EOF (UMA mode). The scanner stops changing batch-size policy once the tail begins.
 
 **Worker Responsibilities at Tail**  
-When `read_idx >= tail_idx` and `batch_size < 0` (e.g., catching a race condition before the scanner's EOF force-flip):  
-1. Finalize immediately (`-N → +N` via CAS).  
-2. Bypass all slow paths (no waiting, no escrow).  
-3. Process exactly one claim using stride metadata.
-
-**Why This Rule Exists**  
-Guarantees exactly one claim per tail batch, prevents policy leakage, eliminates duplicate claims, and perfectly drains the ring without unnecessary escrow bouncing.
-
-**Forbidden**  
-* Scanner publishing batch changes after entering the tail.  
-* Workers applying speculative multi-claim logic in the tail.
+Workers do nothing differently. They claim exactly 1 slot. Because the scanner has already bounded the slot to the exact remaining bytes/lines, the worker processes it and moves on. There is no overshoot to correct at the tail boundary — a single-slot claim never reaches past what the scanner has published.
 
 **Key Insight**  
-Batch size is a *policy*, not a property of the tail. Once the tail begins, policy ends and structure takes over.
+Batch size is a *policy*, not a property of the tail. Once the tail begins, policy ends and structure takes over. The single-slot claim invariant (§4) eliminates the tail-overshoot problem entirely.
+
+**Audit Rule**  
+❌ Never introduce logic that forces workers to finalize or roll back a multi-slot claim at the tail.  
+❌ Scanner must not publish batch-size changes after entering the tail.
 
 ---
 
@@ -207,14 +196,14 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 ## 13. Checklist Summary
 
 If all sections above remain true, **forkrun is correct** — regardless of:
-* batching heuristics
+* batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement
 * worker churn
 * input arrival rate (trickle or burst)
 
 **Mental model reminder**  
-Progress is irreversible. Locality is structural. Contention was designed away.
+Progress is irreversible. Locality is structural. Contention was designed away. Workers always claim exactly one slot.
 
 ---
 
