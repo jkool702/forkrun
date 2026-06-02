@@ -393,11 +393,10 @@ fast_count_delim(const char *p, const char *end, char delim) {
   __atomic_compare_exchange_n(ptr, exp, des, 0, __ATOMIC_ACQ_REL,              \
                               __ATOMIC_RELAXED)
 
-// v3.3: Pre-flight popcount replaces the geometric ramp-up entirely.
-// The scanner does a pure delimiter count at AVX2 speed before committing any
-// ring slots, computes the optimal L = total_lines / W, and enters PID steady-
-// state directly. Workers always claim exactly 1 slot — no multi-claim logic,
-// no TLS cursor state machine, no speculative escrow splits.
+// v3.3: Pre-flight popcount optimally skips the geometric ramp-up in the
+// common case. The scanner does a pure delimiter count at AVX2 speed before
+// committing any ring slots, computes the optimal L = total_lines / W, and
+// enters PID steady-state directly. Workers always claim exactly 1 slot.
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -587,7 +586,8 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
         if (next) {
             *next = '\0'; // Swap delimiter for null terminator
             if (arr) {
-                bind_array_element(arr, (arrayind_t)idx, ptr, 0);
+                if (!bind_array_element(arr, (arrayind_t)idx, ptr, 0))
+                    return EXECUTION_FAILURE;
             } else {
                 tls_argv[fixed_argc + idx] = ptr;
             }
@@ -597,7 +597,8 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
             // Trailing data without a delimiter
             if (ptr < end && *ptr != '\0') {
                 if (arr) {
-                    bind_array_element(arr, (arrayind_t)idx, ptr, 0);
+                    if (!bind_array_element(arr, (arrayind_t)idx, ptr, 0))
+                        return EXECUTION_FAILURE;
                 } else {
                     tls_argv[fixed_argc + idx] = ptr;
                 }
@@ -785,7 +786,11 @@ static int ring_exec_splice_main(int argc, char **argv) {
     // 7. Feed the child concurrently via splice
     if (ret == 0) {
         // IGNORE SIGPIPE so 'head -n' doesn't kill the worker!
-        void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+        struct sigaction sa_ign, sa_old;
+        sa_ign.sa_handler = SIG_IGN;
+        sigemptyset(&sa_ign.sa_mask);
+        sa_ign.sa_flags = 0;
+        sigaction(SIGPIPE, &sa_ign, &sa_old);
 
         size_t written = 0;
         off_t offset = tls_batch_offset;
@@ -800,7 +805,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
         }
 
         // Restore previous SIGPIPE handler
-        signal(SIGPIPE, old_handler);
+        sigaction(SIGPIPE, &sa_old, NULL);
     }
 
     // 8. Close the write end to send EOF to the child
@@ -1552,17 +1557,14 @@ static uint32_t cfg_state = 0;
 static uint64_t user_vals[6] = {0};
 
 static void apply_config(char type, char sub, const char *arg) {
-  uint32_t clear_mask = 0;
   uint32_t set_mask = 0;
   int val_code = S_USER;
   uint64_t u_val = 0;
 
   if (strcmp(arg, "x") == 0) {
     if (type == 1) {
-      clear_mask |= M_L_ALL;
       set_mask |= M_BMODE;
     } else if (type == 2) {
-      clear_mask |= (M_B_ALL | M_BMODE);
     }
   } else {
     if (arg[0] == '\0')
@@ -1591,12 +1593,6 @@ static void apply_config(char type, char sub, const char *arg) {
       cfg_state |= M_STDIN;
       cfg_state &= ~M_L_ALL;
     }
-    if (type == 0)
-      clear_mask |= M_W_ALL;
-    if (type == 1)
-      clear_mask |= M_L_ALL;
-    if (type == 2)
-      clear_mask |= M_B_ALL;
 
 #define APPLY_SLOT(idx_u, sh)                                                  \
   do {                                                                         \
@@ -1639,8 +1635,6 @@ static void apply_config(char type, char sub, const char *arg) {
       }
     }
   }
-  //cfg_state &= ~clear_mask;   // DO NOT UN-COMMENT!!!
-  (void)clear_mask;
   cfg_state |= set_mask;
 }
 
@@ -1767,11 +1761,14 @@ static int ring_init_main(int argc, char **argv) {
   allocated_num_nodes = global_num_nodes;
 
   // --- PHYSICS FIX: Force g_state size to pad out to a 4K boundary ---
-  size_t global_size = (sizeof(struct GlobalState) + 4095ULL) & ~4095ULL;
+  long pg_sz = sysconf(_SC_PAGESIZE);
+  uint64_t align_sz = (pg_sz > 0) ? (uint64_t)pg_sz : 4096ULL;
+
+  size_t global_size = (sizeof(struct GlobalState) + align_sz - 1) & ~(align_sz - 1);
 
   size_t total_size =
       global_size + (sizeof(struct SharedState) * global_num_nodes);
-  total_size = (total_size + 4095ULL) & ~4095ULL;
+  total_size = (total_size + align_sz - 1) & ~(align_sz - 1);
 
   void *p = mmap(NULL, total_size, PROT_READ | PROT_WRITE,
                  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -2131,10 +2128,12 @@ static int ring_destroy_main(int argc, char **argv) {
   (void)argc;
   (void)argv;
   if (g_state) {
-    size_t global_size = (sizeof(struct GlobalState) + 4095ULL) & ~4095ULL;
+    long pg_sz = sysconf(_SC_PAGESIZE);
+    uint64_t align_sz = (pg_sz > 0) ? (uint64_t)pg_sz : 4096ULL;
+    size_t global_size = (sizeof(struct GlobalState) + align_sz - 1) & ~(align_sz - 1);
     size_t total_size =
         global_size + (sizeof(struct SharedState) * allocated_num_nodes);
-    total_size = (total_size + 4095ULL) & ~4095ULL;
+    total_size = (total_size + align_sz - 1) & ~(align_sz - 1);
     munmap(g_state, total_size);
     g_state = NULL;
     state = NULL;
@@ -4491,7 +4490,11 @@ static int ring_ack_main(int argc, char **argv) {
   int fd_fallow = atoi(argv[1]);
   int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
 
-  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+  struct sigaction sa_ign, sa_old;
+  sa_ign.sa_handler = SIG_IGN;
+  sigemptyset(&sa_ign.sa_mask);
+  sa_ign.sa_flags = 0;
+  sigaction(SIGPIPE, &sa_ign, &sa_old);
 
   struct OrderPacket op = {0};
 
@@ -4532,13 +4535,13 @@ static int ring_ack_main(int argc, char **argv) {
       uint64_t end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
       struct PhysPacket pp = {.off = start, .len = end - start};
       if (robust_pipe_write(fd_fallow, &pp, sizeof(pp)) < 0) {
-          signal(SIGPIPE, old_handler);
+          sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
       }
     } else {
       struct IndexPacket ip = {.idx = op.major_idx, .cnt = op.cnt};
       if (robust_pipe_write(fd_fallow, &ip, sizeof(ip)) < 0) {
-          signal(SIGPIPE, old_handler);
+          sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
       }
     }
@@ -4562,27 +4565,27 @@ static int ring_ack_main(int argc, char **argv) {
         int fd_pipe = atoi(s_order_pipe);
         off_t curr = lseek(fd_target, 0, SEEK_CUR);
         if (curr == (off_t)-1) {
-          signal(SIGPIPE, old_handler);
+          sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
         }
         op.fd = fd_target;
         op.off = (uint64_t)last_ack_offset;
         op.len = (uint64_t)(curr - last_ack_offset);
         if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) {
-            signal(SIGPIPE, old_handler);
+            sigaction(SIGPIPE, &sa_old, NULL);
             return EXECUTION_FAILURE;
         }
         last_ack_offset = curr;
       }
     } else {
       if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) {
-          signal(SIGPIPE, old_handler);
+          sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
       }
     }
   }
 
-  signal(SIGPIPE, old_handler);
+  sigaction(SIGPIPE, &sa_old, NULL);
   return EXECUTION_SUCCESS;
 }
 
@@ -4600,9 +4603,10 @@ struct HeapNode {
 static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap,
                       uint64_t key, struct OrderPacket pkt) {
   if (*sz >= *cap) {
-    *cap = (*cap) * 2;
-    void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
+    int new_cap = (*cap) * 2;
+    void *new_ptr = realloc(*heap_ptr, new_cap * sizeof(struct HeapNode));
     if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
+    *cap = new_cap;
     *heap_ptr = new_ptr;
   }
   struct HeapNode *heap = *heap_ptr;
@@ -4709,9 +4713,10 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
 
 static inline void interval_heap_push(struct IntervalNode **heap_ptr, int *sz, int *cap, uint64_t s, uint64_t e) {
     if (*sz >= *cap) {
-        *cap = (*cap) * 2;
-        void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct IntervalNode));
+        int new_cap = (*cap) * 2;
+        void *new_ptr = realloc(*heap_ptr, new_cap * sizeof(struct IntervalNode));
         if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
+        *cap = new_cap;
         *heap_ptr = new_ptr;
     }
     struct IntervalNode *heap = *heap_ptr;
@@ -4833,7 +4838,11 @@ static int ring_order_main(int argc, char **argv) {
   size_t pkt_sz = sizeof(struct OrderPacket);
 
   bool stdout_broken = false;
-  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+  struct sigaction sa_ign, sa_old;
+  sa_ign.sa_handler = SIG_IGN;
+  sigemptyset(&sa_ign.sa_mask);
+  sa_ign.sa_flags = 0;
+  sigaction(SIGPIPE, &sa_ign, &sa_old);
 
   // NEW: Sync flag for Ordered Resume
   bool resume_synced = true;
@@ -5000,7 +5009,7 @@ static int ring_order_main(int argc, char **argv) {
   free(fd_states);
   free(heap);
   free(tracker_heap);
-  signal(SIGPIPE, old_handler);
+  sigaction(SIGPIPE, &sa_old, NULL);
   return EXECUTION_SUCCESS;
 }
 
@@ -5266,7 +5275,11 @@ static int ring_splice_main(int argc, char **argv) {
 
   // PHYSICS FIX: Shield the worker process from kernel assassination if the
   // command exits early.
-  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+  struct sigaction sa_ign, sa_old;
+  sa_ign.sa_handler = SIG_IGN;
+  sigemptyset(&sa_ign.sa_mask);
+  sa_ign.sa_flags = 0;
+  sigaction(SIGPIPE, &sa_ign, &sa_old);
 
   while (written < len) {
     // PHYSICS FIX: Removed SPLICE_F_MOVE and SPLICE_F_MORE.
@@ -5287,7 +5300,7 @@ static int ring_splice_main(int argc, char **argv) {
       if (errno == EPIPE) {
         if (close_out)
           close(fd_out);
-        signal(SIGPIPE, old_handler);
+        sigaction(SIGPIPE, &sa_old, NULL);
         return EXECUTION_SUCCESS;
       }
       if (errno == ENOSPC || errno == ENOMEM) {
@@ -5297,7 +5310,7 @@ static int ring_splice_main(int argc, char **argv) {
       if (close_out)
         close(fd_out);
       builtin_error("splice failed: %s", strerror(errno));
-      signal(SIGPIPE, old_handler);
+      sigaction(SIGPIPE, &sa_old, NULL);
       return EXECUTION_FAILURE;
     }
     if (s == 0)
@@ -5306,7 +5319,7 @@ static int ring_splice_main(int argc, char **argv) {
   }
   if (close_out)
     close(fd_out);
-  signal(SIGPIPE, old_handler);
+  sigaction(SIGPIPE, &sa_old, NULL);
   return EXECUTION_SUCCESS;
 }
 
@@ -5783,9 +5796,12 @@ static int ring_escrow_put_main(int argc, char **argv) {
     struct EscrowPacket ep = { .idx = idx, .cnt = cnt, .num_kills = kills };
 
     if (fd_escrow_w && fd_escrow_w[node] >= 0) {
-        robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
-        // Signal workers to re-arm tl_drain_escrow on their next iteration.
-        __atomic_store_n(&state[node].escrow_pending, 1, __ATOMIC_RELEASE);
+        if (robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep)) == sizeof(ep)) {
+            // Signal workers to re-arm tl_drain_escrow on their next iteration.
+            __atomic_store_n(&state[node].escrow_pending, 1, __ATOMIC_RELEASE);
+            return EXECUTION_SUCCESS;
+        }
+        return EXECUTION_FAILURE;
     }
     return EXECUTION_SUCCESS;
 }
@@ -6251,7 +6267,7 @@ static int ring_call_main(int argc, char **argv) {
 
     // 1. Lazy-load the plugin (Only happens on the first batch for this worker)
     if (!tls_dl_handle) {
-        tls_dl_handle = dlopen(plugin_path, RTLD_LAZY | RTLD_LOCAL);
+        tls_dl_handle = dlopen(plugin_path, RTLD_NOW | RTLD_LOCAL);
         if (!tls_dl_handle) {
             fprintf(stderr, "forkrun [ERROR]: dlopen failed: %s\n", dlerror());
             return EXECUTION_FAILURE;
