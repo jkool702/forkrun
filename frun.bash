@@ -47,7 +47,7 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -623,6 +623,9 @@ toc() { :; }
     # NEW: Apply Checkpoint if Resuming
      ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "${FORKRUN_RESUME_JAGGED[@]}"
 
+    # sanatize checkpoint file
+    printf -v safe_checkpoint_file '%q' "${checkpoint_file}"
+
     # # # # # MAIN # # # # #
     {
         trap '
@@ -633,7 +636,7 @@ toc() { :; }
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
 
                 # ALWAYS write the resume file!
-                ring_dump_resume > "'"${checkpoint_file}"'"
+                ring_dump_resume > '"${safe_checkpoint_file}"'
                 local FORKRUN_EXTRA_DEFS=""
                 for nn in ${FORKRUN_EXTRA_FUNCS:-}; do
                     declare -F -- "${nn}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -f -- "${nn}")"
@@ -642,22 +645,22 @@ toc() { :; }
                     declare -p -- "${vv}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -p -- "${vv}")"
                 done
                 
-                declare -p -- FORKRUN_ORIG_ARGS 2>/dev/null >> "'"${checkpoint_file}"'"
-                [[ -n "${FORKRUN_RETRY_LIMIT:-}" ]] && declare -p -- FORKRUN_RETRY_LIMIT 2>/dev/null >> "'"${checkpoint_file}"'"
-                [[ -n "${FORKRUN_EXTRA_VARS:-}"  ]] && declare -p -- FORKRUN_EXTRA_VARS 2>/dev/null >> "'"${checkpoint_file}"'"
-                [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && declare -p -- FORKRUN_EXTRA_FUNCS 2>/dev/null >> "'"${checkpoint_file}"'"
-                [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && declare -p -- FORKRUN_EXTRA_SETUP 2>/dev/null >> "'"${checkpoint_file}"'"
-                [[ -n "${FORKRUN_EXTRA_DEFS:-}"  ]] && declare -p -- FORKRUN_EXTRA_DEFS 2>/dev/null >> "'"${checkpoint_file}"'"
+                declare -p -- FORKRUN_ORIG_ARGS 2>/dev/null >> '"${safe_checkpoint_file}"'
+                [[ -n "${FORKRUN_RETRY_LIMIT:-}" ]] && declare -p -- FORKRUN_RETRY_LIMIT 2>/dev/null >> '"${safe_checkpoint_file}"'
+                [[ -n "${FORKRUN_EXTRA_VARS:-}"  ]] && declare -p -- FORKRUN_EXTRA_VARS 2>/dev/null >> '"${safe_checkpoint_file}"'
+                [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && declare -p -- FORKRUN_EXTRA_FUNCS 2>/dev/null >> '"${safe_checkpoint_file}"'
+                [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && declare -p -- FORKRUN_EXTRA_SETUP 2>/dev/null >> '"${safe_checkpoint_file}"'
+                [[ -n "${FORKRUN_EXTRA_DEFS:-}"  ]] && declare -p -- FORKRUN_EXTRA_DEFS 2>/dev/null >> '"${safe_checkpoint_file}"'
 
                 if [[ "${order_mode}" != "realtime" ]]; then
-                    local safe_bytes="$(grep -E '"'"'^FORKRUN_RESUME_STDOUT_BYTES='"'"' "${checkpoint_file}")"
+                    local safe_bytes="$(grep -E '"'"'^FORKRUN_RESUME_STDOUT_BYTES='"'"' '"${safe_checkpoint_file}"')"
                     safe_bytes="${safe_bytes#*=}"
                     echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
-                    echo "         then re-run your exact command with: --resume '"${checkpoint_file}"'" >&2
+                    echo "         then re-run your exact command with: --resume "'"${safe_checkpoint_file}"' >&2
                 else
                     echo "forkrun: Warning - Realtime mode (-u) checkpoint generated." >&2
                     echo "         Resuming will result in some duplicate lines at the failure boundary (At-Least-Once semantics)." >&2
-                    echo "         Re-run your exact command with: --resume '"${checkpoint_file}"'" >&2
+                    echo "         Re-run your exact command with: --resume "'"${safe_checkpoint_file}"' >&2
                 fi
             fi
             # Clean up memory only AFTER the trap is done with it!
