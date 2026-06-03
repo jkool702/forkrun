@@ -2417,6 +2417,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (bounce_buf == MAP_FAILED) {
           bounce_buf = NULL; // Prevent invalid munmap in ingest_done
           free(nodemask);
+          builtin_error("forkrun: mmap failed for ingest bounce buffer (OOM)");
           limit_reached_exit = true;
           goto ingest_done;
         }
@@ -4049,6 +4050,8 @@ unified_scanner_eof:
           min_batch = 1;
         if (target < min_batch)
           target = min_batch;
+        if (target > L_tail - L_tail_done)
+          target = L_tail - L_tail_done; // PHYSICS FIX: Prevent UMA ghost batches at EOF
 
         uint64_t lines_found = 0;
         while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
@@ -5073,8 +5076,8 @@ static int ring_fallow_phys_main(int argc, char **argv) {
   free(heap);
   if (state) atomic_store_release(&state[0].fallow_active, 0);
 
-  // SIGPIPE CASCADE: If Fallow dies unexpectedly, signal the Scanners to abort
-  pull_fire_alarm();
+  // PHYSICS FIX: Only pull the fire alarm if Fallow died abnormally
+  if (n_read < 0) pull_fire_alarm();
 
   return EXECUTION_SUCCESS;
 }
@@ -5752,9 +5755,11 @@ static int ring_fallow_main(int argc, char **argv) {
   }
 
   free(heap);
-  // SIGPIPE CASCADE: If Fallow dies (Entropy stops), signal the Scanners to abort
   if (state) atomic_store_release(&state[0].fallow_active, 0);
-  pull_fire_alarm();
+
+  // PHYSICS FIX: Only pull the fire alarm if Fallow died abnormally (e.g. SIGPIPE)
+  // If it exited cleanly (n_read == 0), the pipeline completed successfully!
+  if (n_read < 0) pull_fire_alarm();
 
   return EXECUTION_SUCCESS;
 }
