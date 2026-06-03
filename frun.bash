@@ -289,10 +289,10 @@ EOF
                         echo "___FORKRUN_RESUME_STATE_BOUNDARY___";
                         FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS//[[:space:]$IFS]/ } ";
                         FORKRUN_EXTRA_VARS_A=(${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /});
-                        builtin declare -p FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT "${FORKRUN_EXTRA_VARS_A[@]}";
+                        builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT "${FORKRUN_EXTRA_VARS_A[@]}";
                         [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && {
                             FORKRUN_EXTRA_FUNCS_A=(${FORKRUN_EXTRA_FUNCS})
-                            builtin declare -f "${FORKRUN_EXTRA_FUNCS_A[@]}"
+                            builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}"
                         }
                     ' _ "$(< "$resume_file")" 2>/dev/null)"
 
