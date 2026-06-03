@@ -288,8 +288,12 @@ EOF
                         builtin declare -p FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES FORKRUN_RESUME_JAGGED;
                         echo "___FORKRUN_RESUME_STATE_BOUNDARY___";
                         FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS//[[:space:]$IFS]/ } ";
-                        builtin declare -p FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT ${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /};
-                        [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && builtin declare -f ${FORKRUN_EXTRA_FUNCS}
+                        FORKRUN_EXTRA_VARS_A=(${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /});
+                        builtin declare -p FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT "${FORKRUN_EXTRA_VARS_A[@]}";
+                        [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && {
+                            FORKRUN_EXTRA_FUNCS_A=(${FORKRUN_EXTRA_FUNCS})
+                            builtin declare -f "${FORKRUN_EXTRA_FUNCS_A[@]}"
+                        }
                     ' _ "$(< "$resume_file")" 2>/dev/null)"
 
                     # Security Check: Ensure the restricted shell actually finished successfully
@@ -988,7 +992,10 @@ toc() { :; }
         [[ -n "${fd_out[$RING_WID]:-}" ]] && ring_revert_output "${fd_out[$RING_WID]}"
         '
         worker_func_src+='
-        ring_escrow_put "$RING_NODE_ID" "-" "-" "$RING_NUM_KILLS"
+        ring_escrow_put "$RING_NODE_ID" "-" "-" "$RING_NUM_KILLS" || {
+            ring_abort
+            exit $status
+        }
     fi
     
     # Notify parent that the trap successfully fired
