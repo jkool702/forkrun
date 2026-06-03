@@ -703,9 +703,13 @@ static int ring_exec_main(int argc, char **argv) {
     sigaddset(&set, SIGCHLD);
     sigprocmask(SIG_BLOCK, &set, &oset);
 
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd);
+
     // 6. Spawn the child (inherits FDs natively)
     pid_t pid;
-    ret = posix_spawnp(&pid, tls_argv[0], NULL, NULL, tls_argv, environ);
+    ret = posix_spawnp(&pid, tls_argv[0], &actions, NULL, tls_argv, environ);
 
     // 7. Wait for the child synchronously
     int status = 0;
@@ -718,6 +722,7 @@ static int ring_exec_main(int argc, char **argv) {
         }
     }
 
+    posix_spawn_file_actions_destroy(&actions);
     // 8. Restore signal mask
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
@@ -768,6 +773,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, pfd[0], STDIN_FILENO);
     posix_spawn_file_actions_addclose(&actions, pfd[1]); // Child doesn't need write end
+    if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd); // Shield memfd
 
     // 4. Block SIGCHLD
     sigset_t set, oset;
@@ -2409,8 +2415,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         bounce_buf = mmap(NULL, chunk_size, PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (bounce_buf == MAP_FAILED) {
+          bounce_buf = NULL; // Prevent invalid munmap in ingest_done
           free(nodemask);
-          return EXECUTION_FAILURE;
+          limit_reached_exit = true;
+          goto ingest_done;
         }
       }
     }
@@ -6320,6 +6328,13 @@ static int ring_call_main(int argc, char **argv) {
     tls_argv[batch_argc] = NULL;
 
     // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
+    
+    // PHYSICS FIX: Shield the C-Plugin against Bash's SIGCHLD reaper
+    sigset_t set, oset;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &set, &oset);
+
     int cb_ret;
     if (tls_use_ctx) {
         tls_fctx.batch_index = worker_last_idx;
@@ -6337,6 +6352,8 @@ static int ring_call_main(int argc, char **argv) {
     } else {
         cb_ret = tls_callback((int)batch_argc, tls_argv);
     }
+
+    sigprocmask(SIG_SETMASK, &oset, NULL);
 
     // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
     return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;
