@@ -18,12 +18,11 @@
 // sockets at birth
 //    via `set_mempolicy(MPOL_BIND)` driven by backpressure from indexers. This
 //    minimizes cross-socket migration and enforces conservation of locality.
-// 2. Inertial Claiming (Workers): Workers are "inertial particles". They claim
-// a large block
-//    speculatively via lock-free `atomic_fetch_add` (no CAS retry loops). If
-//    they overshoot (claim > available), they process the available data and
-//    dump the remainder into an "escrow" side-channel (pipe) for others,
-//    preventing slow-path blocks.
+// 2. Single-Slot Claiming (Workers): Workers are water wheels that claim exactly 1
+//    slot (1 batch) at a time via lock-free `atomic_fetch_add`. The scanner
+//    pre-calculates optimal sizes. If a worker process fails mid-execution, its
+//    active transaction is rolled back and re-deposited into an escrow pipe
+//    for other workers to claim.
 // 3. Fallow (Entropy Export): As the workflow unspools, a background fallow
 // thread
 //    punches holes in the backing memfd via `fallocate(PUNCH_HOLE)` to prevent
@@ -243,7 +242,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
     return NULL;
 
 #if defined(__x86_64__) || defined(__i386__)
-  static int avx2_supported = -1;
+  static __thread int avx2_supported = -1;
   if (__builtin_expect(avx2_supported == -1, 0)) {
     __builtin_cpu_init();
     avx2_supported =
@@ -265,7 +264,7 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
 static inline uint64_t
 fast_count_delim(const char *p, const char *end, char delim) {
 #if defined(__x86_64__) || defined(__i386__)
-  static int avx2_supported = -1;
+  static __thread int avx2_supported = -1;
   if (__builtin_expect(avx2_supported == -1, 0)) {
     __builtin_cpu_init();
     avx2_supported = __builtin_cpu_supports("avx2") &&
@@ -386,18 +385,17 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define atomic_store_relaxed(ptr, val)                                         \
   __atomic_store_n(ptr, val, __ATOMIC_RELAXED)
 #define atomic_fetch_add(ptr, val)                                             \
-  __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST)
+  __atomic_fetch_add(ptr, val, __ATOMIC_ACQ_REL)
 #define atomic_fetch_sub(ptr, val)                                             \
-  __atomic_fetch_sub(ptr, val, __ATOMIC_SEQ_CST)
+  __atomic_fetch_sub(ptr, val, __ATOMIC_ACQ_REL)
 #define atomic_compare_exchange(ptr, exp, des)                                 \
   __atomic_compare_exchange_n(ptr, exp, des, 0, __ATOMIC_ACQ_REL,              \
                               __ATOMIC_RELAXED)
 
-// v3.3: Pre-flight popcount replaces the geometric ramp-up entirely.
-// The scanner does a pure delimiter count at AVX2 speed before committing any
-// ring slots, computes the optimal L = total_lines / W, and enters PID steady-
-// state directly. Workers always claim exactly 1 slot — no multi-claim logic,
-// no TLS cursor state machine, no speculative escrow splits.
+// v3.3: Pre-flight popcount optimally skips the geometric ramp-up in the
+// common case. The scanner does a pure delimiter count at AVX2 speed before
+// committing any ring slots, computes the optimal L = total_lines / W, and
+// enters PID steady-state directly. Workers always claim exactly 1 slot.
 
 #ifndef GIT_HASH
 #define GIT_HASH "unknown"
@@ -587,7 +585,8 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
         if (next) {
             *next = '\0'; // Swap delimiter for null terminator
             if (arr) {
-                bind_array_element(arr, (arrayind_t)idx, ptr, 0);
+                if (!bind_array_element(arr, (arrayind_t)idx, ptr, 0))
+                    return EXECUTION_FAILURE;
             } else {
                 tls_argv[fixed_argc + idx] = ptr;
             }
@@ -597,7 +596,8 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
             // Trailing data without a delimiter
             if (ptr < end && *ptr != '\0') {
                 if (arr) {
-                    bind_array_element(arr, (arrayind_t)idx, ptr, 0);
+                    if (!bind_array_element(arr, (arrayind_t)idx, ptr, 0))
+                        return EXECUTION_FAILURE;
                 } else {
                     tls_argv[fixed_argc + idx] = ptr;
                 }
@@ -702,9 +702,13 @@ static int ring_exec_main(int argc, char **argv) {
     sigaddset(&set, SIGCHLD);
     sigprocmask(SIG_BLOCK, &set, &oset);
 
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd);
+
     // 6. Spawn the child (inherits FDs natively)
     pid_t pid;
-    ret = posix_spawnp(&pid, tls_argv[0], NULL, NULL, tls_argv, environ);
+    ret = posix_spawnp(&pid, tls_argv[0], &actions, NULL, tls_argv, environ);
 
     // 7. Wait for the child synchronously
     int status = 0;
@@ -717,6 +721,7 @@ static int ring_exec_main(int argc, char **argv) {
         }
     }
 
+    posix_spawn_file_actions_destroy(&actions);
     // 8. Restore signal mask
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
@@ -767,6 +772,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, pfd[0], STDIN_FILENO);
     posix_spawn_file_actions_addclose(&actions, pfd[1]); // Child doesn't need write end
+    if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd); // Shield memfd
 
     // 4. Block SIGCHLD
     sigset_t set, oset;
@@ -785,7 +791,11 @@ static int ring_exec_splice_main(int argc, char **argv) {
     // 7. Feed the child concurrently via splice
     if (ret == 0) {
         // IGNORE SIGPIPE so 'head -n' doesn't kill the worker!
-        void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+        struct sigaction sa_ign, sa_old;
+        sa_ign.sa_handler = SIG_IGN;
+        sigemptyset(&sa_ign.sa_mask);
+        sa_ign.sa_flags = 0;
+        sigaction(SIGPIPE, &sa_ign, &sa_old);
 
         size_t written = 0;
         off_t offset = tls_batch_offset;
@@ -800,7 +810,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
         }
 
         // Restore previous SIGPIPE handler
-        signal(SIGPIPE, old_handler);
+        sigaction(SIGPIPE, &sa_old, NULL);
     }
 
     // 8. Close the write end to send EOF to the child
@@ -1166,12 +1176,13 @@ static uint32_t allocated_num_nodes = 0;
 static uint32_t *g_logical_to_phys_map = NULL;
 static uint8_t g_explicit_pinning = 0; // NEW
 
-// EscrowPacket: Used to solve the "overshoot" problem. When a worker
-// speculatively claims more offsets than are currently available from the
-// scanner, it processes the available ones and "deposits" the remaining claimed
-// count into a side-channel pipe (escrow) for other idle workers to steal.
+// EscrowPacket: Used as an optimistic transaction recovery queue. If a worker
+// process fails or is killed mid-execution, its active transaction is
+// rolled back and re-deposited into a side-channel pipe (escrow) for other
+// idle workers to steal. Because workers claim exactly 1 slot, there are no
+// partial remainders.
 // NOTE: A given worker can (at any given time) only have a single escrow claim,
-// and these claims are inherently rare occurrences (happen only in rare races).
+// and these claims are inherently rare occurrences (happen only in crashes).
 // This means in practice the escrow pipe buffer will NEVER fill up (even if
 // its capacity is 64 KB, and especially not at 1 MB).
 struct EscrowPacket {
@@ -1552,17 +1563,14 @@ static uint32_t cfg_state = 0;
 static uint64_t user_vals[6] = {0};
 
 static void apply_config(char type, char sub, const char *arg) {
-  uint32_t clear_mask = 0;
   uint32_t set_mask = 0;
   int val_code = S_USER;
   uint64_t u_val = 0;
 
   if (strcmp(arg, "x") == 0) {
     if (type == 1) {
-      clear_mask |= M_L_ALL;
       set_mask |= M_BMODE;
     } else if (type == 2) {
-      clear_mask |= (M_B_ALL | M_BMODE);
     }
   } else {
     if (arg[0] == '\0')
@@ -1591,12 +1599,6 @@ static void apply_config(char type, char sub, const char *arg) {
       cfg_state |= M_STDIN;
       cfg_state &= ~M_L_ALL;
     }
-    if (type == 0)
-      clear_mask |= M_W_ALL;
-    if (type == 1)
-      clear_mask |= M_L_ALL;
-    if (type == 2)
-      clear_mask |= M_B_ALL;
 
 #define APPLY_SLOT(idx_u, sh)                                                  \
   do {                                                                         \
@@ -1639,8 +1641,6 @@ static void apply_config(char type, char sub, const char *arg) {
       }
     }
   }
-  //cfg_state &= ~clear_mask;   // DO NOT UN-COMMENT!!!
-  (void)clear_mask;
   cfg_state |= set_mask;
 }
 
@@ -1767,11 +1767,14 @@ static int ring_init_main(int argc, char **argv) {
   allocated_num_nodes = global_num_nodes;
 
   // --- PHYSICS FIX: Force g_state size to pad out to a 4K boundary ---
-  size_t global_size = (sizeof(struct GlobalState) + 4095ULL) & ~4095ULL;
+  long pg_sz = sysconf(_SC_PAGESIZE);
+  uint64_t align_sz = (pg_sz > 0) ? (uint64_t)pg_sz : 4096ULL;
+
+  size_t global_size = (sizeof(struct GlobalState) + align_sz - 1) & ~(align_sz - 1);
 
   size_t total_size =
       global_size + (sizeof(struct SharedState) * global_num_nodes);
-  total_size = (total_size + 4095ULL) & ~4095ULL;
+  total_size = (total_size + align_sz - 1) & ~(align_sz - 1);
 
   void *p = mmap(NULL, total_size, PROT_READ | PROT_WRITE,
                  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -2131,10 +2134,12 @@ static int ring_destroy_main(int argc, char **argv) {
   (void)argc;
   (void)argv;
   if (g_state) {
-    size_t global_size = (sizeof(struct GlobalState) + 4095ULL) & ~4095ULL;
+    long pg_sz = sysconf(_SC_PAGESIZE);
+    uint64_t align_sz = (pg_sz > 0) ? (uint64_t)pg_sz : 4096ULL;
+    size_t global_size = (sizeof(struct GlobalState) + align_sz - 1) & ~(align_sz - 1);
     size_t total_size =
         global_size + (sizeof(struct SharedState) * allocated_num_nodes);
-    total_size = (total_size + 4095ULL) & ~4095ULL;
+    total_size = (total_size + align_sz - 1) & ~(align_sz - 1);
     munmap(g_state, total_size);
     g_state = NULL;
     state = NULL;
@@ -2410,8 +2415,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         bounce_buf = mmap(NULL, chunk_size, PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (bounce_buf == MAP_FAILED) {
+          bounce_buf = NULL; // Prevent invalid munmap in ingest_done
           free(nodemask);
-          return EXECUTION_FAILURE;
+          limit_reached_exit = true;
+          goto ingest_done;
         }
       }
     }
@@ -4371,13 +4378,13 @@ dlc_evaluate_claim:
   return 0;
 }
 
-// Workers Claiming Data (Inertial Particles):
-// The fast path is a single lock-free `atomic_fetch_add` to claim a batch of
-// records. There are NO CAS retry loops on the fast path. If a worker
-// overshoots and claims records that haven't arrived yet (inertia), it
-// processes the available ones and deposits the remainder into an escrow pipe
-// for other idle workers to steal. Escrow is pure advisory capability; forward
-// progress is guaranteed by strictly monotonic indices.
+// Workers Claiming Data (Water Wheels):
+// The fast path is a single lock-free `atomic_fetch_add` to claim exactly 1
+// slot (1 batch) of records. There are NO CAS retry loops on the fast path. If
+// a worker process fails mid-execution, its active transaction is rolled back
+// and re-deposited into an escrow pipe for other idle workers to steal. Escrow
+// is an optimistic transaction recovery queue; forward progress is guaranteed
+// by strictly monotonic indices.
 //
 // This function is now a thin wrapper: do_lockfree_claim handles all ring
 // physics, and this function handles NUMA init, the SIGPIPE shield, and all
@@ -4491,7 +4498,11 @@ static int ring_ack_main(int argc, char **argv) {
   int fd_fallow = atoi(argv[1]);
   int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
 
-  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+  struct sigaction sa_ign, sa_old;
+  sa_ign.sa_handler = SIG_IGN;
+  sigemptyset(&sa_ign.sa_mask);
+  sa_ign.sa_flags = 0;
+  sigaction(SIGPIPE, &sa_ign, &sa_old);
 
   struct OrderPacket op = {0};
 
@@ -4532,13 +4543,13 @@ static int ring_ack_main(int argc, char **argv) {
       uint64_t end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
       struct PhysPacket pp = {.off = start, .len = end - start};
       if (robust_pipe_write(fd_fallow, &pp, sizeof(pp)) < 0) {
-          signal(SIGPIPE, old_handler);
+          sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
       }
     } else {
       struct IndexPacket ip = {.idx = op.major_idx, .cnt = op.cnt};
       if (robust_pipe_write(fd_fallow, &ip, sizeof(ip)) < 0) {
-          signal(SIGPIPE, old_handler);
+          sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
       }
     }
@@ -4562,27 +4573,27 @@ static int ring_ack_main(int argc, char **argv) {
         int fd_pipe = atoi(s_order_pipe);
         off_t curr = lseek(fd_target, 0, SEEK_CUR);
         if (curr == (off_t)-1) {
-          signal(SIGPIPE, old_handler);
+          sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
         }
         op.fd = fd_target;
         op.off = (uint64_t)last_ack_offset;
         op.len = (uint64_t)(curr - last_ack_offset);
         if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) {
-            signal(SIGPIPE, old_handler);
+            sigaction(SIGPIPE, &sa_old, NULL);
             return EXECUTION_FAILURE;
         }
         last_ack_offset = curr;
       }
     } else {
       if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) {
-          signal(SIGPIPE, old_handler);
+          sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
       }
     }
   }
 
-  signal(SIGPIPE, old_handler);
+  sigaction(SIGPIPE, &sa_old, NULL);
   return EXECUTION_SUCCESS;
 }
 
@@ -4600,9 +4611,10 @@ struct HeapNode {
 static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap,
                       uint64_t key, struct OrderPacket pkt) {
   if (*sz >= *cap) {
-    *cap = (*cap) * 2;
-    void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct HeapNode));
+    int new_cap = (*cap) * 2;
+    void *new_ptr = realloc(*heap_ptr, new_cap * sizeof(struct HeapNode));
     if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
+    *cap = new_cap;
     *heap_ptr = new_ptr;
   }
   struct HeapNode *heap = *heap_ptr;
@@ -4709,9 +4721,10 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
 
 static inline void interval_heap_push(struct IntervalNode **heap_ptr, int *sz, int *cap, uint64_t s, uint64_t e) {
     if (*sz >= *cap) {
-        *cap = (*cap) * 2;
-        void *new_ptr = realloc(*heap_ptr, (*cap) * sizeof(struct IntervalNode));
+        int new_cap = (*cap) * 2;
+        void *new_ptr = realloc(*heap_ptr, new_cap * sizeof(struct IntervalNode));
         if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
+        *cap = new_cap;
         *heap_ptr = new_ptr;
     }
     struct IntervalNode *heap = *heap_ptr;
@@ -4833,7 +4846,11 @@ static int ring_order_main(int argc, char **argv) {
   size_t pkt_sz = sizeof(struct OrderPacket);
 
   bool stdout_broken = false;
-  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+  struct sigaction sa_ign, sa_old;
+  sa_ign.sa_handler = SIG_IGN;
+  sigemptyset(&sa_ign.sa_mask);
+  sa_ign.sa_flags = 0;
+  sigaction(SIGPIPE, &sa_ign, &sa_old);
 
   // NEW: Sync flag for Ordered Resume
   bool resume_synced = true;
@@ -5000,7 +5017,7 @@ static int ring_order_main(int argc, char **argv) {
   free(fd_states);
   free(heap);
   free(tracker_heap);
-  signal(SIGPIPE, old_handler);
+  sigaction(SIGPIPE, &sa_old, NULL);
   return EXECUTION_SUCCESS;
 }
 
@@ -5266,7 +5283,11 @@ static int ring_splice_main(int argc, char **argv) {
 
   // PHYSICS FIX: Shield the worker process from kernel assassination if the
   // command exits early.
-  void (*old_handler)(int) = signal(SIGPIPE, SIG_IGN);
+  struct sigaction sa_ign, sa_old;
+  sa_ign.sa_handler = SIG_IGN;
+  sigemptyset(&sa_ign.sa_mask);
+  sa_ign.sa_flags = 0;
+  sigaction(SIGPIPE, &sa_ign, &sa_old);
 
   while (written < len) {
     // PHYSICS FIX: Removed SPLICE_F_MOVE and SPLICE_F_MORE.
@@ -5287,7 +5308,7 @@ static int ring_splice_main(int argc, char **argv) {
       if (errno == EPIPE) {
         if (close_out)
           close(fd_out);
-        signal(SIGPIPE, old_handler);
+        sigaction(SIGPIPE, &sa_old, NULL);
         return EXECUTION_SUCCESS;
       }
       if (errno == ENOSPC || errno == ENOMEM) {
@@ -5297,7 +5318,7 @@ static int ring_splice_main(int argc, char **argv) {
       if (close_out)
         close(fd_out);
       builtin_error("splice failed: %s", strerror(errno));
-      signal(SIGPIPE, old_handler);
+      sigaction(SIGPIPE, &sa_old, NULL);
       return EXECUTION_FAILURE;
     }
     if (s == 0)
@@ -5306,7 +5327,7 @@ static int ring_splice_main(int argc, char **argv) {
   }
   if (close_out)
     close(fd_out);
-  signal(SIGPIPE, old_handler);
+  sigaction(SIGPIPE, &sa_old, NULL);
   return EXECUTION_SUCCESS;
 }
 
@@ -5783,9 +5804,12 @@ static int ring_escrow_put_main(int argc, char **argv) {
     struct EscrowPacket ep = { .idx = idx, .cnt = cnt, .num_kills = kills };
 
     if (fd_escrow_w && fd_escrow_w[node] >= 0) {
-        robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep));
-        // Signal workers to re-arm tl_drain_escrow on their next iteration.
-        __atomic_store_n(&state[node].escrow_pending, 1, __ATOMIC_RELEASE);
+        if (robust_pipe_write(fd_escrow_w[node], &ep, sizeof(ep)) == sizeof(ep)) {
+            // Signal workers to re-arm tl_drain_escrow on their next iteration.
+            __atomic_store_n(&state[node].escrow_pending, 1, __ATOMIC_RELEASE);
+            return EXECUTION_SUCCESS;
+        }
+        return EXECUTION_FAILURE;
     }
     return EXECUTION_SUCCESS;
 }
@@ -6251,7 +6275,7 @@ static int ring_call_main(int argc, char **argv) {
 
     // 1. Lazy-load the plugin (Only happens on the first batch for this worker)
     if (!tls_dl_handle) {
-        tls_dl_handle = dlopen(plugin_path, RTLD_LAZY | RTLD_LOCAL);
+        tls_dl_handle = dlopen(plugin_path, RTLD_NOW | RTLD_LOCAL);
         if (!tls_dl_handle) {
             fprintf(stderr, "forkrun [ERROR]: dlopen failed: %s\n", dlerror());
             return EXECUTION_FAILURE;
@@ -6304,6 +6328,13 @@ static int ring_call_main(int argc, char **argv) {
     tls_argv[batch_argc] = NULL;
 
     // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
+    
+    // PHYSICS FIX: Shield the C-Plugin against Bash's SIGCHLD reaper
+    sigset_t set, oset;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &set, &oset);
+
     int cb_ret;
     if (tls_use_ctx) {
         tls_fctx.batch_index = worker_last_idx;
@@ -6321,6 +6352,8 @@ static int ring_call_main(int argc, char **argv) {
     } else {
         cb_ret = tls_callback((int)batch_argc, tls_argv);
     }
+
+    sigprocmask(SIG_SETMASK, &oset, NULL);
 
     // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
     return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;
