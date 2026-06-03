@@ -105,7 +105,7 @@ Optimistic execution with near-zero happy-path overhead, instant failure detecti
 
 ### `BORN_LOCAL_NUMA.md`
 
-# FORKRUN BORN-LOCAL NUMA ARCHITECTURE (v3.2.1)
+# FORKRUN BORN-LOCAL NUMA ARCHITECTURE
 
 This document defines the physical memory-routing architecture of `forkrun`. 
 
@@ -430,29 +430,26 @@ Wakeups are advisory; spurious wakeups are harmless.
 
 ---
 
-## 5. Overshoot and Partial Batches
+## 5. Transaction Recovery and Fault Tolerance
 
-### 5.1 The Overshoot Problem
+### 5.1 The Single-Slot Claim Invariant
 
-A worker may claim more data than currently exists, especially when batch sizes are large or input slows abruptly.
+*Note: In versions prior to v3.3.0, workers could speculatively over-claim multiple batches and divide them. This complex overshoot mechanism was permanently excised in favor of the Single-Slot Claim Invariant (see INVARIANTS.md).*
 
-Rather than force all workers to stall, forkrun allows:
+A worker always claims exactly 1 slot (1 batch) per atomic operation. Because the scanner completely pre-calculates boundaries, there is no longer a concept of partial remainders or subdivision.
 
-* Executing the *available* portion immediately
-* Deferring the remainder
+### 5.2 The Escrow Recovery Queue
 
-### 5.2 Escrow Mechanism
-
-To handle deferred remainders, forkrun introduces **escrow**:
+To handle fault-resilience, forkrun repurposes the **escrow** pipe:
 
 * A non-blocking anonymous pipe (per-node in NUMA mode)
-* Entries contain: starting offset + remaining line count
+* Entries contain: starting offset + line count of the aborted batch
 
-When a worker overshoots:
+If a worker process crashes, is killed by OOM, or explicitly fails, its active transaction is rolled back:
 
-1. It executes the partial batch
-2. Publishes the remainder to escrow
-3. Signals availability via `evfd_data`
+1. It is caught by the parent or trap handler
+2. The exact single-slot bounds are published to escrow
+3. Availability is signaled via `evfd_data`
 
 ### 5.3 Escrow Stealing
 
@@ -460,16 +457,9 @@ Idle workers:
 
 * Check escrow before touching the ring
 * If work exists, steal it
-* Consume *at most* one batch
-* Re-publish any leftover
+* Consume the recovered batch exactly as normal
 
-This ensures:
-
-* Only one owner per remainder
-* No duplication
-* Bounded contention
-
-If escrow is full, the worker simply completes the batch itself. Correctness always wins over optimization.
+This ensures fault tolerance without requiring complex rollback tracking in the core scanner logic.
 
 ---
 
@@ -995,7 +985,7 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 ### UNSETTING FLAGS
 
-  - +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed is used.
+  - +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed wins.
 
 ### ENVIRONMENT VARS
 
@@ -1171,7 +1161,7 @@ Scanner writes ring slot data **before** advancing `write_idx`. `write_idx` publ
 A batch is claimed whole or not at all.
 
 **Enforced by**  
-Workers claim ranges, never individual slots. Overshoot handled *after* claim, not during.
+Workers claim exactly 1 slot (1 batch) at a time. Atomicity is enforced upstream by the Scanner, which pre-calculates and bounds the line/byte offsets for the batch within that single slot before publishing.
 
 **Audit Rule**  
 ❌ Never introduce logic that conditionally claims per-slot or splits batch claim across multiple atomics.
@@ -1227,7 +1217,7 @@ Batch size is a *policy*, not a property of the tail. Once the tail begins, poli
 Escrow is advisory and never required for forward progress.
 
 **Enforced by**  
-Escrow stealing is optional. Original worker may always reclaim remainder. Escrow full → self-complete.
+Escrow is strictly a fault-tolerance channel for crashed workers. Because workers claim exactly 1 slot, there are no partial remainders to subdivide or reclaim. Escrow stealing is optional but critical for recovery.
 
 **Audit Rule**  
 ✅ It must always be possible to ignore escrow entirely and still complete all work.
@@ -1512,24 +1502,17 @@ The data never has to cross a socket boundary unless a worker explicitly steals 
 
 ---
 
-## 3. Speculative Claiming + Escrow = Inertial Particles with Corrections
+## 3. Resilience and Rollback = The Escrow Pipe
 
-Workers are not polite queue consumers. They are **inertial particles** moving at high speed along the river.
+Workers are not polite queue consumers. They are **water wheels** placed along the river.
 
-An inertial particle cannot stop instantly. When it sees “enough water ahead,” it claims a big chunk (large batch) — even if some of that water hasn’t arrived yet.
+The worker claims exactly one transaction (one bucket) at a time. If a wheel "evaporates" (the process crashes or is killed by OOM), its uncompleted bucket is dropped into a side-channel (the escrow pipe) for another wheel to process.
 
-In software this is called “overshoot.”  
-In physics it is called **inertia**.
+The physical concept of "overshoot" is now strictly limited to a worker momentarily advancing past the scanner's write cursor (which is handled by waiting, not division).
 
-When the particle discovers it over-claimed, it doesn’t reverse (no rollback). It simply:
+Other idle wheels can pick up these rollback corrections. Forward progress is never blocked. The river keeps flowing.
 
-1. Processes what actually arrived (partial batch).
-2. Drops the remainder into a side-channel (escrow pipe) — like shedding mass or emitting a correction signal.
-
-Other idle particles can pick up those corrections. If none do, the original particle will eventually come back for them.  
-Forward progress is never blocked. The river keeps flowing.
-
-This is why there are no CAS retry loops on the fast path: in physics you never need retries if your particles obey Newton’s laws and the channel is one-way.
+This is why there are no CAS retry loops on the fast path: in physics you never need retries if your wheels obey Newton’s laws and the channel is one-way.
 
 ---
 
@@ -1826,10 +1809,3 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
   Because workers write directly to `stdout` in realtime mode, `forkrun` cannot recall bytes once they hit the terminal. A crash will result in the orchestrator outputting a valid checkpoint, but resuming the pipeline will result in duplicate output lines for the specific batch that was interrupted during the crash.
 
   
-
------------------------------------------
-#ROADMAP.md
-
-# Planned forkrun features and extensions
-
-v3.2.2: add superscaler out-of-order prefetch to posix_spawnp execution path
