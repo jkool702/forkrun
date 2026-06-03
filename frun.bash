@@ -285,7 +285,10 @@ EOF
                         eval "$1";
                         eval "${FORKRUN_EXTRA_DEFS:-}";
                         echo "___FORKRUN_SAFE_STATE_BOUNDARY___";
-                        builtin declare -p FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES FORKRUN_RESUME_JAGGED FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT ${FORKRUN_EXTRA_VARS};
+                        builtin declare -p FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES FORKRUN_RESUME_JAGGED;
+                        echo "___FORKRUN_RESUME_STATE_BOUNDARY___";
+                        FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS:-} ";
+                        builtin declare -p FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT ${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /};
                         [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && builtin declare -f ${FORKRUN_EXTRA_FUNCS}
                     ' _ "$(< "$resume_file")" 2>/dev/null)"
 
@@ -298,28 +301,45 @@ EOF
                     # GREEDY MATCH: Erase all untrusted stdout (including the delimiter itself)
                     parsed_state="${parsed_state##*___FORKRUN_SAFE_STATE_BOUNDARY___$'\n'}"
 
-                    eval "$parsed_state"
-
+                    # BOTH modes require this flag to tell the C-engine to actually resume
                     resume_flag=true
 
-                    if [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]]; then
-                        read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands. Execute them?\n[Commands]: '"${FORKRUN_EXTRA_SETUP}"$'\n(y/N): ' -n 1 -r </dev/tty
-                        echo >&2
-                        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                            echo "forkrun [ABORT]: User rejected setup commands. Resumption cancelled." >&2
-                            return 1
+                    if (( $# == 1 )); then
+                        # FULL AUTO RESUME - extract and use ALL info from resume file
+                        eval "${parsed_state/___FORKRUN_RESUME_STATE_BOUNDARY___/}"
+
+                        if [[ -n "${FORKRUN_EXTRA_SETUP:-}" && "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
+                            local FORKRUN_EXTRA_SETUP_Q
+                            printf -v FORKRUN_EXTRA_SETUP_Q '%q' "${FORKRUN_EXTRA_SETUP}"
+
+                            # Check if we have an interactive terminal to prompt the user
+                            if [ -t 0 ] && [ -e /dev/tty ]; then
+                                read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands. Execute them?\n[Commands]: '"${FORKRUN_EXTRA_SETUP_Q}"$'\n(y/N): ' -n 1 -r -t 60 </dev/tty
+                                echo >&2
+                            else
+                                REPLY="N"
+                                echo "forkrun [SECURITY]: Custom setup commands detected in resume file, but no interactive TTY is available." >&2
+                                echo "Set FORKRUN_TRUST_RESUME=1 to allow unattended resumption." >&2
+                            fi
+                            unset FORKRUN_EXTRA_SETUP_Q
+
+                            if [[ ! ${REPLY,,} == 'y' ]]; then
+                                echo "forkrun [ABORT]: User rejected setup commands. Resumption cancelled." >&2
+                                return 1
+                            fi
                         fi
-                    fi
 
-                    # If the user only provided the resume file (no extra args), inject the original ones
-                    if (( $# == 1 )) && (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
+                        if (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
+                            # Set positional parameters: keep resume_file at $1 so the bottom
+                            # 'shift' safely drops it, then append the original arguments.
+                            set -- "" "${FORKRUN_ORIG_ARGS[@]}"
 
-                        # Set positional parameters: keep resume_file at $1 so the bottom
-                        # 'shift' safely drops it, then append the original arguments.
-                        set -- "" "${FORKRUN_ORIG_ARGS[@]}"
-
-                        # Execute the user's custom setup environment hooks
-                        [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && eval "${FORKRUN_EXTRA_SETUP}"
+                            # Execute the user's custom setup environment hooks
+                            [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && eval "${FORKRUN_EXTRA_SETUP}"
+                        fi
+                    else
+                        # MANUAL RESUME - only extract stream coordinates. User provides execution environment.
+                        eval "${parsed_state%%___FORKRUN_RESUME_STATE_BOUNDARY___*}"
                     fi
 
                     # We intentionally do NOT call 'continue' here!
@@ -813,8 +833,11 @@ toc() { :; }
                 delimiter_str="''"
             fi
 
+            printf -v plugin_so_Q '%q' "${plugin_so}"
+            printf -v plugin_fn_Q '%q' "${plugin_fn}"
+
             pCode='
-            ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so@Q} ${plugin_fn@Q}"
+            ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so_Q} ${plugin_fn_Q}"
 
         elif ${stdin_flag}; then
             # STDIN PAYLOAD
@@ -1763,7 +1786,7 @@ _forkrun_file_to_base64() {
 
     # print output, optionally quoted
     if ${quoteFlag}; then
-        printf '%s' "${outF@Q}"
+        printf '%q' "${outF}"
     else
         printf '%s' "${outF}"
     fi
