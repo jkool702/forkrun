@@ -18,12 +18,11 @@
 // sockets at birth
 //    via `set_mempolicy(MPOL_BIND)` driven by backpressure from indexers. This
 //    minimizes cross-socket migration and enforces conservation of locality.
-// 2. Inertial Claiming (Workers): Workers are "inertial particles". They claim
-// a large block
-//    speculatively via lock-free `atomic_fetch_add` (no CAS retry loops). If
-//    they overshoot (claim > available), they process the available data and
-//    dump the remainder into an "escrow" side-channel (pipe) for others,
-//    preventing slow-path blocks.
+// 2. Single-Slot Claiming (Workers): Workers are water wheels that claim exactly 1
+//    slot (1 batch) at a time via lock-free `atomic_fetch_add`. The scanner
+//    pre-calculates optimal sizes. If a worker process fails mid-execution, its
+//    active transaction is rolled back and re-deposited into an escrow pipe
+//    for other workers to claim.
 // 3. Fallow (Entropy Export): As the workflow unspools, a background fallow
 // thread
 //    punches holes in the backing memfd via `fallocate(PUNCH_HOLE)` to prevent
@@ -703,9 +702,13 @@ static int ring_exec_main(int argc, char **argv) {
     sigaddset(&set, SIGCHLD);
     sigprocmask(SIG_BLOCK, &set, &oset);
 
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd);
+
     // 6. Spawn the child (inherits FDs natively)
     pid_t pid;
-    ret = posix_spawnp(&pid, tls_argv[0], NULL, NULL, tls_argv, environ);
+    ret = posix_spawnp(&pid, tls_argv[0], &actions, NULL, tls_argv, environ);
 
     // 7. Wait for the child synchronously
     int status = 0;
@@ -718,6 +721,7 @@ static int ring_exec_main(int argc, char **argv) {
         }
     }
 
+    posix_spawn_file_actions_destroy(&actions);
     // 8. Restore signal mask
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
@@ -768,6 +772,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, pfd[0], STDIN_FILENO);
     posix_spawn_file_actions_addclose(&actions, pfd[1]); // Child doesn't need write end
+    if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd); // Shield memfd
 
     // 4. Block SIGCHLD
     sigset_t set, oset;
@@ -1171,12 +1176,13 @@ static uint32_t allocated_num_nodes = 0;
 static uint32_t *g_logical_to_phys_map = NULL;
 static uint8_t g_explicit_pinning = 0; // NEW
 
-// EscrowPacket: Used to solve the "overshoot" problem. When a worker
-// speculatively claims more offsets than are currently available from the
-// scanner, it processes the available ones and "deposits" the remaining claimed
-// count into a side-channel pipe (escrow) for other idle workers to steal.
+// EscrowPacket: Used as an optimistic transaction recovery queue. If a worker
+// process fails or is killed mid-execution, its active transaction is
+// rolled back and re-deposited into a side-channel pipe (escrow) for other
+// idle workers to steal. Because workers claim exactly 1 slot, there are no
+// partial remainders.
 // NOTE: A given worker can (at any given time) only have a single escrow claim,
-// and these claims are inherently rare occurrences (happen only in rare races).
+// and these claims are inherently rare occurrences (happen only in crashes).
 // This means in practice the escrow pipe buffer will NEVER fill up (even if
 // its capacity is 64 KB, and especially not at 1 MB).
 struct EscrowPacket {
@@ -2409,8 +2415,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         bounce_buf = mmap(NULL, chunk_size, PROT_READ | PROT_WRITE,
                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (bounce_buf == MAP_FAILED) {
+          bounce_buf = NULL; // Prevent invalid munmap in ingest_done
           free(nodemask);
-          return EXECUTION_FAILURE;
+          limit_reached_exit = true;
+          goto ingest_done;
         }
       }
     }
@@ -4370,13 +4378,13 @@ dlc_evaluate_claim:
   return 0;
 }
 
-// Workers Claiming Data (Inertial Particles):
-// The fast path is a single lock-free `atomic_fetch_add` to claim a batch of
-// records. There are NO CAS retry loops on the fast path. If a worker
-// overshoots and claims records that haven't arrived yet (inertia), it
-// processes the available ones and deposits the remainder into an escrow pipe
-// for other idle workers to steal. Escrow is pure advisory capability; forward
-// progress is guaranteed by strictly monotonic indices.
+// Workers Claiming Data (Water Wheels):
+// The fast path is a single lock-free `atomic_fetch_add` to claim exactly 1
+// slot (1 batch) of records. There are NO CAS retry loops on the fast path. If
+// a worker process fails mid-execution, its active transaction is rolled back
+// and re-deposited into an escrow pipe for other idle workers to steal. Escrow
+// is an optimistic transaction recovery queue; forward progress is guaranteed
+// by strictly monotonic indices.
 //
 // This function is now a thin wrapper: do_lockfree_claim handles all ring
 // physics, and this function handles NUMA init, the SIGPIPE shield, and all
@@ -6320,6 +6328,13 @@ static int ring_call_main(int argc, char **argv) {
     tls_argv[batch_argc] = NULL;
 
     // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
+    
+    // PHYSICS FIX: Shield the C-Plugin against Bash's SIGCHLD reaper
+    sigset_t set, oset;
+    sigemptyset(&set);
+    sigaddset(&set, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &set, &oset);
+
     int cb_ret;
     if (tls_use_ctx) {
         tls_fctx.batch_index = worker_last_idx;
@@ -6337,6 +6352,8 @@ static int ring_call_main(int argc, char **argv) {
     } else {
         cb_ret = tls_callback((int)batch_argc, tls_argv);
     }
+
+    sigprocmask(SIG_SETMASK, &oset, NULL);
 
     // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
     return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;

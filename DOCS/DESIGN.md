@@ -105,29 +105,26 @@ Wakeups are advisory; spurious wakeups are harmless.
 
 ---
 
-## 5. Overshoot and Partial Batches
+## 5. Transaction Recovery and Fault Tolerance
 
-### 5.1 The Overshoot Problem
+### 5.1 The Single-Slot Claim Invariant
 
-A worker may claim more data than currently exists, especially when batch sizes are large or input slows abruptly.
+*Note: In versions prior to v3.3.0, workers could speculatively over-claim multiple batches and divide them. This complex overshoot mechanism was permanently excised in favor of the Single-Slot Claim Invariant (see INVARIANTS.md).*
 
-Rather than force all workers to stall, forkrun allows:
+A worker always claims exactly 1 slot (1 batch) per atomic operation. Because the scanner completely pre-calculates boundaries, there is no longer a concept of partial remainders or subdivision.
 
-* Executing the *available* portion immediately
-* Deferring the remainder
+### 5.2 The Escrow Recovery Queue
 
-### 5.2 Escrow Mechanism
-
-To handle deferred remainders, forkrun introduces **escrow**:
+To handle fault-resilience, forkrun repurposes the **escrow** pipe:
 
 * A non-blocking anonymous pipe (per-node in NUMA mode)
-* Entries contain: starting offset + remaining line count
+* Entries contain: starting offset + line count of the aborted batch
 
-When a worker overshoots:
+If a worker process crashes, is killed by OOM, or explicitly fails, its active transaction is rolled back:
 
-1. It executes the partial batch
-2. Publishes the remainder to escrow
-3. Signals availability via `evfd_data`
+1. It is caught by the parent or trap handler
+2. The exact single-slot bounds are published to escrow
+3. Availability is signaled via `evfd_data`
 
 ### 5.3 Escrow Stealing
 
@@ -135,16 +132,9 @@ Idle workers:
 
 * Check escrow before touching the ring
 * If work exists, steal it
-* Consume *at most* one batch
-* Re-publish any leftover
+* Consume the recovered batch exactly as normal
 
-This ensures:
-
-* Only one owner per remainder
-* No duplication
-* Bounded contention
-
-If escrow is full, the worker simply completes the batch itself. Correctness always wins over optimization.
+This ensures fault tolerance without requiring complex rollback tracking in the core scanner logic.
 
 ---
 

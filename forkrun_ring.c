@@ -18,12 +18,11 @@
 // sockets at birth
 //    via `set_mempolicy(MPOL_BIND)` driven by backpressure from indexers. This
 //    minimizes cross-socket migration and enforces conservation of locality.
-// 2. Inertial Claiming (Workers): Workers are "inertial particles". They claim
-// a large block
-//    speculatively via lock-free `atomic_fetch_add` (no CAS retry loops). If
-//    they overshoot (claim > available), they process the available data and
-//    dump the remainder into an "escrow" side-channel (pipe) for others,
-//    preventing slow-path blocks.
+// 2. Single-Slot Claiming (Workers): Workers are water wheels that claim exactly 1
+//    slot (1 batch) at a time via lock-free `atomic_fetch_add`. The scanner
+//    pre-calculates optimal sizes. If a worker process fails mid-execution, its
+//    active transaction is rolled back and re-deposited into an escrow pipe
+//    for other workers to claim.
 // 3. Fallow (Entropy Export): As the workflow unspools, a background fallow
 // thread
 //    punches holes in the backing memfd via `fallocate(PUNCH_HOLE)` to prevent
@@ -1177,12 +1176,13 @@ static uint32_t allocated_num_nodes = 0;
 static uint32_t *g_logical_to_phys_map = NULL;
 static uint8_t g_explicit_pinning = 0; // NEW
 
-// EscrowPacket: Used to solve the "overshoot" problem. When a worker
-// speculatively claims more offsets than are currently available from the
-// scanner, it processes the available ones and "deposits" the remaining claimed
-// count into a side-channel pipe (escrow) for other idle workers to steal.
+// EscrowPacket: Used as an optimistic transaction recovery queue. If a worker
+// process fails or is killed mid-execution, its active transaction is
+// rolled back and re-deposited into a side-channel pipe (escrow) for other
+// idle workers to steal. Because workers claim exactly 1 slot, there are no
+// partial remainders.
 // NOTE: A given worker can (at any given time) only have a single escrow claim,
-// and these claims are inherently rare occurrences (happen only in rare races).
+// and these claims are inherently rare occurrences (happen only in crashes).
 // This means in practice the escrow pipe buffer will NEVER fill up (even if
 // its capacity is 64 KB, and especially not at 1 MB).
 struct EscrowPacket {
@@ -4378,13 +4378,13 @@ dlc_evaluate_claim:
   return 0;
 }
 
-// Workers Claiming Data (Inertial Particles):
-// The fast path is a single lock-free `atomic_fetch_add` to claim a batch of
-// records. There are NO CAS retry loops on the fast path. If a worker
-// overshoots and claims records that haven't arrived yet (inertia), it
-// processes the available ones and deposits the remainder into an escrow pipe
-// for other idle workers to steal. Escrow is pure advisory capability; forward
-// progress is guaranteed by strictly monotonic indices.
+// Workers Claiming Data (Water Wheels):
+// The fast path is a single lock-free `atomic_fetch_add` to claim exactly 1
+// slot (1 batch) of records. There are NO CAS retry loops on the fast path. If
+// a worker process fails mid-execution, its active transaction is rolled back
+// and re-deposited into an escrow pipe for other idle workers to steal. Escrow
+// is an optimistic transaction recovery queue; forward progress is guaranteed
+// by strictly monotonic indices.
 //
 // This function is now a thin wrapper: do_lockfree_claim handles all ring
 // physics, and this function handles NUMA init, the SIGPIPE shield, and all
