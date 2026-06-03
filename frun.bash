@@ -25,7 +25,7 @@ frun() {
         for nn in "${@##\-*}"; do
             [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && ! [[ " ${FORKRUN_EXTRA_FUNCS} " == *" ${nn} "* ]] && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
-        FORKRUN_EXTRA_VARS+=' FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP'
+        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP}"
 
         FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; declare -p -- ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
         [[ -n "${FORKRUN_EXTRA_SETUP}" ]] && FORKRUN_FRUN_SRC+=$'\n'"${FORKRUN_EXTRA_SETUP}"
@@ -279,8 +279,37 @@ EOF
                 [[ ${arg} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && resume_file="${arg}"
                 if [[ -f "$resume_file" ]]; then
-                    eval "$(PATH='' exec -c "${BASH:-bash}" --norc --noprofile --restricted -c 'eval "$1"; builtin declare -p FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES FORKRUN_RESUME_JAGGED FORKRUN_ORIG_ARGS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_VARS FORKRUN_EXTRA_SETUP FORKRUN_RETRY_LIMIT' _ "$(< "$resume_file")" 2>/dev/null)"
+
+                    local parsed_state
+                    parsed_state="$(PATH='' exec -c "${BASH:-bash}" --norc --noprofile --restricted -c '
+                        eval "$1";
+                        eval "${FORKRUN_EXTRA_DEFS:-}";
+                        echo "___FORKRUN_SAFE_STATE_BOUNDARY___";
+                        builtin declare -p FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES FORKRUN_RESUME_JAGGED FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT ${FORKRUN_EXTRA_VARS};
+                        [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && builtin declare -f ${FORKRUN_EXTRA_FUNCS}
+                    ' _ "$(< "$resume_file")" 2>/dev/null)"
+
+                    # Security Check: Ensure the restricted shell actually finished successfully
+                    if [[ "$parsed_state" != *___FORKRUN_SAFE_STATE_BOUNDARY___* ]]; then
+                        echo "forkrun [ABORT]: Resume file evaluation failed or was intercepted." >&2
+                        return 1
+                    fi
+
+                    # GREEDY MATCH: Erase all untrusted stdout (including the delimiter itself)
+                    parsed_state="${parsed_state##*___FORKRUN_SAFE_STATE_BOUNDARY___$'\n'}"
+
+                    eval "$parsed_state"
+
                     resume_flag=true
+
+                    if [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]]; then
+                        read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands. Execute them?\n[Commands]: '"${FORKRUN_EXTRA_SETUP}"$'\n(y/N): ' -n 1 -r </dev/tty
+                        echo >&2
+                        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                            echo "forkrun [ABORT]: User rejected setup commands. Resumption cancelled." >&2
+                            return 1
+                        fi
+                    fi
 
                     # If the user only provided the resume file (no extra args), inject the original ones
                     if (( $# == 1 )) && (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
@@ -289,7 +318,7 @@ EOF
                         # 'shift' safely drops it, then append the original arguments.
                         set -- "" "${FORKRUN_ORIG_ARGS[@]}"
 
-                        # Resurrect the bash functions into the current shell environment
+                        # Execute the user's custom setup environment hooks
                         [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && eval "${FORKRUN_EXTRA_SETUP}"
                     fi
 
@@ -585,11 +614,20 @@ toc() { :; }
 
                 # ALWAYS write the resume file!
                 ring_dump_resume > "'"${checkpoint_file}"'"
-                for nn in ${FORKRUN_EXTRA_FUNCS}; do
-                    declare -F -- "${nn}" &>/dev/null && ! [[ "${FORKRUN_EXTRA_SETUP}" == *$'"'"'\n'"'"'"${nn}"$'"'"' () \n{'"'"'*'"'"'}'"'"'* ]] && FORKRUN_EXTRA_SETUP+="
-$(declare -f -- "${nn}")"
+                local FORKRUN_EXTRA_DEFS=""
+                for nn in ${FORKRUN_EXTRA_FUNCS:-}; do
+                    declare -F -- "${nn}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -f -- "${nn}")"
                 done
-                declare -p -- FORKRUN_ORIG_ARGS ${FORKRUN_RETRY_LIMIT:+${FORKRUN_RETRY_LIMIT}} ${FORKRUN_EXTRA_VARS} 2>/dev/null >> "'"${checkpoint_file}"'"
+                for vv in ${FORKRUN_EXTRA_VARS:-}; do
+                    declare -p -- "${vv}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -p -- "${vv}")"
+                done
+                
+                declare -p -- FORKRUN_ORIG_ARGS 2>/dev/null >> "'"${checkpoint_file}"'"
+                [[ -n "${FORKRUN_RETRY_LIMIT:-}" ]] && declare -p -- FORKRUN_RETRY_LIMIT 2>/dev/null >> "'"${checkpoint_file}"'"
+                [[ -n "${FORKRUN_EXTRA_VARS:-}"  ]] && declare -p -- FORKRUN_EXTRA_VARS 2>/dev/null >> "'"${checkpoint_file}"'"
+                [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && declare -p -- FORKRUN_EXTRA_FUNCS 2>/dev/null >> "'"${checkpoint_file}"'"
+                [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && declare -p -- FORKRUN_EXTRA_SETUP 2>/dev/null >> "'"${checkpoint_file}"'"
+                [[ -n "${FORKRUN_EXTRA_DEFS:-}"  ]] && declare -p -- FORKRUN_EXTRA_DEFS 2>/dev/null >> "'"${checkpoint_file}"'"
 
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes="$(grep -E '"'"'^FORKRUN_RESUME_STDOUT_BYTES='"'"' "${checkpoint_file}")"
