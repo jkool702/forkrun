@@ -287,7 +287,7 @@ EOF
                         echo "___FORKRUN_SAFE_STATE_BOUNDARY___";
                         builtin declare -p FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES FORKRUN_RESUME_JAGGED;
                         echo "___FORKRUN_RESUME_STATE_BOUNDARY___";
-                        FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS:-} ";
+                        FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS//[[:space:]$IFS]/ } ";
                         builtin declare -p FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT ${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /};
                         [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && builtin declare -f ${FORKRUN_EXTRA_FUNCS}
                     ' _ "$(< "$resume_file")" 2>/dev/null)"
