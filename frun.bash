@@ -811,6 +811,7 @@ toc() { :; }
                         ${verbose_flag} && echo "forkrun [INFO]: Auto-compiling $plugin_c -> $plugin_so" >&2
                     fi
 
+                    rm -f "$target_so" 2>/dev/null  # Break symlinks before compile
                     # Compile directly to the target (Disk or RAM)
                     gcc -O3 -shared -fPIC -march=native "$plugin_c" -o "$target_so" || {
                         echo "forkrun [FATAL]: Auto-compilation of $plugin_c failed." >&2
@@ -843,6 +844,10 @@ toc() { :; }
             printf -v plugin_so_Q '%q' "${plugin_so}"
             printf -v plugin_fn_Q '%q' "${plugin_fn}"
 
+        local needs_external_error_check=true
+
+        if [[ -n "${c_plugin_arg:-}" ]]; then
+            # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
             pCode='
             ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so_Q} ${plugin_fn_Q}"
 
@@ -854,6 +859,7 @@ toc() { :; }
             else
                 # STANDARD BASH PIPE PIPELINE
                 : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
+                needs_external_error_check=false
                 
                 local exec_cmd_str="$cmdline_str"
                 pCode='
@@ -869,14 +875,14 @@ toc() { :; }
                 if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
                     # FAST PATH (Synchronous)
                     # Note: ring_splice "close" closes $pw internally. We only close $pr.
-                    ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || exec {pw}>&-
+                    ring_splice $fd_read $pw "-" $REPLY "close" 2>/dev/null || { exec {pw}>&-; exit 200; }
                     '"$exec_cmd_str"' <&$pr'
                 if ${retry_nonzero_exit_flag}; then
                     pCode+=' || exit $?'
-                elif ${is_func_flag}; then
+                else
                     pCode+='
                     ret=$?
-                    (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                    (( ret == 137 || ret == 139 || ret == 200 || ret == 254 )) && exit $ret'
                 fi
                 pCode+='
                     exec {pr}<&-
@@ -884,13 +890,13 @@ toc() { :; }
                     # SLOW PATH (Asynchronous)
                     # Close both FDs so they do not leak into the pipeline
                     (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                    ( ring_splice $fd_read 1 "-" $REPLY "close" ) | ( '"$exec_cmd_str"' )'
+                    ( ring_splice $fd_read 1 "-" $REPLY "close" || exit 254 ) | ( '"$exec_cmd_str"' )'
                 if ${retry_nonzero_exit_flag}; then
                     pCode+=' || exit $?'
-                elif ${is_func_flag}; then
+                else
                     pCode+='
                     ret=$?
-                    (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+                    (( ret == 137 || ret == 139 || ret == 200 || ret == 254 )) && exit $ret'
                 fi
                 pCode+='
                 fi'
@@ -962,13 +968,14 @@ toc() { :; }
             ring_ack_str+=' ${fd_out[$RING_WID]}'
         }
 
-       ${stdin_flag} || {
+        ${needs_external_error_check} && {
            if ${retry_nonzero_exit_flag}; then
                 pCode+=' || exit $?'
-            elif ${is_func_flag}; then
-                pCode+='
+            else
+                pCode+=' || {
             ret=$?
-            (( ret == 137 || ret == 139 || ret == 200 )) && exit $ret'
+            (( ret == 137 || ret == 139 || ret == 200 || ret == 254 )) && exit $ret
+        }'
             fi
         }
 
