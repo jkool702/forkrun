@@ -844,9 +844,8 @@ toc() { :; }
             printf -v plugin_so_Q '%q' "${plugin_so}"
             printf -v plugin_fn_Q '%q' "${plugin_fn}"
 
-        local needs_external_error_check=true
+            local needs_external_error_check=true
 
-        if [[ -n "${c_plugin_arg:-}" ]]; then
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
             pCode='
             ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so_Q} ${plugin_fn_Q}"
