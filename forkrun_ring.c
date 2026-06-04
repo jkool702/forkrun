@@ -3446,8 +3446,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       }
 
       if (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
-        __atomic_fetch_sub(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
-        continue;
+        // We reached EOF and the claimed chunk does not exist. Safe to exit.
+        goto unified_scanner_eof;
       }
 
       // PHYSICS FIX: Double-entry chunk accounting.
