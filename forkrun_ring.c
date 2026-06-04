@@ -4122,24 +4122,53 @@ unified_scanner_eof:
         uint64_t lines_found = 0;
         while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
           if (atomic_load_relaxed(&state[0].emergency_abort)) goto tail_abort;
-          if (p >= end) {
-            uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-            ssize_t n;
-            do {
-              n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
-            } while (n < 0 && errno == EINTR);
-            if (n > 0) {
-              buf_base_offset = current_p_offset;
-              p = buf;
-              end = buf + n;
-            } else
-              break;
+
+          char *safe_end = end;
+          if (BytesMax > 0) {
+            uint64_t max_overhead = (target + 1) * 8;
+            if (BytesMax <= max_overhead)
+              safe_end = p;
+            else {
+              uint64_t max_payload = BytesMax - max_overhead;
+              uint64_t current_payload =
+                  (buf_base_offset + (p - buf)) - batch_start;
+              if (current_payload >= max_payload)
+                safe_end = p;
+              else if (max_payload - current_payload < (uint64_t)(end - p)) {
+                safe_end = p + (max_payload - current_payload);
+              }
+            }
           }
-          char *nl = memchr(p, delim, end - p);
+
+          if (p >= safe_end) {
+            if (p >= end) {
+              uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
+              ssize_t n;
+              do {
+                n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
+              } while (n < 0 && errno == EINTR);
+              if (n > 0) {
+                buf_base_offset = current_p_offset;
+                p = buf;
+                end = buf + n;
+                continue; // Re-evaluate safe_end with the new buffer
+              } else
+                break;
+            } else {
+              // We reached safe_end before end of buffer. Force early flush.
+              break;
+            }
+          }
+
+          char *nl = memchr(p, delim, safe_end - p);
           if (nl) {
             lines_found++;
             p = nl + 1;
           } else {
+            if (safe_end < end) {
+              // We hit safe_end. Force early flush.
+              break;
+            }
             uint64_t current_p_offset = buf_base_offset + (uint64_t)(end - buf);
             ssize_t n;
             do {
