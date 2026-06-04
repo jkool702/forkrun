@@ -540,12 +540,12 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
     }
 
     // Shield against integer overflow and POSIX pread limits
-    if (length > SSIZE_MAX - 65536) return EXECUTION_FAILURE;
+    if (length > SSIZE_MAX - 65536) return 254;
 
     if (length + 1 > tls_map_buf_cap) {
         size_t new_cap = length + 65536; // Add padding to avoid constant reallocs
         char *new_buf = realloc(tls_map_buf, new_cap);
-        if (!new_buf) return EXECUTION_FAILURE;
+        if (!new_buf) return 254;
         tls_map_buf = new_buf;
         tls_map_buf_cap = new_cap;
     }
@@ -555,14 +555,14 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
         ssize_t n = pread(fd, tls_map_buf + total_read, length - total_read, offset + total_read);
         if (n < 0) {
             if (errno == EINTR) continue;
-            return EXECUTION_FAILURE;
+            return 254;
         }
         if (n == 0) break; // EOF reached before expected length
         total_read += n;
     }
 
     // If we couldn't fulfill the exact claimed length, the batch is broken.
-    if (total_read < length) return EXECUTION_FAILURE;
+    if (total_read < length) return 254;
 
     tls_map_buf[total_read] = '\0'; // Safety terminator
 
@@ -576,7 +576,7 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
             if ((size_t)fixed_argc + idx + 2 > tls_argv_cap) {
                 tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
                 char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-                if (!new_argv) return EXECUTION_FAILURE;
+                if (!new_argv) return 254;
                 tls_argv = new_argv;
             }
         }
@@ -586,7 +586,7 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
             *next = '\0'; // Swap delimiter for null terminator
             if (arr) {
                 if (!bind_array_element(arr, (arrayind_t)idx, ptr, 0))
-                    return EXECUTION_FAILURE;
+                    return 254;
             } else {
                 tls_argv[fixed_argc + idx] = ptr;
             }
@@ -597,7 +597,7 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
             if (ptr < end && *ptr != '\0') {
                 if (arr) {
                     if (!bind_array_element(arr, (arrayind_t)idx, ptr, 0))
-                        return EXECUTION_FAILURE;
+                        return 254;
                 } else {
                     tls_argv[fixed_argc + idx] = ptr;
                 }
@@ -630,7 +630,9 @@ static int ring_map_main(int argc, char **argv) {
     SHELL_VAR *v = make_new_array_variable(arr_name);
     if (!v) return EXECUTION_FAILURE;
 
-    return do_tokenize(fd, length, tls_batch_offset, delim, v, 0, NULL);
+    int ret = do_tokenize(fd, length, tls_batch_offset, delim, v, 0, NULL);
+    if (ret != EXECUTION_SUCCESS) return 254;
+    return EXECUTION_SUCCESS;
 }
 
 // Returns 0 (true) if safe to execute directly via posix_spawnp (Binary or Shebang)
@@ -725,7 +727,7 @@ static int ring_exec_main(int argc, char **argv) {
     // 8. Restore signal mask
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
-    if (ret != 0) return EXECUTION_FAILURE;
+    if (ret != 0) return 254; // posix_spawnp failed (EAGAIN/ENOMEM) — Internal Framework Error
 
     // Return exact status correctness (crucial for -E auto-retry)
     if (WIFEXITED(status)) {
@@ -752,7 +754,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
     if (tls_argv_cap < (size_t)(fixed_argc + 1)) {
         tls_argv_cap = fixed_argc + 1;
         char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-        if (!new_argv) return EXECUTION_FAILURE;
+        if (!new_argv) return 254;
         tls_argv = new_argv;
     }
     for (int i = 0; i < fixed_argc; i++) {
@@ -827,7 +829,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
     // 10. Restore signal mask
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
-    if (ret != 0) return EXECUTION_FAILURE;
+    if (ret != 0) return 254; // posix_spawnp failed (EAGAIN/ENOMEM) — Internal Framework Error
 
     if (WIFEXITED(status)) return (WEXITSTATUS(status) == 0) ? EXECUTION_SUCCESS : WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
@@ -1051,8 +1053,12 @@ static uint64_t get_arg_max_bytes() {
   extern char **environ;
   for (char **ep = environ; *ep; ++ep)
     env_len += strlen(*ep) + 1;
-  if ((long)env_len < sys_arg_max)
-    return (uint64_t)((sys_arg_max - (long)env_len) * 15 / 16);
+  if ((long)env_len < sys_arg_max) {
+    // Subtract an extra 1MB of safety margin to account for bash environment exports
+    long safe_margin = sys_arg_max - (long)env_len - 1048576;
+    if (safe_margin > 0)
+      return (uint64_t)(safe_margin * 15 / 16);
+  }
   return 32768;
 }
 
@@ -1500,7 +1506,6 @@ static inline void check_memory_pressure(uint64_t *total_moved,
     *next_check = *total_moved + 16 * 1024 * 1024;
   }
 }
-
 
 #define S_DIS 0
 #define S_MIN 1
@@ -3238,12 +3243,30 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t pre_lines      = 0;
     uint64_t pre_offset     = buf_base_offset;
     uint64_t target_pre     = W_max_val * Lmax;
+
+    // Physical byte ceiling: stop scanning once we have covered enough bytes
+    // to fill W_max batches at the byte-based maximum batch size.  Two limits
+    // are considered and the tighter one wins:
+    //   • ARG_MAX / max_bytes limit  →  BytesMax * W_max_val
+    //   • NUMA chunk-size limit      →  chunk_sz  * W_max_val  (NUMA only)
+    // Initialise to UINT64_MAX so the check is a no-op when neither applies.
+    uint64_t target_pre_bytes = ~(uint64_t)0;
+    if (BytesMax > 0) {
+        target_pre_bytes = BytesMax * W_max_val;
+    }
+    if (is_numa) {
+        uint64_t numa_byte_max = chunk_sz * W_max_val;
+        if (numa_byte_max < target_pre_bytes) {
+            target_pre_bytes = numa_byte_max;
+        }
+    }
+
     uint64_t sim_W          = W;
     uint64_t sim_L          = (L > 0) ? L : 1;
     uint64_t sim_lines_base = 0; // lines_accum at start of current L level
     bool hit_real_eof       = false;
 
-    while (pre_lines < target_pre) {
+    while (pre_lines < target_pre && (pre_offset - buf_base_offset) < target_pre_bytes) {
         // EMERGENCY BYPASS FIX: Prevent infinite hang if downstream pipe breaks
         if (atomic_load_relaxed(&state[0].emergency_abort)) {
             goto unified_scanner_eof;
@@ -3333,10 +3356,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       }
       phase = 2; // skip geometric ramp-up entirely
     } else {
-      // CASE B: Pre-flight was cut short (a worker spawned before we finished).
-      // We don't have enough line-count data to compute the optimal L, so
-      // hot-swap sim_L (the batch size the simulation had reached) into the
-      // live scanner state and resume the geometric doubling phase from there.
+      // CASE B: Pre-flight was cut short before the line target was reached.
+      // This happens either because a worker arrived early, or because we hit
+      // the physical byte/chunk ceiling (target_pre_bytes) before accumulating
+      // W_max*Lmax lines — i.e. the data is wide-lined and each batch is
+      // already byte-limited rather than line-limited.
+      // In both cases we don't have enough line-count data to compute the
+      // globally optimal L, so hot-swap sim_L (the batch size the simulation
+      // had reached) into the live scanner state and resume the geometric
+      // doubling phase from there.
       // ADAPTIVE_FLOW_CONTROL will continue doubling L → Lmax at the same
       // exponential rate as a normal ramp-up, while workers remain on the
       // claim_count=1 fast path, completely oblivious to the phase.
@@ -6424,13 +6452,13 @@ static int ring_call_main(int argc, char **argv) {
     if (batch_argc + 1 > tls_argv_cap) {
         tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
         char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-        if (!new_argv) return EXECUTION_FAILURE;
+        if (!new_argv) return 254;
         tls_argv = new_argv;
     }
     tls_argv[batch_argc] = NULL;
 
     // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
-    
+
     // PHYSICS FIX: Shield the C-Plugin against Bash's SIGCHLD reaper
     sigset_t set, oset;
     sigemptyset(&set);
