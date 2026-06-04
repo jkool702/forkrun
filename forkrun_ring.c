@@ -3243,12 +3243,30 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t pre_lines      = 0;
     uint64_t pre_offset     = buf_base_offset;
     uint64_t target_pre     = W_max_val * Lmax;
+
+    // Physical byte ceiling: stop scanning once we have covered enough bytes
+    // to fill W_max batches at the byte-based maximum batch size.  Two limits
+    // are considered and the tighter one wins:
+    //   • ARG_MAX / max_bytes limit  →  BytesMax * W_max_val
+    //   • NUMA chunk-size limit      →  chunk_sz  * W_max_val  (NUMA only)
+    // Initialise to UINT64_MAX so the check is a no-op when neither applies.
+    uint64_t target_pre_bytes = ~(uint64_t)0;
+    if (BytesMax > 0) {
+        target_pre_bytes = BytesMax * W_max_val;
+    }
+    if (is_numa) {
+        uint64_t numa_byte_max = chunk_sz * W_max_val;
+        if (numa_byte_max < target_pre_bytes) {
+            target_pre_bytes = numa_byte_max;
+        }
+    }
+
     uint64_t sim_W          = W;
     uint64_t sim_L          = (L > 0) ? L : 1;
     uint64_t sim_lines_base = 0; // lines_accum at start of current L level
     bool hit_real_eof       = false;
 
-    while (pre_lines < target_pre) {
+    while (pre_lines < target_pre && (pre_offset - buf_base_offset) < target_pre_bytes) {
         // EMERGENCY BYPASS FIX: Prevent infinite hang if downstream pipe breaks
         if (atomic_load_relaxed(&state[0].emergency_abort)) {
             goto unified_scanner_eof;
@@ -3338,10 +3356,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       }
       phase = 2; // skip geometric ramp-up entirely
     } else {
-      // CASE B: Pre-flight was cut short (a worker spawned before we finished).
-      // We don't have enough line-count data to compute the optimal L, so
-      // hot-swap sim_L (the batch size the simulation had reached) into the
-      // live scanner state and resume the geometric doubling phase from there.
+      // CASE B: Pre-flight was cut short before the line target was reached.
+      // This happens either because a worker arrived early, or because we hit
+      // the physical byte/chunk ceiling (target_pre_bytes) before accumulating
+      // W_max*Lmax lines — i.e. the data is wide-lined and each batch is
+      // already byte-limited rather than line-limited.
+      // In both cases we don't have enough line-count data to compute the
+      // globally optimal L, so hot-swap sim_L (the batch size the simulation
+      // had reached) into the live scanner state and resume the geometric
+      // doubling phase from there.
       // ADAPTIVE_FLOW_CONTROL will continue doubling L → Lmax at the same
       // exponential rate as a normal ramp-up, while workers remain on the
       // claim_count=1 fast path, completely oblivious to the phase.
@@ -6435,7 +6458,7 @@ static int ring_call_main(int argc, char **argv) {
     tls_argv[batch_argc] = NULL;
 
     // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
-    
+
     // PHYSICS FIX: Shield the C-Plugin against Bash's SIGCHLD reaper
     sigset_t set, oset;
     sigemptyset(&set);
