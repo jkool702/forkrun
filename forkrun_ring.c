@@ -2559,7 +2559,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         // =========================================================================
         uint64_t total_batches = 0;
         uint64_t total_workers = 0;
-        for (uint32_t i = 0; i < num_nodes; i++) {
+        for (uint32_t i = 0; i < (uint32_t)num_nodes; i++) {
             total_batches += atomic_load_relaxed(&state[i].write_idx);
             total_workers += atomic_load_relaxed(&state[i].active_workers);
         }
@@ -2597,8 +2597,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
 
         // Dynamic Stealing Threshold Scaling (Born-Local Preservation)
         uint32_t scale_factor = (min_buf > 4) ? min_buf : 4;
-        for (uint32_t n = 0; n < num_nodes; n++) {
-            for (uint32_t i = 0; i < num_nodes; i++) {
+        for (uint32_t n = 0; n < (uint32_t)num_nodes; n++) {
+            for (uint32_t i = 0; i < (uint32_t)num_nodes; i++) {
                 uint32_t base = state[n].base_steal_threshold[i];
                 // Dynamic formula: (max(4, min_buf) * base_threshold) / 4
                 uint32_t dynamic_thresh = (scale_factor * base) / 4;
