@@ -2552,18 +2552,60 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint64_t Si = current_global_stolen - last_global_stolen - S;
         last_global_stolen = current_global_stolen;
 
-        // Apply bounded IIR filter (Window = 32)
-        if (current_buffer_limit >= 13) {
-            // Ceiling bound: Steady state max is 100 (200 / 2).
+        // =========================================================================
+        // 1. CALCULATE DYNAMIC BOUNDARIES & STEP RESOLUTION (4 -> 16 BASELINE)
+        // =========================================================================
+        uint64_t total_batches = 0;
+        uint64_t total_workers = 0;
+        for (uint32_t i = 0; i < num_nodes; i++) {
+            total_batches += atomic_load_relaxed(&state[i].write_idx);
+            total_workers += atomic_load_relaxed(&state[i].active_workers);
+        }
+
+        uint64_t avg_worker_cnt = total_workers / num_nodes;
+        if (avg_worker_cnt < 1) avg_worker_cnt = 1;
+
+        uint32_t min_buf = 4; // Baseline floor
+
+        if (total_batches > 0) {
+            uint64_t num = current_offset * avg_worker_cnt;
+            uint64_t den = chunk_size * total_batches * 2;
+            if (den > 0) {
+                uint64_t dyn_min = num / den;
+                if (dyn_min < 4) dyn_min = 4;
+                min_buf = (uint32_t)dyn_min;
+            }
+        }
+
+        uint32_t step = min_buf / 8;
+        if (step < 1) step = 1;
+
+        uint32_t bound_a = 4 * min_buf;
+        uint32_t bound_b = min_buf + (12 * step);
+        uint32_t max_buf = (bound_a < bound_b) ? bound_a : bound_b;
+
+        // Instantaneous safety clamp to keep current_buffer_limit in-bounds during transition
+        if (current_buffer_limit < min_buf) {
+            current_buffer_limit = min_buf;
+            atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+        } else if (current_buffer_limit > max_buf) {
+            current_buffer_limit = max_buf;
+            atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+        }
+
+        // =========================================================================
+        // 2. DYNAMICALLY ALIGNED IIR FILTER UPDATES (INVARIANTS PRESERVED)
+        // =========================================================================
+        if (current_buffer_limit >= max_buf) {
+            // Dynamic Ceiling: Steady state max is strictly 75. Physically impossible to exceed 75.
             I_meter = ((I_meter * 31) + (75 * S)) >> 5;
         } else {
-            uint64_t add0 = (current_buffer_limit <= 4) ? 15 : 0;
+            // Dynamic Floor: If at floor, inject 15 to lock steady state min to 15. Physically impossible to drop below 15.
+            uint64_t add0 = (current_buffer_limit <= min_buf) ? 15 : 0;
 
-            // PHYSICS FIX: Clamp Si to 10 to prevent Undefined Behavior bit-shifts.
             uint64_t Si_clamped = (Si > 10) ? 10 : Si;
             uint64_t add1 = (1ULL << (Si_clamped + 1)) - 1;
 
-            // Floor bound: Steady state max is P/2.
             I_meter = ((I_meter * 31) + add0 * (1 - S) + S * (1000ULL + ((1000ULL * add1) >> Si_clamped))) >> 5;
         }
 
@@ -2575,17 +2617,26 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         // We consider it "saturated" if the queue depth is at least (limit - 1)
         bool is_buffer_saturated = (current_depth >= current_buffer_limit - 1);
 
-        // Trigger buffer limits
-        if (I_meter < 15 && current_buffer_limit > 4) {
-            current_buffer_limit--;
+        // =========================================================================
+        // 3. APPLY ADJUSTMENTS
+        // =========================================================================
+        if (I_meter < 15 && current_buffer_limit > min_buf) {
+            if (current_buffer_limit >= min_buf + step) {
+                current_buffer_limit -= step;
+            } else {
+                current_buffer_limit = min_buf;
+            }
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
             I_meter = 50; // Reset
-        } else if (I_meter > 75 && current_buffer_limit < 13 && is_buffer_saturated) {
-            // Only increase the limit if stealing is high AND the buffer is actually full!
-            current_buffer_limit++;
+        } else if (I_meter > 75 && current_buffer_limit < max_buf && is_buffer_saturated) {
+            if (current_buffer_limit + step <= max_buf) {
+                current_buffer_limit += step;
+            } else {
+                current_buffer_limit = max_buf;
+            }
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
             I_meter = 50; // Reset
-       }
+        }
     }
   }
 
@@ -5039,9 +5090,10 @@ static int ring_fallow_phys_main(int argc, char **argv) {
   char pkt_buf[4096];
   size_t buffered = 0;
   size_t pkt_sz = sizeof(struct PhysPacket);
+  ssize_t n_read = 0;
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break;
     buffered += n_read;
     size_t count = buffered / pkt_sz;
@@ -5713,9 +5765,10 @@ static int ring_fallow_main(int argc, char **argv) {
   char pkt_buf[4096];
   size_t buffered = 0;
   size_t pkt_sz = sizeof(struct IndexPacket);
+  ssize_t n_read = 0;
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break; // Workers dead or normal EOF
     buffered += n_read;
 
