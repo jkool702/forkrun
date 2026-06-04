@@ -1327,6 +1327,7 @@ struct SharedState {
 
   // NEW: Dynamic Topology-Aware Steal Thresholds
   uint8_t steal_threshold[1024] ALIGNED(CACHE_LINE);
+  uint8_t base_steal_threshold[1024]; // Stores baseline invariants
   uint32_t chunk_buffer_limit; // Dynamic limit (Ingest -> Scanner)
 };
 
@@ -1980,6 +1981,7 @@ static int ring_init_main(int argc, char **argv) {
       if (thresh < 2)
         thresh = 2;
       state[n].steal_threshold[i] = (uint8_t)thresh;
+      state[n].base_steal_threshold[i] = (uint8_t)thresh; // Lock baseline
     }
   }
 
@@ -2591,6 +2593,19 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         } else if (current_buffer_limit > max_buf) {
             current_buffer_limit = max_buf;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+        }
+
+        // Dynamic Stealing Threshold Scaling (Born-Local Preservation)
+        uint32_t scale_factor = (min_buf > 4) ? min_buf : 4;
+        for (uint32_t n = 0; n < num_nodes; n++) {
+            for (uint32_t i = 0; i < num_nodes; i++) {
+                uint32_t base = state[n].base_steal_threshold[i];
+                // Dynamic formula: (max(4, min_buf) * base_threshold) / 4
+                uint32_t dynamic_thresh = (scale_factor * base) / 4;
+                if (dynamic_thresh < 1) dynamic_thresh = 1;
+                // Store with relaxed release semantics
+                __atomic_store_n(&state[n].steal_threshold[i], (uint8_t)dynamic_thresh, __ATOMIC_RELAXED);
+            }
         }
 
         // =========================================================================
