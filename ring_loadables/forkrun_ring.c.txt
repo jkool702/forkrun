@@ -1327,6 +1327,7 @@ struct SharedState {
 
   // NEW: Dynamic Topology-Aware Steal Thresholds
   uint8_t steal_threshold[1024] ALIGNED(CACHE_LINE);
+  uint8_t base_steal_threshold[1024]; // Stores baseline invariants
   uint32_t chunk_buffer_limit; // Dynamic limit (Ingest -> Scanner)
 };
 
@@ -1980,6 +1981,7 @@ static int ring_init_main(int argc, char **argv) {
       if (thresh < 2)
         thresh = 2;
       state[n].steal_threshold[i] = (uint8_t)thresh;
+      state[n].base_steal_threshold[i] = (uint8_t)thresh; // Lock baseline
     }
   }
 
@@ -2417,6 +2419,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (bounce_buf == MAP_FAILED) {
           bounce_buf = NULL; // Prevent invalid munmap in ingest_done
           free(nodemask);
+          builtin_error("forkrun: mmap failed for ingest bounce buffer (OOM)");
           limit_reached_exit = true;
           goto ingest_done;
         }
@@ -2551,18 +2554,73 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint64_t Si = current_global_stolen - last_global_stolen - S;
         last_global_stolen = current_global_stolen;
 
-        // Apply bounded IIR filter (Window = 32)
-        if (current_buffer_limit >= 13) {
-            // Ceiling bound: Steady state max is 100 (200 / 2).
+        // =========================================================================
+        // 1. CALCULATE DYNAMIC BOUNDARIES & STEP RESOLUTION (4 -> 16 BASELINE)
+        // =========================================================================
+        uint64_t total_batches = 0;
+        uint64_t total_workers = 0;
+        for (uint32_t i = 0; i < (uint32_t)num_nodes; i++) {
+            total_batches += atomic_load_relaxed(&state[i].write_idx);
+            total_workers += atomic_load_relaxed(&state[i].active_workers);
+        }
+
+        uint64_t avg_worker_cnt = total_workers / num_nodes;
+        if (avg_worker_cnt < 1) avg_worker_cnt = 1;
+
+        uint32_t min_buf = 4; // Baseline floor
+
+        if (total_batches > 0) {
+            uint64_t num = current_offset * avg_worker_cnt;
+            uint64_t den = chunk_size * total_batches * 2;
+            if (den > 0) {
+                uint64_t dyn_min = num / den;
+                if (dyn_min < 4) dyn_min = 4;
+                min_buf = (uint32_t)dyn_min;
+            }
+        }
+
+        uint32_t step = min_buf / 8;
+        if (step < 1) step = 1;
+
+        uint32_t bound_a = 4 * min_buf;
+        uint32_t bound_b = min_buf + (12 * step);
+        uint32_t max_buf = (bound_a < bound_b) ? bound_a : bound_b;
+
+        // Instantaneous safety clamp to keep current_buffer_limit in-bounds during transition
+        if (current_buffer_limit < min_buf) {
+            current_buffer_limit = min_buf;
+            atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+        } else if (current_buffer_limit > max_buf) {
+            current_buffer_limit = max_buf;
+            atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+        }
+
+        // Dynamic Stealing Threshold Scaling (Born-Local Preservation)
+        uint32_t scale_factor = (min_buf > 4) ? min_buf : 4;
+        for (uint32_t n = 0; n < (uint32_t)num_nodes; n++) {
+            for (uint32_t i = 0; i < (uint32_t)num_nodes; i++) {
+                uint32_t base = state[n].base_steal_threshold[i];
+                // Dynamic formula: (max(4, min_buf) * base_threshold) / 4
+                uint32_t dynamic_thresh = (scale_factor * base) / 4;
+                if (dynamic_thresh < 1) dynamic_thresh = 1;
+                // Store with relaxed release semantics
+                __atomic_store_n(&state[n].steal_threshold[i], (uint8_t)dynamic_thresh, __ATOMIC_RELAXED);
+            }
+        }
+
+        // =========================================================================
+        // 2. DYNAMICALLY ALIGNED IIR FILTER UPDATES (INVARIANTS PRESERVED)
+        // =========================================================================
+        if (current_buffer_limit >= max_buf) {
+            // Dynamic Ceiling: Steady state max is strictly 75. Physically impossible to exceed 75.
             I_meter = ((I_meter * 31) + (75 * S)) >> 5;
         } else {
-            uint64_t add0 = (current_buffer_limit <= 4) ? 15 : 0;
+            // Dynamic Floor: If at floor, inject 15 to lock steady state min to 15. Physically impossible to drop below 15.
+            uint64_t add0 = (current_buffer_limit <= min_buf) ? 15 : 0;
 
-            // PHYSICS FIX: Clamp Si to 10 to prevent Undefined Behavior bit-shifts.
             uint64_t Si_clamped = (Si > 10) ? 10 : Si;
             uint64_t add1 = (1ULL << (Si_clamped + 1)) - 1;
 
-            // Floor bound: Steady state max is P/2.
             I_meter = ((I_meter * 31) + add0 * (1 - S) + S * (1000ULL + ((1000ULL * add1) >> Si_clamped))) >> 5;
         }
 
@@ -2574,17 +2632,26 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         // We consider it "saturated" if the queue depth is at least (limit - 1)
         bool is_buffer_saturated = (current_depth >= current_buffer_limit - 1);
 
-        // Trigger buffer limits
-        if (I_meter < 15 && current_buffer_limit > 4) {
-            current_buffer_limit--;
+        // =========================================================================
+        // 3. APPLY ADJUSTMENTS
+        // =========================================================================
+        if (I_meter < 15 && current_buffer_limit > min_buf) {
+            if (current_buffer_limit >= min_buf + step) {
+                current_buffer_limit -= step;
+            } else {
+                current_buffer_limit = min_buf;
+            }
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
             I_meter = 50; // Reset
-        } else if (I_meter > 75 && current_buffer_limit < 13 && is_buffer_saturated) {
-            // Only increase the limit if stealing is high AND the buffer is actually full!
-            current_buffer_limit++;
+        } else if (I_meter > 75 && current_buffer_limit < max_buf && is_buffer_saturated) {
+            if (current_buffer_limit + step <= max_buf) {
+                current_buffer_limit += step;
+            } else {
+                current_buffer_limit = max_buf;
+            }
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
             I_meter = 50; // Reset
-       }
+        }
     }
   }
 
@@ -3445,8 +3512,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       }
 
       if (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
-        __atomic_fetch_sub(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
-        continue;
+        // We reached EOF and the claimed chunk does not exist. Safe to exit.
+        goto unified_scanner_eof;
       }
 
       // PHYSICS FIX: Double-entry chunk accounting.
@@ -4049,6 +4116,8 @@ unified_scanner_eof:
           min_batch = 1;
         if (target < min_batch)
           target = min_batch;
+        if (target > L_tail - L_tail_done)
+          target = L_tail - L_tail_done; // PHYSICS FIX: Prevent UMA ghost batches at EOF
 
         uint64_t lines_found = 0;
         while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
@@ -5036,9 +5105,10 @@ static int ring_fallow_phys_main(int argc, char **argv) {
   char pkt_buf[4096];
   size_t buffered = 0;
   size_t pkt_sz = sizeof(struct PhysPacket);
+  ssize_t n_read = 0;
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break;
     buffered += n_read;
     size_t count = buffered / pkt_sz;
@@ -5073,8 +5143,8 @@ static int ring_fallow_phys_main(int argc, char **argv) {
   free(heap);
   if (state) atomic_store_release(&state[0].fallow_active, 0);
 
-  // SIGPIPE CASCADE: If Fallow dies unexpectedly, signal the Scanners to abort
-  pull_fire_alarm();
+  // PHYSICS FIX: Only pull the fire alarm if Fallow died abnormally
+  if (n_read < 0) pull_fire_alarm();
 
   return EXECUTION_SUCCESS;
 }
@@ -5710,9 +5780,10 @@ static int ring_fallow_main(int argc, char **argv) {
   char pkt_buf[4096];
   size_t buffered = 0;
   size_t pkt_sz = sizeof(struct IndexPacket);
+  ssize_t n_read = 0;
 
   while (1) {
-    ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
+    n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) break; // Workers dead or normal EOF
     buffered += n_read;
 
@@ -5752,9 +5823,11 @@ static int ring_fallow_main(int argc, char **argv) {
   }
 
   free(heap);
-  // SIGPIPE CASCADE: If Fallow dies (Entropy stops), signal the Scanners to abort
   if (state) atomic_store_release(&state[0].fallow_active, 0);
-  pull_fire_alarm();
+
+  // PHYSICS FIX: Only pull the fire alarm if Fallow died abnormally (e.g. SIGPIPE)
+  // If it exited cleanly (n_read == 0), the pipeline completed successfully!
+  if (n_read < 0) pull_fire_alarm();
 
   return EXECUTION_SUCCESS;
 }
