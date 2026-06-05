@@ -3610,12 +3610,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
         bool _skipped = false;
-        
+
         // PHYSICS FIX: Publish total_batches BEFORE the flush
         if (is_numa) {
           __atomic_store_n(&meta->total_batches, 1, __ATOMIC_RELEASE);
         }
-        
+
         UNIFIED_SCANNER_FLUSH(meta->major_id, 0, actual_start, _skipped);
         if (is_numa) {
           if (!_skipped) {
@@ -3633,6 +3633,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       buf_base_offset = current_p_offset;
       p = buf;
       end = buf;
+
+      // PHYSICS FIX: Monotonic Publish Shield
+      // Tracks exact byte offset of the last published batch to mathematically
+      // prevent zero-length or overlapping double-flushes.
+      uint64_t last_published_end = actual_start;
 
     } else {
       if (status == 1 && p >= end)
@@ -3812,18 +3817,26 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
           bool _skipped = false;
-          
-          // PHYSICS FIX: Publish total_batches BEFORE the flush
-          if (is_last && is_numa) {
-            __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
+
+          // PHYSICS FIX: Monotonic Shield - Only publish if we have new bytes
+          if (current_p_offset > last_published_end) {
+            if (is_last && is_numa) {
+              __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
+            }
+            UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
+                                  current_p_offset, _skipped);
+            last_published_end = current_p_offset;
+          } else {
+            _skipped = true;
+            if (is_last && is_numa) {
+              __atomic_store_n(&meta->total_batches, minor_idx, __ATOMIC_RELEASE);
+            }
           }
-          
-          UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, _skipped);
+
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
-            minor_idx++;
+            if (!_skipped) minor_idx++;
             if (is_last && !_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
@@ -3998,18 +4011,26 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
           bool _skipped = false;
-          
-          // PHYSICS FIX: Publish total_batches BEFORE the flush
-          if (is_last && is_numa) {
-            __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
+
+          // PHYSICS FIX: Monotonic Shield - Only publish if we have new bytes
+          if (current_p_offset > last_published_end) {
+            if (is_last && is_numa) {
+              __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
+            }
+            UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
+                                  current_p_offset, _skipped);
+            last_published_end = current_p_offset;
+          } else {
+            _skipped = true;
+            if (is_last && is_numa) {
+              __atomic_store_n(&meta->total_batches, minor_idx, __ATOMIC_RELEASE);
+            }
           }
-          
-          UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, _skipped);
+
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
-            minor_idx++;
+            if (!_skipped) minor_idx++;
             if (is_last && !_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
@@ -4031,16 +4052,21 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
     if (is_numa && !chunk_eof_flushed) {
       bool _skipped = false;
-      
-      // PHYSICS FIX: Publish total_batches BEFORE the flush
-      __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
-      
-      UNIFIED_SCANNER_FLUSH(meta->major_id,
-                            minor_idx, current_p_offset, _skipped);
-      minor_idx++;
-      if (!_skipped) {
-        chunk_bounds[cb_head & 15] = local_scan_idx;
-        cb_head++;
+
+      // PHYSICS FIX: Monotonic Shield
+      if (current_p_offset > last_published_end) {
+        __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
+        UNIFIED_SCANNER_FLUSH(meta->major_id,
+                              minor_idx, current_p_offset, _skipped);
+        last_published_end = current_p_offset;
+        minor_idx++;
+        if (!_skipped) {
+          chunk_bounds[cb_head & 15] = local_scan_idx;
+          cb_head++;
+        }
+      } else {
+        // No bytes to flush, so total_batches is just the current minor_idx
+        __atomic_store_n(&meta->total_batches, minor_idx, __ATOMIC_RELEASE);
       }
       batch_start = current_p_offset;
       pending_lines = 0;
