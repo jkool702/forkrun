@@ -3396,6 +3396,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     uint64_t chunk_end = ~(uint64_t)0;
+    uint64_t actual_end = 0;
     uint64_t current_p_offset;
     struct ChunkMeta *meta = NULL;
     uint32_t minor_idx = 0;
