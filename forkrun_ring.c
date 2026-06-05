@@ -3400,6 +3400,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     struct ChunkMeta *meta = NULL;
     uint32_t minor_idx = 0;
     bool chunk_eof_flushed = false;
+    uint64_t last_published_end = 0;
 
     if (is_numa) {
       int steal_target = my_node_id;
@@ -3637,7 +3638,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       // PHYSICS FIX: Monotonic Publish Shield
       // Tracks exact byte offset of the last published batch to mathematically
       // prevent zero-length or overlapping double-flushes.
-      uint64_t last_published_end = actual_start;
+      last_published_end = actual_start;
 
     } else {
       if (status == 1 && p >= end)
