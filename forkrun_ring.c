@@ -361,7 +361,6 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #endif
 
 #define MAX_BATCH_LINES  281474976710656ULL
-#define FLAG_MAJOR_EOF (1U << 31)
 #define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
 
 #define HUGE_PAGE_SIZE (2 * 1024 * 1024)
@@ -1234,6 +1233,7 @@ struct ChunkMeta {
   // major_id aligns with chunk boundaries, minor_id will align with individual
   // records.
   uint32_t major_id;
+  uint32_t total_batches;
   volatile uint64_t actual_end ALIGNED(CACHE_LINE);
 };
 
@@ -2530,6 +2530,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     meta->raw_length = n;
     meta->target_node = target_node;
     meta->major_id = current_major;
+    __atomic_store_n(&meta->total_batches, ~(uint32_t)0, __ATOMIC_RELAXED);
     atomic_store_relaxed(&meta->actual_end, 0);
 
     struct SharedState *t_state = &state[target_node];
@@ -2704,6 +2705,7 @@ ingest_done:
   meta_eof->raw_length = 0;
   meta_eof->target_node = target_node_eof;
   meta_eof->major_id = current_major;
+  __atomic_store_n(&meta_eof->total_batches, ~(uint32_t)0, __ATOMIC_RELAXED);
   atomic_store_relaxed(&meta_eof->actual_end, 0);
 
   struct SharedState *t_state_eof = &state[target_node_eof];
@@ -2917,7 +2919,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
  * 1. Slot-based wrap-around shield boundary is hit (applies to BOTH UMA and NUMA)
  * 2. Chunk-based memory shield boundary is hit (applies ONLY to NUMA)
  */
-#define UNIFIED_SCANNER_FLUSH(_is_last, _maj_id, _minor_val,                   \
+#define UNIFIED_SCANNER_FLUSH(_maj_id, _minor_val,                             \
                               _batch_end_offset, _out_skipped)                 \
   do {                                                                         \
     _out_skipped = false;                                                      \
@@ -2993,8 +2995,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
       local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id);         \
-      local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
-          (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
+      local_state->minor_ring[local_scan_idx & RING_MASK] = (_minor_val);      \
     } else {                                                                   \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
@@ -3609,13 +3610,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
         bool _skipped = false;
-        UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start,
-                              _skipped);
+        UNIFIED_SCANNER_FLUSH(meta->major_id, 0, actual_start, _skipped);
         if (is_numa) {
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
           }
+          __atomic_store_n(&meta->total_batches, 1, __ATOMIC_RELEASE);
         }
         if (!_skipped) UNIFIED_ADAPTIVE_COMMIT(true);
         continue;
@@ -3806,8 +3807,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(is_last,
-                                is_numa ? meta->major_id : 0, minor_idx,
+          UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
@@ -3987,8 +3987,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(is_last,
-                                is_numa ? meta->major_id : 0, minor_idx,
+          UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
@@ -4015,7 +4014,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
     if (is_numa && !chunk_eof_flushed) {
       bool _skipped = false;
-      UNIFIED_SCANNER_FLUSH(true, meta->major_id,
+      UNIFIED_SCANNER_FLUSH(meta->major_id,
                             minor_idx, current_p_offset, _skipped);
       minor_idx++;
       if (!_skipped) {
@@ -4027,6 +4026,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     if (is_numa) {
+      __atomic_store_n(&meta->total_batches, minor_idx, __ATOMIC_RELEASE);
       UNIFIED_ADAPTIVE_COMMIT(true);
     }
 
@@ -4231,14 +4231,13 @@ unified_scanner_eof:
         if (lines_found > 0) {
           uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(false, 0, 0, current_p_offset,
+          UNIFIED_SCANNER_FLUSH(0, 0, current_p_offset,
                                 _skipped);
           batch_start = current_p_offset;
           L_tail_done += lines_found;
         } else
           break;
       }
-    }
 
 tail_abort:
     uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
@@ -4503,9 +4502,7 @@ dlc_evaluate_claim:
 
   if (local_state->numa_enabled) {
     out->major = local_state->major_ring[my_read_idx & RING_MASK];
-    out->minor = local_state->minor_ring[my_read_idx & RING_MASK] & ~FLAG_MAJOR_EOF;
-    if (local_state->minor_ring[my_read_idx & RING_MASK] & FLAG_MAJOR_EOF)
-      out->minor |= FLAG_MAJOR_EOF;
+    out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
   } else {
     out->major = 0;
     out->minor = 0;
@@ -5036,7 +5033,7 @@ static int ring_order_main(int argc, char **argv) {
 
     for (size_t i = 0; i < count; i++) {
       struct OrderPacket *op = &ops[i];
-      uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
+      uint32_t actual_minor = op->minor_idx;
       uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
       if (!unordered_mode) {
@@ -5113,7 +5110,7 @@ static int ring_order_main(int argc, char **argv) {
             if (numa_mode)
               snprintf(path, sizeof(path), "%s.%u.%u", prefix,
                        top.pkt.major_idx,
-                       (top.pkt.minor_idx & ~FLAG_MAJOR_EOF));
+                       top.pkt.minor_idx);
             else
               snprintf(path, sizeof(path), "%s.%u", prefix, top.pkt.major_idx);
             int fd_file = open(path, O_RDONLY);
@@ -5131,7 +5128,11 @@ static int ring_order_main(int argc, char **argv) {
           }
           if (numa_mode) {
             expected_minor += top.pkt.cnt;
-            if (top.pkt.minor_idx & FLAG_MAJOR_EOF) { expected_major++; expected_minor = 0; }
+            struct ChunkMeta *meta = &g_state->meta_ring[expected_major & META_RING_MASK];
+            if (expected_minor == __atomic_load_n(&meta->total_batches, __ATOMIC_ACQUIRE)) {
+                expected_major++;
+                expected_minor = 0;
+            }
           } else { expected_major += top.pkt.cnt; }
         }
       }
