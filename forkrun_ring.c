@@ -3934,12 +3934,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             } else {
               if (is_numa) {
                 uint64_t curr_pos = buf_base_offset + (end - buf);
-                if (curr_pos >= chunk_end) {
-                  lines_found++;
-                  p = end;
-                  break;
-                } else
-                  p = end;
+                 // PHYSICS FIX: Strict Logical Boundary Adherence
+                 // We must never force a line completion unless we are EXACTLY
+                 // at the logical actual_end of the chunk. Overrunning into the
+                 // raw buffer boundary causes overlap with Chunk N+1.
+                 if (curr_pos >= actual_end) {
+                     lines_found++;
+                     p = end;
+                     break;
+                 } else {
+                     p = end;
+                 }
               } else {
                 if (status == 1 && p < end) {
                   lines_found++;
