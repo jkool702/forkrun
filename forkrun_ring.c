@@ -2339,6 +2339,28 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     NUMA_CHECK_SCANNERS_DONE();
     check_memory_pressure(&total_moved, &next_check, oom_threshold);
 
+    // CRITICAL FIX: Enforce Global Meta Ring Backpressure!
+    // Prevents the global meta_ring from wrapping and overwriting unconsumed chunks
+    // when high core counts or pipe fragmentation create >4096 outstanding chunks.
+    while (1) {
+      if (atomic_load_relaxed(&state[0].emergency_abort)) {
+        limit_reached_exit = true;
+        goto ingest_done;
+      }
+      uint64_t min_tail = ~(uint64_t)0;
+      for (uint32_t i = 0; i < (uint32_t)num_nodes; i++) {
+        uint64_t t = atomic_load_acquire(&state[i].chunk_queue_tail);
+        if (t < min_tail) min_tail = t;
+      }
+      if ((current_major - min_tail) < META_RING_SIZE - 1)
+        break;
+      struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
+      if (poll(&pfd, 1, 10) > 0) {
+        uint64_t v;
+        sys_read(evfd_chunk_done, &v, 8);
+      }
+    }
+
     int target_node = 0;
     int min_backlog = INT_MAX;
     for (int i = 0; i < num_nodes; i++) {
@@ -5091,6 +5113,15 @@ static int ring_order_main(int argc, char **argv) {
       if (!unordered_mode && !stdout_broken && resume_synced) {
         while (heap_sz > 0) {
           uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
+
+          // CRITICAL RESILIENCE FIX: Discard stale duplicate packets from Escrow retries
+          // to prevent them from blocking the heap or causing duplicate output.
+          if (heap[0].key < expected_key) {
+            struct HeapNode dummy;
+            heap_pop(heap, &heap_sz, &dummy);
+            continue;
+          }
+
           if (heap[0].key != expected_key) break;
           struct HeapNode top;
           heap_pop(heap, &heap_sz, &top);
