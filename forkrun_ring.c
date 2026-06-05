@@ -3396,6 +3396,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     uint64_t chunk_end = ~(uint64_t)0;
+    uint64_t actual_end = 0;
     uint64_t current_p_offset;
     struct ChunkMeta *meta = NULL;
     uint32_t minor_idx = 0;
@@ -3610,12 +3611,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
         bool _skipped = false;
-        
+
         // PHYSICS FIX: Publish total_batches BEFORE the flush
         if (is_numa) {
           __atomic_store_n(&meta->total_batches, 1, __ATOMIC_RELEASE);
         }
-        
+
         UNIFIED_SCANNER_FLUSH(meta->major_id, 0, actual_start, _skipped);
         if (is_numa) {
           if (!_skipped) {
@@ -3812,12 +3813,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
           bool _skipped = false;
-          
+
           // PHYSICS FIX: Publish total_batches BEFORE the flush
           if (is_last && is_numa) {
             __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
           }
-          
+
           UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
@@ -3934,17 +3935,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             } else {
               if (is_numa) {
                 uint64_t curr_pos = buf_base_offset + (end - buf);
-                 // PHYSICS FIX: Strict Logical Boundary Adherence
-                 // We must never force a line completion unless we are EXACTLY
-                 // at the logical actual_end of the chunk. Overrunning into the
-                 // raw buffer boundary causes overlap with Chunk N+1.
-                 if (curr_pos >= actual_end) {
-                     lines_found++;
-                     p = end;
-                     break;
-                 } else {
-                     p = end;
-                 }
+                // PHYSICS FIX: Strict Logical Boundary Adherence
+                // We must never force a line completion unless we are EXACTLY
+                // at the logical actual_end of the chunk. Overrunning into the
+                // raw buffer boundary causes overlap with Chunk N+1.
+                if (curr_pos >= actual_end) {
+                    lines_found++;
+                    p = end;
+                    break;
+                } else {
+                    p = end;
+                }
               } else {
                 if (status == 1 && p < end) {
                   lines_found++;
@@ -4003,12 +4004,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
           bool _skipped = false;
-          
+
           // PHYSICS FIX: Publish total_batches BEFORE the flush
           if (is_last && is_numa) {
             __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
           }
-          
+
           UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
@@ -4036,10 +4037,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
     if (is_numa && !chunk_eof_flushed) {
       bool _skipped = false;
-      
+
       // PHYSICS FIX: Publish total_batches BEFORE the flush
       __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
-      
+
       UNIFIED_SCANNER_FLUSH(meta->major_id,
                             minor_idx, current_p_offset, _skipped);
       minor_idx++;
