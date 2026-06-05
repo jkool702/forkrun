@@ -4238,6 +4238,7 @@ unified_scanner_eof:
         } else
           break;
       }
+    }
 
 tail_abort:
     uint64_t final_sentinel = buf_base_offset + (uint64_t)(p - buf);
