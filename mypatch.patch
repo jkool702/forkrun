@@ -1,0 +1,30 @@
+--- a/forkrun_ring.c
++++ b/forkrun_ring.c
+@@ -3420,6 +3420,7 @@ static inline __attribute__((always_inline)) int
+   uint64_t chunk_bounds[16] = {0};
+   uint32_t cb_head = 0;
++  _Atomic bool chunk_eof_flushed = false;
+ 
+   atomic_store_relaxed(&local_state->write_idx, 0);
+   atomic_store_relaxed(&local_state->read_idx, 0);
+@@ -3616,12 +3617,15 @@ static inline __attribute__((always_inline)) int
+     if (is_numa && !chunk_eof_flushed) {
+       bool _skipped = false;
+-
+-      // PHYSICS FIX: Publish total_batches BEFORE the flush
+-      __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
+-
+-      UNIFIED_SCANNER_FLUSH(meta->major_id,
+-                            minor_idx, current_p_offset, _skipped);
++      // Check again with acquire semantics to avoid double flush
++      if (!atomic_load_explicit(&chunk_eof_flushed, memory_order_acquire)) {
++        // PHYSICS FIX: Publish total_batches BEFORE the flush
++        __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
++
++        UNIFIED_SCANNER_FLUSH(meta->major_id,
++                              minor_idx, current_p_offset, _skipped);
++        atomic_store_explicit(&chunk_eof_flushed, true, memory_order_release);
++      }
+       minor_idx++;
+       if (!_skipped) {
+         chunk_bounds[cb_head & 15] = local_scan_idx;

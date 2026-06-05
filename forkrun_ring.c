@@ -3400,7 +3400,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t current_p_offset;
     struct ChunkMeta *meta = NULL;
     uint32_t minor_idx = 0;
-    bool chunk_eof_flushed = false;
+    _Atomic bool chunk_eof_flushed = false;
 
     if (is_numa) {
       int steal_target = my_node_id;
@@ -3821,8 +3821,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
-          if (is_last)
-            chunk_eof_flushed = true;
+          if (is_last) {
+            atomic_store_explicit(&chunk_eof_flushed, true,
+                                  memory_order_release);
+            atomic_thread_fence(memory_order_seq_cst);
+          }
           if (is_numa) {
             minor_idx++;
             if (is_last && !_skipped) {
@@ -4012,8 +4015,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
-          if (is_last)
-            chunk_eof_flushed = true;
+          if (is_last) {
+            atomic_store_explicit(&chunk_eof_flushed, true,
+                                  memory_order_release);
+            atomic_thread_fence(memory_order_seq_cst);
+          }
           if (is_numa) {
             minor_idx++;
             if (is_last && !_skipped) {
@@ -4037,12 +4043,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
     if (is_numa && !chunk_eof_flushed) {
       bool _skipped = false;
+      // Check again with acquire semantics to avoid double flush
+      if (!atomic_load_explicit(&chunk_eof_flushed, memory_order_acquire)) {
+        // PHYSICS FIX: Publish total_batches BEFORE the flush
+        __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
 
-      // PHYSICS FIX: Publish total_batches BEFORE the flush
-      __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
-
-      UNIFIED_SCANNER_FLUSH(meta->major_id,
-                            minor_idx, current_p_offset, _skipped);
+        UNIFIED_SCANNER_FLUSH(meta->major_id,
+                              minor_idx, current_p_offset, _skipped);
+        atomic_store_explicit(&chunk_eof_flushed, true, memory_order_release);
+      }
       minor_idx++;
       if (!_skipped) {
         chunk_bounds[cb_head & 15] = local_scan_idx;
