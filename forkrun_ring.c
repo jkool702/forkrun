@@ -3610,13 +3610,18 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
         bool _skipped = false;
+        
+        // PHYSICS FIX: Publish total_batches BEFORE the flush
+        if (is_numa) {
+          __atomic_store_n(&meta->total_batches, 1, __ATOMIC_RELEASE);
+        }
+        
         UNIFIED_SCANNER_FLUSH(meta->major_id, 0, actual_start, _skipped);
         if (is_numa) {
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
           }
-          __atomic_store_n(&meta->total_batches, 1, __ATOMIC_RELEASE);
         }
         if (!_skipped) UNIFIED_ADAPTIVE_COMMIT(true);
         continue;
@@ -3807,6 +3812,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
           bool _skipped = false;
+          
+          // PHYSICS FIX: Publish total_batches BEFORE the flush
+          if (is_last && is_numa) {
+            __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
+          }
+          
           UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
@@ -3987,6 +3998,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
           bool _skipped = false;
+          
+          // PHYSICS FIX: Publish total_batches BEFORE the flush
+          if (is_last && is_numa) {
+            __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
+          }
+          
           UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
@@ -4014,6 +4031,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
     if (is_numa && !chunk_eof_flushed) {
       bool _skipped = false;
+      
+      // PHYSICS FIX: Publish total_batches BEFORE the flush
+      __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
+      
       UNIFIED_SCANNER_FLUSH(meta->major_id,
                             minor_idx, current_p_offset, _skipped);
       minor_idx++;
@@ -4026,7 +4047,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     if (is_numa) {
-      __atomic_store_n(&meta->total_batches, minor_idx, __ATOMIC_RELEASE);
       UNIFIED_ADAPTIVE_COMMIT(true);
     }
 
