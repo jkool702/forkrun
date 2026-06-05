@@ -24,7 +24,7 @@
             else
                 F=(f1 f2 f3)
             fi
-
+#	    F=(f3)
             N=$((${#F[@]} * ${#G[@]} * ${#C[@]} * 4))
             K=0
 
@@ -57,7 +57,8 @@
             declare -i K=0
             ## RUN BENCHMARK
             for Fk in "${F[@]}"; do
-                for GCk in {,-k,-u,-U}\ {,-l\ 1:0}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,cat,tee}$'\n'; do
+                for GCk in {,-k,-u,-U}\ \-X\ {,-l\ 1:-1}\ {true,echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,cat,tee}$'\n'; do
+                #for GCk in {,-k,-u}\ {,-l\ 1:-1}\ {/usr/bin/true,/usr/bin/echo,/usr/bin/printf\ '%s\n'}$'\n' -U\ {,-l\ 1:1024}\ {':',echo,printf\ '%s\n'}$'\n' {-s,-b\ 524288,-b4096\ -s}\ {:,/usr/bin/cat,/usr/bin/tee}$'\n'; do
 
                     GCk="${GCk%$'\n'}"
 
@@ -115,7 +116,7 @@
 
         for f in "${!outA[@]}"; do
             v="${outA[$f]}"
-            printf '\ntotal %s = %s ms\n' "$f" "$v" >&$fd2
+            printf '\ntotal %s = %s ms\n' "${f//sys/sys }" "$v" >&$fd2
         done
 
         cpu=$((1000 * (10#0${outA[user]} + 10#0${outA[sys]}) / 10#0${outA[real]}))
