@@ -3977,28 +3977,29 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         if (!is_numa && limit_items > 0 && total_scanned >= limit_items)
           status = 1;
 
-        if (pending_lines > 0) {
-          if (pending_lines >= L || limit_reached || force_flush_bytes ||
-              (is_numa && current_p_offset >= chunk_end) ||
-              (!is_numa && status == 1)) {
-            flush = true;
-          } else if (starve_meter >= (W + DAMPING_OFFSET - 3)) {
-            bool trigger = (stall_meter >= (W + DAMPING_OFFSET - 3));
-            if (trigger && !exact_lines) {
-              if (timeout_us == 0)
+        // PHYSICS FIX: Force chunk boundary flushes regardless of pending_lines
+        // This prevents 0-byte post-loop flushes and TSAN short-read anomalies
+        if (pending_lines >= L || limit_reached || force_flush_bytes ||
+            (is_numa && current_p_offset >= chunk_end) ||
+            (!is_numa && status == 1)) {
+          flush = true;
+        } else if (pending_lines > 0 && starve_meter >= (W + DAMPING_OFFSET - 3)) {
+          bool trigger = (stall_meter >= (W + DAMPING_OFFSET - 3));
+          if (trigger && !exact_lines) {
+            if (timeout_us == 0)
+              flush = true;
+            else if (timeout_us > 0) {
+              if (first_wait_ts == 0)
+                first_wait_ts = get_us_time();
+              if (get_us_time() - first_wait_ts >= (uint64_t)timeout_us)
                 flush = true;
-              else if (timeout_us > 0) {
-                if (first_wait_ts == 0)
-                  first_wait_ts = get_us_time();
-                if (get_us_time() - first_wait_ts >= (uint64_t)timeout_us)
-                  flush = true;
-              }
             }
           }
-          if (flush)
-            first_wait_ts = 0;
-        } else if (!is_numa)
+        } else if (pending_lines == 0 && !is_numa)
           force_refill = true;
+
+        if (flush)
+          first_wait_ts = 0;
 
         if (flush) {
           // WORMHOLE FIX 8: Ensure a force_flush_bytes doesn't accidentally trigger a FLAG_MAJOR_EOF chunk end
@@ -4038,29 +4039,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         break;
     }
 
-    if (is_numa && __atomic_load_n(&chunk_eof_flushed, __ATOMIC_ACQUIRE) == 0) {
-      bool _skipped = false;
-      // Double-check with acquire to avoid double flush
-      if (__atomic_load_n(&chunk_eof_flushed, __ATOMIC_ACQUIRE) == 0) {
-        // PHYSICS FIX: Publish total_batches BEFORE the flush
-        __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
-
-        UNIFIED_SCANNER_FLUSH(meta->major_id,
-                              minor_idx, current_p_offset, _skipped);
-        minor_idx++;
-        if (!_skipped) {
-          chunk_bounds[cb_head & 15] = local_scan_idx;
-          cb_head++;
-        }
-        __atomic_store_n(&chunk_eof_flushed, 1, __ATOMIC_RELEASE);
-      }
-      batch_start = current_p_offset;
-      pending_lines = 0;
-    }
-
     if (is_numa) {
-      // Full barrier before commit to ensure flag visibility
-      __atomic_thread_fence(__ATOMIC_SEQ_CST);
       UNIFIED_ADAPTIVE_COMMIT(true);
     }
 
