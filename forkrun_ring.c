@@ -361,6 +361,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #endif
 
 #define MAX_BATCH_LINES  281474976710656ULL
+#define FLAG_MAJOR_EOF (1U << 31)
 #define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
 
 #define HUGE_PAGE_SIZE (2 * 1024 * 1024)
@@ -1233,7 +1234,6 @@ struct ChunkMeta {
   // major_id aligns with chunk boundaries, minor_id will align with individual
   // records.
   uint32_t major_id;
-  uint32_t total_batches;
   volatile uint64_t actual_end ALIGNED(CACHE_LINE);
 };
 
@@ -1699,6 +1699,10 @@ static int ring_init_main(int argc, char **argv) {
   // CRITICAL FIX: Prevent buffer overflow in steal_threshold arrays
   if (global_num_nodes > 1024) {
     builtin_error("forkrun: global_num_nodes exceeds maximum limit of 1024");
+    if (g_logical_to_phys_map) {
+      free(g_logical_to_phys_map);
+      g_logical_to_phys_map = NULL;
+    }
     return EXECUTION_FAILURE;
   }
 
@@ -2530,7 +2534,6 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     meta->raw_length = n;
     meta->target_node = target_node;
     meta->major_id = current_major;
-    __atomic_store_n(&meta->total_batches, ~(uint32_t)0, __ATOMIC_RELAXED);
     atomic_store_relaxed(&meta->actual_end, 0);
 
     struct SharedState *t_state = &state[target_node];
@@ -2597,7 +2600,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint32_t bound_a = 4 * min_buf;
         uint32_t bound_b = min_buf + (12 * step);
         uint32_t max_buf = (bound_a < bound_b) ? bound_a : bound_b;
-        if (max_buf >= META_RING_SIZE) max_buf = META_RING_SIZE - 1; // CRITICAL FIX: Prevent ring wrap overwrite
+        if (max_buf > 32) max_buf = 32; // Prevent excessive memory consumption and ring wrap overwrite
 
         // Instantaneous safety clamp to keep current_buffer_limit in-bounds during transition
         if (current_buffer_limit < min_buf) {
@@ -2705,7 +2708,6 @@ ingest_done:
   meta_eof->raw_length = 0;
   meta_eof->target_node = target_node_eof;
   meta_eof->major_id = current_major;
-  __atomic_store_n(&meta_eof->total_batches, ~(uint32_t)0, __ATOMIC_RELAXED);
   atomic_store_relaxed(&meta_eof->actual_end, 0);
 
   struct SharedState *t_state_eof = &state[target_node_eof];
@@ -2919,7 +2921,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
  * 1. Slot-based wrap-around shield boundary is hit (applies to BOTH UMA and NUMA)
  * 2. Chunk-based memory shield boundary is hit (applies ONLY to NUMA)
  */
-#define UNIFIED_SCANNER_FLUSH(_maj_id, _minor_val,                             \
+#define UNIFIED_SCANNER_FLUSH(_is_last, _maj_id, _minor_val,                   \
                               _batch_end_offset, _out_skipped)                 \
   do {                                                                         \
     _out_skipped = false;                                                      \
@@ -2995,7 +2997,8 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
       local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id);         \
-      local_state->minor_ring[local_scan_idx & RING_MASK] = (_minor_val);      \
+      local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
+          (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
     } else {                                                                   \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
@@ -3396,12 +3399,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     uint64_t chunk_end = ~(uint64_t)0;
-    uint64_t actual_end = 0;
     uint64_t current_p_offset;
     struct ChunkMeta *meta = NULL;
     uint32_t minor_idx = 0;
-    // Atomic flag to prevent double-publish of final batch of a chunk
-    uint8_t chunk_eof_flushed = 0;
+    bool chunk_eof_flushed = false;
 
     if (is_numa) {
       int steal_target = my_node_id;
@@ -3612,13 +3613,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
         bool _skipped = false;
-
-        // PHYSICS FIX: Publish total_batches BEFORE the flush
-        if (is_numa) {
-          __atomic_store_n(&meta->total_batches, 1, __ATOMIC_RELEASE);
-        }
-
-        UNIFIED_SCANNER_FLUSH(meta->major_id, 0, actual_start, _skipped);
+        UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start,
+                              _skipped);
         if (is_numa) {
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
@@ -3814,20 +3810,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
           bool _skipped = false;
-
-          // PHYSICS FIX: Publish total_batches BEFORE the flush
-          if (is_last && is_numa) {
-            __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
-          }
-
-          UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
+          UNIFIED_SCANNER_FLUSH(is_last,
+                                is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
-            __atomic_store_n(&chunk_eof_flushed, 1, __ATOMIC_RELEASE);
+            chunk_eof_flushed = true;
           if (is_numa) {
             minor_idx++;
             if (is_last && !_skipped) {
-              __atomic_thread_fence(__ATOMIC_SEQ_CST);
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
@@ -3937,17 +3927,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             } else {
               if (is_numa) {
                 uint64_t curr_pos = buf_base_offset + (end - buf);
-                // PHYSICS FIX: Strict Logical Boundary Adherence
-                // We must never force a line completion unless we are EXACTLY
-                // at the logical actual_end of the chunk. Overrunning into the
-                // raw buffer boundary causes overlap with Chunk N+1.
-                if (curr_pos >= actual_end) {
-                    lines_found++;
-                    p = end;
-                    break;
-                } else {
-                    p = end;
-                }
+                if (curr_pos >= chunk_end) {
+                  lines_found++;
+                  p = end;
+                  break;
+                } else
+                  p = end;
               } else {
                 if (status == 1 && p < end) {
                   lines_found++;
@@ -3977,29 +3962,28 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         if (!is_numa && limit_items > 0 && total_scanned >= limit_items)
           status = 1;
 
-        // PHYSICS FIX: Force chunk boundary flushes regardless of pending_lines
-        // This prevents 0-byte post-loop flushes and TSAN short-read anomalies
-        if (pending_lines >= L || limit_reached || force_flush_bytes ||
-            (is_numa && current_p_offset >= chunk_end) ||
-            (!is_numa && status == 1)) {
-          flush = true;
-        } else if (pending_lines > 0 && starve_meter >= (W + DAMPING_OFFSET - 3)) {
-          bool trigger = (stall_meter >= (W + DAMPING_OFFSET - 3));
-          if (trigger && !exact_lines) {
-            if (timeout_us == 0)
-              flush = true;
-            else if (timeout_us > 0) {
-              if (first_wait_ts == 0)
-                first_wait_ts = get_us_time();
-              if (get_us_time() - first_wait_ts >= (uint64_t)timeout_us)
+        if (pending_lines > 0) {
+          if (pending_lines >= L || limit_reached || force_flush_bytes ||
+              (is_numa && current_p_offset >= chunk_end) ||
+              (!is_numa && status == 1)) {
+            flush = true;
+          } else if (starve_meter >= (W + DAMPING_OFFSET - 3)) {
+            bool trigger = (stall_meter >= (W + DAMPING_OFFSET - 3));
+            if (trigger && !exact_lines) {
+              if (timeout_us == 0)
                 flush = true;
+              else if (timeout_us > 0) {
+                if (first_wait_ts == 0)
+                  first_wait_ts = get_us_time();
+                if (get_us_time() - first_wait_ts >= (uint64_t)timeout_us)
+                  flush = true;
+              }
             }
           }
-        } else if (pending_lines == 0 && !is_numa)
+          if (flush)
+            first_wait_ts = 0;
+        } else if (!is_numa)
           force_refill = true;
-
-        if (flush)
-          first_wait_ts = 0;
 
         if (flush) {
           // WORMHOLE FIX 8: Ensure a force_flush_bytes doesn't accidentally trigger a FLAG_MAJOR_EOF chunk end
@@ -4007,20 +3991,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
           bool _skipped = false;
-
-          // PHYSICS FIX: Publish total_batches BEFORE the flush
-          if (is_last && is_numa) {
-            __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
-          }
-
-          UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
+          UNIFIED_SCANNER_FLUSH(is_last,
+                                is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
-            __atomic_store_n(&chunk_eof_flushed, 1, __ATOMIC_RELEASE);
+            chunk_eof_flushed = true;
           if (is_numa) {
             minor_idx++;
             if (is_last && !_skipped) {
-              __atomic_thread_fence(__ATOMIC_SEQ_CST);
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
@@ -4037,6 +4015,19 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       }
       if (limit_reached)
         break;
+    }
+
+    if (is_numa && !chunk_eof_flushed) {
+      bool _skipped = false;
+      UNIFIED_SCANNER_FLUSH(true, meta->major_id,
+                            minor_idx, current_p_offset, _skipped);
+      minor_idx++;
+      if (!_skipped) {
+        chunk_bounds[cb_head & 15] = local_scan_idx;
+        cb_head++;
+      }
+      batch_start = current_p_offset;
+      pending_lines = 0;
     }
 
     if (is_numa) {
@@ -4175,8 +4166,14 @@ unified_scanner_eof:
           char *safe_end = end;
           if (BytesMax > 0) {
             uint64_t max_overhead = (target + 1) * 8;
+
             if (BytesMax <= max_overhead) {
-              // CRITICAL FIX: If BytesMax is too small, force exactly 1 record to ensure progress.
+              uint64_t max_possible_target = (BytesMax > 16) ? (BytesMax - 1) / 8 - 1 : 1;
+              target = max_possible_target > 0 ? max_possible_target : 1;
+              max_overhead = (target + 1) * 8;
+            }
+
+            if (BytesMax <= max_overhead) {
               target = 1;
               // Allow safe_end = end so memchr finds the next delimiter
             } else {
@@ -4244,7 +4241,7 @@ unified_scanner_eof:
         if (lines_found > 0) {
           uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(0, 0, current_p_offset,
+          UNIFIED_SCANNER_FLUSH(false, 0, 0, current_p_offset,
                                 _skipped);
           batch_start = current_p_offset;
           L_tail_done += lines_found;
@@ -4516,7 +4513,9 @@ dlc_evaluate_claim:
 
   if (local_state->numa_enabled) {
     out->major = local_state->major_ring[my_read_idx & RING_MASK];
-    out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
+    out->minor = local_state->minor_ring[my_read_idx & RING_MASK] & ~FLAG_MAJOR_EOF;
+    if (local_state->minor_ring[my_read_idx & RING_MASK] & FLAG_MAJOR_EOF)
+      out->minor |= FLAG_MAJOR_EOF;
   } else {
     out->major = 0;
     out->minor = 0;
@@ -5047,7 +5046,7 @@ static int ring_order_main(int argc, char **argv) {
 
     for (size_t i = 0; i < count; i++) {
       struct OrderPacket *op = &ops[i];
-      uint32_t actual_minor = op->minor_idx;
+      uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
       uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
       if (!unordered_mode) {
@@ -5124,7 +5123,7 @@ static int ring_order_main(int argc, char **argv) {
             if (numa_mode)
               snprintf(path, sizeof(path), "%s.%u.%u", prefix,
                        top.pkt.major_idx,
-                       top.pkt.minor_idx);
+                       (top.pkt.minor_idx & ~FLAG_MAJOR_EOF));
             else
               snprintf(path, sizeof(path), "%s.%u", prefix, top.pkt.major_idx);
             int fd_file = open(path, O_RDONLY);
@@ -5142,11 +5141,7 @@ static int ring_order_main(int argc, char **argv) {
           }
           if (numa_mode) {
             expected_minor += top.pkt.cnt;
-            struct ChunkMeta *meta = &g_state->meta_ring[expected_major & META_RING_MASK];
-            if (expected_minor == __atomic_load_n(&meta->total_batches, __ATOMIC_ACQUIRE)) {
-                expected_major++;
-                expected_minor = 0;
-            }
+            if (top.pkt.minor_idx & FLAG_MAJOR_EOF) { expected_major++; expected_minor = 0; }
           } else { expected_major += top.pkt.cnt; }
         }
       }
