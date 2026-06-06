@@ -3400,7 +3400,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t current_p_offset;
     struct ChunkMeta *meta = NULL;
     uint32_t minor_idx = 0;
-    bool chunk_eof_flushed = false;
+    // Atomic flag to prevent double-publish of final batch of a chunk
+    uint8_t chunk_eof_flushed = 0;
 
     if (is_numa) {
       int steal_target = my_node_id;
@@ -3822,10 +3823,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
-            chunk_eof_flushed = true;
+            __atomic_store_n(&chunk_eof_flushed, 1, __ATOMIC_RELEASE);
           if (is_numa) {
             minor_idx++;
             if (is_last && !_skipped) {
+              __atomic_thread_fence(__ATOMIC_SEQ_CST);
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
@@ -4013,10 +4015,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           UNIFIED_SCANNER_FLUSH(is_numa ? meta->major_id : 0, minor_idx,
                                 current_p_offset, _skipped);
           if (is_last)
-            chunk_eof_flushed = true;
+            __atomic_store_n(&chunk_eof_flushed, 1, __ATOMIC_RELEASE);
           if (is_numa) {
             minor_idx++;
             if (is_last && !_skipped) {
+              __atomic_thread_fence(__ATOMIC_SEQ_CST);
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
             }
@@ -4037,22 +4040,27 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
     if (is_numa && !chunk_eof_flushed) {
       bool _skipped = false;
+      // Double-check with acquire to avoid double flush
+      if (__atomic_load_n(&chunk_eof_flushed, __ATOMIC_ACQUIRE) == 0) {
+        // PHYSICS FIX: Publish total_batches BEFORE the flush
+        __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
 
-      // PHYSICS FIX: Publish total_batches BEFORE the flush
-      __atomic_store_n(&meta->total_batches, minor_idx + 1, __ATOMIC_RELEASE);
-
-      UNIFIED_SCANNER_FLUSH(meta->major_id,
-                            minor_idx, current_p_offset, _skipped);
-      minor_idx++;
-      if (!_skipped) {
-        chunk_bounds[cb_head & 15] = local_scan_idx;
-        cb_head++;
+        UNIFIED_SCANNER_FLUSH(meta->major_id,
+                              minor_idx, current_p_offset, _skipped);
+        minor_idx++;
+        if (!_skipped) {
+          chunk_bounds[cb_head & 15] = local_scan_idx;
+          cb_head++;
+        }
+        __atomic_store_n(&chunk_eof_flushed, 1, __ATOMIC_RELEASE);
       }
       batch_start = current_p_offset;
       pending_lines = 0;
     }
 
     if (is_numa) {
+      // Full barrier before commit to ensure flag visibility
+      __atomic_thread_fence(__ATOMIC_SEQ_CST);
       UNIFIED_ADAPTIVE_COMMIT(true);
     }
 
