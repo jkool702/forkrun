@@ -1699,6 +1699,10 @@ static int ring_init_main(int argc, char **argv) {
   // CRITICAL FIX: Prevent buffer overflow in steal_threshold arrays
   if (global_num_nodes > 1024) {
     builtin_error("forkrun: global_num_nodes exceeds maximum limit of 1024");
+    if (g_logical_to_phys_map) {
+      free(g_logical_to_phys_map);
+      g_logical_to_phys_map = NULL;
+    }
     return EXECUTION_FAILURE;
   }
 
@@ -2596,7 +2600,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint32_t bound_a = 4 * min_buf;
         uint32_t bound_b = min_buf + (12 * step);
         uint32_t max_buf = (bound_a < bound_b) ? bound_a : bound_b;
-        if (max_buf >= META_RING_SIZE) max_buf = META_RING_SIZE - 1; // CRITICAL FIX: Prevent ring wrap overwrite
+        if (max_buf > 32) max_buf = 32; // Prevent excessive memory consumption and ring wrap overwrite
 
         // Instantaneous safety clamp to keep current_buffer_limit in-bounds during transition
         if (current_buffer_limit < min_buf) {
@@ -4162,8 +4166,14 @@ unified_scanner_eof:
           char *safe_end = end;
           if (BytesMax > 0) {
             uint64_t max_overhead = (target + 1) * 8;
+
             if (BytesMax <= max_overhead) {
-              // CRITICAL FIX: If BytesMax is too small, force exactly 1 record to ensure progress.
+              uint64_t max_possible_target = (BytesMax > 16) ? (BytesMax - 1) / 8 - 1 : 1;
+              target = max_possible_target > 0 ? max_possible_target : 1;
+              max_overhead = (target + 1) * 8;
+            }
+
+            if (BytesMax <= max_overhead) {
               target = 1;
               // Allow safe_end = end so memchr finds the next delimiter
             } else {
