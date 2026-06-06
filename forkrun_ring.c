@@ -4038,7 +4038,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         break;
     }
 
-    if (is_numa && !chunk_eof_flushed) {
+    if (is_numa && __atomic_load_n(&chunk_eof_flushed, __ATOMIC_ACQUIRE) == 0) {
       bool _skipped = false;
       // Double-check with acquire to avoid double flush
       if (__atomic_load_n(&chunk_eof_flushed, __ATOMIC_ACQUIRE) == 0) {
