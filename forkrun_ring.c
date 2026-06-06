@@ -2245,11 +2245,15 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   // If the input is a regular file, scale the chunk size down to ensure every
   // NUMA socket receives at least 2 chunks during initial distribution.
   struct stat st;
-  if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
-      uint64_t ideal = (uint64_t)st.st_size / (uint64_t)(num_nodes * 2);
-      if (ideal < chunk_size) {
-          uint64_t p2 = 1ULL << fast_log2(ideal);
-          chunk_size = (p2 < 4096) ? 4096 : p2;
+  if (fstat(infd, &st) == 0) {
+      if (S_ISFIFO(st.st_mode)) {
+          fcntl(infd, F_SETPIPE_SZ, 1048576); // Expand pipe to 1MB
+      } else if (S_ISREG(st.st_mode) && st.st_size > 0) {
+          uint64_t ideal = (uint64_t)st.st_size / (uint64_t)(num_nodes * 2);
+          if (ideal < chunk_size) {
+              uint64_t p2 = 1ULL << fast_log2(ideal);
+              chunk_size = (p2 < 4096) ? 4096 : p2;
+          }
       }
   }
 
@@ -2283,6 +2287,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   uint32_t current_major = 0;
   int last_target = -1;
   bool limit_reached_exit = false;
+
+  // PHYSICS FIX: Geometric Accumulation Ramp
+  uint64_t accum_target = (65536 > chunk_size) ? chunk_size : 65536; // Start at 64 KB floor (or chunk_size if smaller)
+  uint32_t accum_count = 0;
+  uint64_t bytes_to_current_node = 0;
 
   unsigned long test_mask = 1UL;
   bool numa_enabled =
@@ -2343,17 +2352,48 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     NUMA_CHECK_SCANNERS_DONE();
     check_memory_pressure(&total_moved, &next_check, oom_threshold);
 
-    int target_node = 0;
-    int min_backlog = INT_MAX;
-    for (int i = 0; i < num_nodes; i++) {
-      int check = (last_target + 1 + i) % num_nodes;
-      uint64_t h = atomic_load_relaxed(&state[check].chunk_queue_head);
-      uint64_t t = atomic_load_relaxed(&state[check].chunk_queue_tail);
-      int bl = (int)(h - t);
-      if (bl < min_backlog) {
-        min_backlog = bl;
-        target_node = check;
-      }
+    bool need_new_target = false;
+    if (last_target == -1) {
+        need_new_target = true;
+    } else if (bytes_to_current_node >= accum_target) {
+        need_new_target = true;
+    } else if (bytes_to_current_node >= 65536) {
+        // Starvation Backpressure: if any OTHER node is empty, switch early
+        for (int i = 0; i < num_nodes; i++) {
+            if (i == last_target) continue;
+            uint64_t h = atomic_load_relaxed(&state[i].chunk_queue_head);
+            uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
+            if (h == t) {
+                need_new_target = true;
+                break;
+            }
+        }
+    }
+
+    int target_node = last_target;
+    if (need_new_target) {
+        int min_backlog = INT_MAX;
+        for (int i = 0; i < num_nodes; i++) {
+          int check = (last_target + 1 + i) % num_nodes;
+          uint64_t h = atomic_load_relaxed(&state[check].chunk_queue_head);
+          uint64_t t = atomic_load_relaxed(&state[check].chunk_queue_tail);
+          int bl = (int)(h - t);
+          if (bl < min_backlog) {
+            min_backlog = bl;
+            target_node = check;
+          }
+        }
+
+        if (last_target != -1) {
+            accum_count++;
+            // Geometric Double: After N chunks, double the accumulation target
+            if (accum_count >= num_nodes) {
+                accum_target *= 2;
+                if (accum_target > chunk_size) accum_target = chunk_size;
+                accum_count = 0;
+            }
+        }
+        bytes_to_current_node = 0;
     }
 
     // DYNAMIC LIMIT GATING
@@ -2394,16 +2434,17 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         continue;
     }
 
-    if (numa_enabled && num_nodes > 1) {
-      uint32_t target_phys =
-          g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
-      if (target_phys < mask_words * BITS_PER_LONG) {
-        memset(nodemask, 0, mask_words * sizeof(unsigned long));
-        nodemask[target_phys / BITS_PER_LONG] |=
-            (1UL << (target_phys % BITS_PER_LONG));
-        syscall(__NR_set_mempolicy, MPOL_BIND, nodemask,
-                mask_words * BITS_PER_LONG);
-      }
+    // PHYSICS FIX: Only execute heavy NUMA lock syscalls if the target actually changed
+    if (target_node != last_target && numa_enabled && num_nodes > 1) {
+        uint32_t target_phys =
+            g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
+        if (target_phys < mask_words * BITS_PER_LONG) {
+          memset(nodemask, 0, mask_words * sizeof(unsigned long));
+          nodemask[target_phys / BITS_PER_LONG] |=
+              (1UL << (target_phys % BITS_PER_LONG));
+          syscall(__NR_set_mempolicy, MPOL_BIND, nodemask,
+                  mask_words * BITS_PER_LONG);
+        }
     }
 
     ssize_t n = -1;
@@ -2556,6 +2597,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     current_offset += n;
     current_major++;
     total_moved += n;
+    bytes_to_current_node += n;
 
     // TELEMETRY & AUTO-TUNING (Per-chunk evaluation)
     if (!state[0].mode_byte) {
@@ -2600,7 +2642,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint32_t bound_a = 4 * min_buf;
         uint32_t bound_b = min_buf + (12 * step);
         uint32_t max_buf = (bound_a < bound_b) ? bound_a : bound_b;
-        if (max_buf > 32) max_buf = 32; // Prevent excessive memory consumption and ring wrap overwrite
+        if (max_buf > 128) max_buf = 128; // Safely absorb smaller 64KB metadata entries
 
         // Instantaneous safety clamp to keep current_buffer_limit in-bounds during transition
         if (current_buffer_limit < min_buf) {
@@ -5633,8 +5675,11 @@ static int ring_copy_main(int argc, char **argv) {
     }
   }
 
-  if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
-    if (st.st_size > 0) {
+  if (fstat(infd, &st) == 0) {
+    if (S_ISFIFO(st.st_mode)) {
+      fcntl(infd, F_SETPIPE_SZ, 1048576); // Expand pipe to 1MB
+    }
+    if (S_ISREG(st.st_mode) && st.st_size > 0) {
       while (off < st.st_size) {
         // EMERGENCY BYPASS: Check fire alarm before scanner_finished
         if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
