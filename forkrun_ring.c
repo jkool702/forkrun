@@ -2289,7 +2289,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   bool limit_reached_exit = false;
 
   // PHYSICS FIX: Geometric Accumulation Ramp
-  uint64_t accum_target = 65536; // Start at 64 KB floor
+  uint64_t accum_target = (65536 > chunk_size) ? chunk_size : 65536; // Start at 64 KB floor (or chunk_size if smaller)
   uint32_t accum_count = 0;
   uint64_t bytes_to_current_node = 0;
 
