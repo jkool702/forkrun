@@ -2387,7 +2387,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (last_target != -1) {
             accum_count++;
             // Geometric Double: After N chunks, double the accumulation target
-            if (accum_count >= num_nodes) {
+            if (accum_count >= (uint32_t)num_nodes) {
                 accum_target *= 2;
                 if (accum_target > chunk_size) accum_target = chunk_size;
                 accum_count = 0;
@@ -4371,7 +4371,7 @@ dlc_restart_loop:
   // Re-arm tl_drain_escrow if ring_escrow_put_main has deposited since we
   // last drained.  Costs one relaxed load (≤1 cycle, stays in local cache).
   // PHYSICS FIX: Test-and-Test-and-Set prevents RMW cache-line ping-pong.
-  if (__builtin_expect(__atomic_load_n(&local_state->escrow_pending, __ATOMIC_ACQUIRE), 0)) {
+  if (__builtin_expect(__atomic_load_n(&local_state->escrow_pending, __ATOMIC_RELAXED), 0)) {
     if (__atomic_exchange_n(&local_state->escrow_pending, 0, __ATOMIC_ACQ_REL))
         tl_drain_escrow = true;
 }
