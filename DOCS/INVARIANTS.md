@@ -41,7 +41,7 @@ Scanner writes ring slot data **before** advancing `write_idx`. `write_idx` publ
 A batch is claimed whole or not at all.
 
 **Enforced by**  
-Workers claim ranges, never individual slots. Overshoot handled *after* claim, not during.
+Workers claim exactly 1 slot (1 batch) at a time. Atomicity is enforced upstream by the Scanner, which pre-calculates and bounds the line/byte offsets for the batch within that single slot before publishing.
 
 **Audit Rule**  
 ❌ Never introduce logic that conditionally claims per-slot or splits batch claim across multiple atomics.
@@ -97,7 +97,7 @@ Batch size is a *policy*, not a property of the tail. Once the tail begins, poli
 Escrow is advisory and never required for forward progress.
 
 **Enforced by**  
-Escrow stealing is optional. Original worker may always reclaim remainder. Escrow full → self-complete.
+Escrow is strictly a fault-tolerance channel for crashed workers. Because workers claim exactly 1 slot, there are no partial remainders to subdivide or reclaim. Escrow stealing is optional but critical for recovery.
 
 **Audit Rule**  
 ✅ It must always be possible to ignore escrow entirely and still complete all work.

@@ -49,24 +49,17 @@ The data never has to cross a socket boundary unless a worker explicitly steals 
 
 ---
 
-## 3. Speculative Claiming + Escrow = Inertial Particles with Corrections
+## 3. Resilience and Rollback = The Escrow Pipe
 
-Workers are not polite queue consumers. They are **inertial particles** moving at high speed along the river.
+Workers are not polite queue consumers. They are **water wheels** placed along the river.
 
-An inertial particle cannot stop instantly. When it sees “enough water ahead,” it claims a big chunk (large batch) — even if some of that water hasn’t arrived yet.
+The worker claims exactly one transaction (one bucket) at a time. If a wheel "evaporates" (the process crashes or is killed by OOM), its uncompleted bucket is dropped into a side-channel (the escrow pipe) for another wheel to process.
 
-In software this is called “overshoot.”  
-In physics it is called **inertia**.
+The physical concept of "overshoot" is now strictly limited to a worker momentarily advancing past the scanner's write cursor (which is handled by waiting, not division).
 
-When the particle discovers it over-claimed, it doesn’t reverse (no rollback). It simply:
+Other idle wheels can pick up these rollback corrections. Forward progress is never blocked. The river keeps flowing.
 
-1. Processes what actually arrived (partial batch).
-2. Drops the remainder into a side-channel (escrow pipe) — like shedding mass or emitting a correction signal.
-
-Other idle particles can pick up those corrections. If none do, the original particle will eventually come back for them.  
-Forward progress is never blocked. The river keeps flowing.
-
-This is why there are no CAS retry loops on the fast path: in physics you never need retries if your particles obey Newton’s laws and the channel is one-way.
+This is why there are no CAS retry loops on the fast path: in physics you never need retries if your wheels obey Newton’s laws and the channel is one-way.
 
 ---
 
