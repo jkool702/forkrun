@@ -29,7 +29,8 @@
 //    OOM without breaking the absolute integer offsets.
 //
 // CRITICAL INVARIANT: The fast path has no locks and no CAS retry loops.
-
+// Batch signs (-N / +N) encode the scanner's advisory vs the worker's finalized
+// contract.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -61,7 +62,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-#include <dlfcn.h>      // dlopen/dlsym for -C plugin loading
+#include <dlfcn.h>      // <--- ADD THIS for dynamic plugins
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -2386,7 +2387,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (last_target != -1) {
             accum_count++;
             // Geometric Double: After N chunks, double the accumulation target
-            if (accum_count >= (uint32_t)num_nodes) {
+            if (accum_count >= num_nodes) {
                 accum_target *= 2;
                 if (accum_target > chunk_size) accum_target = chunk_size;
                 accum_count = 0;

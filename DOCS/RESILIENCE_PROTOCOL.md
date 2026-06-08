@@ -92,7 +92,7 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
 ### 5.2 Output Delivery Guarantees
 * **Ordered (`-k`) & Buffered (`--buffered`) Modes: EXACTLY-ONCE DELIVERY.**
   Because partial output is physically reverted (`ftruncate`) inside the per-worker `memfd` upon a graceful crash, and because catastrophic crashes trigger a mathematically absolute byte-coordinate resumption, surviving data is guaranteed to be committed to the final output stream exactly once. 
-* **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY.**
-  Because workers write directly to `stdout` in realtime mode, `forkrun` cannot recall bytes once they hit the terminal. A crash will result in the orchestrator outputting a valid checkpoint, but resuming the pipeline will result in duplicate output lines for the specific batch that was interrupted during the crash.
+* **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY (NOT RECOMMENDED).**
+  Workers write directly to `stdout`, so `forkrun` cannot recall bytes on a crash (resuming produces duplicates). Furthermore, realtime mode risks severely scrambled output (byte interleaving) and kernel lock contention. Use `--buffered` or `-k` instead.
 
   

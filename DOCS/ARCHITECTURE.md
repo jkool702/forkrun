@@ -36,7 +36,7 @@ flowchart TD
     Backend1 & Backend2 & Backend3 --> Output[Output Handler\nOrdered / Buffered / Realtime]
     Output --> Checkpoint[Seqlock Ledger\n.forkrun_resume]
 
-    Ring -.-> Escrow[Escrow Pipe\nOvershoot / Work Stealing]
+    Ring -.-> Escrow[Escrow Pipe\nTransaction Recovery / Stealing]
     Workers -.-> DeathPipe[Death Pipe + POLLHUP\nZero-Cost Failure Detection]
 
     classDef core fill:#1e3a8a,stroke:#60a5fa,color:white
@@ -65,7 +65,7 @@ A carefully designed single-producer, multi-consumer ring per NUMA node with mon
 → [`DESIGN.md`](DESIGN.md) and [`INVARIANTS.md`](INVARIANTS.md)
 
 ### 3. Adaptive Intelligent Batching
-A multi-phase controller (warmup → geometric ramp → steady-state) that dynamically tunes batch sizes based on real-time system behavior.
+An intelligent controller that uses a Pre-Flight SIMD Popcount to compute the globally optimal batch size during orchestrator fork latency, then enters PID steady-state immediately. A geometric fallback engages if a worker spawns before the scan completes. Workers always claim exactly one slot regardless of phase.
 
 → [`PHYSICS.md`](PHYSICS.md)
 

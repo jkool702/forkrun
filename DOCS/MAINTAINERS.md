@@ -113,3 +113,17 @@ We maintain two dedicated branches specifically configured for sanitizer testing
    ```
 
 If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under both standard and sanitized conditions, the build is considered stable and ready for release.
+
+---
+
+## §6. Final Release Criteria
+
+Before tagging a release, run one final sanity check on the benchmark output to confirm the expected number of test cases completed. From the `BENCHMARKS` directory, after running `run_benchmark.bash`, verify the line count of results:
+
+```bash
+grep -E '^[0-9]' benchmark.out | wc -l
+```
+
+The output must match the expected test count for the release. A lower count indicates that one or more benchmark runs silently failed or were skipped, and the release must be held until the discrepancy is resolved.
+
+This check is the last gate before tagging. If it passes alongside the full sanitizer matrix, tag the release and publish.

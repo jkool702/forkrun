@@ -49,38 +49,41 @@ The data never has to cross a socket boundary unless a worker explicitly steals 
 
 ---
 
-## 3. Speculative Claiming + Escrow = Inertial Particles with Corrections
+## 3. Resilience and Rollback = The Escrow Pipe
 
-Workers are not polite queue consumers. They are **inertial particles** moving at high speed along the river.
+Workers are not polite queue consumers. They are **water wheels** placed along the river.
 
-An inertial particle cannot stop instantly. When it sees “enough water ahead,” it claims a big chunk (large batch) — even if some of that water hasn’t arrived yet.
+The worker claims exactly one transaction (one bucket) at a time. If a wheel "evaporates" (the process crashes or is killed by OOM), its uncompleted bucket is dropped into a side-channel (the escrow pipe) for another wheel to process.
 
-In software this is called “overshoot.”  
-In physics it is called **inertia**.
+The physical concept of "overshoot" is now strictly limited to a worker momentarily advancing past the scanner's write cursor (which is handled by waiting, not division).
 
-When the particle discovers it over-claimed, it doesn’t reverse (no rollback). It simply:
+Other idle wheels can pick up these rollback corrections. Forward progress is never blocked. The river keeps flowing.
 
-1. Processes what actually arrived (partial batch).
-2. Drops the remainder into a side-channel (escrow pipe) — like shedding mass or emitting a correction signal.
-
-Other idle particles can pick up those corrections. If none do, the original particle will eventually come back for them.  
-Forward progress is never blocked. The river keeps flowing.
-
-This is why there are no CAS retry loops on the fast path: in physics you never need retries if your particles obey Newton’s laws and the channel is one-way.
+This is why there are no CAS retry loops on the fast path: in physics you never need retries if your wheels obey Newton’s laws and the channel is one-way.
 
 ---
 
-## 4. Adaptive Batching = PID Control with Physical Limits
+## 4. Adaptive Batching = Survey First, Regulate After
 
-The scanner’s three-phase controller (warmup → geometric ramp → PID steady-state) is literally a control system you would find in any geophysical instrument:
+The scanner's controller has two primary phases with a graceful fallback -- exactly the kind of measurement hierarchy a geophysicist would design.
 
-- **Phase 0 (warmup)**: “Make sure every sensor sees at least one event before we start averaging.” (Fairness before optimization — exactly like calibrating a seismometer array.)
-- **Phase 1 (geometric ramp)**: “Double the sampling window until the signal-to-noise ratio stops improving.” (Classic geophysical line search.)
-- **Phase 2 (PID)**: “Adjust gain based on observed flow rate, backlog pressure, and starvation.” (Standard feedback loop with anti-windup via damping constants.)
+**Phase 0: Satellite Surveying (Pre-Flight Popcount)**
 
-The `signed_batch_size` trick (negative = advisory, positive = finalized by worker via CAS) is the control theorist’s way of saying:
+Before the water wheels (workers) touch the river, we use a satellite (AVX2/NEON SIMD popcount) to measure the total volume of water already in the channel -- during the dead time when Bash is forking workers. If we count enough water (`Wmax * Lmax` lines or full EOF), we calculate the exact optimal bucket size ($L = \text{total\_lines} / W$) and jump directly to Phase 2 (PID regulation). The wheels arrive at the river with the right-sized buckets already chosen.
 
-> “The controller may change its mind at any time. Only the sensor that actually measures the river can declare the measurement final.”
+**Phase 1: Acoustic Sounding (Geometric Fallback)**
+
+What if the satellite gets blinded by clouds? (A worker spawns before the pre-flight scan finishes.) The system degrades gracefully. The scanner hot-swaps its simulated batch size `sim_L` into the live state and resumes doubling ($L \times 2$) -- acoustic sounding: halving the uncertainty with each ping until the depth is known. O(log L) convergence, no oscillation.
+
+**The Crucial Invariant: The Wheels Never Change**
+
+In older versions of forkrun, the geometric ramp required workers to do speculative multi-batch claiming using CAS retry loops and signed-batch hysteresis -- the wheels had to dynamically resize their own buckets mid-river. That physics has been permanently excised from the worker code.
+
+Today, whether the scanner is in Phase 0, Phase 1, or Phase 2, the worker fast-path is identical: a single `atomic_fetch_add` claiming exactly one slot. The scanner changes the *size of buckets being published*; workers never see the policy, only the bucket. A single-slot claim never crosses a NUMA chunk boundary, so the escrow/overshoot machinery for that case is also eliminated.
+
+**Phase 2: Flow Regulation (PID Steady-State)**
+
+Once optimal $L$ is found -- immediately via satellite, or after a short acoustic ramp -- the scanner enters a PID controller making micro-adjustments based on the `stall_meter` and `starve_meter`. Standard geophysical instrument feedback: calibrate once, regulate continuously.
 
 ---
 
@@ -111,14 +114,15 @@ The NUMA-aware reorder path is just special relativity for data streams.
 
 Every “weird” feature has a direct physical justification:
 
-| Code Feature                  | Physical Analogy                          | What Breaks Without It                     |
-|-------------------------------|-------------------------------------------|--------------------------------------------|
-| Monotonic indices             | Causality / arrow of time                 | Time travel → data corruption              |
-| Per-node rings + pinning      | Conservation of momentum / locality       | Turbulence → cache-line storms             |
-| Escrow pipe                   | Inertial correction / diffusion           | Blocking or retries on every claim         |
-| Signed batch size + CAS       | Control system with sensor finalization   | Races: two workers act on same advisory size        |
-| Sign bit on offset            | Phase boundary (pre-tail vs tail)         | Partial-line leaks at EOF                  |
-| Fallow punch-hole             | Second law + event horizon                | Unbounded memory growth                    |
+| Code Feature                       | Physical Analogy                          | What Breaks Without It                              |
+|------------------------------------|-------------------------------------------|-----------------------------------------------------|
+| Monotonic indices                  | Causality / arrow of time                 | Time travel -> data corruption                      |
+| Per-node rings + pinning           | Conservation of momentum / locality       | Turbulence -> cache-line storms                     |
+| Escrow pipe                        | Inertial correction / diffusion           | Blocking or retries on every claim                  |
+| Pre-Flight SIMD Popcount           | Satellite surveying the river basin       | Workers guessing bucket sizes; PID oscillation on startup |
+| Single-slot claim (atomic_fetch_add +1) | Inertial bucket with fixed handle    | CAS storms and speculative arithmetic on fast path  |
+| Stride Ring Boundary Flag          | Chunk event horizon                       | Workers reading across NUMA fault lines             |
+| Fallow punch-hole                  | Second law + event horizon                | Unbounded memory growth                             |
 
 Remove any of these and the system either violates a conservation law or requires locks/polling to compensate — exactly like adding friction to a frictionless model.
 

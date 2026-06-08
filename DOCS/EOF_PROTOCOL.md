@@ -51,7 +51,7 @@ if (atomic_load_acquire(&local_state->scanner_finished)) {
 }
 ```
 
-**Reference:** `ring_claim_main()` in `forkrun_ring.c`, lines 3993–4012.
+**Reference:** `ring_claim_main()` in `forkrun_ring.c`.
 
 ---
 
@@ -93,7 +93,7 @@ uint64_t blast = 999999;
 sys_write(evfd_eof_arr[0], &blast, 8);                            // 3. wake all polls
 ```
 
-**Reference:** `core_scanner_loop()` finalization in `forkrun_ring.c`, lines 3609–3614 (NUMA) and 3742–3747 (UMA).
+**Reference:** `core_scanner_loop()` finalization in `forkrun_ring.c`.
 
 ---
 
@@ -138,7 +138,7 @@ There is exactly one exception to the standard priority ordering defined in §3.
 
 ### The Exception
 
-When a worker deposits a partial batch into the escrow pipe (due to overshoot or `FLAG_CHUNK_BOUNDARY` boundary detection), **that specific worker** should temporarily **invert its priority** to check escrow **before** the local ring on its next claim attempt.
+When a worker deposits a failed batch into the escrow pipe (due to a transient failure or crash recovery), **that specific worker** should temporarily **invert its priority** to check escrow **before** the local ring on its next claim attempt.
 
 ### Rationale
 
@@ -151,7 +151,7 @@ By prioritizing escrow immediately after depositing, the depositing worker (or a
 1. The priority inversion is **per-worker** (thread-local). It does **not** affect any other worker's priority.
 2. The inversion flag is **one-shot**: it is cleared unconditionally at the start of the next claim attempt, regardless of whether the escrow read succeeds.
 3. If the escrow pipe is empty (another worker already consumed it), the worker falls through to the standard priority ordering with no penalty.
-4. **Overshoot Validation**: Reclaimed escrow packets must NOT bypass the `write_idx` validation (which prevents reading uninitialized ring data when the scanner hasn't published the slots yet). Therefore, post-escrow jumps must target `evaluate_claim` instead of `check_boundaries`.
+4. **Crash Validation**: Reclaimed escrow packets must NOT bypass the `write_idx` validation (which prevents reading uninitialized ring data when the scanner hasn't published the slots yet). Therefore, post-escrow jumps must target `evaluate_claim` instead of `check_boundaries`.
 
 ### Implementation
 
@@ -167,7 +167,7 @@ if (tl_recently_escrowed) {          // TLS flag, set when depositing into escro
         } while (er < 0 && errno == EINTR);
         if (er == sizeof(ep)) {
             // Safely jump to the write_idx check block. If this is an
-            // overshoot packet, we MUST wait for the scanner to publish it!
+            // crash-recovery packet, we MUST wait for the scanner to publish it!
             goto evaluate_claim;
         }
     }
@@ -209,7 +209,7 @@ else if (eof_fired) {
 
 When `ingest_complete` is observed, the scanner forces one final `pread()` to drain any data written between the last read and the EOF signal (`force_refill = true; continue;`). This prevents the last-byte-lost race.
 
-**Reference:** `core_scanner_loop()` in `forkrun_ring.c`, lines 3220–3282.
+**Reference:** `core_scanner_loop()` in `forkrun_ring.c`.
 
 ---
 
