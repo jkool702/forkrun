@@ -146,7 +146,7 @@ There are multiple eventfds:
 
 * Data availability (per-node)
 * Worker spawning
-* Overshoot notifications
+* Escrow recovery notifications
 * EOF signaling
 
 Properties:

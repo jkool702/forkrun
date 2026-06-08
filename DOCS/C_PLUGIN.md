@@ -85,7 +85,7 @@ You do not actually *need* the header file. Because C only cares about memory la
 // 1. Opt-in flag: Tell forkrun we want the context!
 int forkrun_use_ctx = 1;
 
-// 2. The Context Struct (Matches forkrun v3.2.1+ layout)
+// 2. The Context Struct (Matches forkrun v3.3.0+ layout)
 struct forkrun_ctx {
     uint64_t batch_index;       // Global batch sequence number
     uint64_t batch_offset;      // Byte offset in the shared memfd

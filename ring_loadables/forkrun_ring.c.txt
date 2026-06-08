@@ -540,12 +540,12 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
     }
 
     // Shield against integer overflow and POSIX pread limits
-    if (length > SSIZE_MAX - 65536) return EXECUTION_FAILURE;
+    if (length > SSIZE_MAX - 65536) return 254;
 
     if (length + 1 > tls_map_buf_cap) {
         size_t new_cap = length + 65536; // Add padding to avoid constant reallocs
         char *new_buf = realloc(tls_map_buf, new_cap);
-        if (!new_buf) return EXECUTION_FAILURE;
+        if (!new_buf) return 254;
         tls_map_buf = new_buf;
         tls_map_buf_cap = new_cap;
     }
@@ -555,14 +555,14 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
         ssize_t n = pread(fd, tls_map_buf + total_read, length - total_read, offset + total_read);
         if (n < 0) {
             if (errno == EINTR) continue;
-            return EXECUTION_FAILURE;
+            return 254;
         }
         if (n == 0) break; // EOF reached before expected length
         total_read += n;
     }
 
     // If we couldn't fulfill the exact claimed length, the batch is broken.
-    if (total_read < length) return EXECUTION_FAILURE;
+    if (total_read < length) return 254;
 
     tls_map_buf[total_read] = '\0'; // Safety terminator
 
@@ -576,7 +576,7 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
             if ((size_t)fixed_argc + idx + 2 > tls_argv_cap) {
                 tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
                 char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-                if (!new_argv) return EXECUTION_FAILURE;
+                if (!new_argv) return 254;
                 tls_argv = new_argv;
             }
         }
@@ -586,7 +586,7 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
             *next = '\0'; // Swap delimiter for null terminator
             if (arr) {
                 if (!bind_array_element(arr, (arrayind_t)idx, ptr, 0))
-                    return EXECUTION_FAILURE;
+                    return 254;
             } else {
                 tls_argv[fixed_argc + idx] = ptr;
             }
@@ -597,7 +597,7 @@ static int do_tokenize(int fd, size_t length, off_t offset, char delim, SHELL_VA
             if (ptr < end && *ptr != '\0') {
                 if (arr) {
                     if (!bind_array_element(arr, (arrayind_t)idx, ptr, 0))
-                        return EXECUTION_FAILURE;
+                        return 254;
                 } else {
                     tls_argv[fixed_argc + idx] = ptr;
                 }
@@ -630,7 +630,9 @@ static int ring_map_main(int argc, char **argv) {
     SHELL_VAR *v = make_new_array_variable(arr_name);
     if (!v) return EXECUTION_FAILURE;
 
-    return do_tokenize(fd, length, tls_batch_offset, delim, v, 0, NULL);
+    int ret = do_tokenize(fd, length, tls_batch_offset, delim, v, 0, NULL);
+    if (ret != EXECUTION_SUCCESS) return 254;
+    return EXECUTION_SUCCESS;
 }
 
 // Returns 0 (true) if safe to execute directly via posix_spawnp (Binary or Shebang)
@@ -725,7 +727,7 @@ static int ring_exec_main(int argc, char **argv) {
     // 8. Restore signal mask
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
-    if (ret != 0) return EXECUTION_FAILURE;
+    if (ret != 0) return 254; // posix_spawnp failed (EAGAIN/ENOMEM) — Internal Framework Error
 
     // Return exact status correctness (crucial for -E auto-retry)
     if (WIFEXITED(status)) {
@@ -752,7 +754,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
     if (tls_argv_cap < (size_t)(fixed_argc + 1)) {
         tls_argv_cap = fixed_argc + 1;
         char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-        if (!new_argv) return EXECUTION_FAILURE;
+        if (!new_argv) return 254;
         tls_argv = new_argv;
     }
     for (int i = 0; i < fixed_argc; i++) {
@@ -827,7 +829,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
     // 10. Restore signal mask
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
-    if (ret != 0) return EXECUTION_FAILURE;
+    if (ret != 0) return 254; // posix_spawnp failed (EAGAIN/ENOMEM) — Internal Framework Error
 
     if (WIFEXITED(status)) return (WEXITSTATUS(status) == 0) ? EXECUTION_SUCCESS : WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
@@ -1051,8 +1053,12 @@ static uint64_t get_arg_max_bytes() {
   extern char **environ;
   for (char **ep = environ; *ep; ++ep)
     env_len += strlen(*ep) + 1;
-  if ((long)env_len < sys_arg_max)
-    return (uint64_t)((sys_arg_max - (long)env_len) * 15 / 16);
+  if ((long)env_len < sys_arg_max) {
+    // Subtract an extra 1MB of safety margin to account for bash environment exports
+    long safe_margin = sys_arg_max - (long)env_len - 1048576;
+    if (safe_margin > 0)
+      return (uint64_t)(safe_margin * 15 / 16);
+  }
   return 32768;
 }
 
@@ -1501,7 +1507,6 @@ static inline void check_memory_pressure(uint64_t *total_moved,
   }
 }
 
-
 #define S_DIS 0
 #define S_MIN 1
 #define S_DEF 2
@@ -1689,6 +1694,16 @@ static int ring_init_main(int argc, char **argv) {
     if (!g_logical_to_phys_map)
       return EXECUTION_FAILURE;
     g_logical_to_phys_map[0] = 0;
+  }
+
+  // CRITICAL FIX: Prevent buffer overflow in steal_threshold arrays
+  if (global_num_nodes > 1024) {
+    builtin_error("forkrun: global_num_nodes exceeds maximum limit of 1024");
+    if (g_logical_to_phys_map) {
+      free(g_logical_to_phys_map);
+      g_logical_to_phys_map = NULL;
+    }
+    return EXECUTION_FAILURE;
   }
 
   char node_buf[32];
@@ -2230,11 +2245,15 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   // If the input is a regular file, scale the chunk size down to ensure every
   // NUMA socket receives at least 2 chunks during initial distribution.
   struct stat st;
-  if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
-      uint64_t ideal = (uint64_t)st.st_size / (uint64_t)(num_nodes * 2);
-      if (ideal < chunk_size) {
-          uint64_t p2 = 1ULL << fast_log2(ideal);
-          chunk_size = (p2 < 4096) ? 4096 : p2;
+  if (fstat(infd, &st) == 0) {
+      if (S_ISFIFO(st.st_mode)) {
+          fcntl(infd, F_SETPIPE_SZ, 1048576); // Expand pipe to 1MB
+      } else if (S_ISREG(st.st_mode) && st.st_size > 0) {
+          uint64_t ideal = (uint64_t)st.st_size / (uint64_t)(num_nodes * 2);
+          if (ideal < chunk_size) {
+              uint64_t p2 = 1ULL << fast_log2(ideal);
+              chunk_size = (p2 < 4096) ? 4096 : p2;
+          }
       }
   }
 
@@ -2268,6 +2287,11 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   uint32_t current_major = 0;
   int last_target = -1;
   bool limit_reached_exit = false;
+
+  // PHYSICS FIX: Geometric Accumulation Ramp
+  uint64_t accum_target = (65536 > chunk_size) ? chunk_size : 65536; // Start at 64 KB floor (or chunk_size if smaller)
+  uint32_t accum_count = 0;
+  uint64_t bytes_to_current_node = 0;
 
   unsigned long test_mask = 1UL;
   bool numa_enabled =
@@ -2328,17 +2352,48 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     NUMA_CHECK_SCANNERS_DONE();
     check_memory_pressure(&total_moved, &next_check, oom_threshold);
 
-    int target_node = 0;
-    int min_backlog = INT_MAX;
-    for (int i = 0; i < num_nodes; i++) {
-      int check = (last_target + 1 + i) % num_nodes;
-      uint64_t h = atomic_load_relaxed(&state[check].chunk_queue_head);
-      uint64_t t = atomic_load_relaxed(&state[check].chunk_queue_tail);
-      int bl = (int)(h - t);
-      if (bl < min_backlog) {
-        min_backlog = bl;
-        target_node = check;
-      }
+    bool need_new_target = false;
+    if (last_target == -1) {
+        need_new_target = true;
+    } else if (bytes_to_current_node >= accum_target) {
+        need_new_target = true;
+    } else if (bytes_to_current_node >= 65536) {
+        // Starvation Backpressure: if any OTHER node is empty, switch early
+        for (int i = 0; i < num_nodes; i++) {
+            if (i == last_target) continue;
+            uint64_t h = atomic_load_relaxed(&state[i].chunk_queue_head);
+            uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
+            if (h == t) {
+                need_new_target = true;
+                break;
+            }
+        }
+    }
+
+    int target_node = last_target;
+    if (need_new_target) {
+        int min_backlog = INT_MAX;
+        for (int i = 0; i < num_nodes; i++) {
+          int check = (last_target + 1 + i) % num_nodes;
+          uint64_t h = atomic_load_relaxed(&state[check].chunk_queue_head);
+          uint64_t t = atomic_load_relaxed(&state[check].chunk_queue_tail);
+          int bl = (int)(h - t);
+          if (bl < min_backlog) {
+            min_backlog = bl;
+            target_node = check;
+          }
+        }
+
+        if (last_target != -1) {
+            accum_count++;
+            // Geometric Double: After N chunks, double the accumulation target
+            if (accum_count >= num_nodes) {
+                accum_target *= 2;
+                if (accum_target > chunk_size) accum_target = chunk_size;
+                accum_count = 0;
+            }
+        }
+        bytes_to_current_node = 0;
     }
 
     // DYNAMIC LIMIT GATING
@@ -2379,16 +2434,17 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         continue;
     }
 
-    if (numa_enabled && num_nodes > 1) {
-      uint32_t target_phys =
-          g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
-      if (target_phys < mask_words * BITS_PER_LONG) {
-        memset(nodemask, 0, mask_words * sizeof(unsigned long));
-        nodemask[target_phys / BITS_PER_LONG] |=
-            (1UL << (target_phys % BITS_PER_LONG));
-        syscall(__NR_set_mempolicy, MPOL_BIND, nodemask,
-                mask_words * BITS_PER_LONG);
-      }
+    // PHYSICS FIX: Only execute heavy NUMA lock syscalls if the target actually changed
+    if (target_node != last_target && numa_enabled && num_nodes > 1) {
+        uint32_t target_phys =
+            g_logical_to_phys_map ? g_logical_to_phys_map[target_node] : 0;
+        if (target_phys < mask_words * BITS_PER_LONG) {
+          memset(nodemask, 0, mask_words * sizeof(unsigned long));
+          nodemask[target_phys / BITS_PER_LONG] |=
+              (1UL << (target_phys % BITS_PER_LONG));
+          syscall(__NR_set_mempolicy, MPOL_BIND, nodemask,
+                  mask_words * BITS_PER_LONG);
+        }
     }
 
     ssize_t n = -1;
@@ -2541,6 +2597,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     current_offset += n;
     current_major++;
     total_moved += n;
+    bytes_to_current_node += n;
 
     // TELEMETRY & AUTO-TUNING (Per-chunk evaluation)
     if (!state[0].mode_byte) {
@@ -2585,6 +2642,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint32_t bound_a = 4 * min_buf;
         uint32_t bound_b = min_buf + (12 * step);
         uint32_t max_buf = (bound_a < bound_b) ? bound_a : bound_b;
+        if (max_buf > 128) max_buf = 128; // Safely absorb smaller 64KB metadata entries
 
         // Instantaneous safety clamp to keep current_buffer_limit in-bounds during transition
         if (current_buffer_limit < min_buf) {
@@ -2603,6 +2661,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
                 // Dynamic formula: (max(4, min_buf) * base_threshold) / 4
                 uint32_t dynamic_thresh = (scale_factor * base) / 4;
                 if (dynamic_thresh < 1) dynamic_thresh = 1;
+                if (dynamic_thresh > 255) dynamic_thresh = 255; // CRITICAL FIX: Prevent uint8_t wrap-around
                 // Store with relaxed release semantics
                 __atomic_store_n(&state[n].steal_threshold[i], (uint8_t)dynamic_thresh, __ATOMIC_RELAXED);
             }
@@ -3238,12 +3297,30 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t pre_lines      = 0;
     uint64_t pre_offset     = buf_base_offset;
     uint64_t target_pre     = W_max_val * Lmax;
+
+    // Physical byte ceiling: stop scanning once we have covered enough bytes
+    // to fill W_max batches at the byte-based maximum batch size.  Two limits
+    // are considered and the tighter one wins:
+    //   • ARG_MAX / max_bytes limit  →  BytesMax * W_max_val
+    //   • NUMA chunk-size limit      →  chunk_sz  * W_max_val  (NUMA only)
+    // Initialise to UINT64_MAX so the check is a no-op when neither applies.
+    uint64_t target_pre_bytes = ~(uint64_t)0;
+    if (BytesMax > 0) {
+        target_pre_bytes = BytesMax * W_max_val;
+    }
+    if (is_numa) {
+        uint64_t numa_byte_max = chunk_sz * W_max_val;
+        if (numa_byte_max < target_pre_bytes) {
+            target_pre_bytes = numa_byte_max;
+        }
+    }
+
     uint64_t sim_W          = W;
     uint64_t sim_L          = (L > 0) ? L : 1;
     uint64_t sim_lines_base = 0; // lines_accum at start of current L level
     bool hit_real_eof       = false;
 
-    while (pre_lines < target_pre) {
+    while (pre_lines < target_pre && (pre_offset - buf_base_offset) < target_pre_bytes) {
         // EMERGENCY BYPASS FIX: Prevent infinite hang if downstream pipe breaks
         if (atomic_load_relaxed(&state[0].emergency_abort)) {
             goto unified_scanner_eof;
@@ -3333,10 +3410,15 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       }
       phase = 2; // skip geometric ramp-up entirely
     } else {
-      // CASE B: Pre-flight was cut short (a worker spawned before we finished).
-      // We don't have enough line-count data to compute the optimal L, so
-      // hot-swap sim_L (the batch size the simulation had reached) into the
-      // live scanner state and resume the geometric doubling phase from there.
+      // CASE B: Pre-flight was cut short before the line target was reached.
+      // This happens either because a worker arrived early, or because we hit
+      // the physical byte/chunk ceiling (target_pre_bytes) before accumulating
+      // W_max*Lmax lines — i.e. the data is wide-lined and each batch is
+      // already byte-limited rather than line-limited.
+      // In both cases we don't have enough line-count data to compute the
+      // globally optimal L, so hot-swap sim_L (the batch size the simulation
+      // had reached) into the live scanner state and resume the geometric
+      // doubling phase from there.
       // ADAPTIVE_FLOW_CONTROL will continue doubling L → Lmax at the same
       // exponential rate as a normal ramp-up, while workers remain on the
       // claim_count=1 fast path, completely oblivious to the phase.
@@ -4122,24 +4204,61 @@ unified_scanner_eof:
         uint64_t lines_found = 0;
         while (lines_found < target && (lines_found + L_tail_done) < L_tail) {
           if (atomic_load_relaxed(&state[0].emergency_abort)) goto tail_abort;
-          if (p >= end) {
-            uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
-            ssize_t n;
-            do {
-              n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
-            } while (n < 0 && errno == EINTR);
-            if (n > 0) {
-              buf_base_offset = current_p_offset;
-              p = buf;
-              end = buf + n;
-            } else
-              break;
+
+          char *safe_end = end;
+          if (BytesMax > 0) {
+            uint64_t max_overhead = (target + 1) * 8;
+
+            if (BytesMax <= max_overhead) {
+              uint64_t max_possible_target = (BytesMax > 16) ? (BytesMax - 1) / 8 - 1 : 1;
+              target = max_possible_target > 0 ? max_possible_target : 1;
+              max_overhead = (target + 1) * 8;
+            }
+
+            if (BytesMax <= max_overhead) {
+              target = 1;
+              // Allow safe_end = end so memchr finds the next delimiter
+            } else {
+              uint64_t max_payload = BytesMax - max_overhead;
+              uint64_t current_payload =
+                  (buf_base_offset + (p - buf)) - batch_start;
+              if (current_payload >= max_payload)
+                safe_end = p;
+              else if (max_payload - current_payload < (uint64_t)(end - p)) {
+                safe_end = p + (max_payload - current_payload);
+              }
+            }
           }
-          char *nl = memchr(p, delim, end - p);
+
+          if (p >= safe_end) {
+            if (p >= end) {
+              uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
+              ssize_t n;
+              do {
+                n = pread(fd_or_memfd, buf, chunk_sz, (off_t)current_p_offset);
+              } while (n < 0 && errno == EINTR);
+              if (n > 0) {
+                buf_base_offset = current_p_offset;
+                p = buf;
+                end = buf + n;
+                continue; // Re-evaluate safe_end with the new buffer
+              } else
+                break;
+            } else {
+              // We reached safe_end before end of buffer. Force early flush.
+              break;
+            }
+          }
+
+          char *nl = memchr(p, delim, safe_end - p);
           if (nl) {
             lines_found++;
             p = nl + 1;
           } else {
+            if (safe_end < end) {
+              // We hit safe_end. Force early flush.
+              break;
+            }
             uint64_t current_p_offset = buf_base_offset + (uint64_t)(end - buf);
             ssize_t n;
             do {
@@ -5556,8 +5675,11 @@ static int ring_copy_main(int argc, char **argv) {
     }
   }
 
-  if (fstat(infd, &st) == 0 && S_ISREG(st.st_mode)) {
-    if (st.st_size > 0) {
+  if (fstat(infd, &st) == 0) {
+    if (S_ISFIFO(st.st_mode)) {
+      fcntl(infd, F_SETPIPE_SZ, 1048576); // Expand pipe to 1MB
+    }
+    if (S_ISREG(st.st_mode) && st.st_size > 0) {
       while (off < st.st_size) {
         // EMERGENCY BYPASS: Check fire alarm before scanner_finished
         if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
@@ -6395,13 +6517,13 @@ static int ring_call_main(int argc, char **argv) {
     if (batch_argc + 1 > tls_argv_cap) {
         tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
         char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-        if (!new_argv) return EXECUTION_FAILURE;
+        if (!new_argv) return 254;
         tls_argv = new_argv;
     }
     tls_argv[batch_argc] = NULL;
 
     // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
-    
+
     // PHYSICS FIX: Shield the C-Plugin against Bash's SIGCHLD reaper
     sigset_t set, oset;
     sigemptyset(&set);

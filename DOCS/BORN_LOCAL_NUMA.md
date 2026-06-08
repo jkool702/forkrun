@@ -16,11 +16,12 @@ The NUMA pipeline begins with a single Ingest thread that divides the input stre
 In NUMA mode, the Ingress thread bypasses zero-copy `splice()` and explicitly uses standard `read()` and `write()` syscalls. 
 Before writing a chunk to the shared `memfd`, the thread calls `set_mempolicy(MPOL_BIND)` to bind itself to a specific physical NUMA node. In Linux, the "First-Touch" memory policy dictates that physical RAM pages are instantiated on the node of the thread that first writes to them. By pinning itself, writing the chunk, and then re-pinning itself to the next node, the Ingress thread effectively stripes the `memfd` across the physical topography of the motherboard.
 
-### 1.2 Backpressure & The IIR-Smoothed Adaptive Buffer Controller
+### 1.2 Backpressure & The Geometric Accumulation Ramp
 Chunks are not distributed blindly. 
-1. **Initial State:** The Ingress thread distributes an initial buffer of 3 chunks per node.
-2. **Backpressure Routing:** Subsequent chunks are routed dynamically to the node with the lowest current backlog (`chunk_queue_head - chunk_queue_tail`).
-3. **Dynamic Buffer Scaling:** The Ingress thread maintains a "read-ahead" buffer limit per node (starting at 3 chunks). It continuously monitors global cross-socket steal rates. Using a bounded Infinite Impulse Response (IIR) filter, it scales this buffer limit dynamically between 3 and 12 chunks. If steal rates rise, the buffer expands; if workers are keeping up locally, the buffer shrinks to reduce memory pressure and cache eviction.
+1. **The 1MB Pipe Resize:** If `stdin` is a kernel pipe, `forkrun` expands the kernel pipe buffer to 1 MB to allow massive reads and reduce syscall overhead.
+2. **Geometric Accumulation:** To prevent kernel memory-policy thrashing on small pipe reads, the Ingest thread buffers data to the current NUMA node before switching. It starts at a 64 KB floor and geometrically doubles (up to 2 MB). This ensures tiny files are perfectly distributed across all sockets, while massive streams pool into deep 2 MB reservoirs.
+3. **Starvation Backpressure:** If any other NUMA node completely empties its local queue, the Ingest thread cuts the accumulation phase short to immediately feed the starving node.
+4. **Dynamic Buffer Scaling:** The Ingest thread maintains a "read-ahead" buffer limit. Using a bounded Infinite Impulse Response (IIR) filter, it scales this limit dynamically between 4 and 128 chunks.
 
 ---
 

@@ -36,7 +36,7 @@ flowchart TD
     Backend1 & Backend2 & Backend3 --> Output[Output Handler\nOrdered / Buffered / Realtime]
     Output --> Checkpoint[Seqlock Ledger\n.forkrun_resume]
 
-    Ring -.-> Escrow[Escrow Pipe\nOvershoot / Work Stealing]
+    Ring -.-> Escrow[Escrow Pipe\nTransaction Recovery / Stealing]
     Workers -.-> DeathPipe[Death Pipe + POLLHUP\nZero-Cost Failure Detection]
 
     classDef core fill:#1e3a8a,stroke:#60a5fa,color:white

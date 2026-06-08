@@ -7,10 +7,10 @@ else
 fi
 
 frun() {
-## bash orchestrator function for forkrun, providing extremely fast shell streaming parallelization 
+## bash orchestrator function for forkrun, providing extremely fast shell streaming parallelization
 # USAGE:  . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
 # FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>] [-E] [-v] [-h]
-#  HELP:  . frun.bash && frun --help 
+#  HELP:  . frun.bash && frun --help
 (
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
@@ -124,7 +124,7 @@ frun __exec__ "$@"
 
 USAGE: . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
 FLAGS: [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>] [-E] [-v] [-h]
-HELP:  . frun.bash && frun --help 
+HELP:  . frun.bash && frun --help
 
 EOF
                 ;;
@@ -144,9 +144,9 @@ EOF
   -d, --delim <char>    : Use a custom single-character record delimiter.
 
 ### OUTPUT MODES
-  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes. 
+  --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes.
   -k, --ordered         : Ordered mode. Same as buffered, but output is printed strictly in input-batch order.
-  -u, --realtime        : Unbuffered / realtime mode. Workers output directly to stdout. (Can cause kernel lock contention on massive streams).
+  -u, --realtime        : Unbuffered/realtime mode. **WARNING: AVOID UNLESS ABSOLUTELY NECESSARY.** Workers write directly to STDOUT yields ~0 performance gain over `--buffered`, but risks severe I/O slowdowns, hopelessly scrambled output (byte-level interleaving), and duplicate lines on crash recovery. Use *only* for commands with guaranteed atomic writes where immediate terminal feedback is mandatory.
   -o, --order <mode>    : Explicitly set the mode (buffered, ordered, realtime).
 
 ### WORKER & BATCH SCALING (Dynamic Ranges)
@@ -312,13 +312,21 @@ EOF
                         # FULL AUTO RESUME - extract and use ALL info from resume file
                         eval "${parsed_state/___FORKRUN_RESUME_STATE_BOUNDARY___/}"
 
-                        if [[ -n "${FORKRUN_EXTRA_SETUP:-}" && "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
+                        local has_custom_vars=false
+                        for var in ${FORKRUN_EXTRA_VARS:-}; do
+                            if [[ "$var" != "FORKRUN_EXTRA_VARS" && "$var" != "FORKRUN_EXTRA_FUNCS" && "$var" != "FORKRUN_EXTRA_SETUP" ]]; then
+                                has_custom_vars=true
+                                break
+                            fi
+                        done
+
+                        if [[ ( -n "${FORKRUN_EXTRA_SETUP:-}" || -n "${FORKRUN_EXTRA_FUNCS:-}" || "$has_custom_vars" == "true" ) && "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
                             local FORKRUN_EXTRA_SETUP_Q
                             printf -v FORKRUN_EXTRA_SETUP_Q '%q' "${FORKRUN_EXTRA_SETUP}"
 
                             # Check if we have an interactive terminal to prompt the user
                             if [ -t 0 ] && [ -e /dev/tty ]; then
-                                read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands. Execute them?\n[Commands]: '"${FORKRUN_EXTRA_SETUP_Q}"$'\n(y/N): ' -n 1 -r -t 60 </dev/tty
+                                read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands, functions, or variables. Execute them?\n[Setup]: '"${FORKRUN_EXTRA_SETUP_Q}"$'\n(y/N): ' -n 1 -r -t 60 </dev/tty
                                 echo >&2
                             else
                                 REPLY="N"
@@ -648,7 +656,7 @@ toc() { :; }
                 for vv in ${FORKRUN_EXTRA_VARS:-}; do
                     declare -p -- "${vv}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -p -- "${vv}")"
                 done
-                
+
                 declare -p -- FORKRUN_ORIG_ARGS 2>/dev/null >> '"${safe_checkpoint_file}"'
                 [[ -n "${FORKRUN_RETRY_LIMIT:-}" ]] && declare -p -- FORKRUN_RETRY_LIMIT 2>/dev/null >> '"${safe_checkpoint_file}"'
                 [[ -n "${FORKRUN_EXTRA_VARS:-}"  ]] && declare -p -- FORKRUN_EXTRA_VARS 2>/dev/null >> '"${safe_checkpoint_file}"'
@@ -679,7 +687,7 @@ toc() { :; }
         # --- 2 & 3. THE PRODUCER PLUMBING ---
             declare -a fd_scan_death_r fd_scan_death_w SCANNER_P
             ring_pipe fd_trap_ack_r fd_trap_ack_w
-        
+
             if (( FORKRUN_NUM_NODES > 1 )); then
                 # NUMA TOPOLOGICAL PIPELINE
                 ordered_flag=0
@@ -767,7 +775,7 @@ toc() { :; }
         if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag:-false} && ! ${insert_args_flag:-false}; then
             # Resolve absolute path (e.g., "grep" -> "/usr/bin/grep")
             local cmd_path=$(type -P "$1" 2>/dev/null)
-            
+
             if [[ -n "$cmd_path" ]]; then
                 # Check if it's a compiled binary or has a shebang
                 if ring_is_spawnable "$cmd_path"; then
@@ -788,10 +796,10 @@ toc() { :; }
             local plugin_fn="${c_plugin_arg#*:}"
 
             type -P realpath &>/dev/null && plugin_so="$(realpath "$plugin_so")"
-            
+
             # --- JIT C-COMPILER LOGIC (With Fileless Execution) ---
             local plugin_c="${plugin_so%.so}.c"
-            
+
             # Recompile if .so is missing, or if .c is newer than .so
             if [[ -f "$plugin_c" && ( ! -f "$plugin_so" || "$plugin_c" -nt "$plugin_so" ) ]]; then
                 if type -P gcc >/dev/null; then
@@ -859,7 +867,7 @@ toc() { :; }
                 # STANDARD BASH PIPE PIPELINE
                 : "${RING_BYTES_MAX:=1000000000}" "${RING_PIPE_CAPACITY:=65536}"
                 needs_external_error_check=false
-                
+
                 local exec_cmd_str="$cmdline_str"
                 pCode='
                 pipe_open_flag=0
@@ -870,7 +878,7 @@ toc() { :; }
                     RING_PIPE_CAPACITY_CUR=0
                 fi
 
-                # opportunistically probe the kernels granted capacity    
+                # opportunistically probe the kernels granted capacity
                 if (( pipe_open_flag && REPLY <= RING_PIPE_CAPACITY_CUR - 4096 )); then
                     # FAST PATH (Synchronous)
                     # Note: ring_splice "close" closes $pw internally. We only close $pr.
@@ -889,12 +897,15 @@ toc() { :; }
                     # SLOW PATH (Asynchronous)
                     # Close both FDs so they do not leak into the pipeline
                     (( pipe_open_flag )) && exec {pr}<&- {pw}>&-
-                    ( ring_splice $fd_read 1 "-" $REPLY "close" || exit 254 ) | ( '"$exec_cmd_str"' )'
+                    ( ring_splice $fd_read 1 "-" $REPLY "close" || exit 254 ) | ( '"$exec_cmd_str"' )
+                    _pipe_st=("${PIPESTATUS[@]}")
+                    (( _pipe_st[0] == 254 )) && exit 254'
                 if ${retry_nonzero_exit_flag}; then
-                    pCode+=' || exit $?'
+                    pCode+='
+                    (( _pipe_st[1] != 0 )) && exit ${_pipe_st[1]}'
                 else
                     pCode+='
-                    ret=$?
+                    ret=${_pipe_st[1]}
                     (( ret == 137 || ret == 139 || ret == 200 || ret == 254 )) && exit $ret'
                 fi
                 pCode+='
@@ -931,7 +942,7 @@ toc() { :; }
                 else
                     delimiter_str="''"
                 fi
-                
+
                 # $cmdline_str already contains the quoted command and fixed args
                 pCode='
             ring_exec $fd_read $REPLY '"${delimiter_str}"' '"$cmdline_str"
@@ -985,13 +996,13 @@ toc() { :; }
   export RING_NODE_ID="$2"
   export RING_WID="$3"
   export FD_TRAP_ACK_W="$4"
-  
+
   _ring_registered=false
-  
+
   trap '"'"'
     status=$?
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
-    
+
     if (( status != 0 && ${FRUN_CLAIM_BYTES:-0} > 0 )); then
         (( RING_NUM_KILLS++ ))'
         [[ "$order_mode" != "realtime" ]] && worker_func_src+='
@@ -1003,7 +1014,7 @@ toc() { :; }
             exit $status
         }
     fi
-    
+
     # Notify parent that the trap successfully fired
     if (( status != 0 )); then
         echo "$RING_WID" >&"${FD_TRAP_ACK_W}" 2>/dev/null
@@ -1044,7 +1055,7 @@ toc() { :; }
             fi
         fi
         '"${ring_ack_str}"' || break
-        
+
         # Reset variables natively in Bash so C does not have to allocate them
         RING_POISONED=0
         RING_NUM_KILLS=0
@@ -1062,7 +1073,7 @@ W_NODE[$3]=$2
         # --- SPAWN LOOP REACTOR ---
         nWorkers=0
         local -a node_workers W_NODE fd_worker_r fd_worker_w P wID_free
-        
+
         local -A trap_ack_pending
         local _poll_timer_cmd=0
         local _timer_armed=false
@@ -1103,12 +1114,12 @@ W_NODE[$3]=$2
 
                     wID=$POLL_ARG1
                     (( trap_ack_pending[$wID]-- ))
-                    
+
                     # If it balanced out to 0 (DEATH arrived first), clean it up
                     if (( trap_ack_pending[$wID] == 0 )); then
                         unset 'trap_ack_pending[$wID]'
                     fi
-                    
+
                     if (( ${#trap_ack_pending[@]} == 0 )); then
                         _poll_timer_cmd=-1 # Cancel timer cleanly
                         _timer_armed=false
@@ -1117,14 +1128,14 @@ W_NODE[$3]=$2
                 SPAWN)
                     spawn_count=$POLL_ARG1
                     node_idx=$POLL_ARG2
-                    
+
                     target=$(( node_workers[node_idx] + spawn_count ))
                     (( target > node_worker_max )) && target=$node_worker_max
 
                     for (( ; node_workers[node_idx] < target; node_workers[node_idx]++ )); do
                         for wID in "${!wID_free[@]}"; do break; done
                         unset 'wID_free[$wID]'
-                        
+
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
                         spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}"
                         exec {fd_worker_w[$wID]}>&-
@@ -1135,18 +1146,18 @@ W_NODE[$3]=$2
                     wID=$POLL_ARG1
                     wait "${P[$wID]}" 2>/dev/null
                     status=$?
-                    
+
                     exec {fd_worker_r[$wID]}<&-
                     unset 'fd_worker_r[$wID]' 'fd_worker_w[$wID]' 'P[$wID]'
-                    
+
                     node_idx=${W_NODE[$wID]:-0}
                     unset 'W_NODE[$wID]'
-                    
+
                     (( node_workers[node_idx]-- ))
-                    
+
                     if (( status != 0 )); then
                         (( trap_ack_pending[$wID]++ ))
-                        
+
                         if (( trap_ack_pending[$wID] == 0 )); then
                             # TRAP_ACK already arrived! Clean up safely.
                             unset 'trap_ack_pending[$wID]'
@@ -1158,7 +1169,7 @@ W_NODE[$3]=$2
                                 echo "forkrun [WARN]: Worker $wID (node ${node_idx}) exited with status $status. Waiting up to 3s for EXIT trap confirmation." >&2
                             fi
                         fi
-                        
+
                         # Unconditionally respawn replacement worker
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
                         spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}"
@@ -1173,14 +1184,14 @@ W_NODE[$3]=$2
                     sID=$POLL_ARG1
                     wait "${SCANNER_P[$sID]}" 2>/dev/null
                     status=$?
-                    
+
                     if (( status != 0 )); then
                         echo "forkrun [FATAL]: Scanner $sID exited with error status $status. Aborting to prevent data loss." >&2
                         ring_abort
                         NORMAL_EXIT_FLAG=false
                         _ret_val=1
                     fi
-                    
+
                     exec {fd_scan_death_r[$sID]}<&-
                     unset 'fd_scan_death_r[$sID]' 'SCANNER_P[$sID]'
                     ;;
@@ -1543,7 +1554,7 @@ while True: time.sleep(60)'
         # try various places to make the tmp .so file to bootstrap
         for dir in "${candidates[@]}"; do
             local helper_fd="" helper_pid="" helper_out_fd=""
-            
+
             if [[ "$dir" == "python" ]]; then
                 if type -P python3 >/dev/null 2>&1; then
                     exec {helper_fd}< <(python3 -c "$py_script" 2>/dev/null)
@@ -1587,7 +1598,7 @@ while True: time.sleep(60)'
                 # CRITICAL TEST: Try to Enable loadable
                 # This verifies the filesystem allows execution (noexec check)
                 if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe 2>/dev/null; then
-                    # SUCCESS! The builtin is loaded. 
+                    # SUCCESS! The builtin is loaded.
                     need_memfd_create_flag=false
                 fi
             fi

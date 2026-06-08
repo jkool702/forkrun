@@ -146,7 +146,7 @@ EOF
 ### OUTPUT MODES
   --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes.
   -k, --ordered         : Ordered mode. Same as buffered, but output is printed strictly in input-batch order.
-  -u, --realtime        : Unbuffered / realtime mode. Workers output directly to stdout. (Can cause kernel lock contention on massive streams).
+  -u, --realtime        : Unbuffered/realtime mode. **WARNING: AVOID UNLESS ABSOLUTELY NECESSARY.** Workers write directly to STDOUT yields ~0 performance gain over `--buffered`, but risks severe I/O slowdowns, hopelessly scrambled output (byte-level interleaving), and duplicate lines on crash recovery. Use *only* for commands with guaranteed atomic writes where immediate terminal feedback is mandatory.
   -o, --order <mode>    : Explicitly set the mode (buffered, ordered, realtime).
 
 ### WORKER & BATCH SCALING (Dynamic Ranges)

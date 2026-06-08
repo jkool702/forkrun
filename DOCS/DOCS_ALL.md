@@ -40,7 +40,7 @@ flowchart TD
     Backend1 & Backend2 & Backend3 --> Output[Output Handler\nOrdered / Buffered / Realtime]
     Output --> Checkpoint[Seqlock Ledger\n.forkrun_resume]
 
-    Ring -.-> Escrow[Escrow Pipe\nOvershoot / Work Stealing]
+    Ring -.-> Escrow[Escrow Pipe\nTransaction Recovery / Stealing]
     Workers -.-> DeathPipe[Death Pipe + POLLHUP\nZero-Cost Failure Detection]
 
     classDef core fill:#1e3a8a,stroke:#60a5fa,color:white
@@ -121,11 +121,12 @@ The NUMA pipeline begins with a single Ingest thread that divides the input stre
 In NUMA mode, the Ingress thread bypasses zero-copy `splice()` and explicitly uses standard `read()` and `write()` syscalls. 
 Before writing a chunk to the shared `memfd`, the thread calls `set_mempolicy(MPOL_BIND)` to bind itself to a specific physical NUMA node. In Linux, the "First-Touch" memory policy dictates that physical RAM pages are instantiated on the node of the thread that first writes to them. By pinning itself, writing the chunk, and then re-pinning itself to the next node, the Ingress thread effectively stripes the `memfd` across the physical topography of the motherboard.
 
-### 1.2 Backpressure & The IIR-Smoothed Adaptive Buffer Controller
+### 1.2 Backpressure & The Geometric Accumulation Ramp
 Chunks are not distributed blindly. 
-1. **Initial State:** The Ingress thread distributes an initial buffer of 3 chunks per node.
-2. **Backpressure Routing:** Subsequent chunks are routed dynamically to the node with the lowest current backlog (`chunk_queue_head - chunk_queue_tail`).
-3. **Dynamic Buffer Scaling:** The Ingress thread maintains a "read-ahead" buffer limit per node (starting at 3 chunks). It continuously monitors global cross-socket steal rates. Using a bounded Infinite Impulse Response (IIR) filter, it scales this buffer limit dynamically between 3 and 12 chunks. If steal rates rise, the buffer expands; if workers are keeping up locally, the buffer shrinks to reduce memory pressure and cache eviction.
+1. **The 1MB Pipe Resize:** If `stdin` is a kernel pipe, `forkrun` expands the kernel pipe buffer to 1 MB to allow massive reads and reduce syscall overhead.
+2. **Geometric Accumulation:** To prevent kernel memory-policy thrashing on small pipe reads, the Ingest thread buffers data to the current NUMA node before switching. It starts at a 64 KB floor and geometrically doubles (up to 2 MB). This ensures tiny files are perfectly distributed across all sockets, while massive streams pool into deep 2 MB reservoirs.
+3. **Starvation Backpressure:** If any other NUMA node completely empties its local queue, the Ingest thread cuts the accumulation phase short to immediately feed the starving node.
+4. **Dynamic Buffer Scaling:** The Ingest thread maintains a "read-ahead" buffer limit. Using a bounded Infinite Impulse Response (IIR) filter, it scales this limit dynamically between 4 and 128 chunks.
 
 ---
 
@@ -279,7 +280,7 @@ You do not actually *need* the header file. Because C only cares about memory la
 // 1. Opt-in flag: Tell forkrun we want the context!
 int forkrun_use_ctx = 1;
 
-// 2. The Context Struct (Matches forkrun v3.2.1+ layout)
+// 2. The Context Struct (Matches forkrun v3.3.0+ layout)
 struct forkrun_ctx {
     uint64_t batch_index;       // Global batch sequence number
     uint64_t batch_offset;      // Byte offset in the shared memfd
@@ -471,7 +472,7 @@ There are multiple eventfds:
 
 * Data availability (per-node)
 * Worker spawning
-* Overshoot notifications
+* Escrow recovery notifications
 * EOF signaling
 
 Properties:
@@ -807,7 +808,7 @@ There is exactly one exception to the standard priority ordering defined in §3.
 
 ### The Exception
 
-When a worker deposits a partial batch into the escrow pipe (due to overshoot), **that specific worker** should temporarily **invert its priority** to check escrow **before** the local ring on its next claim attempt.
+When a worker deposits a failed batch into the escrow pipe (due to a transient failure or crash recovery), **that specific worker** should temporarily **invert its priority** to check escrow **before** the local ring on its next claim attempt.
 
 ### Rationale
 
@@ -820,7 +821,7 @@ By prioritizing escrow immediately after depositing, the depositing worker (or a
 1. The priority inversion is **per-worker** (thread-local). It does **not** affect any other worker's priority.
 2. The inversion flag is **one-shot**: it is cleared unconditionally at the start of the next claim attempt, regardless of whether the escrow read succeeds.
 3. If the escrow pipe is empty (another worker already consumed it), the worker falls through to the standard priority ordering with no penalty.
-4. **Overshoot Validation**: Reclaimed escrow packets must NOT bypass the `write_idx` validation (which prevents reading uninitialized ring data when the scanner hasn't published the slots yet). Therefore, post-escrow jumps must target `evaluate_claim` instead of `check_boundaries`.
+4. **Crash Validation**: Reclaimed escrow packets must NOT bypass the `write_idx` validation (which prevents reading uninitialized ring data when the scanner hasn't published the slots yet). Therefore, post-escrow jumps must target `evaluate_claim` instead of `check_boundaries`.
 
 ### Implementation
 
@@ -836,7 +837,7 @@ if (tl_recently_escrowed) {          // TLS flag, set when depositing into escro
         } while (er < 0 && errno == EINTR);
         if (er == sizeof(ep)) {
             // Safely jump to the write_idx check block. If this is an
-            // overshoot packet, we MUST wait for the scanner to publish it!
+            // crash-recovery packet, we MUST wait for the scanner to publish it!
             goto evaluate_claim;
         }
     }
@@ -929,7 +930,7 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 - `--buffered`                : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes. 
 - `-k`, `--ordered`           : Ordered mode. Same as buffered, but output is printed strictly in input-batch order.
-- `-u`, `--realtime`          : Unbuffered / realtime mode. Workers output directly to `stdout`. (Can cause kernel lock contention on massive streams).
+- `-u`, `--realtime`          : Unbuffered/realtime mode. **WARNING: AVOID UNLESS ABSOLUTELY NECESSARY.** Workers write directly to `stdout` yielding ~0 performance gain over `--buffered`, but risking severe I/O slowdowns, hopelessly scrambled output (byte-level interleaving), and duplicate lines on crash recovery. Use *only* for commands with guaranteed atomic writes where immediate terminal feedback is mandatory.
 - `-o`, `--order <mode>`      : Explicitly set the mode (`buffered`, `ordered`, `realtime`).
 
 ### WORKER & BATCH SCALING (Dynamic Ranges)
@@ -1039,7 +1040,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 **The data pipeline** has four stages, each designed to preserve locality:
 1. **Ingest**: Data is `splice()`'d from stdin into a shared memfd. This is **PFS-friendly**, multiplexing data entirely in kernel space without generating filesystem metadata storms (no `stat()`/`open()` cascades). On multi-socket systems, `set_mempolicy(MPOL_BIND)` places each chunk's pages on a target NUMA node *before any worker touches them*. This placement is driven by real-time backpressure from the per-node indexers, making NUMA distribution completely self-load-balancing. Data is always **born-local**.
 2. **Index**: Per-node indexers (pinned to their socket) find record boundaries using AVX2/NEON SIMD scanning at memory bandwidth, dynamically batch based on runtime conditions, then publish offset markers into a per-node lock-free ring buffer.
-3. **Claim**: Workers claim batches via a single `atomic_fetch_add` — no CAS retry loops, no locks, no contention. Workers who overshoot deposit remainders into an escrow pipe for idle workers to steal.
+3. **Claim**: Workers claim batches via a single `atomic_fetch_add` — no CAS retry loops, no locks, no contention. If a worker process crashes, its transaction is safely rolled back and deposited into an escrow pipe for idle workers to steal.
 4. **Reclaim**: A background fallow thread punches holes behind completed work via `fallocate(PUNCH_HOLE)`, bounding memory usage without breaking the offset coordinate system.
 
 **Adaptive tuning** is fully automatic. During the Bash fork-latency window a SIMD Pre-Flight Popcount (AVX2/NEON) measures total available lines and computes the globally optimal initial batch size, jumping the scanner directly into PID steady-state before the first worker claims a slot. If data arrives too quickly for the pre-flight scan to complete, the scanner falls back to a geometric ramp that converges in O(log L) steps. Either way the worker fast-path is identical -- a single `atomic_fetch_add` claiming exactly one slot -- with no user `-n` or `-j` configuration required. forkrun runs efficiently whether it has 20 inputs from `ping` running on your laptop, or a billion lines from a file on a ramdisk running on a Frontier node.
@@ -1073,6 +1074,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 - **`-s` mode** is the headline: data flows memfd → kernel pipe → command stdin via `splice()`, entirely in kernel space. Bash never touches the data bytes — only the claim/dispatch coordination runs in userspace.
 - **`-b` mode**: allows for distributing batches of constant byte size without needing to scan for delimiters. Performance approaching kernel limits on memory movement.
 - **`-k` mode (Ordered output)**: has virtually zero cost. Benchmarks indicate that ordering adds under 2% to the runtime, whereas strict ordering brutally penalizes traditional tools.
+- **`-u` mode (Realtime output)**: **WARNING: AVOID UNLESS ABSOLUTELY NECESSARY.** Yields ~0 performance gain over `--buffered` while risking severe I/O slowdowns, hopelessly scrambled output (byte-level interleaving), and duplicate lines on crash recovery. Use *only* for commands with guaranteed atomic writes where immediate terminal feedback is mandatory.
 - **CPU utilization**: avg 27.1 / 28 cores (95.2%) sustained across all modes for ~400 tests. "Default" mode tests saturate on avg 27.6 / 28 cores (98.6%).
 - **Cross-socket traffic (NUMA, 4 nodes)**: 0.0–0.2% of chunks — born-local placement works and cross-node traffic is virtually eliminated.
 - **File vs pipe input**: zero measurable difference — the ingest pipeline handles both identically.
@@ -1677,7 +1679,7 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 
 1. **Ingest (Born-Local NUMA):** Data is `splice()`'d from stdin into a shared memfd. This is **PFS-friendly** (avoids Lustre/NFS metadata storms). On multi-socket systems, `set_mempolicy(MPOL_BIND)` places each chunk's pages on a target NUMA node *before any worker touches them*. This placement is driven by real-time backpressure from the per-node indexers, making NUMA distribution completely self-load-balancing.
 2. **Index:** Per-node indexers (pinned to their socket) find record boundaries using AVX2/NEON SIMD scanning at memory bandwidth. They dynamically batch based on runtime conditions, then publish offset markers into a per-node lock-free ring buffer.
-3. **Claim (Contention-Free):** Workers claim batches via a single `atomic_fetch_add` — no CAS retry loops, no locks, no contention. Overshoots are handled by depositing remainders into an escrow pipe for idle workers to steal.
+3. **Claim (Contention-Free):** Workers claim batches via a single `atomic_fetch_add` — no CAS retry loops, no locks, no contention. If a worker process crashes, its transaction is safely rolled back and deposited into an escrow pipe for idle workers to steal.
 4. **Reclaim:** A background fallow thread punches holes behind completed work via `fallocate(PUNCH_HOLE)`, bounding memory usage without breaking the offset coordinate system.
 
 **Adaptive tuning** is fully automatic. A Pre-Flight AVX2/NEON SIMD popcount computes the globally optimal batch size during fork latency, instantly entering PID steady-state. If a worker spawns before the scan completes, a geometric fallback converges in O(log L) steps. Either way the worker fast-path is a single `atomic_fetch_add` with no user `-n` or `-j` configuration required.
@@ -1805,7 +1807,7 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
 ### 5.2 Output Delivery Guarantees
 * **Ordered (`-k`) & Buffered (`--buffered`) Modes: EXACTLY-ONCE DELIVERY.**
   Because partial output is physically reverted (`ftruncate`) inside the per-worker `memfd` upon a graceful crash, and because catastrophic crashes trigger a mathematically absolute byte-coordinate resumption, surviving data is guaranteed to be committed to the final output stream exactly once. 
-* **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY.**
-  Because workers write directly to `stdout` in realtime mode, `forkrun` cannot recall bytes once they hit the terminal. A crash will result in the orchestrator outputting a valid checkpoint, but resuming the pipeline will result in duplicate output lines for the specific batch that was interrupted during the crash.
+* **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY (NOT RECOMMENDED).**
+  Workers write directly to `stdout`, so `forkrun` cannot recall bytes on a crash (resuming produces duplicates). Furthermore, realtime mode risks severely scrambled output (byte interleaving) and kernel lock contention. Use `--buffered` or `-k` instead.
 
   
