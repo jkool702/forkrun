@@ -51,7 +51,7 @@ if (atomic_load_acquire(&local_state->scanner_finished)) {
 }
 ```
 
-**Reference:** `ring_claim_main()` in `forkrun_ring.c`, lines 3993–4012.
+**Reference:** `ring_claim_main()` in `forkrun_ring.c`.
 
 ---
 
@@ -93,7 +93,7 @@ uint64_t blast = 999999;
 sys_write(evfd_eof_arr[0], &blast, 8);                            // 3. wake all polls
 ```
 
-**Reference:** `core_scanner_loop()` finalization in `forkrun_ring.c`, lines 3609–3614 (NUMA) and 3742–3747 (UMA).
+**Reference:** `core_scanner_loop()` finalization in `forkrun_ring.c`.
 
 ---
 
@@ -209,7 +209,7 @@ else if (eof_fired) {
 
 When `ingest_complete` is observed, the scanner forces one final `pread()` to drain any data written between the last read and the EOF signal (`force_refill = true; continue;`). This prevents the last-byte-lost race.
 
-**Reference:** `core_scanner_loop()` in `forkrun_ring.c`, lines 3220–3282.
+**Reference:** `core_scanner_loop()` in `forkrun_ring.c`.
 
 ---
 

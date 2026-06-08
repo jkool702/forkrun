@@ -137,11 +137,14 @@ EOF
 ### DATA PASSING & DELIMITERS
   <default>             : Pass arguments fully quoted via cmdline ("${A[@]}"). (no flag needed)
   -U, --unsafe          : Pass arguments unquoted via cmdline (${A[*]}). (WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the ultra-fast C-level vfork engine!)
-  -X, --external        : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. (NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).
   -s, --stdin           : Pass data to the worker via its stdin (instead of via cmdline arguments).
   -b, --bytes <N>       : Byte mode. Split the stream into N-byte chunks instead of using delimiters (implies -s). Supports standard prefixes (e.g., -b 1M).
   -z, --null            : Use NULL (\0) as the record delimiter instead of newline.
   -d, --delim <char>    : Use a custom single-character record delimiter.
+
+### EXECUTION BACKENDS
+  -X, --external        : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. (NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).
+  -C, --plugin <so:fn>    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. See DOCS/C_PLUGIN.md for additional info.
 
 ### OUTPUT MODES
   --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes.
@@ -201,9 +204,9 @@ EOF
   FORKRUN_RETRY_LIMIT   : Controls how many times a batch will be retried before it is declared poisoned. 0 means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
   FORKRUN_EXTRA_FUNCS   : Use this to specify required sub-functions to pass into frun's environment.
       EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_EXTRA_FUNCS='gg hh' frun ff <inputs`.
-  FORKRUN_EXTRA_VARS    : Use this to specify (environment) variables to pass into frun's environment
+  FORKRUN_EXTRA_VARS    : Use this to specify (environment) variables to pass into frun's environment. NOTE: `FORKRUN_EXTRA_VARS='PATH [...]'` is required to propagate a custom PATH into frun's environment.
       EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
-  FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup
+  FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup.
       EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
   FORKRUN_USE_HUGETLB   : Set to '1' to have forkrun attempt to use hugepages for memfd backing. WARNING: only enable this if you have sufficient available hugepages so that forkrun does NOT run out of memory to use.
 
@@ -635,7 +638,7 @@ toc() { :; }
     # NEW: Apply Checkpoint if Resuming
      ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "${FORKRUN_RESUME_JAGGED[@]}"
 
-    # sanatize checkpoint file
+    # sanitize checkpoint file
     printf -v safe_checkpoint_file '%q' "${checkpoint_file}"
 
     # # # # # MAIN # # # # #
@@ -680,6 +683,8 @@ toc() { :; }
             return $status
         ' EXIT INT
         ring_pipe fd_spawn_r fd_spawn_w
+
+        # SPAWN BACKGROUND PROCESSES
 
         # --- 1. RING FALLOW ---
         ring_pipe fd_fallow_r fd_fallow_w
@@ -751,6 +756,9 @@ toc() { :; }
         }
 
         # --- WORKER DEFINITION ---
+
+        # NOTE: the worker code is in effect JIT compiled to remove dead code branches
+
         printf -v cmdline_str '%q ' "$@"
 
         # 1. Replace {ID} with the Worker ID, NUMA Node ID, and Worker Batch Num
@@ -1296,7 +1304,7 @@ _forkrun_get_arch() {
         ARCH="$ARCH0"
         ;;
     *)
-        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: x86_64 aarch64 armv7 riscv64 s390x ppcle64\n\n' >&2
+        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: x86_64 aarch64 armv7 riscv64 s390x ppc64le\n\n' >&2
         return 1
         ;;
     esac

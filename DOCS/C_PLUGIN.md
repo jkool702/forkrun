@@ -28,7 +28,7 @@ int my_plugin(int argc, char **argv) {
     }
     
     // Return 0 on success. 
-    // Returning non-zero automatically triggers forkrun's failure/retry resilience machinery!
+    // Returning 200 (or returning any non-zero code while the -E flag is active) automatically triggers forkruns resilience machinery.
     return 0; 
 }
 ```

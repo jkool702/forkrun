@@ -29,8 +29,7 @@
 //    OOM without breaking the absolute integer offsets.
 //
 // CRITICAL INVARIANT: The fast path has no locks and no CAS retry loops.
-// Batch signs (-N / +N) encode the scanner's advisory vs the worker's finalized
-// contract.
+
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -62,7 +61,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-#include <dlfcn.h>      // <--- ADD THIS for dynamic plugins
+#include <dlfcn.h>      // dlopen/dlsym for -C plugin loading
 #include <spawn.h>
 #include <sys/wait.h>
 
