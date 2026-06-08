@@ -194,7 +194,7 @@ If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), 
 
 ### `C_PLUGIN.md`
 
-# NATIVE C PLUGINS: "Zero-Tax" Execution (v3.3.0+)
+# NATIVE C PLUGINS: "Zero-Tax" Execution (v3.2.1+)
 
 For workloads where absolute maximum throughput is required, `forkrun` can bypass both the Bash AST and external `vfork`/`exec` overhead entirely by loading a native C function and executing it directly inside the persistent worker threads.
 
@@ -222,7 +222,7 @@ int my_plugin(int argc, char **argv) {
     }
     
     // Return 0 on success. 
-    // Returning non-zero automatically triggers forkrun's failure/retry resilience machinery!
+    // Returning 200 (or returning any non-zero code while the -E flag is active) automatically triggers forkruns resilience machinery.
     return 0; 
 }
 ```
@@ -718,7 +718,7 @@ if (atomic_load_acquire(&local_state->scanner_finished)) {
 }
 ```
 
-**Reference:** `ring_claim_main()` in `forkrun_ring.c`, lines 3993–4012.
+**Reference:** `ring_claim_main()` in `forkrun_ring.c`.
 
 ---
 
@@ -760,7 +760,7 @@ uint64_t blast = 999999;
 sys_write(evfd_eof_arr[0], &blast, 8);                            // 3. wake all polls
 ```
 
-**Reference:** `core_scanner_loop()` finalization in `forkrun_ring.c`, lines 3609–3614 (NUMA) and 3742–3747 (UMA).
+**Reference:** `core_scanner_loop()` finalization in `forkrun_ring.c`.
 
 ---
 
@@ -876,7 +876,7 @@ else if (eof_fired) {
 
 When `ingest_complete` is observed, the scanner forces one final `pread()` to drain any data written between the last read and the EOF signal (`force_refill = true; continue;`). This prevents the last-byte-lost race.
 
-**Reference:** `core_scanner_loop()` in `forkrun_ring.c`, lines 3220–3282.
+**Reference:** `core_scanner_loop()` in `forkrun_ring.c`.
 
 ---
 
@@ -917,11 +917,16 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 - `<default>`                 : Pass arguments fully quoted via cmdline (`"${A[@]}"`). (no flag needed)
 - `-U`, `--unsafe`            : Pass arguments unquoted via cmdline (`${A[*]}`). *(WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the ultra-fast C-level vfork engine!)*
-- `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. *(NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).*
 - `-s`, `--stdin`             : Pass data to the worker via its `stdin` (instead of via cmdline arguments).
 - `-b`, `--bytes <N>`         : Byte mode. Split the stream into `<N>`-byte chunks instead of using delimiters (implies `-s`). Supports standard prefixes (e.g., `-b 1M`).
 - `-z`, `--null`              : Use NULL (`\0`) as the record delimiter instead of newline.
 - `-d`, `--delim <char>`      : Use a custom single-character record delimiter.
+
+### EXECUTION BACKENDS
+
+- `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. *(NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).*
+- `-C`, `--plugin <so:fn>`    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. See [`C_PLUGIN.md`](C_PLUGIN.md) for additional info.
+
 
 ### OUTPUT MODES
 
@@ -990,9 +995,9 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 - `FORKRUN_RETRY_LIMIT` : Controls how many times a batch will be retried before it is declared poisoned. `0` means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
 - `FORKRUN_EXTRA_FUNCS` : Use this to specify required sub-functions to pass into frun's environment.
   - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_EXTRA_FUNCS='gg hh' frun ff <inputs`.
-- `FORKRUN_EXTRA_VARS`  : Use this to specify (environment) variables to pass into frun's environment
+- `FORKRUN_EXTRA_VARS`  : Use this to specify (environment) variables to pass into frun's environment.  NOTE: `FORKRUN_EXTRA_VARS='PATH [...]'` is required to propagate a custom PATH into frun's environment.
   - EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
-- `FORKRUN_EXTRA_SETUP` : Use this to specify raw commands that need to be run in frun's environment during setup
+- `FORKRUN_EXTRA_SETUP` : Use this to specify raw commands that need to be run in frun's environment during setup.
   - EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
 - `FORKRUN_USE_HUGETLB` : Set to '1' to have forkrun attempt to use hugepages for memfd backing. WARNING: only enable this if you have sufficient available hugepages so that forkrun does NOT run out of memory to use.
 
