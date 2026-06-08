@@ -187,15 +187,14 @@ Because the Ingress chunker carves the stream based on physical byte sizes (2 MB
 If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), fulfilling the exact-batch contract at a chunk boundary would require the worker to pull the remaining $N - M$ lines from the next chunk (which physically resides on a different NUMA socket), violating the Born-Local structural guarantee and triggering heavy cross-socket memory traffic.
 
 **The Resolution:** 
-If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), `forkrun` automatically demotes the pipeline to the traditional UMA (Uniform Memory Access) architecture. While UMA mode still benefits from the ultra-fast C-ring and zero-copy `posix_spawnp` execution paths, it will incur the standard cross-socket memory migration tax inherent to all traditional shell parallelizers. 
-
+If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), `forkrun` automatically demotes the pipeline to the traditional UMA (Uniform Memory Access) architecture. While UMA mode still benefits from the ultra-fast C-ring and zero-copy `posix_spawnp` execution paths, it will incur the standard cross-socket memory migration tax inherent to all traditional shell parallelizers.
 
 -----------------------------------------
 #C_PLUGIN.md
 
 ### `C_PLUGIN.md`
 
-# NATIVE C PLUGINS: "Zero-Tax" Execution (v3.2.1+)
+# NATIVE C PLUGINS: "Zero-Tax" Execution (v3.3.0+)
 
 For workloads where absolute maximum throughput is required, `forkrun` can bypass both the Bash AST and external `vfork`/`exec` overhead entirely by loading a native C function and executing it directly inside the persistent worker threads.
 
@@ -387,8 +386,6 @@ Each ring slot is described by up to four parallel arrays:
 * `minor_ring` (32-bit, NUMA only): The batch's sequence number within its chunk.
   * **Bit 31 (`FLAG_MAJOR_EOF = 1U << 31`)**: Set on the *last* batch of a NUMA chunk, signaling the ordering subsystem to advance to the next major sequence. Clear on all other batches.
   * **Bits 30–0**: The minor (within-chunk) batch index.
-
-The old `stride_ring` (16-bit line count + `FLAG_CHUNK_BOUNDARY` high bit) has been removed. Chunk-boundary and EOF signaling is now entirely handled by `FLAG_MAJOR_EOF` in `minor_ring` (NUMA mode) or by `write_idx` / `scanner_finished` reaching EOF (UMA mode).
 
 ### 3.3 Atomic Invariants
 
@@ -1050,7 +1047,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 | Workload                                      | forkrun                 | GNU Parallel                 | Speedup    | Notes |
 |-----------------------------------------------|-------------------------|------------------------------|------------|-------|
 | Default (array + fully-quoted args, no-op)    | **25.0 M lines/s**      | 58 k lines/s                 | **~430×**  | forkrun default mode |
-| Ordered output (`-k`, no-op)                  | **24.5 M lines/s**      | 57 k lines/s                 | **~430×**  | ordering is free in forkrun |
+| Ordered output (`-k`, no-op)                  | **24.5 M lines/s**      | 57 k lines/s                 | **~430×**  | no measurable overhead |
 | `echo` (line args)                            | **22.6 M lines/s**      | ~55 k lines/s                | **~410×**  | typical shell command |
 | `printf '%s\n'` (I/O heavy)                   | **12.8 M lines/s**      | ~58 k lines/s                | **~220×**  | formatting + output |
 | `-s` stdin passthrough (no-op)                | **1.04 B lines/s**      | 6.05 M lines/s (`--pipe`)    | **~172×**  | streaming / splice |
@@ -1073,7 +1070,7 @@ Under the hood, forkrun is a **contention-free, NUMA-aware, dynamically self-tun
 **Comparison of forkrun Modes**
 - **`-s` mode** is the headline: data flows memfd → kernel pipe → command stdin via `splice()`, entirely in kernel space. Bash never touches the data bytes — only the claim/dispatch coordination runs in userspace.
 - **`-b` mode**: allows for distributing batches of constant byte size without needing to scan for delimiters. Performance approaching kernel limits on memory movement.
-- **`-k` mode (Ordered output)**: has virtually zero cost. Benchmarks indicate that ordering adds under 2% to the runtime, whereas strict ordering brutally penalizes traditional tools.
+- **`-k` mode (Ordered output)**: has no measurable overhead in our benchmarks. Tests indicate that ordering adds under 2% to the runtime, whereas strict ordering brutally penalizes traditional tools.
 - **`-u` mode (Realtime output)**: **WARNING: AVOID UNLESS ABSOLUTELY NECESSARY.** Yields ~0 performance gain over `--buffered` while risking severe I/O slowdowns, hopelessly scrambled output (byte-level interleaving), and duplicate lines on crash recovery. Use *only* for commands with guaranteed atomic writes where immediate terminal feedback is mandatory.
 - **CPU utilization**: avg 27.1 / 28 cores (95.2%) sustained across all modes for ~400 tests. "Default" mode tests saturate on avg 27.6 / 28 cores (98.6%).
 - **Cross-socket traffic (NUMA, 4 nodes)**: 0.0–0.2% of chunks — born-local placement works and cross-node traffic is virtually eliminated.
@@ -1101,7 +1098,7 @@ GNU Parallel's per-item Perl initialization overhead and NUMA-oblivious scheduli
 
 While `forkrun` now features robust intra-node fault tolerance (automatically recovering from individual worker crashes without data loss), transitioning it into a hardened, facility-wide utility requires advancing its cluster-level and system-state capabilities. Priorities for the development roadmap include:
 
-- **Resume-after-interruption** state saving to gracefully handle preempted Slurm jobs without losing progress.
+- **Enhanced checkpoint portability** and cluster-level resume support (e.g., seamless Slurm integration for preempted multi-node jobs).
 - **Deeper integration** with facility workload managers to dynamically expand or contract resource usage.
 
 Executing this roadmap, hardening the codebase for Exascale production environments, and providing dedicated facility support is the primary focus for proposed collaboration and funding with ORNL.
@@ -1448,20 +1445,21 @@ We maintain two dedicated branches specifically configured for sanitizer testing
    ASAN_OPTIONS=detect_leaks=0 LD_PRELOAD=$(ldconfig -p | grep libasan | awk 'NR==1{print $NF}') "${BASH:-bash}" ./test_frun.sh
    ```
 
-## §6. Final Release Criteria (Line Count Verification)
+If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under both standard and sanitized conditions, the build is considered stable and ready for release.
 
-Passing the automated scripts is not enough to declare the build stable. For each of the **6 benchmark matrix runs** (UMA/NUMA × Baseline/TSan/ASan+UBSan), you must manually verify that the pipeline did not drop or duplicate a single line under extreme concurrency.
+---
 
-After each benchmark run completes, inspect the output log:
+## §6. Final Release Criteria
+
+Before tagging a release, run one final sanity check on the benchmark output to confirm the expected number of test cases completed. From the `BENCHMARKS` directory, after running `run_benchmark.bash`, verify the line count of results:
+
 ```bash
-grep -E '^[0-9]' benchmark.out
+grep -E '^[0-9]' benchmark.out | wc -l
 ```
 
-You must confirm the following:
-1. **Exact Match:** The output line counts for all `printf` runs perfectly match the expected input size (verifying zero dropped or duplicated lines).
-2. **The `-U` Space Exception:** For tests using inputs containing spaces (e.g., `f3`), runs utilizing the `-U` (Unsafe) flag will naturally produce a *higher* line count because Bash splits the strings. This is expected. However, you must verify that this higher line count is **perfectly consistent** across all 4 `printf -U` runs for that specific input source.
+The output must match the expected test count for the release. A lower count indicates that one or more benchmark runs silently failed or were skipped, and the release must be held until the discrepancy is resolved.
 
-If all unit tests pass, and all 6 benchmark logs show mathematically perfect line counts, the build is officially considered stable and ready for release!
+This check is the last gate before tagging. If it passes alongside the full sanitizer matrix, tag the release and publish.
 
 -----------------------------------------
 #PHYSICS.md

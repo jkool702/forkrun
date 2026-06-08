@@ -62,8 +62,6 @@ Each ring slot is described by up to four parallel arrays:
   * **Bit 31 (`FLAG_MAJOR_EOF = 1U << 31`)**: Set on the *last* batch of a NUMA chunk, signaling the ordering subsystem to advance to the next major sequence. Clear on all other batches.
   * **Bits 30–0**: The minor (within-chunk) batch index.
 
-The old `stride_ring` (16-bit line count + `FLAG_CHUNK_BOUNDARY` high bit) has been removed. Chunk-boundary and EOF signaling is now entirely handled by `FLAG_MAJOR_EOF` in `minor_ring` (NUMA mode) or by `write_idx` / `scanner_finished` reaching EOF (UMA mode).
-
 ### 3.3 Atomic Invariants
 
 * `write_idx` monotonically increases
