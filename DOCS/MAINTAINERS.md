@@ -112,4 +112,17 @@ We maintain two dedicated branches specifically configured for sanitizer testing
    ASAN_OPTIONS=detect_leaks=0 LD_PRELOAD=$(ldconfig -p | grep libasan | awk 'NR==1{print $NF}') "${BASH:-bash}" ./test_frun.sh
    ```
 
-If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under both standard and sanitized conditions, the build is considered stable and ready for release.
+## §6. Final Release Criteria (Line Count Verification)
+
+Passing the automated scripts is not enough to declare the build stable. For each of the **6 benchmark matrix runs** (UMA/NUMA × Baseline/TSan/ASan+UBSan), you must manually verify that the pipeline did not drop or duplicate a single line under extreme concurrency.
+
+After each benchmark run completes, inspect the output log:
+```bash
+grep -E '^[0-9]' benchmark.out
+```
+
+You must confirm the following:
+1. **Exact Match:** The output line counts for all `printf` runs perfectly match the expected input size (verifying zero dropped or duplicated lines).
+2. **The `-U` Space Exception:** For tests using inputs containing spaces (e.g., `f3`), runs utilizing the `-U` (Unsafe) flag will naturally produce a *higher* line count because Bash splits the strings. This is expected. However, you must verify that this higher line count is **perfectly consistent** across all 4 `printf -U` runs for that specific input source.
+
+If all unit tests pass, and all 6 benchmark logs show mathematically perfect line counts, the build is officially considered stable and ready for release!
