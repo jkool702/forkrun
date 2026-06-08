@@ -2386,7 +2386,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (last_target != -1) {
             accum_count++;
             // Geometric Double: After N chunks, double the accumulation target
-            if (accum_count >= num_nodes) {
+            if (accum_count >= (uint32_t)num_nodes) {
                 accum_target *= 2;
                 if (accum_target > chunk_size) accum_target = chunk_size;
                 accum_count = 0;
