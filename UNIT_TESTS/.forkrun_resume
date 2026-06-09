@@ -1,7 +1,0 @@
-FORKRUN_RESUME_HORIZON=8
-FORKRUN_RESUME_STDOUT_BYTES=49
-FORKRUN_RESUME_JAGGED=("10:51" )
-declare -a FORKRUN_ORIG_ARGS=([0]="-j" [1]="4" [2]="-l" [3]="1" [4]="crash_kill9_j4")
-declare -- FORKRUN_EXTRA_VARS=" FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS "
-declare -x FORKRUN_EXTRA_FUNCS="crash_kill9_j4"
-declare -- FORKRUN_EXTRA_DEFS=$'\ncrash_kill9_j4 () \n{ \n    if [[ "$1" == "5" ]]; then\n        kill -9 $BASHPID;\n    else\n        echo "$1";\n    fi\n}\ndeclare -- FORKRUN_EXTRA_VARS=" FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS "\ndeclare -x FORKRUN_EXTRA_FUNCS="crash_kill9_j4"'
