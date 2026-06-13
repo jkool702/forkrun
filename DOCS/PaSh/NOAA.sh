@@ -5,8 +5,12 @@
 # NOTE: the script was updated to grab the NOAA data from 
 #       https://www.ncei.noaa.gov/pub/data/noaa/
 
+# Prerequisites: forkrun (https://github.com/jkool702/forkrun), 
+# curl, gunzip, grep, sed, sort, cut, standard GNU coreutils
+
 # Script 1: Combined Pipeline (Minimal storage footprint, 4m 50s)**
 
+# wget https://raw.githubusercontent.com/jkool702/forkrun/main/frun.bash
 source frun.bash
 
 tmpdir="$(mktemp -d)"
@@ -40,6 +44,7 @@ time {
 
 # Script 2: Split Pipeline (Max I/O isolation, 3m 17s fetch + 1m 35s compute)
 
+# wget https://raw.githubusercontent.com/jkool702/forkrun/main/frun.bash
 source frun.bash
 
 tmpdir="$(mktemp -d)"
