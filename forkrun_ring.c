@@ -835,6 +835,33 @@ static int ring_exec_splice_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
 }
 
+// Demotes a file descriptor's access mode from O_RDWR to O_RDONLY or O_WRONLY
+// by reopening it via procfs to release unused read/write references.
+static void demote_fd_mode(int fd, int target_mode) {
+  int flags = fcntl(fd, F_GETFL);
+  int target_acc = target_mode & O_ACCMODE; // Isolate access mode
+
+  if (flags != -1 &&
+      (flags & O_ACCMODE) == O_RDWR &&
+      (target_acc == O_RDONLY || target_acc == O_WRONLY)) {
+
+    int target_flags = (flags & ~O_ACCMODE) | target_acc;
+
+    char proc_path[64];
+    snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
+    int new_fd = open(proc_path, target_flags);
+    if (new_fd < 0) {
+      // Fallback for macOS /dev/fd
+      snprintf(proc_path, sizeof(proc_path), "/dev/fd/%d", fd);
+      new_fd = open(proc_path, target_flags);
+    }
+    if (new_fd >= 0) {
+      dup2(new_fd, fd);
+      close(new_fd);
+    }
+  }
+}
+
 // ---------------------------------------------------------
 // ring_call: Zero-Tax C Plugin Callback Execution
 // ---------------------------------------------------------
@@ -1654,6 +1681,11 @@ static void apply_config(char type, char sub, const char *arg) {
 // ==============================================================================
 
 static int ring_init_main(int argc, char **argv) {
+  // PHYSICS FIX: Demote stdin/stdout from O_RDWR if opened bi-directionally
+  // to prevent background processes from holding unused references open.
+  demote_fd_mode(0, O_RDONLY);
+  demote_fd_mode(1, O_WRONLY);
+
   const char *dbg_env = get_string_value("FORKRUN_DEBUG");
   if (dbg_env && (strcmp(dbg_env, "1") == 0 || strcmp(dbg_env, "true") == 0)) {
     g_debug = 1;
@@ -2233,6 +2265,9 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   int infd = atoi(argv[1]);
   int outfd = atoi(argv[2]);
   int num_nodes = atoi(argv[3]);
+
+  demote_fd_mode(infd, O_RDONLY);
+
   if (num_nodes < 1)
     num_nodes = 1;
   if (num_nodes > 1024)
@@ -5640,6 +5675,9 @@ static int ring_copy_main(int argc, char **argv) {
     return EXECUTION_FAILURE;
   int outfd = atoi(argv[1]);
   int infd = (argc == 3) ? atoi(argv[2]) : 0;
+
+  demote_fd_mode(infd, O_RDONLY);
+
   size_t chunk = get_optimal_chunk_size();
   struct stat st;
   uint64_t oom_threshold = 134217728;
