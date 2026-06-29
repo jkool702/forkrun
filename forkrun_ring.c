@@ -840,6 +840,9 @@ static int ring_exec_splice_main(int argc, char **argv) {
 // ---------------------------------------------------------
 // Note: ring_call_main has been moved to the bottom of the file to resolve definition ordering.
 
+// Forward declaration for ring_tui_main (defined after FORKRUN_LOADABLES)
+static int ring_tui_main(int argc, char **argv);
+
 // RESTORED LOADABLES MACRO
 #define FORKRUN_LOADABLES(X)                                                   \
   X(ring_map, ring_map_main, "ring_map <fd> <len> <array> [delim]", "Fast user-space mapfile") \
@@ -896,7 +899,8 @@ static int ring_exec_splice_main(int argc, char **argv) {
   X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow") \
   X(ring_dump_resume, ring_dump_resume_main, "ring_dump_resume [bytes]", "Dump checkpoint state") \
   X(ring_set_resume, ring_set_resume_main, "ring_set_resume <horizon> [jagged...]", "Set checkpoint state") \
-  X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort")
+  X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort") \
+  X(ring_tui, ring_tui_main, "ring_tui [expected_bytes] [order_mode]", "Real-Time Telemetry Dashboard")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -1256,6 +1260,8 @@ struct GlobalState {
   uint32_t resume_jagged_count;
   struct IntervalNode resume_jagged[1024];
 
+  uint32_t poisoned_count ALIGNED(CACHE_LINE);
+
   struct ChunkMeta meta_ring[META_RING_SIZE];
 };
 
@@ -1319,6 +1325,8 @@ struct SharedState {
   uint8_t numa_enabled;
   uint8_t exact_lines;
   uint8_t cfg_delim; // Record delimiter character (default '\n')
+
+  uint64_t current_batch_size ALIGNED(CACHE_LINE);
 
   uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
   uint64_t stats_chunks_processed;
@@ -4049,6 +4057,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           if (!_skipped) {
             int node_arg = is_numa ? my_node_id : -1;
+            atomic_store_relaxed(&local_state->current_batch_size, L);
             ADAPTIVE_FLOW_CONTROL(local_state, current_stall, node_arg);
           }
         } else if (!is_numa)
@@ -4667,6 +4676,11 @@ static int ring_claim_main(int argc, char **argv) {
     // limit >= 0 → poison when kill count reaches the limit
     if (limit >= 0 && batch.num_kills >= (uint32_t)limit) {
       bind_variable("RING_POISONED", "1", 0);
+
+      // CRITICAL FIX: Increment the global counter exactly ONCE upon crossing the threshold
+      if (batch.num_kills == (uint32_t)limit && g_state) {
+          __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+      }
     } else {
       bind_variable("RING_POISONED", "0", 0);
     }
@@ -6579,6 +6593,346 @@ static int ring_list_main(int argc, char **argv) {
 #undef PRINT_NAME
   }
   return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// 9. LIVE TELEMETRY DASHBOARD (TUI)
+// ==============================================================================
+#include <sys/ioctl.h>
+#include <termios.h>
+
+static volatile sig_atomic_t tui_exit = 0;
+static void tui_sig_handler(int sig) {
+    (void)sig;
+    tui_exit = 1;
+}
+
+static void format_commas(uint64_t n, char *out) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)n);
+    int len = strlen(buf);
+    int out_idx = 0;
+    for (int i = 0; i < len; i++) {
+        if (i > 0 && (len - i) % 3 == 0) out[out_idx++] = ',';
+        out[out_idx++] = buf[i];
+    }
+    out[out_idx] = '\0';
+}
+
+static void format_bytes(double bytes, char *out) {
+    if (bytes >= 1073741824.0)      snprintf(out, 32, "%.1f GB", bytes / 1073741824.0);
+    else if (bytes >= 1048576.0)    snprintf(out, 32, "%.1f MB", bytes / 1048576.0);
+    else if (bytes >= 1024.0)       snprintf(out, 32, "%.1f KB", bytes / 1024.0);
+    else                            snprintf(out, 32, "%.0f B",  bytes);
+}
+
+static void format_rate(double rate, const char *suffix, char *out) {
+    if (rate >= 1e9)        snprintf(out, 32, "%.1f B %s", rate / 1e9,  suffix);
+    else if (rate >= 1e6)   snprintf(out, 32, "%.1f M %s", rate / 1e6,  suffix);
+    else if (rate >= 1e3)   snprintf(out, 32, "%.1f K %s", rate / 1e3,  suffix);
+    else                    snprintf(out, 32, "%.0f %s",   rate,         suffix);
+}
+
+static int ring_tui_main(int argc, char **argv) {
+    if (!g_state || !state) return EXECUTION_FAILURE;
+
+    uint64_t expected_total_bytes = 0;
+    if (argc > 1) expected_total_bytes = strtoull(argv[1], NULL, 10);
+    const char *order_mode_str = (argc > 2) ? argv[2] : "Ordered";
+
+    int tty_fd = open("/dev/tty", O_WRONLY);
+    if (tty_fd < 0) return EXECUTION_FAILURE;
+    FILE *tty = fdopen(tty_fd, "w");
+    if (!tty) { close(tty_fd); return EXECUTION_FAILURE; }
+
+    struct sigaction sa, old_int, old_term;
+    sa.sa_handler = tui_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT,  &sa, &old_int);
+    sigaction(SIGTERM, &sa, &old_term);
+
+    // Initialize Alt-Screen and hide cursor
+    fprintf(tty, "\033[?1049h\033[?25l");
+
+    uint64_t start_time = get_us_time();
+    uint64_t last_time  = start_time;
+    uint64_t last_lines = 0, last_bytes = 0, last_batches = 0;
+
+    char str_throughput[32], str_bandwidth[32], str_batch_rate[32];
+    char str_fallowed[32],   str_in_use[64],    str_total[32];
+    char str_finished[32],   str_remaining[32];
+
+    while (!tui_exit && !atomic_load_relaxed(&state[0].emergency_abort)) {
+        uint64_t now       = get_us_time();
+        double   delta_sec = (now - last_time) / 1000000.0;
+        if (delta_sec < 0.001) delta_sec = 0.001;
+
+        bool is_eof = state[0].numa_enabled ?
+            (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) :
+            atomic_load_acquire(&state[0].ingest_complete);
+
+        uint64_t cur_lines = 0, cur_batches = 0;
+        int      total_q   = 0, total_escrow = 0;
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            cur_lines   += atomic_load_relaxed(&state[i].total_lines_consumed);
+            cur_batches += atomic_load_relaxed(&state[i].stats_chunks_processed);
+
+            uint64_t head = atomic_load_relaxed(&state[i].chunk_queue_head);
+            uint64_t tail = atomic_load_relaxed(&state[i].chunk_queue_tail);
+            total_q      += (head > tail) ? (int)(head - tail) : 0;
+            total_escrow += atomic_load_relaxed(&state[i].escrow_pending);
+        }
+
+        // Memory footprint metrics
+        uint64_t fallowed    = g_state->fallow_horizon_bytes;
+        uint64_t read_offset = state[0].offset_ring[atomic_load_relaxed(&state[0].read_idx) & RING_MASK];
+        uint64_t ingest_off  = 0;
+        uint64_t current_pub = atomic_load_relaxed(&g_state->ingest_publish_idx);
+        if (current_pub > 0) {
+            ingest_off = g_state->meta_ring[(current_pub - 1) & META_RING_MASK].raw_offset +
+                         g_state->meta_ring[(current_pub - 1) & META_RING_MASK].raw_length;
+        }
+
+        // Sanity clamps for out-of-order atomics
+        if (read_offset < fallowed)    read_offset = fallowed;
+        if (ingest_off  < read_offset) ingest_off  = read_offset;
+
+        // Derived rates
+        double lines_ps   = (cur_lines   > last_lines)   ? (cur_lines   - last_lines)   / delta_sec : 0;
+        double bytes_ps   = (read_offset > last_bytes)   ? (read_offset - last_bytes)   / delta_sec : 0;
+        double batches_ps = (cur_batches > last_batches) ? (cur_batches - last_batches) / delta_sec : 0;
+
+        format_rate(lines_ps,   "lines/s", str_throughput);
+        format_rate(bytes_ps,   "B/s",     str_bandwidth);
+        format_commas((uint64_t)batches_ps, str_batch_rate);
+        snprintf(str_batch_rate + strlen(str_batch_rate),
+                 32 - (int)strlen(str_batch_rate), " batches/s");
+
+        uint64_t elapsed_sec  = (now - start_time) / 1000000;
+        uint64_t active_bytes = read_offset - fallowed;
+        uint64_t mapped_bytes = ingest_off  - read_offset;
+
+        char b_f[16], b_a[16], b_m[16];
+        format_bytes((double)fallowed,                   b_f);
+        format_bytes((double)active_bytes,               b_a);
+        format_bytes((double)mapped_bytes,               b_m);
+        format_bytes((double)ingest_off,                 str_total);
+        // str_total now contains the "X.X GB" part; append " Total"
+        char total_label[32];
+        snprintf(total_label, sizeof(total_label), "%s Total", str_total);
+
+        snprintf(str_fallowed, sizeof(str_fallowed), "%s Fallowed", b_f);
+
+        char b_inuse[16];
+        format_bytes((double)(active_bytes + mapped_bytes), b_inuse);
+        snprintf(str_in_use, sizeof(str_in_use),
+                 "%s In Use (%s Active, %s Mapped)", b_inuse, b_a, b_m);
+
+        // Progress & ETA
+        double progress_pct = 0.0;
+        char   str_eta[32]  = "--:--:--";
+        if (expected_total_bytes > 0 && ingest_off > 0) {
+            progress_pct = ((double)read_offset / expected_total_bytes) * 100.0;
+            if (progress_pct > 100.0) progress_pct = 100.0;
+            if (bytes_ps > 0) {
+                uint64_t eta_sec = (uint64_t)((expected_total_bytes - read_offset) / bytes_ps);
+                snprintf(str_eta, sizeof(str_eta), "%02llu:%02llu:%02llu",
+                         (unsigned long long)(eta_sec / 3600),
+                         (unsigned long long)((eta_sec % 3600) / 60),
+                         (unsigned long long)(eta_sec % 60));
+            }
+        }
+        int p_filled = (int)((progress_pct / 100.0) * 46);
+
+        // Bottleneck heuristic
+        const char *bottleneck = "NONE";
+        if      (g_state->resume_jagged_count > 500) bottleneck = "Output-Bound";
+        else if (total_q == 0 && !is_eof)            bottleneck = "IO-Bound";
+        else if (total_q >  0)                       bottleneck = "CPU-Bound";
+
+        // ================================================================
+        // RENDER FRAME
+        // ================================================================
+        char mode_str[32];
+        if (state[0].numa_enabled)
+            snprintf(mode_str, sizeof(mode_str), "NUMA (%u Nodes)", global_num_nodes);
+        else
+            snprintf(mode_str, sizeof(mode_str), "UMA (Flat)");
+
+        fprintf(tty, "\033[H"); // Home cursor
+
+        // Title bar — version padded to 68 chars so right border lands at col 80
+        fprintf(tty, " \xe2\x94\x8c\xe2\x94\x80 forkrun %-68s\xe2\x94\x90\n",
+                FORKRUN_RING_VERSION);
+
+        // Status line — emoji rendered manually to avoid printf width issues
+        fprintf(tty, " \xe2\x94\x82 MODE: %-18s OUTPUT: %-11s STREAM: %s   \xe2\x94\x82\n",
+                mode_str, order_mode_str,
+                is_eof ? "[ \xF0\x9F\x8F\x81 EOF ]   " : "[ \xF0\x9F\x9F\xA2 ACTIVE ]");
+
+        fprintf(tty, " \xe2\x94\x9c\xe2\x94\x80 Global Stream Metrics %s\xe2\x94\xa4\n",
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80");
+
+        fprintf(tty, " \xe2\x94\x82 THROUGHPUT: %-19s\xe2\x94\x82 %-20s\xe2\x94\x82 %-23s\xe2\x94\x82\n",
+                str_throughput, str_bandwidth, str_batch_rate);
+
+        // Progress bar
+        fprintf(tty, " \xe2\x94\x82 PROGRESS:   [");
+        for (int i = 0; i < 46; i++)
+            fputs((i < p_filled) ? "\xe2\x96\x88" : "\xe2\x96\x91", tty);
+        fprintf(tty, "] %5.1f%%        \xe2\x94\x82\n", progress_pct);
+
+        fprintf(tty, " \xe2\x94\x82 TIME:       %02llu:%02llu:%02llu elapsed \xe2\x94\x82 ETA: %-13s\xe2\x94\x82 BOTTLENECK: %-11s\xe2\x94\x82\n",
+                (unsigned long long)(elapsed_sec / 3600),
+                (unsigned long long)((elapsed_sec % 3600) / 60),
+                (unsigned long long)(elapsed_sec % 60),
+                str_eta, bottleneck);
+
+        // Memory section separator
+        fprintf(tty, " \xe2\x94\x9c\xe2\x94\x80 Memory & Entropy (memfd) %s\xe2\x94\xa4\n",
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80");
+
+        // Physical oscilloscope memory bar
+        int BAR_W  = 46;
+        int c_free = (ingest_off > 0) ? (int)((fallowed    * BAR_W) / ingest_off) : 0;
+        int c_act  = (ingest_off > 0) ? (int)((active_bytes * BAR_W) / ingest_off) : 0;
+        int c_map  = BAR_W - c_free - c_act;
+        if (c_free < 0) c_free = 0;
+        if (c_act  < 0) c_act  = 0;
+        if (c_map  < 0) c_map  = 0;
+
+        fprintf(tty, " \xe2\x94\x82 FOOTPRINT:  [");
+        for (int i = 0; i < c_free; i++) fputc(' ', tty);
+        for (int i = 0; i < c_act;  i++) fputs("\xe2\x96\x88", tty);
+        for (int i = 0; i < c_map;  i++) fputs("\xe2\x96\x91", tty);
+        fprintf(tty, "] %-15s\xe2\x94\x82\n", total_label);
+
+        fprintf(tty, " \xe2\x94\x82 STATUS:     %-19s\xe2\x94\x82 %-45s\xe2\x94\x82\n",
+                str_fallowed, str_in_use);
+
+        // CPU/NUMA section separator
+        fprintf(tty, " \xe2\x94\x9c\xe2\x94\x80 CPU Saturation & NUMA Topology %s\xe2\x94\xa4\n",
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80");
+
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            uint64_t w     = atomic_load_relaxed(&state[i].active_workers);
+            uint64_t max_w = state[i].cfg_w_max > 0 ? state[i].cfg_w_max : 1;
+            int pct    = (int)((w * 100) / max_w);
+            int b_fill = (pct * 20) / 100;
+
+            uint64_t h = atomic_load_relaxed(&state[i].chunk_queue_head);
+            uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
+            int q = (h > t) ? (int)(h - t) : 0;
+
+            fprintf(tty, " \xe2\x94\x82 NODE %u CPU: %3d%% [", i, pct);
+            for (int k = 0; k < 20; k++)
+                fputs((k < b_fill) ? "\xe2\x96\x88" : "\xe2\x96\x91", tty);
+            fprintf(tty, "]   W: %2llu/%-2llu \xe2\x94\x82 Q: %2d \xe2\x94\x82 Stolen: %-6llu\xe2\x94\x82\n",
+                    (unsigned long long)w,  (unsigned long long)max_w,
+                    q, (unsigned long long)atomic_load_relaxed(&state[i].stats_chunks_i_stole));
+        }
+
+        // Physics/Batching section separator
+        fprintf(tty, " \xe2\x94\x9c\xe2\x94\x80 Physics Engine & Batching %s\xe2\x94\xa4\n",
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80");
+
+        format_commas(cur_batches, str_finished);
+        uint64_t current_L = atomic_load_relaxed(&state[0].current_batch_size);
+        if (expected_total_bytes > 0 && current_L > 0) {
+            uint64_t est_rem = (expected_total_bytes - read_offset) / (current_L * 128 + 1);
+            snprintf(str_remaining, sizeof(str_remaining), "~%-10llu", (unsigned long long)est_rem);
+        } else {
+            snprintf(str_remaining, sizeof(str_remaining), "Unknown    ");
+        }
+
+        fprintf(tty, " \xe2\x94\x82 BATCH SIZE: %-16llu \xe2\x94\x82 FINISHED: %-9s \xe2\x94\x82 REMAINING: %-12s\xe2\x94\x82\n",
+                (unsigned long long)current_L, str_finished, str_remaining);
+
+        // Fault tolerance section separator
+        fprintf(tty, " \xe2\x94\x9c\xe2\x94\x80 Fault Tolerance & Output Ordering %s\xe2\x94\xa4\n",
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80");
+
+        fprintf(tty, " \xe2\x94\x82 ESCROW QUEUE: %-15d\xe2\x94\x82 POISONED: %-9u \xe2\x94\x82 OUTPUT SKEW: %-10u\xe2\x94\x82\n",
+                total_escrow,
+                __atomic_load_n(&g_state->poisoned_count, __ATOMIC_RELAXED),
+                g_state->resume_jagged_count);
+
+        // Bottom border
+        fprintf(tty,
+                " \xe2\x94\x94"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+                "\xe2\x94\x98\n");
+        fflush(tty);
+
+        // Check all-done condition
+        bool all_done = is_eof;
+        for (uint32_t i = 0; i < global_num_nodes && all_done; i++) {
+            if (!atomic_load_acquire(&state[i].scanner_finished) ||
+                (atomic_load_relaxed(&state[i].read_idx) <
+                 atomic_load_relaxed(&state[i].write_idx))) {
+                all_done = false;
+            }
+        }
+        if (all_done) break;
+
+        last_time    = now;
+        last_lines   = cur_lines;
+        last_bytes   = read_offset;
+        last_batches = cur_batches;
+
+        usleep(250000); // 4 FPS
+    }
+
+    // Restore screen and cursor
+    fprintf(tty, "\033[?1049l\033[?25h");
+    fclose(tty);
+    sigaction(SIGINT,  &old_int,  NULL);
+    sigaction(SIGTERM, &old_term, NULL);
+    return EXECUTION_SUCCESS;
 }
 
 int setup_builtin_forkrun_ring(void) {
