@@ -1332,6 +1332,9 @@ struct SharedState {
   uint64_t stats_chunks_i_stole;
   uint64_t stats_chunks_stolen_from_me;
 
+  uint64_t current_stall_meter ALIGNED(CACHE_LINE);
+  uint64_t current_starve_meter;
+
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
   uint32_t major_ring[RING_SIZE] ALIGNED(4096);
@@ -3701,6 +3704,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         starve_meter = (starve_meter + _xLim) >> 1;
       else
         starve_meter >>= 1;
+
+      atomic_store_relaxed(&local_state->current_stall_meter, stall_meter);
+      atomic_store_relaxed(&local_state->current_starve_meter, starve_meter);
     }
 
     while ((is_numa && current_p_offset < chunk_end) ||
@@ -6764,10 +6770,24 @@ static int ring_tui_main(int argc, char **argv) {
         }
         int p_filled = (int)((progress_pct / 100.0) * 46);
 
+        bool is_io_bound = false;
+        bool is_scanner_bound = false;
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            uint64_t w = atomic_load_relaxed(&state[i].active_workers);
+            uint64_t thresh = (w + DAMPING_OFFSET >= 3) ? (w + DAMPING_OFFSET - 3) : 0;
+            uint64_t st = atomic_load_relaxed(&state[i].current_stall_meter);
+            uint64_t sv = atomic_load_relaxed(&state[i].current_starve_meter);
+            if (st >= thresh) {
+                if (sv >= thresh) is_io_bound = true;
+                else is_scanner_bound = true;
+            }
+        }
+
         const char *bottleneck = "NONE";
-        if      (g_state->resume_jagged_count > 500) bottleneck = "Output-Bound";
-        else if (total_q == 0 && !is_eof)            bottleneck = "IO-Bound";
-        else if (total_q >  0)                       bottleneck = "CPU-Bound";
+        if      (g_state->resume_jagged_count > 500)             bottleneck = "Output-Bound";
+        else if (total_q == 0 && is_io_bound && !is_eof)         bottleneck = "IO-Bound";
+        else if (is_scanner_bound && !is_eof)                    bottleneck = "Scanner-Bound";
+        else if (total_q > 0)                                    bottleneck = "CPU-Bound";
 
         // ================= RENDERING =================
         // tui_print_sep computes separator fill dynamically from the title
