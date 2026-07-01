@@ -3261,7 +3261,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   atomic_store_relaxed(&local_state->read_idx, 0);
   if (!is_numa)
     atomic_store_relaxed(&local_state->tail_idx, 0);
-  atomic_store_relaxed(&local_state->active_workers, W);
 
   // ---- NEW: Pin scanner ----
   if (g_logical_to_phys_map) {
@@ -3391,7 +3390,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 robust_pipe_write(fd_spawn, _sbuf, _slen);
             }
             sim_W += _n_spawn;
-            atomic_store_relaxed(&local_state->active_workers, sim_W);
           } else {
             break; // not enough lines yet for the next geometric step
           }
@@ -6651,6 +6649,34 @@ static void tui_print_sep(FILE *tty, const char *title) {
     fprintf(tty, "\xe2\x94\xa4\n");
 }
 
+static int tui_get_node_cpus(int phys_node, uint8_t *cpu_map, int max_cpus) {
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/cpulist", phys_node);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    char buf[1024] = {0};
+    ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+
+    char *p = buf;
+    while (*p) {
+        while (*p && !isdigit(*p)) p++;
+        if (!*p) break;
+        int start = strtol(p, &p, 10);
+        int end = start;
+        if (*p == '-') {
+            p++;
+            end = strtol(p, &p, 10);
+        }
+        for (int i = start; i <= end; i++) {
+            if (i >= 0 && i < max_cpus) cpu_map[i] = 1;
+        }
+        while (*p && *p != ',' && *p != '\n') p++;
+    }
+    return 0;
+}
+
 static int ring_tui_main(int argc, char **argv) {
     if (!g_state || !state) return EXECUTION_FAILURE;
 
@@ -6675,6 +6701,31 @@ static int ring_tui_main(int argc, char **argv) {
     uint64_t start_time = get_us_time();
     uint64_t last_time  = start_time;
     uint64_t last_lines = 0, last_bytes = 0, last_batches = 0;
+
+    // --- CPU Tracker State ---
+    struct CpuStat {
+        uint64_t active;
+        uint64_t total;
+    };
+    struct CpuStat prev_cpu[1024];
+    memset(prev_cpu, 0, sizeof(prev_cpu));
+
+    uint8_t node_cpu_map[1024][1024];
+    memset(node_cpu_map, 0, sizeof(node_cpu_map));
+    int cpus_per_node[1024];
+    memset(cpus_per_node, 0, sizeof(cpus_per_node));
+
+    // Map physical CPU cores to their NUMA nodes for localized utilization tracking
+    if (global_num_nodes <= 1024) {
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            uint32_t phys = g_logical_to_phys_map ? g_logical_to_phys_map[i] : 0;
+            if (tui_get_node_cpus(phys, node_cpu_map[i], 1024) == 0) {
+                for (int c = 0; c < 1024; c++) {
+                    if (node_cpu_map[i][c]) cpus_per_node[i]++;
+                }
+            }
+        }
+    }
 
     char str_throughput[32], str_bandwidth[32], str_batch_rate[32];
     char str_fallowed[32],   str_in_use[64],    str_total[32];
@@ -6770,6 +6821,40 @@ static int ring_tui_main(int argc, char **argv) {
         }
         int p_filled = (int)((progress_pct / 100.0) * 46);
 
+        // Read raw Hardware CPU stats from /proc/stat
+        struct CpuStat cur_cpu[1024];
+        memset(cur_cpu, 0, sizeof(cur_cpu));
+        int max_cpu_seen = -1;
+
+        int stat_fd = open("/proc/stat", O_RDONLY);
+        if (stat_fd >= 0) {
+            char buf[8192];
+            ssize_t n = sys_read(stat_fd, buf, sizeof(buf) - 1);
+            close(stat_fd);
+            if (n > 0) {
+                buf[n] = '\0';
+                char *line = buf;
+                while (line && *line) {
+                    if (strncmp(line, "cpu", 3) == 0 && isdigit(line[3])) {
+                        int cpu_id = atoi(line + 3);
+                        if (cpu_id >= 0 && cpu_id < 1024) {
+                            if (cpu_id > max_cpu_seen) max_cpu_seen = cpu_id;
+                            unsigned long long user = 0, nice = 0, sys = 0, idle = 0;
+                            unsigned long long iowait = 0, irq = 0, softirq = 0, steal = 0;
+                            char *p = line;
+                            while (*p && !isspace(*p)) p++;
+                            sscanf(p, "%llu %llu %llu %llu %llu %llu %llu %llu",
+                                   &user, &nice, &sys, &idle, &iowait, &irq, &softirq, &steal);
+                            cur_cpu[cpu_id].active = (uint64_t)(user + nice + sys + irq + softirq + steal);
+                            cur_cpu[cpu_id].total  = cur_cpu[cpu_id].active + (uint64_t)(idle + iowait);
+                        }
+                    }
+                    line = strchr(line, '\n');
+                    if (line) line++;
+                }
+            }
+        }
+
         bool is_io_bound = false;
         bool is_scanner_bound = false;
         for (uint32_t i = 0; i < global_num_nodes; i++) {
@@ -6784,10 +6869,16 @@ static int ring_tui_main(int argc, char **argv) {
         }
 
         const char *bottleneck = "NONE";
-        if      (g_state->resume_jagged_count > 500)             bottleneck = "Output-Bound";
-        else if (total_q == 0 && is_io_bound && !is_eof)         bottleneck = "IO-Bound";
-        else if (is_scanner_bound && !is_eof)                    bottleneck = "Scanner-Bound";
-        else if (total_q > 0)                                    bottleneck = "CPU-Bound";
+        if (g_state->resume_jagged_count > 500) {
+            bottleneck = "Output-Bound";
+        } else if (!is_eof) {
+            // Strictly require an empty wait buffer to declare IO starvation
+            if (total_q == 0 && waiting_bytes < 65536 && is_io_bound) {
+                bottleneck = "IO-Bound";
+            } else if (is_scanner_bound) {
+                bottleneck = "Scanner-Bound";
+            }
+        }
 
         // ================= RENDERING =================
         // tui_print_sep computes separator fill dynamically from the title
@@ -6824,17 +6915,24 @@ static int ring_tui_main(int argc, char **argv) {
         tui_print_sep(tty, "Memory & Entropy (memfd)");
 
         // Physical memory oscilloscope bar:
-        //   [spaces = fallowed/reclaimed][█ = active/in-use][░ = waiting/ingested-not-consumed]
+        //   [spaces = fallowed/reclaimed][░ = active/in-use][█ = waiting/ingested-not-consumed]
         int BAR_W  = 46;
         int c_free = (ingest_off > 0) ? (int)((fallowed * BAR_W) / ingest_off) : 0;
         int c_act  = (ingest_off > 0) ? (int)((active_bytes * BAR_W) / ingest_off) : 0;
+
+        // Ensure "Active" isn't swallowed entirely by rounding if > 0
+        if (active_bytes > 0 && c_act == 0) c_act = 1;
+
         int c_map  = BAR_W - c_free - c_act;
-        if (c_free < 0) c_free = 0; if (c_act < 0) c_act = 0; if (c_map < 0) c_map = 0;
+        if (c_map < 0) {
+            if (c_free > 0) c_free--; else c_act--;
+            c_map = 0;
+        }
 
         fprintf(tty, " \xe2\x94\x82 FOOTPRINT:  [");
         for (int i = 0; i < c_free; i++) fputc(' ', tty);
-        for (int i = 0; i < c_act;  i++) fputs("\xe2\x96\x88", tty);
-        for (int i = 0; i < c_map;  i++) fputs("\xe2\x96\x91", tty);
+        for (int i = 0; i < c_act;  i++) fputs("\xe2\x96\x91", tty); // Active -> ░
+        for (int i = 0; i < c_map;  i++) fputs("\xe2\x96\x88", tty); // Waiting -> █
         fprintf(tty, "] %-15s\xe2\x94\x82\n", total_label);
 
         fprintf(tty, " \xe2\x94\x82 STATUS:     %-17s\xe2\x94\x82 %-45s\xe2\x94\x82\n", str_fallowed, str_in_use);
@@ -6849,8 +6947,40 @@ static int ring_tui_main(int argc, char **argv) {
 
         for (uint32_t i = 0; i < global_num_nodes; i++) {
             uint64_t w = atomic_load_relaxed(&state[i].active_workers);
-            int pct = (int)((w * 100) / logical_cores_per_node);
-            if (pct > 100) pct = 100; // clamp to 100% capacity
+
+            int pct = 0;
+            uint64_t delta_active = 0;
+            uint64_t delta_total = 0;
+            bool has_cpu_stats = false;
+
+            // Map the parsed hardware stats directly to the underlying physical NUMA node
+            if (cpus_per_node[i] > 0) {
+                for (int c = 0; c <= max_cpu_seen; c++) {
+                    if (node_cpu_map[i][c] && cur_cpu[c].total > prev_cpu[c].total) {
+                        delta_active += (cur_cpu[c].active - prev_cpu[c].active);
+                        delta_total  += (cur_cpu[c].total - prev_cpu[c].total);
+                        has_cpu_stats = true;
+                    }
+                }
+            } else if (global_num_nodes == 1 && max_cpu_seen >= 0) {
+                // Flat UMA fallback: aggregate all cores
+                for (int c = 0; c <= max_cpu_seen; c++) {
+                    if (cur_cpu[c].total > prev_cpu[c].total) {
+                        delta_active += (cur_cpu[c].active - prev_cpu[c].active);
+                        delta_total  += (cur_cpu[c].total - prev_cpu[c].total);
+                        has_cpu_stats = true;
+                    }
+                }
+            }
+
+            if (has_cpu_stats && delta_total > 0) {
+                pct = (int)((delta_active * 100) / delta_total);
+            } else {
+                // Final fallback if hardware stats failed parsing
+                pct = (int)((w * 100) / logical_cores_per_node);
+            }
+
+            if (pct > 100) pct = 100;
             int b_fill = (pct * 20) / 100;
 
             uint64_t h = atomic_load_relaxed(&state[i].chunk_queue_head);
@@ -6863,6 +6993,9 @@ static int ring_tui_main(int argc, char **argv) {
                     (unsigned long long)w, logical_cores_per_node, q,
                     (unsigned long long)atomic_load_relaxed(&state[i].stats_chunks_i_stole));
         }
+
+        // Commit CPU hardware stats for the next loop's delta
+        memcpy(prev_cpu, cur_cpu, sizeof(prev_cpu));
 
         tui_print_sep(tty, "Physics Engine & Batching");
 
