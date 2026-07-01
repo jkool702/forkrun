@@ -929,7 +929,7 @@ static int pin_to_numa_node(int node_id) {
   CPU_ZERO(&cpuset);
   char *p = buf;
   while (*p) {
-    while (*p && !isdigit(*p))
+    while (*p && !isdigit((unsigned char)*p))
       p++;
     if (!*p)
       break;
@@ -1993,12 +1993,12 @@ static int ring_init_main(int argc, char **argv) {
       if (dist_buf[0] != '\0') {
         const char *p = dist_buf;
         for (uint32_t skip = 0; skip < phys_i && *p; skip++) {
-          while (*p && !isspace(*p))
+          while (*p && !isspace((unsigned char)*p))
             p++;
-          while (*p && isspace(*p))
+          while (*p && isspace((unsigned char)*p))
             p++;
         }
-        if (*p && isdigit(*p))
+        if (*p && isdigit((unsigned char)*p))
           dist = atoi(p);
       }
 
@@ -6051,7 +6051,7 @@ static int ring_dump_resume_main(int argc, char **argv) {
         seq1 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
         snap_horizon = g_state->resume_horizon;
         snap_bytes = g_state->resume_stdout_bytes;
-        snap_count = g_state->resume_jagged_count;
+        snap_count = atomic_load_relaxed(&g_state->resume_jagged_count);
         for (uint32_t i = 0; i < snap_count; i++) snap_jagged[i] = g_state->resume_jagged[i];
         seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
     } while (seq1 != seq2 || (seq1 & 1));
@@ -6661,7 +6661,7 @@ static int tui_get_node_cpus(int phys_node, uint8_t *cpu_map, int max_cpus) {
 
     char *p = buf;
     while (*p) {
-        while (*p && !isdigit(*p)) p++;
+        while (*p && !isdigit((unsigned char)*p)) p++;
         if (!*p) break;
         int start = strtol(p, &p, 10);
         int end = start;
@@ -6669,8 +6669,9 @@ static int tui_get_node_cpus(int phys_node, uint8_t *cpu_map, int max_cpus) {
             p++;
             end = strtol(p, &p, 10);
         }
-        for (int i = start; i <= end; i++) {
-            if (i >= 0 && i < max_cpus) cpu_map[i] = 1;
+        int limit = end < max_cpus ? end : max_cpus - 1;
+        for (int i = start; i <= limit; i++) {
+            if (i >= 0) cpu_map[i] = 1;
         }
         while (*p && *p != ',' && *p != '\n') p++;
     }
@@ -6828,21 +6829,27 @@ static int ring_tui_main(int argc, char **argv) {
 
         int stat_fd = open("/proc/stat", O_RDONLY);
         if (stat_fd >= 0) {
-            char buf[8192];
-            ssize_t n = sys_read(stat_fd, buf, sizeof(buf) - 1);
-            close(stat_fd);
-            if (n > 0) {
-                buf[n] = '\0';
-                char *line = buf;
+            size_t stat_buf_sz = 131072; // 128KB easily supports 1024+ CPUs
+            char *stat_buf = malloc(stat_buf_sz);
+            if (stat_buf) {
+                size_t total_read = 0;
+                while (total_read < stat_buf_sz - 1) {
+                    ssize_t n = sys_read(stat_fd, stat_buf + total_read, stat_buf_sz - 1 - total_read);
+                    if (n <= 0) break;
+                    total_read += n;
+                }
+                stat_buf[total_read] = '\0';
+
+                char *line = stat_buf;
                 while (line && *line) {
-                    if (strncmp(line, "cpu", 3) == 0 && isdigit(line[3])) {
+                    if (strncmp(line, "cpu", 3) == 0 && isdigit((unsigned char)line[3])) {
                         int cpu_id = atoi(line + 3);
                         if (cpu_id >= 0 && cpu_id < 1024) {
                             if (cpu_id > max_cpu_seen) max_cpu_seen = cpu_id;
                             unsigned long long user = 0, nice = 0, sys = 0, idle = 0;
                             unsigned long long iowait = 0, irq = 0, softirq = 0, steal = 0;
                             char *p = line;
-                            while (*p && !isspace(*p)) p++;
+                            while (*p && !isspace((unsigned char)*p)) p++;
                             sscanf(p, "%llu %llu %llu %llu %llu %llu %llu %llu",
                                    &user, &nice, &sys, &idle, &iowait, &irq, &softirq, &steal);
                             cur_cpu[cpu_id].active = (uint64_t)(user + nice + sys + irq + softirq + steal);
@@ -6852,7 +6859,9 @@ static int ring_tui_main(int argc, char **argv) {
                     line = strchr(line, '\n');
                     if (line) line++;
                 }
+                free(stat_buf);
             }
+            close(stat_fd);
         }
 
         bool is_io_bound = false;
@@ -6869,7 +6878,7 @@ static int ring_tui_main(int argc, char **argv) {
         }
 
         const char *bottleneck = "NONE";
-        if (g_state->resume_jagged_count > 500) {
+        if (atomic_load_relaxed(&g_state->resume_jagged_count) > 500) {
             bottleneck = "Output-Bound";
         } else if (!is_eof) {
             // Strictly require an empty wait buffer to declare IO starvation
@@ -7021,7 +7030,7 @@ static int ring_tui_main(int argc, char **argv) {
         fprintf(tty, " \xe2\x94\x82 ESCROW QUEUE: %-14d \xe2\x94\x82 POISONED: %-10u\xe2\x94\x82 OUTPUT SKEW: %-10u\xe2\x94\x82\n",
                 total_escrow,
                 __atomic_load_n(&g_state->poisoned_count, __ATOMIC_RELAXED),
-                g_state->resume_jagged_count);
+                atomic_load_relaxed(&g_state->resume_jagged_count));
 
         fprintf(tty, " \xe2\x94\x94");
         for (int i = 0; i < 77; i++) fputs("\xe2\x94\x80", tty);
