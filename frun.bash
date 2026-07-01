@@ -47,7 +47,7 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg tui_flag TUI_PID
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -176,6 +176,7 @@ EOF
   +v, --no-verbose      : Decrease verbosity. Disables --stats.
   -V, --version         : Prints forkrun version number
   --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
+  --tui                 : Opens a Live Telemetry Dashboard visualizing the internal stream and buffers
 
 ### ERROR HANDLING & RETRIES
   -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
@@ -226,6 +227,7 @@ EOF
     resume_flag=false
     retry_nonzero_exit_flag=false
     prefer_external_flag=false
+    tui_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
     checkpoint_file='.forkrun_resume'
@@ -260,6 +262,9 @@ EOF
 
             -X|--external|--EXTERNAL)      prefer_external_flag=true  ;;
             +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL) prefer_external_flag=false ;;
+
+            --tui|--TUI)                                        tui_flag=true  ;;
+            --no-tui|--NO-TUI)                                  tui_flag=false ;;
 
             -C|--plugin|--PLUGIN)
                 arg="${1##@(-C|--plugin|--PLUGIN)?([= $'\t'])}";
@@ -646,6 +651,13 @@ toc() { :; }
         trap '
 
             status=${_ret_val:-$?}
+
+            # CRITICAL: Gracefully terminate TUI before unmapping shared memory
+            if [[ -n "${TUI_PID:-}" ]]; then
+                kill -TERM "$TUI_PID" 2>/dev/null
+                wait "$TUI_PID" 2>/dev/null
+            fi
+
             if ! ${NORMAL_EXIT_FLAG:-false}; then
                 echo "forkrun [FATAL]: Pipeline aborted. Generating checkpoint..." >&2
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
@@ -754,6 +766,23 @@ toc() { :; }
             exec {fd_order_r}<&-
             export FD_ORDER_PIPE=$fd_order_w
         }
+
+        # --- 5. RING TUI (OPTIONAL) ---
+        if ${tui_flag:-false}; then
+            local expected_bytes=0
+            # Use -L to follow /dev/stdin symlink to the actual underlying file
+            if [[ -f /dev/stdin ]]; then
+                expected_bytes=$(stat -L -c %s /dev/stdin 2>/dev/null || wc -c < /dev/stdin)
+            fi
+
+            local tui_order_mode="Ordered"
+            [[ "${order_mode}" == "buffered" ]] && tui_order_mode="Buffered"
+            [[ "${order_mode}" == "realtime" ]] && tui_order_mode="Realtime"
+
+            # Run TUI in background, fully disconnected from stdin/stdout data streams
+            ( ring_tui "$expected_bytes" "$tui_order_mode" ) </dev/null >/dev/null 2>/dev/null &
+            TUI_PID=$!
+        fi
 
         # --- WORKER DEFINITION ---
 

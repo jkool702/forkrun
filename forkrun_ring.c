@@ -6782,7 +6782,7 @@ static int ring_tui_main(int argc, char **argv) {
         fprintf(tty, " \xe2\x94\x8c\xe2\x94\x80 forkrun ");
         fprintf(tty, "%s ", FORKRUN_RING_VERSION);
         int top_len = 12 + (int)strlen(FORKRUN_RING_VERSION);
-        for (int i = 0; i < 79 - top_len; i++) fputs("\xe2\x94\x80", tty);
+        for (int i = 0; i < 78 - top_len; i++) fputs("\xe2\x94\x80", tty);
         fprintf(tty, "\xe2\x94\x90\n");
 
         fprintf(tty, " \xe2\x94\x82 MODE: %-18s \xe2\x94\x82 OUTPUT: %-10s \xe2\x94\x82 STREAM: %-15s     \xe2\x94\x82\n",
@@ -6795,7 +6795,7 @@ static int ring_tui_main(int argc, char **argv) {
 
         fprintf(tty, " \xe2\x94\x82 PROGRESS:   [");
         for (int i = 0; i < 46; i++) fputs((i < p_filled) ? "\xe2\x96\x88" : "\xe2\x96\x91", tty);
-        fprintf(tty, "] %5.1f%%          \xe2\x94\x82\n", progress_pct);
+        fprintf(tty, "] %5.1f%%         \xe2\x94\x82\n", progress_pct);
 
         fprintf(tty, " \xe2\x94\x82 TIME:       %02llu:%02llu:%02llu elapsed \xe2\x94\x82 ETA: %-13s \xe2\x94\x82 BOTTLENECK: %-12s\xe2\x94\x82\n",
                 (unsigned long long)(elapsed_sec / 3600), (unsigned long long)((elapsed_sec % 3600) / 60),
@@ -6815,7 +6815,7 @@ static int ring_tui_main(int argc, char **argv) {
         for (int i = 0; i < c_free; i++) fputc(' ', tty);
         for (int i = 0; i < c_act;  i++) fputs("\xe2\x96\x88", tty);
         for (int i = 0; i < c_map;  i++) fputs("\xe2\x96\x91", tty);
-        fprintf(tty, "] %-15s \xe2\x94\x82\n", total_label);
+        fprintf(tty, "] %-15s\xe2\x94\x82\n", total_label);
 
         fprintf(tty, " \xe2\x94\x82 STATUS:     %-17s\xe2\x94\x82 %-45s\xe2\x94\x82\n", str_fallowed, str_in_use);
 
@@ -6865,7 +6865,7 @@ static int ring_tui_main(int argc, char **argv) {
 
         tui_print_sep(tty, "Fault Tolerance & Output Ordering");
 
-        fprintf(tty, " \xe2\x94\x82 ESCROW QUEUE: %-14d \xe2\x94\x82 POISONED: %-10u\xe2\x94\x82 OUTPUT SKEW: %-10u \xe2\x94\x82\n",
+        fprintf(tty, " \xe2\x94\x82 ESCROW QUEUE: %-14d \xe2\x94\x82 POISONED: %-10u\xe2\x94\x82 OUTPUT SKEW: %-10u\xe2\x94\x82\n",
                 total_escrow,
                 __atomic_load_n(&g_state->poisoned_count, __ATOMIC_RELAXED),
                 g_state->resume_jagged_count);
