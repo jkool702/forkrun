@@ -176,6 +176,7 @@ EOF
   +v, --no-verbose      : Decrease verbosity. Disables --stats.
   -V, --version         : Prints forkrun version number
   --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
+  --tui                 : Opens a Live Telemetry Dashboard visualizing the internal stream and buffers
 
 ### ERROR HANDLING & RETRIES
   -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
@@ -650,6 +651,13 @@ toc() { :; }
         trap '
 
             status=${_ret_val:-$?}
+
+            # CRITICAL: Gracefully terminate TUI before unmapping shared memory
+            if [[ -n "${TUI_PID:-}" ]]; then
+                kill -TERM "$TUI_PID" 2>/dev/null
+                wait "$TUI_PID" 2>/dev/null
+            fi
+
             if ! ${NORMAL_EXIT_FLAG:-false}; then
                 echo "forkrun [FATAL]: Pipeline aborted. Generating checkpoint..." >&2
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
@@ -683,11 +691,6 @@ toc() { :; }
                 fi
             fi
             # Clean up memory only AFTER the trap is done with it!
-            # CRITICAL: Gracefully terminate TUI before unmapping shared memory
-            if [[ -n "${TUI_PID:-}" ]]; then
-                kill -TERM "$TUI_PID" 2>/dev/null
-                wait "$TUI_PID" 2>/dev/null
-            fi
             ring_destroy 2>/dev/null
             return $status
         ' EXIT INT

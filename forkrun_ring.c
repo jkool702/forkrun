@@ -3879,6 +3879,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           batch_start += is_numa ? take : current_p_offset - batch_start;
           total_scanned += is_numa ? take : 1;
           pending_lines = 0;
+
+          if (!_skipped) {
+            int node_arg = is_numa ? my_node_id : -1;
+            atomic_store_relaxed(&local_state->current_batch_size, take);
+            ADAPTIVE_FLOW_CONTROL(local_state, current_stall, node_arg);
+          }
         } else {
           if (!is_numa)
             force_refill = true;
@@ -5946,8 +5952,8 @@ static int ring_fallow_main(int argc, char **argv) {
         }
 
         if (state) atomic_store_release(&state[0].min_idx, next_idx);
-        if (!dry_run) {
-          uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK];
+        if (!dry_run && next_idx > 0) {
+          uint64_t byte_limit = state[0].end_ring[(next_idx - 1) & RING_MASK];
           if (g_state) g_state->fallow_horizon_bytes = byte_limit;
           off_t aligned = (off_t)((byte_limit / 4096ULL) * 4096ULL);
           if (aligned > last_punched) {
@@ -6760,7 +6766,18 @@ static int ring_tui_main(int argc, char **argv) {
         // ingest_off = total bytes written into the memfd so far (NUMA) or
         // total bytes read from stdin so far (UMA).
         uint64_t fallowed    = g_state->fallow_horizon_bytes;
-        uint64_t read_offset = state[0].offset_ring[atomic_load_relaxed(&state[0].read_idx) & RING_MASK];
+
+        uint64_t read_offset = 0;
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            uint64_t r_idx = atomic_load_relaxed(&state[i].read_idx);
+            uint64_t w_idx = atomic_load_relaxed(&state[i].write_idx);
+            uint64_t safe_idx = (r_idx > w_idx) ? w_idx : r_idx;
+            if (safe_idx > 0) {
+                uint64_t off = state[i].end_ring[(safe_idx - 1) & RING_MASK];
+                if (off > read_offset) read_offset = off;
+            }
+        }
+
         uint64_t ingest_off  = 0;
 
         if (is_numa) {
@@ -6781,7 +6798,13 @@ static int ring_tui_main(int argc, char **argv) {
         double bytes_ps   = (read_offset > last_bytes)   ? (read_offset - last_bytes)   / delta_sec : 0;
         double batches_ps = (cur_batches > last_batches) ? (cur_batches - last_batches) / delta_sec : 0;
 
-        format_rate(lines_ps,   "lines/s", str_throughput);
+        bool is_byte_mode = state[0].mode_byte;
+
+        if (is_byte_mode) {
+            snprintf(str_throughput, sizeof(str_throughput), "N/A lines/s");
+        } else {
+            format_rate(lines_ps,   "lines/s", str_throughput);
+        }
         format_rate(bytes_ps,   "B/s",     str_bandwidth);
         format_commas((uint64_t)batches_ps, str_batch_rate);
         snprintf(str_batch_rate + strlen(str_batch_rate),
@@ -7022,8 +7045,15 @@ static int ring_tui_main(int argc, char **argv) {
             snprintf(str_remaining, sizeof(str_remaining), "Unknown    ");
         }
 
-        fprintf(tty, " \xe2\x94\x82 BATCH SIZE: %-16llu \xe2\x94\x82 FINISHED: %-10s\xe2\x94\x82 REMAINING: %-11s \xe2\x94\x82\n",
-                (unsigned long long)current_L, str_finished, str_remaining);
+        char str_batch_size[32];
+        if (is_byte_mode) {
+            snprintf(str_batch_size, sizeof(str_batch_size), "%llu bytes", (unsigned long long)current_L);
+        } else {
+            snprintf(str_batch_size, sizeof(str_batch_size), "%llu lines", (unsigned long long)current_L);
+        }
+
+        fprintf(tty, " \xe2\x94\x82 BATCH SIZE: %-16s \xe2\x94\x82 FINISHED: %-10s\xe2\x94\x82 REMAINING: %-11s \xe2\x94\x82\n",
+                str_batch_size, str_finished, str_remaining);
 
         tui_print_sep(tty, "Fault Tolerance & Output Ordering");
 
