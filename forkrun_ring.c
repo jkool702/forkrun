@@ -6937,7 +6937,7 @@ static int ring_tui_main(int argc, char **argv) {
         const char *stream_color = is_eof ? "\033[1;33m" : "\033[1;32m";
         const char *stream_text  = is_eof ? "[   EOF   ]" : "[ RUNNING ]";
 
-        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mMODE: \033[1;36m%-18s \033[1;34m\xe2\x94\x82 \033[1;37mOUTPUT: \033[1;36m%-10s \033[1;34m\xe2\x94\x82 \033[1;37mSTREAM: %s%s\033[0m    \033[1;34m\xe2\x94\x82\033[0m\n",
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mMODE: \033[1;36m%-20s \033[1;34m\xe2\x94\x82 \033[1;37mOUTPUT: \033[1;36m%-12s \033[1;34m\xe2\x94\x82 \033[1;37mSTREAM: %s%-15s\033[0m \033[1;34m\xe2\x94\x82\033[0m\n",
                 mode_str, order_mode_str, stream_color, stream_text);
 
         tui_print_sep(tty, "Global Stream Metrics");
@@ -6950,12 +6950,10 @@ static int ring_tui_main(int argc, char **argv) {
         fprintf(tty, "\033[1;34m] \033[1;36m%5.1f%%\033[0m         \033[1;34m\xe2\x94\x82\033[0m\n", progress_pct);
 
         const char *bn_color = strcmp(bottleneck, "NONE") == 0 ? "\033[1;32m" : "\033[1;33m";
-        char bn_padded[16];
-        snprintf(bn_padded, sizeof(bn_padded), "%-13s", bottleneck);
 
-        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mTIME:       \033[1;36m%02llu:%02llu:%02llu elapsed \033[1;34m\xe2\x94\x82 \033[1;37mETA: \033[1;36m%-13s \033[1;34m\xe2\x94\x82 \033[1;37mBOTTLENECK: %s%s\033[0m\033[1;34m\xe2\x94\x82\033[0m\n",
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mTIME:      \033[1;36m%02llu:%02llu:%02llu elapsed \033[1;34m\xe2\x94\x82 \033[1;37mETA: \033[1;33m%-12s \033[1;34m\xe2\x94\x82 \033[1;37mBOTTLENECK: %s%-13s\033[0m \033[1;34m\xe2\x94\x82\033[0m\n",
                 (unsigned long long)(elapsed_sec / 3600), (unsigned long long)((elapsed_sec % 3600) / 60),
-                (unsigned long long)(elapsed_sec % 60), str_eta, bn_color, bn_padded);
+                (unsigned long long)(elapsed_sec % 60), str_eta, bn_color, bottleneck);
 
         tui_print_sep(tty, "Memory & Entropy (memfd)");
 
@@ -6978,7 +6976,7 @@ static int ring_tui_main(int argc, char **argv) {
         for (int i = 0; i < c_free; i++) fputc(' ', tty);
         fputs("\033[1;36m", tty); // Cyan for Active
         for (int i = 0; i < c_act;  i++) fputs("\xe2\x96\x91", tty);
-        fputs("\033[1;35m", tty); // Magenta for Waiting
+        fputs("\033[38;5;33m", tty); // Dodger Blue for Waiting
         for (int i = 0; i < c_map;  i++) fputs("\xe2\x96\x88", tty);
         fprintf(tty, "\033[1;34m] \033[1;36m%-15s\033[1;34m\xe2\x94\x82\033[0m\n", total_label);
 
