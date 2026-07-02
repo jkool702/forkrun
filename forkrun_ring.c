@@ -6647,12 +6647,19 @@ static void format_rate(double rate, const char *suffix, char *out) {
     else                    snprintf(out, 32, "%.0f %s",   rate,         suffix);
 }
 
+static void format_bw(double bytes_ps, char *out) {
+    if (bytes_ps >= 1073741824.0)      snprintf(out, 32, "%.1f GB/s", bytes_ps / 1073741824.0);
+    else if (bytes_ps >= 1048576.0)    snprintf(out, 32, "%.1f MB/s", bytes_ps / 1048576.0);
+    else if (bytes_ps >= 1024.0)       snprintf(out, 32, "%.1f KB/s", bytes_ps / 1024.0);
+    else                               snprintf(out, 32, "%.0f B/s",  bytes_ps);
+}
+
 static void tui_print_sep(FILE *tty, const char *title) {
-    fprintf(tty, " \xe2\x94\x9c\xe2\x94\x80 %s ", title);
+    fprintf(tty, " \033[1;34m\xe2\x94\x9c\xe2\x94\x80 \033[1;33m%s \033[1;34m", title);
     int title_len = (int)strlen(title);
     // 1(space) + 1(├) + 1(─) + 1(space) + title_len + 1(space) + N(─) + 1(┤) = 80
     for (int i = 0; i < 74 - title_len; i++) fputs("\xe2\x94\x80", tty);
-    fprintf(tty, "\xe2\x94\xa4\n");
+    fprintf(tty, "\xe2\x94\xa4\033[0m\n");
 }
 
 static int tui_get_node_cpus(int phys_node, uint8_t *cpu_map, int max_cpus) {
@@ -6805,7 +6812,7 @@ static int ring_tui_main(int argc, char **argv) {
         } else {
             format_rate(lines_ps,   "lines/s", str_throughput);
         }
-        format_rate(bytes_ps,   "B/s",     str_bandwidth);
+        format_bw(bytes_ps, str_bandwidth);
         format_commas((uint64_t)batches_ps, str_batch_rate);
         snprintf(str_batch_rate + strlen(str_batch_rate),
                  (int)(32 - strlen(str_batch_rate)), " batches/s");
@@ -6922,27 +6929,33 @@ static int ring_tui_main(int argc, char **argv) {
 
         fprintf(tty, "\033[H");
 
-        fprintf(tty, " \xe2\x94\x8c\xe2\x94\x80 forkrun ");
-        fprintf(tty, "%s ", FORKRUN_RING_VERSION);
+        fprintf(tty, " \033[1;34m\xe2\x94\x8c\xe2\x94\x80 \033[1;37mforkrun \033[1;36m%s \033[1;34m", FORKRUN_RING_VERSION);
         int top_len = 12 + (int)strlen(FORKRUN_RING_VERSION);
         for (int i = 0; i < 78 - top_len; i++) fputs("\xe2\x94\x80", tty);
-        fprintf(tty, "\xe2\x94\x90\n");
+        fprintf(tty, "\xe2\x94\x90\033[0m\n");
 
-        fprintf(tty, " \xe2\x94\x82 MODE: %-18s \xe2\x94\x82 OUTPUT: %-10s \xe2\x94\x82 STREAM: %-15s     \xe2\x94\x82\n",
-                mode_str, order_mode_str, is_eof ? "[   EOF   ]" : "[ RUNNING ]");
+        const char *stream_color = is_eof ? "\033[1;33m" : "\033[1;32m";
+        const char *stream_text  = is_eof ? "[   EOF   ]" : "[ RUNNING ]";
+
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mMODE: \033[1;36m%-18s \033[1;34m\xe2\x94\x82 \033[1;37mOUTPUT: \033[1;36m%-10s \033[1;34m\xe2\x94\x82 \033[1;37mSTREAM: %s%s\033[0m    \033[1;34m\xe2\x94\x82\033[0m\n",
+                mode_str, order_mode_str, stream_color, stream_text);
 
         tui_print_sep(tty, "Global Stream Metrics");
 
-        fprintf(tty, " \xe2\x94\x82 THROUGHPUT: %-17s\xe2\x94\x82 %-20s\xe2\x94\x82 %-22s \xe2\x94\x82\n",
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mTHROUGHPUT: \033[1;36m%-17s\033[1;34m\xe2\x94\x82 \033[1;36m%-20s\033[1;34m\xe2\x94\x82 \033[1;36m%-22s \033[1;34m\xe2\x94\x82\033[0m\n",
                 str_throughput, str_bandwidth, str_batch_rate);
 
-        fprintf(tty, " \xe2\x94\x82 PROGRESS:   [");
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mPROGRESS:   \033[1;34m[\033[1;32m");
         for (int i = 0; i < 46; i++) fputs((i < p_filled) ? "\xe2\x96\x88" : "\xe2\x96\x91", tty);
-        fprintf(tty, "] %5.1f%%         \xe2\x94\x82\n", progress_pct);
+        fprintf(tty, "\033[1;34m] \033[1;36m%5.1f%%\033[0m         \033[1;34m\xe2\x94\x82\033[0m\n", progress_pct);
 
-        fprintf(tty, " \xe2\x94\x82 TIME:       %02llu:%02llu:%02llu elapsed \xe2\x94\x82 ETA: %-13s \xe2\x94\x82 BOTTLENECK: %-12s\xe2\x94\x82\n",
+        const char *bn_color = strcmp(bottleneck, "NONE") == 0 ? "\033[1;32m" : "\033[1;33m";
+        char bn_padded[16];
+        snprintf(bn_padded, sizeof(bn_padded), "%-13s", bottleneck);
+
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mTIME:       \033[1;36m%02llu:%02llu:%02llu elapsed \033[1;34m\xe2\x94\x82 \033[1;37mETA: \033[1;36m%-13s \033[1;34m\xe2\x94\x82 \033[1;37mBOTTLENECK: %s%s\033[0m\033[1;34m\xe2\x94\x82\033[0m\n",
                 (unsigned long long)(elapsed_sec / 3600), (unsigned long long)((elapsed_sec % 3600) / 60),
-                (unsigned long long)(elapsed_sec % 60), str_eta, bottleneck);
+                (unsigned long long)(elapsed_sec % 60), str_eta, bn_color, bn_padded);
 
         tui_print_sep(tty, "Memory & Entropy (memfd)");
 
@@ -6961,13 +6974,15 @@ static int ring_tui_main(int argc, char **argv) {
             c_map = 0;
         }
 
-        fprintf(tty, " \xe2\x94\x82 FOOTPRINT:  [");
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mFOOTPRINT:  \033[1;34m[\033[0m");
         for (int i = 0; i < c_free; i++) fputc(' ', tty);
-        for (int i = 0; i < c_act;  i++) fputs("\xe2\x96\x91", tty); // Active -> ░
-        for (int i = 0; i < c_map;  i++) fputs("\xe2\x96\x88", tty); // Waiting -> █
-        fprintf(tty, "] %-15s\xe2\x94\x82\n", total_label);
+        fputs("\033[1;36m", tty); // Cyan for Active
+        for (int i = 0; i < c_act;  i++) fputs("\xe2\x96\x91", tty);
+        fputs("\033[1;35m", tty); // Magenta for Waiting
+        for (int i = 0; i < c_map;  i++) fputs("\xe2\x96\x88", tty);
+        fprintf(tty, "\033[1;34m] \033[1;36m%-15s\033[1;34m\xe2\x94\x82\033[0m\n", total_label);
 
-        fprintf(tty, " \xe2\x94\x82 STATUS:     %-17s\xe2\x94\x82 %-45s\xe2\x94\x82\n", str_fallowed, str_in_use);
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mSTATUS:     \033[1;32m%-17s\033[1;34m\xe2\x94\x82 \033[1;33m%-45s\033[1;34m\xe2\x94\x82\033[0m\n", str_fallowed, str_in_use);
 
         tui_print_sep(tty, "CPU Saturation & NUMA Topology");
 
@@ -7019,9 +7034,13 @@ static int ring_tui_main(int argc, char **argv) {
             uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
             int q = (h > t) ? (int)(h - t) : 0;
 
-            fprintf(tty, " \xe2\x94\x82 NODE %-2u CPU:%3d%% [", i, pct);
+            const char *cpu_color = "\033[1;32m"; // Green
+            if (pct > 80) cpu_color = "\033[1;31m"; // Red
+            else if (pct > 50) cpu_color = "\033[1;33m"; // Yellow
+
+            fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mNODE %-2u \033[1;37mCPU:%s%3d%%\033[0m \033[1;34m[%s", i, cpu_color, pct, cpu_color);
             for (int k = 0; k < 20; k++) fputs((k < b_fill) ? "\xe2\x96\x88" : "\xe2\x96\x91", tty);
-            fprintf(tty, "] W:%3llu/%-3d \xe2\x94\x82 Q: %-5d \xe2\x94\x82 Stolen: %-5llu\xe2\x94\x82\n",
+            fprintf(tty, "\033[1;34m] \033[1;37mW:\033[1;36m%3llu\033[1;37m/%-3d \033[1;34m\xe2\x94\x82 \033[1;37mQ: \033[1;36m%-5d \033[1;34m\xe2\x94\x82 \033[1;37mStolen: \033[1;36m%-5llu\033[1;34m\xe2\x94\x82\033[0m\n",
                     (unsigned long long)w, logical_cores_per_node, q,
                     (unsigned long long)atomic_load_relaxed(&state[i].stats_chunks_i_stole));
         }
@@ -7052,19 +7071,25 @@ static int ring_tui_main(int argc, char **argv) {
             snprintf(str_batch_size, sizeof(str_batch_size), "%llu lines", (unsigned long long)current_L);
         }
 
-        fprintf(tty, " \xe2\x94\x82 BATCH SIZE: %-16s \xe2\x94\x82 FINISHED: %-10s\xe2\x94\x82 REMAINING: %-11s \xe2\x94\x82\n",
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mBATCH SIZE: \033[1;36m%-16s \033[1;34m\xe2\x94\x82 \033[1;37mFINISHED: \033[1;32m%-10s\033[1;34m\xe2\x94\x82 \033[1;37mREMAINING: \033[1;33m%-11s \033[1;34m\xe2\x94\x82\033[0m\n",
                 str_batch_size, str_finished, str_remaining);
 
         tui_print_sep(tty, "Fault Tolerance & Output Ordering");
 
-        fprintf(tty, " \xe2\x94\x82 ESCROW QUEUE: %-14d \xe2\x94\x82 POISONED: %-10u\xe2\x94\x82 OUTPUT SKEW: %-10u\xe2\x94\x82\n",
-                total_escrow,
-                __atomic_load_n(&g_state->poisoned_count, __ATOMIC_RELAXED),
-                atomic_load_relaxed(&g_state->resume_jagged_count));
+        uint32_t poisoned = __atomic_load_n(&g_state->poisoned_count, __ATOMIC_RELAXED);
+        const char *p_color = poisoned > 0 ? "\033[1;31m" : "\033[1;32m";
+        const char *e_color = total_escrow > 0 ? "\033[1;33m" : "\033[1;32m";
 
-        fprintf(tty, " \xe2\x94\x94");
+        char p_str[16], e_str[16];
+        snprintf(p_str, sizeof(p_str), "%u", poisoned);
+        snprintf(e_str, sizeof(e_str), "%d", total_escrow);
+
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mESCROW QUEUE: %s%-14s\033[0m \033[1;34m\xe2\x94\x82 \033[1;37mPOISONED: %s%-10s\033[0m\033[1;34m\xe2\x94\x82 \033[1;37mOUTPUT SKEW: \033[1;36m%-10u\033[1;34m\xe2\x94\x82\033[0m\n",
+                e_color, e_str, p_color, p_str, __atomic_load_n(&g_state->resume_jagged_count, __ATOMIC_RELAXED));
+
+        fprintf(tty, " \033[1;34m\xe2\x94\x94");
         for (int i = 0; i < 77; i++) fputs("\xe2\x94\x80", tty);
-        fprintf(tty, "\xe2\x94\x98\n");
+        fprintf(tty, "\xe2\x94\x98\033[0m\n");
         fflush(tty);
 
         // All-done check: EOF signalled + all scanners finished + ring drained
