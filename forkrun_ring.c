@@ -6697,6 +6697,7 @@ static int ring_tui_main(int argc, char **argv) {
     uint64_t expected_total_bytes = 0;
     if (argc > 1) expected_total_bytes = strtoull(argv[1], NULL, 10);
     const char *order_mode_str = (argc > 2) ? argv[2] : "Ordered";
+    const char *cmd_str = (argc > 3) ? argv[3] : "";
 
     int tty_fd = open("/dev/tty", O_WRONLY);
     if (tty_fd < 0) return EXECUTION_FAILURE;
@@ -6933,6 +6934,15 @@ static int ring_tui_main(int argc, char **argv) {
         int top_len = 12 + (int)strlen(FORKRUN_RING_VERSION);
         for (int i = 0; i < 78 - top_len; i++) fputs("\xe2\x94\x80", tty);
         fprintf(tty, "\xe2\x94\x90\033[0m\n");
+
+        char cmd_trunc[75];
+        if (strlen(cmd_str) > 70) {
+            snprintf(cmd_trunc, sizeof(cmd_trunc), "%.67s...", cmd_str);
+        } else {
+            snprintf(cmd_trunc, sizeof(cmd_trunc), "%s", cmd_str);
+        }
+
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mCMD: \033[1;36m%-70s \033[1;34m\xe2\x94\x82\033[0m\n", cmd_trunc);
 
         const char *stream_color = is_eof ? "\033[1;33m" : "\033[1;32m";
         const char *stream_text  = is_eof ? "[   EOF   ]" : "[ RUNNING ]";
