@@ -6942,17 +6942,17 @@ static int ring_tui_main(int argc, char **argv) {
             snprintf(cmd_trunc, sizeof(cmd_trunc), "%s", cmd_str);
         }
 
-        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mCMD: \033[1;36m%-70s \033[1;34m\xe2\x94\x82\033[0m\n", cmd_trunc);
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mCMD: \033[38;5;33m%-70s \033[1;34m\xe2\x94\x82\033[0m\n", cmd_trunc);
 
         const char *stream_color = is_eof ? "\033[1;33m" : "\033[1;32m";
         const char *stream_text  = is_eof ? "[   EOF   ]" : "[ RUNNING ]";
 
-        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mMODE: \033[1;36m%-20s \033[1;34m\xe2\x94\x82 \033[1;37mOUTPUT: \033[1;36m%-12s \033[1;34m\xe2\x94\x82 \033[1;37mSTREAM: %s%-15s\033[0m \033[1;34m\xe2\x94\x82\033[0m\n",
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mMODE: \033[1;36m%-23s\033[1;34m\xe2\x94\x82 \033[1;37mOUTPUT: \033[1;36m%-9s \033[1;34m\xe2\x94\x82 \033[1;37mSTREAM: %s%-17s\033[0m\033[1;34m\xe2\x94\x82\033[0m\n",
                 mode_str, order_mode_str, stream_color, stream_text);
 
         tui_print_sep(tty, "Global Stream Metrics");
 
-        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mTHROUGHPUT: \033[1;36m%-17s\033[1;34m\xe2\x94\x82 \033[1;36m%-20s\033[1;34m\xe2\x94\x82 \033[1;36m%-22s \033[1;34m\xe2\x94\x82\033[0m\n",
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mTHROUGHPUT: \033[1;36m%-17s\033[1;34m\xe2\x94\x82 \033[1;36m%-18s\033[1;34m\xe2\x94\x82 \033[1;36m%-24s \033[1;34m\xe2\x94\x82\033[0m\n",
                 str_throughput, str_bandwidth, str_batch_rate);
 
         fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mPROGRESS:   \033[1;34m[\033[1;32m");
@@ -6961,7 +6961,7 @@ static int ring_tui_main(int argc, char **argv) {
 
         const char *bn_color = strcmp(bottleneck, "NONE") == 0 ? "\033[1;32m" : "\033[1;33m";
 
-        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mTIME:      \033[1;36m%02llu:%02llu:%02llu elapsed \033[1;34m\xe2\x94\x82 \033[1;37mETA: \033[1;33m%-12s \033[1;34m\xe2\x94\x82 \033[1;37mBOTTLENECK: %s%-13s\033[0m \033[1;34m\xe2\x94\x82\033[0m\n",
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mTIME:       \033[1;36m%02llu:%02llu:%02llu elapsed \033[1;34m\xe2\x94\x82 \033[1;37mETA: \033[38;5;208m%-12s \033[1;34m\xe2\x94\x82 \033[1;37mBOTTLENECK: %s%-13s\033[0m\033[1;34m\xe2\x94\x82\033[0m\n",
                 (unsigned long long)(elapsed_sec / 3600), (unsigned long long)((elapsed_sec % 3600) / 60),
                 (unsigned long long)(elapsed_sec % 60), str_eta, bn_color, bottleneck);
 
@@ -7079,7 +7079,7 @@ static int ring_tui_main(int argc, char **argv) {
             snprintf(str_batch_size, sizeof(str_batch_size), "%llu lines", (unsigned long long)current_L);
         }
 
-        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mBATCH SIZE: \033[1;36m%-16s \033[1;34m\xe2\x94\x82 \033[1;37mFINISHED: \033[1;32m%-10s\033[1;34m\xe2\x94\x82 \033[1;37mREMAINING: \033[1;33m%-11s \033[1;34m\xe2\x94\x82\033[0m\n",
+        fprintf(tty, " \033[1;34m\xe2\x94\x82 \033[1;37mBATCH SIZE: \033[1;36m%-16s \033[1;34m\xe2\x94\x82 \033[1;37mFINISHED: \033[1;32m%-10s\033[1;34m\xe2\x94\x82 \033[1;37mREMAINING: \033[38;5;208m%-11s \033[1;34m\xe2\x94\x82\033[0m\n",
                 str_batch_size, str_finished, str_remaining);
 
         tui_print_sep(tty, "Fault Tolerance & Output Ordering");
