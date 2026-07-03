@@ -779,8 +779,10 @@ toc() { :; }
             [[ "${order_mode}" == "buffered" ]] && tui_order_mode="Buffered"
             [[ "${order_mode}" == "realtime" ]] && tui_order_mode="Realtime"
 
+            local tui_cmd="frun ${FORKRUN_ORIG_ARGS[*]}"
+
             # Run TUI in background, fully disconnected from stdin/stdout data streams
-            ( ring_tui "$expected_bytes" "$tui_order_mode" ) </dev/null >/dev/null 2>/dev/null &
+            ( ring_tui "$expected_bytes" "$tui_order_mode" "$tui_cmd" ) </dev/null >/dev/null 2>/dev/null &
             TUI_PID=$!
         fi
 
