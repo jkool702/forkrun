@@ -47,7 +47,7 @@ frun __exec__ "$@"
     FORKRUN_ORIG_ARGS=("$@")
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg tui_flag TUI_PID
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg tui_flag TUI_PID preempt_mode
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -61,6 +61,16 @@ frun __exec__ "$@"
     else
         shopt -s extglob;
         extglob_was_set=false;
+    fi
+
+    # --- PREEMPTION & CHECKPOINT DETECTION ---
+    preempt_mode="${FORKRUN_PREEMPT_MODE:-auto}"
+    if [[ "$preempt_mode" == "auto" ]]; then
+        if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+            preempt_mode=1
+        else
+            preempt_mode=0
+        fi
     fi
 
    # --- HELPER: Expand units (IEC/IEEE prefixes) ---
@@ -210,6 +220,11 @@ EOF
   FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup.
       EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
   FORKRUN_USE_HUGETLB   : Set to '1' to have forkrun attempt to use hugepages for memfd backing. WARNING: only enable this if you have sufficient available hugepages so that forkrun does NOT run out of memory to use.
+  FORKRUN_PREEMPT_MODE  : Controls SLURM preemption detection and handling.
+      auto (default): Automatically detect SLURM environment by checking for SLURM_JOB_ID. Enables preemption traps if running under SLURM.
+      0 or false: Disable preemption handling entirely.
+      1 or true: Force-enable preemption handling (useful for testing or non-SLURM environments that send SIGTERM/SIGUSR1).
+      When enabled, forkrun catches SIGTERM (preemption/scancel) and SIGUSR1 (SLURM --signal=B:USR1@<time>) to freeze the pipeline and generate a checkpoint for perfect resume capability.
 
 EOF
                 ;;
@@ -649,7 +664,6 @@ toc() { :; }
     # # # # # MAIN # # # # #
     {
         trap '
-
             status=${_ret_val:-$?}
 
             # CRITICAL: Gracefully terminate TUI before unmapping shared memory
@@ -693,7 +707,19 @@ toc() { :; }
             # Clean up memory only AFTER the trap is done with it!
             ring_destroy 2>/dev/null
             return $status
-        ' EXIT INT
+        ' EXIT
+
+        # Ctrl+C (SIGINT) should always trigger a dirty exit
+        trap 'NORMAL_EXIT_FLAG=false; _ret_val=130; ring_abort; exit 130' INT
+
+        # If Preemption Support is active, trap SLURM signals
+        if (( preempt_mode == 1 )); then
+            # SLURM default preemption / scancel signal
+            trap 'NORMAL_EXIT_FLAG=false; _ret_val=143; echo "forkrun [WARN]: Caught SIGTERM (SLURM Preemption). Freezing pipeline..." >&2; ring_abort; exit 143' TERM
+
+            # Common alternative pre-kill signal used via SLURM --signal=B:USR1@<time>
+            trap 'NORMAL_EXIT_FLAG=false; _ret_val=138; echo "forkrun [WARN]: Caught SIGUSR1 (SLURM Warning). Freezing pipeline..." >&2; ring_abort; exit 138' USR1
+        fi
         ring_pipe fd_spawn_r fd_spawn_w
 
         # SPAWN BACKGROUND PROCESSES
