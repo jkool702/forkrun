@@ -1544,9 +1544,74 @@ static inline void check_memory_pressure(uint64_t *total_moved,
 #define M_L_ALL (M_L_A | M_L_B)
 #define M_B_ALL (M_B_A | M_B_B)
 
+// Helper to determine the actual usable CPU count, respecting taskset (affinity)
+// and container/HPC fractional cgroup quotas.
+static uint64_t get_logical_cores() {
+  uint64_t affinity_cores = 0;
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+
+  // 1. Check CPU Affinity Mask (Catches Slurm taskset & cpuset confinement)
+  if (sched_getaffinity(0, sizeof(cpu_set_t), &cpuset) == 0) {
+    affinity_cores = CPU_COUNT(&cpuset);
+  }
+  if (affinity_cores == 0) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    affinity_cores = (n > 0) ? (uint64_t)n : 1;
+  }
+
+  uint64_t quota_cores = (uint64_t)-1; // Default: Unlimited
+  char buf[128];
+
+  // 2. Check cgroups v2 (cpu.max)
+  int fd = open("/sys/fs/cgroup/cpu.max", O_RDONLY);
+  if (fd >= 0) {
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n > 0) {
+      buf[n] = '\0';
+      if (strncmp(buf, "max", 3) != 0) {
+        long long quota = 0, period = 0;
+        if (sscanf(buf, "%lld %lld", &quota, &period) == 2 && period > 0 && quota > 0) {
+          quota_cores = (quota + period - 1) / period; // Ceiling division
+        }
+      }
+    }
+  } else {
+    // 3. Fallback to cgroups v1 (cpu.cfs_quota_us)
+    fd = open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", O_RDONLY);
+    if (fd >= 0) {
+      ssize_t n = read(fd, buf, sizeof(buf) - 1);
+      close(fd);
+      if (n > 0) {
+        buf[n] = '\0';
+        long long quota = atoll(buf);
+        if (quota > 0) {
+          int pfd = open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", O_RDONLY);
+          if (pfd >= 0) {
+            n = read(pfd, buf, sizeof(buf) - 1);
+            close(pfd);
+            if (n > 0) {
+              buf[n] = '\0';
+              long long period = atoll(buf);
+              if (period > 0) {
+                quota_cores = (quota + period - 1) / period; // Ceiling division
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // The actual limit is the stricter of the two (Affinity vs. Quota)
+  uint64_t final_cores = (quota_cores < affinity_cores) ? quota_cores : affinity_cores;
+  return (final_cores > 0) ? final_cores : 1;
+}
+
 static uint64_t get_v_def(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
-    return sysconf(_SC_NPROCESSORS_ONLN);
+    return get_logical_cores();
   if (!strcmp(type, "lines"))
     return 4096;
   if (!strcmp(type, "bytes")) {
@@ -1561,7 +1626,7 @@ static uint64_t get_v_def(const char *type, bool stdin_mode) {
 
 static uint64_t get_v_max(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
-    return sysconf(_SC_NPROCESSORS_ONLN) * 2;
+    return get_logical_cores() * 2;
   if (!strcmp(type, "lines"))
     return 65536;
   if (!strcmp(type, "bytes")) {
@@ -7003,7 +7068,9 @@ static int ring_tui_main(int argc, char **argv) {
         // Base CPU% on logical cores (hyperthreads), not physical cores --
         // a worker count above the physical core count is expected and
         // correct on HT/SMT systems, so it must not read as >100%.
-        int logical_cores_per_node = (int)sysconf(_SC_NPROCESSORS_ONLN) / (global_num_nodes > 0 ? (int)global_num_nodes : 1);
+
+        // --- Replace sysconf(_SC_NPROCESSORS_ONLN) with get_logical_cores() ---
+        int logical_cores_per_node = (int)get_logical_cores() / (global_num_nodes > 0 ? (int)global_num_nodes : 1);
         if (logical_cores_per_node < 1) logical_cores_per_node = 1;
 
         for (uint32_t i = 0; i < global_num_nodes; i++) {
