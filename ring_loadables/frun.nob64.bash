@@ -186,7 +186,7 @@ EOF
   +v, --no-verbose      : Decrease verbosity. Disables --stats.
   -V, --version         : Prints forkrun version number
   --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
-  --tui                 : Opens a Live Telemetry Dashboard visualizing the internal stream and buffers
+  --tui, --progress     : Opens a Live Telemetry Dashboard visualizing the internal stream and buffers
 
 ### ERROR HANDLING & RETRIES
   -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
@@ -278,8 +278,8 @@ EOF
             -X|--external|--EXTERNAL)      prefer_external_flag=true  ;;
             +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL) prefer_external_flag=false ;;
 
-            --tui|--TUI)                                        tui_flag=true  ;;
-            --no-tui|--NO-TUI)                                  tui_flag=false ;;
+            --tui|--TUI|--progress|--PROGRESS)                  tui_flag=true  ;;
+            --no-tui|--NO-TUI|--no-progress|--NO-PROGRESS)      tui_flag=false ;;
 
             -C|--plugin|--PLUGIN)
                 arg="${1##@(-C|--plugin|--PLUGIN)?([= $'\t'])}";
@@ -450,7 +450,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.3.0';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.4.0';  return 0  ;;
 
             --) shift; break ;;
 

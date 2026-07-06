@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.3.0
+// forkrun_ring.c v3.4.0
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -374,7 +374,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.3.0"
+#define FORKRUN_RING_VERSION "v3.4.0"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -5002,6 +5002,7 @@ static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len, struct O
     if (fs->heap_cap == 0) {
         fs->heap_cap = 64;
         fs->heap = malloc(fs->heap_cap * sizeof(struct IntervalNode));
+        if (!fs->heap) { fs->heap_cap = 0; return; } // OOM: retry next call instead of dereferencing NULL
     }
 
     if ((uint64_t)p_off <= fs->limit) {
@@ -5071,6 +5072,7 @@ static int ring_order_main(int argc, char **argv) {
   int tracker_cap = 1024;
   int tracker_sz = 0;
   struct IntervalNode *tracker_heap = malloc(tracker_cap * sizeof(struct IntervalNode));
+  if (!tracker_heap) { free(fd_states); free(heap); return EXECUTION_FAILURE; }
   uint64_t tracker_horizon = 0;
   uint64_t tracker_bytes = 0;
 
@@ -5240,6 +5242,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
   int heap_cap = 1024;
   int heap_sz = 0;
   struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
+  if (!heap) return EXECUTION_FAILURE;
   uint64_t limit = 0;
   off_t last_punched = 0;
 
@@ -5624,6 +5627,7 @@ static int ring_fetcher_main(int argc, char **argv) {
         copy_file_range(fd_global, &off_in, fd_local, &off_out, pp.len, 0);
     if (ret < 0) {
       char *buf = malloc(65536);
+      if (!buf) goto skip_copy_fallback;
       uint64_t copied = 0;
       lseek(fd_global, pp.off, SEEK_SET);
       lseek(fd_local, 0, SEEK_END);
@@ -5646,6 +5650,7 @@ static int ring_fetcher_main(int argc, char **argv) {
         copied += r;
       }
       free(buf);
+      skip_copy_fallback: ;
     }
     uint64_t one = 1;
     sys_write(fd_local_sig, &one, 8);
@@ -5923,6 +5928,7 @@ static int ring_fallow_main(int argc, char **argv) {
   int heap_cap = 1024;
   int heap_sz = 0;
   struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
+  if (!heap) return EXECUTION_FAILURE;
   uint64_t next_idx = 0;
   off_t last_punched = 0;
 
@@ -7009,7 +7015,9 @@ static int ring_tui_main(int argc, char **argv) {
             bool has_cpu_stats = false;
 
             // Map the parsed hardware stats directly to the underlying physical NUMA node
-            if (cpus_per_node[i] > 0) {
+            // (node_cpu_map/cpus_per_node are fixed-size [1024]; guard against
+            // oversubscribed node counts from --nodes=@N to avoid an OOB stack read)
+            if (i < 1024 && cpus_per_node[i] > 0) {
                 for (int c = 0; c <= max_cpu_seen; c++) {
                     if (node_cpu_map[i][c] && cur_cpu[c].total > prev_cpu[c].total) {
                         delta_active += (cur_cpu[c].active - prev_cpu[c].active);

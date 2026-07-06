@@ -49,6 +49,7 @@
 - `+v`, `--no-verbose`        : Decrease verbosity. Disables --stats.
 - `-V`, `--version`           : Prints forkrun version number
 -  `--stats`                  : Prints NUMA statistics to stderr (currently ignored for UMA)
+- `--tui`, `--progress`      : Opens a live telemetry dashboard (TUI) visualizing throughput, memory footprint, and per-node CPU/queue saturation. `--no-tui`/`--no-progress` disables it.
 
 ### ERROR HANDLING & RETRIES
 
