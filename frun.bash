@@ -798,7 +798,7 @@ toc() { :; }
             local expected_bytes=0
             # Use -L to follow /dev/stdin symlink to the actual underlying file
             if [[ -f /dev/stdin ]]; then
-                expected_bytes=$(stat -L -c %s /dev/stdin 2>/dev/null || wc -c < /dev/stdin)
+                expected_bytes=$(stat -L -c %s /dev/stdin 2>/dev/null || stat -L -f %z /dev/stdin 2>/dev/null || echo 0)
             fi
 
             local tui_order_mode="Ordered"
