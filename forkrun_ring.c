@@ -1322,6 +1322,8 @@ struct SharedState {
   uint8_t numa_enabled;
   uint8_t exact_lines;
   uint8_t cfg_delim; // Record delimiter character (default '\n')
+  uint32_t cfg_halt_count; // Absolute count threshold for halt
+  uint32_t cfg_halt_pct;   // Percentage threshold for halt
 
   uint64_t current_batch_size ALIGNED(CACHE_LINE);
   uint64_t uma_ingest_offset ALIGNED(CACHE_LINE);
@@ -1893,6 +1895,8 @@ static int ring_init_main(int argc, char **argv) {
   int64_t parsed_timeout = -1;
   uint8_t parsed_exact_lines = 0;
   uint8_t parsed_delim = '\n';
+  uint32_t parsed_halt_count = 0;
+  uint32_t parsed_halt_pct = 0;
 
   for (int i = 1; i < argc; i++) {
     const char *arg = argv[i];
@@ -1930,6 +1934,22 @@ static int ring_init_main(int argc, char **argv) {
       stdin_explicit = 0;
     else if (strncmp(arg, "--delim=", 8) == 0)
       parsed_delim = (uint8_t)arg[8];
+    else if (strncmp(arg, "--halt=", 7) == 0) {
+      const char *val = arg + 7;
+      const char *num_ptr = val;
+
+      // Handle GNU Parallel syntax: "now,fail=10", "soon,fail=10", "fail=10", or just "10"
+      char *fail_ptr = strstr(val, "fail=");
+      if (fail_ptr) num_ptr = fail_ptr + 5;
+      else if (strncmp(val, "now,fail=", 9) == 0) num_ptr = val + 9;
+      else if (strncmp(val, "soon,fail=", 10) == 0) num_ptr = val + 10;
+
+      if (strchr(num_ptr, '%')) {
+        parsed_halt_pct = atoi(num_ptr);
+      } else {
+        parsed_halt_count = atoi(num_ptr);
+      }
+    }
     else if (strncmp(arg, "--nodes=", 8) != 0 &&
              strncmp(arg, "--numa-map=", 11) != 0 && arg[0] != '-')
       out_array_name = arg;
@@ -2015,6 +2035,8 @@ static int ring_init_main(int argc, char **argv) {
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
     state[n].exact_lines = parsed_exact_lines;
     state[n].cfg_delim = parsed_delim;
+    state[n].cfg_halt_count = parsed_halt_count;
+    state[n].cfg_halt_pct = parsed_halt_pct;
     state[n].cfg_limit = parsed_limit;
     state[n].cfg_timeout_us = parsed_timeout;
     atomic_store_relaxed(&state[n].chunk_buffer_limit, 4); // Default to 3 chunks active (limit = 4)
@@ -4753,7 +4775,34 @@ static int ring_claim_main(int argc, char **argv) {
 
       // CRITICAL FIX: Increment the global counter exactly ONCE upon crossing the threshold
       if (batch.num_kills == (uint32_t)limit && g_state) {
-          __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+          uint32_t total_poisoned = __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+
+          uint32_t h_cnt = state[0].cfg_halt_count;
+          uint32_t h_pct = state[0].cfg_halt_pct;
+
+          // 1. Check absolute count
+          if (h_cnt > 0 && total_poisoned >= h_cnt) {
+              fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u failed batches). Triggering emergency abort.\n", total_poisoned);
+              pull_fire_alarm();
+              return EXECUTION_FAILURE;
+          }
+
+          // 2. Check percentage (Requires at least 100 batches processed to prevent premature aborts)
+          if (h_pct > 0) {
+              uint64_t total_batches = 0;
+              for (uint32_t i = 0; i < global_num_nodes; i++) {
+                  // total_lines_consumed is actually tracking total *claims* (batches), not lines.
+                  total_batches += atomic_load_relaxed(&state[i].total_lines_consumed);
+              }
+              if (total_batches >= 100) {
+                  uint32_t current_pct = (total_poisoned * 100) / total_batches;
+                  if (current_pct >= h_pct) {
+                      fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u%% failed batches). Triggering emergency abort.\n", current_pct);
+                      pull_fire_alarm();
+                      return EXECUTION_FAILURE;
+                  }
+              }
+          }
       }
     } else {
       bind_variable("RING_POISONED", "0", 0);
