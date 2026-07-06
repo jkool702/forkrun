@@ -447,6 +447,12 @@ EOF
                 fi
                 delimiter_val="${arg:0:1}" ;;
 
+            # --- HALT (--halt) ---
+            @(--halt)?(?([= $'\t'])*))
+                arg="${1##@(--halt)?([= $'\t'])}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && ring_init_opts+=("--halt=${arg}") ;;
+
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
