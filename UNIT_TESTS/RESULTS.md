@@ -442,7 +442,7 @@ Skipped:   0  ([1;33m0.0%[0m)
 
 [0;32m[1mALL TESTS PASSED![0m
 [0;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-=== forkrun v3.3.0 C Plugin Test Suite ===
+=== forkrun v3.4.0 C Plugin Test Suite ===
 UNIT_TESTS_DIR : /mnt/ramdisk/forkrun/UNIT_TESTS
 FRUN_SCRIPT    : /mnt/ramdisk/forkrun/UNIT_TESTS/frun.bash
 Sourcing frun.bash...
@@ -483,7 +483,7 @@ Cmd : frun -k -C ./test_basic.so:test_basic < input_1M.txt
 
 === All C Plugin Tests Completed Successfully ===
 
-=== forkrun v3.3.0 C Plugin Rigorous Test Suite ===
+=== forkrun v3.4.0 C Plugin Rigorous Test Suite ===
 Compiling Native Plugins...
 Generating Deterministic Test Inputs...
 ------------------------------------------------------
