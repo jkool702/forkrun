@@ -946,6 +946,17 @@ toc() { :; }
             cmdline_str="${cmdline_str//\\\{ID\\\}/\{\${RING_NODE_ID:+\$\{RING_NODE_ID\}.\}\$\{ID\}.\$\{W_BATCH\}\}}"
         fi
 
+        # 2. Sweep Substitutions
+        if ${is_sweep:-false}; then
+            # Trigger insert mode automatically if {} or {1}..{9} are detected
+            if [[ "$cmdline_str" == *\\\{[1-9]\\\}* || "$cmdline_str" == *\\\{\\\}* ]]; then
+                insert_args_flag=true
+            fi
+            for ((k=1; k<=9; k++)); do
+                cmdline_str="${cmdline_str//\\\{$k\\\}/\"\${A[$((k-1))]}\"}"
+            done
+        fi
+
         ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"
 
         ring_ack_str="ring_ack $fd_fallow_w"
@@ -976,6 +987,11 @@ toc() { :; }
             # Ensure the user actually passed a colon!
             if [[ "$c_plugin_arg" != *:* ]]; then
                 echo "forkrun [FATAL]: -C requires format 'path/to/plugin.so:function_name'" >&2
+                return 1
+            fi
+
+            if ${is_sweep:-false}; then
+                echo "forkrun [FATAL]: C Plugins (-C) cannot be combined with multi-parameter sweeps (:::)." >&2
                 return 1
             fi
 
@@ -1157,7 +1173,11 @@ toc() { :; }
 
                 pCode='
             ring_map $fd_read $REPLY A '"${delimiter_str}"'
-            '"$cmdline_str"
+            '
+                if ${is_sweep:-false}; then
+                    pCode+='eval "A=(${A[0]})"'$'\n            '
+                fi
+                pCode+="$cmdline_str"
             fi
         fi
 
