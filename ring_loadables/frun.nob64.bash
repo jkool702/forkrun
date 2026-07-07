@@ -113,8 +113,7 @@ frun() {
             for _fr_i in "${!_fr_A_dims[@]}"; do _fr_eval_str+="done"$'\n'; done
         fi
 
-        _fr_base_args+=("-z" "--_sweep")
-        eval "$_fr_eval_str" | frun "${_fr_base_args[@]}"
+        eval "$_fr_eval_str" | frun -z --_sweep "${_fr_base_args[@]}"
         return $?
     fi
 
@@ -387,7 +386,7 @@ EOF
             -I|--insert-id|--INSERT|--INSERT-ID) insert_id_flag=true  ;;
             +I|--no-insert-id|--NO-INSERT|--NO-INSERT-ID) insert_id_flag=false ;;
 
-            --_sweep) is_sweep=true; stdin_flag=false; byte_mode_flag=false; ring_init_opts+=("--lines0=1" "--lines-max=1") ;;
+            --_sweep)                        is_sweep=true; stdin_flag=false; byte_mode_flag=false ;;
 
             -E|--retry-nonzero-exit)    retry_nonzero_exit_flag=true  ;;
             +E|--no-retry-nonzero-exit) retry_nonzero_exit_flag=false ;;
@@ -582,6 +581,16 @@ EOF
         shift
     done
     unset arg
+
+    # --- SWEEP CONFIG LOCK ---
+    if ${is_sweep:-false}; then
+        if [[ -n "${exact_lines_val:-}" || " ${ring_init_opts[*]} " == *" --lines"* ]]; then
+            echo "forkrun [WARNING]: Batch sizes (-l / -L) are forced to 1 when using parameter sweeps (:::). Your setting is ignored." >&2
+            exact_lines_val=""
+        fi
+        ring_init_opts+=("--lines0=1" "--lines-max=1")
+    fi
+
     # --- AST MANIPULATION FOR BASH FUNCTIONS ---
     declare -F -- "$1" &>/dev/null 2>&1 && is_func_flag=true
     if [[ -n "$1" ]] && ${is_func_flag}; then
