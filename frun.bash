@@ -387,7 +387,7 @@ EOF
             -I|--insert-id|--INSERT|--INSERT-ID) insert_id_flag=true  ;;
             +I|--no-insert-id|--NO-INSERT|--NO-INSERT-ID) insert_id_flag=false ;;
 
-            --_sweep)                        is_sweep=true; stdin_flag=false; byte_mode_flag=false ;;
+            --_sweep) is_sweep=true; stdin_flag=false; byte_mode_flag=false; ring_init_opts+=("--lines0=1" "--lines-max=1") ;;
 
             -E|--retry-nonzero-exit)    retry_nonzero_exit_flag=true  ;;
             +E|--no-retry-nonzero-exit) retry_nonzero_exit_flag=false ;;
