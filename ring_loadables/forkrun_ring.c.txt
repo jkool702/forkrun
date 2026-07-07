@@ -4774,7 +4774,9 @@ static int ring_claim_main(int argc, char **argv) {
       bind_variable("RING_POISONED", "1", 0);
 
       // CRITICAL FIX: Increment the global counter exactly ONCE upon crossing the threshold
-      if (batch.num_kills == (uint32_t)limit && g_state) {
+      // If limit=0, it is poisoned on the 1st retry (num_kills=1)
+      uint32_t poison_threshold = (limit > 0) ? (uint32_t)limit : 1;
+      if (batch.num_kills == poison_threshold && g_state) {
           uint32_t total_poisoned = __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
 
           uint32_t h_cnt = state[0].cfg_halt_count;
@@ -6357,14 +6359,14 @@ static int ring_poll_main(int argc, char **argv) {
     }
 
     int r;
+    bool abort_active = false;
     do {
         if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
-            free(pfds); free(meta);
-            return EXECUTION_FAILURE;
+            abort_active = true;
         }
 
-        int timeout_this_iter = 100; // 100ms default for fire alarm checks
-        if (g_poll_deadline_ms > 0) {
+        int timeout_this_iter = abort_active ? 0 : 100; // 100ms default (or 0 to drain on abort)
+        if (!abort_active && g_poll_deadline_ms > 0) {
             uint64_t now_ms = get_mono_ms();
             if (now_ms >= g_poll_deadline_ms) {
                 g_poll_deadline_ms = 0;
@@ -6378,7 +6380,7 @@ static int ring_poll_main(int argc, char **argv) {
         }
 
         r = poll(pfds, p_cnt, timeout_this_iter);
-    } while (r == 0 || (r < 0 && errno == EINTR));
+    } while (r < 0 && errno == EINTR);
 
     if (r < 0) {
         free(pfds); free(meta);
@@ -6456,6 +6458,7 @@ static int ring_poll_main(int argc, char **argv) {
 
     bind_variable("POLL_EVENT", "IGNORE", 0);
     free(pfds); free(meta);
+    if (abort_active) return EXECUTION_FAILURE;
     return EXECUTION_SUCCESS;
 }
 #undef LOAD_ARRAY
