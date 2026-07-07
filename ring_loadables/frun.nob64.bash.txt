@@ -1242,7 +1242,11 @@ toc() { :; }
 
   trap '"'"'ring_abort
   kill -INT '"${BASHPID}'"' INT
-
+  '
+  (( preempt_mode == 1 )) &&  worker_func_src+='trap '"'"'kill -USR1 '"${BASHPID}'"' USR1
+trap '"'"'kill -TERM '"${BASHPID}'"' TERM
+'
+worker_func_src+='
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion
     RING_NUM_KILLS=0
@@ -1285,7 +1289,8 @@ toc() { :; }
 P[$3]=$!
 W_NODE[$3]=$2
 }'
-
+trap -p >&2
+declare -p worker_func_src >&2
         eval "${worker_func_src}"
 
         # --- SPAWN LOOP REACTOR ---
