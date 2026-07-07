@@ -29,31 +29,9 @@ frun() {
         local _fr_mode=""
         local _fr_delim=$'\n'
         local _fr_link=false
-
-        # Extract delimiter for `::::` file parsing
         local _fr_prev=""
-        for _fr_a in "$@"; do
-            if [[ "$_fr_prev" == "-d" || "$_fr_prev" == "--delim" || "$_fr_prev" == "--delimiter" ]]; then
-                _fr_delim="${_fr_a:0:1}"
-                _fr_prev=""
-            elif [[ "$_fr_a" == --delim=* ]]; then
-                _fr_delim="${_fr_a#*=}"
-                _fr_delim="${_fr_delim:0:1}"
-            elif [[ "$_fr_a" == -d?* ]]; then
-                _fr_delim="${_fr_a:2:1}"
-            elif [[ "$_fr_a" == "-z" || "$_fr_a" == "--null" ]]; then
-                _fr_delim=""
-            else
-                _fr_prev="$_fr_a"
-            fi
-        done
 
         for _fr_a in "$@"; do
-            if [[ "$_fr_a" == "--link" ]]; then
-                _fr_link=true
-                continue
-            fi
-
             if [[ "$_fr_a" == ":::" || "$_fr_a" == "::::" ]]; then
                 if [[ -n "$_fr_mode" ]]; then
                     eval "_fr_A${_fr_dim}=(\"\${_fr_cur_list[@]}\")"
@@ -66,6 +44,24 @@ frun() {
             fi
 
             if [[ -z "$_fr_mode" ]]; then
+                if [[ "$_fr_a" == "--link" ]]; then
+                    _fr_link=true
+                    continue
+                fi
+
+                if [[ "$_fr_prev" == "-d" || "$_fr_prev" == "--delim" || "$_fr_prev" == "--delimiter" ]]; then
+                    _fr_delim="${_fr_a:0:1}"
+                    _fr_prev=""
+                elif [[ "$_fr_a" == --delim=* ]]; then
+                    _fr_delim="${_fr_a#*=}"
+                    _fr_delim="${_fr_delim:0:1}"
+                elif [[ "$_fr_a" == -d?* ]]; then
+                    _fr_delim="${_fr_a:2:1}"
+                elif [[ "$_fr_a" == "-z" || "$_fr_a" == "--null" ]]; then
+                    _fr_delim=""
+                else
+                    _fr_prev="$_fr_a"
+                fi
                 _fr_base_args+=("$_fr_a")
             elif [[ "$_fr_mode" == ":::" ]]; then
                 _fr_cur_list+=("$_fr_a")
@@ -93,11 +89,17 @@ frun() {
 
         if $_fr_link; then
             local _fr_min_len=-1
+            local _fr_max_len=-1
             for _fr_i in "${!_fr_A_dims[@]}"; do
                 local _len; eval "_len=\${#_fr_A${_fr_i}[@]}"
                 if (( _fr_min_len == -1 || _len < _fr_min_len )); then _fr_min_len=$_len; fi
+                if (( _len > _fr_max_len )); then _fr_max_len=$_len; fi
             done
             if (( _fr_min_len == -1 )); then _fr_min_len=0; fi
+
+            if (( _fr_min_len != _fr_max_len && _fr_min_len > 0 )); then
+                echo "forkrun [WARNING]: --link zip-mode lists have different lengths. Truncating combinations to the shortest length ($_fr_min_len)." >&2
+            fi
 
             _fr_eval_str+="for (( _fr_idx=0; _fr_idx<${_fr_min_len}; _fr_idx++ )); do"$'\n'
             _fr_eval_str+="  printf '$_fr_fmt' "
@@ -298,6 +300,8 @@ EOF
   ::: <args>            : Treat subsequent arguments as inputs. Generates Cartesian cross-product if multiple ::: are used.
   :::: <files>          : Treat subsequent arguments as files and read inputs from them (use - for stdin).
   --link                : Zip parameter lists together instead of generating a full cross-product.
+  *Note*: When using sweeps, parameters are automatically unpacked and passed as positional arguments ($1, $2, etc.) to
+          your function, or you can use {1}, {2}, etc. to insert them explicitly into your command string.
 
 ### ERROR HANDLING & RETRIES
   -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
