@@ -11,6 +11,75 @@ frun() {
 # USAGE:  . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
 # FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>] [-E] [-v] [-h]
 #  HELP:  . frun.bash && frun --help
+
+    # --- MULTI-INPUT PARAMETER SWEEP (::: / ::::) INTERCEPT ---
+    local _fr_has_sweep=false
+    local _fr_a
+    for _fr_a in "$@"; do
+        if [[ "$_fr_a" == ":::" || "$_fr_a" == "::::" ]]; then
+            _fr_has_sweep=true; break
+        fi
+    done
+
+    if $_fr_has_sweep; then
+        local -a _fr_base_args=()
+        local -a _fr_cur_list=()
+        local -a _fr_A_dims=()
+        local _fr_dim=0
+        local _fr_mode=""
+
+        for _fr_a in "$@"; do
+            if [[ "$_fr_a" == ":::" || "$_fr_a" == "::::" ]]; then
+                if [[ -n "$_fr_mode" ]]; then
+                    eval "_fr_A${_fr_dim}=(\"\${_fr_cur_list[@]}\")"
+                    _fr_A_dims+=("_fr_A${_fr_dim}")
+                    ((_fr_dim++))
+                fi
+                _fr_mode="$_fr_a"
+                _fr_cur_list=()
+                continue
+            fi
+
+            if [[ -z "$_fr_mode" ]]; then
+                _fr_base_args+=("$_fr_a")
+            elif [[ "$_fr_mode" == ":::" ]]; then
+                _fr_cur_list+=("$_fr_a")
+            elif [[ "$_fr_mode" == "::::" ]]; then
+                local -a _tmp_map=()
+                if [[ "$_fr_a" == "-" ]]; then
+                    mapfile -t _tmp_map < /dev/stdin
+                else
+                    mapfile -t _tmp_map < "$_fr_a"
+                fi
+                _fr_cur_list+=("${_tmp_map[@]}")
+            fi
+        done
+        if [[ -n "$_fr_mode" ]]; then
+            eval "_fr_A${_fr_dim}=(\"\${_fr_cur_list[@]}\")"
+            _fr_A_dims+=("_fr_A${_fr_dim}")
+        fi
+
+        local _fr_eval_str=""
+        local _fr_i
+        for _fr_i in "${!_fr_A_dims[@]}"; do
+            _fr_eval_str+="for a${_fr_i} in \"\${_fr_A${_fr_i}[@]}\"; do"$'\n'
+        done
+
+        local _fr_fmt=""
+        for _fr_i in "${!_fr_A_dims[@]}"; do _fr_fmt+="%s "; done
+        _fr_fmt="${_fr_fmt% }\\n"
+
+        _fr_eval_str+="printf %b \"$_fr_fmt\" "
+        for _fr_i in "${!_fr_A_dims[@]}"; do _fr_eval_str+="\"\$a${_fr_i}\" "; done
+        _fr_eval_str+=$'\n'
+
+        for _fr_i in "${!_fr_A_dims[@]}"; do _fr_eval_str+="done"$'\n'; done
+
+        # Execute combinations and pipe back into a clean frun instance
+        eval "$_fr_eval_str" | frun "${_fr_base_args[@]}"
+        return $?
+    fi
+
 (
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
@@ -181,12 +250,17 @@ EOF
                           @N: Oversubscribe / force N logical nodes.
                           0,1: Explicitly bind to physical NUMA nodes 0 and 1.
                           0:3: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
+  --halt <val>          : Halt the pipeline if too many batches fail. Format: fail=N or fail=N% (e.g., --halt fail=10%).
   -N, --dry-run         : Dry run. Print the generated command strings instead of executing them.
   -v, --verbose         : Increase verbosity (prints timing and flag summaries to stderr). Implies --stats.
   +v, --no-verbose      : Decrease verbosity. Disables --stats.
   -V, --version         : Prints forkrun version number
   --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
   --tui, --progress     : Opens a Live Telemetry Dashboard visualizing the internal stream and buffers
+
+### MULTI-INPUT PARAMETER SWEEPS
+  ::: <args>            : Treat subsequent arguments as inputs. Generates Cartesian cross-product if multiple ::: are used.
+  :::: <files>          : Treat subsequent arguments as files and read inputs from them (use - for stdin).
 
 ### ERROR HANDLING & RETRIES
   -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
@@ -1320,7 +1394,7 @@ _frun_complete() {
           -z --null -N --dry-run -i --insert -I --insert-id -n --limit -L --exact-lines \
           -E --retry-nonzero-exit +E --no-retry-nonzero-exit \
           -l --lines --batchsize -b --bytes -j -P --workers -t --timeout --nodes --numa \
-          -o --order -d --delim --delimiter -h --help --usage"
+          -o --order -d --delim --delimiter -h --help --usage --halt"
 
     # If the user is currently typing a flag
     if [[ ${cur} == -* ]] ; then
@@ -1736,6 +1810,7 @@ while True: time.sleep(60)'
 }
 
 
+
 _forkrun_file_to_base64() {
 
    # local nn kk kk0 k1 k2 out out0 outF outN v1 v2 nnSum hexProg quoteFlag noCompressFlag IFS IFS0
@@ -1897,7 +1972,6 @@ FORKRUN_FRUN_SRC="ulimit -n $(ulimit -Hn)"$'\n'
 unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #
-
 declare -A b64=()   # removed base64
 
 _forkrun_bootstrap_setup --force

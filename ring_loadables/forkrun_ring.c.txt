@@ -1322,6 +1322,8 @@ struct SharedState {
   uint8_t numa_enabled;
   uint8_t exact_lines;
   uint8_t cfg_delim; // Record delimiter character (default '\n')
+  uint32_t cfg_halt_count; // Absolute count threshold for halt
+  uint32_t cfg_halt_pct;   // Percentage threshold for halt
 
   uint64_t current_batch_size ALIGNED(CACHE_LINE);
   uint64_t uma_ingest_offset ALIGNED(CACHE_LINE);
@@ -1544,9 +1546,74 @@ static inline void check_memory_pressure(uint64_t *total_moved,
 #define M_L_ALL (M_L_A | M_L_B)
 #define M_B_ALL (M_B_A | M_B_B)
 
+// Helper to determine the actual usable CPU count, respecting taskset (affinity)
+// and container/HPC fractional cgroup quotas.
+static uint64_t get_logical_cores() {
+  uint64_t affinity_cores = 0;
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+
+  // 1. Check CPU Affinity Mask (Catches Slurm taskset & cpuset confinement)
+  if (sched_getaffinity(0, sizeof(cpu_set_t), &cpuset) == 0) {
+    affinity_cores = CPU_COUNT(&cpuset);
+  }
+  if (affinity_cores == 0) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    affinity_cores = (n > 0) ? (uint64_t)n : 1;
+  }
+
+  uint64_t quota_cores = (uint64_t)-1; // Default: Unlimited
+  char buf[128];
+
+  // 2. Check cgroups v2 (cpu.max)
+  int fd = open("/sys/fs/cgroup/cpu.max", O_RDONLY);
+  if (fd >= 0) {
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n > 0) {
+      buf[n] = '\0';
+      if (strncmp(buf, "max", 3) != 0) {
+        long long quota = 0, period = 0;
+        if (sscanf(buf, "%lld %lld", &quota, &period) == 2 && period > 0 && quota > 0) {
+          quota_cores = (quota + period - 1) / period; // Ceiling division
+        }
+      }
+    }
+  } else {
+    // 3. Fallback to cgroups v1 (cpu.cfs_quota_us)
+    fd = open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", O_RDONLY);
+    if (fd >= 0) {
+      ssize_t n = read(fd, buf, sizeof(buf) - 1);
+      close(fd);
+      if (n > 0) {
+        buf[n] = '\0';
+        long long quota = atoll(buf);
+        if (quota > 0) {
+          int pfd = open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", O_RDONLY);
+          if (pfd >= 0) {
+            n = read(pfd, buf, sizeof(buf) - 1);
+            close(pfd);
+            if (n > 0) {
+              buf[n] = '\0';
+              long long period = atoll(buf);
+              if (period > 0) {
+                quota_cores = (quota + period - 1) / period; // Ceiling division
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // The actual limit is the stricter of the two (Affinity vs. Quota)
+  uint64_t final_cores = (quota_cores < affinity_cores) ? quota_cores : affinity_cores;
+  return (final_cores > 0) ? final_cores : 1;
+}
+
 static uint64_t get_v_def(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
-    return sysconf(_SC_NPROCESSORS_ONLN);
+    return get_logical_cores();
   if (!strcmp(type, "lines"))
     return 4096;
   if (!strcmp(type, "bytes")) {
@@ -1561,7 +1628,7 @@ static uint64_t get_v_def(const char *type, bool stdin_mode) {
 
 static uint64_t get_v_max(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
-    return sysconf(_SC_NPROCESSORS_ONLN) * 2;
+    return get_logical_cores() * 2;
   if (!strcmp(type, "lines"))
     return 65536;
   if (!strcmp(type, "bytes")) {
@@ -1828,6 +1895,8 @@ static int ring_init_main(int argc, char **argv) {
   int64_t parsed_timeout = -1;
   uint8_t parsed_exact_lines = 0;
   uint8_t parsed_delim = '\n';
+  uint32_t parsed_halt_count = 0;
+  uint32_t parsed_halt_pct = 0;
 
   for (int i = 1; i < argc; i++) {
     const char *arg = argv[i];
@@ -1865,6 +1934,22 @@ static int ring_init_main(int argc, char **argv) {
       stdin_explicit = 0;
     else if (strncmp(arg, "--delim=", 8) == 0)
       parsed_delim = (uint8_t)arg[8];
+    else if (strncmp(arg, "--halt=", 7) == 0) {
+      const char *val = arg + 7;
+      const char *num_ptr = val;
+
+      // Handle GNU Parallel syntax: "now,fail=10", "soon,fail=10", "fail=10", or just "10"
+      char *fail_ptr = strstr(val, "fail=");
+      if (fail_ptr) num_ptr = fail_ptr + 5;
+      else if (strncmp(val, "now,fail=", 9) == 0) num_ptr = val + 9;
+      else if (strncmp(val, "soon,fail=", 10) == 0) num_ptr = val + 10;
+
+      if (strchr(num_ptr, '%')) {
+        parsed_halt_pct = atoi(num_ptr);
+      } else {
+        parsed_halt_count = atoi(num_ptr);
+      }
+    }
     else if (strncmp(arg, "--nodes=", 8) != 0 &&
              strncmp(arg, "--numa-map=", 11) != 0 && arg[0] != '-')
       out_array_name = arg;
@@ -1950,6 +2035,8 @@ static int ring_init_main(int argc, char **argv) {
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
     state[n].exact_lines = parsed_exact_lines;
     state[n].cfg_delim = parsed_delim;
+    state[n].cfg_halt_count = parsed_halt_count;
+    state[n].cfg_halt_pct = parsed_halt_pct;
     state[n].cfg_limit = parsed_limit;
     state[n].cfg_timeout_us = parsed_timeout;
     atomic_store_relaxed(&state[n].chunk_buffer_limit, 4); // Default to 3 chunks active (limit = 4)
@@ -4688,7 +4775,34 @@ static int ring_claim_main(int argc, char **argv) {
 
       // CRITICAL FIX: Increment the global counter exactly ONCE upon crossing the threshold
       if (batch.num_kills == (uint32_t)limit && g_state) {
-          __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+          uint32_t total_poisoned = __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+
+          uint32_t h_cnt = state[0].cfg_halt_count;
+          uint32_t h_pct = state[0].cfg_halt_pct;
+
+          // 1. Check absolute count
+          if (h_cnt > 0 && total_poisoned >= h_cnt) {
+              fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u failed batches). Triggering emergency abort.\n", total_poisoned);
+              pull_fire_alarm();
+              return EXECUTION_FAILURE;
+          }
+
+          // 2. Check percentage (Requires at least 100 batches processed to prevent premature aborts)
+          if (h_pct > 0) {
+              uint64_t total_batches = 0;
+              for (uint32_t i = 0; i < global_num_nodes; i++) {
+                  // total_lines_consumed is actually tracking total *claims* (batches), not lines.
+                  total_batches += atomic_load_relaxed(&state[i].total_lines_consumed);
+              }
+              if (total_batches >= 100) {
+                  uint32_t current_pct = (total_poisoned * 100) / total_batches;
+                  if (current_pct >= h_pct) {
+                      fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u%% failed batches). Triggering emergency abort.\n", current_pct);
+                      pull_fire_alarm();
+                      return EXECUTION_FAILURE;
+                  }
+              }
+          }
       }
     } else {
       bind_variable("RING_POISONED", "0", 0);
@@ -7003,7 +7117,9 @@ static int ring_tui_main(int argc, char **argv) {
         // Base CPU% on logical cores (hyperthreads), not physical cores --
         // a worker count above the physical core count is expected and
         // correct on HT/SMT systems, so it must not read as >100%.
-        int logical_cores_per_node = (int)sysconf(_SC_NPROCESSORS_ONLN) / (global_num_nodes > 0 ? (int)global_num_nodes : 1);
+
+        // --- Replace sysconf(_SC_NPROCESSORS_ONLN) with get_logical_cores() ---
+        int logical_cores_per_node = (int)get_logical_cores() / (global_num_nodes > 0 ? (int)global_num_nodes : 1);
         if (logical_cores_per_node < 1) logical_cores_per_node = 1;
 
         for (uint32_t i = 0; i < global_num_nodes; i++) {
