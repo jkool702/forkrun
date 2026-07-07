@@ -4791,13 +4791,13 @@ static int ring_claim_main(int argc, char **argv) {
 
           // 2. Check percentage (Requires at least 100 batches processed to prevent premature aborts)
           if (h_pct > 0) {
-              uint64_t total_batches = 0;
+              uint64_t total_unique_batches = 0;
               for (uint32_t i = 0; i < global_num_nodes; i++) {
-                  // total_lines_consumed is actually tracking total *claims* (batches), not lines.
-                  total_batches += atomic_load_relaxed(&state[i].total_lines_consumed);
+                  // read_idx tracks strictly unique batches (not claims including retries)
+                  total_unique_batches += atomic_load_relaxed(&state[i].read_idx);
               }
-              if (total_batches >= 100) {
-                  uint32_t current_pct = (total_poisoned * 100) / total_batches;
+              if (total_unique_batches >= 100) {
+                  uint32_t current_pct = (total_poisoned * 100) / total_unique_batches;
                   if (current_pct >= h_pct) {
                       fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u%% failed batches). Triggering emergency abort.\n", current_pct);
                       pull_fire_alarm();
@@ -6360,31 +6360,39 @@ static int ring_poll_main(int argc, char **argv) {
 
     int r;
     bool abort_active = false;
-    do {
-        if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
-            abort_active = true;
-        }
+    if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
+        abort_active = true;
+    }
 
-        int timeout_this_iter = abort_active ? 0 : 100; // 100ms default (or 0 to drain on abort)
-        if (!abort_active && g_poll_deadline_ms > 0) {
-            uint64_t now_ms = get_mono_ms();
-            if (now_ms >= g_poll_deadline_ms) {
-                g_poll_deadline_ms = 0;
-                bind_variable("POLL_EVENT", "TIMEOUT", 0);
-                free(pfds); free(meta);
-                return EXECUTION_SUCCESS;
-            }
-            uint64_t remaining_ms = g_poll_deadline_ms - now_ms;
-            timeout_this_iter = (remaining_ms < 100) ? (int)remaining_ms : 100;
-            if (timeout_this_iter < 1) timeout_this_iter = 1;
+    int timeout_this_iter = abort_active ? 0 : 100; // 100ms default (or 0 to drain on abort)
+    if (!abort_active && g_poll_deadline_ms > 0) {
+        uint64_t now_ms = get_mono_ms();
+        if (now_ms >= g_poll_deadline_ms) {
+            g_poll_deadline_ms = 0;
+            bind_variable("POLL_EVENT", "TIMEOUT", 0);
+            free(pfds); free(meta);
+            return EXECUTION_SUCCESS;
         }
+        uint64_t remaining_ms = g_poll_deadline_ms - now_ms;
+        timeout_this_iter = (remaining_ms < 100) ? (int)remaining_ms : 100;
+        if (timeout_this_iter < 1) timeout_this_iter = 1;
+    }
 
-        r = poll(pfds, p_cnt, timeout_this_iter);
-    } while (r < 0 && errno == EINTR);
+    r = poll(pfds, p_cnt, timeout_this_iter);
 
     if (r < 0) {
         free(pfds); free(meta);
+        if (errno == EINTR) {
+            bind_variable("POLL_EVENT", "IGNORE", 0);
+            return abort_active ? EXECUTION_FAILURE : EXECUTION_SUCCESS;
+        }
         return EXECUTION_FAILURE;
+    }
+
+    if (r == 0) {
+        free(pfds); free(meta);
+        bind_variable("POLL_EVENT", "IGNORE", 0);
+        return abort_active ? EXECUTION_FAILURE : EXECUTION_SUCCESS;
     }
 
     // 4. Process the Events
