@@ -586,9 +586,9 @@ EOF
     if ${is_sweep:-false}; then
         if [[ -n "${exact_lines_val:-}" || " ${ring_init_opts[*]} " == *" --lines"* ]]; then
             echo "forkrun [WARNING]: Batch sizes (-l / -L) are forced to 1 when using parameter sweeps (:::). Your setting is ignored." >&2
-            exact_lines_val=""
         fi
-        ring_init_opts+=("--lines0=1" "--lines-max=1")
+        exact_lines_val=1
+        ring_init_opts+=("--exact-lines" "--lines0=1" "--lines-max=1")
     fi
 
     # --- AST MANIPULATION FOR BASH FUNCTIONS ---
@@ -758,7 +758,10 @@ toc() { :; }
 
     # --- Feature 2: -L vs NUMA Conflict Resolution ---
     if [[ -n "${exact_lines_val:-}" ]] && (( FORKRUN_NUM_NODES > 1 )); then
-        if [[ "$last_conflict" == "exact_lines" ]]; then
+        if ${is_sweep:-false}; then
+            # Silent fallback to UMA for sweeps
+            _forkrun_build_numa_map "1"
+        elif [[ "$last_conflict" == "exact_lines" ]]; then
             printf '\nforkrun [WARNING]: To facilitate using exactly %s arguments per batch, forkrun will run in UMA mode. NUMA optimizations prevent -L from working properly, and will be disabled.\n\n' "${exact_lines_val}" >&2
             # Force UMA mode by re-building the map with exactly 1 node
             _forkrun_build_numa_map "1"
@@ -1180,13 +1183,11 @@ toc() { :; }
                     delimiter_str="''"
                 fi
 
-                pCode='
-            ring_map $fd_read $REPLY A '"${delimiter_str}"'
-            '
                 if ${is_sweep:-false}; then
-                    pCode+='eval "A=(${A[0]})"'$'\n            '
+                    pCode=$'ring_map $fd_read $REPLY A ""\neval "A=(${A[0]})"\n'"$cmdline_str"
+                else
+                    pCode=$'ring_map $fd_read $REPLY A '"${delimiter_str}"$'\n'"$cmdline_str"
                 fi
-                pCode+="$cmdline_str"
             fi
         fi
 

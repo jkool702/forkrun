@@ -2884,6 +2884,207 @@ if in_section Q; then
 fi
 
 # ============================================================================
+# SECTION R: v3.4.0 NEW FEATURES (TUI, SLURM, Halt, Sweeps)
+# ============================================================================
+print_section R "v3.4.0 New Features (TUI, SLURM, Halt, Sweeps)"
+
+# --- R1: TUI flag accepted and pipeline completes (headless safe) ---
+# Even without a /dev/tty, frun should gracefully skip the TUI and run normally.
+run_test_exact R "R1: TUI flag accepted and pipeline completes (headless safe)" \
+    "seq 10 | frun --tui -k printf '%s\n'" \
+    "$(seq 10)"
+
+# --- R2: SLURM SIGUSR1 triggers checkpoint and exit 138 ---
+# NOTE: This test may expose a bug where preempt_mode is not passed to the cleanroom shell.
+if in_section R; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/R_SLURM"; mkdir -p "$_MD"
+    seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    # Run a job that takes ~1 second, send SIGUSR1 after 0.3s
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; cat input.txt | FORKRUN_PREEMPT_MODE=1 frun -k -l 1 sleep 0.01" \
+        > "$_MD/output.txt" 2>"$_MD/err.txt" &
+    _RPID=$!
+
+    sleep 0.3
+    kill -USR1 $_RPID 2>/dev/null
+    wait $_RPID
+    _REXIT=$?
+
+    if (( _REXIT == 138 )) && [[ -f "$_MD/.forkrun_resume" ]] && grep -q "Caught SIGUSR1" "$_MD/err.txt"; then
+        TEST_RESULTS["R2: SLURM SIGUSR1 triggers checkpoint and exit 138"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "R2: SLURM SIGUSR1 triggers checkpoint and exit 138"
+    else
+        TEST_RESULTS["R2: SLURM SIGUSR1 triggers checkpoint and exit 138"]="FAIL"
+        TEST_ERRORS["R2: SLURM SIGUSR1 triggers checkpoint and exit 138"]="exit=$_REXIT, cp=$([[ -f "$_MD/.forkrun_resume" ]] && echo yes || echo no), err=$(cat "$_MD/err.txt" | tail -1)"
+        ((FAILED_TESTS++)); _print_result FAIL "R2: SLURM SIGUSR1 triggers checkpoint and exit 138" "exit=$_REXIT"
+    fi
+fi
+
+# --- R3: Auto halt on absolute fail count (--halt fail=2) ---
+if in_section R; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/R_HALT1"; mkdir -p "$_MD"
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_on_3_7() {
+    for a in "$@"; do
+        if [[ "$a" == "3" ]] || [[ "$a" == "7" ]]; then
+            exit 1
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    # FORKRUN_RETRY_LIMIT=0 means immediate poison. --halt fail=2 should abort after 2 fails.
+    bash -c "source '$FRUN_SOURCE' && source '$_MD/funcs.sh' && FORKRUN_RETRY_LIMIT=0 seq 1 10 | FORKRUN_EXTRA_FUNCS='crash_on_3_7' frun -k -l 1 -E --halt fail=2 crash_on_3_7" \
+        > "$_MD/out.txt" 2>"$_MD/err.txt"
+    _RX=$?
+    _RERR=$(cat "$_MD/err.txt")
+
+    if (( _RX != 0 )) && echo "$_RERR" | grep -q "Halt condition met (2 failed batches)"; then
+        TEST_RESULTS["R3: Auto halt on absolute fail count (--halt fail=2)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "R3: Auto halt on absolute fail count (--halt fail=2)"
+    else
+        TEST_RESULTS["R3: Auto halt on absolute fail count (--halt fail=2)"]="FAIL"
+        TEST_ERRORS["R3: Auto halt on absolute fail count (--halt fail=2)"]="exit=$_RX, err=$(echo "$_RERR" | tail -1)"
+        ((FAILED_TESTS++)); _print_result FAIL "R3: Auto halt on absolute fail count (--halt fail=2)" "exit=$_RX"
+    fi
+fi
+
+# --- R4: Auto halt on percentage (--halt fail=50%) ---
+if in_section R; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/R_HALT2"; mkdir -p "$_MD"
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+crash_even() {
+    for a in "$@"; do
+        if (( a % 2 == 0 )); then
+            exit 1
+        else
+            printf '%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    # 100 lines, 50 will crash. --halt fail=50% should trigger emergency abort.
+    bash -c "source '$FRUN_SOURCE' && source '$_MD/funcs.sh' && FORKRUN_RETRY_LIMIT=0 seq 1 100 | FORKRUN_EXTRA_FUNCS='crash_even' frun -k -l 1 -E --halt fail=50% crash_even" \
+        > "$_MD/out.txt" 2>"$_MD/err.txt"
+    _Rx=$?
+    _RERR=$(cat "$_MD/err.txt")
+
+    if (( _Rx != 0 )) && echo "$_RERR" | grep -q "Halt condition met (50% failed batches)"; then
+        TEST_RESULTS["R4: Auto halt on percentage (--halt fail=50%)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "R4: Auto halt on percentage (--halt fail=50%)"
+    else
+        TEST_RESULTS["R4: Auto halt on percentage (--halt fail=50%)"]="FAIL"
+        TEST_ERRORS["R4: Auto halt on percentage (--halt fail=50%)"]="exit=$_Rx, err=$(echo "$_RERR" | tail -1)"
+        ((FAILED_TESTS++)); _print_result FAIL "R4: Auto halt on percentage (--halt fail=50%)" "exit=$_Rx"
+    fi
+fi
+
+# --- R5: Sweep inline args (:::) with {1}-{2} substitution ---
+if in_section R; then
+    ((TOTAL_TESTS++))
+    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun echo {1}-{2} ::: a b c ::: 1 2 2>&1 | sort")
+    _REXP="a-1
+a-2
+b-1
+b-2
+c-1
+c-2"
+    if [[ "$_ROUT" == "$_REXP" ]]; then
+        TEST_RESULTS["R5: Sweep inline args (:::) with {1}-{2}"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "R5: Sweep inline args (:::) with {1}-{2}"
+    else
+        TEST_RESULTS["R5: Sweep inline args (:::) with {1}-{2}"]="FAIL"
+        TEST_ERRORS["R5: Sweep inline args (:::) with {1}-{2}"]="out: $_ROUT"
+        ((FAILED_TESTS++)); _print_result FAIL "R5: Sweep inline args (:::) with {1}-{2}" "output mismatch"
+    fi
+fi
+
+# --- R6: Sweep inline args (:::) default args ---
+if in_section R; then
+    ((TOTAL_TESTS++))
+    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun echo ::: a b c ::: 1 2 2>&1 | sort")
+    _REXP="a 1
+a 2
+b 1
+b 2
+c 1
+c 2"
+    if [[ "$_ROUT" == "$_REXP" ]]; then
+        TEST_RESULTS["R6: Sweep inline args (:::) default args"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "R6: Sweep inline args (:::) default args"
+    else
+        TEST_RESULTS["R6: Sweep inline args (:::) default args"]="FAIL"
+        TEST_ERRORS["R6: Sweep inline args (:::) default args"]="out: $_ROUT"
+        ((FAILED_TESTS++)); _print_result FAIL "R6: Sweep inline args (:::) default args" "output mismatch"
+    fi
+fi
+
+# --- R7: Sweep file args (::::) default args ---
+if in_section R; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/R_SWEEP2"; mkdir -p "$_MD"
+    printf "x\ny\nz\n" > "$_MD/f1.txt"
+    printf "100\n200\n" > "$_MD/f2.txt"
+
+    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun echo :::: '$_MD/f1.txt' :::: '$_MD/f2.txt' 2>&1 | sort")
+    _REXP="x 100
+x 200
+y 100
+y 200
+z 100
+z 200"
+    if [[ "$_ROUT" == "$_REXP" ]]; then
+        TEST_RESULTS["R7: Sweep file args (::::) default args"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "R7: Sweep file args (::::) default args"
+    else
+        TEST_RESULTS["R7: Sweep file args (::::) default args"]="FAIL"
+        TEST_ERRORS["R7: Sweep file args (::::) default args"]="out: $_ROUT"
+        ((FAILED_TESTS++)); _print_result FAIL "R7: Sweep file args (::::) default args" "output mismatch"
+    fi
+fi
+
+# --- R8: Sweep --link zip mode ---
+if in_section R; then
+    ((TOTAL_TESTS++))
+    _ROUT=$(bash -c "source '$FRUN_SOURCE' && frun --link echo ::: a b c ::: 1 2 3 2>&1 | sort")
+    _REXP="a 1
+b 2
+c 3"
+    if [[ "$_ROUT" == "$_REXP" ]]; then
+        TEST_RESULTS["R8: Sweep --link zip mode"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "R8: Sweep --link zip mode"
+    else
+        TEST_RESULTS["R8: Sweep --link zip mode"]="FAIL"
+        TEST_ERRORS["R8: Sweep --link zip mode"]="out: $_ROUT"
+        ((FAILED_TESTS++)); _print_result FAIL "R8: Sweep --link zip mode" "output mismatch"
+    fi
+fi
+
+# --- R9: Sweep with bash function ---
+if in_section R; then
+    ((TOTAL_TESTS++))
+    _ROUT=$(bash -c "source '$FRUN_SOURCE' && my_func() { echo \"\$1:\$2\"; }; frun my_func ::: a b ::: 1 2 2>&1 | sort" 2>/dev/null)
+    _REXP="a:1
+a:2
+b:1
+b:2"
+    if [[ "$_ROUT" == "$_REXP" ]]; then
+        TEST_RESULTS["R9: Sweep with bash function"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "R9: Sweep with bash function"
+    else
+        TEST_RESULTS["R9: Sweep with bash function"]="FAIL"
+        TEST_ERRORS["R9: Sweep with bash function"]="out: $_ROUT"
+        ((FAILED_TESTS++)); _print_result FAIL "R9: Sweep with bash function" "output mismatch"
+    fi
+fi
+
+# ============================================================================
 # SUMMARY
 # ============================================================================
 
