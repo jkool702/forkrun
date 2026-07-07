@@ -965,7 +965,7 @@ toc() { :; }
                 insert_args_flag=true
             fi
             for ((k=1; k<=9; k++)); do
-                cmdline_str="${cmdline_str//\\\{$k\\\}/\"\${A[$((k-1))]}\"}"
+                cmdline_str="${cmdline_str//\\\{$k\\\}/\"\${A[$((k-1))]\}\"}"
             done
         fi
 
