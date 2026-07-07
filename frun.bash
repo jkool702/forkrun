@@ -1243,8 +1243,7 @@ toc() { :; }
   trap '"'"'ring_abort
   kill -INT '"${BASHPID}'"' INT
   '
-  (( preempt_mode == 1 )) &&  worker_func_src+='trap '"'"'kill -USR1 '"${BASHPID}'"' USR1
-trap '"'"'kill -TERM '"${BASHPID}'"' TERM
+   (( preempt_mode == 1 )) && worker_func_src+='trap "" USR1 TERM
 '
 worker_func_src+='
   {

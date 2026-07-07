@@ -4786,7 +4786,6 @@ static int ring_claim_main(int argc, char **argv) {
           if (h_cnt > 0 && total_poisoned >= h_cnt) {
               fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u failed batches). Triggering emergency abort.\n", total_poisoned);
               pull_fire_alarm();
-              return EXECUTION_FAILURE;
           }
 
           // 2. Check percentage (Requires at least 100 batches processed to prevent premature aborts)
@@ -4799,9 +4798,8 @@ static int ring_claim_main(int argc, char **argv) {
               if (total_unique_batches >= 100) {
                   uint32_t current_pct = (total_poisoned * 100) / total_unique_batches;
                   if (current_pct >= h_pct) {
-                      fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u%% failed batches). Triggering emergency abort.\n", current_pct);
+                      fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u%% failed batches). Triggering emergency abort.\n", h_pct);
                       pull_fire_alarm();
-                      return EXECUTION_FAILURE;
                   }
               }
           }
