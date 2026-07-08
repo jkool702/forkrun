@@ -6378,10 +6378,14 @@ static int ring_poll_main(int argc, char **argv) {
         }
 
         r = poll(pfds, p_cnt, timeout_this_iter);
-    } while (r == 0 || (r < 0 && errno == EINTR));
+    } while (r == 0);
 
     if (r < 0) {
         free(pfds); free(meta);
+        if (errno == EINTR) {
+            bind_variable("POLL_EVENT", "IGNORE", 0);
+            return EXECUTION_SUCCESS;
+        }
         return EXECUTION_FAILURE;
     }
 
