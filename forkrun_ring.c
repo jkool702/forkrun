@@ -1941,8 +1941,8 @@ static int ring_init_main(int argc, char **argv) {
       // Handle GNU Parallel syntax: "now,fail=10", "soon,fail=10", "fail=10", or just "10"
       char *fail_ptr = strstr(val, "fail=");
       if (fail_ptr) num_ptr = fail_ptr + 5;
-      else if (strncmp(val, "now,fail=", 9) == 0) num_ptr = val + 9;
-      else if (strncmp(val, "soon,fail=", 10) == 0) num_ptr = val + 10;
+      else if (strncmp(val, "now,", 4) == 0) num_ptr = val + 4;
+      else if (strncmp(val, "soon,", 5) == 0) num_ptr = val + 5;
 
       if (strchr(num_ptr, '%')) {
         parsed_halt_pct = atoi(num_ptr);
@@ -4779,8 +4779,8 @@ static int ring_claim_main(int argc, char **argv) {
       if (batch.num_kills == poison_threshold && g_state) {
           uint32_t total_poisoned = __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
 
-          uint32_t h_cnt = state[0].cfg_halt_count;
-          uint32_t h_pct = state[0].cfg_halt_pct;
+          uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
+          uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;
 
           // 1. Check absolute count
           if (h_cnt > 0 && total_poisoned >= h_cnt) {
@@ -6357,40 +6357,32 @@ static int ring_poll_main(int argc, char **argv) {
     }
 
     int r;
-    bool abort_active = false;
-    if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
-        abort_active = true;
-    }
-
-    int timeout_this_iter = abort_active ? 0 : 100; // 100ms default (or 0 to drain on abort)
-    if (!abort_active && g_poll_deadline_ms > 0) {
-        uint64_t now_ms = get_mono_ms();
-        if (now_ms >= g_poll_deadline_ms) {
-            g_poll_deadline_ms = 0;
-            bind_variable("POLL_EVENT", "TIMEOUT", 0);
+    do {
+        if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
             free(pfds); free(meta);
-            return EXECUTION_SUCCESS;
+            return EXECUTION_FAILURE;
         }
-        uint64_t remaining_ms = g_poll_deadline_ms - now_ms;
-        timeout_this_iter = (remaining_ms < 100) ? (int)remaining_ms : 100;
-        if (timeout_this_iter < 1) timeout_this_iter = 1;
-    }
 
-    r = poll(pfds, p_cnt, timeout_this_iter);
+        int timeout_this_iter = 100;
+        if (g_poll_deadline_ms > 0) {
+            uint64_t now_ms = get_mono_ms();
+            if (now_ms >= g_poll_deadline_ms) {
+                g_poll_deadline_ms = 0;
+                bind_variable("POLL_EVENT", "TIMEOUT", 0);
+                free(pfds); free(meta);
+                return EXECUTION_SUCCESS;
+            }
+            uint64_t remaining_ms = g_poll_deadline_ms - now_ms;
+            timeout_this_iter = (remaining_ms < 100) ? (int)remaining_ms : 100;
+            if (timeout_this_iter < 1) timeout_this_iter = 1;
+        }
+
+        r = poll(pfds, p_cnt, timeout_this_iter);
+    } while (r == 0 || (r < 0 && errno == EINTR));
 
     if (r < 0) {
         free(pfds); free(meta);
-        if (errno == EINTR) {
-            bind_variable("POLL_EVENT", "IGNORE", 0);
-            return abort_active ? EXECUTION_FAILURE : EXECUTION_SUCCESS;
-        }
         return EXECUTION_FAILURE;
-    }
-
-    if (r == 0) {
-        free(pfds); free(meta);
-        bind_variable("POLL_EVENT", "IGNORE", 0);
-        return abort_active ? EXECUTION_FAILURE : EXECUTION_SUCCESS;
     }
 
     // 4. Process the Events
@@ -6464,7 +6456,6 @@ static int ring_poll_main(int argc, char **argv) {
 
     bind_variable("POLL_EVENT", "IGNORE", 0);
     free(pfds); free(meta);
-    if (abort_active) return EXECUTION_FAILURE;
     return EXECUTION_SUCCESS;
 }
 #undef LOAD_ARRAY
