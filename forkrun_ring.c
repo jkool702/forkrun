@@ -6359,6 +6359,7 @@ static int ring_poll_main(int argc, char **argv) {
     int r;
     do {
         if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
+            bind_variable("POLL_EVENT", "ABORT", 0);
             free(pfds); free(meta);
             return EXECUTION_FAILURE;
         }

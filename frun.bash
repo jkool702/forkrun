@@ -1316,6 +1316,11 @@ W_NODE[$3]=$2
 
             case "$POLL_EVENT" in
                 IGNORE) ;;
+                ABORT)
+                    NORMAL_EXIT_FLAG=false
+                    (( _ret_val == 0 )) && _ret_val=1
+                    break
+                    ;;
                 TIMEOUT)
                     _timer_armed=false
                     if (( ${#trap_ack_pending[@]} > 0 )); then
