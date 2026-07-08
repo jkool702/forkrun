@@ -2933,7 +2933,7 @@ crash_on_3_7() {
 }
 FUNCEOF
 
-    bash -c "source '$FRUN_SOURCE' && source '$_MD/funcs.sh' && seq 1 10 | FORKRUN_RETRY_LIMIT=0 FORKRUN_EXTRA_FUNCS='crash_on_3_7' frun -k -l 1 -E --halt fail=2 crash_on_3_7" \
+    bash -c "source '$FRUN_SOURCE' && source '$_MD/funcs.sh' && seq 1 100 | FORKRUN_RETRY_LIMIT=0 FORKRUN_EXTRA_FUNCS='crash_on_3_7' frun -k -l 1 -E --halt fail=2 crash_on_3_7" \
         > "$_MD/out.txt" 2>"$_MD/err.txt"
     _RX=$?
     _RERR=$(cat "$_MD/err.txt")
