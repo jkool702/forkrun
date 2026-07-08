@@ -131,7 +131,7 @@ frun() {
         for nn in "${@##\-*}"; do
             [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && ! [[ " ${FORKRUN_EXTRA_FUNCS} " == *" ${nn} "* ]] && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
-        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP}"
+        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_USE_HUGETLB:+FORKRUN_USE_HUGETLB} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} "
 
         FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; declare -p -- ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
         [[ -n "${FORKRUN_EXTRA_SETUP}" ]] && FORKRUN_FRUN_SRC+=$'\n'"${FORKRUN_EXTRA_SETUP}"
@@ -1243,8 +1243,7 @@ toc() { :; }
   trap '"'"'ring_abort
   kill -INT '"${BASHPID}'"' INT
   '
-  (( preempt_mode == 1 )) &&  worker_func_src+='trap '"'"'kill -USR1 '"${BASHPID}'"' USR1
-trap '"'"'kill -TERM '"${BASHPID}'"' TERM
+   (( preempt_mode == 1 )) && worker_func_src+='trap "" USR1 TERM
 '
 worker_func_src+='
   {
@@ -1289,8 +1288,7 @@ worker_func_src+='
 P[$3]=$!
 W_NODE[$3]=$2
 }'
-trap -p >&2
-declare -p worker_func_src >&2
+
         eval "${worker_func_src}"
 
         # --- SPAWN LOOP REACTOR ---
