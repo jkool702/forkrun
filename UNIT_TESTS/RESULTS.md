@@ -323,12 +323,16 @@ Verifying run_test_sorted catches duplicate lines...
   [0;32m✓[0m R7: Sweep file args (::::) default args
   [0;32m✓[0m R8: Sweep --link zip mode
   [0;32m✓[0m R9: Sweep with bash function
+  [0;32m✓[0m R10: SLURM SIGTERM triggers checkpoint and exit 143
+  [0;32m✓[0m R11: GNU Halt syntax (--halt now,2) triggers abort
+  [0;32m✓[0m R12: Sweep file args from stdin (:::: -)
+  [0;32m✓[0m R13: Sweep --link truncates uneven arrays safely
 
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 [1mSUMMARY[0m
 [1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-Total:   204
-Passed:  204  ([0;32m100.0%[0m)
+Total:   208
+Passed:  208  ([0;32m100.0%[0m)
 Failed:    0  ([0;31m0.0%[0m)
 Skipped:   0  ([1;33m0.0%[0m)
 
