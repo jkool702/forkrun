@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.3.0
+// forkrun_ring.c v3.4.0
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -29,8 +29,7 @@
 //    OOM without breaking the absolute integer offsets.
 //
 // CRITICAL INVARIANT: The fast path has no locks and no CAS retry loops.
-// Batch signs (-N / +N) encode the scanner's advisory vs the worker's finalized
-// contract.
+
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
@@ -62,7 +61,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-#include <dlfcn.h>      // <--- ADD THIS for dynamic plugins
+#include <dlfcn.h>      // dlopen/dlsym for -C plugin loading
 #include <spawn.h>
 #include <sys/wait.h>
 
@@ -375,7 +374,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.3.0"
+#define FORKRUN_RING_VERSION "v3.4.0"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -897,7 +896,8 @@ static int ring_exec_splice_main(int argc, char **argv) {
   X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow") \
   X(ring_dump_resume, ring_dump_resume_main, "ring_dump_resume [bytes]", "Dump checkpoint state") \
   X(ring_set_resume, ring_set_resume_main, "ring_set_resume <horizon> [jagged...]", "Set checkpoint state") \
-  X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort")
+  X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort") \
+  X(ring_tui, ring_tui_main, "ring_tui [expected_bytes] [order_mode]", "Real-Time Telemetry Dashboard")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
 FORKRUN_LOADABLES(X)
@@ -929,7 +929,7 @@ static int pin_to_numa_node(int node_id) {
   CPU_ZERO(&cpuset);
   char *p = buf;
   while (*p) {
-    while (*p && !isdigit(*p))
+    while (*p && !isdigit((unsigned char)*p))
       p++;
     if (!*p)
       break;
@@ -1257,6 +1257,8 @@ struct GlobalState {
   uint32_t resume_jagged_count;
   struct IntervalNode resume_jagged[1024];
 
+  uint32_t poisoned_count ALIGNED(CACHE_LINE);
+
   struct ChunkMeta meta_ring[META_RING_SIZE];
 };
 
@@ -1320,11 +1322,20 @@ struct SharedState {
   uint8_t numa_enabled;
   uint8_t exact_lines;
   uint8_t cfg_delim; // Record delimiter character (default '\n')
+  uint32_t cfg_halt_count; // Absolute count threshold for halt
+  uint32_t cfg_halt_pct;   // Percentage threshold for halt
+
+  uint64_t current_batch_size ALIGNED(CACHE_LINE);
+  uint64_t uma_ingest_offset ALIGNED(CACHE_LINE);
+  uint64_t total_lines_scanned ALIGNED(CACHE_LINE);
 
   uint64_t stats_chunks_assigned ALIGNED(CACHE_LINE);
   uint64_t stats_chunks_processed;
   uint64_t stats_chunks_i_stole;
   uint64_t stats_chunks_stolen_from_me;
+
+  uint64_t current_stall_meter ALIGNED(CACHE_LINE);
+  uint64_t current_starve_meter;
 
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
@@ -1535,9 +1546,74 @@ static inline void check_memory_pressure(uint64_t *total_moved,
 #define M_L_ALL (M_L_A | M_L_B)
 #define M_B_ALL (M_B_A | M_B_B)
 
+// Helper to determine the actual usable CPU count, respecting taskset (affinity)
+// and container/HPC fractional cgroup quotas.
+static uint64_t get_logical_cores() {
+  uint64_t affinity_cores = 0;
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+
+  // 1. Check CPU Affinity Mask (Catches Slurm taskset & cpuset confinement)
+  if (sched_getaffinity(0, sizeof(cpu_set_t), &cpuset) == 0) {
+    affinity_cores = CPU_COUNT(&cpuset);
+  }
+  if (affinity_cores == 0) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    affinity_cores = (n > 0) ? (uint64_t)n : 1;
+  }
+
+  uint64_t quota_cores = (uint64_t)-1; // Default: Unlimited
+  char buf[128];
+
+  // 2. Check cgroups v2 (cpu.max)
+  int fd = open("/sys/fs/cgroup/cpu.max", O_RDONLY);
+  if (fd >= 0) {
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n > 0) {
+      buf[n] = '\0';
+      if (strncmp(buf, "max", 3) != 0) {
+        long long quota = 0, period = 0;
+        if (sscanf(buf, "%lld %lld", &quota, &period) == 2 && period > 0 && quota > 0) {
+          quota_cores = (quota + period - 1) / period; // Ceiling division
+        }
+      }
+    }
+  } else {
+    // 3. Fallback to cgroups v1 (cpu.cfs_quota_us)
+    fd = open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", O_RDONLY);
+    if (fd >= 0) {
+      ssize_t n = read(fd, buf, sizeof(buf) - 1);
+      close(fd);
+      if (n > 0) {
+        buf[n] = '\0';
+        long long quota = atoll(buf);
+        if (quota > 0) {
+          int pfd = open("/sys/fs/cgroup/cpu/cpu.cfs_period_us", O_RDONLY);
+          if (pfd >= 0) {
+            n = read(pfd, buf, sizeof(buf) - 1);
+            close(pfd);
+            if (n > 0) {
+              buf[n] = '\0';
+              long long period = atoll(buf);
+              if (period > 0) {
+                quota_cores = (quota + period - 1) / period; // Ceiling division
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // The actual limit is the stricter of the two (Affinity vs. Quota)
+  uint64_t final_cores = (quota_cores < affinity_cores) ? quota_cores : affinity_cores;
+  return (final_cores > 0) ? final_cores : 1;
+}
+
 static uint64_t get_v_def(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
-    return sysconf(_SC_NPROCESSORS_ONLN);
+    return get_logical_cores();
   if (!strcmp(type, "lines"))
     return 4096;
   if (!strcmp(type, "bytes")) {
@@ -1552,7 +1628,7 @@ static uint64_t get_v_def(const char *type, bool stdin_mode) {
 
 static uint64_t get_v_max(const char *type, bool stdin_mode) {
   if (!strcmp(type, "workers"))
-    return sysconf(_SC_NPROCESSORS_ONLN) * 2;
+    return get_logical_cores() * 2;
   if (!strcmp(type, "lines"))
     return 65536;
   if (!strcmp(type, "bytes")) {
@@ -1768,7 +1844,10 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].meta_waiters, 0);
 
       // Reset PID Controller / Flow State
-      atomic_store_relaxed(&state[n].active_workers, state[n].cfg_w_start);
+      atomic_store_relaxed(&state[n].active_workers, 0); // Rely on Bash 'ring_worker inc'
+      atomic_store_relaxed(&state[n].current_batch_size, 0);
+      atomic_store_relaxed(&state[n].uma_ingest_offset, 0);
+      atomic_store_relaxed(&state[n].total_lines_scanned, 0);
 
       state[n].offset_ring[0] = 0;
       if (fd_escrow_r && fd_escrow_r[n] >= 0) {
@@ -1816,6 +1895,8 @@ static int ring_init_main(int argc, char **argv) {
   int64_t parsed_timeout = -1;
   uint8_t parsed_exact_lines = 0;
   uint8_t parsed_delim = '\n';
+  uint32_t parsed_halt_count = 0;
+  uint32_t parsed_halt_pct = 0;
 
   for (int i = 1; i < argc; i++) {
     const char *arg = argv[i];
@@ -1853,6 +1934,22 @@ static int ring_init_main(int argc, char **argv) {
       stdin_explicit = 0;
     else if (strncmp(arg, "--delim=", 8) == 0)
       parsed_delim = (uint8_t)arg[8];
+    else if (strncmp(arg, "--halt=", 7) == 0) {
+      const char *val = arg + 7;
+      const char *num_ptr = val;
+
+      // Handle GNU Parallel syntax: "now,fail=10", "soon,fail=10", "fail=10", or just "10"
+      char *fail_ptr = strstr(val, "fail=");
+      if (fail_ptr) num_ptr = fail_ptr + 5;
+      else if (strncmp(val, "now,", 4) == 0) num_ptr = val + 4;
+      else if (strncmp(val, "soon,", 5) == 0) num_ptr = val + 5;
+
+      if (strchr(num_ptr, '%')) {
+        parsed_halt_pct = atoi(num_ptr);
+      } else {
+        parsed_halt_count = atoi(num_ptr);
+      }
+    }
     else if (strncmp(arg, "--nodes=", 8) != 0 &&
              strncmp(arg, "--numa-map=", 11) != 0 && arg[0] != '-')
       out_array_name = arg;
@@ -1938,6 +2035,8 @@ static int ring_init_main(int argc, char **argv) {
     state[n].numa_enabled = (global_num_nodes > 1) ? 1 : 0;
     state[n].exact_lines = parsed_exact_lines;
     state[n].cfg_delim = parsed_delim;
+    state[n].cfg_halt_count = parsed_halt_count;
+    state[n].cfg_halt_pct = parsed_halt_pct;
     state[n].cfg_limit = parsed_limit;
     state[n].cfg_timeout_us = parsed_timeout;
     atomic_store_relaxed(&state[n].chunk_buffer_limit, 4); // Default to 3 chunks active (limit = 4)
@@ -1981,12 +2080,12 @@ static int ring_init_main(int argc, char **argv) {
       if (dist_buf[0] != '\0') {
         const char *p = dist_buf;
         for (uint32_t skip = 0; skip < phys_i && *p; skip++) {
-          while (*p && !isspace(*p))
+          while (*p && !isspace((unsigned char)*p))
             p++;
-          while (*p && isspace(*p))
+          while (*p && isspace((unsigned char)*p))
             p++;
         }
-        if (*p && isdigit(*p))
+        if (*p && isdigit((unsigned char)*p))
           dist = atoi(p);
       }
 
@@ -3029,7 +3128,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           if (slen > 0)                                                        \
             robust_pipe_write(fd_spawn, sbuf, slen);                           \
           W += needed;                                                         \
-          atomic_store_relaxed(&local_state->active_workers, W);               \
         }                                                                      \
       }                                                                        \
       usleep(100);                                                             \
@@ -3097,7 +3195,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
               if (_slen > 0)                                                   \
                 robust_pipe_write(fd_spawn, _sbuf, _slen);                     \
               W += _n_spawn;                                                   \
-              atomic_store_relaxed(&(state_ptr)->active_workers, W);           \
             }                                                                  \
           }                                                                    \
           batch_counter = 0;                                                   \
@@ -3151,7 +3248,6 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             if (_slen > 0)                                                     \
               robust_pipe_write(fd_spawn, _sbuf, _slen);                       \
             W += _grow;                                                        \
-            atomic_store_relaxed(&(state_ptr)->active_workers, W);             \
           }                                                                    \
         }                                                                      \
       }                                                                        \
@@ -3252,7 +3348,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   atomic_store_relaxed(&local_state->read_idx, 0);
   if (!is_numa)
     atomic_store_relaxed(&local_state->tail_idx, 0);
-  atomic_store_relaxed(&local_state->active_workers, W);
 
   // ---- NEW: Pin scanner ----
   if (g_logical_to_phys_map) {
@@ -3382,7 +3477,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 robust_pipe_write(fd_spawn, _sbuf, _slen);
             }
             sim_W += _n_spawn;
-            atomic_store_relaxed(&local_state->active_workers, sim_W);
           } else {
             break; // not enough lines yet for the next geometric step
           }
@@ -3695,6 +3789,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         starve_meter = (starve_meter + _xLim) >> 1;
       else
         starve_meter >>= 1;
+
+      atomic_store_relaxed(&local_state->current_stall_meter, stall_meter);
+      atomic_store_relaxed(&local_state->current_starve_meter, starve_meter);
     }
 
     while ((is_numa && current_p_offset < chunk_end) ||
@@ -3869,6 +3966,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           batch_start += is_numa ? take : current_p_offset - batch_start;
           total_scanned += is_numa ? take : 1;
           pending_lines = 0;
+
+          if (!_skipped) {
+            int node_arg = is_numa ? my_node_id : -1;
+            atomic_store_relaxed(&local_state->current_batch_size, take);
+            ADAPTIVE_FLOW_CONTROL(local_state, current_stall, node_arg);
+          }
         } else {
           if (!is_numa)
             force_refill = true;
@@ -3999,6 +4102,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
         pending_lines += lines_found;
         total_scanned += lines_found;
+        atomic_store_relaxed(&local_state->total_lines_scanned, total_scanned);
         current_p_offset = buf_base_offset + (p - buf);
 
         if (!is_numa && limit_items > 0 && total_scanned >= limit_items)
@@ -4050,6 +4154,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           if (!_skipped) {
             int node_arg = is_numa ? my_node_id : -1;
+            atomic_store_relaxed(&local_state->current_batch_size, L);
             ADAPTIVE_FLOW_CONTROL(local_state, current_stall, node_arg);
           }
         } else if (!is_numa)
@@ -4106,7 +4211,6 @@ unified_scanner_eof:
           if (slen > 0)
             robust_pipe_write(fd_spawn, sbuf, slen);
           W += needed;
-          atomic_store_relaxed(&local_state->active_workers, W);
         }
       }
     }
@@ -4371,7 +4475,7 @@ dlc_restart_loop:
   // Re-arm tl_drain_escrow if ring_escrow_put_main has deposited since we
   // last drained.  Costs one relaxed load (≤1 cycle, stays in local cache).
   // PHYSICS FIX: Test-and-Test-and-Set prevents RMW cache-line ping-pong.
-  if (__builtin_expect(__atomic_load_n(&local_state->escrow_pending, __ATOMIC_RELAXED), 0)) {
+  if (__builtin_expect(__atomic_load_n(&local_state->escrow_pending, __ATOMIC_ACQUIRE), 0)) {
     if (__atomic_exchange_n(&local_state->escrow_pending, 0, __ATOMIC_ACQ_REL))
         tl_drain_escrow = true;
 }
@@ -4668,6 +4772,38 @@ static int ring_claim_main(int argc, char **argv) {
     // limit >= 0 → poison when kill count reaches the limit
     if (limit >= 0 && batch.num_kills >= (uint32_t)limit) {
       bind_variable("RING_POISONED", "1", 0);
+
+      // CRITICAL FIX: Increment the global counter exactly ONCE upon crossing the threshold
+      // If limit=0, it is poisoned on the 1st retry (num_kills=1)
+      uint32_t poison_threshold = (limit > 0) ? (uint32_t)limit : 1;
+      if (batch.num_kills == poison_threshold && g_state) {
+          uint32_t total_poisoned = __atomic_add_fetch(&g_state->poisoned_count, 1, __ATOMIC_RELAXED);
+
+          uint32_t h_cnt = state ? state[0].cfg_halt_count : 0;
+          uint32_t h_pct = state ? state[0].cfg_halt_pct : 0;
+
+          // 1. Check absolute count
+          if (h_cnt > 0 && total_poisoned >= h_cnt) {
+              fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u failed batches). Triggering emergency abort.\n", total_poisoned);
+              pull_fire_alarm();
+          }
+
+          // 2. Check percentage (Requires at least 100 batches processed to prevent premature aborts)
+          if (h_pct > 0) {
+              uint64_t total_unique_batches = 0;
+              for (uint32_t i = 0; i < global_num_nodes; i++) {
+                  // read_idx tracks strictly unique batches (not claims including retries)
+                  total_unique_batches += atomic_load_relaxed(&state[i].read_idx);
+              }
+              if (total_unique_batches >= 100) {
+                  uint32_t current_pct = (total_poisoned * 100) / total_unique_batches;
+                  if (current_pct >= h_pct) {
+                      fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u%% failed batches). Triggering emergency abort.\n", h_pct);
+                      pull_fire_alarm();
+                  }
+              }
+          }
+      }
     } else {
       bind_variable("RING_POISONED", "0", 0);
     }
@@ -4980,6 +5116,7 @@ static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len, struct O
     if (fs->heap_cap == 0) {
         fs->heap_cap = 64;
         fs->heap = malloc(fs->heap_cap * sizeof(struct IntervalNode));
+        if (!fs->heap) { fs->heap_cap = 0; return; } // OOM: retry next call instead of dereferencing NULL
     }
 
     if ((uint64_t)p_off <= fs->limit) {
@@ -5049,6 +5186,7 @@ static int ring_order_main(int argc, char **argv) {
   int tracker_cap = 1024;
   int tracker_sz = 0;
   struct IntervalNode *tracker_heap = malloc(tracker_cap * sizeof(struct IntervalNode));
+  if (!tracker_heap) { free(fd_states); free(heap); return EXECUTION_FAILURE; }
   uint64_t tracker_horizon = 0;
   uint64_t tracker_bytes = 0;
 
@@ -5218,6 +5356,7 @@ static int ring_fallow_phys_main(int argc, char **argv) {
   int heap_cap = 1024;
   int heap_sz = 0;
   struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
+  if (!heap) return EXECUTION_FAILURE;
   uint64_t limit = 0;
   off_t last_punched = 0;
 
@@ -5602,6 +5741,7 @@ static int ring_fetcher_main(int argc, char **argv) {
         copy_file_range(fd_global, &off_in, fd_local, &off_out, pp.len, 0);
     if (ret < 0) {
       char *buf = malloc(65536);
+      if (!buf) goto skip_copy_fallback;
       uint64_t copied = 0;
       lseek(fd_global, pp.off, SEEK_SET);
       lseek(fd_local, 0, SEEK_END);
@@ -5624,6 +5764,7 @@ static int ring_fetcher_main(int argc, char **argv) {
         copied += r;
       }
       free(buf);
+      skip_copy_fallback: ;
     }
     uint64_t one = 1;
     sys_write(fd_local_sig, &one, 8);
@@ -5731,6 +5872,7 @@ static int ring_copy_main(int argc, char **argv) {
           sys_write(evfd_ingest_data, &v, 8);
         }
         total_moved += copied_in_chunk;
+      atomic_store_relaxed(&state[0].uma_ingest_offset, total_moved);
       }
       while (off < st.st_size && !limit_reached_exit) {
         if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
@@ -5761,6 +5903,7 @@ static int ring_copy_main(int argc, char **argv) {
           sys_write(evfd_ingest_data, &v, 8);
         }
         total_moved += n;
+        atomic_store_relaxed(&state[0].uma_ingest_offset, total_moved);
       }
       if (off >= st.st_size)
         use_bounce = false;
@@ -5846,6 +5989,7 @@ static int ring_copy_main(int argc, char **argv) {
         sys_write(evfd_ingest_data, &v, 8);
       }
       total_moved += written;
+      atomic_store_relaxed(&state[0].uma_ingest_offset, total_moved);
       check_memory_pressure(&total_moved, &next_check, oom_threshold);
     }
     munmap(bounce_buf, chunk);
@@ -5855,6 +5999,7 @@ static int ring_copy_main(int argc, char **argv) {
     uint64_t val = 999999;
     sys_write(evfd_ingest_eof, &val, 8);
   }
+  if (state) atomic_store_release(&state[0].ingest_complete, 1);
   if (g_explicit_pinning) {
     syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   }
@@ -5865,6 +6010,7 @@ err_out:
     uint64_t val = 999999;
     sys_write(evfd_ingest_eof, &val, 8);
   }
+  if (state) atomic_store_release(&state[0].ingest_complete, 1);
   if (g_explicit_pinning) {
     syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
   }
@@ -5896,6 +6042,7 @@ static int ring_fallow_main(int argc, char **argv) {
   int heap_cap = 1024;
   int heap_sz = 0;
   struct IntervalNode *heap = malloc(heap_cap * sizeof(struct IntervalNode));
+  if (!heap) return EXECUTION_FAILURE;
   uint64_t next_idx = 0;
   off_t last_punched = 0;
 
@@ -5925,8 +6072,8 @@ static int ring_fallow_main(int argc, char **argv) {
         }
 
         if (state) atomic_store_release(&state[0].min_idx, next_idx);
-        if (!dry_run) {
-          uint64_t byte_limit = state[0].offset_ring[next_idx & RING_MASK];
+        if (!dry_run && next_idx > 0) {
+          uint64_t byte_limit = state[0].end_ring[(next_idx - 1) & RING_MASK];
           if (g_state) g_state->fallow_horizon_bytes = byte_limit;
           off_t aligned = (off_t)((byte_limit / 4096ULL) * 4096ULL);
           if (aligned > last_punched) {
@@ -6030,7 +6177,7 @@ static int ring_dump_resume_main(int argc, char **argv) {
         seq1 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
         snap_horizon = g_state->resume_horizon;
         snap_bytes = g_state->resume_stdout_bytes;
-        snap_count = g_state->resume_jagged_count;
+        snap_count = atomic_load_relaxed(&g_state->resume_jagged_count);
         for (uint32_t i = 0; i < snap_count; i++) snap_jagged[i] = g_state->resume_jagged[i];
         seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
     } while (seq1 != seq2 || (seq1 & 1));
@@ -6212,11 +6359,12 @@ static int ring_poll_main(int argc, char **argv) {
     int r;
     do {
         if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
+            bind_variable("POLL_EVENT", "ABORT", 0);
             free(pfds); free(meta);
-            return EXECUTION_FAILURE;
+            return EXECUTION_SUCCESS;
         }
 
-        int timeout_this_iter = 100; // 100ms default for fire alarm checks
+        int timeout_this_iter = 100;
         if (g_poll_deadline_ms > 0) {
             uint64_t now_ms = get_mono_ms();
             if (now_ms >= g_poll_deadline_ms) {
@@ -6231,10 +6379,14 @@ static int ring_poll_main(int argc, char **argv) {
         }
 
         r = poll(pfds, p_cnt, timeout_this_iter);
-    } while (r == 0 || (r < 0 && errno == EINTR));
+    } while (r == 0);
 
     if (r < 0) {
         free(pfds); free(meta);
+        if (errno == EINTR) {
+            bind_variable("POLL_EVENT", "IGNORE", 0);
+            return EXECUTION_SUCCESS;
+        }
         return EXECUTION_FAILURE;
     }
 
@@ -6580,6 +6732,534 @@ static int ring_list_main(int argc, char **argv) {
 #undef PRINT_NAME
   }
   return EXECUTION_SUCCESS;
+}
+
+// ==============================================================================
+// 9. LIVE TELEMETRY DASHBOARD (TUI)
+// ==============================================================================
+#include <sys/ioctl.h>
+#include <termios.h>
+
+static volatile sig_atomic_t tui_exit = 0;
+static void tui_sig_handler(int sig) {
+    (void)sig;
+    tui_exit = 1;
+}
+
+static void format_commas(uint64_t n, char *out) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)n);
+    int len = strlen(buf);
+    int out_idx = 0;
+    for (int i = 0; i < len; i++) {
+        if (i > 0 && (len - i) % 3 == 0) out[out_idx++] = ',';
+        out[out_idx++] = buf[i];
+    }
+    out[out_idx] = '\0';
+}
+
+static void format_bytes(double bytes, char *out) {
+    if (bytes >= 1073741824.0)      snprintf(out, 32, "%.1f GB", bytes / 1073741824.0);
+    else if (bytes >= 1048576.0)    snprintf(out, 32, "%.1f MB", bytes / 1048576.0);
+    else if (bytes >= 1024.0)       snprintf(out, 32, "%.1f KB", bytes / 1024.0);
+    else                            snprintf(out, 32, "%.0f B",  bytes);
+}
+
+static void format_rate(double rate, const char *suffix, char *out) {
+    if (rate >= 1e9)        snprintf(out, 32, "%.1f B %s", rate / 1e9,  suffix);
+    else if (rate >= 1e6)   snprintf(out, 32, "%.1f M %s", rate / 1e6,  suffix);
+    else if (rate >= 1e3)   snprintf(out, 32, "%.1f K %s", rate / 1e3,  suffix);
+    else                    snprintf(out, 32, "%.0f %s",   rate,         suffix);
+}
+
+static void format_bw(double bytes_ps, char *out) {
+    if (bytes_ps >= 1073741824.0)      snprintf(out, 32, "%.1f GB/s", bytes_ps / 1073741824.0);
+    else if (bytes_ps >= 1048576.0)    snprintf(out, 32, "%.1f MB/s", bytes_ps / 1048576.0);
+    else if (bytes_ps >= 1024.0)       snprintf(out, 32, "%.1f KB/s", bytes_ps / 1024.0);
+    else                               snprintf(out, 32, "%.0f B/s",  bytes_ps);
+}
+
+static void tui_print_sep(FILE *tty, const char *title) {
+    fprintf(tty, "\033[1;34m\xe2\x94\x9c\xe2\x94\x80 \033[1;33m%s \033[1;34m", title);
+    int title_len = (int)strlen(title);
+    // 1(├) + 1(─) + 1(space) + title_len + 1(space) + N(─) + 1(┤) = 80
+    for (int i = 0; i < 75 - title_len; i++) fputs("\xe2\x94\x80", tty);
+    fprintf(tty, "\xe2\x94\xa4\033[0m\n");
+}
+
+static int tui_get_node_cpus(int phys_node, uint8_t *cpu_map, int max_cpus) {
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/cpulist", phys_node);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    char buf[1024] = {0};
+    ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -1;
+
+    char *p = buf;
+    while (*p) {
+        while (*p && !isdigit((unsigned char)*p)) p++;
+        if (!*p) break;
+        int start = strtol(p, &p, 10);
+        int end = start;
+        if (*p == '-') {
+            p++;
+            end = strtol(p, &p, 10);
+        }
+        int limit = end < max_cpus ? end : max_cpus - 1;
+        for (int i = start; i <= limit; i++) {
+            if (i >= 0) cpu_map[i] = 1;
+        }
+        while (*p && *p != ',' && *p != '\n') p++;
+    }
+    return 0;
+}
+
+static int ring_tui_main(int argc, char **argv) {
+    if (!g_state || !state) return EXECUTION_FAILURE;
+
+    uint64_t expected_total_bytes = 0;
+    if (argc > 1) expected_total_bytes = strtoull(argv[1], NULL, 10);
+    const char *order_mode_str = (argc > 2) ? argv[2] : "Ordered";
+    const char *cmd_str = (argc > 3) ? argv[3] : "";
+
+    int tty_fd = open("/dev/tty", O_WRONLY);
+    if (tty_fd < 0) return EXECUTION_FAILURE;
+    FILE *tty = fdopen(tty_fd, "w");
+    if (!tty) { close(tty_fd); return EXECUTION_FAILURE; }
+
+    struct sigaction sa, old_int, old_term;
+    sa.sa_handler = tui_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT,  &sa, &old_int);
+    sigaction(SIGTERM, &sa, &old_term);
+
+    fprintf(tty, "\033[?1049h\033[?25l"); // Alt screen, hide cursor
+
+    uint64_t start_time = get_us_time();
+    uint64_t last_time  = start_time;
+    uint64_t last_lines = 0, last_bytes = 0, last_batches = 0;
+
+    // --- CPU Tracker State ---
+    struct CpuStat {
+        uint64_t active;
+        uint64_t total;
+    };
+    struct CpuStat prev_cpu[1024];
+    memset(prev_cpu, 0, sizeof(prev_cpu));
+
+    uint8_t node_cpu_map[1024][1024];
+    memset(node_cpu_map, 0, sizeof(node_cpu_map));
+    int cpus_per_node[1024];
+    memset(cpus_per_node, 0, sizeof(cpus_per_node));
+
+    // Map physical CPU cores to their NUMA nodes for localized utilization tracking
+    if (global_num_nodes <= 1024) {
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            uint32_t phys = g_logical_to_phys_map ? g_logical_to_phys_map[i] : 0;
+            if (tui_get_node_cpus(phys, node_cpu_map[i], 1024) == 0) {
+                for (int c = 0; c < 1024; c++) {
+                    if (node_cpu_map[i][c]) cpus_per_node[i]++;
+                }
+            }
+        }
+    }
+
+    char str_throughput[32], str_bandwidth[32], str_batch_rate[32];
+    char str_fallowed[32],   str_in_use[64],    str_total[32];
+    char str_finished[32],   str_remaining[32];
+
+    while (!tui_exit && !atomic_load_relaxed(&state[0].emergency_abort)) {
+        uint64_t now       = get_us_time();
+        double   delta_sec = (now - last_time) / 1000000.0;
+        if (delta_sec < 0.001) delta_sec = 0.001;
+
+        bool is_numa = state[0].numa_enabled;
+        bool is_eof = is_numa ?
+            (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) :
+            atomic_load_acquire(&state[0].ingest_complete);
+
+        // cur_lines  = lines scanned (from scanner, for throughput display)
+        // cur_batches = lines consumed by workers (proxy for completed batch count)
+        uint64_t cur_lines = 0, cur_batches = 0;
+        int      total_q   = 0, total_escrow = 0;
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            cur_lines   += atomic_load_relaxed(&state[i].total_lines_scanned);
+            cur_batches += atomic_load_relaxed(&state[i].total_lines_consumed);
+
+            uint64_t head = atomic_load_relaxed(&state[i].chunk_queue_head);
+            uint64_t tail = atomic_load_relaxed(&state[i].chunk_queue_tail);
+            total_q      += (head > tail) ? (int)(head - tail) : 0;
+            total_escrow += atomic_load_relaxed(&state[i].escrow_pending);
+        }
+
+        // Memory footprint: fallowed = reclaimed, read_offset = consumed by workers,
+        // ingest_off = total bytes written into the memfd so far (NUMA) or
+        // total bytes read from stdin so far (UMA).
+        uint64_t fallowed    = g_state->fallow_horizon_bytes;
+
+        uint64_t read_offset = 0;
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            uint64_t r_idx = atomic_load_relaxed(&state[i].read_idx);
+            uint64_t w_idx = atomic_load_relaxed(&state[i].write_idx);
+            uint64_t safe_idx = (r_idx > w_idx) ? w_idx : r_idx;
+            if (safe_idx > 0) {
+                uint64_t off = state[i].end_ring[(safe_idx - 1) & RING_MASK];
+                if (off > read_offset) read_offset = off;
+            }
+        }
+
+        uint64_t ingest_off  = 0;
+
+        if (is_numa) {
+            uint64_t current_pub = atomic_load_relaxed(&g_state->ingest_publish_idx);
+            if (current_pub > 0) {
+                ingest_off = g_state->meta_ring[(current_pub - 1) & META_RING_MASK].raw_offset +
+                             g_state->meta_ring[(current_pub - 1) & META_RING_MASK].raw_length;
+            }
+        } else {
+            ingest_off = atomic_load_relaxed(&state[0].uma_ingest_offset);
+        }
+
+        // Sanity clamps for out-of-order atomics
+        if (read_offset < fallowed)    read_offset = fallowed;
+        if (ingest_off  < read_offset) ingest_off  = read_offset;
+
+        double lines_ps   = (cur_lines   > last_lines)   ? (cur_lines   - last_lines)   / delta_sec : 0;
+        double bytes_ps   = (read_offset > last_bytes)   ? (read_offset - last_bytes)   / delta_sec : 0;
+        double batches_ps = (cur_batches > last_batches) ? (cur_batches - last_batches) / delta_sec : 0;
+
+        bool is_byte_mode = state[0].mode_byte;
+
+        if (is_byte_mode) {
+            snprintf(str_throughput, sizeof(str_throughput), "N/A lines/s");
+        } else {
+            format_rate(lines_ps,   "lines/s", str_throughput);
+        }
+        format_bw(bytes_ps, str_bandwidth);
+        format_commas((uint64_t)batches_ps, str_batch_rate);
+        snprintf(str_batch_rate + strlen(str_batch_rate),
+                 (int)(32 - strlen(str_batch_rate)), " batches/s");
+
+        uint64_t elapsed_sec   = (now - start_time) / 1000000;
+        uint64_t active_bytes  = read_offset - fallowed;
+        uint64_t waiting_bytes = ingest_off - read_offset; // ingested but not yet consumed
+
+        char b_f[16], b_a[16], b_w[16];
+        format_bytes((double)fallowed,       b_f);
+        format_bytes((double)active_bytes,   b_a);
+        format_bytes((double)waiting_bytes,  b_w);
+        format_bytes((double)ingest_off,     str_total);
+
+        char total_label[32];
+        snprintf(total_label, sizeof(total_label), "%s Total", str_total);
+        snprintf(str_fallowed, sizeof(str_fallowed), "%s Freed", b_f);
+
+        char b_inuse[16];
+        format_bytes((double)(active_bytes + waiting_bytes), b_inuse);
+        snprintf(str_in_use, sizeof(str_in_use),
+                 "%s In Use (%s Act, %s Wait)", b_inuse, b_a, b_w);
+
+        // Progress & ETA
+        double progress_pct = 0.0;
+        char   str_eta[32]  = "--:--:--";
+        if (expected_total_bytes > 0 && ingest_off > 0) {
+            progress_pct = ((double)read_offset / expected_total_bytes) * 100.0;
+            if (progress_pct > 100.0) progress_pct = 100.0;
+            if (bytes_ps > 0) {
+                uint64_t eta_sec = (uint64_t)((expected_total_bytes - read_offset) / bytes_ps);
+                snprintf(str_eta, sizeof(str_eta), "%02llu:%02llu:%02llu",
+                         (unsigned long long)(eta_sec / 3600),
+                         (unsigned long long)((eta_sec % 3600) / 60),
+                         (unsigned long long)(eta_sec % 60));
+            }
+        }
+        int p_filled = (int)((progress_pct / 100.0) * 46);
+
+        // Read raw Hardware CPU stats from /proc/stat
+        struct CpuStat cur_cpu[1024];
+        memset(cur_cpu, 0, sizeof(cur_cpu));
+        int max_cpu_seen = -1;
+
+        int stat_fd = open("/proc/stat", O_RDONLY);
+        if (stat_fd >= 0) {
+            size_t stat_buf_sz = 131072; // 128KB easily supports 1024+ CPUs
+            char *stat_buf = malloc(stat_buf_sz);
+            if (stat_buf) {
+                size_t total_read = 0;
+                while (total_read < stat_buf_sz - 1) {
+                    ssize_t n = sys_read(stat_fd, stat_buf + total_read, stat_buf_sz - 1 - total_read);
+                    if (n <= 0) break;
+                    total_read += n;
+                }
+                stat_buf[total_read] = '\0';
+
+                char *line = stat_buf;
+                while (line && *line) {
+                    if (strncmp(line, "cpu", 3) == 0 && isdigit((unsigned char)line[3])) {
+                        int cpu_id = atoi(line + 3);
+                        if (cpu_id >= 0 && cpu_id < 1024) {
+                            if (cpu_id > max_cpu_seen) max_cpu_seen = cpu_id;
+                            unsigned long long user = 0, nice = 0, sys = 0, idle = 0;
+                            unsigned long long iowait = 0, irq = 0, softirq = 0, steal = 0;
+                            char *p = line;
+                            while (*p && !isspace((unsigned char)*p)) p++;
+                            sscanf(p, "%llu %llu %llu %llu %llu %llu %llu %llu",
+                                   &user, &nice, &sys, &idle, &iowait, &irq, &softirq, &steal);
+                            cur_cpu[cpu_id].active = (uint64_t)(user + nice + sys + irq + softirq + steal);
+                            cur_cpu[cpu_id].total  = cur_cpu[cpu_id].active + (uint64_t)(idle + iowait);
+                        }
+                    }
+                    line = strchr(line, '\n');
+                    if (line) line++;
+                }
+                free(stat_buf);
+            }
+            close(stat_fd);
+        }
+
+        bool is_io_bound = false;
+        bool is_scanner_bound = false;
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            uint64_t w = atomic_load_relaxed(&state[i].active_workers);
+            uint64_t thresh = (w + DAMPING_OFFSET >= 3) ? (w + DAMPING_OFFSET - 3) : 0;
+            uint64_t st = atomic_load_relaxed(&state[i].current_stall_meter);
+            uint64_t sv = atomic_load_relaxed(&state[i].current_starve_meter);
+            if (st >= thresh) {
+                if (sv >= thresh) is_io_bound = true;
+                else is_scanner_bound = true;
+            }
+        }
+
+        const char *bottleneck = "NONE";
+        if (atomic_load_relaxed(&g_state->resume_jagged_count) > 500) {
+            bottleneck = "Output-Bound";
+        } else if (!is_eof) {
+            // Strictly require an empty wait buffer to declare IO starvation
+            if (total_q == 0 && waiting_bytes < 65536 && is_io_bound) {
+                bottleneck = "IO-Bound";
+            } else if (is_scanner_bound) {
+                bottleneck = "Scanner-Bound";
+            }
+        }
+
+        // ================= RENDERING =================
+        // tui_print_sep computes separator fill dynamically from the title
+        // length, so every horizontal rule lands flush at column 80
+        // regardless of section-title length.
+        char mode_str[32];
+        if (is_numa) snprintf(mode_str, sizeof(mode_str), "NUMA (%u Nodes)", global_num_nodes);
+        else         snprintf(mode_str, sizeof(mode_str), "UMA (Flat)");
+
+        fprintf(tty, "\033[H");
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x8c\xe2\x94\x80 \033[1;37mforkrun \033[1;36m%s \033[1;34m", FORKRUN_RING_VERSION);
+        int top_len = 12 + (int)strlen(FORKRUN_RING_VERSION);
+        for (int i = 0; i < 79 - top_len; i++) fputs("\xe2\x94\x80", tty);
+        fprintf(tty, "\xe2\x94\x90\033[0m\n");
+
+        char cmd_trunc[76];
+        if (strlen(cmd_str) > 71) {
+            snprintf(cmd_trunc, sizeof(cmd_trunc), "%.68s...", cmd_str);
+        } else {
+            snprintf(cmd_trunc, sizeof(cmd_trunc), "%s", cmd_str);
+        }
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mCMD: \033[38;5;33m%-71s \033[1;34m\xe2\x94\x82\033[0m\n", cmd_trunc);
+
+        const char *stream_color = is_eof ? "\033[1;33m" : "\033[1;32m";
+        const char *stream_text  = is_eof ? "[   EOF   ]" : "[ RUNNING ]";
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mMODE: \033[1;36m%-24s\033[1;34m\xe2\x94\x82 \033[1;37mOUTPUT: \033[1;36m%-9s \033[1;34m\xe2\x94\x82 \033[1;37mSTREAM: %s%-16s\033[0m \033[1;34m\xe2\x94\x82\033[0m\n",
+                mode_str, order_mode_str, stream_color, stream_text);
+
+        tui_print_sep(tty, "Global Stream Metrics");
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mTHROUGHPUT: \033[1;36m%-18s\033[1;34m\xe2\x94\x82 \033[1;36m%-19s\033[1;34m\xe2\x94\x82 \033[1;36m%-23s \033[1;34m\xe2\x94\x82\033[0m\n",
+                str_throughput, str_bandwidth, str_batch_rate);
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mPROGRESS:   \033[1;34m[\033[1;32m");
+        for (int i = 0; i < 46; i++) fputs((i < p_filled) ? "\xe2\x96\x88" : "\xe2\x96\x91", tty);
+        fprintf(tty, "\033[1;34m] \033[1;36m%5.1f%%\033[0m          \033[1;34m\xe2\x94\x82\033[0m\n", progress_pct);
+
+        const char *bn_color = strcmp(bottleneck, "NONE") == 0 ? "\033[1;32m" : "\033[1;33m";
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mTIME:       \033[1;36m%02llu:%02llu:%02llu elapsed  \033[1;34m\xe2\x94\x82 \033[1;37mETA: \033[38;5;208m%-12s \033[1;34m\xe2\x94\x82 \033[1;37mBOTTLENECK: %s%-12s\033[0m \033[1;34m\xe2\x94\x82\033[0m\n",
+                (unsigned long long)(elapsed_sec / 3600), (unsigned long long)((elapsed_sec % 3600) / 60),
+                (unsigned long long)(elapsed_sec % 60), str_eta, bn_color, bottleneck);
+
+        tui_print_sep(tty, "Memory & Entropy (memfd)");
+
+        // Physical memory oscilloscope bar:
+        //   [spaces = fallowed/reclaimed][░ = active/in-use][█ = waiting/ingested-not-consumed]
+        int BAR_W  = 46;
+        int c_free = (ingest_off > 0) ? (int)((fallowed * BAR_W) / ingest_off) : 0;
+        int c_act  = (ingest_off > 0) ? (int)((active_bytes * BAR_W) / ingest_off) : 0;
+
+        // Ensure "Active" isn't swallowed entirely by rounding if > 0
+        if (active_bytes > 0 && c_act == 0) c_act = 1;
+
+        int c_map  = BAR_W - c_free - c_act;
+        if (c_map < 0) {
+            if (c_free > 0) c_free--; else c_act--;
+            c_map = 0;
+        }
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mFOOTPRINT:  \033[1;34m[\033[0m");
+        for (int i = 0; i < c_free; i++) fputc(' ', tty);
+        fputs("\033[1;36m", tty); // Cyan for Active
+        for (int i = 0; i < c_act;  i++) fputs("\xe2\x96\x91", tty);
+        fputs("\033[38;5;33m", tty); // Dodger Blue for Waiting
+        for (int i = 0; i < c_map;  i++) fputs("\xe2\x96\x88", tty);
+        fprintf(tty, "\033[1;34m] \033[1;36m%-16s\033[1;34m\xe2\x94\x82\033[0m\n", total_label);
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mSTATUS:     \033[1;32m%-18s\033[1;34m\xe2\x94\x82 \033[1;33m%-45s\033[1;34m\xe2\x94\x82\033[0m\n", str_fallowed, str_in_use);
+
+        tui_print_sep(tty, "CPU Saturation & NUMA Topology");
+
+        // Base CPU% on logical cores (hyperthreads), not physical cores --
+        // a worker count above the physical core count is expected and
+        // correct on HT/SMT systems, so it must not read as >100%.
+
+        // --- Replace sysconf(_SC_NPROCESSORS_ONLN) with get_logical_cores() ---
+        int logical_cores_per_node = (int)get_logical_cores() / (global_num_nodes > 0 ? (int)global_num_nodes : 1);
+        if (logical_cores_per_node < 1) logical_cores_per_node = 1;
+
+        for (uint32_t i = 0; i < global_num_nodes; i++) {
+            uint64_t w = atomic_load_relaxed(&state[i].active_workers);
+
+            int pct = 0;
+            uint64_t delta_active = 0;
+            uint64_t delta_total = 0;
+            bool has_cpu_stats = false;
+
+            // Map the parsed hardware stats directly to the underlying physical NUMA node
+            // (node_cpu_map/cpus_per_node are fixed-size [1024]; guard against
+            // oversubscribed node counts from --nodes=@N to avoid an OOB stack read)
+            if (i < 1024 && cpus_per_node[i] > 0) {
+                for (int c = 0; c <= max_cpu_seen; c++) {
+                    if (node_cpu_map[i][c] && cur_cpu[c].total > prev_cpu[c].total) {
+                        delta_active += (cur_cpu[c].active - prev_cpu[c].active);
+                        delta_total  += (cur_cpu[c].total - prev_cpu[c].total);
+                        has_cpu_stats = true;
+                    }
+                }
+            } else if (global_num_nodes == 1 && max_cpu_seen >= 0) {
+                // Flat UMA fallback: aggregate all cores
+                for (int c = 0; c <= max_cpu_seen; c++) {
+                    if (cur_cpu[c].total > prev_cpu[c].total) {
+                        delta_active += (cur_cpu[c].active - prev_cpu[c].active);
+                        delta_total  += (cur_cpu[c].total - prev_cpu[c].total);
+                        has_cpu_stats = true;
+                    }
+                }
+            }
+
+            if (has_cpu_stats && delta_total > 0) {
+                pct = (int)((delta_active * 100) / delta_total);
+            } else {
+                // Final fallback if hardware stats failed parsing
+                pct = (int)((w * 100) / logical_cores_per_node);
+            }
+
+            if (pct > 100) pct = 100;
+            int b_fill = (pct * 20) / 100;
+
+            uint64_t h = atomic_load_relaxed(&state[i].chunk_queue_head);
+            uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
+            int q = (h > t) ? (int)(h - t) : 0;
+            uint64_t stolen = atomic_load_relaxed(&state[i].stats_chunks_i_stole);
+
+            const char *q_color = (q == 0) ? "\033[38;5;245m" : "\033[1;36m";
+            const char *s_color = (stolen == 0) ? "\033[38;5;245m" : "\033[1;36m";
+
+            const char *cpu_color = "\033[1;32m"; // Green
+            if (pct > 80) cpu_color = "\033[1;31m"; // Red
+            else if (pct > 50) cpu_color = "\033[1;33m"; // Yellow
+
+            fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mNODE %-2u \033[1;37mCPU:%s%3d%%\033[0m \033[1;34m[%s", i, cpu_color, pct, cpu_color);
+            for (int k = 0; k < 20; k++) fputs((k < b_fill) ? "\xe2\x96\x88" : "\xe2\x96\x91", tty);
+            fprintf(tty, "\033[1;34m] \033[1;37mW:\033[1;36m%3llu\033[1;37m/%-3d \033[1;34m\xe2\x94\x82 \033[1;37mQ: %s%-5d \033[1;34m\xe2\x94\x82 \033[1;37mStolen: %s%-5llu \033[1;34m\xe2\x94\x82\033[0m\n",
+                    (unsigned long long)w, logical_cores_per_node, q_color, q, s_color, (unsigned long long)stolen);
+        }
+
+        // Commit CPU hardware stats for the next loop's delta
+        memcpy(prev_cpu, cur_cpu, sizeof(prev_cpu));
+
+        tui_print_sep(tty, "Physics Engine & Batching");
+
+        format_commas(cur_batches, str_finished);
+        uint64_t current_L = atomic_load_relaxed(&state[0].current_batch_size);
+        if (expected_total_bytes > 0 && cur_batches > 0) {
+            uint64_t avg_bytes_per_batch = read_offset / cur_batches;
+            if (avg_bytes_per_batch == 0) avg_bytes_per_batch = 1;
+            uint64_t est_rem = (expected_total_bytes > read_offset) ?
+                (expected_total_bytes - read_offset) / avg_bytes_per_batch : 0;
+            char tmp_rem[32];
+            format_commas(est_rem, tmp_rem);
+            snprintf(str_remaining, sizeof(str_remaining), "~%s", tmp_rem);
+        } else {
+            snprintf(str_remaining, sizeof(str_remaining), "Unknown    ");
+        }
+
+        char str_batch_size[32];
+        if (is_byte_mode) {
+            snprintf(str_batch_size, sizeof(str_batch_size), "%llu bytes", (unsigned long long)current_L);
+        } else {
+            snprintf(str_batch_size, sizeof(str_batch_size), "%llu lines", (unsigned long long)current_L);
+        }
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mBATCH SIZE: \033[1;36m%-18s\033[1;34m\xe2\x94\x82 \033[1;37mFINISHED: \033[1;32m%-10s\033[1;34m\xe2\x94\x82 \033[1;37mREMAINING: \033[38;5;208m%-11s \033[1;34m\xe2\x94\x82\033[0m\n",
+                str_batch_size, str_finished, str_remaining);
+
+        tui_print_sep(tty, "Fault Tolerance & Output Ordering");
+
+        uint32_t poisoned = __atomic_load_n(&g_state->poisoned_count, __ATOMIC_RELAXED);
+        uint32_t skew = __atomic_load_n(&g_state->resume_jagged_count, __ATOMIC_RELAXED);
+        const char *p_color = poisoned > 0 ? "\033[1;31m" : "\033[38;5;245m";
+        const char *e_color = total_escrow > 0 ? "\033[1;33m" : "\033[38;5;245m";
+        const char *sk_color = skew > 0 ? "\033[1;36m" : "\033[38;5;245m";
+
+        char p_str[16], e_str[16], sk_str[16];
+        snprintf(p_str, sizeof(p_str), "%u", poisoned);
+        snprintf(e_str, sizeof(e_str), "%d", total_escrow);
+        snprintf(sk_str, sizeof(sk_str), "%u", skew);
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x82 \033[1;37mESCROW QUEUE: %s%-16s\033[1;34m\xe2\x94\x82 \033[1;37mPOISONED: %s%-10s\033[1;34m\xe2\x94\x82 \033[1;37mOUTPUT SKEW: %s%-9s \033[1;34m\xe2\x94\x82\033[0m\n",
+                e_color, e_str, p_color, p_str, sk_color, sk_str);
+
+        fprintf(tty, "\033[1;34m\xe2\x94\x94");
+        for (int i = 0; i < 78; i++) fputs("\xe2\x94\x80", tty);
+        fprintf(tty, "\xe2\x94\x98\033[0m\n");
+        fflush(tty);
+
+        // All-done check: EOF signalled + all scanners finished + ring drained
+        bool all_done = is_eof;
+        for (uint32_t i = 0; i < global_num_nodes && all_done; i++) {
+            if (!atomic_load_acquire(&state[i].scanner_finished) ||
+                (atomic_load_relaxed(&state[i].read_idx) <
+                 atomic_load_relaxed(&state[i].write_idx))) {
+                all_done = false;
+            }
+        }
+        if (all_done) break;
+
+        last_time    = now;
+        last_lines   = cur_lines;
+        last_bytes   = read_offset;
+        last_batches = cur_batches;
+
+        usleep(250000); // 4 FPS
+    }
+
+    // Restore screen and cursor
+    fprintf(tty, "\033[?1049l\033[?25h");
+    fclose(tty);
+    sigaction(SIGINT,  &old_int,  NULL);
+    sigaction(SIGTERM, &old_term, NULL);
+    return EXECUTION_SUCCESS;
 }
 
 int setup_builtin_forkrun_ring(void) {

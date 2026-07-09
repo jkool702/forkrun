@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# forkrun v3.2.1 - C Plugin Rigorous Test Suite
+# forkrun v3.4.0 - C Plugin Rigorous Test Suite
 # =============================================================================
 
 set -o pipefail
@@ -13,7 +13,7 @@ HEADER="${UNIT_TESTS_DIR}/../ring_loadables/forkrun_plugin.h"
 mkdir -p "$TEST_DIR"
 cd "$TEST_DIR"
 
-echo "=== forkrun v3.2.1 C Plugin Rigorous Test Suite ==="
+echo "=== forkrun v3.4.0 C Plugin Rigorous Test Suite ==="
 
 # Source frun
 . "$FRUN_SCRIPT"
