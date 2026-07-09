@@ -253,6 +253,8 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
   }
 #elif defined(__aarch64__)
   return scan_batch_neon(p, safe_end, target, delim);
+#else
+  (void)delim; // Silence unused parameter warning on non-SIMD architectures
 #endif
 
   return NULL;
@@ -626,7 +628,7 @@ static int ring_map_main(int argc, char **argv) {
         unbind_variable(arr_name);
     }
 
-    SHELL_VAR *v = make_new_array_variable(arr_name);
+    SHELL_VAR *v = make_new_array_variable((char *)arr_name);
     if (!v) return EXECUTION_FAILURE;
 
     int ret = do_tokenize(fd, length, tls_batch_offset, delim, v, 0, NULL);
@@ -2179,7 +2181,7 @@ static int ring_init_main(int argc, char **argv) {
       v = NULL;
     }
     if (!v)
-      v = make_new_array_variable(out_array_name);
+      v = make_new_array_variable((char *)out_array_name);
     if (!v) {
       ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
@@ -5567,7 +5569,7 @@ static int ring_pipe_main(int argc, char **argv) {
       v = NULL;
     }
     if (!v)
-      v = make_new_array_variable(arr_name);
+      v = make_new_array_variable((char *)arr_name);
     if (!v) {
       close(pfd[0]);
       close(pfd[1]);
@@ -6715,7 +6717,7 @@ static int ring_list_main(int argc, char **argv) {
       v = NULL;
     }
     if (!v)
-      v = make_new_array_variable(var_name);
+      v = make_new_array_variable((char *)var_name);
     if (!v)
       return EXECUTION_FAILURE;
     int i = 0;
