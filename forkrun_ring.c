@@ -1939,7 +1939,7 @@ static int ring_init_main(int argc, char **argv) {
       const char *num_ptr = val;
 
       // Handle GNU Parallel syntax: "now,fail=10", "soon,fail=10", "fail=10", or just "10"
-      char *fail_ptr = strstr(val, "fail=");
+      const char *fail_ptr = strstr(val, "fail=");
       if (fail_ptr) num_ptr = fail_ptr + 5;
       else if (strncmp(val, "now,", 4) == 0) num_ptr = val + 4;
       else if (strncmp(val, "soon,", 5) == 0) num_ptr = val + 5;
@@ -4796,7 +4796,7 @@ static int ring_claim_main(int argc, char **argv) {
                   total_unique_batches += atomic_load_relaxed(&state[i].read_idx);
               }
               if (total_unique_batches >= 100) {
-                  uint32_t current_pct = (total_poisoned * 100) / total_unique_batches;
+                  uint32_t current_pct = ((uint64_t)total_poisoned * 100) / total_unique_batches;
                   if (current_pct >= h_pct) {
                       fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u%% failed batches). Triggering emergency abort.\n", h_pct);
                       pull_fire_alarm();
@@ -5872,7 +5872,7 @@ static int ring_copy_main(int argc, char **argv) {
           sys_write(evfd_ingest_data, &v, 8);
         }
         total_moved += copied_in_chunk;
-      atomic_store_relaxed(&state[0].uma_ingest_offset, total_moved);
+        if (state) atomic_store_relaxed(&state[0].uma_ingest_offset, total_moved);
       }
       while (off < st.st_size && !limit_reached_exit) {
         if (state && atomic_load_relaxed(&state[0].emergency_abort)) {
@@ -5903,7 +5903,7 @@ static int ring_copy_main(int argc, char **argv) {
           sys_write(evfd_ingest_data, &v, 8);
         }
         total_moved += n;
-        atomic_store_relaxed(&state[0].uma_ingest_offset, total_moved);
+        if (state) atomic_store_relaxed(&state[0].uma_ingest_offset, total_moved);
       }
       if (off >= st.st_size)
         use_bounce = false;
@@ -5989,7 +5989,7 @@ static int ring_copy_main(int argc, char **argv) {
         sys_write(evfd_ingest_data, &v, 8);
       }
       total_moved += written;
-      atomic_store_relaxed(&state[0].uma_ingest_offset, total_moved);
+      if (state) atomic_store_relaxed(&state[0].uma_ingest_offset, total_moved);
       check_memory_pressure(&total_moved, &next_check, oom_threshold);
     }
     munmap(bounce_buf, chunk);
@@ -6850,8 +6850,11 @@ static int ring_tui_main(int argc, char **argv) {
     struct CpuStat prev_cpu[1024];
     memset(prev_cpu, 0, sizeof(prev_cpu));
 
-    uint8_t node_cpu_map[1024][1024];
-    memset(node_cpu_map, 0, sizeof(node_cpu_map));
+    uint8_t (*node_cpu_map)[1024] = calloc(1024, sizeof(*node_cpu_map));
+    if (!node_cpu_map) {
+        fclose(tty);
+        return EXECUTION_FAILURE;
+    }
     int cpus_per_node[1024];
     memset(cpus_per_node, 0, sizeof(cpus_per_node));
 
@@ -7259,6 +7262,7 @@ static int ring_tui_main(int argc, char **argv) {
     fclose(tty);
     sigaction(SIGINT,  &old_int,  NULL);
     sigaction(SIGTERM, &old_term, NULL);
+    free(node_cpu_map);
     return EXECUTION_SUCCESS;
 }
 
