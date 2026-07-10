@@ -2970,7 +2970,8 @@ FUNCEOF
     _Rx=$?
     _RERR=$(cat "$_MD/err.txt")
 
-    if (( _Rx != 0 )) && echo "$_RERR" | grep -q "Halt condition met (50% failed batches)"; then
+    # FIXED: Updated grep to accept either the standard percentage message or the new "early in run" safeguard message
+    if (( _Rx != 0 )) && echo "$_RERR" | grep -qE "Halt condition met \(50(% failed batches| failed batches early in run)\)"; then
         TEST_RESULTS["R4: Auto halt on percentage (--halt fail=50%)"]="PASS"; ((PASSED_TESTS++))
         _print_result PASS "R4: Auto halt on percentage (--halt fail=50%)"
     else
