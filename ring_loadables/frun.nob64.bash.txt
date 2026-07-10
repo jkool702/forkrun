@@ -168,7 +168,7 @@ frun __exec__ "$@"
     shift 1 # Remove __exec__
 
     if [[ -n "${FORKRUN_SWEEP_ARGS:-}" ]]; then
-        eval "${FORKRUN_SWEEP_ARGS/_FR_SWEEP_ORIG/FORKRUN_ORIG_ARGS}"
+        eval "FORKRUN_ORIG_ARGS=${FORKRUN_SWEEP_ARGS#*=}"
         FORKRUN_EXTRA_VARS="${FORKRUN_EXTRA_VARS// FORKRUN_SWEEP_ARGS /}"
     else
         FORKRUN_ORIG_ARGS=("$@")
