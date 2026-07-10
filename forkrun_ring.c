@@ -4803,6 +4803,12 @@ static int ring_claim_main(int argc, char **argv) {
                       fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u%% failed batches). Triggering emergency abort.\n", h_pct);
                       pull_fire_alarm();
                   }
+              } else {
+                  // For the first 100 batches, evaluate percentage as a hard limit
+                  if (total_poisoned >= h_pct) {
+                      fprintf(stderr, "forkrun [ABORT]: Halt condition met (%u failed batches early in run). Triggering emergency abort.\n", h_pct);
+                      pull_fire_alarm();
+                  }
               }
           }
       }
