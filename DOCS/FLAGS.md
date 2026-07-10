@@ -14,7 +14,6 @@
 - `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. *(NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).*
 - `-C`, `--plugin <so:fn>`    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. See [`C_PLUGIN.md`](C_PLUGIN.md) for additional info.
 
-
 ### OUTPUT MODES
 
 - `--buffered`                : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes. 
@@ -51,6 +50,13 @@
 -  `--stats`                  : Prints NUMA statistics to stderr (currently ignored for UMA)
 - `--tui`, `--progress`      : Opens a live telemetry dashboard (TUI) visualizing throughput, memory footprint, and per-node CPU/queue saturation. `--no-tui`/`--no-progress` disables it.
 
+### MULTI-INPUT PARAMETER SWEEPS
+
+- `::: <args>`                : Treat subsequent arguments as inputs. Generates a Cartesian cross-product if multiple `:::` are used.
+- `:::: <files>`              : Treat subsequent arguments as files and read inputs from them (use `-` for stdin).
+- `--link`                    : Zip parameter lists together instead of generating a full cross-product.
+  *Note: When using sweeps, parameters are automatically unpacked and passed as positional arguments (`$1`, `$2`, etc.) to your function, or you can use `{1}`, `{2}`, etc. to insert them explicitly into your command string.*
+  
 ### ERROR HANDLING & RETRIES
 
 - `-E`, `--retry-nonzero-exit`    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
@@ -88,3 +94,7 @@
 - `FORKRUN_EXTRA_SETUP` : Use this to specify raw commands that need to be run in frun's environment during setup.
   - EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
 - `FORKRUN_USE_HUGETLB` : Set to '1' to have forkrun attempt to use hugepages for memfd backing. WARNING: only enable this if you have sufficient available hugepages so that forkrun does NOT run out of memory to use.
+- `FORKRUN_PREEMPT_MODE`: Controls SLURM preemption detection and handling.
+  - `auto` (default): Automatically detects SLURM environment via `SLURM_JOB_ID`.
+  - `0` / `false`: Disable preemption handling entirely.
+  - `1` / `true`: Force-enable preemption handling. When enabled, forkrun catches `SIGTERM` (scancel/preemption) and `SIGUSR1` (SLURM `--signal=B:USR1@<time>`) to instantly freeze the pipeline and generate a checkpoint for perfect resume capability.
