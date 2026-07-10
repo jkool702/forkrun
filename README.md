@@ -53,7 +53,7 @@ frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output na
 - **GNU Parallel-compatible parameter sweeps** (`:::`, `::::`, `--link`) — run a command across the cartesian product (or zipped pairing) of multiple input lists directly, with `{1}`, `{2}`, ... placeholders, without needing a separate driver script.
 - **Every abnormal exit now checkpoints.** In addition to SLURM signals, forkrun now traps `SIGINT` (Ctrl+C), `SIGHUP` (dropped terminal/SSH session), and `SIGQUIT`, and always writes a `.forkrun_resume` file before exiting — so interactive runs are just as resumable as scheduled ones.
 
-![forkrun TUI demo](https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/NEW/TUI/DOCS/TUI/forkrun_demo.gif)
+![forkrun TUI demo](https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/main/DOCS/TUI/forkrun_demo.gif)
 
 ---
 
