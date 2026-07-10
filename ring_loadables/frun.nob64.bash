@@ -11,6 +11,127 @@ frun() {
 # USAGE:  . frun.bash && printf '%s\n' "${args[@]}" | frun [-flags] [--] parFunc ["${args0[@]}"]
 # FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>] [-E] [-v] [-h]
 #  HELP:  . frun.bash && frun --help
+
+    # --- MULTI-INPUT PARAMETER SWEEP (::: / ::::) INTERCEPT ---
+    local _fr_has_sweep=false
+    local -a _FR_SWEEP_ORIG=()
+    local _skip_next=false
+    local _fr_a
+
+    for _fr_a in "$@"; do
+        if $_skip_next; then _skip_next=false; continue; fi
+        if [[ "$_fr_a" == "--resume" || "$_fr_a" == "--checkpoint-file" ]]; then
+            _skip_next=true; continue
+        fi
+        _FR_SWEEP_ORIG+=("$_fr_a")
+        if [[ "$_fr_a" == ":::" || "$_fr_a" == "::::" ]]; then
+            _fr_has_sweep=true
+        fi
+    done
+
+    if $_fr_has_sweep; then
+        local -a _fr_base_args=()
+        local -a _fr_cur_list=()
+        local -a _fr_A_dims=()
+        local _fr_dim=0
+        local _fr_mode=""
+        local _fr_delim=$'\n'
+        local _fr_link=false
+        local _fr_prev=""
+
+        for _fr_a in "$@"; do
+            if [[ "$_fr_a" == ":::" || "$_fr_a" == "::::" ]]; then
+                if [[ -n "$_fr_mode" ]]; then
+                    eval "_fr_A${_fr_dim}=(\"\${_fr_cur_list[@]}\")"
+                    _fr_A_dims+=("_fr_A${_fr_dim}")
+                    ((_fr_dim++))
+                fi
+                _fr_mode="$_fr_a"
+                _fr_cur_list=()
+                continue
+            fi
+
+            if [[ -z "$_fr_mode" ]]; then
+                if [[ "$_fr_a" == "--link" ]]; then
+                    _fr_link=true
+                    continue
+                fi
+
+                if [[ "$_fr_prev" == "-d" || "$_fr_prev" == "--delim" || "$_fr_prev" == "--delimiter" ]]; then
+                    _fr_delim="${_fr_a:0:1}"
+                    _fr_prev=""
+                elif [[ "$_fr_a" == --delim=* ]]; then
+                    _fr_delim="${_fr_a#*=}"
+                    _fr_delim="${_fr_delim:0:1}"
+                elif [[ "$_fr_a" == -d?* ]]; then
+                    _fr_delim="${_fr_a:2:1}"
+                elif [[ "$_fr_a" == "-z" || "$_fr_a" == "--null" ]]; then
+                    _fr_delim=""
+                else
+                    _fr_prev="$_fr_a"
+                fi
+                _fr_base_args+=("$_fr_a")
+            elif [[ "$_fr_mode" == ":::" ]]; then
+                _fr_cur_list+=("$_fr_a")
+            elif [[ "$_fr_mode" == "::::" ]]; then
+                local -a _tmp_map=()
+                if [[ "$_fr_a" == "-" ]]; then
+                    if [[ -z "$_fr_delim" ]]; then mapfile -d '' -t _tmp_map < /dev/stdin; else mapfile -d "$_fr_delim" -t _tmp_map < /dev/stdin; fi
+                else
+                    if [[ -z "$_fr_delim" ]]; then mapfile -d '' -t _tmp_map < "$_fr_a"; else mapfile -d "$_fr_delim" -t _tmp_map < "$_fr_a"; fi
+                fi
+                _fr_cur_list+=("${_tmp_map[@]}")
+            fi
+        done
+        if [[ -n "$_fr_mode" ]]; then
+            eval "_fr_A${_fr_dim}=(\"\${_fr_cur_list[@]}\")"
+            _fr_A_dims+=("_fr_A${_fr_dim}")
+        fi
+
+        local _fr_eval_str=""
+        local _fr_i
+
+        local _fr_fmt=""
+        for _fr_i in "${!_fr_A_dims[@]}"; do _fr_fmt+="%q "; done
+        _fr_fmt="${_fr_fmt% }\\0"
+
+        if $_fr_link; then
+            local _fr_min_len=-1
+            local _fr_max_len=-1
+            for _fr_i in "${!_fr_A_dims[@]}"; do
+                local _len; eval "_len=\${#_fr_A${_fr_i}[@]}"
+                if (( _fr_min_len == -1 || _len < _fr_min_len )); then _fr_min_len=$_len; fi
+                if (( _len > _fr_max_len )); then _fr_max_len=$_len; fi
+            done
+            if (( _fr_min_len == -1 )); then _fr_min_len=0; fi
+
+            if (( _fr_min_len != _fr_max_len && _fr_min_len > 0 )); then
+                echo "forkrun [WARNING]: --link zip-mode lists have different lengths. Truncating combinations to the shortest length ($_fr_min_len)." >&2
+            fi
+
+            _fr_eval_str+="for (( _fr_idx=0; _fr_idx<${_fr_min_len}; _fr_idx++ )); do"$'\n'
+            _fr_eval_str+="  printf '$_fr_fmt' "
+            for _fr_i in "${!_fr_A_dims[@]}"; do _fr_eval_str+="\"\${_fr_A${_fr_i}[_fr_idx]}\" "; done
+            _fr_eval_str+=$'\n'"done"$'\n'
+        else
+            for _fr_i in "${!_fr_A_dims[@]}"; do _fr_eval_str+="for a${_fr_i} in \"\${_fr_A${_fr_i}[@]}\"; do"$'\n'; done
+            _fr_eval_str+="printf '$_fr_fmt' "
+            for _fr_i in "${!_fr_A_dims[@]}"; do _fr_eval_str+="\"\$a${_fr_i}\" "; done
+            _fr_eval_str+=$'\n'
+            for _fr_i in "${!_fr_A_dims[@]}"; do _fr_eval_str+="done"$'\n'; done
+        fi
+
+        local sweep_export=""
+        [[ -z "${_FR_IN_CLEANROOM:-}" ]] && sweep_export="FORKRUN_SWEEP_ARGS=\"\$(declare -p _FR_SWEEP_ORIG 2>/dev/null)\""
+
+        if [[ -n "${_FR_IN_CLEANROOM:-}" ]]; then
+            eval "$_fr_eval_str" | eval "$sweep_export frun __exec__ -z --_sweep \"\${_fr_base_args[@]}\""
+        else
+            eval "$_fr_eval_str" | eval "$sweep_export frun -z --_sweep \"\${_fr_base_args[@]}\""
+        fi
+        return $?
+    fi
+
 (
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
@@ -25,7 +146,7 @@ frun() {
         for nn in "${@##\-*}"; do
             [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && ! [[ " ${FORKRUN_EXTRA_FUNCS} " == *" ${nn} "* ]] && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
-        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP}"
+        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_USE_HUGETLB:+FORKRUN_USE_HUGETLB} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} "
 
         FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; declare -p -- ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
         [[ -n "${FORKRUN_EXTRA_SETUP}" ]] && FORKRUN_FRUN_SRC+=$'\n'"${FORKRUN_EXTRA_SETUP}"
@@ -34,6 +155,7 @@ frun() {
         # /proc/self/fd/ is safer than $BASHPID in some namespace contexts
         exec -c "${BASH:-bash}" --norc --noprofile -c 'enable -f "/proc/self/fd/'"${FORKRUN_MEMFD_LOADABLES}"'" '"${ring_enable}"' ring_list
 export LC_ALL=C
+export _FR_IN_CLEANROOM=1
 set +m
 shopt -s extglob
 '"${FORKRUN_FRUN_SRC}"'
@@ -44,10 +166,16 @@ frun __exec__ "$@"
     }
     # 2. WORKER LOGIC (Clean Shell)
     shift 1 # Remove __exec__
-    FORKRUN_ORIG_ARGS=("$@")
+
+    if [[ -n "${FORKRUN_SWEEP_ARGS:-}" ]]; then
+        eval "FORKRUN_ORIG_ARGS=${FORKRUN_SWEEP_ARGS#*=}"
+        FORKRUN_EXTRA_VARS="${FORKRUN_EXTRA_VARS// FORKRUN_SWEEP_ARGS /}"
+    else
+        FORKRUN_ORIG_ARGS=("$@")
+    fi
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg tui_flag TUI_PID preempt_mode is_sweep
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -61,6 +189,16 @@ frun __exec__ "$@"
     else
         shopt -s extglob;
         extglob_was_set=false;
+    fi
+
+    # --- PREEMPTION & CHECKPOINT DETECTION ---
+    preempt_mode="${FORKRUN_PREEMPT_MODE:-auto}"
+    if [[ "$preempt_mode" == "auto" ]]; then
+        if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+            preempt_mode=1
+        else
+            preempt_mode=0
+        fi
     fi
 
    # --- HELPER: Expand units (IEC/IEEE prefixes) ---
@@ -171,11 +309,20 @@ EOF
                           @N: Oversubscribe / force N logical nodes.
                           0,1: Explicitly bind to physical NUMA nodes 0 and 1.
                           0:3: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
+  --halt <val>          : Halt the pipeline if too many batches fail. Format: fail=N or fail=N% (e.g., --halt fail=10%).
   -N, --dry-run         : Dry run. Print the generated command strings instead of executing them.
   -v, --verbose         : Increase verbosity (prints timing and flag summaries to stderr). Implies --stats.
   +v, --no-verbose      : Decrease verbosity. Disables --stats.
   -V, --version         : Prints forkrun version number
   --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
+  --tui, --progress     : Opens a Live Telemetry Dashboard visualizing the internal stream and buffers
+
+### MULTI-INPUT PARAMETER SWEEPS
+  ::: <args>            : Treat subsequent arguments as inputs. Generates Cartesian cross-product if multiple ::: are used.
+  :::: <files>          : Treat subsequent arguments as files and read inputs from them (use - for stdin).
+  --link                : Zip parameter lists together instead of generating a full cross-product.
+  *Note*: When using sweeps, parameters are automatically unpacked and passed as positional arguments ($1, $2, etc.) to
+          your function, or you can use {1}, {2}, etc. to insert them explicitly into your command string.
 
 ### ERROR HANDLING & RETRIES
   -E, --retry-nonzero-exit    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
@@ -209,6 +356,11 @@ EOF
   FORKRUN_EXTRA_SETUP   : Use this to specify raw commands that need to be run in frun's environment during setup.
       EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
   FORKRUN_USE_HUGETLB   : Set to '1' to have forkrun attempt to use hugepages for memfd backing. WARNING: only enable this if you have sufficient available hugepages so that forkrun does NOT run out of memory to use.
+  FORKRUN_PREEMPT_MODE  : Controls SLURM preemption detection and handling.
+      auto (default): Automatically detect SLURM environment by checking for SLURM_JOB_ID. Enables preemption traps if running under SLURM.
+      0 or false: Disable preemption handling entirely.
+      1 or true: Force-enable preemption handling (useful for testing or non-SLURM environments that send SIGTERM/SIGUSR1).
+      When enabled, forkrun catches SIGTERM (preemption/scancel) and SIGUSR1 (SLURM --signal=B:USR1@<time>) to freeze the pipeline and generate a checkpoint for perfect resume capability.
 
 EOF
                 ;;
@@ -226,6 +378,7 @@ EOF
     resume_flag=false
     retry_nonzero_exit_flag=false
     prefer_external_flag=false
+    tui_flag=false
     delimiter_val=$'\n'
     ring_init_opts=()
     checkpoint_file='.forkrun_resume'
@@ -255,11 +408,16 @@ EOF
             -I|--insert-id|--INSERT|--INSERT-ID) insert_id_flag=true  ;;
             +I|--no-insert-id|--NO-INSERT|--NO-INSERT-ID) insert_id_flag=false ;;
 
+            --_sweep)                        is_sweep=true; stdin_flag=false; byte_mode_flag=false ;;
+
             -E|--retry-nonzero-exit)    retry_nonzero_exit_flag=true  ;;
             +E|--no-retry-nonzero-exit) retry_nonzero_exit_flag=false ;;
 
             -X|--external|--EXTERNAL)      prefer_external_flag=true  ;;
             +X|--no-external|--NO-EXTERNAL|--internal|--INTERNAL) prefer_external_flag=false ;;
+
+            --tui|--TUI|--progress|--PROGRESS)                  tui_flag=true  ;;
+            --no-tui|--NO-TUI|--no-progress|--NO-PROGRESS)      tui_flag=false ;;
 
             -C|--plugin|--PLUGIN)
                 arg="${1##@(-C|--plugin|--PLUGIN)?([= $'\t'])}";
@@ -345,6 +503,27 @@ EOF
                         fi
 
                         if (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
+                            local _is_sweep=false
+                            for var in "${FORKRUN_ORIG_ARGS[@]}"; do
+                                if [[ "$var" == ":::" || "$var" == "::::" ]]; then _is_sweep=true; break; fi
+                            done
+
+                            if $_is_sweep; then
+                                # Export the restored environment to the nested sweep process
+                                for var in ${FORKRUN_EXTRA_VARS:-}; do
+                                    [[ "$var" != "FORKRUN_EXTRA_VARS" && "$var" != "FORKRUN_EXTRA_FUNCS" && "$var" != "FORKRUN_EXTRA_SETUP" ]] && export "$var"
+                                done
+                                export FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP FORKRUN_RETRY_LIMIT
+
+                                for func in ${FORKRUN_EXTRA_FUNCS:-}; do
+                                    export -f "$func" 2>/dev/null || true
+                                done
+
+                                # Restart the sweep pipeline
+                                frun --resume "$resume_file" "${FORKRUN_ORIG_ARGS[@]}"
+                                return $?
+                            fi
+
                             # Set positional parameters: keep resume_file at $1 so the bottom
                             # 'shift' safely drops it, then append the original arguments.
                             set -- "" "${FORKRUN_ORIG_ARGS[@]}"
@@ -427,10 +606,16 @@ EOF
                 fi
                 delimiter_val="${arg:0:1}" ;;
 
+            # --- HALT (--halt) ---
+            @(--halt)?(?([= $'\t'])*))
+                arg="${1##@(--halt)?([= $'\t'])}";
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                [[ ${arg} ]] && ring_init_opts+=("--halt=${arg}") ;;
+
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.3.0';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.4.0';  return 0  ;;
 
             --) shift; break ;;
 
@@ -439,6 +624,16 @@ EOF
         shift
     done
     unset arg
+
+    # --- SWEEP CONFIG LOCK ---
+    if ${is_sweep:-false}; then
+        if [[ -n "${exact_lines_val:-}" || " ${ring_init_opts[*]} " == *" --lines"* ]]; then
+            echo "forkrun [WARNING]: Batch sizes (-l / -L) are forced to 1 when using parameter sweeps (:::). Your setting is ignored." >&2
+        fi
+        exact_lines_val=1
+        ring_init_opts+=("--exact-lines" "--lines0=1" "--lines-max=1")
+    fi
+
     # --- AST MANIPULATION FOR BASH FUNCTIONS ---
     declare -F -- "$1" &>/dev/null 2>&1 && is_func_flag=true
     if [[ -n "$1" ]] && ${is_func_flag}; then
@@ -606,7 +801,10 @@ toc() { :; }
 
     # --- Feature 2: -L vs NUMA Conflict Resolution ---
     if [[ -n "${exact_lines_val:-}" ]] && (( FORKRUN_NUM_NODES > 1 )); then
-        if [[ "$last_conflict" == "exact_lines" ]]; then
+        if ${is_sweep:-false}; then
+            # Silent fallback to UMA for sweeps
+            _forkrun_build_numa_map "1"
+        elif [[ "$last_conflict" == "exact_lines" ]]; then
             printf '\nforkrun [WARNING]: To facilitate using exactly %s arguments per batch, forkrun will run in UMA mode. NUMA optimizations prevent -L from working properly, and will be disabled.\n\n' "${exact_lines_val}" >&2
             # Force UMA mode by re-building the map with exactly 1 node
             _forkrun_build_numa_map "1"
@@ -644,8 +842,14 @@ toc() { :; }
     # # # # # MAIN # # # # #
     {
         trap '
-
             status=${_ret_val:-$?}
+
+            # CRITICAL: Gracefully terminate TUI before unmapping shared memory
+            if [[ -n "${TUI_PID:-}" ]]; then
+                kill -TERM "$TUI_PID" 2>/dev/null
+                wait "$TUI_PID" 2>/dev/null
+            fi
+
             if ! ${NORMAL_EXIT_FLAG:-false}; then
                 echo "forkrun [FATAL]: Pipeline aborted. Generating checkpoint..." >&2
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
@@ -681,7 +885,33 @@ toc() { :; }
             # Clean up memory only AFTER the trap is done with it!
             ring_destroy 2>/dev/null
             return $status
-        ' EXIT INT
+        ' EXIT
+
+_forkrun_checkpoint_signal() {
+    NORMAL_EXIT_FLAG=false
+    _ret_val="$2"
+    echo "forkrun [WARN]: Caught SIG${1}. Freezing pipeline..." >&2
+    ring_abort
+    exit "$2"
+}
+        trap '_forkrun_checkpoint_signal HUP  129' HUP
+        trap '_forkrun_checkpoint_signal INT  130' INT
+        trap '_forkrun_checkpoint_signal QUIT 131' QUIT
+
+        # If Preemption Support is active, trap SLURM signals
+        if (( preempt_mode == 1 )); then
+            # SLURM default preemption / scancel signal
+            trap 'NORMAL_EXIT_FLAG=false; _ret_val=143; echo "forkrun [WARN]: Caught SIGTERM (SLURM Preemption). Freezing pipeline..." >&2; ring_abort; exit 143' TERM
+
+            # Common alternative pre-kill signal used via SLURM --signal=B:USR1@<time>
+            trap 'NORMAL_EXIT_FLAG=false; _ret_val=138; echo "forkrun [WARN]: Caught SIGUSR1 (SLURM Warning). Freezing pipeline..." >&2; ring_abort; exit 138' USR1
+
+            trap '_forkrun_checkpoint_signal USR2 140' USR2
+            trap '_forkrun_checkpoint_signal XCPU 152' XCPU
+            trap '_forkrun_checkpoint_signal XFSZ 153' XFSZ
+        else
+            trap '_forkrun_checkpoint_signal TERM 143' TERM
+        fi
         ring_pipe fd_spawn_r fd_spawn_w
 
         # SPAWN BACKGROUND PROCESSES
@@ -755,6 +985,25 @@ toc() { :; }
             export FD_ORDER_PIPE=$fd_order_w
         }
 
+        # --- 5. RING TUI (OPTIONAL) ---
+        if ${tui_flag:-false}; then
+            local expected_bytes=0
+            # Use -L to follow /dev/stdin symlink to the actual underlying file
+            if [[ -f /dev/stdin ]]; then
+                expected_bytes=$(stat -L -c %s /dev/stdin 2>/dev/null || stat -L -f %z /dev/stdin 2>/dev/null || echo 0)
+            fi
+
+            local tui_order_mode="Ordered"
+            [[ "${order_mode}" == "buffered" ]] && tui_order_mode="Buffered"
+            [[ "${order_mode}" == "realtime" ]] && tui_order_mode="Realtime"
+
+            local tui_cmd="frun ${FORKRUN_ORIG_ARGS[*]}"
+
+            # Run TUI in background, fully disconnected from stdin/stdout data streams
+            ( ring_tui "$expected_bytes" "$tui_order_mode" "$tui_cmd" ) </dev/null >/dev/null 2>/dev/null &
+            TUI_PID=$!
+        fi
+
         # --- WORKER DEFINITION ---
 
         # NOTE: the worker code is in effect JIT compiled to remove dead code branches
@@ -764,6 +1013,17 @@ toc() { :; }
         # 1. Replace {ID} with the Worker ID, NUMA Node ID, and Worker Batch Num
         if ${insert_id_flag:-false}; then
             cmdline_str="${cmdline_str//\\\{ID\\\}/\{\${RING_NODE_ID:+\$\{RING_NODE_ID\}.\}\$\{ID\}.\$\{W_BATCH\}\}}"
+        fi
+
+        # 2. Sweep Substitutions
+        if ${is_sweep:-false}; then
+            # Trigger insert mode automatically if {} or {1}..{9} are detected
+            if [[ "$cmdline_str" == *\\\{[1-9]\\\}* || "$cmdline_str" == *\\\{\\\}* ]]; then
+                insert_args_flag=true
+            fi
+            for ((k=1; k<=9; k++)); do
+                cmdline_str="${cmdline_str//\\\{$k\\\}/\"\${A[$((k-1))]\}\"}"
+            done
         fi
 
         ${dry_run_flag:-false} && printf -v cmdline_str 'echo %q' "${cmdline_str}"
@@ -780,7 +1040,7 @@ toc() { :; }
         local use_ultra_fast_path=false
 
         # Only use the fast path if it's an external file, safe mode, and no {} insertions
-        if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag:-false} && ! ${insert_args_flag:-false}; then
+        if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag:-false} && ! ${insert_args_flag:-false} && ! ${is_sweep:-false}; then
             # Resolve absolute path (e.g., "grep" -> "/usr/bin/grep")
             local cmd_path=$(type -P "$1" 2>/dev/null)
 
@@ -796,6 +1056,11 @@ toc() { :; }
             # Ensure the user actually passed a colon!
             if [[ "$c_plugin_arg" != *:* ]]; then
                 echo "forkrun [FATAL]: -C requires format 'path/to/plugin.so:function_name'" >&2
+                return 1
+            fi
+
+            if ${is_sweep:-false}; then
+                echo "forkrun [FATAL]: C Plugins (-C) cannot be combined with multi-parameter sweeps (:::)." >&2
                 return 1
             fi
 
@@ -975,9 +1240,11 @@ toc() { :; }
                     delimiter_str="''"
                 fi
 
-                pCode='
-            ring_map $fd_read $REPLY A '"${delimiter_str}"'
-            '"$cmdline_str"
+                if ${is_sweep:-false}; then
+                    pCode=$'ring_map $fd_read $REPLY A ""\neval "A=(${A[0]})"\n'"$cmdline_str"
+                else
+                    pCode=$'ring_map $fd_read $REPLY A '"${delimiter_str}"$'\n'"$cmdline_str"
+                fi
             fi
         fi
 
@@ -1030,9 +1297,13 @@ toc() { :; }
     exit $status
   '"'"' EXIT
 
-  trap '"'"'ring_abort
-  kill -INT '"${BASHPID}'"' INT
-
+  trap '"'"'ring_abort; trap - INT; kill -INT ${BASHPID}'"'"' INT
+  trap '"'"'ring_abort; trap - HUP; kill -HUP ${BASHPID}'"'"' HUP
+  trap '"'"'ring_abort; trap - QUIT; kill -QUIT ${BASHPID}'"'"' QUIT
+  '
+   (( preempt_mode == 1 )) && worker_func_src+='trap "" USR1 TERM
+'
+worker_func_src+='
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion
     RING_NUM_KILLS=0
@@ -1103,6 +1374,11 @@ W_NODE[$3]=$2
 
             case "$POLL_EVENT" in
                 IGNORE) ;;
+                ABORT)
+                    NORMAL_EXIT_FLAG=false
+                    (( _ret_val == 0 )) && _ret_val=1
+                    break
+                    ;;
                 TIMEOUT)
                     _timer_armed=false
                     if (( ${#trap_ack_pending[@]} > 0 )); then
@@ -1257,7 +1533,7 @@ _frun_complete() {
           -z --null -N --dry-run -i --insert -I --insert-id -n --limit -L --exact-lines \
           -E --retry-nonzero-exit +E --no-retry-nonzero-exit \
           -l --lines --batchsize -b --bytes -j -P --workers -t --timeout --nodes --numa \
-          -o --order -d --delim --delimiter -h --help --usage"
+          -o --order -d --delim --delimiter -h --help --usage --halt"
 
     # If the user is currently typing a flag
     if [[ ${cur} == -* ]] ; then
@@ -1671,6 +1947,7 @@ while True: time.sleep(60)'
 
     return 0
 }
+
 
 
 _forkrun_file_to_base64() {
