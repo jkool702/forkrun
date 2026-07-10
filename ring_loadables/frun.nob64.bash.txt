@@ -14,10 +14,18 @@ frun() {
 
     # --- MULTI-INPUT PARAMETER SWEEP (::: / ::::) INTERCEPT ---
     local _fr_has_sweep=false
+    local -a _FR_SWEEP_ORIG=()
+    local _skip_next=false
     local _fr_a
+
     for _fr_a in "$@"; do
+        if $_skip_next; then _skip_next=false; continue; fi
+        if [[ "$_fr_a" == "--resume" || "$_fr_a" == "--checkpoint-file" ]]; then
+            _skip_next=true; continue
+        fi
+        _FR_SWEEP_ORIG+=("$_fr_a")
         if [[ "$_fr_a" == ":::" || "$_fr_a" == "::::" ]]; then
-            _fr_has_sweep=true; break
+            _fr_has_sweep=true
         fi
     done
 
@@ -113,7 +121,7 @@ frun() {
             for _fr_i in "${!_fr_A_dims[@]}"; do _fr_eval_str+="done"$'\n'; done
         fi
 
-        eval "$_fr_eval_str" | frun -z --_sweep "${_fr_base_args[@]}"
+        eval "$_fr_eval_str" | FORKRUN_SWEEP_ARGS="$(declare -p _FR_SWEEP_ORIG 2>/dev/null)" frun -z --_sweep "${_fr_base_args[@]}"
         return $?
     fi
 
@@ -150,7 +158,12 @@ frun __exec__ "$@"
     }
     # 2. WORKER LOGIC (Clean Shell)
     shift 1 # Remove __exec__
-    FORKRUN_ORIG_ARGS=("$@")
+
+    if [[ -n "${FORKRUN_SWEEP_ARGS:-}" ]]; then
+        eval "${FORKRUN_SWEEP_ARGS/_FR_SWEEP_ORIG/FORKRUN_ORIG_ARGS}"
+    else
+        FORKRUN_ORIG_ARGS=("$@")
+    fi
 
     # # # # # SETUP # # # # #
     local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg tui_flag TUI_PID preempt_mode is_sweep
@@ -481,6 +494,27 @@ EOF
                         fi
 
                         if (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
+                            local _is_sweep=false
+                            for var in "${FORKRUN_ORIG_ARGS[@]}"; do
+                                if [[ "$var" == ":::" || "$var" == "::::" ]]; then _is_sweep=true; break; fi
+                            done
+
+                            if $_is_sweep; then
+                                # Export the restored environment to the nested sweep process
+                                for var in ${FORKRUN_EXTRA_VARS:-}; do
+                                    [[ "$var" != "FORKRUN_EXTRA_VARS" && "$var" != "FORKRUN_EXTRA_FUNCS" && "$var" != "FORKRUN_EXTRA_SETUP" ]] && export "$var"
+                                done
+                                export FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP FORKRUN_RETRY_LIMIT
+
+                                for func in ${FORKRUN_EXTRA_FUNCS:-}; do
+                                    export -f "$func" 2>/dev/null || true
+                                done
+
+                                # Restart the sweep pipeline
+                                frun --resume "$resume_file" "${FORKRUN_ORIG_ARGS[@]}"
+                                return $?
+                            fi
+
                             # Set positional parameters: keep resume_file at $1 so the bottom
                             # 'shift' safely drops it, then append the original arguments.
                             set -- "" "${FORKRUN_ORIG_ARGS[@]}"
