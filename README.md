@@ -9,6 +9,8 @@
 - **~95–99% CPU utilization** across all cores (vs ~6% for GNU Parallel)
 - **Near-zero cross-socket memory traffic** (NUMA-aware “born-local” design)
 - **Automatic recovery and retry** when a worker unexpectedly dies processing a batch (v3.1.0+)
+- **Seamless HPC Cluster Preemption** via automatic SLURM `SIGTERM`/`SIGUSR1` checkpointing (v3.4.0+)
+- **Cartesian Parameter Sweeps** (`:::`) and Live TUI Telemetry (v3.4.0+)
 
 forkrun is built for high-frequency, low-latency workloads on deep NUMA hardware — a regime where existing tools leave most cores idle due to IPC overhead and cross-socket data migration.
 
@@ -38,6 +40,20 @@ frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output na
 ```
 
 **Verifiable Builds**: The embedded C-extension is compiled and injected transparently via GitHub Actions. You can trace the git blame of the Base64 blob directly to the public CI workflow run that compiled forkrun_ring.c, guaranteeing the binary contains no hidden malicious code.
+
+---
+
+## 🆕 What's New in v3.4.0
+ 
+**v3.4.0** extends forkrun from a single-node accelerator into a facility-ready tool for long-running, cluster-scheduled, parameter-sweep workloads:
+ 
+- **Live TUI dashboard** (`--tui`) — a 4 FPS terminal telemetry view showing per-node CPU/queue saturation, a live memory oscilloscope, and bottleneck heuristics, so you can watch NUMA balance and throughput in real time instead of guessing from `top`.
+- **SLURM preemption support** — forkrun detects SLURM jobs automatically and cleanly checkpoints on `SIGTERM`/`SIGUSR1` (the standard preemption and pre-kill-warning signals), so a preempted or requeued job resumes exactly where it left off instead of restarting from scratch.
+- **`--halt` failure-threshold auto-abort** — stop a pipeline automatically once too many batches fail, using the same `now,fail=N` / `fail=N%` syntax as GNU Parallel, so a bad input file or broken command doesn't silently burn through an entire allocation before anyone notices.
+- **GNU Parallel-compatible parameter sweeps** (`:::`, `::::`, `--link`) — run a command across the cartesian product (or zipped pairing) of multiple input lists directly, with `{1}`, `{2}`, ... placeholders, without needing a separate driver script.
+- **Every abnormal exit now checkpoints.** In addition to SLURM signals, forkrun now traps `SIGINT` (Ctrl+C), `SIGHUP` (dropped terminal/SSH session), and `SIGQUIT`, and always writes a `.forkrun_resume` file before exiting — so interactive runs are just as resumable as scheduled ones.
+
+![forkrun TUI demo](https://raw.githubusercontent.com/jkool702/forkrun/refs/heads/NEW/TUI/DOCS/TUI/forkrun_demo.gif)
 
 ---
 
