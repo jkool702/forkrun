@@ -799,6 +799,8 @@ toc() { :; }
     # # # # # MAIN # # # # #
     {
         trap '
+        echo EXIT TRAP FIRED >&2
+        declare -p _ret_val NORMAL_EXIT_FLAG >&2
             status=${_ret_val:-$?}
 
             # CRITICAL: Gracefully terminate TUI before unmapping shared memory
@@ -807,7 +809,10 @@ toc() { :; }
                 wait "$TUI_PID" 2>/dev/null
             fi
 
-            if ! ${NORMAL_EXIT_FLAG:-false}; then
+        echo EXIT TRAP FIRED 2 >&2
+        declare -p _ret_val NORMAL_EXIT_FLAG >&2
+
+        if ! ${NORMAL_EXIT_FLAG:-false}; then
                 echo "forkrun [FATAL]: Pipeline aborted. Generating checkpoint..." >&2
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
 
@@ -844,8 +849,16 @@ toc() { :; }
             return $status
         ' EXIT
 
-        # Ctrl+C (SIGINT) should always trigger a dirty exit
-        trap 'NORMAL_EXIT_FLAG=false; _ret_val=130; ring_abort; exit 130' INT
+_forkrun_checkpoint_signal() {
+    NORMAL_EXIT_FLAG=false
+    _ret_val="$2"
+    echo "forkrun [WARN]: Caught SIG${1}. Freezing pipeline..." >&2
+    ring_abort
+    exit "$2"
+}
+        trap '_forkrun_checkpoint_signal HUP  129' HUP
+        trap '_forkrun_checkpoint_signal INT  130' INT
+        trap '_forkrun_checkpoint_signal QUIT 131' QUIT
 
         # If Preemption Support is active, trap SLURM signals
         if (( preempt_mode == 1 )); then
@@ -854,6 +867,12 @@ toc() { :; }
 
             # Common alternative pre-kill signal used via SLURM --signal=B:USR1@<time>
             trap 'NORMAL_EXIT_FLAG=false; _ret_val=138; echo "forkrun [WARN]: Caught SIGUSR1 (SLURM Warning). Freezing pipeline..." >&2; ring_abort; exit 138' USR1
+
+            trap '_forkrun_checkpoint_signal USR2 140' USR2
+            trap '_forkrun_checkpoint_signal XCPU 152' XCPU
+            trap '_forkrun_checkpoint_signal XFSZ 153' XFSZ
+        else
+            trap '_forkrun_checkpoint_signal TERM 143' TERM
         fi
         ring_pipe fd_spawn_r fd_spawn_w
 
@@ -1240,8 +1259,9 @@ toc() { :; }
     exit $status
   '"'"' EXIT
 
-  trap '"'"'ring_abort
-  kill -INT '"${BASHPID}'"' INT
+  trap '"'"'ring_abort; trap - INT; kill -INT ${BASHPID}'"'"' INT
+  trap '"'"'ring_abort; trap - HUP; kill -HUP ${BASHPID}'"'"' HUP
+  trap '"'"'ring_abort; trap - QUIT; kill -QUIT ${BASHPID}'"'"' QUIT
   '
    (( preempt_mode == 1 )) && worker_func_src+='trap "" USR1 TERM
 '
