@@ -1300,10 +1300,8 @@ _forkrun_checkpoint_signal() {
   trap '"'"'ring_abort; trap - INT; kill -INT ${BASHPID}'"'"' INT
   trap '"'"'ring_abort; trap - HUP; kill -HUP ${BASHPID}'"'"' HUP
   trap '"'"'ring_abort; trap - QUIT; kill -QUIT ${BASHPID}'"'"' QUIT
-  '
-   (( preempt_mode == 1 )) && worker_func_src+='trap "" USR1 TERM
-'
-worker_func_src+='
+  trap "" USR1 TERM
+
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion
     RING_NUM_KILLS=0
