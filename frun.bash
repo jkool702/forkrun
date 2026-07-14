@@ -615,7 +615,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.4.0';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.4.1';  return 0  ;;
 
             --) shift; break ;;
 
