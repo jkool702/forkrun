@@ -175,7 +175,7 @@ frun __exec__ "$@"
     fi
 
     # # # # # SETUP # # # # #
-    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg tui_flag TUI_PID preempt_mode is_sweep
+    local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg tui_flag TUI_PID preempt_mode is_sweep status trap_status
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
     local -gx LC_ALL
     local -a fallow_args
@@ -615,7 +615,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.4.0';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.4.1';  return 0  ;;
 
             --) shift; break ;;
 
@@ -1275,7 +1275,7 @@ _forkrun_checkpoint_signal() {
   _ring_registered=false
 
   trap '"'"'
-    status=$?
+    status=${trap_status:-$?}
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
 
     if (( status != 0 && ${FRUN_CLAIM_BYTES:-0} > 0 )); then
@@ -1301,8 +1301,14 @@ _forkrun_checkpoint_signal() {
   trap '"'"'ring_abort; trap - HUP; kill -HUP ${BASHPID}'"'"' HUP
   trap '"'"'ring_abort; trap - QUIT; kill -QUIT ${BASHPID}'"'"' QUIT
   '
-   (( preempt_mode == 1 )) && worker_func_src+='trap "" USR1 TERM
+    if (( preempt_mode == 1 )); then
+       worker_func_src+='trap "" USR1 TERM
 '
+    else
+       worker_func_src+='trap '"'"'trap_status=143; trap - TERM; kill -TERM ${BASHPID}'"'"' TERM
+trap '"'"'trap_status=138; trap - USR1; kill -USR1 ${BASHPID}'"'"' USR1
+'
+    fi
 worker_func_src+='
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion
