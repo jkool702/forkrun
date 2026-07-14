@@ -1299,7 +1299,6 @@ _forkrun_checkpoint_signal() {
 
   trap '"'"'ring_abort; trap - INT; kill -INT ${BASHPID}'"'"' INT
   trap '"'"'ring_abort; trap - HUP; kill -HUP ${BASHPID}'"'"' HUP
-  trap '"'"'ring_abort; trap - QUIT; kill -QUIT ${BASHPID}'"'"' QUIT
   '
     if (( preempt_mode == 1 )); then
        worker_func_src+='trap "" USR1 TERM
