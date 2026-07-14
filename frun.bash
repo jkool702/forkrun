@@ -1275,7 +1275,7 @@ _forkrun_checkpoint_signal() {
   _ring_registered=false
 
   trap '"'"'
-    status=$?
+    (( status = ${status:-0} + $? ))
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
 
     if (( status != 0 && ${FRUN_CLAIM_BYTES:-0} > 0 )); then
@@ -1300,8 +1300,16 @@ _forkrun_checkpoint_signal() {
   trap '"'"'ring_abort; trap - INT; kill -INT ${BASHPID}'"'"' INT
   trap '"'"'ring_abort; trap - HUP; kill -HUP ${BASHPID}'"'"' HUP
   trap '"'"'ring_abort; trap - QUIT; kill -QUIT ${BASHPID}'"'"' QUIT
-  trap "" USR1 TERM
-
+  '
+    if (( preempt_mode == 1 )); then
+       worker_func_src+='trap "" USR1 TERM
+'
+    else
+       worker_func_src+='trap '"'"'status=143; trap - TERM; kill -TERM ${BASHPID}'"'"' TERM
+trap '"'"'status=138; trap - USR1; kill -USR1 ${BASHPID}'"'"' USR1
+'
+    fi
+worker_func_src+='
   {
     ID="$1" # ID is passed purely for user payload compatibility/insertion
     RING_NUM_KILLS=0
