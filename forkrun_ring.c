@@ -3966,7 +3966,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           p += take;
           batch_start += is_numa ? take : current_p_offset - batch_start;
-          total_scanned += is_numa ? take : 1;
+          total_scanned += take;
           pending_lines = 0;
 
           if (!_skipped) {
