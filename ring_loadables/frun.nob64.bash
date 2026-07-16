@@ -486,7 +486,7 @@ EOF
                             printf -v FORKRUN_EXTRA_SETUP_Q '%q' "${FORKRUN_EXTRA_SETUP}"
 
                             # Check if we have an interactive terminal to prompt the user
-                            if [ -t 0 ] && [ -e /dev/tty ]; then
+                            if [ -e /dev/tty ]; then
                                 read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands, functions, or variables. Execute them?\n[Setup]: '"${FORKRUN_EXTRA_SETUP_Q}"$'\n(y/N): ' -n 1 -r -t 60 </dev/tty
                                 echo >&2
                             else
