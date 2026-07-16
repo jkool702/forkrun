@@ -6303,7 +6303,7 @@ static int ring_set_resume_main(int argc, char **argv) {
     for (int i = start_idx; i < argc && g_state->resume_jagged_count < 1024; i++) {
         char *colon = strchr(argv[i], ':');
         if (colon) {
-            *colon = ' ';
+            *colon = '\0';
             g_state->resume_jagged[g_state->resume_jagged_count].s = strtoull(argv[i], NULL, 10);
             g_state->resume_jagged[g_state->resume_jagged_count].e = strtoull(colon + 1, NULL, 10);
             g_state->resume_jagged_count++;
