@@ -488,7 +488,7 @@ EOF
                             (( has_custom_vars == 1 )) && FORKRUN_EXTRA_SETUP_Q+=$'\n'"$(declare -p ${FORKRUN_EXTRA_VARS})"
 
                             # Check if we have an interactive terminal to prompt the user
-                            if [ -e /dev/tty ]; then
+                            if { true; } 2>/dev/null </dev/tty; then
                                 read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands, functions, or variables. Execute them?\n[Setup]: '"${FORKRUN_EXTRA_SETUP_Q}"$'\n(y/N): ' -n 1 -r -t 60 </dev/tty
                                 echo >&2
                             else
@@ -836,7 +836,7 @@ toc() { :; }
     ring_memfd_create ingress_memfd
 
     # NEW: Apply Checkpoint if Resuming
-     ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "${FORKRUN_RESUME_JAGGED[@]}"
+     ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "$FORKRUN_RESUME_STDOUT_BYTES" "${FORKRUN_RESUME_JAGGED[@]}"
 
     # sanitize checkpoint file
     printf -v safe_checkpoint_file '%q' "${checkpoint_file}"
