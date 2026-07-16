@@ -2884,9 +2884,9 @@ if in_section Q; then
 fi
 
 # ============================================================================
-# SECTION R: v3.4.1 NEW FEATURES (TUI, SLURM, Halt, Sweeps)
+# SECTION R: v3.4.2 NEW FEATURES (TUI, SLURM, Halt, Sweeps)
 # ============================================================================
-print_section R "v3.4.1 New Features (TUI, SLURM, Halt, Sweeps)"
+print_section R "v3.4.2 New Features (TUI, SLURM, Halt, Sweeps)"
 
 # --- R1: TUI flag accepted and pipeline completes (headless safe) ---
 # Even without a /dev/tty, frun should gracefully skip the TUI and run normally.

@@ -1,4 +1,4 @@
-=== forkrun v3.4.1 C Plugin Test Suite ===
+=== forkrun v3.4.2 C Plugin Test Suite ===
 UNIT_TESTS_DIR : /mnt/ramdisk/forkrun/UNIT_TESTS
 FRUN_SCRIPT    : /mnt/ramdisk/forkrun/UNIT_TESTS/frun.bash
 Sourcing frun.bash...
@@ -39,7 +39,7 @@ Cmd : frun -k -C ./test_basic.so:test_basic < input_1M.txt
 
 === All C Plugin Tests Completed Successfully ===
 
-=== forkrun v3.4.1 C Plugin Rigorous Test Suite ===
+=== forkrun v3.4.2 C Plugin Rigorous Test Suite ===
 Compiling Native Plugins...
 Generating Deterministic Test Inputs...
 ------------------------------------------------------
@@ -312,7 +312,7 @@ Verifying run_test_sorted catches duplicate lines...
   [0;32m✓[0m Q3: Concurrent frun with separate checkpoints
   [0;32m✓[0m Q4: Sequential frun reuse, 10 iterations
 
-[1;34m[1m▶ Section R: v3.4.1 New Features (TUI, SLURM, Halt, Sweeps)[0m
+[1;34m[1m▶ Section R: v3.4.2 New Features (TUI, SLURM, Halt, Sweeps)[0m
 [1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
   [0;32m✓[0m R1: TUI flag accepted and pipeline completes (headless safe)
   [0;32m✓[0m R2: SLURM SIGUSR1 triggers checkpoint and exit 138
