@@ -1522,7 +1522,7 @@ W_NODE[$3]=$2
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
 
     } {fd_write}>"/proc/${BASHPID}/fd/${ingress_memfd}" {fd_scan}<"/proc/${BASHPID}/fd/${ingress_memfd}" {fd0}<&0 {fd1}>&1 {fd2}>&2
-    return $_ret_val
+    return ${_ret_val:-0}
   ) {fd00}<&0 {fd11}>&1 {fd22}>&2
 }
 
