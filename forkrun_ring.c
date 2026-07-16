@@ -708,6 +708,8 @@ static int ring_exec_main(int argc, char **argv) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd);
+    // NOTE: fd leakage into exec'd commands is prevented by MFD_CLOEXEC/O_CLOEXEC
+    // set in xcreate_anon_file(). CLOEXEC survives fork() but closes on exec().
 
     // 6. Spawn the child (inherits FDs natively)
     pid_t pid;
@@ -717,10 +719,12 @@ static int ring_exec_main(int argc, char **argv) {
     int status = 0;
     if (ret == 0) {
         while (waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) {
-                ret = -1; // Mark the execution as failed!
-                break;
-            }
+            if (errno == EINTR) continue;
+            // waitpid failed with ECHILD or other non-EINTR error: child already reaped
+            // or wait failed. Do NOT call kill() here – PID may have been recycled,
+            // which would risk killing an unrelated process (PID recycling race).
+            ret = -1;
+            break;
         }
     }
 
@@ -823,7 +827,10 @@ static int ring_exec_splice_main(int argc, char **argv) {
     int status = 0;
     if (ret == 0) {
         while (waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) { ret = -1; break; }
+            if (errno == EINTR) continue;
+            // Do NOT kill on ECHILD – PID may be recycled (see comment above)
+            ret = -1;
+            break;
         }
     }
 
@@ -1124,7 +1131,7 @@ static inline void u64toa(uint64_t value, char *buffer) {
 
 static inline uint64_t get_us_time() {
   struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+  clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000;
 }
 
@@ -3966,7 +3973,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           p += take;
           batch_start += is_numa ? take : current_p_offset - batch_start;
-          total_scanned += is_numa ? take : 1;
+          total_scanned += take;
           pending_lines = 0;
 
           if (!_skipped) {
@@ -4463,6 +4470,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 // Precondition: my_numa_node must be initialized by the caller.
 // ------------------------------------------------------------------
 static int do_lockfree_claim(struct WorkerBatchState *out, bool blocking) {
+  if (!state || !g_state) return EXECUTION_FAILURE;
   if (atomic_load_relaxed(&state[0].emergency_abort))
     return EXECUTION_FAILURE;
 
@@ -4661,9 +4669,7 @@ dlc_evaluate_claim:
 
   if (local_state->numa_enabled) {
     out->major = local_state->major_ring[my_read_idx & RING_MASK];
-    out->minor = local_state->minor_ring[my_read_idx & RING_MASK] & ~FLAG_MAJOR_EOF;
-    if (local_state->minor_ring[my_read_idx & RING_MASK] & FLAG_MAJOR_EOF)
-      out->minor |= FLAG_MAJOR_EOF;
+    out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
   } else {
     out->major = 0;
     out->minor = 0;
@@ -4684,6 +4690,7 @@ dlc_evaluate_claim:
 // physics, and this function handles NUMA init, the SIGPIPE shield, and all
 // Bash variable bindings.
 static int ring_claim_main(int argc, char **argv) {
+  if (!state || !g_state) return EXECUTION_FAILURE;
   const char *v_target = "REPLY";
 
   if (argc >= 2) {
@@ -4830,6 +4837,7 @@ static int ring_ack_main(int argc, char **argv) {
   int fd_fallow = atoi(argv[1]);
   int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
 
+  if (!state || !g_state) return EXECUTION_FAILURE;
   struct sigaction sa_ign, sa_old;
   sa_ign.sa_handler = SIG_IGN;
   sigemptyset(&sa_ign.sa_mask);
@@ -4856,13 +4864,25 @@ static int ring_ack_main(int argc, char **argv) {
       op.cnt = worker_last_cnt;
     }
   } else {
-    op.cnt = (uint32_t)atoi(get_string_value("RING_BATCH_SLOTS"));
+    const char *s_slots = get_string_value("RING_BATCH_SLOTS");
+    const char *s_batch_idx = get_string_value("RING_BATCH_IDX");
+    if (!s_slots || !s_batch_idx) {
+      sigaction(SIGPIPE, &sa_old, NULL);
+      return EXECUTION_FAILURE;
+    }
+    op.cnt = (uint32_t)atoi(s_slots);
     if (local_state && local_state->numa_enabled) {
-      op.major_idx = (uint32_t)atoi(get_string_value("RING_MAJOR"));
-      op.minor_idx = (uint32_t)atoi(get_string_value("RING_MINOR"));
-      my_idx = (uint64_t)atoll(get_string_value("RING_BATCH_IDX"));
+      const char *s_maj = get_string_value("RING_MAJOR");
+      const char *s_min = get_string_value("RING_MINOR");
+      if (!s_maj || !s_min) {
+        sigaction(SIGPIPE, &sa_old, NULL);
+        return EXECUTION_FAILURE;
+      }
+      op.major_idx = (uint32_t)atoi(s_maj);
+      op.minor_idx = (uint32_t)atoi(s_min);
+      my_idx = (uint64_t)atoll(s_batch_idx);
     } else {
-      op.major_idx = (uint32_t)atoi(get_string_value("RING_BATCH_IDX"));
+      op.major_idx = (uint32_t)atoi(s_batch_idx);
       op.minor_idx = 0;
       my_idx = op.major_idx;
     }
@@ -5198,6 +5218,24 @@ static int ring_order_main(int argc, char **argv) {
   uint64_t tracker_horizon = 0;
   uint64_t tracker_bytes = 0;
 
+  // MULTI-RESUME FIX: Bootstrap tracker from previous checkpoint so that
+  // subsequent checkpoints are cumulative, not just delta of current run.
+  // Without this, a 2nd resume would dump horizon=0 and only new intervals,
+  // causing the 3rd resume to replay data from the 1st run (observed bug).
+  if (g_state && g_state->is_resume_mode) {
+      tracker_horizon = __atomic_load_n(&g_state->resume_horizon, __ATOMIC_RELAXED);
+      tracker_bytes = __atomic_load_n(&g_state->resume_stdout_bytes, __ATOMIC_RELAXED);
+      uint32_t prev_cnt = __atomic_load_n(&g_state->resume_jagged_count, __ATOMIC_RELAXED);
+      if (prev_cnt > 1024) prev_cnt = 1024;
+      for (uint32_t _ri = 0; _ri < prev_cnt; _ri++) {
+          uint64_t _s = __atomic_load_n(&g_state->resume_jagged[_ri].s, __ATOMIC_RELAXED);
+          uint64_t _e = __atomic_load_n(&g_state->resume_jagged[_ri].e, __ATOMIC_RELAXED);
+          if (_e > _s) {
+              interval_heap_push(&tracker_heap, &tracker_sz, &tracker_cap, _s, _e);
+          }
+      }
+  }
+
   // NEW: Macro to absorb a successfully written batch into the Ledger
   #define TRACK_COMPLETED_BATCH(_op) do { \
       tracker_bytes += (_op).len; \
@@ -5215,10 +5253,14 @@ static int ring_order_main(int argc, char **argv) {
       } \
       if (g_state) { \
           __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_ACQ_REL); \
-          g_state->resume_horizon = tracker_horizon; \
-          g_state->resume_stdout_bytes = tracker_bytes; \
-          g_state->resume_jagged_count = (tracker_sz < 1024) ? tracker_sz : 1024; \
-          for(uint32_t _i=0; _i<g_state->resume_jagged_count; _i++) g_state->resume_jagged[_i] = tracker_heap[_i]; \
+          __atomic_store_n(&g_state->resume_horizon, tracker_horizon, __ATOMIC_RELAXED); \
+          __atomic_store_n(&g_state->resume_stdout_bytes, tracker_bytes, __ATOMIC_RELAXED); \
+          uint32_t _j_cnt = (tracker_sz < 1024) ? tracker_sz : 1024; \
+          __atomic_store_n(&g_state->resume_jagged_count, _j_cnt, __ATOMIC_RELAXED); \
+          for(uint32_t _i=0; _i<_j_cnt; _i++) { \
+              __atomic_store_n(&g_state->resume_jagged[_i].s, tracker_heap[_i].s, __ATOMIC_RELAXED); \
+              __atomic_store_n(&g_state->resume_jagged[_i].e, tracker_heap[_i].e, __ATOMIC_RELAXED); \
+          } \
           __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_RELEASE); \
       } \
   } while(0)
@@ -5668,6 +5710,7 @@ static int ring_splice_main(int argc, char **argv) {
 }
 
 static int ring_indexer_main(int argc, char **argv) {
+  if (!state || !g_state) return EXECUTION_FAILURE;
   if (argc < 4)
     return EXECUTION_FAILURE;
   int fd_data = atoi(argv[1]);
@@ -5726,6 +5769,7 @@ static int ring_indexer_main(int argc, char **argv) {
 }
 
 static int ring_fetcher_main(int argc, char **argv) {
+  if (!state || !g_state) return EXECUTION_FAILURE;
   if (argc < 6)
     return EXECUTION_FAILURE;
   int fd_pipe = atoi(argv[1]);
@@ -5741,7 +5785,7 @@ static int ring_fetcher_main(int argc, char **argv) {
       if (sys_read(fd_token_in, &t, 1) <= 0)
         break;
     }
-    if (robust_pipe_read(fd_pipe, &pp, sizeof(pp), true) <= 0)
+    if (robust_pipe_read(fd_pipe, &pp, sizeof(pp), true) != (ssize_t)sizeof(pp))
       break;
     loff_t off_in = (loff_t)pp.off;
     loff_t off_out = lseek(fd_local, 0, SEEK_END);
@@ -6240,8 +6284,23 @@ static int ring_set_resume_main(int argc, char **argv) {
     g_state->is_resume_mode = 1;
     g_state->resume_horizon = strtoull(argv[1], NULL, 10);
     g_state->resume_jagged_count = 0;
+    g_state->resume_stdout_bytes = 0;
 
-    for (int i = 2; i < argc && g_state->resume_jagged_count < 1024; i++) {
+    const char *env_bytes = getenv("FORKRUN_RESUME_STDOUT_BYTES");
+    if (env_bytes) {
+        g_state->resume_stdout_bytes = strtoull(env_bytes, NULL, 10);
+    }
+
+    int start_idx = 2;
+    // New calling convention: ring_set_resume <horizon> <stdout_bytes> [jagged...]
+    if (argc > 2 && strchr(argv[2], ':') == NULL) {
+        if (!env_bytes) {
+            g_state->resume_stdout_bytes = strtoull(argv[2], NULL, 10);
+        }
+        start_idx = 3;
+    }
+
+    for (int i = start_idx; i < argc && g_state->resume_jagged_count < 1024; i++) {
         char *colon = strchr(argv[i], ':');
         if (colon) {
             *colon = '\0';
@@ -6837,20 +6896,7 @@ static int ring_tui_main(int argc, char **argv) {
     FILE *tty = fdopen(tty_fd, "w");
     if (!tty) { close(tty_fd); return EXECUTION_FAILURE; }
 
-    struct sigaction sa, old_int, old_term;
-    sa.sa_handler = tui_sig_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT,  &sa, &old_int);
-    sigaction(SIGTERM, &sa, &old_term);
-
-    fprintf(tty, "\033[?1049h\033[?25l"); // Alt screen, hide cursor
-
-    uint64_t start_time = get_us_time();
-    uint64_t last_time  = start_time;
-    uint64_t last_lines = 0, last_bytes = 0, last_batches = 0;
-
-    // --- CPU Tracker State ---
+    // --- CPU Tracker State (alloc before touching terminal) ---
     struct CpuStat {
         uint64_t active;
         uint64_t total;
@@ -6863,6 +6909,19 @@ static int ring_tui_main(int argc, char **argv) {
         fclose(tty);
         return EXECUTION_FAILURE;
     }
+
+    struct sigaction sa, old_int, old_term;
+    sa.sa_handler = tui_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT,  &sa, &old_int);
+    sigaction(SIGTERM, &sa, &old_term);
+
+    fprintf(tty, "\033[?1049h\033[?25l"); // Alt screen, hide cursor
+
+    uint64_t start_time = get_us_time();
+    uint64_t last_time  = start_time;
+    uint64_t last_lines = 0, last_bytes = 0, last_batches = 0;
     int cpus_per_node[1024];
     memset(cpus_per_node, 0, sizeof(cpus_per_node));
 

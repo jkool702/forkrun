@@ -146,7 +146,7 @@ frun() {
         for nn in "${@##\-*}"; do
             [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && ! [[ " ${FORKRUN_EXTRA_FUNCS} " == *" ${nn} "* ]] && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
-        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_USE_HUGETLB:+FORKRUN_USE_HUGETLB} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} "
+        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_USE_HUGETLB:+FORKRUN_USE_HUGETLB} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} ${FORKRUN_TRUST_RESUME:+FORKRUN_TRUST_RESUME} "
 
         FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; declare -p -- ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
         [[ -n "${FORKRUN_EXTRA_SETUP}" ]] && FORKRUN_FRUN_SRC+=$'\n'"${FORKRUN_EXTRA_SETUP}"
@@ -473,20 +473,22 @@ EOF
                         # FULL AUTO RESUME - extract and use ALL info from resume file
                         eval "${parsed_state/___FORKRUN_RESUME_STATE_BOUNDARY___/}"
 
-                        local has_custom_vars=false
+                        local has_custom_vars=0
                         for var in ${FORKRUN_EXTRA_VARS:-}; do
                             if [[ "$var" != "FORKRUN_EXTRA_VARS" && "$var" != "FORKRUN_EXTRA_FUNCS" && "$var" != "FORKRUN_EXTRA_SETUP" ]]; then
-                                has_custom_vars=true
+                                has_custom_vars=1
                                 break
                             fi
                         done
 
-                        if [[ ( -n "${FORKRUN_EXTRA_SETUP:-}" || -n "${FORKRUN_EXTRA_FUNCS:-}" || "$has_custom_vars" == "true" ) && "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
+                        if [[ ( -n "${FORKRUN_EXTRA_SETUP:-}" || -n "${FORKRUN_EXTRA_FUNCS:-}" || "${has_custom_vars:-0}" == "1" ) && "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
                             local FORKRUN_EXTRA_SETUP_Q
                             printf -v FORKRUN_EXTRA_SETUP_Q '%q' "${FORKRUN_EXTRA_SETUP}"
+                            [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && FORKRUN_EXTRA_SETUP_Q+=$'\n'"$(declare -f ${FORKRUN_EXTRA_FUNCS})"
+                            (( has_custom_vars == 1 )) && FORKRUN_EXTRA_SETUP_Q+=$'\n'"$(declare -p ${FORKRUN_EXTRA_VARS})"
 
                             # Check if we have an interactive terminal to prompt the user
-                            if [ -t 0 ] && [ -e /dev/tty ]; then
+                            if { true; } 2>/dev/null </dev/tty; then
                                 read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands, functions, or variables. Execute them?\n[Setup]: '"${FORKRUN_EXTRA_SETUP_Q}"$'\n(y/N): ' -n 1 -r -t 60 </dev/tty
                                 echo >&2
                             else
@@ -834,7 +836,7 @@ toc() { :; }
     ring_memfd_create ingress_memfd
 
     # NEW: Apply Checkpoint if Resuming
-     ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "${FORKRUN_RESUME_JAGGED[@]}"
+     ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "$FORKRUN_RESUME_STDOUT_BYTES" "${FORKRUN_RESUME_JAGGED[@]}"
 
     # sanitize checkpoint file
     printf -v safe_checkpoint_file '%q' "${checkpoint_file}"
@@ -1299,7 +1301,7 @@ _forkrun_checkpoint_signal() {
 
   trap '"'"'ring_abort; trap - INT; kill -INT ${BASHPID}'"'"' INT
   trap '"'"'ring_abort; trap - HUP; kill -HUP ${BASHPID}'"'"' HUP
-  trap '"'"'ring_abort; trap - QUIT; kill -QUIT ${BASHPID}'"'"' QUIT
+  trap '"'"'trap_status=131; trap - QUIT; kill -QUIT ${BASHPID}'"'"' QUIT
   '
     if (( preempt_mode == 1 )); then
        worker_func_src+='trap "" USR1 TERM
@@ -1520,7 +1522,7 @@ W_NODE[$3]=$2
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
 
     } {fd_write}>"/proc/${BASHPID}/fd/${ingress_memfd}" {fd_scan}<"/proc/${BASHPID}/fd/${ingress_memfd}" {fd0}<&0 {fd1}>&1 {fd2}>&2
-    return $_ret_val
+    return ${_ret_val:-0}
   ) {fd00}<&0 {fd11}>&1 {fd22}>&2
 }
 
@@ -1539,7 +1541,14 @@ _frun_complete() {
           -z --null -N --dry-run -i --insert -I --insert-id -n --limit -L --exact-lines \
           -E --retry-nonzero-exit +E --no-retry-nonzero-exit \
           -l --lines --batchsize -b --bytes -j -P --workers -t --timeout --nodes --numa \
-          -o --order -d --delim --delimiter -h --help --usage --halt"
+          -o --order -d --delim --delimiter -h --help --usage --halt \
+          --resume --checkpoint-file --tui --debug --fast --version"
+
+    # File completion for --resume and --checkpoint-file
+    if [[ ${prev} == --resume || ${prev} == --checkpoint-file ]]; then
+        COMPREPLY=( $(compgen -f -- "${cur}") )
+        return 0
+    fi
 
     # If the user is currently typing a flag
     if [[ ${cur} == -* ]] ; then

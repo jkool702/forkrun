@@ -547,9 +547,9 @@ run_test_regex "Dry run (-N)" \
   "printf" \
   0 false
 
-run_test "Version (-V)" \
+run_test_regex "Version (-V)" \
   "frun -V" \
-  "forkrun v3.4.1"
+  "v[0-9]+\.[0-9]+\.[0-9]+"
 
 # FIXED: Check for USAGE string explicitly without exact match
 run_test_regex "Help (--help)" \
