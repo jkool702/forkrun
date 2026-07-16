@@ -5218,6 +5218,24 @@ static int ring_order_main(int argc, char **argv) {
   uint64_t tracker_horizon = 0;
   uint64_t tracker_bytes = 0;
 
+  // MULTI-RESUME FIX: Bootstrap tracker from previous checkpoint so that
+  // subsequent checkpoints are cumulative, not just delta of current run.
+  // Without this, a 2nd resume would dump horizon=0 and only new intervals,
+  // causing the 3rd resume to replay data from the 1st run (observed bug).
+  if (g_state && g_state->is_resume_mode) {
+      tracker_horizon = __atomic_load_n(&g_state->resume_horizon, __ATOMIC_RELAXED);
+      tracker_bytes = __atomic_load_n(&g_state->resume_stdout_bytes, __ATOMIC_RELAXED);
+      uint32_t prev_cnt = __atomic_load_n(&g_state->resume_jagged_count, __ATOMIC_RELAXED);
+      if (prev_cnt > 1024) prev_cnt = 1024;
+      for (uint32_t _ri = 0; _ri < prev_cnt; _ri++) {
+          uint64_t _s = __atomic_load_n(&g_state->resume_jagged[_ri].s, __ATOMIC_RELAXED);
+          uint64_t _e = __atomic_load_n(&g_state->resume_jagged[_ri].e, __ATOMIC_RELAXED);
+          if (_e > _s) {
+              interval_heap_push(&tracker_heap, &tracker_sz, &tracker_cap, _s, _e);
+          }
+      }
+  }
+
   // NEW: Macro to absorb a successfully written batch into the Ledger
   #define TRACK_COMPLETED_BATCH(_op) do { \
       tracker_bytes += (_op).len; \
@@ -6266,11 +6284,26 @@ static int ring_set_resume_main(int argc, char **argv) {
     g_state->is_resume_mode = 1;
     g_state->resume_horizon = strtoull(argv[1], NULL, 10);
     g_state->resume_jagged_count = 0;
+    g_state->resume_stdout_bytes = 0;
 
-    for (int i = 2; i < argc && g_state->resume_jagged_count < 1024; i++) {
+    const char *env_bytes = getenv("FORKRUN_RESUME_STDOUT_BYTES");
+    if (env_bytes) {
+        g_state->resume_stdout_bytes = strtoull(env_bytes, NULL, 10);
+    }
+
+    int start_idx = 2;
+    // New calling convention: ring_set_resume <horizon> <stdout_bytes> [jagged...]
+    if (argc > 2 && strchr(argv[2], ':') == NULL) {
+        if (!env_bytes) {
+            g_state->resume_stdout_bytes = strtoull(argv[2], NULL, 10);
+        }
+        start_idx = 3;
+    }
+
+    for (int i = start_idx; i < argc && g_state->resume_jagged_count < 1024; i++) {
         char *colon = strchr(argv[i], ':');
         if (colon) {
-            *colon = '\0';
+            *colon = ' ';
             g_state->resume_jagged[g_state->resume_jagged_count].s = strtoull(argv[i], NULL, 10);
             g_state->resume_jagged[g_state->resume_jagged_count].e = strtoull(colon + 1, NULL, 10);
             g_state->resume_jagged_count++;

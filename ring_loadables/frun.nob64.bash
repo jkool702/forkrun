@@ -836,7 +836,7 @@ toc() { :; }
     ring_memfd_create ingress_memfd
 
     # NEW: Apply Checkpoint if Resuming
-     ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "${FORKRUN_RESUME_JAGGED[@]}"
+     ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "$FORKRUN_RESUME_STDOUT_BYTES" "${FORKRUN_RESUME_JAGGED[@]}"
 
     # sanitize checkpoint file
     printf -v safe_checkpoint_file '%q' "${checkpoint_file}"
