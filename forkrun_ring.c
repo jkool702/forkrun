@@ -708,10 +708,8 @@ static int ring_exec_main(int argc, char **argv) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd);
-    // HARDENING: prevent memfd/escrow/eventfd leakage into exec'd user commands
-    if (fd_escrow_r) { for (uint32_t _i=0; _i<allocated_num_nodes; _i++) if (fd_escrow_r[_i]>=0) posix_spawn_file_actions_addclose(&actions, fd_escrow_r[_i]); }
-    if (fd_escrow_w) { for (uint32_t _i=0; _i<allocated_num_nodes; _i++) if (fd_escrow_w[_i]>=0) posix_spawn_file_actions_addclose(&actions, fd_escrow_w[_i]); }
-    if (evfd_data_arr) { for (uint32_t _i=0; _i<allocated_num_nodes; _i++) if (evfd_data_arr[_i]>=0) posix_spawn_file_actions_addclose(&actions, evfd_data_arr[_i]); }
+    // NOTE: fd leakage into exec'd commands is prevented by MFD_CLOEXEC/O_CLOEXEC
+    // set in xcreate_anon_file(). CLOEXEC survives fork() but closes on exec().
 
     // 6. Spawn the child (inherits FDs natively)
     pid_t pid;
