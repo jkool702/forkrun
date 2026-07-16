@@ -1541,7 +1541,14 @@ _frun_complete() {
           -z --null -N --dry-run -i --insert -I --insert-id -n --limit -L --exact-lines \
           -E --retry-nonzero-exit +E --no-retry-nonzero-exit \
           -l --lines --batchsize -b --bytes -j -P --workers -t --timeout --nodes --numa \
-          -o --order -d --delim --delimiter -h --help --usage --halt"
+          -o --order -d --delim --delimiter -h --help --usage --halt \
+          --resume --checkpoint-file --tui --debug --fast --version"
+
+    # File completion for --resume and --checkpoint-file
+    if [[ ${prev} == --resume || ${prev} == --checkpoint-file ]]; then
+        COMPREPLY=( $(compgen -f -- "${cur}") )
+        return 0
+    fi
 
     # If the user is currently typing a flag
     if [[ ${cur} == -* ]] ; then
