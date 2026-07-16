@@ -1,7 +1,8 @@
-FORKRUN_RESUME_HORIZON=8
-FORKRUN_RESUME_STDOUT_BYTES=49
-FORKRUN_RESUME_JAGGED=("10:51" )
-declare -a FORKRUN_ORIG_ARGS=([0]="-j" [1]="4" [2]="-l" [3]="1" [4]="crash_kill9_j4")
-declare -- FORKRUN_EXTRA_VARS=" FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS "
-declare -x FORKRUN_EXTRA_FUNCS="crash_kill9_j4"
-declare -- FORKRUN_EXTRA_DEFS=$'\ncrash_kill9_j4 () \n{ \n    if [[ "$1" == "5" ]]; then\n        kill -9 $BASHPID;\n    else\n        echo "$1";\n    fi\n}\ndeclare -- FORKRUN_EXTRA_VARS=" FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS "\ndeclare -x FORKRUN_EXTRA_FUNCS="crash_kill9_j4"'
+FORKRUN_RESUME_HORIZON=14
+FORKRUN_RESUME_STDOUT_BYTES=10
+FORKRUN_RESUME_JAGGED=()
+declare -a FORKRUN_ORIG_ARGS=([0]="-k" [1]="-l" [2]="1" [3]="-E" [4]="--halt" [5]="now,2" [6]="crash_on_3_7")
+declare -x FORKRUN_RETRY_LIMIT="0"
+declare -- FORKRUN_EXTRA_VARS=" FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS  FORKRUN_RETRY_LIMIT     "
+declare -x FORKRUN_EXTRA_FUNCS="crash_on_3_7"
+declare -- FORKRUN_EXTRA_DEFS=$'\ncrash_on_3_7 () \n{ \n    for a in "$@";\n    do\n        if [[ "$a" == "3" ]] || [[ "$a" == "7" ]]; then\n            exit 1;\n        else\n            printf \'%s\\n\' "$a";\n        fi;\n    done\n}\ndeclare -- FORKRUN_EXTRA_VARS=" FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS  FORKRUN_RETRY_LIMIT     "\ndeclare -x FORKRUN_EXTRA_FUNCS="crash_on_3_7"\ndeclare -x FORKRUN_RETRY_LIMIT="0"'
