@@ -715,16 +715,16 @@ static int ring_exec_main(int argc, char **argv) {
     pid_t pid;
     ret = posix_spawnp(&pid, tls_argv[0], &actions, NULL, tls_argv, environ);
 
-    // 7. Wait for the child synchronously - reap on non-EINTR to avoid zombie/runaway
+    // 7. Wait for the child synchronously
     int status = 0;
     if (ret == 0) {
         while (waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) {
-                kill(pid, SIGKILL);
-                while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
-                ret = -1; // Mark the execution as failed!
-                break;
-            }
+            if (errno == EINTR) continue;
+            // waitpid failed with ECHILD or other non-EINTR error: child already reaped
+            // or wait failed. Do NOT call kill() here – PID may have been recycled,
+            // which would risk killing an unrelated process (PID recycling race).
+            ret = -1;
+            break;
         }
     }
 
@@ -823,15 +823,14 @@ static int ring_exec_splice_main(int argc, char **argv) {
     // 8. Close the write end to send EOF to the child
     close(pfd[1]);
 
-    // 9. Wait for the child to finish - reap on non-EINTR
+    // 9. Wait for the child to finish
     int status = 0;
     if (ret == 0) {
         while (waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) {
-                kill(pid, SIGKILL);
-                while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
-                ret = -1; break;
-            }
+            if (errno == EINTR) continue;
+            // Do NOT kill on ECHILD – PID may be recycled (see comment above)
+            ret = -1;
+            break;
         }
     }
 
@@ -5768,7 +5767,7 @@ static int ring_fetcher_main(int argc, char **argv) {
       if (sys_read(fd_token_in, &t, 1) <= 0)
         break;
     }
-    if (robust_pipe_read(fd_pipe, &pp, sizeof(pp), true) != sizeof(pp))
+    if (robust_pipe_read(fd_pipe, &pp, sizeof(pp), true) != (ssize_t)sizeof(pp))
       break;
     loff_t off_in = (loff_t)pp.off;
     loff_t off_out = lseek(fd_local, 0, SEEK_END);
