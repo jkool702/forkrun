@@ -1081,21 +1081,25 @@ static int xcreate_anon_file(const char *name) {
     int fd = -1;
     const char *use_hugetlb = get_string_value("FORKRUN_USE_HUGETLB");
     if (use_hugetlb && strcmp(use_hugetlb, "1") == 0) {
-      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_CLOEXEC);
+      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_HUGETLB);
     }
     if (fd < 0) {
-      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_CLOEXEC);
+      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
     }
-    if (fd >= 0) { fcntl(fd, F_SETFD, FD_CLOEXEC); return fd; }
+    if (fd >= 0)
+      return fd;
     if (errno == EINVAL) {
-      fd = syscall(__NR_memfd_create, name, MFD_CLOEXEC);
-      if (fd >= 0) { fcntl(fd, F_SETFD, FD_CLOEXEC); return fd; }
+      fd = syscall(__NR_memfd_create, name, 0);
+      if (fd >= 0)
+        return fd;
     }
   }
-  int fd = open("/dev/shm", O_TMPFILE | O_RDWR | O_EXCL | O_CLOEXEC, 0600);
-  if (fd >= 0) { fcntl(fd, F_SETFD, FD_CLOEXEC); return fd; }
-  fd = open("/tmp", O_TMPFILE | O_RDWR | O_EXCL | O_CLOEXEC, 0600);
-  if (fd >= 0) { fcntl(fd, F_SETFD, FD_CLOEXEC); return fd; }
+  int fd = open("/dev/shm", O_TMPFILE | O_RDWR | O_EXCL, 0600);
+  if (fd >= 0)
+    return fd;
+  fd = open("/tmp", O_TMPFILE | O_RDWR | O_EXCL, 0600);
+  if (fd >= 0)
+    return fd;
   char path[64];
   snprintf(path, sizeof(path), "/dev/shm/forkrun.XXXXXX");
   fd = mkstemp(path);
