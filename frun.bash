@@ -473,17 +473,19 @@ EOF
                         # FULL AUTO RESUME - extract and use ALL info from resume file
                         eval "${parsed_state/___FORKRUN_RESUME_STATE_BOUNDARY___/}"
 
-                        local has_custom_vars=false
+                        local has_custom_vars=0
                         for var in ${FORKRUN_EXTRA_VARS:-}; do
                             if [[ "$var" != "FORKRUN_EXTRA_VARS" && "$var" != "FORKRUN_EXTRA_FUNCS" && "$var" != "FORKRUN_EXTRA_SETUP" ]]; then
-                                has_custom_vars=true
+                                has_custom_vars=1
                                 break
                             fi
                         done
 
-                        if [[ ( -n "${FORKRUN_EXTRA_SETUP:-}" || -n "${FORKRUN_EXTRA_FUNCS:-}" || "$has_custom_vars" == "true" ) && "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
+                        if [[ ( -n "${FORKRUN_EXTRA_SETUP:-}" || -n "${FORKRUN_EXTRA_FUNCS:-}" || "${has_custom_vars:-0}" == "1" ) && "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
                             local FORKRUN_EXTRA_SETUP_Q
                             printf -v FORKRUN_EXTRA_SETUP_Q '%q' "${FORKRUN_EXTRA_SETUP}"
+                            [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && FORKRUN_EXTRA_SETUP_Q+=$'\n'"$(declare -f ${FORKRUN_EXTRA_FUNCS})"
+                            (( has_custom_vars == 1 )) && FORKRUN_EXTRA_SETUP_Q+=$'\n'"$(declare -p ${FORKRUN_EXTRA_VARS})"
 
                             # Check if we have an interactive terminal to prompt the user
                             if [ -e /dev/tty ]; then
