@@ -708,16 +708,22 @@ static int ring_exec_main(int argc, char **argv) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd);
+    // HARDENING: prevent memfd/escrow/eventfd leakage into exec'd user commands
+    if (fd_escrow_r) { for (uint32_t _i=0; _i<allocated_num_nodes; _i++) if (fd_escrow_r[_i]>=0) posix_spawn_file_actions_addclose(&actions, fd_escrow_r[_i]); }
+    if (fd_escrow_w) { for (uint32_t _i=0; _i<allocated_num_nodes; _i++) if (fd_escrow_w[_i]>=0) posix_spawn_file_actions_addclose(&actions, fd_escrow_w[_i]); }
+    if (evfd_data_arr) { for (uint32_t _i=0; _i<allocated_num_nodes; _i++) if (evfd_data_arr[_i]>=0) posix_spawn_file_actions_addclose(&actions, evfd_data_arr[_i]); }
 
     // 6. Spawn the child (inherits FDs natively)
     pid_t pid;
     ret = posix_spawnp(&pid, tls_argv[0], &actions, NULL, tls_argv, environ);
 
-    // 7. Wait for the child synchronously
+    // 7. Wait for the child synchronously - reap on non-EINTR to avoid zombie/runaway
     int status = 0;
     if (ret == 0) {
         while (waitpid(pid, &status, 0) == -1) {
             if (errno != EINTR) {
+                kill(pid, SIGKILL);
+                while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
                 ret = -1; // Mark the execution as failed!
                 break;
             }
@@ -819,11 +825,15 @@ static int ring_exec_splice_main(int argc, char **argv) {
     // 8. Close the write end to send EOF to the child
     close(pfd[1]);
 
-    // 9. Wait for the child to finish
+    // 9. Wait for the child to finish - reap on non-EINTR
     int status = 0;
     if (ret == 0) {
         while (waitpid(pid, &status, 0) == -1) {
-            if (errno != EINTR) { ret = -1; break; }
+            if (errno != EINTR) {
+                kill(pid, SIGKILL);
+                while (waitpid(pid, &status, 0) == -1 && errno == EINTR) {}
+                ret = -1; break;
+            }
         }
     }
 
@@ -1073,25 +1083,21 @@ static int xcreate_anon_file(const char *name) {
     int fd = -1;
     const char *use_hugetlb = get_string_value("FORKRUN_USE_HUGETLB");
     if (use_hugetlb && strcmp(use_hugetlb, "1") == 0) {
-      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_HUGETLB);
+      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_HUGETLB | MFD_CLOEXEC);
     }
     if (fd < 0) {
-      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
+      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_CLOEXEC);
     }
-    if (fd >= 0)
-      return fd;
+    if (fd >= 0) { fcntl(fd, F_SETFD, FD_CLOEXEC); return fd; }
     if (errno == EINVAL) {
-      fd = syscall(__NR_memfd_create, name, 0);
-      if (fd >= 0)
-        return fd;
+      fd = syscall(__NR_memfd_create, name, MFD_CLOEXEC);
+      if (fd >= 0) { fcntl(fd, F_SETFD, FD_CLOEXEC); return fd; }
     }
   }
-  int fd = open("/dev/shm", O_TMPFILE | O_RDWR | O_EXCL, 0600);
-  if (fd >= 0)
-    return fd;
-  fd = open("/tmp", O_TMPFILE | O_RDWR | O_EXCL, 0600);
-  if (fd >= 0)
-    return fd;
+  int fd = open("/dev/shm", O_TMPFILE | O_RDWR | O_EXCL | O_CLOEXEC, 0600);
+  if (fd >= 0) { fcntl(fd, F_SETFD, FD_CLOEXEC); return fd; }
+  fd = open("/tmp", O_TMPFILE | O_RDWR | O_EXCL | O_CLOEXEC, 0600);
+  if (fd >= 0) { fcntl(fd, F_SETFD, FD_CLOEXEC); return fd; }
   char path[64];
   snprintf(path, sizeof(path), "/dev/shm/forkrun.XXXXXX");
   fd = mkstemp(path);
@@ -1124,7 +1130,7 @@ static inline void u64toa(uint64_t value, char *buffer) {
 
 static inline uint64_t get_us_time() {
   struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+  clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000;
 }
 
@@ -4463,6 +4469,7 @@ static int ring_numa_scanner_main(int argc, char **argv) {
 // Precondition: my_numa_node must be initialized by the caller.
 // ------------------------------------------------------------------
 static int do_lockfree_claim(struct WorkerBatchState *out, bool blocking) {
+  if (!state || !g_state) return EXECUTION_FAILURE;
   if (atomic_load_relaxed(&state[0].emergency_abort))
     return EXECUTION_FAILURE;
 
@@ -4661,9 +4668,7 @@ dlc_evaluate_claim:
 
   if (local_state->numa_enabled) {
     out->major = local_state->major_ring[my_read_idx & RING_MASK];
-    out->minor = local_state->minor_ring[my_read_idx & RING_MASK] & ~FLAG_MAJOR_EOF;
-    if (local_state->minor_ring[my_read_idx & RING_MASK] & FLAG_MAJOR_EOF)
-      out->minor |= FLAG_MAJOR_EOF;
+    out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
   } else {
     out->major = 0;
     out->minor = 0;
@@ -4684,6 +4689,7 @@ dlc_evaluate_claim:
 // physics, and this function handles NUMA init, the SIGPIPE shield, and all
 // Bash variable bindings.
 static int ring_claim_main(int argc, char **argv) {
+  if (!state || !g_state) return EXECUTION_FAILURE;
   const char *v_target = "REPLY";
 
   if (argc >= 2) {
@@ -4830,6 +4836,7 @@ static int ring_ack_main(int argc, char **argv) {
   int fd_fallow = atoi(argv[1]);
   int fd_target = (argc >= 3) ? atoi(argv[2]) : -1;
 
+  if (!state || !g_state) return EXECUTION_FAILURE;
   struct sigaction sa_ign, sa_old;
   sa_ign.sa_handler = SIG_IGN;
   sigemptyset(&sa_ign.sa_mask);
@@ -4856,13 +4863,25 @@ static int ring_ack_main(int argc, char **argv) {
       op.cnt = worker_last_cnt;
     }
   } else {
-    op.cnt = (uint32_t)atoi(get_string_value("RING_BATCH_SLOTS"));
+    const char *s_slots = get_string_value("RING_BATCH_SLOTS");
+    const char *s_batch_idx = get_string_value("RING_BATCH_IDX");
+    if (!s_slots || !s_batch_idx) {
+      sigaction(SIGPIPE, &sa_old, NULL);
+      return EXECUTION_FAILURE;
+    }
+    op.cnt = (uint32_t)atoi(s_slots);
     if (local_state && local_state->numa_enabled) {
-      op.major_idx = (uint32_t)atoi(get_string_value("RING_MAJOR"));
-      op.minor_idx = (uint32_t)atoi(get_string_value("RING_MINOR"));
-      my_idx = (uint64_t)atoll(get_string_value("RING_BATCH_IDX"));
+      const char *s_maj = get_string_value("RING_MAJOR");
+      const char *s_min = get_string_value("RING_MINOR");
+      if (!s_maj || !s_min) {
+        sigaction(SIGPIPE, &sa_old, NULL);
+        return EXECUTION_FAILURE;
+      }
+      op.major_idx = (uint32_t)atoi(s_maj);
+      op.minor_idx = (uint32_t)atoi(s_min);
+      my_idx = (uint64_t)atoll(s_batch_idx);
     } else {
-      op.major_idx = (uint32_t)atoi(get_string_value("RING_BATCH_IDX"));
+      op.major_idx = (uint32_t)atoi(s_batch_idx);
       op.minor_idx = 0;
       my_idx = op.major_idx;
     }
@@ -5215,10 +5234,14 @@ static int ring_order_main(int argc, char **argv) {
       } \
       if (g_state) { \
           __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_ACQ_REL); \
-          g_state->resume_horizon = tracker_horizon; \
-          g_state->resume_stdout_bytes = tracker_bytes; \
-          g_state->resume_jagged_count = (tracker_sz < 1024) ? tracker_sz : 1024; \
-          for(uint32_t _i=0; _i<g_state->resume_jagged_count; _i++) g_state->resume_jagged[_i] = tracker_heap[_i]; \
+          __atomic_store_n(&g_state->resume_horizon, tracker_horizon, __ATOMIC_RELAXED); \
+          __atomic_store_n(&g_state->resume_stdout_bytes, tracker_bytes, __ATOMIC_RELAXED); \
+          uint32_t _j_cnt = (tracker_sz < 1024) ? tracker_sz : 1024; \
+          __atomic_store_n(&g_state->resume_jagged_count, _j_cnt, __ATOMIC_RELAXED); \
+          for(uint32_t _i=0; _i<_j_cnt; _i++) { \
+              __atomic_store_n(&g_state->resume_jagged[_i].s, tracker_heap[_i].s, __ATOMIC_RELAXED); \
+              __atomic_store_n(&g_state->resume_jagged[_i].e, tracker_heap[_i].e, __ATOMIC_RELAXED); \
+          } \
           __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_RELEASE); \
       } \
   } while(0)
@@ -5668,6 +5691,7 @@ static int ring_splice_main(int argc, char **argv) {
 }
 
 static int ring_indexer_main(int argc, char **argv) {
+  if (!state || !g_state) return EXECUTION_FAILURE;
   if (argc < 4)
     return EXECUTION_FAILURE;
   int fd_data = atoi(argv[1]);
@@ -5726,6 +5750,7 @@ static int ring_indexer_main(int argc, char **argv) {
 }
 
 static int ring_fetcher_main(int argc, char **argv) {
+  if (!state || !g_state) return EXECUTION_FAILURE;
   if (argc < 6)
     return EXECUTION_FAILURE;
   int fd_pipe = atoi(argv[1]);
@@ -5741,7 +5766,7 @@ static int ring_fetcher_main(int argc, char **argv) {
       if (sys_read(fd_token_in, &t, 1) <= 0)
         break;
     }
-    if (robust_pipe_read(fd_pipe, &pp, sizeof(pp), true) <= 0)
+    if (robust_pipe_read(fd_pipe, &pp, sizeof(pp), true) != sizeof(pp))
       break;
     loff_t off_in = (loff_t)pp.off;
     loff_t off_out = lseek(fd_local, 0, SEEK_END);
@@ -6837,20 +6862,7 @@ static int ring_tui_main(int argc, char **argv) {
     FILE *tty = fdopen(tty_fd, "w");
     if (!tty) { close(tty_fd); return EXECUTION_FAILURE; }
 
-    struct sigaction sa, old_int, old_term;
-    sa.sa_handler = tui_sig_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT,  &sa, &old_int);
-    sigaction(SIGTERM, &sa, &old_term);
-
-    fprintf(tty, "\033[?1049h\033[?25l"); // Alt screen, hide cursor
-
-    uint64_t start_time = get_us_time();
-    uint64_t last_time  = start_time;
-    uint64_t last_lines = 0, last_bytes = 0, last_batches = 0;
-
-    // --- CPU Tracker State ---
+    // --- CPU Tracker State (alloc before touching terminal) ---
     struct CpuStat {
         uint64_t active;
         uint64_t total;
@@ -6863,6 +6875,19 @@ static int ring_tui_main(int argc, char **argv) {
         fclose(tty);
         return EXECUTION_FAILURE;
     }
+
+    struct sigaction sa, old_int, old_term;
+    sa.sa_handler = tui_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT,  &sa, &old_int);
+    sigaction(SIGTERM, &sa, &old_term);
+
+    fprintf(tty, "\033[?1049h\033[?25l"); // Alt screen, hide cursor
+
+    uint64_t start_time = get_us_time();
+    uint64_t last_time  = start_time;
+    uint64_t last_lines = 0, last_bytes = 0, last_batches = 0;
     int cpus_per_node[1024];
     memset(cpus_per_node, 0, sizeof(cpus_per_node));
 
