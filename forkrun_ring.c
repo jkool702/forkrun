@@ -1495,7 +1495,7 @@ static inline void pull_fire_alarm_reason(uint8_t reason) {
     if (__atomic_compare_exchange_n(&state[0].emergency_abort, &expected, 1,
                                     0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
         // First caller wins: record why we aborted.
-        __atomic_store_n(&g_state->abort_reason, reason, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_state->abort_reason, reason, __ATOMIC_RELEASE);
         uint64_t blast = 999999;
         for (uint32_t n = 0; n < allocated_num_nodes; n++) {
             if (evfd_eof_arr && evfd_eof_arr[n] >= 0)
@@ -6480,7 +6480,7 @@ static int ring_abort_reason_main(int argc, char **argv) {
     if (!g_state) return EXECUTION_FAILURE;
     char buf[4];
     snprintf(buf, sizeof(buf), "%u",
-             __atomic_load_n(&g_state->abort_reason, __ATOMIC_RELAXED));
+             __atomic_load_n(&g_state->abort_reason, __ATOMIC_ACQUIRE));
     bind_var_or_array(argc >= 2 ? argv[1] : "REPLY", buf, 0);
     return EXECUTION_SUCCESS;
 }
