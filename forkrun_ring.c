@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.4.3
+// forkrun_ring.c v3.4.4
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -1296,8 +1296,57 @@ struct ChunkMeta {
   volatile uint64_t actual_end ALIGNED(CACHE_LINE);
 };
 
+// PHYSICS: Wait for (meta_ptr)->actual_end to have FLAG_META_READY set, spinning
+// briefly first, then registering as a waiter on (node_var)'s meta_waiters count
+// and blocking via poll() on its meta-ready eventfd once the spin budget is
+// spent. Resolved value (flag bit still set) is stored into out_var.
+// on_abort_stmt runs (and must not fall through) if emergency_abort fires while
+// blocked in poll().
+//
+// NOTE: the post-registration double-check deliberately re-stores its read into
+// out_var before breaking -- an earlier hand-written copy of this pattern read
+// the fresh value only to test the flag and then discarded it, leaving out_var
+// holding the pre-registration (not-yet-ready, i.e. zero) value on that path.
+#define WAIT_FOR_META_READY(out_var, meta_ptr, node_var, on_abort_stmt)         \
+  do {                                                                         \
+    int _wmr_spin = 0;                                                        \
+    while (!(((out_var) = atomic_load_acquire(&(meta_ptr)->actual_end)) &      \
+             FLAG_META_READY)) {                                              \
+      if (_wmr_spin < 10000) {                                                \
+        cpu_relax();                                                          \
+        _wmr_spin++;                                                          \
+      } else {                                                                \
+        __atomic_fetch_add(&state[(node_var)].meta_waiters, 1,                 \
+                            __ATOMIC_SEQ_CST);                                \
+        if (((out_var) = atomic_load_acquire(&(meta_ptr)->actual_end)) &       \
+            FLAG_META_READY) {                                                \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
+                              __ATOMIC_SEQ_CST);                              \
+          break;                                                              \
+        }                                                                     \
+        struct pollfd _wmr_pfds[2] = {                                        \
+            {.fd = evfd_meta_arr[(node_var)], .events = POLLIN},              \
+            {.fd = evfd_ingest_eof, .events = POLLIN}};                       \
+        poll(_wmr_pfds, 2, -1);                                               \
+        if (atomic_load_relaxed(&state[0].emergency_abort)) {                 \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
+                              __ATOMIC_SEQ_CST);                              \
+          on_abort_stmt;                                                      \
+        }                                                                     \
+        if (_wmr_pfds[0].revents & POLLIN) {                                  \
+          uint64_t _wmr_v;                                                    \
+          sys_read(evfd_meta_arr[(node_var)], &_wmr_v, 8);                    \
+        }                                                                     \
+        __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,                 \
+                            __ATOMIC_SEQ_CST);                                \
+        _wmr_spin = 0;                                                        \
+      }                                                                       \
+    }                                                                         \
+  } while (0)
+
 struct IntervalNode {
     uint64_t s;
+
     uint64_t e;
 };
 
@@ -3042,8 +3091,37 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           break;
         search_end = window_start;
       }
-      if (search_end <= meta->raw_offset)
-        actual_end = meta->raw_offset;
+      if (search_end <= meta->raw_offset) {
+        if (meta->raw_length == 0) {
+          // Genuine EOF sentinel (see the ingest-side EOF meta): raw_offset
+          // here IS the true end-of-stream byte offset, so this really is the
+          // final boundary -- emit it as-is so any trailing unterminated data
+          // still gets flushed as the last record.
+          actual_end = meta->raw_offset;
+        } else {
+          // A real chunk (raw_length > 0) searched its entire window and found
+          // no delimiter at all -- a single logical line spans at least this
+          // whole chunk. Do NOT default to this chunk's own start offset: the
+          // consumer would then treat [prev_boundary, this_chunk_start) as a
+          // complete, delimiter-bounded batch, silently slicing a still-open
+          // line into fragments. Instead, propagate the last REAL resolved
+          // boundary forward so the consumer's existing
+          // "actual_start >= actual_end" skip path defers this chunk (and any
+          // further no-delimiter chunks) until a real delimiter, or true EOF,
+          // is eventually found.
+          if (major_id == 0) {
+            actual_end = 0;
+          } else {
+            struct ChunkMeta *prev_meta =
+                &g_state->meta_ring[(major_id - 1) & META_RING_MASK];
+            uint64_t prev_act_end;
+            uint32_t tnode = prev_meta->target_node;
+            WAIT_FOR_META_READY(prev_act_end, prev_meta, tnode,
+                                 return EXECUTION_FAILURE);
+            actual_end = prev_act_end & ~FLAG_META_READY;
+          }
+        }
+      }
     }
 
     // 1. Mark meta ready
@@ -3778,36 +3856,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         struct ChunkMeta *prev_meta =
             &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
         uint64_t prev_act_end;
-        int _pe_spin = 0;
-        while (!((prev_act_end = atomic_load_acquire(&prev_meta->actual_end)) &
-                 FLAG_META_READY)) {
-          if (_pe_spin < 10000) {
-            cpu_relax();
-            _pe_spin++;
-          } else {
-            uint32_t tnode = prev_meta->target_node;
-            __atomic_fetch_add(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
-            if (atomic_load_acquire(&prev_meta->actual_end) & FLAG_META_READY) {
-              __atomic_fetch_sub(&state[tnode].meta_waiters, 1,
-                                 __ATOMIC_SEQ_CST);
-              break;
-            }
-            struct pollfd pfds[2] = {
-                {.fd = evfd_meta_arr[tnode], .events = POLLIN},
-                {.fd = evfd_ingest_eof, .events = POLLIN}};
-            poll(pfds, 2, -1);
-            if (atomic_load_relaxed(&state[0].emergency_abort)) {
-                __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
-                goto unified_scanner_eof;
-            }
-            if (pfds[0].revents & POLLIN) {
-              uint64_t v;
-              sys_read(evfd_meta_arr[tnode], &v, 8);
-            }
-            __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
-            _pe_spin = 0;
-          }
-        }
+        uint32_t tnode = prev_meta->target_node;
+        WAIT_FOR_META_READY(prev_act_end, prev_meta, tnode,
+                             goto unified_scanner_eof);
         actual_start = prev_act_end & ~FLAG_META_READY;
       }
 
