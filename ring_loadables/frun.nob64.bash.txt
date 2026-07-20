@@ -1402,8 +1402,21 @@ W_NODE[$3]=$2
             case "$POLL_EVENT" in
                 IGNORE) ;;
                 ABORT)
-                    NORMAL_EXIT_FLAG=false
-                    (( _ret_val == 0 )) && _ret_val=1
+                    # Query WHY the fire alarm was pulled.
+                    # reason 1 = downstream SIGPIPE (e.g. `| head -c 100`):
+                    #   the consumer closed the pipe. This is a normal, clean
+                    #   termination — no checkpoint, no error message, exit 0.
+                    # reason 2 (or 0) = internal fault (worker crash, scanner
+                    #   death, OOM): generate a checkpoint for resume.
+                    local _abort_reason=0
+                    ring_abort_reason _abort_reason 2>/dev/null
+                    if (( _abort_reason == 1 )); then
+                        NORMAL_EXIT_FLAG=true
+                        _ret_val=0
+                    else
+                        NORMAL_EXIT_FLAG=false
+                        (( _ret_val == 0 )) && _ret_val=1
+                    fi
                     break
                     ;;
                 TIMEOUT)

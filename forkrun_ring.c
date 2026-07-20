@@ -906,6 +906,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
   X(ring_dump_resume, ring_dump_resume_main, "ring_dump_resume [bytes]", "Dump checkpoint state") \
   X(ring_set_resume, ring_set_resume_main, "ring_set_resume <horizon> [jagged...]", "Set checkpoint state") \
   X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort") \
+  X(ring_abort_reason, ring_abort_reason_main, "ring_abort_reason [VAR]", "Query abort reason (0=unset 1=sigpipe 2=fault)") \
   X(ring_tui, ring_tui_main, "ring_tui [expected_bytes] [order_mode]", "Real-Time Telemetry Dashboard")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
@@ -1356,6 +1357,13 @@ struct GlobalState {
   uint64_t ingest_eof_idx ALIGNED(CACHE_LINE);
   uint64_t _pad_ingest_waiters[7];
 
+  // Abort reason: 0 = unset, 1 = downstream SIGPIPE (clean exit),
+  //               2 = internal fault (checkpoint needed).
+  // Written once by the first pull_fire_alarm caller (protected by
+  // the CAS on emergency_abort). Read by the Bash wrapper after
+  // ring_poll returns ABORT to decide whether to generate a checkpoint.
+  uint8_t abort_reason ALIGNED(CACHE_LINE);
+
   // NEW: Orderer Ledger (The Checkpoint)
   uint8_t is_resume_mode ALIGNED(CACHE_LINE);
   volatile uint32_t resume_seq; // NEW: Seqlock counter
@@ -1470,22 +1478,37 @@ static inline void cleanup_waiter_state() {
 }
 
 // EMERGENCY SHUTDOWN: Global fire alarm sentry.
-// Any thread (Worker or Orderer) can call this to trigger an immediate system-wide
-// abort. It atomically flips emergency_abort to 1 (CAS ensures we only blast once),
-// then blasts ALL EOF eventfds to wake every sleeping poll across the engine.
-// Data eventfds are left untouched to preserve the conservation laws of the ring.
-static inline void pull_fire_alarm() {
+// Any thread (Worker or Orderer) can call this to trigger an immediate
+// system-wide abort. It atomically flips emergency_abort to 1 (CAS ensures
+// we only blast once), records the abort reason, then blasts ALL EOF
+// eventfds to wake every sleeping poll across the engine.
+// Data eventfds are left untouched to preserve the conservation laws of
+// the ring.
+//
+// reason: 1 = downstream SIGPIPE / consumer closed pipe (clean exit,
+//             no checkpoint needed)
+//         2 = internal fault (worker crash, scanner death, OOM, etc. —
+//             checkpoint IS needed)
+static inline void pull_fire_alarm_reason(uint8_t reason) {
     if (!state) return;
-    // CAS: Only the first caller blasts the eventfds
     uint8_t expected = 0;
-    if (__atomic_compare_exchange_n(&state[0].emergency_abort, &expected, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+    if (__atomic_compare_exchange_n(&state[0].emergency_abort, &expected, 1,
+                                    0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+        // First caller wins: record why we aborted.
+        __atomic_store_n(&g_state->abort_reason, reason, __ATOMIC_RELAXED);
         uint64_t blast = 999999;
         for (uint32_t n = 0; n < allocated_num_nodes; n++) {
-            if (evfd_eof_arr && evfd_eof_arr[n] >= 0) sys_write(evfd_eof_arr[n], &blast, 8);
+            if (evfd_eof_arr && evfd_eof_arr[n] >= 0)
+                sys_write(evfd_eof_arr[n], &blast, 8);
         }
         if (evfd_ingest_eof >= 0) sys_write(evfd_ingest_eof, &blast, 8);
-        if (evfd_chunk_done >= 0) sys_write(evfd_chunk_done, &blast, 8); // Wake up Ingest
+        if (evfd_chunk_done >= 0) sys_write(evfd_chunk_done, &blast, 8);
     }
+}
+
+// Backward-compatible wrapper: internal fault (reason = 2).
+static inline void pull_fire_alarm(void) {
+    pull_fire_alarm_reason(2);
 }
 
 #define OOM_WAIT_FOR_MEMORY(free_b_var, threshold, si_var, mu_var)             \
@@ -4195,10 +4218,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 } else
                   p = end;
               } else {
-                if (status == 1 && p < end) {
+                // UMA: always advance p past the scanned buffer so that
+                // current_p_offset tracks correctly across refills.
+                // Without this, a delimiter-free stream causes the scanner
+                // to re-read the same chunk_sz window forever and publish
+                // only the final buffer at EOF (the "4 MB cutoff" bug).
+                // lines_found is only incremented at true EOF so that
+                // pending_lines stays 0 and force_refill keeps firing
+                // until the ingest thread signals completion.
+                if (status == 1 && p < end)
                   lines_found++;
-                  p = end;
-                }
+                p = end;
                 break;
               }
             }
@@ -4845,8 +4875,9 @@ static int ring_claim_main(int argc, char **argv) {
       if ((claim_calls++ & 63) == 0) {
           struct pollfd pfd_stdout = {.fd = 1, .events = POLLOUT};
           if (poll(&pfd_stdout, 1, 0) > 0 && (pfd_stdout.revents & (POLLERR | POLLHUP))) {
-              // The downstream pipe was cut (e.g., head -n 5). Pull the fire alarm!
-              pull_fire_alarm();
+              // Downstream consumer closed the pipe (e.g. `head -c 100`).
+              // This is a clean exit, not an internal fault — reason 1.
+              pull_fire_alarm_reason(1);
               return EXECUTION_FAILURE;
           }
       }
@@ -5407,7 +5438,7 @@ static int ring_order_main(int argc, char **argv) {
             if (ring_copy_chunk(op->fd, 1, offset, op->len) < 0) stdout_broken = true;
           }
           if (stdout_broken) {
-              pull_fire_alarm();
+              pull_fire_alarm_reason(1);   // downstream close, not internal fault
               break;
           }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
@@ -5429,7 +5460,7 @@ static int ring_order_main(int argc, char **argv) {
             }
             close(fd_file);
             unlink(path);
-            if (stdout_broken) { pull_fire_alarm(); break; }
+            if (stdout_broken) { pull_fire_alarm_reason(1); break; }
             TRACK_COMPLETED_BATCH(*op);
           }
         }
@@ -5449,7 +5480,7 @@ static int ring_order_main(int argc, char **argv) {
               if (ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len) < 0) stdout_broken = true;
             }
             if (stdout_broken) {
-                pull_fire_alarm();
+                pull_fire_alarm_reason(1);   // downstream close, not internal fault
                 break;
             }
             safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
@@ -5472,7 +5503,7 @@ static int ring_order_main(int argc, char **argv) {
               }
               close(fd_file);
               unlink(path);
-              if (stdout_broken) { pull_fire_alarm(); break; }
+              if (stdout_broken) { pull_fire_alarm_reason(1); break; }
               TRACK_COMPLETED_BATCH(top.pkt);
             }
           }
@@ -5485,7 +5516,7 @@ static int ring_order_main(int argc, char **argv) {
     }
 
     if (stdout_broken) {
-        pull_fire_alarm();
+        pull_fire_alarm_reason(1);   // downstream close, not internal fault
         break; // Break outer read loop on SIGPIPE
     }
 
@@ -6423,6 +6454,18 @@ static int ring_set_resume_main(int argc, char **argv) {
 static int ring_abort_main(int argc, char **argv) {
     (void)argc; (void)argv;
     pull_fire_alarm();
+    return EXECUTION_SUCCESS;
+}
+
+// Query the abort reason so the Bash wrapper can decide whether to
+// generate a checkpoint.  Returns 0 (unset), 1 (SIGPIPE / downstream
+// close), or 2 (internal fault).
+static int ring_abort_reason_main(int argc, char **argv) {
+    if (!g_state) return EXECUTION_FAILURE;
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%u",
+             __atomic_load_n(&g_state->abort_reason, __ATOMIC_RELAXED));
+    bind_var_or_array(argc >= 2 ? argv[1] : "REPLY", buf, 0);
     return EXECUTION_SUCCESS;
 }
 
