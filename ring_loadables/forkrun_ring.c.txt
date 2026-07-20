@@ -3908,8 +3908,24 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       end = buf;
 
     } else {
-      if (status == 1 && p >= end)
+      if (status == 1 && p >= end) {
+        // UMA EOF with no trailing delimiter: the inner loop consumed
+        // the buffer (p = end) but never found a delimiter, so
+        // pending_lines stayed 0 and no flush was triggered.  If
+        // batch_start < current position, there is unflushed data
+        // spanning the entire stream (or the tail since the last
+        // delimiter).  Force-flush it as a single batch, exactly as
+        // the NUMA path does via its chunk_eof_flushed guard.
+        if (!byte_mode) {
+          uint64_t final_off = buf_base_offset + (uint64_t)(p - buf);
+          if (batch_start < final_off) {
+            bool _skipped = false;
+            UNIFIED_SCANNER_FLUSH(false, 0, 0, final_off, _skipped);
+            batch_start = final_off;
+          }
+        }
         break;
+      }
       current_p_offset = buf_base_offset + (uint64_t)(p - buf);
     }
 
