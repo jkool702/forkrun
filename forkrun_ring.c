@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.4.2
+// forkrun_ring.c v3.4.3
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -336,11 +336,11 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #ifndef MFD_ALLOW_SEALING
 #define MFD_ALLOW_SEALING 0x0002U
 #endif
-#ifndef MFD_HUGETLB
-#define MFD_HUGETLB 0x0004U
-#endif
 #ifndef O_TMPFILE
 #define O_TMPFILE 020200000
+#endif
+#ifndef MADV_HUGEPAGE
+#define MADV_HUGEPAGE 14
 #endif
 #ifndef F_ADD_SEALS
 #define F_ADD_SEALS 1033
@@ -1071,20 +1071,70 @@ static uint64_t get_arg_max_bytes() {
   return 32768;
 }
 
+// PHYSICS: forkrun's shared ring-state mapping (g_state/state, a MAP_SHARED
+// anonymous mapping, i.e. kernel-backed by shmem) is madvise(MADV_HUGEPAGE)-hinted
+// below, so it can be promoted to a Shmem Transparent Huge Page whenever
+// shmem_enabled is 'always' or 'advise'.
+//
+// IMPORTANT SCOPE NOTE: this does NOT extend to the memfd-backed input/output
+// files, which forkrun only ever touches via read/write/pread/copy_file_range/
+// sendfile -- never mmap. Under shmem_enabled=advise, the kernel only grants huge
+// folios to pages faulted in through a VM_HUGEPAGE-flagged mapping; plain
+// buffered I/O syscalls carry no such mapping, so 'advise' mode has no effect on
+// that data no matter what forkrun madvises elsewhere. The large throughput gain
+// observed in testing (50-60% on -s/-b/-C modes, big systime cut in -C) was
+// measured with shmem_enabled=always, which is a pure inode/size-based policy
+// that isn't gated on any mapping and so does apply to that data. Getting the
+// same effect under 'advise' would require forkrun to mmap the memfd itself and
+// access it through that mapping -- a real change to the I/O path, not yet done.
+static void check_thp_shmem_config(void) {
+  int fd = open("/sys/kernel/mm/transparent_hugepage/shmem_enabled", O_RDONLY);
+  if (fd < 0)
+    return; // Not present on this kernel; nothing useful to report.
+  char buf[256];
+  ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return;
+  buf[n] = '\0';
+  if (strstr(buf, "[never]") != NULL) {
+    fprintf(stderr,
+            "forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled "
+            "is 'never'.\n"
+            "         forkrun's internal shared ring-state mapping can use Shmem "
+            "Transparent\n"
+            "         Huge Pages when this is 'advise' or 'always' (forkrun hints "
+            "for it\n"
+            "         automatically). For the larger throughput gain observed on "
+            "memfd-backed\n"
+            "         I/O (~50-60%% on -s/-b/-C modes, and a large drop in system "
+            "time, most\n"
+            "         notably in -C mode), 'always' is currently required -- "
+            "'advise' does not\n"
+            "         cover plain read/write I/O the way forkrun uses it today. "
+            "Consider:\n"
+            "           echo always | sudo tee "
+            "/sys/kernel/mm/transparent_hugepage/shmem_enabled\n"
+            "         or, for the more conservative system-wide setting:\n"
+            "           echo advise | sudo tee "
+            "/sys/kernel/mm/transparent_hugepage/shmem_enabled\n");
+  }
+}
+
 static int xcreate_anon_file(const char *name) {
   const char *force_fallback = get_string_value("FORKRUN_FORCE_FALLBACK");
   bool use_memfd = true;
   if (force_fallback && (strcmp(force_fallback, "1") == 0))
     use_memfd = false;
   if (use_memfd) {
-    int fd = -1;
-    const char *use_hugetlb = get_string_value("FORKRUN_USE_HUGETLB");
-    if (use_hugetlb && strcmp(use_hugetlb, "1") == 0) {
-      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_HUGETLB);
-    }
-    if (fd < 0) {
-      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
-    }
+    // NOTE: MFD_HUGETLB is intentionally not used here. It conflicts with the
+    // shmem semantics forkrun's memfd-backed files depend on (ftruncate/fallocate
+    // PUNCH_HOLE fine-grained resizing, arbitrary-offset sparse growth, etc).
+    // Transparent Huge Pages are the supported path to hugepage-backed throughput
+    // gains for this data, but note they currently require shmem_enabled=always
+    // to take effect, since this fd is only ever accessed via read/write/
+    // copy_file_range/sendfile, not mmap -- see check_thp_shmem_config() above.
+    int fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
     if (fd >= 0)
       return fd;
     if (errno == EINVAL) {
@@ -1886,6 +1936,12 @@ static int ring_init_main(int argc, char **argv) {
     builtin_error("mmap: %s", strerror(errno));
     return EXECUTION_FAILURE;
   }
+  // PHYSICS: This is a MAP_SHARED anonymous mapping, so the kernel backs it with
+  // shmem. Hint MADV_HUGEPAGE so it can be promoted to Shmem Transparent Huge
+  // Pages when /sys/kernel/mm/transparent_hugepage/shmem_enabled == 'advise'
+  // (best-effort; failure here is harmless and intentionally ignored).
+  madvise(p, total_size, MADV_HUGEPAGE);
+  check_thp_shmem_config();
 
   g_state = (struct GlobalState *)p;
   // Step exactly 'global_size' bytes forward so state stays 4096-aligned
