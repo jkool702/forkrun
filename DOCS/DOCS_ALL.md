@@ -1,6 +1,6 @@
 
 -----------------------------------------
-#ARCHITECTURE.md
+# ARCHITECTURE.md
 
 # forkrun Architecture
 
@@ -101,7 +101,7 @@ Optimistic execution with near-zero happy-path overhead, instant failure detecti
 ---
 
 -----------------------------------------
-#BORN_LOCAL_NUMA.md
+# BORN_LOCAL_NUMA.md
 
 ### `BORN_LOCAL_NUMA.md`
 
@@ -190,7 +190,7 @@ If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), 
 If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), `forkrun` automatically demotes the pipeline to the traditional UMA (Uniform Memory Access) architecture. While UMA mode still benefits from the ultra-fast C-ring and zero-copy `posix_spawnp` execution paths, it will incur the standard cross-socket memory migration tax inherent to all traditional shell parallelizers.
 
 -----------------------------------------
-#C_PLUGIN.md
+# C_PLUGIN.md
 
 ### `C_PLUGIN.md`
 
@@ -321,7 +321,7 @@ If you are a systems hacker, you might wonder how `forkrun` handles dynamically 
 This guarantees total POSIX compliance and avoids Undefined Behavior, while giving power-users zero-overhead access to `forkrun`'s internal ring metadata. Furthermore, the `cfg_state[3]` array exposes the engine's internal configuration state while maintaining strictly aligned 8-byte memory boundaries regardless of underlying hardware architecture, and the `version` tag allows us to expand the context in future v3.x releases without breaking older plugins.
 
 -----------------------------------------
-#DESIGN.md
+# DESIGN.md
 
 ### `DESIGN.md`
 
@@ -596,7 +596,7 @@ Once that model clicks, the rest of the design follows naturally.
 **See also:** `INVARIANTS.md` (the formal never-break list) and `PHYSICS.md` (the geophysics perspective).
 
 -----------------------------------------
-#ECONOMIC_IMPACT.md
+# ECONOMIC_IMPACT.md
 
 # Reclaiming Exascale Capacity: The Economic Case for forkrun on Frontier
 
@@ -663,7 +663,7 @@ https://github.com/jkool702/forkrun
 Background: Computational Geophysics & Inverse Theory
 
 -----------------------------------------
-#EOF_PROTOCOL.md
+# EOF_PROTOCOL.md
 
 ### `EOF_PROTOCOL.md`
 
@@ -909,7 +909,7 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 | [PHYSICS.md](PHYSICS.md) | The adaptive flow controller interacts with EOF via the stall/starve meters, but does not affect the correctness of EOF detection. |
 
 -----------------------------------------
-#FLAGS.md
+# FLAGS.md
 
 # # # # # FORKRUN V3 FLAGS # # # # #
 
@@ -926,7 +926,6 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 - `-X`, `--external`          : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. *(NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).*
 - `-C`, `--plugin <so:fn>`    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. See [`C_PLUGIN.md`](C_PLUGIN.md) for additional info.
-
 
 ### OUTPUT MODES
 
@@ -962,7 +961,15 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 - `+v`, `--no-verbose`        : Decrease verbosity. Disables --stats.
 - `-V`, `--version`           : Prints forkrun version number
 -  `--stats`                  : Prints NUMA statistics to stderr (currently ignored for UMA)
+- `--tui`, `--progress`      : Opens a live telemetry dashboard (TUI) visualizing throughput, memory footprint, and per-node CPU/queue saturation. `--no-tui`/`--no-progress` disables it.
 
+### MULTI-INPUT PARAMETER SWEEPS
+
+- `::: <args>`                : Treat subsequent arguments as inputs. Generates a Cartesian cross-product if multiple `:::` are used.
+- `:::: <files>`              : Treat subsequent arguments as files and read inputs from them (use `-` for stdin).
+- `--link`                    : Zip parameter lists together instead of generating a full cross-product.
+  *Note: When using sweeps, parameters are automatically unpacked and passed as positional arguments (`$1`, `$2`, etc.) to your function, or you can use `{1}`, `{2}`, etc. to insert them explicitly into your command string.*
+  
 ### ERROR HANDLING & RETRIES
 
 - `-E`, `--retry-nonzero-exit`    : Activate auto-retry machinery for commands returning non-zero exit codes. When active, `|| exit $?` is appended to the parallelized command, meaning any non-zero return triggers a worker kill and batch retry.
@@ -988,7 +995,16 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 ### UNSETTING FLAGS
 
-  - +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed wins.
+- +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed wins.
+
+### PERFORMANCE TIP: TRANSPARENT HUGE PAGES
+
+- forkrun's internal shared ring-state mapping is `madvise(MADV_HUGEPAGE)`-hinted automatically, so it can use Shmem Transparent Huge Pages whenever `/sys/kernel/mm/transparent_hugepage/shmem_enabled` is 'advise' or 'always'.
+- A much larger effect (50-60% higher top-end throughput in `-s`/`-b`/`-C` modes, plus a large reduction in system time, especially in `-C` mode) comes from THP being used for the memfd-backed input/output data itself. That data is only ever accessed via read/write/copy_file_range/sendfile, never mmap, so it is NOT covered by 'advise' mode (which requires an actual madvise-hinted mapping over the data to take effect) -- 'always' is currently required to get this gain, since it is a pure inode/size-based policy that applies regardless of how the file is accessed:
+  - `echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled`
+- If you'd rather not change this system-wide, 'advise' is a safe, more conservative default that still helps the ring-state mapping:
+  - `echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled`
+- If shmem_enabled is set to 'never', forkrun will print a one-time recommendation to stderr on startup. (Note: hugetlbfs-backed hugepages are NOT supported and are not the same thing as this setting -- forkrun relies solely on THP, not HUGETLB.)
 
 ### ENVIRONMENT VARS
 
@@ -999,10 +1015,13 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
   - EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
 - `FORKRUN_EXTRA_SETUP` : Use this to specify raw commands that need to be run in frun's environment during setup.
   - EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
-- `FORKRUN_USE_HUGETLB` : Set to '1' to have forkrun attempt to use hugepages for memfd backing. WARNING: only enable this if you have sufficient available hugepages so that forkrun does NOT run out of memory to use.
+- `FORKRUN_PREEMPT_MODE`: Controls SLURM preemption detection and handling.
+  - `auto` (default): Automatically detects SLURM environment via `SLURM_JOB_ID`.
+  - `0` / `false`: Disable preemption handling entirely.
+  - `1` / `true`: Force-enable preemption handling. When enabled, forkrun catches `SIGTERM` (scancel/preemption) and `SIGUSR1` (SLURM `--signal=B:USR1@<time>`) to instantly freeze the pipeline and generate a checkpoint for perfect resume capability.
 
 -----------------------------------------
-#FORKRUN_OVERVIEW.md
+# FORKRUN_OVERVIEW.md
 
 # forkrun — NUMA-Aware Contention-Free Streaming Parallelization for HPC Data Prep
 
@@ -1120,7 +1139,7 @@ Dandridge, TN (1 hour from ORNL) • anthonywbarone@gmail.com • (858) 735-2342
 https://github.com/jkool702/forkrun • Background: Computational Geophysics & Inverse Theory
 
 -----------------------------------------
-#INVARIANTS.md
+# INVARIANTS.md
 
 ### `INVARIANTS.md`
 
@@ -1334,7 +1353,7 @@ Progress is irreversible. Locality is structural. Contention was designed away. 
 **See also:** `DESIGN.md` and `PHYSICS.md`
 
 -----------------------------------------
-#MAINTAINERS.md
+# MAINTAINERS.md
 
 ### `MAINTAINERS.md`
 
@@ -1467,7 +1486,7 @@ The output must match the expected test count for the release. A lower count ind
 This check is the last gate before tagging. If it passes alongside the full sanitizer matrix, tag the release and publish.
 
 -----------------------------------------
-#PHYSICS.md
+# PHYSICS.md
 
 # PHYSICS.md – Thinking About forkrun Like a Physical System
 
@@ -1626,7 +1645,7 @@ Welcome to the physics department. The CS department is across the hall — they
 - The C source – the actual riverbed geometry
 
 -----------------------------------------
-#README.md
+# README.md
 
 # forkrun — NUMA-Aware Contention-Free Streaming Parallelization
 
@@ -1727,7 +1746,7 @@ Priorities for the development roadmap include:
 
 
 -----------------------------------------
-#RESILIENCE_PROTOCOL.md
+# RESILIENCE_PROTOCOL.md
 
 ### `RESILIENCE_PROTOCOL.md`
 

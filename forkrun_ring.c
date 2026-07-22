@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.4.2
+// forkrun_ring.c v3.4.3
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -336,11 +336,11 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #ifndef MFD_ALLOW_SEALING
 #define MFD_ALLOW_SEALING 0x0002U
 #endif
-#ifndef MFD_HUGETLB
-#define MFD_HUGETLB 0x0004U
-#endif
 #ifndef O_TMPFILE
 #define O_TMPFILE 020200000
+#endif
+#ifndef MADV_HUGEPAGE
+#define MADV_HUGEPAGE 14
 #endif
 #ifndef F_ADD_SEALS
 #define F_ADD_SEALS 1033
@@ -376,7 +376,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.4.2"
+#define FORKRUN_RING_VERSION "v3.4.3"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -906,6 +906,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
   X(ring_dump_resume, ring_dump_resume_main, "ring_dump_resume [bytes]", "Dump checkpoint state") \
   X(ring_set_resume, ring_set_resume_main, "ring_set_resume <horizon> [jagged...]", "Set checkpoint state") \
   X(ring_abort, ring_abort_main, "ring_abort", "Trigger global emergency abort") \
+  X(ring_abort_reason, ring_abort_reason_main, "ring_abort_reason [VAR]", "Query abort reason (0=unset 1=sigpipe 2=fault)") \
   X(ring_tui, ring_tui_main, "ring_tui [expected_bytes] [order_mode]", "Real-Time Telemetry Dashboard")
 
 #define X(name, func, usage, doc) static int func(int argc, char **argv);
@@ -1071,20 +1072,70 @@ static uint64_t get_arg_max_bytes() {
   return 32768;
 }
 
+// PHYSICS: forkrun's shared ring-state mapping (g_state/state, a MAP_SHARED
+// anonymous mapping, i.e. kernel-backed by shmem) is madvise(MADV_HUGEPAGE)-hinted
+// below, so it can be promoted to a Shmem Transparent Huge Page whenever
+// shmem_enabled is 'always' or 'advise'.
+//
+// IMPORTANT SCOPE NOTE: this does NOT extend to the memfd-backed input/output
+// files, which forkrun only ever touches via read/write/pread/copy_file_range/
+// sendfile -- never mmap. Under shmem_enabled=advise, the kernel only grants huge
+// folios to pages faulted in through a VM_HUGEPAGE-flagged mapping; plain
+// buffered I/O syscalls carry no such mapping, so 'advise' mode has no effect on
+// that data no matter what forkrun madvises elsewhere. The large throughput gain
+// observed in testing (50-60% on -s/-b/-C modes, big systime cut in -C) was
+// measured with shmem_enabled=always, which is a pure inode/size-based policy
+// that isn't gated on any mapping and so does apply to that data. Getting the
+// same effect under 'advise' would require forkrun to mmap the memfd itself and
+// access it through that mapping -- a real change to the I/O path, not yet done.
+static void check_thp_shmem_config(void) {
+  int fd = open("/sys/kernel/mm/transparent_hugepage/shmem_enabled", O_RDONLY);
+  if (fd < 0)
+    return; // Not present on this kernel; nothing useful to report.
+  char buf[256];
+  ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return;
+  buf[n] = '\0';
+  if (strstr(buf, "[never]") != NULL) {
+    fprintf(stderr,
+            "forkrun: NOTICE: /sys/kernel/mm/transparent_hugepage/shmem_enabled "
+            "is 'never'.\n"
+            "         forkrun's internal shared ring-state mapping can use Shmem "
+            "Transparent\n"
+            "         Huge Pages when this is 'advise' or 'always' (forkrun hints "
+            "for it\n"
+            "         automatically). For the larger throughput gain observed on "
+            "memfd-backed\n"
+            "         I/O (~50-60%% on -s/-b/-C modes, and a large drop in system "
+            "time, most\n"
+            "         notably in -C mode), 'always' is currently required -- "
+            "'advise' does not\n"
+            "         cover plain read/write I/O the way forkrun uses it today. "
+            "Consider:\n"
+            "           echo always | sudo tee "
+            "/sys/kernel/mm/transparent_hugepage/shmem_enabled\n"
+            "         or, for the more conservative system-wide setting:\n"
+            "           echo advise | sudo tee "
+            "/sys/kernel/mm/transparent_hugepage/shmem_enabled\n");
+  }
+}
+
 static int xcreate_anon_file(const char *name) {
   const char *force_fallback = get_string_value("FORKRUN_FORCE_FALLBACK");
   bool use_memfd = true;
   if (force_fallback && (strcmp(force_fallback, "1") == 0))
     use_memfd = false;
   if (use_memfd) {
-    int fd = -1;
-    const char *use_hugetlb = get_string_value("FORKRUN_USE_HUGETLB");
-    if (use_hugetlb && strcmp(use_hugetlb, "1") == 0) {
-      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING | MFD_HUGETLB);
-    }
-    if (fd < 0) {
-      fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
-    }
+    // NOTE: MFD_HUGETLB is intentionally not used here. It conflicts with the
+    // shmem semantics forkrun's memfd-backed files depend on (ftruncate/fallocate
+    // PUNCH_HOLE fine-grained resizing, arbitrary-offset sparse growth, etc).
+    // Transparent Huge Pages are the supported path to hugepage-backed throughput
+    // gains for this data, but note they currently require shmem_enabled=always
+    // to take effect, since this fd is only ever accessed via read/write/
+    // copy_file_range/sendfile, not mmap -- see check_thp_shmem_config() above.
+    int fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
     if (fd >= 0)
       return fd;
     if (errno == EINVAL) {
@@ -1246,8 +1297,57 @@ struct ChunkMeta {
   volatile uint64_t actual_end ALIGNED(CACHE_LINE);
 };
 
+// PHYSICS: Wait for (meta_ptr)->actual_end to have FLAG_META_READY set, spinning
+// briefly first, then registering as a waiter on (node_var)'s meta_waiters count
+// and blocking via poll() on its meta-ready eventfd once the spin budget is
+// spent. Resolved value (flag bit still set) is stored into out_var.
+// on_abort_stmt runs (and must not fall through) if emergency_abort fires while
+// blocked in poll().
+//
+// NOTE: the post-registration double-check deliberately re-stores its read into
+// out_var before breaking -- an earlier hand-written copy of this pattern read
+// the fresh value only to test the flag and then discarded it, leaving out_var
+// holding the pre-registration (not-yet-ready, i.e. zero) value on that path.
+#define WAIT_FOR_META_READY(out_var, meta_ptr, node_var, on_abort_stmt)         \
+  do {                                                                         \
+    int _wmr_spin = 0;                                                        \
+    while (!(((out_var) = atomic_load_acquire(&(meta_ptr)->actual_end)) &      \
+             FLAG_META_READY)) {                                              \
+      if (_wmr_spin < 10000) {                                                \
+        cpu_relax();                                                          \
+        _wmr_spin++;                                                          \
+      } else {                                                                \
+        __atomic_fetch_add(&state[(node_var)].meta_waiters, 1,                 \
+                            __ATOMIC_SEQ_CST);                                \
+        if (((out_var) = atomic_load_acquire(&(meta_ptr)->actual_end)) &       \
+            FLAG_META_READY) {                                                \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
+                              __ATOMIC_SEQ_CST);                              \
+          break;                                                              \
+        }                                                                     \
+        struct pollfd _wmr_pfds[2] = {                                        \
+            {.fd = evfd_meta_arr[(node_var)], .events = POLLIN},              \
+            {.fd = evfd_ingest_eof, .events = POLLIN}};                       \
+        poll(_wmr_pfds, 2, -1);                                               \
+        if (atomic_load_relaxed(&state[0].emergency_abort)) {                 \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
+                              __ATOMIC_SEQ_CST);                              \
+          on_abort_stmt;                                                      \
+        }                                                                     \
+        if (_wmr_pfds[0].revents & POLLIN) {                                  \
+          uint64_t _wmr_v;                                                    \
+          sys_read(evfd_meta_arr[(node_var)], &_wmr_v, 8);                    \
+        }                                                                     \
+        __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,                 \
+                            __ATOMIC_SEQ_CST);                                \
+        _wmr_spin = 0;                                                        \
+      }                                                                       \
+    }                                                                         \
+  } while (0)
+
 struct IntervalNode {
     uint64_t s;
+
     uint64_t e;
 };
 
@@ -1256,6 +1356,13 @@ struct GlobalState {
   uint64_t ingest_publish_idx ALIGNED(CACHE_LINE);
   uint64_t ingest_eof_idx ALIGNED(CACHE_LINE);
   uint64_t _pad_ingest_waiters[7];
+
+  // Abort reason: 0 = unset, 1 = downstream SIGPIPE (clean exit),
+  //               2 = internal fault (checkpoint needed).
+  // Written once by the first pull_fire_alarm caller (protected by
+  // the CAS on emergency_abort). Read by the Bash wrapper after
+  // ring_poll returns ABORT to decide whether to generate a checkpoint.
+  uint8_t abort_reason ALIGNED(CACHE_LINE);
 
   // NEW: Orderer Ledger (The Checkpoint)
   uint8_t is_resume_mode ALIGNED(CACHE_LINE);
@@ -1371,22 +1478,37 @@ static inline void cleanup_waiter_state() {
 }
 
 // EMERGENCY SHUTDOWN: Global fire alarm sentry.
-// Any thread (Worker or Orderer) can call this to trigger an immediate system-wide
-// abort. It atomically flips emergency_abort to 1 (CAS ensures we only blast once),
-// then blasts ALL EOF eventfds to wake every sleeping poll across the engine.
-// Data eventfds are left untouched to preserve the conservation laws of the ring.
-static inline void pull_fire_alarm() {
+// Any thread (Worker or Orderer) can call this to trigger an immediate
+// system-wide abort. It atomically flips emergency_abort to 1 (CAS ensures
+// we only blast once), records the abort reason, then blasts ALL EOF
+// eventfds to wake every sleeping poll across the engine.
+// Data eventfds are left untouched to preserve the conservation laws of
+// the ring.
+//
+// reason: 1 = downstream SIGPIPE / consumer closed pipe (clean exit,
+//             no checkpoint needed)
+//         2 = internal fault (worker crash, scanner death, OOM, etc. —
+//             checkpoint IS needed)
+static inline void pull_fire_alarm_reason(uint8_t reason) {
     if (!state) return;
-    // CAS: Only the first caller blasts the eventfds
     uint8_t expected = 0;
-    if (__atomic_compare_exchange_n(&state[0].emergency_abort, &expected, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+    if (__atomic_compare_exchange_n(&state[0].emergency_abort, &expected, 1,
+                                    0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+        // First caller wins: record why we aborted.
+        __atomic_store_n(&g_state->abort_reason, reason, __ATOMIC_RELEASE);
         uint64_t blast = 999999;
         for (uint32_t n = 0; n < allocated_num_nodes; n++) {
-            if (evfd_eof_arr && evfd_eof_arr[n] >= 0) sys_write(evfd_eof_arr[n], &blast, 8);
+            if (evfd_eof_arr && evfd_eof_arr[n] >= 0)
+                sys_write(evfd_eof_arr[n], &blast, 8);
         }
         if (evfd_ingest_eof >= 0) sys_write(evfd_ingest_eof, &blast, 8);
-        if (evfd_chunk_done >= 0) sys_write(evfd_chunk_done, &blast, 8); // Wake up Ingest
+        if (evfd_chunk_done >= 0) sys_write(evfd_chunk_done, &blast, 8);
     }
+}
+
+// Backward-compatible wrapper: internal fault (reason = 2).
+static inline void pull_fire_alarm(void) {
+    pull_fire_alarm_reason(2);
 }
 
 #define OOM_WAIT_FOR_MEMORY(free_b_var, threshold, si_var, mu_var)             \
@@ -1886,6 +2008,12 @@ static int ring_init_main(int argc, char **argv) {
     builtin_error("mmap: %s", strerror(errno));
     return EXECUTION_FAILURE;
   }
+  // PHYSICS: This is a MAP_SHARED anonymous mapping, so the kernel backs it with
+  // shmem. Hint MADV_HUGEPAGE so it can be promoted to Shmem Transparent Huge
+  // Pages when /sys/kernel/mm/transparent_hugepage/shmem_enabled == 'advise'
+  // (best-effort; failure here is harmless and intentionally ignored).
+  madvise(p, total_size, MADV_HUGEPAGE);
+  check_thp_shmem_config();
 
   g_state = (struct GlobalState *)p;
   // Step exactly 'global_size' bytes forward so state stays 4096-aligned
@@ -2986,8 +3114,37 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           break;
         search_end = window_start;
       }
-      if (search_end <= meta->raw_offset)
-        actual_end = meta->raw_offset;
+      if (search_end <= meta->raw_offset) {
+        if (meta->raw_length == 0) {
+          // Genuine EOF sentinel (see the ingest-side EOF meta): raw_offset
+          // here IS the true end-of-stream byte offset, so this really is the
+          // final boundary -- emit it as-is so any trailing unterminated data
+          // still gets flushed as the last record.
+          actual_end = meta->raw_offset;
+        } else {
+          // A real chunk (raw_length > 0) searched its entire window and found
+          // no delimiter at all -- a single logical line spans at least this
+          // whole chunk. Do NOT default to this chunk's own start offset: the
+          // consumer would then treat [prev_boundary, this_chunk_start) as a
+          // complete, delimiter-bounded batch, silently slicing a still-open
+          // line into fragments. Instead, propagate the last REAL resolved
+          // boundary forward so the consumer's existing
+          // "actual_start >= actual_end" skip path defers this chunk (and any
+          // further no-delimiter chunks) until a real delimiter, or true EOF,
+          // is eventually found.
+          if (major_id == 0) {
+            actual_end = 0;
+          } else {
+            struct ChunkMeta *prev_meta =
+                &g_state->meta_ring[(major_id - 1) & META_RING_MASK];
+            uint64_t prev_act_end;
+            uint32_t tnode = prev_meta->target_node;
+            WAIT_FOR_META_READY(prev_act_end, prev_meta, tnode,
+                                 return EXECUTION_FAILURE);
+            actual_end = prev_act_end & ~FLAG_META_READY;
+          }
+        }
+      }
     }
 
     // 1. Mark meta ready
@@ -3722,36 +3879,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         struct ChunkMeta *prev_meta =
             &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
         uint64_t prev_act_end;
-        int _pe_spin = 0;
-        while (!((prev_act_end = atomic_load_acquire(&prev_meta->actual_end)) &
-                 FLAG_META_READY)) {
-          if (_pe_spin < 10000) {
-            cpu_relax();
-            _pe_spin++;
-          } else {
-            uint32_t tnode = prev_meta->target_node;
-            __atomic_fetch_add(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
-            if (atomic_load_acquire(&prev_meta->actual_end) & FLAG_META_READY) {
-              __atomic_fetch_sub(&state[tnode].meta_waiters, 1,
-                                 __ATOMIC_SEQ_CST);
-              break;
-            }
-            struct pollfd pfds[2] = {
-                {.fd = evfd_meta_arr[tnode], .events = POLLIN},
-                {.fd = evfd_ingest_eof, .events = POLLIN}};
-            poll(pfds, 2, -1);
-            if (atomic_load_relaxed(&state[0].emergency_abort)) {
-                __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
-                goto unified_scanner_eof;
-            }
-            if (pfds[0].revents & POLLIN) {
-              uint64_t v;
-              sys_read(evfd_meta_arr[tnode], &v, 8);
-            }
-            __atomic_fetch_sub(&state[tnode].meta_waiters, 1, __ATOMIC_SEQ_CST);
-            _pe_spin = 0;
-          }
-        }
+        uint32_t tnode = prev_meta->target_node;
+        WAIT_FOR_META_READY(prev_act_end, prev_meta, tnode,
+                             goto unified_scanner_eof);
         actual_start = prev_act_end & ~FLAG_META_READY;
       }
 
@@ -3778,8 +3908,24 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       end = buf;
 
     } else {
-      if (status == 1 && p >= end)
+      if (status == 1 && p >= end) {
+        // UMA EOF with no trailing delimiter: the inner loop consumed
+        // the buffer (p = end) but never found a delimiter, so
+        // pending_lines stayed 0 and no flush was triggered.  If
+        // batch_start < current position, there is unflushed data
+        // spanning the entire stream (or the tail since the last
+        // delimiter).  Force-flush it as a single batch, exactly as
+        // the NUMA path does via its chunk_eof_flushed guard.
+        if (!byte_mode) {
+          uint64_t final_off = buf_base_offset + (uint64_t)(p - buf);
+          if (batch_start < final_off) {
+            bool _skipped = false;
+            UNIFIED_SCANNER_FLUSH(false, 0, 0, final_off, _skipped);
+            batch_start = final_off;
+          }
+        }
         break;
+      }
       current_p_offset = buf_base_offset + (uint64_t)(p - buf);
     }
 
@@ -4088,10 +4234,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 } else
                   p = end;
               } else {
-                if (status == 1 && p < end) {
+                // UMA: always advance p past the scanned buffer so that
+                // current_p_offset tracks correctly across refills.
+                // Without this, a delimiter-free stream causes the scanner
+                // to re-read the same chunk_sz window forever and publish
+                // only the final buffer at EOF (the "4 MB cutoff" bug).
+                // lines_found is only incremented at true EOF so that
+                // pending_lines stays 0 and force_refill keeps firing
+                // until the ingest thread signals completion.
+                if (status == 1 && p < end)
                   lines_found++;
-                  p = end;
-                }
+                p = end;
                 break;
               }
             }
@@ -4738,8 +4891,9 @@ static int ring_claim_main(int argc, char **argv) {
       if ((claim_calls++ & 63) == 0) {
           struct pollfd pfd_stdout = {.fd = 1, .events = POLLOUT};
           if (poll(&pfd_stdout, 1, 0) > 0 && (pfd_stdout.revents & (POLLERR | POLLHUP))) {
-              // The downstream pipe was cut (e.g., head -n 5). Pull the fire alarm!
-              pull_fire_alarm();
+              // Downstream consumer closed the pipe (e.g. `head -c 100`).
+              // This is a clean exit, not an internal fault — reason 1.
+              pull_fire_alarm_reason(1);
               return EXECUTION_FAILURE;
           }
       }
@@ -5300,7 +5454,7 @@ static int ring_order_main(int argc, char **argv) {
             if (ring_copy_chunk(op->fd, 1, offset, op->len) < 0) stdout_broken = true;
           }
           if (stdout_broken) {
-              pull_fire_alarm();
+              pull_fire_alarm_reason(1);   // downstream close, not internal fault
               break;
           }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
@@ -5322,7 +5476,7 @@ static int ring_order_main(int argc, char **argv) {
             }
             close(fd_file);
             unlink(path);
-            if (stdout_broken) { pull_fire_alarm(); break; }
+            if (stdout_broken) { pull_fire_alarm_reason(1); break; }
             TRACK_COMPLETED_BATCH(*op);
           }
         }
@@ -5342,7 +5496,7 @@ static int ring_order_main(int argc, char **argv) {
               if (ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len) < 0) stdout_broken = true;
             }
             if (stdout_broken) {
-                pull_fire_alarm();
+                pull_fire_alarm_reason(1);   // downstream close, not internal fault
                 break;
             }
             safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
@@ -5365,7 +5519,7 @@ static int ring_order_main(int argc, char **argv) {
               }
               close(fd_file);
               unlink(path);
-              if (stdout_broken) { pull_fire_alarm(); break; }
+              if (stdout_broken) { pull_fire_alarm_reason(1); break; }
               TRACK_COMPLETED_BATCH(top.pkt);
             }
           }
@@ -5378,7 +5532,7 @@ static int ring_order_main(int argc, char **argv) {
     }
 
     if (stdout_broken) {
-        pull_fire_alarm();
+        pull_fire_alarm_reason(1);   // downstream close, not internal fault
         break; // Break outer read loop on SIGPIPE
     }
 
@@ -6316,6 +6470,18 @@ static int ring_set_resume_main(int argc, char **argv) {
 static int ring_abort_main(int argc, char **argv) {
     (void)argc; (void)argv;
     pull_fire_alarm();
+    return EXECUTION_SUCCESS;
+}
+
+// Query the abort reason so the Bash wrapper can decide whether to
+// generate a checkpoint.  Returns 0 (unset), 1 (SIGPIPE / downstream
+// close), or 2 (internal fault).
+static int ring_abort_reason_main(int argc, char **argv) {
+    if (!g_state) return EXECUTION_FAILURE;
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%u",
+             __atomic_load_n(&g_state->abort_reason, __ATOMIC_ACQUIRE));
+    bind_var_or_array(argc >= 2 ? argv[1] : "REPLY", buf, 0);
     return EXECUTION_SUCCESS;
 }
 
