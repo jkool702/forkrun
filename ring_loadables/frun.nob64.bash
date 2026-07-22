@@ -348,24 +348,12 @@ EOF
   +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed wins.
 
 ### PERFORMANCE TIP: TRANSPARENT HUGE PAGES
-  forkrun's internal shared ring-state mapping is madvise(MADV_HUGEPAGE)-hinted
-  automatically, so it can use Shmem Transparent Huge Pages whenever
-  /sys/kernel/mm/transparent_hugepage/shmem_enabled is 'advise' or 'always'.
-
-  A much larger effect (50-60% higher top-end throughput in -s/-b/-C modes, plus a
-  large reduction in system time, especially in -C mode) comes from THP being used
-  for the memfd-backed input/output data itself. That data is only ever accessed
-  via read/write/copy_file_range/sendfile, never mmap, so it is NOT covered by
-  'advise' mode (which requires an actual madvise-hinted mapping over the data to
-  take effect) -- 'always' is currently required to get this gain, since it is a
-  pure inode/size-based policy that applies regardless of how the file is accessed:
-    echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
-  If you'd rather not change this system-wide, 'advise' is a safe, more
-  conservative default that still helps the ring-state mapping:
-    echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled
-  If shmem_enabled is set to 'never', forkrun will print a one-time recommendation
-  to stderr on startup. (Note: hugetlbfs-backed hugepages are NOT supported and are
-  not the same thing as this setting -- forkrun relies solely on THP, not HUGETLB.)
+  forkrun's internal shared ring-state mapping is `madvise(MADV_HUGEPAGE)`-hinted automatically, so it can use Shmem Transparent Huge Pages whenever `/sys/kernel/mm/transparent_hugepage/shmem_enabled` is 'advise' or 'always'.
+  A much larger effect (50-60% higher top-end throughput in `-s`/`-b`/`-C` modes, plus a large reduction in system time, especially in `-C` mode) comes from THP being used for the memfd-backed input/output data itself. That data is only ever accessed via read/write/copy_file_range/sendfile, never mmap, so it is NOT covered by 'advise' mode (which requires an actual madvise-hinted mapping over the data to take effect) -- 'always' is currently required to get this gain, since it is a pure inode/size-based policy that applies regardless of how the file is accessed:
+      `echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled`
+  If you'd rather not change this system-wide, 'advise' is a safe, more conservative default that still helps the ring-state mapping:
+      `echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled`
+  If shmem_enabled is set to 'never', forkrun will print a one-time recommendation to stderr on startup. (Note: hugetlbfs-backed hugepages are NOT supported and are not the same thing as this setting -- forkrun relies solely on THP, not HUGETLB.)
 
 ### ENVIRONMENT VARS
   FORKRUN_RETRY_LIMIT   : Controls how many times a batch will be retried before it is declared poisoned. 0 means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.

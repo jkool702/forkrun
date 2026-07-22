@@ -82,7 +82,16 @@
 
 ### UNSETTING FLAGS
 
-  - +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed wins.
+- +U, +s, +N, +i, +I, +E, +X, +v, --no-stats : disables the corresponding flag listed above, restoring default behavior. If both +flag and -flag are used, the last one passed wins.
+
+### PERFORMANCE TIP: TRANSPARENT HUGE PAGES
+
+- forkrun's internal shared ring-state mapping is `madvise(MADV_HUGEPAGE)`-hinted automatically, so it can use Shmem Transparent Huge Pages whenever `/sys/kernel/mm/transparent_hugepage/shmem_enabled` is 'advise' or 'always'.
+- A much larger effect (50-60% higher top-end throughput in `-s`/`-b`/`-C` modes, plus a large reduction in system time, especially in `-C` mode) comes from THP being used for the memfd-backed input/output data itself. That data is only ever accessed via read/write/copy_file_range/sendfile, never mmap, so it is NOT covered by 'advise' mode (which requires an actual madvise-hinted mapping over the data to take effect) -- 'always' is currently required to get this gain, since it is a pure inode/size-based policy that applies regardless of how the file is accessed:
+  - `echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled`
+- If you'd rather not change this system-wide, 'advise' is a safe, more conservative default that still helps the ring-state mapping:
+  - `echo advise | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled`
+- If shmem_enabled is set to 'never', forkrun will print a one-time recommendation to stderr on startup. (Note: hugetlbfs-backed hugepages are NOT supported and are not the same thing as this setting -- forkrun relies solely on THP, not HUGETLB.)
 
 ### ENVIRONMENT VARS
 
@@ -93,7 +102,6 @@
   - EXAMPLE: If your code depends on variable X and X is only defined in your current shell session (and not in the code you are running) then you need to call `frun` via `FORKRUN_EXTRA_VARS='X' frun ...`
 - `FORKRUN_EXTRA_SETUP` : Use this to specify raw commands that need to be run in frun's environment during setup.
   - EXAMPLE: If you are running frun with a custom loadable builtin, then you would enable it via `FORKRUN_EXTRA_SETUP='enable -f "/path/to/custom_loadable.so" custom_loadable'`
-- `FORKRUN_USE_HUGETLB` : Set to '1' to have forkrun attempt to use hugepages for memfd backing. WARNING: only enable this if you have sufficient available hugepages so that forkrun does NOT run out of memory to use.
 - `FORKRUN_PREEMPT_MODE`: Controls SLURM preemption detection and handling.
   - `auto` (default): Automatically detects SLURM environment via `SLURM_JOB_ID`.
   - `0` / `false`: Disable preemption handling entirely.
