@@ -484,10 +484,10 @@ EOF
 
                     resume_flag=true
 
-
                     if (( $# == 1 )); then
                         # FULL AUTO RESUME - extract and verify execution environment
                         local _secret_token="___FORKRUN_ENV_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        local _secret_end="___FORKRUN_END_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local parsed_env
                         parsed_env="$(PATH='' exec -c "${BASH:-bash}" --norc --noprofile --restricted -c '
                             source "$1" 2>/dev/null || exit 1
@@ -520,16 +520,25 @@ EOF
                                 exit 1
                             fi
 
-                            echo "$2"
-                            printf "%s" "$out"
-                        ' _ "$resume_file" "$_secret_token" 2>/dev/null)"
+                            # Kill any background jobs spawned by the resume file so they
+                            # cannot inject output after our boundary.
+                            for _jp in $(jobs -p 2>/dev/null); do
+                                kill -9 "$_jp" 2>/dev/null
+                            done
+                            wait 2>/dev/null
 
-                        if [[ "$parsed_env" != *"${_secret_token}"* ]]; then
+                            # Single write: token + payload + end-token in ONE buffer
+                            _emit="$2"$'\n'"$out"$'\n'"$3"$'\n'
+                            printf '%s' "$_emit"
+                        ' _ "$resume_file" "$_secret_token" "$_secret_end" 2>/dev/null)"
+
+                        if [[ "$parsed_env" != *"${_secret_token}"* || "$parsed_env" != *"${_secret_end}"* ]]; then
                             echo "forkrun [ABORT]: Resume file environment verification failed or was intercepted." >&2
                             return 1
                         fi
 
                         parsed_env="${parsed_env##*"${_secret_token}"$'\n'}"
+                        parsed_env="${parsed_env%%$'\n'"${_secret_end}"*}"
                         eval "$parsed_env"
 
                         local has_custom_vars=0
