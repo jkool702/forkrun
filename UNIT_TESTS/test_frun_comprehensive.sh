@@ -236,7 +236,7 @@ run_test_line_count() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; thensanatizers
+        if [[ "${VERBOSE:-}" == "true" ]]; then
             echo -e "    ${YELLOW}cmd:${NC} $cmd"
             echo -e "    ${YELLOW}$reason${NC}"
             [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC} $(echo "$err" | head -3 | sed 's/^/      /')"
