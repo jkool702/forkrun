@@ -642,6 +642,8 @@ EOF
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _parse_count "workers" "${arg}" ;;
 
+            --greedy|--GREEDY)                ring_init_opts+=('--greedy') ;;
+
             # --- TIMEOUT (-t 5000) ---
             @(-t|--timeout)?(?([= $'\t'])+([0-9.+-])))
                 arg="${1##@(-t|--timeout)?([= $'\t'])}";

@@ -1208,10 +1208,11 @@ static __thread int my_numa_node = -1;
 static __thread bool is_waiting_on_ring = false;
 static __thread off_t last_ack_offset = 0;
 static __thread int ack_cached_target_fd = -1;
+static __thread int ack_cached_order_pipe = -1;
 static __thread int ack_cached_mode = 0;
 static __thread uint64_t worker_last_idx = 0;
 static __thread uint64_t worker_last_cnt = 0;
-static __thread uint32_t worker_last_major = 0;
+static __thread uint64_t worker_last_major = 0;
 static __thread uint32_t worker_last_minor = 0;
 static __thread uint32_t worker_last_num_kills = 0;
 static __thread bool tl_drain_escrow = true;
@@ -1228,7 +1229,7 @@ struct WorkerBatchState {
     uint32_t num_kills;
     uint64_t offset;
     uint64_t length;
-    uint32_t major;
+    uint64_t major;
     uint32_t minor;
 };
 
@@ -1278,7 +1279,7 @@ struct PhysPacket {
 };
 
 struct OrderPacket {
-  uint32_t major_idx;
+  uint64_t major_idx;
   uint32_t minor_idx;
   uint32_t cnt;
   int32_t fd;
@@ -1301,7 +1302,7 @@ struct ChunkMeta {
   uint32_t target_node;
   // major_id aligns with chunk boundaries, minor_id will align with individual
   // records.
-  uint32_t major_id;
+  uint64_t major_id;
   volatile uint64_t actual_end ALIGNED(CACHE_LINE);
 };
 
@@ -1400,7 +1401,7 @@ struct SharedState {
   uint64_t chunk_queue_tail ALIGNED(CACHE_LINE);
   uint8_t _pad_cq_tail[CACHE_LINE - sizeof(uint64_t)];
 
-  uint32_t chunk_queue[META_RING_SIZE];
+  uint64_t chunk_queue[META_RING_SIZE];
 
   uint64_t read_idx ALIGNED(CACHE_LINE);
   uint8_t _pad_read_idx[CACHE_LINE - sizeof(uint64_t)];
@@ -1463,7 +1464,7 @@ struct SharedState {
 
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
-  uint32_t major_ring[RING_SIZE] ALIGNED(4096);
+  uint64_t major_ring[RING_SIZE] ALIGNED(4096);
   uint32_t minor_ring[RING_SIZE] ALIGNED(4096);
 
   // NEW: Dynamic Topology-Aware Steal Thresholds
@@ -1791,7 +1792,6 @@ static void apply_config(char type, char sub, const char *arg) {
   if (strcmp(arg, "x") == 0) {
     if (type == 1) {
       set_mask |= M_BMODE;
-    } else if (type == 2) {
     }
   } else {
     if (arg[0] == '\0')
@@ -1933,6 +1933,14 @@ static int ring_init_main(int argc, char **argv) {
     }
     atomic_store_relaxed(&g_state->ingest_publish_idx, 0);
     atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
+    g_state->abort_reason = 0;
+    g_state->is_resume_mode = 0;
+    g_state->resume_seq = 0;
+    g_state->resume_horizon = 0;
+    g_state->resume_stdout_bytes = 0;
+    g_state->fallow_horizon_bytes = 0;
+    g_state->resume_jagged_count = 0;
+    g_state->poisoned_count = 0;
 
     // PHYSICS FIX: Comprehensively drain all eventfds to prevent false EOFs
     // and spurious wakeups from previous invocations.
@@ -2024,7 +2032,6 @@ static int ring_init_main(int argc, char **argv) {
   g_state = (struct GlobalState *)p;
   // Step exactly 'global_size' bytes forward so state stays 4096-aligned
   state = (struct SharedState *)((char *)p + global_size);
-  memset(p, 0, total_size);
   atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
   }
 
@@ -2539,7 +2546,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   // -------------------------------------
 
   uint64_t current_offset = 0;
-  uint32_t current_major = 0;
+  uint64_t current_major = 0;
   int last_target = -1;
   bool limit_reached_exit = false;
 
@@ -3117,7 +3124,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }
     spin = 0;
 
-    uint32_t major_id = t_state->chunk_queue[my_idx & META_RING_MASK];
+    uint64_t major_id = t_state->chunk_queue[my_idx & META_RING_MASK];
     struct ChunkMeta *meta = &g_state->meta_ring[major_id & META_RING_MASK];
     uint64_t chunk_end = meta->raw_offset + meta->raw_length;
     uint64_t actual_end = chunk_end;
@@ -3266,16 +3273,22 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   do {                                                                         \
     _out_skipped = false;                                                      \
     if (__builtin_expect(g_state->is_resume_mode, 0)) {                        \
-        uint64_t _s_byte = batch_start;                                        \
-        uint64_t _e_byte = _batch_end_offset;                                  \
-        if (_s_byte >= g_state->resume_horizon) {                              \
+        if (batch_start < g_state->resume_horizon) {                           \
+            if ((_batch_end_offset) <= g_state->resume_horizon) {              \
+                _out_skipped = true;                                           \
+            } else {                                                           \
+                batch_start = g_state->resume_horizon;                         \
+            }                                                                  \
+        }                                                                      \
+        if (!_out_skipped && batch_start >= g_state->resume_horizon) {         \
+            uint64_t _s_byte = batch_start;                                    \
+            uint64_t _e_byte = (_batch_end_offset);                            \
             for (uint32_t _i = 0; _i < g_state->resume_jagged_count; _i++) {   \
-                if (_s_byte >= g_state->resume_jagged[_i].s && _e_byte <= g_state->resume_jagged[_i].e) { \
+                if (_s_byte >= g_state->resume_jagged[_i].s &&                 \
+                    _e_byte <= g_state->resume_jagged[_i].e) {                 \
                     _out_skipped = true; break;                                \
                 }                                                              \
             }                                                                  \
-        } else if (_e_byte <= g_state->resume_horizon) {                       \
-            _out_skipped = true;                                               \
         }                                                                      \
         if (_out_skipped) break;                                               \
     }                                                                          \
@@ -3901,7 +3914,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                            __ATOMIC_RELAXED);
       }
 
-      uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
+      uint64_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
       meta = &g_state->meta_ring[current_major & META_RING_MASK];
 
       uint64_t act_end_flag = atomic_load_acquire(&meta->actual_end);
@@ -4694,6 +4707,10 @@ dlc_restart_loop:
     } else if (er < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       // Pipe fully drained. Snap back to zero-overhead fast path.
       tl_drain_escrow = false;
+    } else if (er > 0) {
+      fprintf(stderr, "forkrun [FATAL]: Escrow pipe framing corrupted (read %zd bytes, expected %zu)\n", er, sizeof(ep));
+      pull_fire_alarm();
+      return EXECUTION_FAILURE;
     }
   }
 
@@ -4723,6 +4740,10 @@ dlc_restart_loop:
         my_read_idx   = ep.idx;
         current_kills = ep.num_kills;
         break;
+      } else if (er > 0) {
+        fprintf(stderr, "forkrun [FATAL]: Escrow pipe framing corrupted (read %zd bytes, expected %zu)\n", er, sizeof(ep));
+        pull_fire_alarm();
+        return EXECUTION_FAILURE;
       }
     }
 
@@ -5046,7 +5067,7 @@ static int ring_ack_main(int argc, char **argv) {
       op.minor_idx = worker_last_minor;
       op.cnt = worker_last_cnt;
     } else {
-      op.major_idx = (uint32_t)worker_last_idx;
+      op.major_idx = worker_last_idx;
       op.minor_idx = 0;
       op.cnt = worker_last_cnt;
     }
@@ -5065,11 +5086,11 @@ static int ring_ack_main(int argc, char **argv) {
         sigaction(SIGPIPE, &sa_old, NULL);
         return EXECUTION_FAILURE;
       }
-      op.major_idx = (uint32_t)atoi(s_maj);
+      op.major_idx = (uint64_t)strtoull(s_maj, NULL, 10);
       op.minor_idx = (uint32_t)atoi(s_min);
       my_idx = (uint64_t)atoll(s_batch_idx);
     } else {
-      op.major_idx = (uint32_t)atoi(s_batch_idx);
+      op.major_idx = (uint64_t)strtoull(s_batch_idx, NULL, 10);
       op.minor_idx = 0;
       my_idx = op.major_idx;
     }
@@ -5107,9 +5128,12 @@ static int ring_ack_main(int argc, char **argv) {
           (fstat(fd_target, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
     }
     if (ack_cached_mode == 1) {
-      const char *s_order_pipe = get_string_value("FD_ORDER_PIPE");
-      if (s_order_pipe) {
-        int fd_pipe = atoi(s_order_pipe);
+      if (ack_cached_order_pipe < 0) {
+        const char *s_order_pipe = get_string_value("FD_ORDER_PIPE");
+        if (s_order_pipe) ack_cached_order_pipe = atoi(s_order_pipe);
+      }
+      if (ack_cached_order_pipe >= 0) {
+        int fd_pipe = ack_cached_order_pipe;
         off_t curr = lseek(fd_target, 0, SEEK_CUR);
         if (curr == (off_t)-1) {
           sigaction(SIGPIPE, &sa_old, NULL);
@@ -5132,6 +5156,7 @@ static int ring_ack_main(int argc, char **argv) {
     }
   }
 
+  worker_last_cnt = 0;
   sigaction(SIGPIPE, &sa_old, NULL);
   return EXECUTION_SUCCESS;
 }
@@ -5379,7 +5404,8 @@ static int ring_order_main(int argc, char **argv) {
   struct OrderFdState *fd_states = calloc(fd_states_cap, sizeof(struct OrderFdState));
   if (!fd_states) { free(heap); return EXECUTION_FAILURE; }
 
-  uint32_t expected_major = 0, expected_minor = 0;
+  uint64_t expected_major = 0;
+  uint32_t expected_minor = 0;
 
   char pkt_buf[4096];
   size_t buffered = 0;
@@ -5496,10 +5522,10 @@ static int ring_order_main(int argc, char **argv) {
         } else {
           char path[256];
           if (numa_mode)
-            snprintf(path, sizeof(path), "%s.%u.%u", prefix, op->major_idx,
+            snprintf(path, sizeof(path), "%s.%" PRIu64 ".%u", prefix, op->major_idx,
                      actual_minor);
           else
-            snprintf(path, sizeof(path), "%s.%u", prefix, op->major_idx);
+            snprintf(path, sizeof(path), "%s.%" PRIu64, prefix, op->major_idx);
           int fd_file = open(path, O_RDONLY);
           if (fd_file >= 0) {
             off_t offset = 0;
@@ -5538,11 +5564,11 @@ static int ring_order_main(int argc, char **argv) {
           } else {
             char path[256];
             if (numa_mode)
-              snprintf(path, sizeof(path), "%s.%u.%u", prefix,
+              snprintf(path, sizeof(path), "%s.%" PRIu64 ".%u", prefix,
                        top.pkt.major_idx,
                        (top.pkt.minor_idx & ~FLAG_MAJOR_EOF));
             else
-              snprintf(path, sizeof(path), "%s.%u", prefix, top.pkt.major_idx);
+              snprintf(path, sizeof(path), "%s.%" PRIu64, prefix, top.pkt.major_idx);
             int fd_file = open(path, O_RDONLY);
             if (fd_file >= 0) {
               off_t offset = 0;
@@ -5572,6 +5598,15 @@ static int ring_order_main(int argc, char **argv) {
     size_t consumed = count * pkt_sz;
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
+  }
+
+  if (!unordered_mode && g_state && g_state->is_resume_mode && !resume_synced && !stdout_broken) {
+      fprintf(stderr, "forkrun [FATAL]: Resume sync failed (no batch matched horizon %" PRIu64 "). Aborting.\n",
+              g_state->resume_horizon);
+      pull_fire_alarm();
+      free(fd_states); free(heap); free(tracker_heap);
+      sigaction(SIGPIPE, &sa_old, NULL);
+      return EXECUTION_FAILURE;
   }
 
   for (int i = 0; i < fd_states_cap; i++) {
@@ -6909,12 +6944,17 @@ struct forkrun_ctx {
     uint64_t batch_index;       // global batch sequence number
     uint64_t batch_offset;      // byte offset in input stream
     uint64_t batch_byte_length; // length of current batch in bytes
-    uint32_t version;           // struct version, currently 1
+    uint32_t version;           // struct version: 1 (legacy) or 2 (packed)
     uint32_t worker_id;         // RING_WID
     uint32_t node_id;           // NUMA node
     uint32_t num_kills;         // retry count for this batch
-    uint32_t numa_major;        // NUMA major sequence (0 if not NUMA)
-    uint32_t numa_minor;        // NUMA minor sequence (0 if not NUMA)
+    union {
+        uint64_t numa_batch_id; // version 2: packed (42-bit major << 22 | 22-bit minor)
+        struct {
+            uint32_t numa_major; // version 1: truncated 32-bit major
+            uint32_t numa_minor; // version 1: 32-bit minor
+        };
+    };
     int32_t  fd_in;             // input file descriptor
     char     delimiter;         // batch delimiter
     uint8_t  cfg_state[3];      // global configuration state
@@ -6959,8 +6999,8 @@ static int ring_call_main(int argc, char **argv) {
         }
 
         int *has_ctx = (int *)dlsym(tls_dl_handle, "forkrun_use_ctx");
-        if (has_ctx && *has_ctx == 1) {
-            tls_use_ctx = 1;
+        if (has_ctx && (*has_ctx == 1 || *has_ctx == 2)) {
+            tls_use_ctx = *has_ctx;
             tls_callback_ctx = (forkrun_cb_ctx_t)dlsym(tls_dl_handle, func_name);
             if (!tls_callback_ctx) {
                 fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
@@ -6968,7 +7008,7 @@ static int ring_call_main(int argc, char **argv) {
                 tls_dl_handle = NULL;
                 return EXECUTION_FAILURE;
             }
-            tls_fctx.version = 1;
+            tls_fctx.version = (uint32_t)tls_use_ctx;
             const char *wid_str = get_string_value("RING_WID");
             tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
             tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
@@ -7014,16 +7054,26 @@ static int ring_call_main(int argc, char **argv) {
 
     int cb_ret;
     if (tls_use_ctx) {
+        tls_fctx.version = (uint32_t)tls_use_ctx;
         tls_fctx.batch_index = worker_last_idx;
         tls_fctx.batch_offset = (uint64_t)tls_batch_offset;
         tls_fctx.num_kills = worker_last_num_kills;
         tls_fctx.batch_byte_length = (uint64_t)length;
         if (tls_numa_enabled) {
-            tls_fctx.numa_major = worker_last_major;
-            tls_fctx.numa_minor = worker_last_minor;
+            if (tls_use_ctx == 2) {
+                uint32_t actual_minor = worker_last_minor & MINOR_MASK;
+                tls_fctx.numa_batch_id = PACK_KEY(worker_last_major, actual_minor);
+            } else {
+                tls_fctx.numa_major = (uint32_t)worker_last_major;
+                tls_fctx.numa_minor = worker_last_minor;
+            }
         } else {
-            tls_fctx.numa_major = 0;
-            tls_fctx.numa_minor = 0;
+            if (tls_use_ctx == 2) {
+                tls_fctx.numa_batch_id = 0;
+            } else {
+                tls_fctx.numa_major = 0;
+                tls_fctx.numa_minor = 0;
+            }
         }
         cb_ret = tls_callback_ctx((int)batch_argc, tls_argv, &tls_fctx);
     } else {
