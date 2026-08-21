@@ -3317,7 +3317,7 @@ run_test_sorted T "T4b: --nodes=@512 terminates with intact data" \
     "timeout 180 bash -c 'source \"$FRUN_SOURCE\" && seq 5000 | frun --nodes=@512 printf \"%s\n\"'" \
     "$(seq 5000)"
 
-# --- T5: C-plugin return-code truncation mapping (256 wraps to 1, etc.) ---
+# --- T5: C-plugin return-code truncation mapping ---
 if in_section T; then
     if ! type -P gcc >/dev/null 2>&1; then
         run_test_skip T "T5: plugin return-code mapping (256→1 etc.)" "gcc not available"
@@ -3333,23 +3333,43 @@ int f257(void) { return 257; }
 int f139(void) { return 139; }
 int fneg(void) { return -7; }
 CEOF
-        if ! gcc -O2 -shared -fPIC "$_MD/p.c" -o "$_MD/p.so" 2>/dev/null; then
-            run_test_skip T "T5: plugin return-code mapping (256→1 etc.)" "plugin compile failed"
+        gcc -O2 -shared -fPIC "$_MD/p.c" -o "$_MD/p.so" 2>/dev/null || {
+            run_test_skip T "T5: plugin return-code mapping (256→1 etc.)" "compile failed"
+        }
+        if [[ -f "$_MD/p.so" ]]; then
+
+        # Helper as a standalone file — quoted heredoc, no expansion at write time
+        cat > "$_MD/one.sh" << 'EOF'
+#!/usr/bin/env bash
+# one.sh <fn> <so-path> <frun.bash-path>  — prints RC:<n> on stdout
+set +e
+source "$3" || { echo "RC:SOURCE_FAILED"; exit 9; }
+fn="$1"; so="$2"
+ring_memfd_create _PV
+printf 'a b\n' >&"$_PV"
+ring_call "$_PV" 4 ' ' "$so" "$fn"
+echo "RC:$?"
+EOF
+
+        _LOG="$_MD/results.txt"; : > "$_LOG"; _OK=0
+        for _fn in f0 f1 f200 f256 f257 f139 fneg; do
+            _got=$(bash "$_MD/one.sh" "$_fn" "$_MD/p.so" "$FRUN_SOURCE" 2>/dev/null)
+            #echo "fn=$_fn got='$_got'" | tee -a "$_LOG" >&2
+            echo "fn=$_fn got='$_got'" >> "$_LOG" >&2
+            case "$_fn:$_got" in
+                f0:RC:0|f1:RC:1|f200:RC:200|f256:RC:1|f257:RC:1|f139:RC:139|fneg:RC:249)
+                    _OK=$((_OK+1)) ;;
+            esac
+        done
+
+        if (( _OK == 7 )); then
+            TEST_RESULTS["T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"]="PASS"; ((PASSED_TESTS++))
+            _print_result PASS "T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"
         else
-            _OK=0
-            for _pair in "f0 0" "f1 1" "f200 200" "f256 1" "f257 1" "f139 139" "fneg 249"; do
-                _fn=${_pair%% *}; _want=${_pair##* }
-                _got=$(bash -c "source '$FRUN_SOURCE' && ring_memfd_create _PV && printf 'a b\n' >&\"\$_PV\" && ring_call \"\$_PV\" 4 ' ' '$_MD/p.so:$_fn'; echo \$?" 2>/dev/null | tail -1)
-                [[ "$_got" == "$_want" ]] && _OK=$((_OK+1))
-            done
-            if (( _OK == 7 )); then
-                TEST_RESULTS["T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"]="PASS"; ((PASSED_TESTS++))
-                _print_result PASS "T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"
-            else
-                TEST_RESULTS["T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"]="FAIL"
-                TEST_ERRORS["T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"]="$_OK/7 mappings correct"
-                ((FAILED_TESTS++)); _print_result FAIL "T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)" "$_OK/7 correct"
-            fi
+            TEST_RESULTS["T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"]="FAIL"
+            TEST_ERRORS["T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"]="$_OK/7 — see $_LOG"
+            ((FAILED_TESTS++)); _print_result FAIL "T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)" "$_OK/7 — logged to stderr + $_LOG"
+        fi
         fi
     fi
 fi

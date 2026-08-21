@@ -1,4 +1,4 @@
-=== forkrun v3.4.3 C Plugin Test Suite ===
+=== forkrun v3.4.4 C Plugin Test Suite ===
 UNIT_TESTS_DIR : /mnt/ramdisk/forkrun/UNIT_TESTS
 FRUN_SCRIPT    : /mnt/ramdisk/forkrun/UNIT_TESTS/frun.bash
 Sourcing frun.bash...
@@ -7,7 +7,7 @@ Copying header...
 ✓ Plugins compiled successfully.
 Generating test inputs...
 Generating variable-length input (~3M lines)...
-Only 952229 lines found. Duplicating...
+Only 967299 lines found. Duplicating...
 ✓ Generated 3000000 lines.
 
 === Running C Plugin Tests ===
@@ -39,7 +39,7 @@ Cmd : frun -k -C ./test_basic.so:test_basic < input_1M.txt
 
 === All C Plugin Tests Completed Successfully ===
 
-=== forkrun v3.4.3 C Plugin Rigorous Test Suite ===
+=== forkrun v3.4.4 C Plugin Rigorous Test Suite ===
 Compiling Native Plugins...
 Generating Deterministic Test Inputs...
 ------------------------------------------------------
@@ -54,9 +54,184 @@ TEST 3: Fault Injection & Retry Semantics (-E)
 ------------------------------------------------------
 === All C Plugin Rigorous Tests Completed Successfully ===
 
+[1;34m[1m▶ Core Modes (Default, Ordered, Realtime)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Default mode
+  [0;32m✓[0m Ordered mode (-k)
+  [0;32m✓[0m Realtime mode (-u)
+  [0;32m✓[0m Buffered ordered (--buffered -k)
+
+[1;34m[1m▶ Input Handling (stdin, bytes, delimiters)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Stdin mode (-s)
+  [0;32m✓[0m Byte mode (-b 10)
+  [0;32m✓[0m Byte mode (-b 50)
+  [0;32m✓[0m Custom delimiter (-d :)
+  [0;32m✓[0m Null delimiter (-z)
+  [0;32m✓[0m Unicode support
+
+[1;34m[1m▶ Batch Size Control (lines, bytes, exact)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Fixed batch size (-l 2)
+  [0;32m✓[0m Batch size range (-l 1:5)
+  [0;32m✓[0m Exact lines (-L 3)
+  [0;32m✓[0m Exact lines with limit (-L 4 -n 8)
+
+[1;34m[1m▶ Worker Scaling (-j)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Fixed workers (-j 2)
+  [0;32m✓[0m Worker range (-j 1:4)
+  [0;32m✓[0m Oversubscribe (--nodes=@2)
+
+[1;34m[1m▶ Limits and Timeouts[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Record limit (-n 5)
+  [0;32m✓[0m Limit with unordered (-n 5)
+  [0;32m✓[0m Timeout flag accepted (--timeout 50000)
+
+[1;34m[1m▶ String Substitution (-i, -I)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Insert mode (-i)
+  [0;32m✓[0m Insert ID mode (-I)
+  [0;32m✓[0m Insert with custom command (-i)
+
+[1;34m[1m▶ Quoting and Unsafe Mode[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Safe quoting with spaces
+  [0;32m✓[0m Unsafe mode (-U) with spaces
+  [0;32m✓[0m Explicit safe mode (+U)
+
+[1;34m[1m▶ Output Mode Combinations[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Stdin + ordered (-s -k)
+  [0;32m✓[0m Byte + realtime (-b 10 -u)
+  [0;32m✓[0m Byte + ordered (-b 50 -k)
+  [0;32m✓[0m Exact lines + stdin (-L 3 -s)
+
+[1;34m[1m▶ NUMA Topology[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Auto NUMA (--nodes=auto)
+  [0;32m✓[0m Explicit nodes (--nodes=0)
+  [0;32m✓[0m Multi-node (--nodes=2)
+  [0;32m✓[0m Exact lines with NUMA (downgrade warning)
+
+[1;34m[1m▶ Special Flags[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Dry run (-N)
+  [0;32m✓[0m Version (-V)
+  [0;32m✓[0m Help (--help)
+  [0;32m✓[0m Verbose flag (-v)
+  [0;32m✓[0m Stats flag (--stats)
+
+[1;34m[1m▶ Edge Cases[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Empty input
+  [0;32m✓[0m Single line input
+  [0;32m✓[0m Batch larger than input (-l 100)
+  [0;32m✓[0m More workers than lines (-j 20)
+  [0;32m✓[0m Tab characters
+
+[1;34m[1m▶ Complex Flag Combinations[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Combination: -s -k -n 5
+  [0;32m✓[0m Combination: -b 20 -u -j 2
+  [0;32m✓[0m Combination: --nodes=2 -j 4 -l 2 -k
+  [0;32m✓[0m Combination: -L 2 --timeout 100000 -v
+  [0;32m✓[0m Combination: -b 33 --nodes=auto -s
+
+[1;34m[1m▶ Performance & Stress (Quick Checks)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Large input (1000 lines) default
+  [0;32m✓[0m Large input with -j 8
+  [0;32m✓[0m Large byte input (10k) -b 1024
+
+[1;34m[1m▶ Alias Flags[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Alias: --atomic (buffered)
+  [0;32m✓[0m Alias: --keep-order
+  [0;32m✓[0m Alias: --unbuffered
+
+[1;34m[1m▶ Deep Architecture (Zero-Copy, Trickle, SIMD)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Direct file ingest (Zero-Copy UMA)
+  [0;32m✓[0m Direct file ingest (Zero-Copy NUMA)
+  [0;32m✓[0m Direct file ingest (Byte Mode)
+  [0;32m✓[0m AVX2/NEON SIMD long-line boundaries
+  [0;32m✓[0m Trickle input (Early Flush / Stall Meter)
+  [0;32m✓[0m Command failure tolerance (No Deadlock)
+
+[1;34m[1m▶ Bash Execution Environment & State Propagation[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Parallelize simple bash function
+  [0;32m✓[0m Parallelize nested bash functions
+  [0;32m✓[0m Exported variables propagate
+  [0;32m✓[0m Unexported variables do not propagate
+
+[1;34m[1m▶ Engine Physics: Escrow, Skew, and Heap Stress[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m ring_order Min-Heap with Severe Skew (-k)
+  [0;32m✓[0m Forced Escrow Steal (Single Worker Overshoot)
+  [0;32m✓[0m Massive Oversubscription (128 workers, 10 lines)
+
+[1;34m[1m▶ I/O Edge Cases & Scanner Boundaries[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m File with NO trailing newline
+  [0;32m✓[0m Exact Limit matching
+
+[1;34m[1m▶ Routing: Data as Arguments (Default)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Default mode passes data as arguments
+  [0;32m✓[0m Default mode passes filenames to cat
+
+[1;34m[1m▶ Routing: Data Spliced to Stdin (-s / -b)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Stdin mode (-s) splices to worker stdin
+  [0;32m✓[0m Byte mode (-b) splices to worker stdin
+
+[1;34m[1m▶ Variable Serialization (FORKRUN_EXTRA_VARS)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m FORKRUN_EXTRA_VARS passes simple strings
+  [0;32m✓[0m FORKRUN_EXTRA_VARS passes standard arrays
+  [0;32m✓[0m FORKRUN_EXTRA_VARS passes associative arrays
+
+[1;34m[1m▶ Custom clean-room setup (FORKRUN_EXTRA_SETUP)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m FORKRUN_EXTRA_SETUP: set env var used by worker
+  [0;32m✓[0m FORKRUN_EXTRA_SETUP: enable extglob affects pattern matching
+  [0;32m✓[0m FORKRUN_EXTRA_SETUP: setup executes before function capture
+  [0;32m✓[0m FORKRUN_EXTRA_SETUP: failing setup code propagates exact exit code
+
+[1;34m[1m▶ Signal Handling and Early Termination[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Graceful SIGPIPE handling (head -n 5)
+  [0;32m✓[0m Worker transient failure mid-batch
+  [0;32m✓[0m Worker one-time transient failure mid-batch
+
+[1;34m[1m▶ Misc additional tests[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m Min-heap ordering: 100 batches with random sleep skew
+  [0;32m✓[0m SIGPIPE cascade: orderer dies, workers abort cleanly
+  [0;32m✓[0m Byte mode: UTF-8 character integrity (10 bytes for 5 Greek chars)
+  [0;32m✓[0m Operates correctly under moderate FD limits (ulimit -n 256)
+  [0;32m✓[0m Timeout flush: 50ms timeout delivers trickle input
+
+[1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1;36m[1m  FORKRUN TEST SUITE[0m
+[1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[1mTEST SUMMARY[0m
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Total:   89
+Passed:  89 ([0;32m100.0%[0m)
+Failed:   0 ([0;31m0.0%[0m)
+Skipped:   0 ([1;33m0.0%[0m)
+
+[0;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+[0;32m[1mALL TESTS PASSED![0m
+[0;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 [1;36m[1m  FORKRUN COMPREHENSIVE SUPPLEMENTAL TEST SUITE[0m
-[1;36m[1m  System: 28 CPUs, 4 NUMA node(s)[0m
+[1;36m[1m  System: 28 CPUs, 1 NUMA node(s)[0m
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 
 [1;34m[1m▶ Section A: REGRESSION: Bash Function Transmission[0m
@@ -328,188 +503,26 @@ Verifying run_test_sorted catches duplicate lines...
   [0;32m✓[0m R12: Sweep file args from stdin (:::: -)
   [0;32m✓[0m R13: Sweep --link truncates uneven arrays safely
 
+[1;34m[1m▶ Section T: Adversarial & Periphery (resume sandbox, fd hygiene, extremes)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m T1a: resume output-injection rejected (payload not executed)
+  [0;32m✓[0m T1b: resume content-injection neutralized by round-trip
+  [0;32m✓[0m T1c: corrupt resume file (no coordinates) rejected
+  [0;32m✓[0m T2: daemon-spawning worker does not hang shutdown
+  [0;32m✓[0m T3a: 3MB single line via -s is byte-exact
+  [0;32m✓[0m T3b: >ARG_MAX line in args mode terminates (poison, no hang)
+  [0;32m✓[0m T4a: --nodes=@40 exact passthrough
+  [0;32m✓[0m T4b: --nodes=@512 terminates with intact data
+  [0;32m✓[0m T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)
+  [0;32m✓[0m T6: ring_lseek argc forms disambiguated
+
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 [1mSUMMARY[0m
 [1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-Total:   208
-Passed:  208  ([0;32m100.0%[0m)
+Total:   218
+Passed:  218  ([0;32m100.0%[0m)
 Failed:    0  ([0;31m0.0%[0m)
 Skipped:   0  ([1;33m0.0%[0m)
 
-[0;32m[1mALL TESTS PASSED![0m
-[0;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-
-[1;34m[1m▶ Core Modes (Default, Ordered, Realtime)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Default mode
-  [0;32m✓[0m Ordered mode (-k)
-  [0;32m✓[0m Realtime mode (-u)
-  [0;32m✓[0m Buffered ordered (--buffered -k)
-
-[1;34m[1m▶ Input Handling (stdin, bytes, delimiters)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Stdin mode (-s)
-  [0;32m✓[0m Byte mode (-b 10)
-  [0;32m✓[0m Byte mode (-b 50)
-  [0;32m✓[0m Custom delimiter (-d :)
-  [0;32m✓[0m Null delimiter (-z)
-  [0;32m✓[0m Unicode support
-
-[1;34m[1m▶ Batch Size Control (lines, bytes, exact)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Fixed batch size (-l 2)
-  [0;32m✓[0m Batch size range (-l 1:5)
-  [0;32m✓[0m Exact lines (-L 3)
-  [0;32m✓[0m Exact lines with limit (-L 4 -n 8)
-
-[1;34m[1m▶ Worker Scaling (-j)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Fixed workers (-j 2)
-  [0;32m✓[0m Worker range (-j 1:4)
-  [0;32m✓[0m Oversubscribe (--nodes=@2)
-
-[1;34m[1m▶ Limits and Timeouts[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Record limit (-n 5)
-  [0;32m✓[0m Limit with unordered (-n 5)
-  [0;32m✓[0m Timeout flag accepted (--timeout 50000)
-
-[1;34m[1m▶ String Substitution (-i, -I)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Insert mode (-i)
-  [0;32m✓[0m Insert ID mode (-I)
-  [0;32m✓[0m Insert with custom command (-i)
-
-[1;34m[1m▶ Quoting and Unsafe Mode[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Safe quoting with spaces
-  [0;32m✓[0m Unsafe mode (-U) with spaces
-  [0;32m✓[0m Explicit safe mode (+U)
-
-[1;34m[1m▶ Output Mode Combinations[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Stdin + ordered (-s -k)
-  [0;32m✓[0m Byte + realtime (-b 10 -u)
-  [0;32m✓[0m Byte + ordered (-b 50 -k)
-  [0;32m✓[0m Exact lines + stdin (-L 3 -s)
-
-[1;34m[1m▶ NUMA Topology[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Auto NUMA (--nodes=auto)
-  [0;32m✓[0m Explicit nodes (--nodes=0)
-  [0;32m✓[0m Multi-node (--nodes=2)
-  [0;32m✓[0m Exact lines with NUMA (downgrade warning)
-
-[1;34m[1m▶ Special Flags[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Dry run (-N)
-  [0;32m✓[0m Version (-V)
-  [0;32m✓[0m Help (--help)
-  [0;32m✓[0m Verbose flag (-v)
-  [0;32m✓[0m Stats flag (--stats)
-
-[1;34m[1m▶ Edge Cases[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Empty input
-  [0;32m✓[0m Single line input
-  [0;32m✓[0m Batch larger than input (-l 100)
-  [0;32m✓[0m More workers than lines (-j 20)
-  [0;32m✓[0m Tab characters
-
-[1;34m[1m▶ Complex Flag Combinations[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Combination: -s -k -n 5
-  [0;32m✓[0m Combination: -b 20 -u -j 2
-  [0;32m✓[0m Combination: --nodes=2 -j 4 -l 2 -k
-  [0;32m✓[0m Combination: -L 2 --timeout 100000 -v
-  [0;32m✓[0m Combination: -b 33 --nodes=auto -s
-
-[1;34m[1m▶ Performance & Stress (Quick Checks)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Large input (1000 lines) default
-  [0;32m✓[0m Large input with -j 8
-  [0;32m✓[0m Large byte input (10k) -b 1024
-
-[1;34m[1m▶ Alias Flags[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Alias: --atomic (buffered)
-  [0;32m✓[0m Alias: --keep-order
-  [0;32m✓[0m Alias: --unbuffered
-
-[1;34m[1m▶ Deep Architecture (Zero-Copy, Trickle, SIMD)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Direct file ingest (Zero-Copy UMA)
-  [0;32m✓[0m Direct file ingest (Zero-Copy NUMA)
-  [0;32m✓[0m Direct file ingest (Byte Mode)
-  [0;32m✓[0m AVX2/NEON SIMD long-line boundaries
-  [0;32m✓[0m Trickle input (Early Flush / Stall Meter)
-  [0;32m✓[0m Command failure tolerance (No Deadlock)
-
-[1;34m[1m▶ Bash Execution Environment & State Propagation[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Parallelize simple bash function
-  [0;32m✓[0m Parallelize nested bash functions
-  [0;32m✓[0m Exported variables propagate
-  [0;32m✓[0m Unexported variables do not propagate
-
-[1;34m[1m▶ Engine Physics: Escrow, Skew, and Heap Stress[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m ring_order Min-Heap with Severe Skew (-k)
-  [0;32m✓[0m Forced Escrow Steal (Single Worker Overshoot)
-  [0;32m✓[0m Massive Oversubscription (128 workers, 10 lines)
-
-[1;34m[1m▶ I/O Edge Cases & Scanner Boundaries[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m File with NO trailing newline
-  [0;32m✓[0m Exact Limit matching
-
-[1;34m[1m▶ Routing: Data as Arguments (Default)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Default mode passes data as arguments
-  [0;32m✓[0m Default mode passes filenames to cat
-
-[1;34m[1m▶ Routing: Data Spliced to Stdin (-s / -b)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Stdin mode (-s) splices to worker stdin
-  [0;32m✓[0m Byte mode (-b) splices to worker stdin
-
-[1;34m[1m▶ Variable Serialization (FORKRUN_EXTRA_VARS)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m FORKRUN_EXTRA_VARS passes simple strings
-  [0;32m✓[0m FORKRUN_EXTRA_VARS passes standard arrays
-  [0;32m✓[0m FORKRUN_EXTRA_VARS passes associative arrays
-
-[1;34m[1m▶ Custom clean-room setup (FORKRUN_EXTRA_SETUP)[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m FORKRUN_EXTRA_SETUP: set env var used by worker
-  [0;32m✓[0m FORKRUN_EXTRA_SETUP: enable extglob affects pattern matching
-  [0;32m✓[0m FORKRUN_EXTRA_SETUP: setup executes before function capture
-  [0;32m✓[0m FORKRUN_EXTRA_SETUP: failing setup code propagates exact exit code
-
-[1;34m[1m▶ Signal Handling and Early Termination[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Graceful SIGPIPE handling (head -n 5)
-  [0;32m✓[0m Worker transient failure mid-batch
-  [0;32m✓[0m Worker one-time transient failure mid-batch
-
-[1;34m[1m▶ Misc additional tests[0m
-[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-  [0;32m✓[0m Min-heap ordering: 100 batches with random sleep skew
-  [0;32m✓[0m SIGPIPE cascade: orderer dies, workers abort cleanly
-  [0;32m✓[0m Byte mode: UTF-8 character integrity (10 bytes for 5 Greek chars)
-  [0;32m✓[0m Operates correctly under moderate FD limits (ulimit -n 256)
-  [0;32m✓[0m Timeout flush: 50ms timeout delivers trickle input
-
-[1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-[1;36m[1m  FORKRUN TEST SUITE[0m
-[1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-[1mTEST SUMMARY[0m
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:   89
-Passed:  89 ([0;32m100.0%[0m)
-Failed:   0 ([0;31m0.0%[0m)
-Skipped:   0 ([1;33m0.0%[0m)
-
-[0;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 [0;32m[1mALL TESTS PASSED![0m
 [0;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
