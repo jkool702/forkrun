@@ -47,6 +47,8 @@ Scanners in NUMA mode differ from standard UMA scanners in three ways:
 2. **The Scanner Shield:** Scanners are strictly limited in how far they can read ahead of the worker pool. This prevents a fast scanner from blowing out the L2/L3 cache with metadata while workers are still processing older batches.
 3. **Topology-Aware Stealing:** If a Scanner runs out of local chunks, it is allowed to steal an unprocessed chunk from another NUMA node. However, to prevent thrashing, it will only steal if the victim node has a backlog exceeding a topological threshold: `1 + (NUMA_distance / 10)`. Under extreme starvation (e.g., EOF is reached and no new data will ever arrive), this threshold collapses to `1`, allowing full cluster drain.
 
+**Distance-charged stealing.** The threshold formula `1 + (distance / 10)` makes the minimum backlog required to steal *inversely proportional to the cost of stealing*. On `numa=fake=4` every inter-node distance is 10, so the threshold bottoms out at 2 chunks — fake-NUMA measurements are therefore a worst case. On real 2-socket EPYC, cross-socket distances of 32–40 raise the floor to 4–5 chunks before the dynamic scaling multiplier applies. Stealing permission is priced by the topology itself. (Exception: under global-EOF drain the threshold collapses to 1 so the stream can finish; bounded to end-of-stream.)
+
 ---
 
 ## §4. The Worker Pools & The Structural Guarantee

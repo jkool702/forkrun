@@ -153,6 +153,12 @@ Per-batch logical index + reorder buffer + emit only contiguous prefix.
 
 ---
 
+## 11. (reserved)
+
+This section is intentionally reserved to preserve numbering stability after v3.4 refactors.
+
+---
+
 ## 12. Meter-Based Early Flush Protocol
 
 **Purpose**

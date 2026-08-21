@@ -28,7 +28,7 @@
 - `-j`, `-P`, `--workers <W>` : Set the number of concurrent workers. Supports `<init>:<max>` (e.g., `-j 4:32`). Default max is the number of logical cores.
 - `-l`, `--lines <L>`         : Set the batch size (lines per worker). Supports `<init>:<max>` (e.g., `-l 10:10000`). Default max is 4096.
 - `-L`, `--exact-lines <N>`   : Force exactly `N` lines per batch. (Warning: Disables NUMA topological stealing to guarantee exact counts).
-- `-t`, `--timeout <us>`      : Set the maximum wait time (in microseconds) for a partial batch before flushing early.
+- `-t, --timeout <us>`: maximum time (µs) a partial batch may sit in the scanner before early flush. This bounds the wait feeding the stall/starve early-flush invariant (DESIGN.md §7, Phase 2b): when input is trickling *and* workers are idle, the scanner flushes the partial batch at this deadline instead of waiting for a full one. `--greedy` is equivalent to `-t 0`.
 
 ### STRING SUBSTITUTION
 
@@ -78,6 +78,7 @@
 - `--resume <file>`           : Resume a previously aborted pipeline using the specified checkpoint file.
   - **Buffered/Ordered modes**: Provides "Exactly-Once" semantics. Ensure you truncate your output file to the byte count specified in the crash message before resuming.
   - **Realtime (-u) mode**: Provides "At-Least-Once" semantics. Resuming may result in a few duplicate lines at the failure boundary.
+  - SECURITY: full-auto resume re-extracts the execution environment inside a PATH-less restricted shell, re-renders it via `declare -p/-f`, and round-trip-verifies the serialization (bounded by unguessable start/end tokens) before importing anything. Resume files containing setup commands, functions, or custom variables require interactive confirmation or `FORKRUN_TRUST_RESUME=1`. Environment state whose serialization is not round-trip-stable (e.g., setups embedding command substitution) is rejected rather than imported.
 - `--checkpoint-file <file>`  : Specify a custom filename for the checkpoint file written in case of failure. (Default: .forkrun_resume)
 
 ### UNSETTING FLAGS
@@ -95,7 +96,7 @@
 
 ### ENVIRONMENT VARS
 
-- `FORKRUN_RETRY_LIMIT` : Controls how many times a batch will be retried before it is declared poisoned. `0` means declared poisoned after the 1st failure. A negative value means it will never be declared poisoned (and could retry indefinitely). Default is 3.
+- `FORKRUN_RETRY_LIMIT`: poison threshold. A batch is declared poisoned once it has failed **N total times** (the original attempt plus N−1 retries — i.e., up to N executions of the batch). Default 3 = up to 3 executions. N=0 and N=1 both mean "poison after the first failure" (a single execution). Negative = never poisoned. Exactly-once execution (no retries): set to 0.
 - `FORKRUN_EXTRA_FUNCS` : Use this to specify required sub-functions to pass into frun's environment.
   - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_EXTRA_FUNCS='gg hh' frun ff <inputs`.
 - `FORKRUN_EXTRA_VARS`  : Use this to specify (environment) variables to pass into frun's environment.  NOTE: `FORKRUN_EXTRA_VARS='PATH [...]'` is required to propagate a custom PATH into frun's environment.

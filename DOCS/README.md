@@ -7,7 +7,7 @@
 **forkrun achieves:**
 - **200,000+ batch dispatches/sec** (vs ~500 for GNU Parallel)
 - **~95–99% CPU utilization** across all cores (vs ~6% for GNU Parallel)
-- **Near-zero cross-socket memory traffic** (NUMA-aware “born-local” design)
+- **Born-local NUMA placement**: file ingest measures 0.0–0.2% cross-socket chunks. Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **Automatic recovery and retry** when a worker unexpectedly dies processing a batch (v3.1.0+)
 
 forkrun is built for high-frequency, low-latency workloads on deep NUMA hardware — a regime where existing tools leave most cores idle due to IPC overhead and cross-socket data migration.
@@ -37,7 +37,7 @@ frun -k -s sort < records.tsv              # stdin-passthrough, ordered output
 frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
 ```
 
-**Verifiable Builds**: The embedded C-extension is compiled and injected transparently via GitHub Actions. You can trace the git blame of the Base64 blob directly to the public CI workflow run that compiled forkrun_ring.c, guaranteeing the binary contains no hidden malicious code.
+**Auditable Builds**: the embedded C extension is compiled and injected by a public GitHub Actions workflow; the git history of the base64 blob traces every byte to a specific CI run of `forkrun_ring.c`. (Reproducible builds with published checksums are on the roadmap and would upgrade this to cryptographic attestation.)
 
 ---
 
@@ -65,7 +65,7 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 
 1. **Ingest (Born-Local NUMA):** Data is `splice()`'d from stdin into a shared memfd. This is **PFS-friendly** (avoids Lustre/NFS metadata storms). On multi-socket systems, `set_mempolicy(MPOL_BIND)` places each chunk's pages on a target NUMA node *before any worker touches them*. This placement is driven by real-time backpressure from the per-node indexers, making NUMA distribution completely self-load-balancing.
 2. **Index:** Per-node indexers (pinned to their socket) find record boundaries using AVX2/NEON SIMD scanning at memory bandwidth. They dynamically batch based on runtime conditions, then publish offset markers into a per-node lock-free ring buffer.
-3. **Claim (Contention-Free):** Workers claim batches via a single `atomic_fetch_add` — no CAS retry loops, no locks, no contention. If a worker process crashes, its transaction is safely rolled back and deposited into an escrow pipe for idle workers to steal.
+3. **Claim (contention-free *(no userspace locks or CAS retry loops on the fast path — a single amortized atomic increment per batch, sharded per NUMA node)*):** Workers claim batches via a single `atomic_fetch_add` — no CAS retry loops, no locks, no contention. If a worker process crashes, its transaction is safely rolled back and deposited into an escrow pipe for idle workers to steal.
 4. **Reclaim:** A background fallow thread punches holes behind completed work via `fallocate(PUNCH_HOLE)`, bounding memory usage without breaking the offset coordinate system.
 
 **Adaptive tuning** is fully automatic. A Pre-Flight AVX2/NEON SIMD popcount computes the globally optimal batch size during fork latency, instantly entering PID steady-state. If a worker spawns before the scan completes, a geometric fallback converges in O(log L) steps. Either way the worker fast-path is a single `atomic_fetch_add` with no user `-n` or `-j` configuration required.
@@ -75,7 +75,7 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 ## 🛠 Requirements & Dependencies
 
 forkrun is designed to run anywhere with zero friction:
-*   **Required:** Bash ≥ 4.0 (Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`).
+*   **Required:** Bash ≥ 4.0 (Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`). Requires only a Linux kernel ≥ 3.17 and Bash ≥ 4.0. Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
 
 ---
 
@@ -94,4 +94,3 @@ Priorities for the development roadmap include:
 - **Deeper integration** with facility workload managers.
 
 *(If forkrun is saving your institution compute-hours, please consider sponsoring its development to accelerate these features!)*
-

@@ -121,7 +121,7 @@ Every “weird” feature has a direct physical justification:
 | Escrow pipe                        | Inertial correction / diffusion           | Blocking or retries on every claim                  |
 | Pre-Flight SIMD Popcount           | Satellite surveying the river basin       | Workers guessing bucket sizes; PID oscillation on startup |
 | Single-slot claim (atomic_fetch_add +1) | Inertial bucket with fixed handle    | CAS storms and speculative arithmetic on fast path  |
-| Stride Ring Boundary Flag          | Chunk event horizon                       | Workers reading across NUMA fault lines             |
+| `FLAG_MAJOR_EOF` chunk-end marker | Chunk event horizon | Orderer stalls at chunk boundaries; workers reading across NUMA fault lines |
 | Fallow punch-hole                  | Second law + event horizon                | Unbounded memory growth                             |
 
 Remove any of these and the system either violates a conservation law or requires locks/polling to compensate — exactly like adding friction to a frictionless model.

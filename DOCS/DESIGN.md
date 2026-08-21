@@ -21,6 +21,8 @@ The guiding philosophy is:
 
 ## 2. High-Level Model
 
+**Process model:** although docs speak of ingest/scanner/orderer/fallow "threads" (and the C code uses TLS for per-worker state), each role is at runtime a *forked process* sharing one `MAP_SHARED` anonymous mapping. There are no user threads in the pipeline; the atomics on the shared mapping are inter-process operations, and all TLS state is per-process.
+
 forkrun consists of four cooperating roles (three in legacy flat mode, four when NUMA is active):
 
 1. **NUMA Ingest** – Zero-copy splice from stdin into the shared memfd, routing data to the correct socket via `set_mempolicy`.
@@ -116,7 +118,7 @@ A worker always claims exactly 1 slot (1 batch) per atomic operation. Because th
 To handle fault-resilience, forkrun repurposes the **escrow** pipe:
 
 * A non-blocking anonymous pipe (per-node in NUMA mode)
-* Entries contain: starting offset + line count of the aborted batch
+* Entries contain: the ring slot index of the aborted batch, its slot count (always 1 under the single-slot invariant), and the batch's `num_kills` counter (24-byte packet).
 
 If a worker process crashes, is killed by OOM, or explicitly fails, its active transaction is rolled back:
 
@@ -149,7 +151,7 @@ There are multiple eventfds:
 
 Properties:
 
-* Semaphore mode prevents counter overflow
+* Semaphore mode makes each wakeup a consumable unit (a read decrements by 1), so one blast wakes exactly N waiters.
 * Spurious wakeups are allowed
 * Missed wakeups are impossible due to monotonic indices
 
@@ -236,6 +238,7 @@ A background GC process:
 * Punches holes behind it using `fallocate(PUNCH_HOLE)`
 
 This:
+
 * Preserves offsets
 * Avoids fragmentation
 * Requires no coordination with workers

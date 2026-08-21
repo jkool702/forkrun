@@ -132,48 +132,15 @@ This is in contrast to polling for **non-local** data, where simultaneously poll
 
 ---
 
-## §4. Escrow Priority Inversion
+## §4. Escrow Priority Inversion (v3.4+)
 
-There is exactly one exception to the standard priority ordering defined in §3.2.
+### Mechanism (v3.4+): Continuous Drain + Re-arm Flag
 
-### The Exception
+1. **Deposit signal.** `ring_escrow_put` writes the packet to the per-node escrow pipe and sets the per-node `escrow_pending` flag (release store).
+2. **Re-arm (test-and-test-and-set).** On every claim iteration each worker performs one acquire load of `escrow_pending` (cache-resident; reads 0 for the whole run in the no-failure case). The first worker to see it non-zero atomically exchanges it to 0 and sets its thread-local `tl_drain_escrow` flag. The TATAS form prevents RMW cache-line ping-pong when several workers observe the flag simultaneously.
+3. **Continuous drain.** While `tl_drain_escrow` is set, the worker checks escrow *before* the ring on every claim, draining until EAGAIN, then snaps back to ring-first priority. Inversion is continuous for the recovery episode, not one-shot.
 
-When a worker deposits a failed batch into the escrow pipe (due to a transient failure or crash recovery), **that specific worker** should temporarily **invert its priority** to check escrow **before** the local ring on its next claim attempt.
-
-### Rationale
-
-Without this inversion, the escrowed batch could sit in the pipe until all local ring work is exhausted. In ordered mode (`-k`), this means the orderer would be blocked waiting for a batch that exists but isn't being processed, limiting throughput and causing unnecessary head-of-line blocking.
-
-By prioritizing escrow immediately after depositing, the depositing worker (or another worker, if the depositing worker's escrow was already consumed) recovers the batch quickly, keeping the output ordering pipeline flowing.
-
-### Rules
-
-1. The priority inversion is **per-worker** (thread-local). It does **not** affect any other worker's priority.
-2. The inversion flag is **one-shot**: it is cleared unconditionally at the start of the next claim attempt, regardless of whether the escrow read succeeds.
-3. If the escrow pipe is empty (another worker already consumed it), the worker falls through to the standard priority ordering with no penalty.
-4. **Crash Validation**: Reclaimed escrow packets must NOT bypass the `write_idx` validation (which prevents reading uninitialized ring data when the scanner hasn't published the slots yet). Therefore, post-escrow jumps must target `evaluate_claim` instead of `check_boundaries`.
-
-### Implementation
-
-```c
-// At top of restart_loop, BEFORE the normal ring check:
-if (tl_recently_escrowed) {          // TLS flag, set when depositing into escrow
-    tl_recently_escrowed = false;    // One-shot: clear unconditionally
-    if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
-        struct EscrowPacket ep;
-        ssize_t er;
-        do {
-            er = read(fd_escrow_r[my_numa_node], &ep, sizeof(ep));
-        } while (er < 0 && errno == EINTR);
-        if (er == sizeof(ep)) {
-            // Safely jump to the write_idx check block. If this is an
-            // crash-recovery packet, we MUST wait for the scanner to publish it!
-            goto evaluate_claim;
-        }
-    }
-}
-// ... fall through to normal priority: ring first, then escrow
-```
+Crash validation is unchanged: reclaimed packets route through `evaluate_claim`, never bypassing `write_idx` validation.
 
 **Reference:** `ring_claim_main()` in `forkrun_ring.c`.
 
@@ -229,7 +196,7 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 - [ ] **The 3-condition EOF check re-verifies from C1 on any failure.** If a modification adds a `break` instead of `continue` when C2 or C3 fails, the worker could miss work that arrived between checks.
 
-- [ ] **Escrow priority inversion is one-shot and thread-local.** If the `tl_recently_escrowed` flag is not cleared before the escrow read attempt, a failed read could cause an infinite escrow-priority loop. If it's made global (not TLS), it would affect all workers.
+- [ ] **Escrow drain must terminate on EAGAIN (never spin on an empty pipe); the per-node re-arm flag must be consumed by exactly one atomic exchange per deposit episode.** Continuous drain inversion is thread-local and must not affect global priority when idle; the `tl_drain_escrow` flag must be cleared only after EAGAIN, and `escrow_pending` must be TATAS-consumed.
 
 ---
 
