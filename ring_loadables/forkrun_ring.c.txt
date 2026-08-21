@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.4.3
+// forkrun_ring.c v3.4.4
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -363,7 +363,10 @@ fast_count_delim(const char *p, const char *end, char delim) {
 
 #define MAX_BATCH_LINES  281474976710656ULL
 #define FLAG_MAJOR_EOF (1U << 31)
-#define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
+#define MINOR_BITS 22
+#define MINOR_MASK ((1ULL << MINOR_BITS) - 1ULL)
+#define MAJOR_MASK ((1ULL << (64 - MINOR_BITS)) - 1ULL)
+#define PACK_KEY(maj, min) ((((uint64_t)(maj) & MAJOR_MASK) << MINOR_BITS) | ((uint64_t)(min) & MINOR_MASK))
 
 #define HUGE_PAGE_SIZE (2 * 1024 * 1024)
 #define SCANNER_CHUNK_SIZE (2 * 1024 * 1024)
@@ -376,7 +379,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.4.3"
+#define FORKRUN_RING_VERSION "v3.4.4"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -708,8 +711,9 @@ static int ring_exec_main(int argc, char **argv) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd);
-    // NOTE: fd leakage into exec'd commands is prevented by MFD_CLOEXEC/O_CLOEXEC
-    // set in xcreate_anon_file(). CLOEXEC survives fork() but closes on exec().
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    // NOTE: Ingress & output memfds are created with MFD_CLOEXEC/O_CLOEXEC,
+    // while engine pipes use FD_CLOEXEC to prevent descriptor leakage into children.
 
     // 6. Spawn the child (inherits FDs natively)
     pid_t pid;
@@ -769,7 +773,13 @@ static int ring_exec_splice_main(int argc, char **argv) {
 
     // 2. Create the pipe
     int pfd[2];
+#if defined(O_CLOEXEC)
+    if (pipe2(pfd, O_CLOEXEC) != 0) return EXECUTION_FAILURE;
+#else
     if (pipe(pfd) != 0) return EXECUTION_FAILURE;
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+#endif
 
     // Optional: Maximize pipe buffer size for throughput
     fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
@@ -780,6 +790,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
     posix_spawn_file_actions_adddup2(&actions, pfd[0], STDIN_FILENO);
     posix_spawn_file_actions_addclose(&actions, pfd[1]); // Child doesn't need write end
     if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd); // Shield memfd
+    // DO NOT add /dev/null here! Child STDIN is fed by pfd[0]!
 
     // 4. Block SIGCHLD
     sigset_t set, oset;
@@ -1122,43 +1133,40 @@ static void check_thp_shmem_config(void) {
   }
 }
 
-static int xcreate_anon_file(const char *name) {
+static int xcreate_anon_file(const char *name, bool cloexec) {
   const char *force_fallback = get_string_value("FORKRUN_FORCE_FALLBACK");
   bool use_memfd = true;
   if (force_fallback && (strcmp(force_fallback, "1") == 0))
     use_memfd = false;
+  unsigned int mfd_flags = MFD_ALLOW_SEALING | (cloexec ? MFD_CLOEXEC : 0);
   if (use_memfd) {
-    // NOTE: MFD_HUGETLB is intentionally not used here. It conflicts with the
-    // shmem semantics forkrun's memfd-backed files depend on (ftruncate/fallocate
-    // PUNCH_HOLE fine-grained resizing, arbitrary-offset sparse growth, etc).
-    // Transparent Huge Pages are the supported path to hugepage-backed throughput
-    // gains for this data, but note they currently require shmem_enabled=always
-    // to take effect, since this fd is only ever accessed via read/write/
-    // copy_file_range/sendfile, not mmap -- see check_thp_shmem_config() above.
-    int fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
+    int fd = syscall(__NR_memfd_create, name, mfd_flags);
     if (fd >= 0)
       return fd;
     if (errno == EINVAL) {
-      fd = syscall(__NR_memfd_create, name, 0);
+      fd = syscall(__NR_memfd_create, name, cloexec ? MFD_CLOEXEC : 0);
       if (fd >= 0)
         return fd;
     }
   }
-  int fd = open("/dev/shm", O_TMPFILE | O_RDWR | O_EXCL, 0600);
+  int o_flags = O_TMPFILE | O_RDWR | O_EXCL | (cloexec ? O_CLOEXEC : 0);
+  int fd = open("/dev/shm", o_flags, 0600);
   if (fd >= 0)
     return fd;
-  fd = open("/tmp", O_TMPFILE | O_RDWR | O_EXCL, 0600);
+  fd = open("/tmp", o_flags, 0600);
   if (fd >= 0)
     return fd;
   char path[64];
-  snprintf(path, sizeof(path), "/dev/shm/forkrun.XXXXXX");
-  fd = mkstemp(path);
-  if (fd < 0) {
+  const char *tmpdir = getenv("TMPDIR");
+  if (tmpdir)
+    snprintf(path, sizeof(path), "%s/forkrun.XXXXXX", tmpdir);
+  else
     snprintf(path, sizeof(path), "/tmp/forkrun.XXXXXX");
-    fd = mkstemp(path);
-  }
-  if (fd >= 0)
+  fd = mkstemp(path);
+  if (fd >= 0) {
     unlink(path);
+    if (cloexec) fcntl(fd, F_SETFD, FD_CLOEXEC);
+  }
   return fd;
 }
 
@@ -1987,10 +1995,8 @@ static int ring_init_main(int argc, char **argv) {
         }
       }
     }
-    return EXECUTION_SUCCESS;
-  }
-
-  allocated_num_nodes = global_num_nodes;
+  } else {
+    allocated_num_nodes = global_num_nodes;
 
   // --- PHYSICS FIX: Force g_state size to pad out to a 4K boundary ---
   long pg_sz = sysconf(_SC_PAGESIZE);
@@ -2020,6 +2026,7 @@ static int ring_init_main(int argc, char **argv) {
   state = (struct SharedState *)((char *)p + global_size);
   memset(p, 0, total_size);
   atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
+  }
 
   // Config register: 0xBBLLWW where BB=bytes, LL=lines, WW=workers
   // Each pair is (upper nibble = max policy, lower nibble = start policy)
@@ -2236,6 +2243,7 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
+  if (evfd_data_arr == NULL) {
   evfd_data_arr = calloc(global_num_nodes, sizeof(int));
   evfd_eof_arr = calloc(global_num_nodes, sizeof(int));
   evfd_indexer_arr = calloc(global_num_nodes, sizeof(int));
@@ -2296,6 +2304,7 @@ static int ring_init_main(int argc, char **argv) {
       ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
   }
+  }
 
   evfd_data = evfd_data_arr[0];
   fd_escrow[0] = fd_escrow_r[0];
@@ -2338,7 +2347,7 @@ static int ring_init_main(int argc, char **argv) {
     int created_cnt = 0;
     int failure = 0;
     for (uint64_t i = 0; i < actual_total_w_max; i++) {
-      int fd = xcreate_anon_file("forkrun_out");
+      int fd = xcreate_anon_file("forkrun_out", true);
       if (fd >= 0) {
         created_fds[created_cnt++] = fd;
         char val[32];
@@ -2361,7 +2370,13 @@ static int ring_init_main(int argc, char **argv) {
 
   int probe_fd[2];
   int pipe_cap = 65536;
+#if defined(O_CLOEXEC)
+  if (pipe2(probe_fd, O_CLOEXEC) == 0) {
+#else
   if (pipe(probe_fd) == 0) {
+    fcntl(probe_fd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(probe_fd[1], F_SETFD, FD_CLOEXEC);
+#endif
     int ret = fcntl(probe_fd[1], F_SETPIPE_SZ, 1048576);
     if (ret >= 0)
       pipe_cap = ret;
@@ -2499,6 +2514,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       uint64_t mult = (chunk_size + L - 1) / L;
       chunk_size = mult * L;
     }
+  }
+  uint64_t min_batch_sz = (state[0].mode_byte && state[0].cfg_batch_start > 0) ? state[0].cfg_batch_start : 1;
+  if (chunk_size > (MINOR_MASK * min_batch_sz)) {
+    chunk_size = MINOR_MASK * min_batch_sz;
   }
 
   // --- OOM Protection Initialization ---
@@ -2642,7 +2661,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       NUMA_CHECK_SCANNERS_DONE();
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
-      if (poll(&pfd, 1, -1) > 0) {
+      if (poll(&pfd, 1, 10) > 0) {
         uint64_t v;
         sys_read(evfd_chunk_done, &v, 8);
       }
@@ -2653,9 +2672,12 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         {.fd = infd, .events = POLLIN},
         {.fd = evfd_chunk_done, .events = POLLIN}
     };
-    int p_res = poll(pfds_gate, 2, -1);
+    int p_res = poll(pfds_gate, 2, 10);
     if (p_res < 0) {
-        if (errno != EINTR && errno != EAGAIN) break;
+        if (errno != EINTR && errno != EAGAIN) {
+            pull_fire_alarm_reason(2);
+            break;
+        }
         continue;
     }
 
@@ -2752,7 +2774,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
                     {.fd = outfd, .events = POLLOUT},
                     {.fd = evfd_chunk_done, .events = POLLIN}
                 };
-                int p_out_res = poll(pfds_out, 2, -1);
+                int p_out_res = poll(pfds_out, 2, 10);
                 if (p_out_res < 0) {
                     if (errno == EINTR || errno == EAGAIN) continue;
                     if (errno == ENOMEM) {
@@ -2760,6 +2782,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
                         continue;
                     }
                     inner_fatal = true; // Hard unrecoverable error
+                    pull_fire_alarm_reason(2);
                     break;
                 }
                 if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
@@ -2777,6 +2800,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
               continue;
             }
             inner_fatal = true;
+            pull_fire_alarm_reason(2);
             break;
           }
           written += w;
@@ -2800,6 +2824,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         usleep(10000); // Catch ENOSPC on sendfile/copy_file_range
         continue;
       }
+      pull_fire_alarm_reason(2);
       break; // Safe hard exit
     }
     if (n == 0)
@@ -2879,6 +2904,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint32_t bound_b = min_buf + (12 * step);
         uint32_t max_buf = (bound_a < bound_b) ? bound_a : bound_b;
         if (max_buf > 128) max_buf = 128; // Safely absorb smaller 64KB metadata entries
+        uint32_t global_max = (META_RING_SIZE / 2) / (num_nodes > 0 ? (uint32_t)num_nodes : 1);
+        if (global_max < 4) global_max = 4;
+        if (max_buf > global_max) max_buf = global_max;
+        if (min_buf > global_max) min_buf = global_max;
 
         // Instantaneous safety clamp to keep current_buffer_limit in-bounds during transition
         if (current_buffer_limit < min_buf) {
@@ -2886,6 +2915,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
         } else if (current_buffer_limit > max_buf) {
             current_buffer_limit = max_buf;
+            atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+        }
+        if (current_buffer_limit > global_max) {
+            current_buffer_limit = global_max;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
         }
 
@@ -5680,20 +5713,32 @@ static int ring_lseek_main(int argc, char **argv) {
   }
 
   int whence = SEEK_CUR;
-  if (argc > 3) {
+  const char *var_name = NULL;
+  if (argc == 4) {
     if (!strcmp(argv[3], "SEEK_SET"))
       whence = SEEK_SET;
     else if (!strcmp(argv[3], "SEEK_END"))
       whence = SEEK_END;
+    else if (!strcmp(argv[3], "SEEK_CUR"))
+      whence = SEEK_CUR;
+    else
+      var_name = argv[3];
+  } else if (argc >= 5) {
+    if (!strcmp(argv[3], "SEEK_SET"))
+      whence = SEEK_SET;
+    else if (!strcmp(argv[3], "SEEK_END"))
+      whence = SEEK_END;
+    var_name = argv[4];
   }
+
   off_t no = lseek(fd, off, whence);
   if (no == -1)
     return EXECUTION_FAILURE;
-  if (argc >= 4 && argv[argc - 1][0]) {
+  if (var_name && var_name[0]) {
     char buf[32];
     snprintf(buf, 32, "%lld", (long long)no);
-    bind_var_or_array(argv[argc - 1], buf, 0);
-  } else if (argc < 4) {
+    bind_var_or_array(var_name, buf, 0);
+  } else if (!var_name) {
     printf("%lld\n", (long long)no);
   }
   return EXECUTION_SUCCESS;
@@ -5702,7 +5747,8 @@ static int ring_lseek_main(int argc, char **argv) {
 static int ring_memfd_create_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
-  int fd = xcreate_anon_file("forkrun_input");
+  bool cloexec = (argc >= 3 && atoi(argv[2]) != 0);
+  int fd = xcreate_anon_file("forkrun_input", cloexec);
   if (fd < 0) {
     builtin_error("memfd_create failed: %s", strerror(errno));
     return EXECUTION_FAILURE;
@@ -5746,10 +5792,19 @@ static int ring_pipe_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
   int pfd[2];
+#if defined(O_CLOEXEC)
+  if (pipe2(pfd, O_CLOEXEC) < 0) {
+    builtin_error("pipe failed: %s", strerror(errno));
+    return EXECUTION_FAILURE;
+  }
+#else
   if (pipe(pfd) < 0) {
     builtin_error("pipe failed: %s", strerror(errno));
     return EXECUTION_FAILURE;
   }
+  fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+  fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+#endif
   fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
 
   // PHYSICS FIX: Get the ACTUAL size granted by the kernel and export it
@@ -6146,7 +6201,7 @@ static int ring_copy_main(int argc, char **argv) {
       if (r < 0) {
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
           continue;
-        break;
+        goto err_out;
       }
       if (r == 0)
         break;
@@ -6182,8 +6237,7 @@ static int ring_copy_main(int argc, char **argv) {
             usleep(10000);
             continue;
           }
-          inner_fatal = true; // Hard unrecoverable error
-          break;
+          goto err_out;
         }
         written += w;
       }
@@ -6212,6 +6266,7 @@ static int ring_copy_main(int argc, char **argv) {
   return EXECUTION_SUCCESS;
 
 err_out:
+  pull_fire_alarm_reason(2);
   if (evfd_ingest_eof >= 0) {
     uint64_t val = 999999;
     sys_write(evfd_ingest_eof, &val, 8);
@@ -6381,10 +6436,13 @@ static int ring_dump_resume_main(int argc, char **argv) {
 
     do {
         seq1 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
-        snap_horizon = g_state->resume_horizon;
-        snap_bytes = g_state->resume_stdout_bytes;
-        snap_count = atomic_load_relaxed(&g_state->resume_jagged_count);
-        for (uint32_t i = 0; i < snap_count; i++) snap_jagged[i] = g_state->resume_jagged[i];
+        snap_horizon = __atomic_load_n(&g_state->resume_horizon, __ATOMIC_RELAXED);
+        snap_bytes = __atomic_load_n(&g_state->resume_stdout_bytes, __ATOMIC_RELAXED);
+        snap_count = __atomic_load_n(&g_state->resume_jagged_count, __ATOMIC_RELAXED);
+        for (uint32_t i = 0; i < snap_count && i < 1024; i++) {
+            snap_jagged[i].s = __atomic_load_n(&g_state->resume_jagged[i].s, __ATOMIC_RELAXED);
+            snap_jagged[i].e = __atomic_load_n(&g_state->resume_jagged[i].e, __ATOMIC_RELAXED);
+        }
         seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
     } while (seq1 != seq2 || (seq1 & 1));
 
@@ -6499,7 +6557,8 @@ struct PollMeta {
     int type; // 0 = spawn, 1 = scanner, 2 = worker, 3 = trap_ack
 };
 
-static uint64_t g_poll_deadline_ms = 0;
+#define MAX_POLL_WORKERS 8192
+static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
 
 static inline uint64_t get_mono_ms(void) {
     struct timespec ts;
@@ -6513,13 +6572,23 @@ static int ring_poll_main(int argc, char **argv) {
     const char *scan_arr_name = argv[2];
     const char *work_arr_name = argv[3];
 
-    // Optional 4th arg: timer command.
+    // Optional 4th arg: Per-worker timer command (+wID, -wID, -1)
     if (argc >= 5 && argv[4][0] != '\0') {
-        int timer_arg = atoi(argv[4]);
-        if (timer_arg > 0) {
-            g_poll_deadline_ms = get_mono_ms() + (uint64_t)timer_arg;
-        } else if (timer_arg < 0) {
-            g_poll_deadline_ms = 0;
+        const char *t_cmd = argv[4];
+        if (t_cmd[0] == '+') {
+            int wid = atoi(t_cmd + 1);
+            if (wid >= 0 && wid < MAX_POLL_WORKERS) {
+                g_worker_deadlines[wid] = get_mono_ms() + 3000ULL;
+            }
+        } else if (t_cmd[0] == '-') {
+            if (strcmp(t_cmd, "-1") == 0) {
+                memset(g_worker_deadlines, 0, sizeof(g_worker_deadlines));
+            } else {
+                int wid = atoi(t_cmd + 1);
+                if (wid >= 0 && wid < MAX_POLL_WORKERS) {
+                    g_worker_deadlines[wid] = 0;
+                }
+            }
         }
     }
 
@@ -6583,7 +6652,11 @@ static int ring_poll_main(int argc, char **argv) {
     LOAD_ARRAY(scan_arr_name, 1);
     LOAD_ARRAY(work_arr_name, 2);
 
-    // If there is no core infrastructure left to poll, exit
+    uint64_t g_poll_deadline_ms = 0;
+    for (int w = 0; w < MAX_POLL_WORKERS; w++) {
+        if (g_worker_deadlines[w] > 0) { g_poll_deadline_ms = g_worker_deadlines[w]; break; }
+    }
+
     if (core_cnt == 0 && g_poll_deadline_ms == 0) {
         free(pfds); free(meta);
         return EXECUTION_FAILURE;
@@ -6597,16 +6670,35 @@ static int ring_poll_main(int argc, char **argv) {
             return EXECUTION_SUCCESS;
         }
 
-        int timeout_this_iter = 100;
-        if (g_poll_deadline_ms > 0) {
-            uint64_t now_ms = get_mono_ms();
-            if (now_ms >= g_poll_deadline_ms) {
-                g_poll_deadline_ms = 0;
-                bind_variable("POLL_EVENT", "TIMEOUT", 0);
-                free(pfds); free(meta);
-                return EXECUTION_SUCCESS;
+        uint64_t now_ms = get_mono_ms();
+        uint64_t earliest_deadline = 0;
+        int timed_out_wid = -1;
+
+        for (int w = 0; w < MAX_POLL_WORKERS; w++) {
+            if (g_worker_deadlines[w] > 0) {
+                if (now_ms >= g_worker_deadlines[w]) {
+                    timed_out_wid = w;
+                    break;
+                }
+                if (earliest_deadline == 0 || g_worker_deadlines[w] < earliest_deadline) {
+                    earliest_deadline = g_worker_deadlines[w];
+                }
             }
-            uint64_t remaining_ms = g_poll_deadline_ms - now_ms;
+        }
+
+        if (timed_out_wid >= 0) {
+            g_worker_deadlines[timed_out_wid] = 0;
+            bind_variable("POLL_EVENT", "TIMEOUT", 0);
+            char w_buf[32];
+            snprintf(w_buf, sizeof(w_buf), "%d", timed_out_wid);
+            bind_variable("POLL_ARG1", w_buf, 0);
+            free(pfds); free(meta);
+            return EXECUTION_SUCCESS;
+        }
+
+        int timeout_this_iter = 100;
+        if (earliest_deadline > 0) {
+            uint64_t remaining_ms = earliest_deadline - now_ms;
             timeout_this_iter = (remaining_ms < 100) ? (int)remaining_ms : 100;
             if (timeout_this_iter < 1) timeout_this_iter = 1;
         }
@@ -6623,7 +6715,7 @@ static int ring_poll_main(int argc, char **argv) {
         return EXECUTION_FAILURE;
     }
 
-    // 4. Process the Events
+        // 4. Process the Events
     for (int i = 0; i < p_cnt; i++) {
         if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
             if (meta[i].type == 0 || meta[i].type == 3) {
@@ -6665,6 +6757,10 @@ static int ring_poll_main(int argc, char **argv) {
                         snprintf(arg_buf, sizeof(arg_buf), "%d", node);
                         bind_variable("POLL_ARG2", arg_buf, 0);
                     } else {
+                        if (buf[0] != 'P') {
+                            int ack_wid = atoi(buf);
+                            if (ack_wid >= 0 && ack_wid < MAX_POLL_WORKERS) g_worker_deadlines[ack_wid] = 0;
+                        }
                         bind_variable("POLL_EVENT", "TRAP_ACK", 0);
                         bind_variable("POLL_ARG1", buf, 0);
                     }
@@ -6826,7 +6922,8 @@ struct forkrun_ctx {
 
 // Define the user's expected function signatures
 typedef int (*forkrun_cb_t)(int argc, char **argv);
-typedef int (*forkrun_cb_ctx_t)(int argc, char **argv, void *ctx);
+struct forkrun_ctx;
+typedef int (*forkrun_cb_ctx_t)(int argc, char **argv, const struct forkrun_ctx *ctx);
 
 // Cache the loaded plugin per-worker in Thread-Local Storage
 static __thread void *tls_dl_handle = NULL;
@@ -6936,7 +7033,9 @@ static int ring_call_main(int argc, char **argv) {
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
     // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
-    return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;
+    if (cb_ret == 0) return EXECUTION_SUCCESS;
+    int truncated = cb_ret & 0xFF;
+    return (truncated == 0) ? 1 : truncated;
 }
 
 static int ring_list_main(int argc, char **argv) {
