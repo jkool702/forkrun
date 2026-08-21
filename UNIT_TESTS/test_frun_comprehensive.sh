@@ -236,7 +236,7 @@ run_test_line_count() {
     else
         TEST_RESULTS["$test_name"]="FAIL"; TEST_ERRORS["$test_name"]="$reason"; ((FAILED_TESTS++))
         _print_result FAIL "$test_name" "$reason"
-        if [[ "${VERBOSE:-}" == "true" ]]; then
+        if [[ "${VERBOSE:-}" == "true" ]]; thensanatizers
             echo -e "    ${YELLOW}cmd:${NC} $cmd"
             echo -e "    ${YELLOW}$reason${NC}"
             [[ -n "$err" ]] && echo -e "    ${YELLOW}stderr:${NC} $(echo "$err" | head -3 | sed 's/^/      /')"
@@ -3172,6 +3172,209 @@ if in_section R; then
         TEST_RESULTS["R13: Sweep --link truncates uneven arrays safely"]="FAIL"
         TEST_ERRORS["R13: Sweep --link truncates uneven arrays safely"]="out: $_ROUT, err: $_RERR"
         ((FAILED_TESTS++)); _print_result FAIL "R13: Sweep --link truncates uneven arrays safely" "output or warning mismatch"
+    fi
+fi
+
+# ============================================================================
+# SECTION T: Adversarial & Periphery Tests
+# ============================================================================
+# T1: hostile resume files (acceptance tests for the resume sandbox)
+# T2: daemon-spawning workers (CLOEXEC fd hygiene / shutdown hang)
+# T3: giant records larger than a NUMA chunk
+# T4: extreme oversubscription (--nodes=@N) and the meta_ring bound
+# T5: C-plugin return-code truncation mapping (review item C4)
+# T6: ring_lseek argc disambiguation (review item C3)
+# ============================================================================
+print_section T "Adversarial & Periphery (resume sandbox, fd hygiene, extremes)"
+
+# --- T1a: hostile resume file — delayed background-writer OUTPUT injection ---
+# The resume file backgrounds a pure-builtin orphan that waits for the sandbox
+# to print its boundary, then appends a payload line to the same captured
+# stdout. The payload must NEVER execute in the cleanroom (no marker file).
+# NOTE: this is the acceptance test for the token+end-token hardening.
+#       It is EXPECTED TO FAIL until that patch lands.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/T1a"; mkdir -p "$_MD"
+    _MARK="/tmp/_frun_t1a_pwn_$$_$RANDOM"
+    rm -f "$_MARK"
+    cat > "$_MD/.forkrun_resume" << 'PAYLOAD'
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+( for (( _i=0; _i<8000000; _i++ )); do :; done; printf '%s\n' "declare -a FORKRUN_ORIG_ARGS=(x) \$(touch __MARK__)" ) &
+PAYLOAD
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/.forkrun_resume"
+
+    timeout 60 bash -c "source '$FRUN_SOURCE' && printf 'a\nb\n' | frun --resume '$_MD/.forkrun_resume'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+
+    if [[ ! -f "$_MARK" ]]; then
+        TEST_RESULTS["T1a: resume output-injection rejected (payload not executed)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1a: resume output-injection rejected (payload not executed)"
+    else
+        TEST_RESULTS["T1a: resume output-injection rejected (payload not executed)"]="FAIL"
+        TEST_ERRORS["T1a: resume output-injection rejected (payload not executed)"]="injected payload executed (marker created); exit=$_TX"
+        ((FAILED_TESTS++)); _print_result FAIL "T1a: resume output-injection rejected (payload not executed)" "payload executed"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- T1b: hostile resume file — CONTENT injection via declare + $( ) ---
+# A declare with command substitution is sourced inside the PATH-less
+# restricted sandbox: the substitution cannot run anything there, and the
+# round-trip re-render (declare -p) neutralizes it as a literal value before
+# the outer eval. Marker must not exist.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/T1b"; mkdir -p "$_MD"
+    _MARK="/tmp/_frun_t1b_pwn_$$_$RANDOM"
+    rm -f "$_MARK"
+    cat > "$_MD/.forkrun_resume" << 'PAYLOAD'
+FORKRUN_RESUME_HORIZON=5
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+declare -a FORKRUN_ORIG_ARGS=("safe" "$(touch __MARK__)")
+PAYLOAD
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/.forkrun_resume"
+
+    timeout 60 bash -c "source '$FRUN_SOURCE' && printf 'a\n' | frun --resume '$_MD/.forkrun_resume'" \
+        >/dev/null 2>&1
+
+    if [[ ! -f "$_MARK" ]]; then
+        TEST_RESULTS["T1b: resume content-injection neutralized by round-trip"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1b: resume content-injection neutralized by round-trip"
+    else
+        TEST_RESULTS["T1b: resume content-injection neutralized by round-trip"]="FAIL"
+        TEST_ERRORS["T1b: resume content-injection neutralized by round-trip"]="marker created — re-render sanitization failed"
+        ((FAILED_TESTS++)); _print_result FAIL "T1b: resume content-injection neutralized by round-trip" "marker created"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- T1c: corrupt resume file (no recognizable coordinates) is rejected ---
+run_test_regex T "T1c: corrupt resume file (no coordinates) rejected" \
+    "echo 'total garbage' > '$TEST_DIR/T1c_resume'; printf 'x\n' | frun --resume '$TEST_DIR/T1c_resume'" \
+    "Invalid or corrupt resume file" 1 true
+
+# --- T2: worker backgrounds a surviving daemon (fd CLOEXEC / shutdown hang) ---
+# Pre-CLOEXEC-fix, the orphan held the fallow write end and shutdown hung for
+# the lifetime of the orphan. Must now complete promptly with exact output.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _TEXP="D:1
+D:2
+D:3
+D:4
+D:5"
+    _TOUT=$(timeout 25 bash -c "source '$FRUN_SOURCE' && _spawner(){ ( sleep 60 & ) ; printf 'D:%s\n' \"\$1\"; }; seq 5 | FORKRUN_EXTRA_FUNCS='_spawner' frun -k -l 1 _spawner" 2>/dev/null)
+    _TRC=$?
+    if [[ $_TRC -eq 0 && "$_TOUT" == "$_TEXP" ]]; then
+        TEST_RESULTS["T2: daemon-spawning worker does not hang shutdown"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T2: daemon-spawning worker does not hang shutdown"
+    else
+        TEST_RESULTS["T2: daemon-spawning worker does not hang shutdown"]="FAIL"
+        TEST_ERRORS["T2: daemon-spawning worker does not hang shutdown"]="exit=$_TRC (124=hang) out='$(echo "$_TOUT" | head -2 | tr '\n' ' ')'"
+        ((FAILED_TESTS++)); _print_result FAIL "T2: daemon-spawning worker does not hang shutdown" "exit=$_TRC"
+    fi
+fi
+
+# --- T3: giant record larger than a NUMA chunk (3 MB single line) ---
+if in_section T; then
+    ((TOTAL_TESTS++))   # T3a: -s mode must deliver the giant line byte-exact
+    _MD="$TEST_DIR/T3"; mkdir -p "$_MD"
+    { head -c 3145728 /dev/zero | tr '\0' 'A'; printf '\ntail\n'; } > "$_MD/big.txt"
+    _EXP=$(md5sum < "$_MD/big.txt" | awk '{print $1}')
+    _GOT=$(timeout 60 bash -c "source '$FRUN_SOURCE' && frun -k -s cat < '$_MD/big.txt'" 2>/dev/null | md5sum | awk '{print $1}')
+    if [[ "$_GOT" == "$_EXP" ]]; then
+        TEST_RESULTS["T3a: 3MB single line via -s is byte-exact"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T3a: 3MB single line via -s is byte-exact"
+    else
+        TEST_RESULTS["T3a: 3MB single line via -s is byte-exact"]="FAIL"
+        TEST_ERRORS["T3a: 3MB single line via -s is byte-exact"]="md5 mismatch: got '$_GOT'"
+        ((FAILED_TESTS++)); _print_result FAIL "T3a: 3MB single line via -s is byte-exact" "md5 mismatch"
+    fi
+
+    ((TOTAL_TESTS++))   # T3b: args mode with a >ARG_MAX line must TERMINATE
+    _TOUT=$(timeout 60 bash -c "source '$FRUN_SOURCE' && frun -k -l 10 printf '%s\n' < '$_MD/big.txt' 2>/dev/null; echo TERMINATED")
+    if [[ "$_TOUT" == *TERMINATED* && "$_TOUT" == *tail* ]]; then
+        TEST_RESULTS["T3b: >ARG_MAX line in args mode terminates (poison, no hang)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T3b: >ARG_MAX line in args mode terminates (poison, no hang)"
+    else
+        TEST_RESULTS["T3b: >ARG_MAX line in args mode terminates (poison, no hang)"]="FAIL"
+        TEST_ERRORS["T3b: >ARG_MAX line in args mode terminates (poison, no hang)"]="hung or lost tail: $(echo "$_TOUT" | tail -1)"
+        ((FAILED_TESTS++)); _print_result FAIL "T3b: >ARG_MAX line in args mode terminates (poison, no hang)" "hang/tail missing"
+    fi
+fi
+
+# --- T4: extreme oversubscription (meta_ring / chunk-buffer bound) ---
+run_test_exact T "T4a: --nodes=@40 exact passthrough" \
+    "timeout 120 bash -c 'source \"$FRUN_SOURCE\" && seq 20000 | frun -k --nodes=@40 printf \"%s\n\"'" \
+    "$(seq 20000)"
+
+run_test_sorted T "T4b: --nodes=@512 terminates with intact data" \
+    "timeout 180 bash -c 'source \"$FRUN_SOURCE\" && seq 5000 | frun --nodes=@512 printf \"%s\n\"'" \
+    "$(seq 5000)"
+
+# --- T5: C-plugin return-code truncation mapping (256 wraps to 1, etc.) ---
+if in_section T; then
+    if ! type -P gcc >/dev/null 2>&1; then
+        run_test_skip T "T5: plugin return-code mapping (256→1 etc.)" "gcc not available"
+    else
+        ((TOTAL_TESTS++))
+        _MD="$TEST_DIR/T5"; mkdir -p "$_MD"
+        cat > "$_MD/p.c" << 'CEOF'
+int f0(void)   { return 0; }
+int f1(void)   { return 1; }
+int f200(void) { return 200; }
+int f256(void) { return 256; }
+int f257(void) { return 257; }
+int f139(void) { return 139; }
+int fneg(void) { return -7; }
+CEOF
+        if ! gcc -O2 -shared -fPIC "$_MD/p.c" -o "$_MD/p.so" 2>/dev/null; then
+            run_test_skip T "T5: plugin return-code mapping (256→1 etc.)" "plugin compile failed"
+        else
+            _OK=0
+            for _pair in "f0 0" "f1 1" "f200 200" "f256 1" "f257 1" "f139 139" "fneg 249"; do
+                _fn=${_pair%% *}; _want=${_pair##* }
+                _got=$(bash -c "source '$FRUN_SOURCE' && ring_memfd_create _PV && printf 'a b\n' >&\"\$_PV\" && ring_call \"\$_PV\" 4 ' ' '$_MD/p.so:$_fn'; echo \$?" 2>/dev/null | tail -1)
+                [[ "$_got" == "$_want" ]] && _OK=$((_OK+1))
+            done
+            if (( _OK == 7 )); then
+                TEST_RESULTS["T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"]="PASS"; ((PASSED_TESTS++))
+                _print_result PASS "T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"
+            else
+                TEST_RESULTS["T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"]="FAIL"
+                TEST_ERRORS["T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)"]="$_OK/7 mappings correct"
+                ((FAILED_TESTS++)); _print_result FAIL "T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)" "$_OK/7 correct"
+            fi
+        fi
+    fi
+fi
+
+# --- T6: ring_lseek argc disambiguation (whence vs var-name vs print) ---
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _R=$(bash -c "
+        source '$FRUN_SOURCE'
+        ring_memfd_create _LV
+        printf 'abc' >&\"\$_LV\"
+        ring_lseek \"\$_LV\" 0 SEEK_END _E;  E1=\$_E            # argc5: whence+var
+        P3=\$(ring_lseek \"\$_LV\" 0)                           # argc3: print form
+        ring_lseek \"\$_LV\" 0 MYPOS; V4=\$MYPOS                # argc4: var form
+        P4=\$(ring_lseek \"\$_LV\" 0 SEEK_CUR)                  # argc4: whence (prints)
+        ring_lseek \"\$_LV\" 2 SEEK_SET _E2; E5=\$_E2           # argc5 again
+        echo \"\$E1 \$P3 \$V4 \$P4 \$E5\"
+    " 2>/dev/null)
+    if [[ "$_R" == "3 3 3 3 2" ]]; then
+        TEST_RESULTS["T6: ring_lseek argc forms disambiguated"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T6: ring_lseek argc forms disambiguated"
+    else
+        TEST_RESULTS["T6: ring_lseek argc forms disambiguated"]="FAIL"
+        TEST_ERRORS["T6: ring_lseek argc forms disambiguated"]="got '$_R', expected '3 3 3 3 2'"
+        ((FAILED_TESTS++)); _print_result FAIL "T6: ring_lseek argc forms disambiguated" "got '$_R'"
     fi
 fi
 
