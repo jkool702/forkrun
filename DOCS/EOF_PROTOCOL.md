@@ -53,6 +53,8 @@ if (atomic_load_acquire(&local_state->scanner_finished)) {
 
 **Reference:** `ring_claim_main()` in `forkrun_ring.c`.
 
+> **Note on §1 C3 implementation:** the snippet above shows the *logical* condition for escrow emptiness (is escrow empty?). Since v3.4 the hot-path implementation does not poll the escrow pipe here; it uses a per-node `escrow_pending` flag with TATAS re-arm and continuous drain (see §4). The poll-based check remains the correct logical definition of C3, but the fast-path check is the flag load described in §4.
+
 ---
 
 ## §2. The EOF eventfd

@@ -36,6 +36,11 @@ When `--nodes=1` (or auto-detected as single node) the system falls back to the 
 
 ---
 
+
+### No-load / bring-up time
+
+Full NUMA pipeline bring-up — including `memfd` creation, per-node ring setup, `madvise(MADV_HUGEPAGE)`, pinning, and clean-room exec environment extraction — completes in ~30 ms on the reference 14-core machine. This is not just overhead; it is the basis of trickle-friendliness: sub-second jobs (<100 ms) correctly show lower core utilization because the engine declines to over-spawn for work that will finish during fork latency. For ≥1B-line sustained workloads the fixed cost is negligible.
+
 ## 3. The Ring Buffer
 
 ### 3.1 What the Ring Represents
@@ -78,18 +83,32 @@ Memory ordering:
 
 In NUMA mode each socket has its own independent `SharedState` ring; the invariants hold per node.
 
+## 3.4 Ring-full semantics (never-wraps design)
+
+The ring is sized to *never wrap* in normal operation, which eliminates ABA and overwrite hazards.
+
+- **UMA mode:** the ring is shielded by `W_max * 64` slots with a floor of 1024 slots. The scanner is throttled by `active_workers` and the fallow horizon — it never publishes beyond `read_idx + shield`.
+- **NUMA mode:** per-node ring size is `RING_SIZE/2` usable, with the same fallow-horizon shield.
+- **Fallow-horizon shield:** the scanner may not advance `write_idx` beyond the minimum active worker offset plus shield; `fallocate(PUNCH_HOLE)` reclaims physical pages behind the horizon without moving the logical offsets.
+
+If a ring were to fill (pathological oversubscription or stalled orderer), workers block on `evfd_data` rather than overwriting — correctness is preserved, throughput degrades gracefully. This invariant is structural: no slot is ever reused before all workers have passed it.
+
+
 ---
 
 ## 4. Claiming Work
 
 ### 4.1 Fast Path Claim
 
-The fast path is intentionally simple:
+The fast path is intentionally simple (two amortized RMWs per batch):
 
 1. Load `write_idx`
-2. Atomically increment `read_idx` by exactly **1**
-3. Compute offsets from the single claimed ring slot
-4. Execute batch
+2. Atomically increment `read_idx` by exactly **1** (claim)
+3. Atomically add to `total_lines_consumed` (accounting — same cache line, sharded per NUMA node)
+4. Compute offsets from the single claimed ring slot
+5. Execute batch
+
+No locks, no CAS retry loops. Amortized contention is still negligible — both RMWs are per-NUMA sharded and the second is often on a hot cache line.
 
 No polling, no blocking, no branching beyond bounds checks. The scanner has already pre-calculated the byte/line boundaries for this slot. If sufficient data exists, the worker never sleeps.
 
@@ -253,6 +272,23 @@ This:
 The reorder path is the only place that may block.
 
 ---
+
+
+## 12. Cross-file contracts (seams most at risk from refactor)
+
+These invariants span C and Bash wrapper; both sides must maintain them:
+
+**(a) H1 — `RING_NUM_KILLS`/`RING_POISONED`/`RING_BATCH_IDX` lifecycle:**
+C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` *only* when `num_kills > 0` (poison/escrow path). The Bash wrapper *must* reset/clear these after every `ring_ack` (it does via `RING_NUM_KILLS=0; RING_POISONED=0` etc.). If C ever writes them unconditionally, or wrapper fails to reset, a later batch could inherit a stale poison flag.
+
+**(b) M1 — zero-length sentinel batches:**
+Zero-length sentinel batches (EOF markers, `FLAG_MAJOR_EOF` with 0 bytes) must be **acked but not executed**. Wrapper guards with `[[ "$REPLY" != "0" ]]` (or byte-length check) before invoking user command. Executing them would invoke the user command with empty input, breaking exactly-once accounting.
+
+**(c) `FRUN_CLAIM_BYTES` gating of trap's escrow deposit:**
+The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES` (or claim-active flag). Only when a batch has been claimed and not yet acked should the trap deposit to escrow. This prevents double-deposit on successful ack or on pre-claim failures.
+
+Encode these checks in both `forkrun_ring.c` and `frun.bash` comments; any change to claim/ack path must preserve them.
+
 
 ## 11. Design Summary & Mental Model
 

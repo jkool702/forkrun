@@ -19,15 +19,15 @@ forkrun achieves extreme performance by:
 ```mermaid
 flowchart TD
     Input[Input Stream\nstdin or file] 
-    --> Ingest[Ingress Thread\nsplice / write + MPOL_BIND]
+    --> Ingest[Ingress Process\nsplice / write + MPOL_BIND]
 
     Ingest --> Memfd[(Shared memfd\nBorn-Local Pages)]
 
-    Memfd --> Indexer[Per-Node Indexer\nSIMD Boundary Alignment]
-    Indexer --> Scanner[Per-Node Scanners\nAVX2 / NEON Batching]
+    Memfd --> Indexer[Per-Node Indexer Process\nSIMD Boundary Alignment]
+    Indexer --> Scanner[Per-Node Scanner Processes\nAVX2 / NEON Batching]
 
     Scanner --> Ring[Lock-Free Ring Buffer\nPer-NUMA Node]
-    Ring --> Workers[Worker Threads\nPinned to Node]
+    Ring --> Workers[Worker Processes\nPinned to Node]
 
     Workers --> Backend1[Bash Builtins / Functions\nring_map]
     Workers --> Backend2[External Binaries / -X\nring_exec + posix_spawnp]
@@ -79,7 +79,7 @@ Optimistic execution with near-zero happy-path overhead, instant failure detecti
 | Backend                  | Speed                  | Use Case                          |
 |--------------------------|------------------------|-----------------------------------|
 | Bash builtins/functions  | Very Fast              | General shell usage               |
-| `posix_spawnp` (`-X`)    | Significantly Faster   | External binaries                 |
+| `posix_spawnp` / vfork (`-X`) | Significantly Faster   | External binaries (glibc `posix_spawnp` uses `CLONE_VFORK`) |
 | C Plugin (`-C`)          | **Fastest**            | Maximum performance callbacks     |
 
 ## Documentation Map
@@ -95,3 +95,12 @@ Optimistic execution with near-zero happy-path overhead, instant failure detecti
 - [`EOF_PROTOCOL.md`](EOF_PROTOCOL.md) — End-of-file and stream termination
 
 ---
+
+
+## Cross-file Contracts (maintainer note)
+
+- **H1:** C writes `RING_NUM_KILLS`/`RING_POISONED`/`RING_BATCH_IDX` only when `num_kills > 0`; wrapper must reset after every ack.
+- **M1:** Zero-length sentinel batches must be acked but not executed (`[[ "$REPLY" != "0" ]]` guard).
+- **FRUN_CLAIM_BYTES:** EXIT trap escrow deposit gated by claim-active flag to avoid double-deposit.
+
+These are currently-correct seams most at risk from refactor — preserve in both C and Bash.

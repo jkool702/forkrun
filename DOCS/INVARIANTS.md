@@ -155,7 +155,7 @@ Per-batch logical index + reorder buffer + emit only contiguous prefix.
 
 ## 11. (reserved)
 
-This section is intentionally reserved to preserve numbering stability after v3.4 refactors.
+This section number is intentionally reserved to preserve numbering stability after v3.4 refactors (original §11 merged into §5 during single-slot simplification). Keeping the number reserved avoids breaking external references in papers and facility docs.
 
 ---
 
