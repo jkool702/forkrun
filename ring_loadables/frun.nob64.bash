@@ -208,6 +208,7 @@ frun __exec__ "$@"
         val="${1,,}"
         iec=false
         [[ "${val#[+-]}" == '0' ]] && { REPLY="${val}"; return 0; }
+        [[ "${val}" == *.* ]] && val="${val%%.*}"
         [[ "${val}" == +* ]] && { iec=true; val="${val#+}"; }
         num="${val//[^0-9]/}"
         [[ $num ]] || if [[ ${val} ]]; then return 1; else REPLY=''; return 0; fi
@@ -1380,7 +1381,9 @@ trap '"'"'trap_status=138; trap - USR1; kill -USR1 ${BASHPID}'"'"' USR1
     fi
 worker_func_src+='
   {
-    ID="$1" # ID is passed purely for user payload compatibility/insertion
+    local w_alias="$1"
+    (( ${5:-0} > 0 )) && w_alias="${1}.r${5}"
+    ID="$w_alias"
     RING_NUM_KILLS=0
     RING_POISONED=0
     FRUN_CLAIM_BYTES=0
@@ -1431,6 +1434,7 @@ W_NODE[$3]=$2
         # --- SPAWN LOOP REACTOR ---
         nWorkers=0
         local -a node_workers W_NODE fd_worker_r fd_worker_w P wID_free
+        local -a W_INCARN=()
 
         local -A trap_ack_pending
         local _poll_timer_cmd=""
@@ -1505,7 +1509,7 @@ W_NODE[$3]=$2
                         unset 'wID_free[$wID]'
 
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
-                        spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}"
+                        spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}" "${W_INCARN[$wID]:-0}"
                         exec {fd_worker_w[$wID]}>&-
                         ((nWorkers++))
                     done
@@ -1534,9 +1538,10 @@ W_NODE[$3]=$2
                             echo "forkrun [WARN]: Worker $wID (node ${node_idx}) exited with status $status. Waiting up to 3s for EXIT trap confirmation." >&2
                         fi
 
+                        (( W_INCARN[$wID]++ ))
                         # Unconditionally respawn replacement worker
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
-                        spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}"
+                        spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}" "${W_INCARN[$wID]}"
                         exec {fd_worker_w[$wID]}>&-
                         ((nWorkers++))
                         (( node_workers[node_idx]++ ))

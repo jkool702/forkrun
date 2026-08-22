@@ -1585,9 +1585,46 @@ static int get_cgroup_free_memory(uint64_t *free_mem) {
   return -1;
 }
 
+static inline uint64_t get_effective_total_memory(void) {
+  uint64_t mem_limit = 0;
+  int fd = open("/sys/fs/cgroup/memory.max", O_RDONLY);
+  if (fd >= 0) {
+    char buf[64];
+    ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n > 0) {
+      buf[n] = '\0';
+      if (strncmp(buf, "max", 3) != 0) {
+        mem_limit = strtoull(buf, NULL, 10);
+      }
+    }
+  }
+  if (mem_limit == 0) {
+    fd = open("/sys/fs/cgroup/memory/memory.limit_in_bytes", O_RDONLY);
+    if (fd >= 0) {
+      char buf[64];
+      ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
+      close(fd);
+      if (n > 0) {
+        buf[n] = '\0';
+        uint64_t v = strtoull(buf, NULL, 10);
+        if (v > 0 && v < 9000000000000000000ULL) mem_limit = v;
+      }
+    }
+  }
+  struct sysinfo si;
+  if (sysinfo(&si) == 0) {
+    uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
+    uint64_t host_ram = (uint64_t)si.totalram * mu;
+    if (mem_limit == 0 || mem_limit > host_ram) mem_limit = host_ram;
+  }
+  return (mem_limit > 0) ? mem_limit : (1024ULL * 1024ULL * 1024ULL);
+}
+
 // ==============================================================================
 // OOM PROTECTION AND MEMORY SENSING
 // ==============================================================================
+
 
 // Helper to get available memory (accounting for reclaimable cache like memfd)
 static inline uint64_t get_mem_available(struct sysinfo *si) {
@@ -2536,11 +2573,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     if (v > 0)
       threshold_div = v;
   }
-  struct sysinfo si_init;
-  if (sysinfo(&si_init) == 0) {
-    uint64_t mu = (uint64_t)si_init.mem_unit ? si_init.mem_unit : 1;
-    oom_threshold = ((uint64_t)si_init.totalram * mu) / (uint64_t)threshold_div;
-  }
+  oom_threshold = get_effective_total_memory() / (uint64_t)threshold_div;
   uint64_t total_moved = 0;
   uint64_t next_check = 16 * 1024 * 1024;
   // -------------------------------------
@@ -3284,9 +3317,18 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             uint64_t _s_byte = batch_start;                                    \
             uint64_t _e_byte = (_batch_end_offset);                            \
             for (uint32_t _i = 0; _i < g_state->resume_jagged_count; _i++) {   \
-                if (_s_byte >= g_state->resume_jagged[_i].s &&                 \
-                    _e_byte <= g_state->resume_jagged[_i].e) {                 \
-                    _out_skipped = true; break;                                \
+                uint64_t _js = g_state->resume_jagged[_i].s;                  \
+                uint64_t _je = g_state->resume_jagged[_i].e;                  \
+                if (_s_byte >= _js && _s_byte < _je) {                         \
+                    if (_e_byte <= _je) {                                      \
+                        _out_skipped = true; break;                            \
+                    } else {                                                   \
+                        batch_start = _je;                                     \
+                        _s_byte = _je;                                         \
+                    }                                                          \
+                } else if (_s_byte < _js && _e_byte > _js) {                   \
+                    _batch_end_offset = _js;                                   \
+                    break;                                                     \
                 }                                                              \
             }                                                                  \
         }                                                                      \
@@ -4114,8 +4156,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             break;
           }
           if (is_numa) {
-            uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, (avail >= L ? L : avail), __ATOMIC_SEQ_CST);
+            uint64_t want = (avail >= L ? L : avail);
+            uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, want, __ATOMIC_SEQ_CST);
             if (prev >= limit_items) break;
+            if (prev + want > limit_items) {
+              take = limit_items - prev;
+              flush = true;
+            }
           }
         }
 
@@ -4304,8 +4351,20 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             lines_found = 0;
             limit_reached = true;
             break;
-          } else if (prev + lines_found >= limit_items)
+          } else if (prev + lines_found >= limit_items) {
+            uint64_t allowed = limit_items - prev;
+            if (allowed < lines_found) {
+              char *rewind_p = buf + (batch_start - buf_base_offset);
+              for (uint64_t _k = 0; _k < allowed; _k++) {
+                char *nl = memchr(rewind_p, delim, end - rewind_p);
+                if (nl) rewind_p = nl + 1;
+                else break;
+              }
+              p = rewind_p;
+              lines_found = allowed;
+            }
             limit_reached = true;
+          }
         }
 
         pending_lines += lines_found;
@@ -6088,11 +6147,7 @@ static int ring_copy_main(int argc, char **argv) {
     if (v > 0)
       threshold_div = v;
   }
-  struct sysinfo si_init;
-  if (sysinfo(&si_init) == 0) {
-    uint64_t mu = (uint64_t)si_init.mem_unit ? si_init.mem_unit : 1;
-    oom_threshold = ((uint64_t)si_init.totalram * mu) / (uint64_t)threshold_div;
-  }
+  oom_threshold = get_effective_total_memory() / (uint64_t)threshold_div;
   uint64_t total_moved = 0;
   uint64_t next_check = 16 * 1024 * 1024;
   off_t off = 0;
@@ -6433,8 +6488,13 @@ static int ring_escrow_put_main(int argc, char **argv) {
     else idx = strtoull(argv[2], NULL, 10);
 
     uint64_t cnt;
-    if (argv[3][0] == '-' && argv[3][1] == '\0') cnt = worker_last_cnt;
-    else cnt = strtoull(argv[3], NULL, 10);
+    if (argv[3][0] == '-' && argv[3][1] == '\0') {
+        if (worker_last_cnt == 0) return EXECUTION_SUCCESS; // batch already acked — nothing in flight
+        cnt = worker_last_cnt;
+    } else {
+        cnt = strtoull(argv[3], NULL, 10);
+        if (cnt == 0) return EXECUTION_SUCCESS;
+    }
     uint32_t kills = (uint32_t)atoi(argv[4]);
 
     if (node < 0 || node >= (int)global_num_nodes) node = 0;
