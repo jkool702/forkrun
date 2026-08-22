@@ -3305,9 +3305,10 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                               _batch_end_offset, _out_skipped)                 \
   do {                                                                         \
     _out_skipped = false;                                                      \
+    uint64_t _eff_end = (_batch_end_offset);                                   \
     if (__builtin_expect(g_state->is_resume_mode, 0)) {                        \
         if (batch_start < g_state->resume_horizon) {                           \
-            if ((_batch_end_offset) <= g_state->resume_horizon) {              \
+            if (_eff_end <= g_state->resume_horizon) {                         \
                 _out_skipped = true;                                           \
             } else {                                                           \
                 batch_start = g_state->resume_horizon;                         \
@@ -3315,19 +3316,18 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         }                                                                      \
         if (!_out_skipped && batch_start >= g_state->resume_horizon) {         \
             uint64_t _s_byte = batch_start;                                    \
-            uint64_t _e_byte = (_batch_end_offset);                            \
             for (uint32_t _i = 0; _i < g_state->resume_jagged_count; _i++) {   \
                 uint64_t _js = g_state->resume_jagged[_i].s;                  \
                 uint64_t _je = g_state->resume_jagged[_i].e;                  \
                 if (_s_byte >= _js && _s_byte < _je) {                         \
-                    if (_e_byte <= _je) {                                      \
+                    if (_eff_end <= _je) {                                     \
                         _out_skipped = true; break;                            \
                     } else {                                                   \
                         batch_start = _je;                                     \
                         _s_byte = _je;                                         \
                     }                                                          \
-                } else if (_s_byte < _js && _e_byte > _js) {                   \
-                    _batch_end_offset = _js;                                   \
+                } else if (_s_byte < _js && _eff_end > _js) {                 \
+                    _eff_end = _js;                                            \
                     break;                                                     \
                 }                                                              \
             }                                                                  \
@@ -3389,13 +3389,13 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     uint64_t pk = (uint64_t)batch_start;                                       \
     if (is_numa) {                                                             \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
-      local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
+      local_state->end_ring[local_scan_idx & RING_MASK] = _eff_end;            \
       local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id);         \
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
           (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
     } else {                                                                   \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
-      local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
+      local_state->end_ring[local_scan_idx & RING_MASK] = _eff_end;            \
     }                                                                          \
     local_scan_idx++;                                                          \
     UNIFIED_ADAPTIVE_COMMIT(false);                                            \
@@ -4155,15 +4155,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             status = 1;
             break;
           }
-          if (is_numa) {
-            uint64_t want = (avail >= L ? L : avail);
-            uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, want, __ATOMIC_SEQ_CST);
-            if (prev >= limit_items) break;
-            if (prev + want > limit_items) {
-              take = limit_items - prev;
-              flush = true;
-            }
-          }
         }
 
         if (avail >= L) {
@@ -4184,6 +4175,26 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               take = avail;
               flush = true;
               first_wait_ts = 0;
+            }
+          }
+        }
+
+        if (flush && limit_items > 0) {
+          if (!is_numa) {
+            if (total_scanned + take >= limit_items) {
+              take = limit_items - total_scanned;
+              status = 1;
+            }
+          } else {
+            uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, take, __ATOMIC_SEQ_CST);
+            if (prev >= limit_items) {
+              take = 0;
+              flush = false;
+              break;
+            }
+            if (prev + take >= limit_items) {
+              take = limit_items - prev;
+              limit_reached = true;
             }
           }
         }
@@ -4354,14 +4365,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           } else if (prev + lines_found >= limit_items) {
             uint64_t allowed = limit_items - prev;
             if (allowed < lines_found) {
-              char *rewind_p = buf + (batch_start - buf_base_offset);
-              for (uint64_t _k = 0; _k < allowed; _k++) {
-                char *nl = memchr(rewind_p, delim, end - rewind_p);
-                if (nl) rewind_p = nl + 1;
-                else break;
+              int64_t bs_rel = (int64_t)batch_start - (int64_t)buf_base_offset;
+              if (bs_rel >= 0 && bs_rel <= (int64_t)(end - buf)) {
+                char *rewind_p = buf + bs_rel;
+                for (uint64_t _k = 0; _k < allowed; _k++) {
+                  char *nl = memchr(rewind_p, delim, end - rewind_p);
+                  if (nl) rewind_p = nl + 1;
+                  else break;
+                }
+                p = rewind_p;
+                lines_found = allowed;
               }
-              p = rewind_p;
-              lines_found = allowed;
             }
             limit_reached = true;
           }

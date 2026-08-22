@@ -1348,7 +1348,7 @@ _forkrun_checkpoint_signal() {
     status=${trap_status:-$?}
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
 
-    if (( status != 0 && ${FRUN_CLAIM_BYTES:-0} > 0 )); then
+    if (( status != 0 )); then
         (( RING_NUM_KILLS++ ))'
         [[ "$order_mode" != "realtime" ]] && worker_func_src+='
         [[ -n "${fd_out[$RING_WID]:-}" ]] && ring_revert_output "${fd_out[$RING_WID]}"
