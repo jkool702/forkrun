@@ -516,11 +516,27 @@ Verifying run_test_sorted catches duplicate lines...
   [0;32m✓[0m T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)
   [0;32m✓[0m T6: ring_lseek argc forms disambiguated
 
+[1;34m[1m▶ Section T2: v3.4.4 Hardening Regressions (W1, M2, W2, resume)[0m
+[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
+  [0;32m✓[0m T7a: ordered resume, non-reproducible boundaries (-l 1000→777)
+  [0;32m✓[0m T7b: buffered resume, non-reproducible boundaries (-l 1000→777)
+  [0;32m✓[0m T7c: ordered NUMA resume, non-reproducible boundaries
+  [0;32m✓[0m T7d: ordered resume, adaptive boundaries (2M lines)
+  [0;32m✓[0m T8a: byte-mode -n exact (UMA): 700 bytes
+  [0;32m✓[0m T8b: byte-mode -n exact (NUMA): 700 bytes
+  [0;32m✓[0m T9: NUMA line-mode -n 37 with -l 4: exactly 37 lines
+  [0;32m✓[0m T10a: long lines + -n 20 (rewind path, in-buffer)
+  [0;32m✓[0m T10b: 100KB lines + -n 25 across buffer refills (5x)
+  [0;32m✓[0m T11a: {ID} incarnation suffix prevents respawn collisions
+  [0;32m✓[0m T11b: {ID} unique across 200 batches incl. respawn
+  [0;32m✓[0m T12: jagged-straddle resume (buffered, differing -l)
+  [0;32m✓[0m T13: external SIGKILL stress under -k terminates exactly-once
+
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 [1mSUMMARY[0m
 [1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-Total:   218
-Passed:  218  ([0;32m100.0%[0m)
+Total:   231
+Passed:  231  ([0;32m100.0%[0m)
 Failed:    0  ([0;31m0.0%[0m)
 Skipped:   0  ([1;33m0.0%[0m)
 
