@@ -4375,6 +4375,32 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                 }
                 p = rewind_p;
                 lines_found = allowed;
+              } else {
+                // Batch started before current buffer refill.
+                // Re-derive exact delimiter boundary from batch_start via pread.
+                uint64_t cur_pos = batch_start;
+                uint64_t found = 0;
+                char tmp_buf[4096];
+                while (found < allowed) {
+                  ssize_t rn;
+                  do {
+                    rn = pread(fd_or_memfd, tmp_buf, sizeof(tmp_buf), (off_t)cur_pos);
+                  } while (rn < 0 && errno == EINTR);
+                  if (rn <= 0) break;
+                  char *tp = tmp_buf;
+                  char *te = tmp_buf + rn;
+                  while (found < allowed && tp < te) {
+                    char *nl = memchr(tp, delim, te - tp);
+                    if (nl) { found++; tp = nl + 1; }
+                    else { tp = te; }
+                  }
+                  cur_pos += (uint64_t)(tp - tmp_buf);
+                  if (found >= allowed) break;
+                }
+                buf_base_offset = cur_pos;
+                p = buf;
+                end = buf;
+                lines_found = allowed;
               }
             }
             limit_reached = true;
