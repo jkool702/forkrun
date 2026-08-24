@@ -4188,6 +4188,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           } else {
             uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, take, __ATOMIC_SEQ_CST);
             if (prev >= limit_items) {
+              // NOTE: global_scanned overshoots limit_items by `take` here
+              // (charged before the clamp). Benign: all readers use >= as a
+              // stop condition. Published batch below is exact. For exact
+              // counter semantics, save pre-clamp take and fetch_sub the diff.
               take = 0;
               flush = false;
               break;
@@ -4244,6 +4248,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           if (current_global >= limit_items) {
             if (!is_numa)
               status = 1;
+            // NOTE: breaks with current_p_offset == batch_start (post-flush
+            // invariant) — the tail flush below publishes an empty
+            // [batch_start, batch_start) chunk-end marker. This is correct
+            // but depends on the invariant. Do not recompute current_p_offset
+            // here without preserving this property.
             break;
           }
           uint64_t rem = limit_items - current_global;
@@ -4472,6 +4481,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     if (is_numa && !chunk_eof_flushed) {
+      // RESIDUAL-PAST-LIMIT GUARD (v3.4.4):
+      // When a concurrent scanner has already crossed the global -n limit,
+      // this scanner may hold unflushed residual data in its chunk. Publishing
+      // it would deliver records past the limit (T10b failure mode). Zero the
+      // residual so the tail flush publishes an empty batch with the
+      // FLAG_MAJOR_EOF marker only — the orderer advances, no data leaks.
+      if (limit_items > 0 &&
+          atomic_load_relaxed(&state[0].global_scanned) >= limit_items) {
+        current_p_offset = batch_start;
+        pending_lines = 0;
+      }
       bool _skipped = false;
       UNIFIED_SCANNER_FLUSH(true, meta->major_id,
                             minor_idx, current_p_offset, _skipped);

@@ -1501,6 +1501,17 @@ W_NODE[$3]=$2
                     spawn_count=$POLL_ARG1
                     node_idx=$POLL_ARG2
 
+                    # TOTAL WORKER CAP: Cap total workers across all nodes at
+                    # nWorkersMax. Without this, -j N with N < NUM_NODES spawns
+                    # NUM_NODES workers (per-node max 1 × NUM_NODES), violating
+                    # the user's -j N request. E.g., -j 1 on 4 nodes → 4 workers.
+                    if (( nWorkers >= nWorkersMax )); then
+                        continue
+                    fi
+                    if (( spawn_count > nWorkersMax - nWorkers )); then
+                        spawn_count=$(( nWorkersMax - nWorkers ))
+                    fi
+
                     target=$(( node_workers[node_idx] + spawn_count ))
                     (( target > node_worker_max )) && target=$node_worker_max
 
@@ -1526,6 +1537,9 @@ W_NODE[$3]=$2
                     unset 'W_NODE[$wID]'
 
                     (( node_workers[node_idx]-- ))
+                    # Decrement total live worker count so the SPAWN cap
+                    # tracks live workers, not cumulative spawn events.
+                    (( nWorkers-- ))
 
                     if (( status != 0 )); then
                         (( trap_ack_pending[$wID]++ ))
