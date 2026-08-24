@@ -4153,6 +4153,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         if (limit_items > 0) {
           if (!is_numa && total_scanned >= limit_items) {
             status = 1;
+            limit_reached = true;
+            chunk_eof_flushed = true;
+            pending_lines = 0;
             break;
           }
         }
@@ -4190,6 +4193,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             if (prev >= limit_items) {
               take = 0;
               flush = false;
+              limit_reached = true;
+              chunk_eof_flushed = true;
               break;
             }
             if (prev + take >= limit_items) {
@@ -4244,6 +4249,9 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           if (current_global >= limit_items) {
             if (!is_numa)
               status = 1;
+            limit_reached = true;
+            chunk_eof_flushed = true;
+            pending_lines = 0;
             break;
           }
           uint64_t rem = limit_items - current_global;
@@ -4360,6 +4368,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                                              lines_found, __ATOMIC_SEQ_CST);
           if (prev >= limit_items) {
             lines_found = 0;
+            pending_lines = 0;
+            chunk_eof_flushed = true;
             limit_reached = true;
             break;
           } else if (prev + lines_found >= limit_items) {
