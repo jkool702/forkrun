@@ -1375,11 +1375,6 @@ struct ChunkMeta {
                               __ATOMIC_SEQ_CST);                               \
           break;                                                               \
         }                                                                      \
-        if (g_debug) { \
-          fprintf(stderr, "forkrun[DEBUG] WAIT_FOR_CUM_LINES: waiting for chunk %lu on node %u (my_node=%d)\n", \
-            ((char*)meta_ptr - (char*)g_state->meta_ring) / sizeof(struct ChunkMeta), \
-            (node_var), my_node_id); \
-        } \
         struct pollfd _wcl_pfds[2] = {                                         \
             {.fd = evfd_meta_arr[(node_var)], .events = POLLIN},               \
             {.fd = evfd_ingest_eof, .events = POLLIN}};                        \
@@ -2029,6 +2024,7 @@ static int ring_init_main(int argc, char **argv) {
     g_state->resume_jagged_count = 0;
     g_state->poisoned_count = 0;
     g_state->limit_cutoff_major = 0;
+    memset(g_state->meta_ring, 0, sizeof(g_state->meta_ring));
 
     // PHYSICS FIX: Comprehensively drain all eventfds to prevent false EOFs
     // and spurious wakeups from previous invocations.
@@ -4050,6 +4046,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           if (prev_cum_raw & FLAG_CUM_READY) {
             prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
             cum_lines_known = true;
+            if (g_debug) {
+              fprintf(stderr, "forkrun[DEBUG] OPPORTUNISTIC: node=%d major=%lu prev_cum=%lu\n",
+                      my_node_id, current_major, prev_cum_lines);
+            }
           }
 
           // Check if a prior chunk already crossed the limit
@@ -4081,9 +4081,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         if (limit_items > 0 && !byte_mode) {
           // Path 5 Fix: Ensure predecessor count is resolved before propagating forward
           if (!cum_lines_known && prev_chunk_meta) {
-            uint64_t prev_cum_raw;
-            WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
-            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            uint64_t cutoff_check = atomic_load_acquire(&g_state->limit_cutoff_major);
+            if (cutoff_check > 0 && (current_major + 1) > cutoff_check) {
+              prev_cum_lines = limit_items;
+            } else {
+              uint64_t prev_cum_raw;
+              WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
+              prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            }
             cum_lines_known = true;
           }
           atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
@@ -4110,10 +4115,8 @@ numa_chunk_skip:
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
           }
-          if (!cum_lines_known && prev_chunk_meta) {
-            uint64_t prev_cum_raw;
-            WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
-            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+          if (!cum_lines_known) {
+            prev_cum_lines = limit_items;
             cum_lines_known = true;
           }
           atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
@@ -4571,6 +4574,10 @@ numa_chunk_skip:
               }
               limit_reached = true;
               atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
+              if (g_debug) {
+                fprintf(stderr, "forkrun[DEBUG] INLOOP_CLAMP: node=%d major=%lu prev_cum=%lu chunk_scanned=%lu lines_found=%lu allowed=%lu\n",
+                        my_node_id, current_major, prev_cum_lines, chunk_lines_scanned, lines_found, allowed);
+              }
             }
           }
           chunk_lines_scanned += lines_found;
@@ -4615,6 +4622,10 @@ numa_chunk_skip:
             WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
             prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
             cum_lines_known = true;
+            if (g_debug) {
+              fprintf(stderr, "forkrun[DEBUG] GATE_RESOLVED: node=%d major=%lu prev_cum=%lu chunk_scanned=%lu pending=%lu\n",
+                      my_node_id, current_major, prev_cum_lines, chunk_lines_scanned, pending_lines);
+            }
 
             // Check if cutoff occurred while we were scanning
             uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
