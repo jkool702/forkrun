@@ -439,7 +439,7 @@ extern void dispose_command(COMMAND *);
 extern int execute_command(COMMAND *);
 extern int add_builtin(struct builtin *bp, int keep);
 
-static int g_debug = 1;
+static int g_debug = 0;
 
 #define SYS_CHK(x)                                                             \
   do {                                                                         \
