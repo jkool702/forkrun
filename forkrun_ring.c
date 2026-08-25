@@ -4076,9 +4076,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         if (limit_items > 0 && !byte_mode) {
           // Path 5 Fix: Ensure predecessor count is resolved before propagating forward
           if (!cum_lines_known && prev_chunk_meta) {
-            uint64_t prev_cum_raw;
-            WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
-            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            uint64_t cutoff_check = atomic_load_acquire(&g_state->limit_cutoff_major);
+            if (cutoff_check > 0 && (current_major + 1) > cutoff_check) {
+              prev_cum_lines = limit_items;
+            } else {
+              uint64_t prev_cum_raw;
+              WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
+              prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            }
             cum_lines_known = true;
           }
           atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
@@ -4105,10 +4110,8 @@ numa_chunk_skip:
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
           }
-          if (!cum_lines_known && prev_chunk_meta) {
-            uint64_t prev_cum_raw;
-            WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
-            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+          if (!cum_lines_known) {
+            prev_cum_lines = limit_items;
             cum_lines_known = true;
           }
           atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
