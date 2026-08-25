@@ -3849,6 +3849,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t chunk_end = ~(uint64_t)0;
     uint64_t current_p_offset;
     struct ChunkMeta *meta = NULL;
+    uint64_t current_major = 0;
     uint32_t minor_idx = 0;
     bool chunk_eof_flushed = false;
     bool limit_reached = false;
@@ -4015,7 +4016,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                            __ATOMIC_RELAXED);
       }
 
-      uint64_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
+      current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
       meta = &g_state->meta_ring[current_major & META_RING_MASK];
 
       uint64_t act_end_flag = atomic_load_acquire(&meta->actual_end);
