@@ -3650,6 +3650,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   // v3.5: Cumulative chain state for deterministic -n
   uint64_t prev_cum_lines = 0;
   uint64_t chunk_lines_scanned = 0;
+  // v3.5 stage 2: Publication-gated count chain
+  bool cum_lines_known = false;
+  uint64_t chunk_start_scan_idx = 0;
+  struct ChunkMeta *prev_chunk_meta = NULL;
+  uint32_t prev_chunk_node = 0;
 
   atomic_store_relaxed(&local_state->write_idx, 0);
   atomic_store_relaxed(&local_state->read_idx, 0);
@@ -4026,45 +4031,37 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                              goto unified_scanner_eof);
         actual_start = prev_act_end & ~FLAG_META_READY;
 
-        // v3.5: Cumulative Line Count Chain Gating
+        // v3.5 stage 2: Publication-gated count chain (Non-blocking pre-check)
+        // Scan proceeds immediately without blocking. The count chain wait
+        // is deferred to the first flush point.
         if (limit_items > 0 && !byte_mode) {
-          uint64_t prev_cum_raw;
-          WAIT_FOR_CUM_LINES(prev_cum_raw, prev_meta, tnode,
-                             goto unified_scanner_eof);
-          prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+          prev_chunk_meta = prev_meta;
+          prev_chunk_node = tnode;
+          cum_lines_known = false;
+
+          // Fast opportunistic check: if predecessor already finished, grab count now
+          uint64_t prev_cum_raw = atomic_load_acquire(&prev_meta->cum_lines);
+          if (prev_cum_raw & FLAG_CUM_READY) {
+            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            cum_lines_known = true;
+          }
 
           // Check if a prior chunk already crossed the limit
           uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
           if (cutoff > 0 && (current_major + 1) > cutoff) {
-            // Our entire chunk is past the limit. Skip scanning!
-            batch_start = actual_start;
-            current_p_offset = actual_start;
-
-            bool _skipped = false;
-            UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
-            if (!_skipped) {
-              chunk_bounds[cb_head & 15] = local_scan_idx;
-              cb_head++;
-            }
-            // Propagate cum_lines forward so subsequent chunks also skip cleanly
-            atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
-            __atomic_thread_fence(__ATOMIC_SEQ_CST);
-            uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
-            if (mw > 0) {
-              uint64_t v = mw;
-              sys_write(evfd_meta_arr[meta->target_node], &v, 8);
-            }
-            UNIFIED_ADAPTIVE_COMMIT(true);
-            continue; // Move to next chunk
+            goto numa_chunk_skip;
           }
         } else {
           prev_cum_lines = 0;
+          cum_lines_known = true;
         }
       } else {
         prev_cum_lines = 0;
+        cum_lines_known = true;
       }
 
       chunk_lines_scanned = 0;
+      chunk_start_scan_idx = local_scan_idx;
 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
@@ -4076,6 +4073,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           cb_head++;
         }
         if (limit_items > 0 && !byte_mode) {
+          // Path 5 Fix: Ensure predecessor count is resolved before propagating forward
+          if (!cum_lines_known && prev_chunk_meta) {
+            uint64_t prev_cum_raw;
+            WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
+            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            cum_lines_known = true;
+          }
           atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
           __atomic_thread_fence(__ATOMIC_SEQ_CST);
           uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
@@ -4086,6 +4090,36 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         }
         if (!_skipped) UNIFIED_ADAPTIVE_COMMIT(true);
         continue;
+      }
+
+numa_chunk_skip:
+      if (is_numa && limit_items > 0 && !byte_mode) {
+        uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
+        if (cutoff > 0 && (current_major + 1) > cutoff) {
+          batch_start = actual_start;
+          current_p_offset = actual_start;
+          bool _skipped = false;
+          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
+          if (!_skipped) {
+            chunk_bounds[cb_head & 15] = local_scan_idx;
+            cb_head++;
+          }
+          if (!cum_lines_known && prev_chunk_meta) {
+            uint64_t prev_cum_raw;
+            WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
+            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            cum_lines_known = true;
+          }
+          atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
+          __atomic_thread_fence(__ATOMIC_SEQ_CST);
+          uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
+          if (mw > 0) {
+            uint64_t v = mw;
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+          }
+          UNIFIED_ADAPTIVE_COMMIT(true);
+          continue;
+        }
       }
 
       // Check byte-mode limit
@@ -4488,53 +4522,50 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           }
         }
 
-        // v3.5: Deterministic -n Line Budget Clamping (replaces global_scanned race)
         if (is_numa && limit_items > 0 && !byte_mode && lines_found > 0) {
-          uint64_t running_total = prev_cum_lines + chunk_lines_scanned + lines_found;
-
-          if (running_total >= limit_items) {
-            uint64_t allowed = limit_items - (prev_cum_lines + chunk_lines_scanned);
-            if (allowed < lines_found) {
-              // Rewind to the exact delimiter of the allowed-th line
-              int64_t bs_rel = (int64_t)batch_start - (int64_t)buf_base_offset;
-              if (bs_rel >= 0 && bs_rel <= (int64_t)(end - buf)) {
-                char *rewind_p = buf + bs_rel;
-                for (uint64_t _k = 0; _k < allowed; _k++) {
-                  char *nl = memchr(rewind_p, delim, end - rewind_p);
-                  if (nl) rewind_p = nl + 1;
-                  else break;
-                }
-                p = rewind_p;
-              } else {
-                uint64_t cur_pos = batch_start;
-                uint64_t found = 0;
-                char tmp_buf[4096];
-                while (found < allowed) {
-                  ssize_t rn;
-                  do {
-                    rn = pread(fd_or_memfd, tmp_buf, sizeof(tmp_buf), (off_t)cur_pos);
-                  } while (rn < 0 && errno == EINTR);
-                  if (rn <= 0) break;
-                  char *tp = tmp_buf;
-                  char *te = tmp_buf + rn;
-                  while (found < allowed && tp < te) {
-                    char *nl = memchr(tp, delim, te - tp);
-                    if (nl) { found++; tp = nl + 1; }
-                    else { tp = te; }
+          if (cum_lines_known) {
+            uint64_t running_total = prev_cum_lines + chunk_lines_scanned + lines_found;
+            if (running_total >= limit_items) {
+              uint64_t allowed = limit_items - (prev_cum_lines + chunk_lines_scanned);
+              if (allowed < lines_found) {
+                int64_t bs_rel = (int64_t)batch_start - (int64_t)buf_base_offset;
+                if (bs_rel >= 0 && bs_rel <= (int64_t)(end - buf)) {
+                  char *rewind_p = buf + bs_rel;
+                  for (uint64_t _k = 0; _k < allowed; _k++) {
+                    char *nl = memchr(rewind_p, delim, end - rewind_p);
+                    if (nl) rewind_p = nl + 1;
+                    else break;
                   }
-                  cur_pos += (uint64_t)(tp - tmp_buf);
-                  if (found >= allowed) break;
+                  p = rewind_p;
+                } else {
+                  uint64_t cur_pos = batch_start;
+                  uint64_t found = 0;
+                  char tmp_buf[4096];
+                  while (found < allowed) {
+                    ssize_t rn;
+                    do {
+                      rn = pread(fd_or_memfd, tmp_buf, sizeof(tmp_buf), (off_t)cur_pos);
+                    } while (rn < 0 && errno == EINTR);
+                    if (rn <= 0) break;
+                    char *tp = tmp_buf;
+                    char *te = tmp_buf + rn;
+                    while (found < allowed && tp < te) {
+                      char *nl = memchr(tp, delim, te - tp);
+                      if (nl) { found++; tp = nl + 1; }
+                      else { tp = te; }
+                    }
+                    cur_pos += (uint64_t)(tp - tmp_buf);
+                    if (found >= allowed) break;
+                  }
+                  buf_base_offset = cur_pos;
+                  p = buf;
+                  end = buf;
                 }
-                buf_base_offset = cur_pos;
-                p = buf;
-                end = buf;
+                lines_found = allowed;
               }
-              lines_found = allowed;
+              limit_reached = true;
+              atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
             }
-            limit_reached = true;
-
-            // Publish 1-based cutoff signal BEFORE publishing cum_lines
-            atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
           }
           chunk_lines_scanned += lines_found;
         }
@@ -4571,6 +4602,69 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           force_refill = true;
 
         if (flush) {
+          // v3.5 stage 2: PUBLICATION GATE
+          // Before the first flush makes slots visible, resolve predecessor's cum_lines
+          if (is_numa && limit_items > 0 && !byte_mode && !cum_lines_known && prev_chunk_meta) {
+            uint64_t prev_cum_raw;
+            WAIT_FOR_CUM_LINES(prev_cum_raw, prev_chunk_meta, prev_chunk_node, goto unified_scanner_eof);
+            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            cum_lines_known = true;
+
+            // Check if cutoff occurred while we were scanning
+            uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
+            if (cutoff > 0 && (current_major + 1) > cutoff) {
+              local_scan_idx = chunk_start_scan_idx;
+              goto numa_chunk_skip;
+            }
+
+            // Clamping check for the first batch
+            uint64_t running_total = prev_cum_lines + chunk_lines_scanned;
+            if (running_total >= limit_items) {
+              uint64_t allowed = limit_items - (prev_cum_lines + (chunk_lines_scanned - pending_lines));
+              if (allowed < pending_lines) {
+                uint64_t old_pending = pending_lines;
+                int64_t bs_rel = (int64_t)batch_start - (int64_t)buf_base_offset;
+                if (bs_rel >= 0 && bs_rel <= (int64_t)(end - buf)) {
+                  char *rewind_p = buf + bs_rel;
+                  for (uint64_t _k = 0; _k < allowed; _k++) {
+                    char *nl = memchr(rewind_p, delim, end - rewind_p);
+                    if (nl) rewind_p = nl + 1;
+                    else break;
+                  }
+                  p = rewind_p;
+                } else {
+                  uint64_t cur_pos = batch_start;
+                  uint64_t found = 0;
+                  char tmp_buf[4096];
+                  while (found < allowed) {
+                    ssize_t rn;
+                    do {
+                      rn = pread(fd_or_memfd, tmp_buf, sizeof(tmp_buf), (off_t)cur_pos);
+                    } while (rn < 0 && errno == EINTR);
+                    if (rn <= 0) break;
+                    char *tp = tmp_buf;
+                    char *te = tmp_buf + rn;
+                    while (found < allowed && tp < te) {
+                      char *nl = memchr(tp, delim, te - tp);
+                      if (nl) { found++; tp = nl + 1; }
+                      else { tp = te; }
+                    }
+                    cur_pos += (uint64_t)(tp - tmp_buf);
+                    if (found >= allowed) break;
+                  }
+                  buf_base_offset = cur_pos;
+                  p = buf;
+                  end = buf;
+                }
+                pending_lines = allowed;
+                chunk_lines_scanned -= (old_pending - pending_lines);
+                current_p_offset = buf_base_offset + (p - buf);
+              }
+              limit_reached = true;
+              atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
+            }
+          }
+
           // WORMHOLE FIX 8: Ensure a force_flush_bytes doesn't accidentally trigger a FLAG_MAJOR_EOF chunk end
           bool is_last = is_numa
                              ? (current_p_offset >= chunk_end || limit_reached)
