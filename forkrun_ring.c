@@ -1375,6 +1375,11 @@ struct ChunkMeta {
                               __ATOMIC_SEQ_CST);                               \
           break;                                                               \
         }                                                                      \
+        if (g_debug) { \
+          fprintf(stderr, "forkrun[DEBUG] WAIT_FOR_CUM_LINES: waiting for chunk %lu on node %u (my_node=%d)\n", \
+            ((char*)meta_ptr - (char*)g_state->meta_ring) / sizeof(struct ChunkMeta), \
+            (node_var), my_node_id); \
+        } \
         struct pollfd _wcl_pfds[2] = {                                         \
             {.fd = evfd_meta_arr[(node_var)], .events = POLLIN},               \
             {.fd = evfd_ingest_eof, .events = POLLIN}};                        \
