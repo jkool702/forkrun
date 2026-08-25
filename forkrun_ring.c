@@ -3846,6 +3846,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     struct ChunkMeta *meta = NULL;
     uint32_t minor_idx = 0;
     bool chunk_eof_flushed = false;
+    bool limit_reached = false;
 
     if (is_numa) {
       int steal_target = my_node_id;
@@ -4048,10 +4049,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             // Propagate cum_lines forward so subsequent chunks also skip cleanly
             atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
-            uint32_t mw = atomic_load_relaxed(&state[my_node_id].meta_waiters);
+            uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
             if (mw > 0) {
               uint64_t v = mw;
-              sys_write(evfd_meta_arr[my_node_id], &v, 8);
+              sys_write(evfd_meta_arr[meta->target_node], &v, 8);
             }
             UNIFIED_ADAPTIVE_COMMIT(true);
             continue; // Move to next chunk
@@ -4077,10 +4078,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         if (limit_items > 0 && !byte_mode) {
           atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
           __atomic_thread_fence(__ATOMIC_SEQ_CST);
-          uint32_t mw = atomic_load_relaxed(&state[my_node_id].meta_waiters);
+          uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
           if (mw > 0) {
             uint64_t v = mw;
-            sys_write(evfd_meta_arr[my_node_id], &v, 8);
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
           }
         }
         if (!_skipped) UNIFIED_ADAPTIVE_COMMIT(true);
@@ -4259,7 +4260,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       }
 
       bool flush = false;
-      bool limit_reached = false;
       bool force_flush_bytes = false; // WORMHOLE FIX 8
 
       if (byte_mode) {
@@ -4626,10 +4626,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         uint64_t my_cum_lines = prev_cum_lines + chunk_lines_scanned;
         atomic_store_release(&meta->cum_lines, my_cum_lines | FLAG_CUM_READY);
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        uint32_t mw = atomic_load_relaxed(&state[my_node_id].meta_waiters);
+        uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
         if (mw > 0) {
           uint64_t v = mw;
-          sys_write(evfd_meta_arr[my_node_id], &v, 8);
+          sys_write(evfd_meta_arr[meta->target_node], &v, 8);
         }
       }
     }
