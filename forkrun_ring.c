@@ -4678,6 +4678,13 @@ numa_chunk_skip:
               }
               limit_reached = true;
               atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
+
+              // CRITICAL FIX: If allowed == 0, the limit was reached by the predecessor.
+              // We must skip this chunk entirely to prevent leaking the scanned lines!
+              if (allowed == 0) {
+                  local_scan_idx = chunk_start_scan_idx;
+                  goto numa_chunk_skip;
+              }
             }
           }
 
