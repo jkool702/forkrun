@@ -4105,7 +4105,12 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 numa_chunk_skip:
       if (is_numa && limit_items > 0 && !byte_mode) {
         uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
-        if (cutoff > 0 && (current_major + 1) > cutoff) {
+        bool skip_by_cutoff = (cutoff > 0 && (current_major + 1) > cutoff);
+        bool skip_by_prev_cum = (cum_lines_known && prev_cum_lines >= limit_items);
+
+        // CRITICAL FIX: Skip if the predecessor already hit the limit,
+        // even if they didn't set the cutoff flag (exact boundary match).
+        if (skip_by_cutoff || skip_by_prev_cum) {
           batch_start = actual_start;
           current_p_offset = actual_start;
           bool _skipped = false;
