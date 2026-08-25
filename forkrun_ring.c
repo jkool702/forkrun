@@ -4027,8 +4027,18 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       if (current_major > 0) {
         struct ChunkMeta *prev_meta =
             &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
-        uint64_t prev_act_end;
         uint32_t tnode = prev_meta->target_node;
+
+        // v3.5: Check cutoff BEFORE waiting on metadata of dead predecessor indexers
+        if (limit_items > 0 && !byte_mode) {
+          uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
+          if (cutoff > 0 && (current_major + 1) > cutoff) {
+            actual_start = meta->raw_offset;
+            goto numa_chunk_skip;
+          }
+        }
+
+        uint64_t prev_act_end;
         WAIT_FOR_META_READY(prev_act_end, prev_meta, tnode,
                              goto unified_scanner_eof);
         actual_start = prev_act_end & ~FLAG_META_READY;
@@ -4050,12 +4060,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               fprintf(stderr, "forkrun[DEBUG] OPPORTUNISTIC: node=%d major=%lu prev_cum=%lu\n",
                       my_node_id, current_major, prev_cum_lines);
             }
-          }
-
-          // Check if a prior chunk already crossed the limit
-          uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
-          if (cutoff > 0 && (current_major + 1) > cutoff) {
-            goto numa_chunk_skip;
           }
         } else {
           prev_cum_lines = 0;
