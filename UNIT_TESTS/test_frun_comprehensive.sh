@@ -3981,10 +3981,13 @@ if in_section T2; then
         # Only kill children (workers spawn as subshell bashes); avoid the root
         for _v in $_VICTIMS; do
             _KIDS=$(ps -o pid= --ppid "$_v" 2>/dev/null | tr -d ' ')
+            _KIDS="$(sort -nr <<<"$_KIDS" | head -n $(( $(wc -l <<<"$_KIDS") >> 1 )) )"
+            needKillFlag=true
             for _kid in $_KIDS; do
-                # Kill grandchildren (worker subshells) with 30% probability
-                if (( RANDOM % 10 < 3 )); then
+                # Kill grandchildren (worker subshells) with 30% probability. guarantee killing at least 1.
+                if (( RANDOM % 10 < 3 )) || $needKillFlag; then
                     kill -9 "$_kid" 2>/dev/null
+                    needKillFlag=false
                 fi
             done
         done
