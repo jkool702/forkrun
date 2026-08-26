@@ -379,7 +379,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.4.4"
+#define FORKRUN_RING_VERSION "v3.5.0"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -3179,6 +3179,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   char tail_buf[65536];
   int spin = 0;
   bool byte_mode = t_state->mode_byte;
+  bool exact_lines_l = t_state->exact_lines; // v3.5: -L bypasses the indexer
 
   while (1) {
     if (atomic_load_relaxed(&state[0].emergency_abort)) {
@@ -3233,7 +3234,9 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     uint64_t actual_end = chunk_end;
 
     // PHYSICS FIX: Bypass delimiter search in byte mode!
-    if (!byte_mode) {
+    // v3.5.0: bypass in -L mode too — the SCANNER owns actual_end there
+    // (scanner-handoff chain); the indexer is pure queue plumbing.
+    if (!byte_mode && !exact_lines_l) {
       uint64_t search_end = chunk_end;
       while (search_end > meta->raw_offset) {
         uint64_t window_size =
@@ -3288,10 +3291,11 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           }
         }
       }
+
+      // 1. Mark meta ready (indexer-owned modes only)
+      atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
     }
 
-    // 1. Mark meta ready
-    atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
     // 2. Put it on the Scanner's Ready Shelf
     __atomic_store_n(&t_state->chunk_ready_head, my_idx + 1, __ATOMIC_RELEASE);
 
@@ -4033,6 +4037,320 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
       uint64_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
       meta = &g_state->meta_ring[current_major & META_RING_MASK];
+
+      // ====================================================================
+      // v3.5.0: -L (exact lines) NUMA PATH — the Scanner-Handoff Chain.
+      //
+      // The indexer is bypassed and the SCANNER owns both actual_end and
+      // cum_lines for its chunk. Scanning is serialized by the cum_lines
+      // chain (scan gate) — exactly what exact batch boundaries require,
+      // since a boundary is a global-sequence property decidable only by
+      // the scanner whose turn it is.
+      //
+      // UNIFIED HANDOFF — there is no case-1/case-2 split. Every scanner
+      // traverses its ENTIRE own raw chunk exactly once (delimiter owner-
+      // ship is exclusive: a line is counted by the scanner whose raw chunk
+      // contains its terminating delimiter). The handoff is uniform:
+      //   actual_end = start of the open batch (wherever it began — possibly
+      //                in an earlier chunk), = actual_start if none is open
+      //   cum_lines  = cumulative delimiter count through this chunk
+      // The successor begins at its OWN raw_start seeded with
+      // pending = cum_lines mod L. No scanner ever re-traverses a
+      // predecessor's bytes — the open batch's earlier bytes are read only
+      // by the WORKER that executes it (the -L cross-socket tax).
+      //
+      // INVARIANT (EOF-hang class): every chunk-exit path — normal end,
+      // skip-past-cutoff, EOF sentinel — publishes BOTH values. Never wait
+      // for data a scanner that exited will not produce.
+      // ====================================================================
+      if (is_numa && exact_lines && !byte_mode) {
+        uint64_t raw_start = meta->raw_offset;
+        uint64_t raw_end = raw_start + meta->raw_length;
+
+        // ---- (1) GATE: predecessor handoff, with cutoff escape ----
+        uint64_t prev_cum = 0;
+        uint64_t handoff_start = 0;
+        bool past_cutoff = false;
+
+        if (limit_items > 0) {
+          uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
+          if (cutoff > 0 && (current_major + 1) > cutoff)
+            past_cutoff = true;
+        }
+
+        if (!past_cutoff && current_major > 0) {
+          struct ChunkMeta *pm =
+              &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
+          uint32_t pnode = pm->target_node;
+          int gate_spin = 0;
+          while (1) {
+            uint64_t ae = atomic_load_acquire(&pm->actual_end);
+            uint64_t cl = atomic_load_acquire(&pm->cum_lines);
+            if ((ae & FLAG_META_READY) && (cl & FLAG_CUM_READY)) {
+              handoff_start = ae & ~FLAG_META_READY;
+              prev_cum = cl & ~FLAG_CUM_READY;
+              break;
+            }
+            if (limit_items > 0) {
+              uint64_t cutoff =
+                  atomic_load_acquire(&g_state->limit_cutoff_major);
+              if (cutoff > 0 && (current_major + 1) > cutoff) {
+                past_cutoff = true;
+                break;
+              }
+            }
+            if (atomic_load_relaxed(&state[0].emergency_abort))
+              goto unified_scanner_eof;
+            if (gate_spin < 10000) {
+              cpu_relax();
+              gate_spin++;
+            } else {
+              __atomic_fetch_add(&state[pnode].meta_waiters, 1,
+                                 __ATOMIC_SEQ_CST);
+              ae = atomic_load_acquire(&pm->actual_end);
+              cl = atomic_load_acquire(&pm->cum_lines);
+              bool resolved = (ae & FLAG_META_READY) && (cl & FLAG_CUM_READY);
+              bool escaped = false;
+              if (!resolved && limit_items > 0) {
+                uint64_t cutoff =
+                    atomic_load_acquire(&g_state->limit_cutoff_major);
+                escaped = (cutoff > 0 && (current_major + 1) > cutoff);
+              }
+              if (!resolved && !escaped &&
+                  !atomic_load_relaxed(&state[0].emergency_abort)) {
+                struct pollfd gfds[2] = {
+                    {.fd = evfd_meta_arr[pnode], .events = POLLIN},
+                    {.fd = evfd_ingest_eof, .events = POLLIN}};
+                poll(gfds, 2, 100); // bounded: cutoff/abort must be re-checked
+                if (gfds[0].revents & POLLIN) {
+                  uint64_t gv;
+                  sys_read(evfd_meta_arr[pnode], &gv, 8);
+                }
+              }
+              __atomic_fetch_sub(&state[pnode].meta_waiters, 1,
+                                 __ATOMIC_SEQ_CST);
+              if (resolved) {
+                handoff_start = ae & ~FLAG_META_READY;
+                prev_cum = cl & ~FLAG_CUM_READY;
+                break;
+              }
+              if (escaped) {
+                past_cutoff = true;
+                break;
+              }
+              gate_spin = 0;
+            }
+          }
+        }
+
+        // Belt-and-suspenders: predecessor already at/over the limit.
+        if (!past_cutoff && limit_items > 0 && prev_cum >= limit_items)
+          past_cutoff = true;
+
+        if (g_debug)
+          fprintf(stderr,
+                  "forkrun[DEBUG] -L GATE: node=%d major=%lu handoff=%lu "
+                  "prev_cum=%lu pending=%lu past_cutoff=%d\n",
+                  my_node_id, current_major, handoff_start, prev_cum,
+                  prev_cum % L, (int)past_cutoff);
+
+        // ---- (2) SKIP PATH (past cutoff): carry sentinel forward ----
+        if (past_cutoff) {
+          if (limit_items > 0)
+            prev_cum = limit_items; // sentinel: at/past the limit
+          batch_start = raw_start;
+          bool _skipped = false;
+          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, raw_start, _skipped);
+          if (!_skipped) {
+            chunk_bounds[cb_head & 15] = local_scan_idx;
+            cb_head++;
+          }
+          atomic_store_release(&meta->actual_end,
+                               raw_start | FLAG_META_READY);
+          atomic_store_release(&meta->cum_lines, prev_cum | FLAG_CUM_READY);
+          __atomic_thread_fence(__ATOMIC_SEQ_CST);
+          uint32_t mw = atomic_load_relaxed(
+              &state[meta->target_node].meta_waiters);
+          if (mw > 0) {
+            uint64_t v = mw;
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+          }
+          UNIFIED_ADAPTIVE_COMMIT(true);
+          continue;
+        }
+
+        // ---- (3) EOF SENTINEL CHUNK: flush the pending partial batch ----
+        // raw_length == 0 iff this is the ingest EOF sentinel; its
+        // raw_offset is the true end-of-stream byte offset.
+        if (meta->raw_length == 0) {
+          uint64_t eof_off = meta->raw_offset;
+          batch_start = handoff_start;
+          bool _skipped = false;
+          // Zero-length when nothing is pending: acked-not-executed (M1).
+          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, eof_off, _skipped);
+          if (!_skipped) {
+            chunk_bounds[cb_head & 15] = local_scan_idx;
+            cb_head++;
+          }
+          if (g_debug)
+            fprintf(stderr,
+                    "forkrun[DEBUG] -L EOF_TAIL: node=%d major=%lu "
+                    "[%lu,%lu)\n",
+                    my_node_id, current_major, handoff_start, eof_off);
+          atomic_store_release(&meta->actual_end, eof_off | FLAG_META_READY);
+          atomic_store_release(&meta->cum_lines, prev_cum | FLAG_CUM_READY);
+          __atomic_thread_fence(__ATOMIC_SEQ_CST);
+          uint32_t mw = atomic_load_relaxed(
+              &state[meta->target_node].meta_waiters);
+          if (mw > 0) {
+            uint64_t v = mw;
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+          }
+          UNIFIED_ADAPTIVE_COMMIT(true);
+          continue;
+        }
+
+        // ---- (4) SCAN: count own-chunk delimiters, publish exact-L batches
+        {
+          uint64_t pending_carried = prev_cum % L;
+          // Lines already sealed in complete batches. Every complete batch
+          // is exactly L lines, so the sealed portion of prev_cum is its
+          // multiple-of-L part — the open batch holds the remainder. This
+          // is what makes the -n budget exact: carried pending lines live
+          // in lines_in_batch and are absent from `sealed`, so they are
+          // never double-counted.
+          uint64_t sealed = prev_cum - pending_carried;
+
+          uint64_t lines_in_batch = pending_carried;
+          uint64_t counted = 0;   // delimiters found in THIS chunk
+          uint64_t published = 0; // lines sealed into batches by this scanner
+          uint32_t l_minor = 0;
+          bool l_last_flushed = false;
+          bool l_limit_hit = false;
+
+          batch_start = handoff_start;
+          buf_base_offset = raw_start;
+          p = buf;
+          end = buf;
+
+          while (1) {
+            if (p >= end) {
+              if (buf_base_offset + (uint64_t)(end - buf) >= raw_end)
+                break; // chunk exhausted — always scan to the very end
+              if (atomic_load_relaxed(&state[0].emergency_abort))
+                goto unified_scanner_eof;
+              uint64_t read_start = buf_base_offset + (uint64_t)(end - buf);
+              size_t to_read = chunk_sz;
+              if (read_start + to_read > raw_end)
+                to_read = raw_end - read_start;
+              ssize_t n;
+              do {
+                n = pread(fd_or_memfd, buf, to_read, (off_t)read_start);
+              } while (n < 0 && errno == EINTR);
+              if (n <= 0)
+                break; // defensive: treat as chunk end
+              buf_base_offset = read_start;
+              p = buf;
+              end = buf + n;
+            }
+
+            char *nl = memchr(p, delim, (size_t)(end - p));
+            if (!nl) {
+              p = end;
+              continue;
+            }
+            p = nl + 1;
+            lines_in_batch++;
+            counted++;
+
+            // Batches complete at exactly L; the -n budget may clamp the
+            // FINAL batch short. sealed+published+lines_in_batch is the
+            // cumulative total that will be sealed once this batch
+            // publishes; it steps by 1 per delimiter, so it reaches
+            // limit_items exactly (no under/over-delivery).
+            bool complete = (lines_in_batch >= L);
+            bool budget_hit = false;
+            if (limit_items > 0 &&
+                (sealed + published + lines_in_batch) >= limit_items)
+              budget_hit = true;
+
+            if (complete || budget_hit) {
+              uint64_t bnd = buf_base_offset + (uint64_t)(p - buf);
+              bool is_last = (bnd >= raw_end);
+              bool _skipped = false;
+              UNIFIED_SCANNER_FLUSH(is_last, meta->major_id, l_minor, bnd,
+                                    _skipped);
+              l_minor++;
+              if (is_last && !_skipped) {
+                l_last_flushed = true;
+                chunk_bounds[cb_head & 15] = local_scan_idx;
+                cb_head++;
+              }
+              batch_start = bnd;
+              published += lines_in_batch;
+              lines_in_batch = 0;
+              if (!_skipped) {
+                atomic_store_relaxed(&local_state->current_batch_size, L);
+                ADAPTIVE_FLOW_CONTROL(local_state, false, my_node_id);
+              }
+              if (budget_hit) {
+                l_limit_hit = true;
+                // Cutoff BEFORE handoff (same ordering rule as the -n path)
+                atomic_store_release(&g_state->limit_cutoff_major,
+                                     meta->major_id + 1);
+                break;
+              }
+            }
+          }
+
+          total_scanned += counted;
+          atomic_store_relaxed(&local_state->total_lines_scanned,
+                               total_scanned);
+
+          // Chunk ended with an open batch (or a skipped last batch):
+          // zero-length sentinel advances the orderer's major; the open
+          // batch transfers via actual_end = batch_start. This covers the
+          // no-complete-batch case (actual_end = actual_start) and the
+          // mid-next-batch case (actual_end = last batch boundary)
+          // identically — the unified handoff.
+          if (!l_last_flushed) {
+            bool _skipped = false;
+            UNIFIED_SCANNER_FLUSH(true, meta->major_id, l_minor, batch_start,
+                                  _skipped);
+            if (!_skipped) {
+              chunk_bounds[cb_head & 15] = local_scan_idx;
+              cb_head++;
+            }
+          }
+
+          // Publish the handoff for scanner N+1: actual_end = start of the
+          // open batch; cum_lines = cumulative count through this chunk.
+          uint64_t my_cum = prev_cum + counted;
+          atomic_store_release(&meta->actual_end,
+                               batch_start | FLAG_META_READY);
+          atomic_store_release(&meta->cum_lines, my_cum | FLAG_CUM_READY);
+          __atomic_thread_fence(__ATOMIC_SEQ_CST);
+          uint32_t mw = atomic_load_relaxed(
+              &state[meta->target_node].meta_waiters);
+          if (mw > 0) {
+            uint64_t v = mw;
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+          }
+          if (g_debug)
+            fprintf(stderr,
+                    "forkrun[DEBUG] -L CHUNK_END: node=%d major=%lu "
+                    "counted=%lu cum=%lu actual_end=%lu\n",
+                    my_node_id, current_major, counted, my_cum, batch_start);
+
+          UNIFIED_ADAPTIVE_COMMIT(true);
+
+          if (l_limit_hit)
+            break; // limit crossed; cutoff is set for all successors
+          continue;
+        }
+      }
+      // ================= end v3.5.0 -L NUMA path ========================
+
 
       uint64_t act_end_flag = atomic_load_acquire(&meta->actual_end);
       uint64_t actual_end = act_end_flag & ~FLAG_META_READY;

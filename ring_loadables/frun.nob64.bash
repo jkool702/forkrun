@@ -298,7 +298,7 @@ EOF
 
   -j, -P, --workers <W> : Set the number of concurrent workers. Supports <init>:<max> (e.g., -j 4:32). Default max is the number of logical cores.
   -l, --lines <L>       : Set the batch size (lines per worker). Supports <init>:<max> (e.g., -l 10:10000). Default max is 4096.
-  -L, --exact-lines <N> : Force exactly N lines per batch. (Warning: Disables NUMA topological stealing to guarantee exact counts).
+  -L, --exact-lines <N> : Force exactly N lines per batch. NUMA-native since v3.5.0 (scanning is serialized across nodes and a batch may straddle a NUMA chunk boundary — prefer -l unless exact counts are required).
   -t, --timeout <us>    : Set the maximum wait time (in microseconds) for a partial batch before flushing early.
 
 ### STRING SUBSTITUTION
@@ -674,7 +674,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.4.4';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.5.0';  return 0  ;;
 
             --) shift; break ;;
 
@@ -858,21 +858,14 @@ toc() { :; }
         fi
     fi
 
-    # --- Feature 2: -L vs NUMA Conflict Resolution ---
-    if [[ -n "${exact_lines_val:-}" ]] && (( FORKRUN_NUM_NODES > 1 )); then
-        if ${is_sweep:-false}; then
-            # Silent fallback to UMA for sweeps
-            _forkrun_build_numa_map "1"
-        elif [[ "$last_conflict" == "exact_lines" ]]; then
-            printf '\nforkrun [WARNING]: To facilitate using exactly %s arguments per batch, forkrun will run in UMA mode. NUMA optimizations prevent -L from working properly, and will be disabled.\n\n' "${exact_lines_val}" >&2
-            # Force UMA mode by re-building the map with exactly 1 node
-            _forkrun_build_numa_map "1"
-        else
-            printf '\nforkrun [WARNING]: forkrun cannot guarantee exactly %s lines per batch in NUMA mode. The -L option has been downgraded to -l, which guarantees a maximum of %s lines per batch. If you need exactly %s lines per batch, remove the --nodes option from the invocation.\n\n' "${exact_lines_val}" "${exact_lines_val}" "${exact_lines_val}" >&2
-            # Downgrade to -l (clear exact lines flag so it just parses normally below)
-            _parse_count "lines" "${exact_lines_val}"
-            exact_lines_val=""
-        fi
+    # --- -L vs NUMA: v3.5.0 — native NUMA support (scanner-handoff chain) ---
+    # Exact batches are now preserved in NUMA mode: the cum_lines chain gates
+    # scanning (serialized across node scanners), and a batch of L lines may
+    # straddle a chunk boundary (1..L-1 lines of cross-socket traffic per
+    # boundary — the price of exactness). Sweeps still run UMA: they need
+    # L=1 per batch and the flat pipeline is the right tool for that.
+    if ${is_sweep:-false} && (( FORKRUN_NUM_NODES > 1 )); then
+        _forkrun_build_numa_map "1"
     fi
 
     # If exact_lines_val survived (either it was UMA, or we forced UMA), apply it
