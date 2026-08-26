@@ -3890,8 +3890,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       chunk_end = actual_end;
       minor_idx = 0;
       chunk_eof_flushed = false;
+      // 2. SCAN AHEAD AND PUBLISH (With Inline Clamping)
+      chunk_lines_scanned = 0;
+      chunk_start_scan_idx = local_scan_idx;
+      current_p_offset = actual_start;
+      batch_start = actual_start;
+      buf_base_offset = actual_start;
+      p = buf; end = buf;
+      chunk_end = actual_end;
+      minor_idx = 0;
+      chunk_eof_flushed = false;
 
-      // 2. SCAN AHEAD AND PUBLISH (Gated First Flush)
       while (current_p_offset < actual_end) {
         if (p >= end) {
           uint64_t read_start = current_p_offset;
@@ -3915,26 +3924,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         if (lines_found > 0) {
           current_p_offset = buf_base_offset + (p - buf);
 
-          // THE FIRST FLUSH GATE: Wait for cum_lines only when we MUST publish
-          if (limit_items > 0 && !byte_mode && !cum_lines_known) {
-            if (current_major > 0 && prev_meta_ptr) {
-              uint64_t prev_cum_raw;
-              uint32_t tnode = prev_meta_ptr->target_node;
-              WAIT_FOR_CUM_LINES(prev_cum_raw, prev_meta_ptr, tnode, goto unified_scanner_eof);
-              prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
-            } else {
-              prev_cum_lines = 0;
-            }
-            cum_lines_known = true;
-
-            // CHECK LIMIT SKIP
-            uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
-            if ((cutoff > 0 && current_major >= cutoff) || prev_cum_lines >= limit_items) {
-              local_scan_idx = chunk_start_scan_idx;
-              goto numa_chunk_skip;
-            }
-
-            // CROSSING SCANNER CLAMP CHECK
+          // INLINE CLAMP: Since cum_lines is known, we can clamp exactly!
+          if (limit_items > 0 && !byte_mode && cum_lines_known) {
             uint64_t running_total = prev_cum_lines + chunk_lines_scanned + lines_found;
             if (running_total >= limit_items) {
               uint64_t allowed = limit_items - (prev_cum_lines + chunk_lines_scanned);
@@ -3957,7 +3948,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             }
           }
 
-          // PUBLISH BATCH AND COMMIT TO WORKERS
+          // PUBLISH BATCH AND COMMIT TO WORKERS (Prevents Starvation!)
           bool _skipped = false;
           UNIFIED_SCANNER_FLUSH(false, meta->major_id, minor_idx, current_p_offset, _skipped);
           minor_idx++;
@@ -3989,7 +3980,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       UNIFIED_ADAPTIVE_COMMIT(true);
       if (limit_reached) break;
       continue;
-      }
 
       if (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
         goto unified_scanner_eof;
