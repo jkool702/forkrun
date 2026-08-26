@@ -2268,6 +2268,15 @@ static int ring_init_main(int argc, char **argv) {
   if (vals[4] > vals[5])
     vals[4] = vals[5];
 
+  // Hard-max sentinel (-1/+0): ceiling must allow >= 2 workers per node,
+  // even under --nodes=@N oversubscription beyond core count.
+  {
+    int wb_code = (cfg_state >> SH_W_B) & 0xF;
+    if (global_num_nodes > 1 && wb_code == S_MAX &&
+        vals[1] < (uint64_t)(2 * global_num_nodes))
+      vals[1] = 2 * global_num_nodes;
+  }
+
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     uint64_t w_start_balanced = vals[0] / global_num_nodes;
     if (w_start_balanced < 1)

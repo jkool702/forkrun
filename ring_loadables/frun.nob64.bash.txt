@@ -146,7 +146,8 @@ frun() {
         for nn in "${@##\-*}"; do
             [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && ! [[ " ${FORKRUN_EXTRA_FUNCS} " == *" ${nn} "* ]] && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
-        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} ${FORKRUN_TRUST_RESUME:+FORKRUN_TRUST_RESUME} "
+        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} ${FORKRUN_TRUST_RESUME:+FORKRUN_TRUST_RESUME} ${FORKRUN_DEBUG:+FORKRUN_DEBUG} "
+
 
         local FORKRUN_FRUN_SRC="ulimit -n $(ulimit -Hn)"$'\n'
         FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; declare -p -- ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
@@ -242,25 +243,13 @@ frun __exec__ "$@"
 
             _expand_unit "$v2"; ring_init_opts+=("--${type}-max=${REPLY}")
             [[ $REPLY ]] && case "${type}" in
-                workers)
-                    case "$REPLY" in
-                        0)  nWorkersMax="$(nproc)" ;;
-                        -1) nWorkersMax="$(( $(nproc) * 2 ))" ;;
-                        *)  nWorkersMax="${REPLY}" ;;
-                    esac
-                    ;;
+                workers)  nWorkersMax="${REPLY}" ;;
                 lines)    byte_mode_flag=false   ;;
             esac
          else
             _expand_unit "$val"; ring_init_opts+=("--${type}=${REPLY}")
             case "${type}" in
-                workers)
-                    case "$REPLY" in
-                        0)  nWorkersMax="$(nproc)" ;;
-                        -1) nWorkersMax="$(( $(nproc) * 2 ))" ;;
-                        *)  [[ $REPLY ]] && nWorkersMax="${REPLY}" ;;
-                    esac
-                    ;;
+                workers)  [[ $REPLY ]] && nWorkersMax="${REPLY}" ;;
                 lines)    byte_mode_flag=false   ;;
                 bytes)    byte_mode_flag=true    ;;
             esac
@@ -750,7 +739,7 @@ toc() {
 toc() { :; }
     fi
 
-    : "${nWorkersMax:=$(nproc)}"
+    : "${nWorkersMax:=0}"
 
     # Resolve Default Modes
     [[ -z ${stdin_flag} ]] && {
@@ -890,6 +879,24 @@ toc() { :; }
     if [[ -n "${exact_lines_val:-}" ]]; then
         _parse_count "lines" "${exact_lines_val}"
         ring_init_opts+=("--exact-lines")
+    fi
+
+    # --- WORKER-COUNT SENTINEL RESOLUTION (topology-aware) ---
+    #   0  = default max -> max(nproc, active_nodes)      [>= 1 worker/node]
+    #   -1 = hard max    -> max(2*nproc, 2*active_nodes)  [>= 2 workers/node]
+    case "${nWorkersMax}" in
+        -1) nWorkersMax=$(( $(nproc) * 2 > FORKRUN_NUM_NODES * 2 ? $(nproc) * 2 : FORKRUN_NUM_NODES * 2 )) ;;
+        0)  nWorkersMax=$(( $(nproc) > FORKRUN_NUM_NODES ? $(nproc) : FORKRUN_NUM_NODES )) ;;
+    esac
+
+    # --- WORKER / NUMA RECONCILIATION ---
+    # Ensure no NUMA node is left with 0 workers (which causes starvation/hangs).
+    if (( FORKRUN_NUM_NODES > 1 && nWorkersMax < FORKRUN_NUM_NODES )); then
+        if [[ "${parsed_numa_nodes_arg}" == "auto" ]]; then
+            _forkrun_build_numa_map "$nWorkersMax"
+        else
+            nWorkersMax=$FORKRUN_NUM_NODES
+        fi
     fi
 
     if [[ -n "$numa_map_str" ]]; then
