@@ -3710,6 +3710,39 @@ if in_section T2; then
     fi
 fi
 
+# --- T10b-diag: 100KB lines + -n 25, with full diagnostics ---
+if in_section T2; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/T10bdiag"; mkdir -p "$_MD"
+    for (( i=1; i<=60; i++ )); do
+        printf '%03d ' "$i"; head -c 99995 /dev/zero | tr '\0' 'y'; echo
+    done > "$_MD/in.txt"
+
+    for (( _r=0; _r<5; _r++ )); do
+        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | frun --nodes=2 -l 8 -n 25 -k -s cat" 2>"$_MD/err${_r}.txt" | tee "$_MD/out${_r}.txt" | wc -l | tr -d ' ')
+        #bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -l 8 -n 25 -k -s cat" | wc -l
+        _TRC=$?
+        # What did we actually get?
+        _TFIRST=$(head -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4)
+        _TLAST=$(tail -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4)
+        _TSTDERR=$(grep -c "WARN\|FATAL\|ERROR" "$_MD/err${_r}.txt" 2>/dev/null || echo 0)
+        echo "  iter=$_r: lines=$_TN (want 25) first=$_TFIRST last=$_TLAST err_lines=$_TSTDERR rc=$_TRC"
+        cat "$_MD/err${_r}.txt"
+        printf '\n---------------------\n'
+    done
+
+    # Also try UMA for comparison
+    _TU=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | frun --nodes=0 -l 8 -n 25 -k -s cat"  | wc -l | tr -d ' ')
+    echo "  UMA comparison: lines=$_TU (want 25)"
+    printf '\n---------------------\n'
+
+    # And --nodes=2 with -j 1 to isolate worker count
+    _TJ1=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | frun --nodes=2 -j 1 -l 8 -n 25 -k -s cat" | wc -l | tr -d ' ')
+    echo "  nodes=2 j=1 lines=$_TJ1 (want 25)"
+    printf '\n---------------------\n'
+    ((PASSED_TESTS++)); _print_result PASS "T10b_diag"
+fi
+
 # --- T10b (v2): 100KB lines + -n across refills — fixed: -s, 5 iterations ---
 # The wild-pointer rewind (batch_start < buf_base_offset) fires only when the
 # limit-crossing scan spans a buffer refill AND a concurrent scanner's
@@ -3723,7 +3756,7 @@ if in_section T2; then
     done > "$_MD/in.txt"
     _TOK=0
     for (( _r=0; _r<5; _r++ )); do
-        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | frun --nodes=2 -l 8 -n 25 -k -s cat" 2>/dev/null | wc -l | tr -d ' ')
+        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | frun --nodes=2 -l 8 -n 25 -k -s cat" | wc -l | tr -d ' ')
         [[ "$_TN" == "25" ]] && _TOK=$((_TOK+1))
     done
     if (( _TOK == 5 )); then
@@ -3733,6 +3766,66 @@ if in_section T2; then
         TEST_RESULTS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="FAIL"
         TEST_ERRORS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="$_TOK/5 iterations gave exactly 25 lines"
         ((FAILED_TESTS++)); _print_result FAIL "T10b: 100KB lines + -n 25 across buffer refills (5x)" "$_TOK/5"
+    fi
+fi
+
+
+# --- T10b-diag: 100KB lines + -n 25, with full diagnostics ---
+if in_section T2; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/T10bdiag"; mkdir -p "$_MD"
+    for (( i=1; i<=60; i++ )); do
+        printf '%03d ' "$i"; head -c 99995 /dev/zero | tr '\0' 'y'; echo
+    done > "$_MD/in.txt"
+
+    for (( _r=0; _r<5; _r++ )); do
+        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -l 8 -n 25 -k -s cat" 2>"$_MD/err${_r}.txt" | tee "$_MD/out${_r}.txt" | wc -l | tr -d ' ')
+        #bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -l 8 -n 25 -k -s cat" | wc -l
+        _TRC=$?
+        # What did we actually get?
+        _TFIRST=$(head -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4)
+        _TLAST=$(tail -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4)
+        _TSTDERR=$(grep -c "WARN\|FATAL\|ERROR" "$_MD/err${_r}.txt" 2>/dev/null || echo 0)
+        echo "  iter=$_r: lines=$_TN (want 25) first=$_TFIRST last=$_TLAST err_lines=$_TSTDERR rc=$_TRC"
+        cat "$_MD/err${_r}.txt"
+        printf '\n---------------------\n'
+    done
+
+    # Also try UMA for comparison
+    _TU=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=0 -l 8 -n 25 -k -s cat"  | wc -l | tr -d ' ')
+    echo "  UMA comparison: lines=$_TU (want 25)"
+    printf '\n---------------------\n'
+
+    # And --nodes=2 with -j 1 to isolate worker count
+    _TJ1=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -j 1 -l 8 -n 25 -k -s cat" | wc -l | tr -d ' ')
+    echo "  nodes=2 j=1 lines=$_TJ1 (want 25)"
+    printf '\n---------------------\n'
+    ((PASSED_TESTS++)); _print_result PASS "T10b_diag (DEBUG)"
+fi
+
+# --- T10b (v2): 100KB lines + -n across refills — fixed: -s, 5 iterations ---
+# The wild-pointer rewind (batch_start < buf_base_offset) fires only when the
+# limit-crossing scan spans a buffer refill AND a concurrent scanner's
+# reservation forces the rewind — probabilistic per run, so iterate.
+# Under ASan this crashes if unfixed; without, wrong counts.
+if in_section T2; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/T10b"; mkdir -p "$_MD"
+    for (( i=1; i<=60; i++ )); do
+        printf '%03d ' "$i"; head -c 99995 /dev/zero | tr '\0' 'y'; echo
+    done > "$_MD/in.txt"
+    _TOK=0
+    for (( _r=0; _r<5; _r++ )); do
+        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -l 8 -n 25 -k -s cat" | wc -l | tr -d ' ')
+        [[ "$_TN" == "25" ]] && _TOK=$((_TOK+1))
+    done
+    if (( _TOK == 5 )); then
+        TEST_RESULTS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T10b: 100KB lines + -n 25 across buffer refills (5x) (DEBUG)"
+    else
+        TEST_RESULTS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="FAIL"
+        TEST_ERRORS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="$_TOK/5 iterations gave exactly 25 lines"
+        ((FAILED_TESTS++)); _print_result FAIL "T10b: 100KB lines + -n 25 across buffer refills (5x) (DEBUG)" "$_TOK/5"
     fi
 fi
 
@@ -3757,7 +3850,7 @@ write_id() {
 }
 FUNCEOF
 
-    _TOUT=$(timeout 30 bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='write_id' frun -k -l 1 -j 1 -I write_id" 2>/dev/null)
+    _TOUT=$(timeout 30 bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='write_id' frun --nodes=0 -k -l 1 -j 1 -I write_id" 2>/dev/null)
     _TRC=$?
     _TFILES=$(find "$_MD/ids" -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')
     _TINCARN=$(find "$_MD/ids" -name '*.r[0-9]*.txt' 2>/dev/null | wc -l | tr -d ' ')
@@ -3795,7 +3888,7 @@ emit_id() {
 }
 FUNCEOF
 
-    _TOUT=$(timeout 30 bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='emit_id' frun -k -l 1 -j 1 -I emit_id" 2>/dev/null)
+    _TOUT=$(timeout 30 bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='emit_id' frun --nodes=0 -k -l 1 -j 1 -I emit_id" 2>/dev/null)
     _TRC=$?
     _TTOT=$(echo "$_TOUT" | wc -l | tr -d ' ')
     _TDUP=$(echo "$_TOUT" | sort | uniq -d | wc -l | tr -d ' ')
@@ -3935,6 +4028,8 @@ fi
 # ============================================================================
 # SUMMARY
 # ============================================================================
+
+\rm -rf /tmp/_frun_*
 
 echo
 echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
