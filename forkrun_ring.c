@@ -3862,136 +3862,133 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       uint64_t my_head = atomic_load_acquire(&t_state->chunk_ready_head);
       bool global_eof = (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0);
 
-      if (my_tail >= my_head) {
-        bool workers_starved = (atomic_load_relaxed(&local_state->read_idx) ==
-                                atomic_load_relaxed(&local_state->write_idx));
-        bool local_exhausted =
-            (my_tail >= atomic_load_acquire(&t_state->chunk_queue_head));
+      // ... [KEEP EXISTING STEALING LOGIC HERE] ...
 
-        bool extreme_starvation =
-            (global_eof && local_exhausted && workers_starved);
+      uint64_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
+      meta = &g_state->meta_ring[current_major & META_RING_MASK];
 
-        int max_bl = 0, best_ready_bl = 0, ready_target = -1,
-            fallback_target = -1;
-        bool any_valid_backlog = false;
+      uint64_t act_end_flag = atomic_load_acquire(&meta->actual_end);
+      uint64_t actual_end = act_end_flag & ~FLAG_META_READY;
 
-        for (int i = 0; i < num_nodes; i++) {
-          if (i == my_node_id)
-            continue;
-
-          uint64_t h = atomic_load_acquire(&state[i].chunk_ready_head);
-          uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
-
-          if (h > t) {
-            int bl = (int)(h - t);
-            int required_bl =
-                extreme_starvation ? 1 : local_state->steal_threshold[i];
-
-            if (bl >= required_bl) {
-              any_valid_backlog = true;
-              if (bl > max_bl) {
-                max_bl = bl;
-                fallback_target = i;
-              }
-
-              bool ready = true;
-              if (atomic_load_acquire(&state[i].write_idx) == 0)
-                ready = false;
-              if (ready && bl > best_ready_bl) {
-                best_ready_bl = bl;
-                ready_target = i;
-              }
-            }
-          }
-        }
-
-        if (!any_valid_backlog) {
-          if (global_eof && local_exhausted) {
-            goto unified_scanner_eof;
-          }
-        } else {
-          if (ready_target != -1)
-            steal_target = ready_target;
-          else if (fallback_target != -1)
-            steal_target = fallback_target;
-        }
-
-        if (steal_target == my_node_id) {
-          int _starve_spin = 0;
-          int max_spin = global_eof ? 10 : 1000;
-          while (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail &&
-                 _starve_spin < max_spin) {
-            cpu_relax();
-            _starve_spin++;
-          }
-
-          if (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail) {
-            __atomic_fetch_add(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
-
-            if (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail) {
-              struct pollfd pfds[2] = {
-                  {.fd = evfd_meta_arr[my_node_id], .events = POLLIN},
-                  {.fd = evfd_ingest_eof, .events = POLLIN}};
-              poll(pfds, 2, -1);
-              if (atomic_load_relaxed(&state[0].emergency_abort)) {
-                  __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
-                  goto unified_scanner_eof;
-              }
-              if (pfds[0].revents & POLLIN) {
-                uint64_t v;
-                sys_read(evfd_meta_arr[my_node_id], &v, 8);
-              }
-            }
-            __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
-          }
-          continue;
-        }
-
-        t_state = &state[steal_target];
+      uint64_t actual_start = 0;
+      struct ChunkMeta *prev_meta_ptr = NULL;
+      if (current_major > 0) {
+        prev_meta_ptr = &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
+        uint64_t prev_act_end;
+        uint32_t tnode = prev_meta_ptr->target_node;
+        WAIT_FOR_META_READY(prev_act_end, prev_meta_ptr, tnode, goto unified_scanner_eof);
+        actual_start = prev_act_end & ~FLAG_META_READY;
       }
 
-      uint64_t claim_idx =
-          __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
+      // 1. INITIALIZE SCAN AHEAD (DO NOT WAIT FOR CUM_LINES YET)
+      chunk_lines_scanned = 0;
+      chunk_start_scan_idx = local_scan_idx;
+      current_p_offset = actual_start;
+      batch_start = actual_start;
+      buf_base_offset = actual_start;
+      p = buf; end = buf;
+      chunk_end = actual_end;
+      minor_idx = 0;
+      chunk_eof_flushed = false;
 
-      uint64_t _one = 1;
-      sys_write(evfd_chunk_done, &_one, 8);
-
-      int meta_spin = 0;
-      int max_meta_spin = global_eof ? 10 : 10000;
-      while (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
-        if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
-          if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx)
-            break;
+      // 2. SCAN AHEAD AND PUBLISH (Gated First Flush)
+      while (current_p_offset < actual_end) {
+        if (p >= end) {
+          uint64_t read_start = current_p_offset;
+          size_t to_read = chunk_sz;
+          if (read_start + to_read > actual_end) to_read = actual_end - read_start;
+          if (to_read > 0) {
+            ssize_t n;
+            do { n = pread(fd_or_memfd, buf, to_read, read_start); } while (n < 0 && errno == EINTR);
+            if (n > 0) { buf_base_offset = read_start; p = buf; end = buf + n; }
+            else break;
+          } else break;
         }
 
-        if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
-          experienced_stall = true;
+        uint64_t lines_found = 0;
+        while (lines_found < L && p < end) {
+          char *nl = memchr(p, delim, end - p);
+          if (nl) { lines_found++; p = nl + 1; }
+          else { p = end; break; }
         }
 
-        if (meta_spin < max_meta_spin) {
-          cpu_relax();
-          meta_spin++;
-        } else {
-          __atomic_fetch_add(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
-          if (atomic_load_acquire(&t_state->chunk_ready_head) > claim_idx) {
-            __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
-            break;
+        if (lines_found > 0) {
+          current_p_offset = buf_base_offset + (p - buf);
+
+          // THE FIRST FLUSH GATE: Wait for cum_lines only when we MUST publish
+          if (limit_items > 0 && !byte_mode && !cum_lines_known) {
+            if (current_major > 0 && prev_meta_ptr) {
+              uint64_t prev_cum_raw;
+              uint32_t tnode = prev_meta_ptr->target_node;
+              WAIT_FOR_CUM_LINES(prev_cum_raw, prev_meta_ptr, tnode, goto unified_scanner_eof);
+              prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            } else {
+              prev_cum_lines = 0;
+            }
+            cum_lines_known = true;
+
+            // CHECK LIMIT SKIP
+            uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
+            if ((cutoff > 0 && current_major >= cutoff) || prev_cum_lines >= limit_items) {
+              local_scan_idx = chunk_start_scan_idx;
+              goto numa_chunk_skip;
+            }
+
+            // CROSSING SCANNER CLAMP CHECK
+            uint64_t running_total = prev_cum_lines + chunk_lines_scanned + lines_found;
+            if (running_total >= limit_items) {
+              uint64_t allowed = limit_items - (prev_cum_lines + chunk_lines_scanned);
+              if (allowed < lines_found) {
+                // Rewind p to find exactly 'allowed' lines
+                int64_t bs_rel = (int64_t)batch_start - (int64_t)buf_base_offset;
+                if (bs_rel >= 0 && bs_rel <= (int64_t)(end - buf)) {
+                  char *rewind_p = buf + bs_rel;
+                  for (uint64_t _k = 0; _k < allowed; _k++) {
+                    char *nl = memchr(rewind_p, delim, end - rewind_p);
+                    if (nl) rewind_p = nl + 1; else break;
+                  }
+                  p = rewind_p;
+                }
+                lines_found = allowed;
+                current_p_offset = buf_base_offset + (p - buf);
+              }
+              limit_reached = true;
+              atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
+            }
           }
-          struct pollfd pfds[2] = {
-              {.fd = evfd_meta_arr[steal_target], .events = POLLIN},
-              {.fd = evfd_ingest_eof, .events = POLLIN}};
-          poll(pfds, 2, -1);
-          if (atomic_load_relaxed(&state[0].emergency_abort)) {
-              __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
-              goto unified_scanner_eof;
-          }
-          if (pfds[0].revents & POLLIN) {
-            uint64_t v;
-            sys_read(evfd_meta_arr[steal_target], &v, 8);
-          }
-          __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
-          meta_spin = 0;
+
+          // PUBLISH BATCH AND COMMIT TO WORKERS
+          bool _skipped = false;
+          UNIFIED_SCANNER_FLUSH(false, meta->major_id, minor_idx, current_p_offset, _skipped);
+          minor_idx++;
+          batch_start = current_p_offset;
+          chunk_lines_scanned += lines_found;
+
+          bool _starving = (atomic_load_relaxed(&local_state->active_waiters) > 0);
+          UNIFIED_ADAPTIVE_COMMIT(_starving);
+
+          if (limit_reached) break;
         }
+      }
+
+      // 3. CHUNK END: PUBLISH cum_lines AND EOF SENTINEL
+      if (limit_items > 0 && !byte_mode) {
+        uint64_t my_cum_lines = prev_cum_lines + chunk_lines_scanned;
+        atomic_store_release(&meta->cum_lines, my_cum_lines | FLAG_CUM_READY);
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
+        if (mw > 0) { uint64_t v = mw; sys_write(evfd_meta_arr[meta->target_node], &v, 8); }
+      }
+
+      if (!chunk_eof_flushed) {
+        bool _skipped = false;
+        UNIFIED_SCANNER_FLUSH(true, meta->major_id, minor_idx, current_p_offset, _skipped);
+        if (!_skipped) { chunk_bounds[cb_head & 15] = local_scan_idx; cb_head++; }
+      }
+
+      UNIFIED_ADAPTIVE_COMMIT(true);
+      if (limit_reached) break;
+      continue;
       }
 
       if (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
