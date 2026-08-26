@@ -1358,41 +1358,53 @@ struct ChunkMeta {
     }                                                                         \
   } while (0)
 
-#define WAIT_FOR_CUM_LINES(out_var, meta_ptr, node_var, on_abort_stmt)         \
-  do {                                                                         \
-    int _wcl_spin = 0;                                                         \
-    while (!(((out_var) = atomic_load_acquire(&(meta_ptr)->cum_lines)) &       \
-             FLAG_CUM_READY)) {                                                \
-      if (_wcl_spin < 10000) {                                                 \
-        cpu_relax();                                                           \
-        _wcl_spin++;                                                           \
-      } else {                                                                 \
-        __atomic_fetch_add(&state[(node_var)].meta_waiters, 1,                 \
-                            __ATOMIC_SEQ_CST);                                 \
-        if (((out_var) = atomic_load_acquire(&(meta_ptr)->cum_lines)) &        \
-            FLAG_CUM_READY) {                                                  \
-          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
-                              __ATOMIC_SEQ_CST);                               \
-          break;                                                               \
-        }                                                                      \
-        struct pollfd _wcl_pfds[2] = {                                         \
-            {.fd = evfd_meta_arr[(node_var)], .events = POLLIN},               \
-            {.fd = evfd_ingest_eof, .events = POLLIN}};                        \
-        poll(_wcl_pfds, 2, -1);                                                \
-        if (atomic_load_relaxed(&state[0].emergency_abort)) {                  \
-          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
-                              __ATOMIC_SEQ_CST);                               \
-          on_abort_stmt;                                                       \
-        }                                                                      \
-        if (_wcl_pfds[0].revents & POLLIN) {                                   \
-          uint64_t _wcl_v;                                                     \
-          sys_read(evfd_meta_arr[(node_var)], &_wcl_v, 8);                     \
-        }                                                                      \
-        __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,                 \
-                            __ATOMIC_SEQ_CST);                                 \
-        _wcl_spin = 0;                                                         \
-      }                                                                        \
-    }                                                                          \
+
+// Like WAIT_FOR_CUM_LINES, but with a cutoff escape: if the global -n cutoff
+// is set and (my_major + 1) > cutoff, the predecessor's count will NEVER be
+// published (its scanner exited via limit_reached without claiming it).
+// Bounded poll is mandatory: ingest may be blocked in queue gating, so
+// evfd_ingest_eof may never fire and poll(-1) would sleep through the cutoff.
+#define WAIT_FOR_CUM_LINES_OR_CUTOFF(out_var, meta_ptr, node_var, my_major,    \
+                                     out_past, on_abort_stmt)                   \
+  do {                                                                          \
+    int _wcl_spin = 0;                                                          \
+    (out_past) = false;                                                         \
+    while (1) {                                                                 \
+      uint64_t _raw = atomic_load_acquire(&(meta_ptr)->cum_lines);              \
+      if (_raw & FLAG_CUM_READY) { (out_var) = _raw; break; }                   \
+      uint64_t _co = atomic_load_acquire(&g_state->limit_cutoff_major);         \
+      if (_co > 0 && ((uint64_t)(my_major) + 1) > _co) {                        \
+        (out_past) = true; break;                                               \
+      }                                                                         \
+      if (atomic_load_relaxed(&state[0].emergency_abort)) { on_abort_stmt; }    \
+      if (_wcl_spin < 10000) { cpu_relax(); _wcl_spin++; }                      \
+      else {                                                                    \
+        __atomic_fetch_add(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST);\
+        _raw = atomic_load_acquire(&(meta_ptr)->cum_lines);                     \
+        _co = atomic_load_acquire(&g_state->limit_cutoff_major);                \
+        if (_raw & FLAG_CUM_READY) {                                            \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST); \
+          (out_var) = _raw; break;                                              \
+        }                                                                       \
+        if (_co > 0 && ((uint64_t)(my_major) + 1) > _co) {                      \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST); \
+          (out_past) = true; break;                                             \
+        }                                                                       \
+        struct pollfd _wcl_pfds[2] = {                                          \
+            {.fd = evfd_meta_arr[(node_var)], .events = POLLIN},                \
+            {.fd = evfd_ingest_eof, .events = POLLIN}};                         \
+        poll(_wcl_pfds, 2, 100);                                                \
+        if (atomic_load_relaxed(&state[0].emergency_abort)) {                   \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST); \
+          on_abort_stmt;                                                        \
+        }                                                                       \
+        if (_wcl_pfds[0].revents & POLLIN) {                                    \
+          uint64_t _wcl_v; sys_read(evfd_meta_arr[(node_var)], &_wcl_v, 8);     \
+        }                                                                       \
+        __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST); \
+        _wcl_spin = 0;                                                          \
+      }                                                                         \
+    }                                                                           \
   } while (0)
 
 
@@ -3650,11 +3662,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   // v3.5: Cumulative chain state for deterministic -n
   uint64_t prev_cum_lines = 0;
   uint64_t chunk_lines_scanned = 0;
-  // v3.5 stage 2: Publication-gated count chain
-  bool cum_lines_known = false;
-  uint64_t chunk_start_scan_idx = 0;
-  struct ChunkMeta *prev_chunk_meta = NULL;
-  uint32_t prev_chunk_node = 0;
 
   atomic_store_relaxed(&local_state->write_idx, 0);
   atomic_store_relaxed(&local_state->read_idx, 0);
@@ -3849,7 +3856,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     uint64_t chunk_end = ~(uint64_t)0;
     uint64_t current_p_offset;
     struct ChunkMeta *meta = NULL;
-    uint64_t current_major = 0;
     uint32_t minor_idx = 0;
     bool chunk_eof_flushed = false;
     bool limit_reached = false;
@@ -3868,6 +3874,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                                 atomic_load_relaxed(&local_state->write_idx));
         bool local_exhausted =
             (my_tail >= atomic_load_acquire(&t_state->chunk_queue_head));
+
         bool extreme_starvation =
             (global_eof && local_exhausted && workers_starved);
 
@@ -3876,59 +3883,89 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         bool any_valid_backlog = false;
 
         for (int i = 0; i < num_nodes; i++) {
-          if (i == my_node_id) continue;
+          if (i == my_node_id)
+            continue;
+
           uint64_t h = atomic_load_acquire(&state[i].chunk_ready_head);
           uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
+
           if (h > t) {
             int bl = (int)(h - t);
             int required_bl =
                 extreme_starvation ? 1 : local_state->steal_threshold[i];
+
             if (bl >= required_bl) {
               any_valid_backlog = true;
-              if (bl > max_bl) { max_bl = bl; fallback_target = i; }
+              if (bl > max_bl) {
+                max_bl = bl;
+                fallback_target = i;
+              }
+
               bool ready = true;
-              if (atomic_load_acquire(&state[i].write_idx) == 0) ready = false;
-              if (ready && bl > best_ready_bl) { best_ready_bl = bl; ready_target = i; }
+              if (atomic_load_acquire(&state[i].write_idx) == 0)
+                ready = false;
+              if (ready && bl > best_ready_bl) {
+                best_ready_bl = bl;
+                ready_target = i;
+              }
             }
           }
         }
 
         if (!any_valid_backlog) {
-          if (global_eof && local_exhausted) goto unified_scanner_eof;
+          // --- PHYSICS FIX: Instant NUMA Tear-down ---
+          if (global_eof && local_exhausted) {
+            goto unified_scanner_eof;
+          }
         } else {
-          if (ready_target != -1) steal_target = ready_target;
-          else if (fallback_target != -1) steal_target = fallback_target;
+          if (ready_target != -1)
+            steal_target = ready_target;
+          else if (fallback_target != -1)
+            steal_target = fallback_target;
         }
 
+        // FIXED NUMA LATENCY BUBBLE: Don't claim an empty local queue
+        // If completely starved, yield to the OS to prevent 100% CPU spinning.
         if (steal_target == my_node_id) {
           int _starve_spin = 0;
           int max_spin = global_eof ? 10 : 1000;
+          // Spin briefly to handle micro-stalls without OS context-switching
           while (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail &&
-                 _starve_spin < max_spin) { cpu_relax(); _starve_spin++; }
+                 _starve_spin < max_spin) {
+            cpu_relax();
+            _starve_spin++;
+          }
+
+          // If STILL starved after spinning, yield the CPU
           if (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail) {
             __atomic_fetch_add(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
+
+            // Double check to prevent race conditions before sleeping
             if (atomic_load_acquire(&t_state->chunk_ready_head) <= my_tail) {
               struct pollfd pfds[2] = {
                   {.fd = evfd_meta_arr[my_node_id], .events = POLLIN},
                   {.fd = evfd_ingest_eof, .events = POLLIN}};
               poll(pfds, 2, -1);
               if (atomic_load_relaxed(&state[0].emergency_abort)) {
-                __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
-                goto unified_scanner_eof;
+                  __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
+                  goto unified_scanner_eof;
               }
               if (pfds[0].revents & POLLIN) {
-                uint64_t v; sys_read(evfd_meta_arr[my_node_id], &v, 8);
+                uint64_t v;
+                sys_read(evfd_meta_arr[my_node_id], &v, 8);
               }
             }
             __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
           }
           continue;
         }
+
         t_state = &state[steal_target];
       }
 
       uint64_t claim_idx =
           __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
+
       uint64_t _one = 1;
       sys_write(evfd_chunk_done, &_one, 8);
 
@@ -3936,12 +3973,18 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       int max_meta_spin = global_eof ? 10 : 10000;
       while (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
         if (atomic_load_acquire(&g_state->ingest_eof_idx) != ~(uint64_t)0) {
-          if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) break;
+          if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx)
+            break;
         }
-        if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx)
+
+        if (atomic_load_acquire(&t_state->chunk_queue_head) <= claim_idx) {
           experienced_stall = true;
-        if (meta_spin < max_meta_spin) { cpu_relax(); meta_spin++; }
-        else {
+        }
+
+        if (meta_spin < max_meta_spin) {
+          cpu_relax();
+          meta_spin++;
+        } else {
           __atomic_fetch_add(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
           if (atomic_load_acquire(&t_state->chunk_ready_head) > claim_idx) {
             __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
@@ -3952,227 +3995,149 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               {.fd = evfd_ingest_eof, .events = POLLIN}};
           poll(pfds, 2, -1);
           if (atomic_load_relaxed(&state[0].emergency_abort)) {
-            __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
-            goto unified_scanner_eof;
+              __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
+              goto unified_scanner_eof;
           }
           if (pfds[0].revents & POLLIN) {
-            uint64_t v; sys_read(evfd_meta_arr[steal_target], &v, 8);
+            uint64_t v;
+            sys_read(evfd_meta_arr[steal_target], &v, 8);
           }
           __atomic_fetch_sub(&t_state->meta_waiters, 1, __ATOMIC_SEQ_CST);
           meta_spin = 0;
         }
       }
-      if (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx)
-        goto unified_scanner_eof;
 
-      __atomic_fetch_add(&state[my_node_id].stats_chunks_processed, 1, __ATOMIC_RELAXED);
-      if (steal_target != my_node_id) {
-        __atomic_fetch_add(&state[my_node_id].stats_chunks_i_stole, 1, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&state[steal_target].stats_chunks_stolen_from_me, 1, __ATOMIC_RELAXED);
+      if (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
+        // We reached EOF and the claimed chunk does not exist. Safe to exit.
+        goto unified_scanner_eof;
       }
 
-      current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
+      // PHYSICS FIX: Double-entry chunk accounting.
+      __atomic_fetch_add(&state[my_node_id].stats_chunks_processed, 1,
+                         __ATOMIC_RELAXED);
+      if (steal_target != my_node_id) {
+        __atomic_fetch_add(&state[my_node_id].stats_chunks_i_stole, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_fetch_add(&state[steal_target].stats_chunks_stolen_from_me, 1,
+                           __ATOMIC_RELAXED);
+      }
+
+      uint64_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
       meta = &g_state->meta_ring[current_major & META_RING_MASK];
-      uint64_t actual_end = atomic_load_acquire(&meta->actual_end) & ~FLAG_META_READY;
+
+      uint64_t act_end_flag = atomic_load_acquire(&meta->actual_end);
+      uint64_t actual_end = act_end_flag & ~FLAG_META_READY;
 
       uint64_t actual_start = 0;
-      struct ChunkMeta *prev_meta_ptr = NULL;
       if (current_major > 0) {
-        prev_meta_ptr = &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
+        struct ChunkMeta *prev_meta =
+            &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
         uint64_t prev_act_end;
-        WAIT_FOR_META_READY(prev_act_end, prev_meta_ptr, prev_meta_ptr->target_node,
-                            goto unified_scanner_eof);
+        uint32_t tnode = prev_meta->target_node;
+        WAIT_FOR_META_READY(prev_act_end, prev_meta, tnode,
+                             goto unified_scanner_eof);
         actual_start = prev_act_end & ~FLAG_META_READY;
-      }
 
-      // v3.5: re-arm the publication gate for THIS chunk (fixes stale-count leak)
-      chunk_lines_scanned = 0;
-      chunk_start_scan_idx = local_scan_idx;
-      cum_lines_known = false;
-      prev_cum_lines = 0;
-      prev_chunk_meta = prev_meta_ptr;
-      prev_chunk_node = prev_meta_ptr ? prev_meta_ptr->target_node : 0;
-      bool current_stall = experienced_stall;
-      experienced_stall = false;
-
-      // Byte-mode limit: clamp/skip at chunk granularity
-      if (byte_mode && limit_items > 0) {
-        if (actual_start >= limit_items) actual_end = actual_start;
-        else if (actual_end > limit_items) actual_end = limit_items;
-      }
-
-      // EMPTY CHUNK: resolve count chain, emit sentinel, move on
-      if (actual_start >= actual_end) {
+        // v3.5: Cumulative Line Count Chain Gating
+        // EOF-HANG FIX: never wait for a count a dead scanner will never
+        // publish. If the cutoff is already set and this whole chunk is past
+        // it, skip immediately; if not, the wait re-checks the cutoff every
+        // iteration (the crossing scanner can set it while we're blocked).
         if (limit_items > 0 && !byte_mode) {
-          if (prev_meta_ptr) {
+          bool past_cutoff = false;
+          uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
+          if (cutoff > 0 && (current_major + 1) > cutoff) {
+            past_cutoff = true;
+          } else {
             uint64_t prev_cum_raw;
-            WAIT_FOR_CUM_LINES(prev_cum_raw, prev_meta_ptr, prev_chunk_node,
-                               goto unified_scanner_eof);
-            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+            WAIT_FOR_CUM_LINES_OR_CUTOFF(prev_cum_raw, prev_meta, tnode,
+                                         current_major, past_cutoff,
+                                         goto unified_scanner_eof);
+            if (!past_cutoff)
+              prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
           }
-          cum_lines_known = true;
+
+          if (past_cutoff) {
+            // Our entire chunk is past the limit. Skip scanning!
+            // Sentinel (>= limit) so any reader that misses the cutoff still
+            // computes a zero budget and propagates the skip down the chain.
+            prev_cum_lines = limit_items;
+            batch_start = actual_start;
+            current_p_offset = actual_start;
+
+            bool _skipped = false;
+            UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
+            if (!_skipped) {
+              chunk_bounds[cb_head & 15] = local_scan_idx;
+              cb_head++;
+            }
+            // Propagate cum_lines forward so subsequent chunks also skip cleanly
+            atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
+            if (mw > 0) {
+              uint64_t v = mw;
+              sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+            }
+            UNIFIED_ADAPTIVE_COMMIT(true);
+            continue; // Move to next chunk
+          }
+        } else {
+          prev_cum_lines = 0;
+        }
+      } else {
+        prev_cum_lines = 0;
+      }
+
+      chunk_lines_scanned = 0;
+
+      if (actual_start >= actual_end) {
+        batch_start = actual_start;
+        bool _skipped = false;
+        UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start,
+                              _skipped);
+        if (!_skipped) {
+          chunk_bounds[cb_head & 15] = local_scan_idx;
+          cb_head++;
+        }
+        if (limit_items > 0 && !byte_mode) {
           atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
           __atomic_thread_fence(__ATOMIC_SEQ_CST);
           uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
-          if (mw > 0) { uint64_t v = mw; sys_write(evfd_meta_arr[meta->target_node], &v, 8); }
+          if (mw > 0) {
+            uint64_t v = mw;
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+          }
         }
-        batch_start = actual_start;
-        current_p_offset = actual_start;
-        bool _skipped = false;
-        UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
-        if (!_skipped) { chunk_bounds[cb_head & 15] = local_scan_idx; cb_head++; }
-        UNIFIED_ADAPTIVE_COMMIT(true);
+        if (!_skipped) UNIFIED_ADAPTIVE_COMMIT(true);
         continue;
+      }
+
+      // Check byte-mode limit
+      if (byte_mode && limit_items > 0) {
+        if (actual_start >= limit_items) {
+          // Entire chunk past byte limit: emit empty sentinel and continue
+          batch_start = actual_start;
+          bool _skipped = false;
+          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
+          if (!_skipped) {
+            chunk_bounds[cb_head & 15] = local_scan_idx;
+            cb_head++;
+          }
+          UNIFIED_ADAPTIVE_COMMIT(true);
+          continue;
+        } else if (actual_end > limit_items) {
+          actual_end = limit_items; // Clamp exact crossing byte
+        }
       }
 
       chunk_end = actual_end;
       current_p_offset = actual_start;
-      batch_start = actual_start;
-      buf_base_offset = actual_start;
-      p = buf; end = buf;
-      minor_idx = 0;
-      chunk_eof_flushed = false;
+      batch_start = current_p_offset;
+      buf_base_offset = current_p_offset;
+      p = buf;
+      end = buf;
 
-      // SCAN + PUBLISH loop: gate at first publish, clamp on EVERY batch
-      while (current_p_offset < actual_end) {
-        if (p >= end) {
-          uint64_t read_start = current_p_offset;
-          size_t to_read = chunk_sz;
-          if (read_start + to_read > actual_end) to_read = actual_end - read_start;
-          if (to_read > 0) {
-            ssize_t n;
-            do { n = pread(fd_or_memfd, buf, to_read, read_start); } while (n < 0 && errno == EINTR);
-            if (n > 0) { buf_base_offset = read_start; p = buf; end = buf + n; }
-            else break;
-          } else break;
-        }
-
-        uint64_t lines_found = 0;
-        while (lines_found < L && p < end) {
-          char *nl = memchr(p, delim, end - p);
-          if (nl) { lines_found++; p = nl + 1; }
-          else { p = end; break; }
-        }
-
-        if (lines_found == 0) {
-          current_p_offset = buf_base_offset + (p - buf);
-          continue; // refill
-        }
-
-        // (a) PUBLICATION GATE: resolve count chain exactly once, before the
-        //     first slot of this chunk becomes visible. Nothing for this chunk
-        //     has been flushed yet, so there is nothing to un-publish.
-        if (limit_items > 0 && !byte_mode && !cum_lines_known) {
-          if (prev_meta_ptr) {
-            uint64_t prev_cum_raw;
-            WAIT_FOR_CUM_LINES(prev_cum_raw, prev_meta_ptr, prev_chunk_node,
-                               goto unified_scanner_eof);
-            prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
-          }
-          cum_lines_known = true;
-
-          uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
-          if ((cutoff > 0 && current_major >= cutoff) ||
-              prev_cum_lines >= limit_items) {
-            // Predecessor consumed the limit: emit sentinel, propagate count, skip.
-            local_scan_idx = chunk_start_scan_idx; // nothing flushed yet; no-op safety
-            atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
-            __atomic_thread_fence(__ATOMIC_SEQ_CST);
-            uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
-            if (mw > 0) { uint64_t v = mw; sys_write(evfd_meta_arr[meta->target_node], &v, 8); }
-            batch_start = actual_start;
-            current_p_offset = actual_start;
-            bool _skipped = false;
-            UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
-            if (!_skipped) { chunk_bounds[cb_head & 15] = local_scan_idx; cb_head++; }
-            UNIFIED_ADAPTIVE_COMMIT(true);
-            goto next_chunk;
-          }
-        }
-
-        // (b) INLINE CLAMP: runs on EVERY batch once cum_lines is known.
-        //     Only ever affects the current, not-yet-published batch.
-        if (limit_items > 0 && !byte_mode && cum_lines_known) {
-          uint64_t running_total = prev_cum_lines + chunk_lines_scanned + lines_found;
-          if (running_total >= limit_items) {
-            uint64_t allowed = limit_items - (prev_cum_lines + chunk_lines_scanned);
-            if (allowed < lines_found) {
-              int64_t bs_rel = (int64_t)batch_start - (int64_t)buf_base_offset;
-              if (bs_rel >= 0 && bs_rel <= (int64_t)(end - buf)) {
-                char *rewind_p = buf + bs_rel;
-                for (uint64_t _k = 0; _k < allowed; _k++) {
-                  char *nl = memchr(rewind_p, delim, end - rewind_p);
-                  if (nl) rewind_p = nl + 1; else break;
-                }
-                p = rewind_p;
-                current_p_offset = buf_base_offset + (p - buf);
-              } else {
-                // Batch straddles a buffer refill: re-derive boundary via pread.
-                uint64_t cur_pos = batch_start;
-                uint64_t found = 0;
-                char tmp_buf[4096];
-                while (found < allowed) {
-                  ssize_t rn;
-                  do { rn = pread(fd_or_memfd, tmp_buf, sizeof(tmp_buf), (off_t)cur_pos); }
-                  while (rn < 0 && errno == EINTR);
-                  if (rn <= 0) break;
-                  char *tp = tmp_buf, *te = tmp_buf + rn;
-                  while (found < allowed && tp < te) {
-                    char *nl = memchr(tp, delim, te - tp);
-                    if (nl) { found++; tp = nl + 1; } else tp = te;
-                  }
-                  cur_pos += (uint64_t)(tp - tmp_buf);
-                  if (found >= allowed) break;
-                }
-                buf_base_offset = cur_pos; p = buf; end = buf;
-                current_p_offset = cur_pos;
-              }
-              lines_found = allowed;
-            }
-            limit_reached = true;
-            atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
-          }
-        }
-
-        // (c) PUBLISH + COMMIT inside the loop: workers stay fed during the scan.
-        if (lines_found > 0) {
-          bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(false, meta->major_id, minor_idx, current_p_offset, _skipped);
-          minor_idx++;
-          batch_start = current_p_offset;
-          chunk_lines_scanned += lines_found;
-          total_scanned += lines_found;
-          atomic_store_relaxed(&local_state->total_lines_scanned, total_scanned);
-          if (!_skipped) {
-            atomic_store_relaxed(&local_state->current_batch_size, L);
-            ADAPTIVE_FLOW_CONTROL(local_state, current_stall, my_node_id);
-          }
-          UNIFIED_ADAPTIVE_COMMIT(
-              (atomic_load_relaxed(&local_state->active_waiters) > 0));
-        }
-        if (limit_reached) break;
-      }
-
-      // CHUNK END: publish count for the successor's gate, then the sentinel.
-      if (limit_items > 0 && !byte_mode) {
-        uint64_t my_cum_lines = prev_cum_lines + chunk_lines_scanned;
-        atomic_store_release(&meta->cum_lines, my_cum_lines | FLAG_CUM_READY);
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
-        if (mw > 0) { uint64_t v = mw; sys_write(evfd_meta_arr[meta->target_node], &v, 8); }
-      }
-
-      if (!chunk_eof_flushed) {
-        bool _skipped = false;
-        UNIFIED_SCANNER_FLUSH(true, meta->major_id, minor_idx, current_p_offset, _skipped);
-        if (!_skipped) { chunk_bounds[cb_head & 15] = local_scan_idx; cb_head++; }
-        batch_start = current_p_offset;
-        pending_lines = 0;
-      }
-      UNIFIED_ADAPTIVE_COMMIT(true);
-      if (limit_reached) break;
-next_chunk:
-      continue;
     } else {
       if (status == 1 && p >= end) {
         // UMA EOF with no trailing delimiter: the inner loop consumed
@@ -4548,54 +4513,53 @@ next_chunk:
           }
         }
 
+        // v3.5: Deterministic -n Line Budget Clamping (replaces global_scanned race)
         if (is_numa && limit_items > 0 && !byte_mode && lines_found > 0) {
-          if (cum_lines_known) {
-            uint64_t running_total = prev_cum_lines + chunk_lines_scanned + lines_found;
-            if (running_total >= limit_items) {
-              uint64_t allowed = limit_items - (prev_cum_lines + chunk_lines_scanned);
-              if (allowed < lines_found) {
-                int64_t bs_rel = (int64_t)batch_start - (int64_t)buf_base_offset;
-                if (bs_rel >= 0 && bs_rel <= (int64_t)(end - buf)) {
-                  char *rewind_p = buf + bs_rel;
-                  for (uint64_t _k = 0; _k < allowed; _k++) {
-                    char *nl = memchr(rewind_p, delim, end - rewind_p);
-                    if (nl) rewind_p = nl + 1;
-                    else break;
-                  }
-                  p = rewind_p;
-                } else {
-                  uint64_t cur_pos = batch_start;
-                  uint64_t found = 0;
-                  char tmp_buf[4096];
-                  while (found < allowed) {
-                    ssize_t rn;
-                    do {
-                      rn = pread(fd_or_memfd, tmp_buf, sizeof(tmp_buf), (off_t)cur_pos);
-                    } while (rn < 0 && errno == EINTR);
-                    if (rn <= 0) break;
-                    char *tp = tmp_buf;
-                    char *te = tmp_buf + rn;
-                    while (found < allowed && tp < te) {
-                      char *nl = memchr(tp, delim, te - tp);
-                      if (nl) { found++; tp = nl + 1; }
-                      else { tp = te; }
-                    }
-                    cur_pos += (uint64_t)(tp - tmp_buf);
-                    if (found >= allowed) break;
-                  }
-                  buf_base_offset = cur_pos;
-                  p = buf;
-                  end = buf;
+          uint64_t running_total = prev_cum_lines + chunk_lines_scanned + lines_found;
+
+          if (running_total >= limit_items) {
+            uint64_t allowed = limit_items - (prev_cum_lines + chunk_lines_scanned);
+            if (allowed < lines_found) {
+              // Rewind to the exact delimiter of the allowed-th line
+              int64_t bs_rel = (int64_t)batch_start - (int64_t)buf_base_offset;
+              if (bs_rel >= 0 && bs_rel <= (int64_t)(end - buf)) {
+                char *rewind_p = buf + bs_rel;
+                for (uint64_t _k = 0; _k < allowed; _k++) {
+                  char *nl = memchr(rewind_p, delim, end - rewind_p);
+                  if (nl) rewind_p = nl + 1;
+                  else break;
                 }
-                lines_found = allowed;
+                p = rewind_p;
+              } else {
+                uint64_t cur_pos = batch_start;
+                uint64_t found = 0;
+                char tmp_buf[4096];
+                while (found < allowed) {
+                  ssize_t rn;
+                  do {
+                    rn = pread(fd_or_memfd, tmp_buf, sizeof(tmp_buf), (off_t)cur_pos);
+                  } while (rn < 0 && errno == EINTR);
+                  if (rn <= 0) break;
+                  char *tp = tmp_buf;
+                  char *te = tmp_buf + rn;
+                  while (found < allowed && tp < te) {
+                    char *nl = memchr(tp, delim, te - tp);
+                    if (nl) { found++; tp = nl + 1; }
+                    else { tp = te; }
+                  }
+                  cur_pos += (uint64_t)(tp - tmp_buf);
+                  if (found >= allowed) break;
+                }
+                buf_base_offset = cur_pos;
+                p = buf;
+                end = buf;
               }
-              limit_reached = true;
-              atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
-              if (g_debug) {
-                fprintf(stderr, "forkrun[DEBUG] INLOOP_CLAMP: node=%d major=%lu prev_cum=%lu chunk_scanned=%lu lines_found=%lu allowed=%lu\n",
-                        my_node_id, current_major, prev_cum_lines, chunk_lines_scanned, lines_found, allowed);
-              }
+              lines_found = allowed;
             }
+            limit_reached = true;
+
+            // Publish 1-based cutoff signal BEFORE publishing cum_lines
+            atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
           }
           chunk_lines_scanned += lines_found;
         }
@@ -7959,4 +7923,3 @@ int setup_builtin_forkrun_ring(void) {
 #undef REGISTER_X
   return 0;
 }
-
