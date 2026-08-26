@@ -4105,12 +4105,13 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 numa_chunk_skip:
       if (is_numa && limit_items > 0 && !byte_mode) {
         uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
-        bool skip_by_cutoff = (cutoff > 0 && (current_major + 1) > cutoff);
+        // FIX 1: Use >= so chunk N+1 skips if chunk N set cutoff to N+1
+        bool skip_by_cutoff = (cutoff > 0 && current_major >= cutoff);
         bool skip_by_prev_cum = (cum_lines_known && prev_cum_lines >= limit_items);
+        // FIX 2: If this chunk already hit limit_reached, skip the rest of it!
+        bool skip_by_limit = limit_reached;
 
-        // CRITICAL FIX: Skip if the predecessor already hit the limit,
-        // even if they didn't set the cutoff flag (exact boundary match).
-        if (skip_by_cutoff || skip_by_prev_cum) {
+        if (skip_by_cutoff || skip_by_prev_cum || skip_by_limit) {
           batch_start = actual_start;
           current_p_offset = actual_start;
           bool _skipped = false;
@@ -4633,14 +4634,16 @@ numa_chunk_skip:
 
             // Check if cutoff occurred while we were scanning
             uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
-            if (cutoff > 0 && (current_major + 1) > cutoff) {
+            if (cutoff > 0 && current_major >= cutoff) {
               local_scan_idx = chunk_start_scan_idx;
               goto numa_chunk_skip;
             }
 
             // Clamping check for the first batch
+            // chunk_lines_scanned INCLUDES pending_lines, so running_total is just prev_cum + chunk_lines_scanned
             uint64_t running_total = prev_cum_lines + chunk_lines_scanned;
             if (running_total >= limit_items) {
+              // allowed = limit - (prev_cum + lines_already_flushed_in_this_chunk)
               uint64_t allowed = limit_items - (prev_cum_lines + (chunk_lines_scanned - pending_lines));
               if (allowed < pending_lines) {
                 uint64_t old_pending = pending_lines;
@@ -4684,8 +4687,8 @@ numa_chunk_skip:
               limit_reached = true;
               atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
 
-              // CRITICAL FIX: If allowed == 0, the limit was reached by the predecessor.
-              // We must skip this chunk entirely to prevent leaking the scanned lines!
+              // If allowed == 0, the limit was reached by the predecessor.
+              // goto numa_chunk_skip will now properly skip due to skip_by_limit / skip_by_prev_cum!
               if (allowed == 0) {
                   local_scan_idx = chunk_start_scan_idx;
                   goto numa_chunk_skip;
