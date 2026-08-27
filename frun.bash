@@ -451,39 +451,6 @@ EOF
                 [[ ${arg} ]] && resume_file="${arg}"
                 if [[ -f "$resume_file" ]]; then
 
-                    # --- RESUME FILE SECURITY & OWNERSHIP CHECK ---
-                    local _rf_uid="" _rf_gid="" _rf_mode="" _cur_uid="" _cur_gid=""
-                    read -r _rf_uid _rf_gid _rf_mode < <(stat -L -c '%u %g %a' "$resume_file" 2>/dev/null || stat -L -f '%u %g %Lp' "$resume_file" 2>/dev/null)
-                    _cur_uid="${EUID:-$(id -u)}"
-                    _cur_gid="$(id -g 2>/dev/null || echo "${GROUPS[0]:-0}")"
-
-                    local _perm_mismatch=false
-                    if [[ -z "$_rf_uid" || "$_rf_uid" != "$_cur_uid" ]]; then
-                        _perm_mismatch=true
-                    fi
-                    if [[ -z "$_rf_gid" || ( "$_rf_gid" != "$_cur_gid" && " $(id -G 2>/dev/null) " != *" $_rf_gid "* ) ]]; then
-                        _perm_mismatch=true
-                    fi
-                    if [[ -z "$_rf_mode" ]] || (( 8#${_rf_mode} != 8#600 )); then
-                        _perm_mismatch=true
-                    fi
-
-                    if $_perm_mismatch && [[ "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
-                        if { true; } 2>/dev/null </dev/tty; then
-                            read -p $'\nforkrun [SECURITY WARNING]: Resume file '\''"'"$resume_file"'"'\'' has unexpected ownership or permissions.\n[File]: UID='"$_rf_uid"', GID='"$_rf_gid"', Mode='"$_rf_mode"$'\n[Expected]: UID='"$_cur_uid"', GID='"$_cur_gid"', Mode=600\nResume files can alter parallel execution commands. Do you trust this file and wish to proceed?\n(y/N): ' -n 1 -r -t 60 </dev/tty
-                            echo >&2
-                        else
-                            REPLY="N"
-                            echo "forkrun [SECURITY WARNING]: Resume file '$resume_file' ownership or permissions do not match current user/group or 600 (UID:$_rf_uid GID:$_rf_gid Mode:$_rf_mode), but no interactive TTY is available." >&2
-                            echo "Set FORKRUN_TRUST_RESUME=1 to allow unattended resumption." >&2
-                        fi
-
-                        if [[ ! ${REPLY,,} == 'y' ]]; then
-                            echo "forkrun [ABORT]: Resumption cancelled due to ownership/permission check failure." >&2
-                            return 1
-                        fi
-                    fi
-
                     # 1. Parse Stream Coordinates safely line-by-line without arbitrary code execution
                     local _res_line
                     while IFS= read -r _res_line || [[ -n "$_res_line" ]]; do
@@ -507,14 +474,152 @@ EOF
 
                     resume_flag=true
 
-                    if (( $# == 1 )); then
-                        # FULL AUTO RESUME - safely restore environment
-                        source "$resume_file" 2>/dev/null || {
-                            echo "forkrun [ERROR]: Failed to read resume file '$resume_file'." >&2
+                    # --- v3.5.0: RESUME FILE OWNERSHIP / PERMISSION GATE ---
+                    # The resume file encodes commands (FORKRUN_ORIG_ARGS,
+                    # EXTRA_SETUP/FUNCS/VARS). Filesystem ownership is the
+                    # primary trust boundary: only the file's owner should
+                    # be able to dictate what a resume executes. The sandbox
+                    # below remains the secondary boundary against partial
+                    # tampering (shared dirs, spool artifacts). Both stay.
+                    if (( $# == 1 )) && [[ "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
+                        local _rf_uid _rf_mode _my_uid
+                        read -r _rf_uid _rf_mode < <(stat -Lc '%u %04a' "$resume_file" 2>/dev/null)
+
+                        if [[ -z "${_rf_uid:-}" ]]; then
+                            # Cannot stat (broken symlink, race, perms):
+                            # fail CLOSED. An unvalidatable command file
+                            # must never auto-execute.
+                            echo "forkrun [ABORT]: Cannot stat resume file '$resume_file'. Refusing auto-resume." >&2
                             return 1
-                        }
-                        eval "${FORKRUN_EXTRA_DEFS:-}" 2>/dev/null
-                        [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && eval "${FORKRUN_EXTRA_SETUP}" 2>/dev/null
+                        fi
+
+                        local _rf_reject=""
+                        local _rf_reason=""
+                        _my_uid=$(id -u)
+
+                        if (( _rf_uid != _my_uid )); then
+                            # Not ours: someone else's file is someone
+                            # else's code. HARD reject (override: TRUST=1).
+                            _rf_reject="hard"
+                            _rf_reason="owned by uid ${_rf_uid} (you are ${_my_uid})"
+                        elif (( (8#${_rf_mode:-0} & 0o022) != 0 )); then
+                            # Ours but group/world-writable: anyone sharing
+                            # the dir can rewrite it. Require chmod or trust.
+                            _rf_reject="soft"
+                            _rf_reason="mode ${_rf_mode} is group/world-writable"
+                        fi
+
+                        if [[ -n "$_rf_reject" ]]; then
+                            echo "forkrun [SECURITY]: Resume file '$resume_file' ${_rf_reason}." >&2
+                            if [[ "$_rf_reject" == "hard" ]]; then
+                                echo "                   Refusing automatic resumption." >&2
+                                echo "                   To resume anyway: FORKRUN_TRUST_RESUME=1 frun --resume ..." >&2
+                                return 1
+                            fi
+                            # Soft: interactive confirm, auto-N without a TTY
+                            if { true; } 2>/dev/null </dev/tty; then
+                                read -p $'\nforkrun [SECURITY]: Resume this group/world-writable file anyway? (y/N): ' -n 1 -r -t 60 </dev/tty
+                                echo >&2
+                                if [[ ! ${REPLY,,} == 'y' ]]; then
+                                    echo "forkrun [ABORT]: Resume cancelled by user." >&2
+                                    return 1
+                                fi
+                            else
+                                echo "forkrun [ABORT]: No TTY to confirm. Fix with: chmod go-w '$resume_file'" >&2
+                                echo "                Or set FORKRUN_TRUST_RESUME=1 for unattended resumption." >&2
+                                return 1
+                            fi
+                        fi
+                    fi
+
+                    if (( $# == 1 )); then
+                        # FULL AUTO RESUME - extract and verify execution environment
+                        # NOTE: trust/ownership checks happen in the PARENT before this subprocess; this block must remain tool-free and decision-free
+                        local _secret_token="___FORKRUN_ENV_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        local _secret_end="___FORKRUN_END_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        local parsed_env
+                        parsed_env="$(PATH='' exec -c "${BASH:-bash}" --norc --noprofile --restricted -c '
+                            source "$1" 2>/dev/null || exit 1
+                            eval "${FORKRUN_EXTRA_DEFS:-}" 2>/dev/null
+                            trap - EXIT DEBUG RETURN ERR
+
+                            # Re-render strictly via builtin declare
+                            out=""
+                            out+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT 2>/dev/null)"$'\n'
+                            FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS//[[:space:]$IFS]/ } "
+                            FORKRUN_EXTRA_VARS_A=(${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /})
+                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && out+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}" 2>/dev/null)"$'\n'
+                            out+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP 2>/dev/null)"$'\n'
+                            [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && {
+                                FORKRUN_EXTRA_FUNCS_A=(${FORKRUN_EXTRA_FUNCS})
+                                out+="$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}" 2>/dev/null)"$'\n'
+                            }
+
+                            # Round-trip verification: re-evaluate and assert identical serialization
+                            eval "$out" 2>/dev/null || exit 1
+                            check=""
+                            check+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT 2>/dev/null)"$'\n'
+                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && check+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}" 2>/dev/null)"$'\n'
+                            check+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP 2>/dev/null)"$'\n'
+                            [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && {
+                                check+="$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}" 2>/dev/null)"$'\n'
+                            }
+
+                            if [[ "$out" != "$check" ]]; then
+                                exit 1
+                            fi
+
+                            # Kill any background jobs spawned by the resume file so they
+                            # cannot inject output after our boundary.
+                            for _jp in $(jobs -p 2>/dev/null); do
+                                kill -9 "$_jp" 2>/dev/null
+                            done
+                            wait 2>/dev/null
+
+                            # Single write: token + payload + end-token in ONE buffer
+                            _emit="$2"$'\n'"$out"$'\n'"$3"$'\n'
+                            printf '%s' "$_emit"
+                        ' _ "$resume_file" "$_secret_token" "$_secret_end" 2>/dev/null)"
+
+                        if [[ "$parsed_env" != *"${_secret_token}"* || "$parsed_env" != *"${_secret_end}"* ]]; then
+                            echo "forkrun [ABORT]: Resume file environment verification failed or was intercepted." >&2
+                            return 1
+                        fi
+
+                        parsed_env="${parsed_env##*"${_secret_token}"$'\n'}"
+                        parsed_env="${parsed_env%%$'\n'"${_secret_end}"*}"
+                        eval "$parsed_env"
+
+                        local has_custom_vars=0
+                        for var in ${FORKRUN_EXTRA_VARS:-}; do
+                            if [[ "$var" != "FORKRUN_EXTRA_VARS" && "$var" != "FORKRUN_EXTRA_FUNCS" && "$var" != "FORKRUN_EXTRA_SETUP" ]]; then
+                                has_custom_vars=1
+                                break
+                            fi
+                        done
+
+                        if [[ ( -n "${FORKRUN_EXTRA_SETUP:-}" || -n "${FORKRUN_EXTRA_FUNCS:-}" || "${has_custom_vars:-0}" == "1" ) && "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
+                            local FORKRUN_EXTRA_SETUP_Q
+                            printf -v FORKRUN_EXTRA_SETUP_Q '%q' "${FORKRUN_EXTRA_SETUP}"
+                            [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && FORKRUN_EXTRA_SETUP_Q+=$'\n'"$(declare -f ${FORKRUN_EXTRA_FUNCS})"
+                            (( has_custom_vars == 1 )) && FORKRUN_EXTRA_SETUP_Q+=$'\n'"$(declare -p ${FORKRUN_EXTRA_VARS})"
+
+                            # Check if we have an interactive terminal to prompt the user
+                            if { true; } 2>/dev/null </dev/tty; then
+                                read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands, functions, or variables. Execute them?\n[Setup]: '"${FORKRUN_EXTRA_SETUP_Q}"$'\n(y/N): ' -n 1 -r -t 60 </dev/tty
+                                echo >&2
+                            else
+                                REPLY="N"
+                                echo "forkrun [SECURITY]: Custom setup commands detected in resume file, but no interactive TTY is available." >&2
+                                echo "Set FORKRUN_TRUST_RESUME=1 to allow unattended resumption." >&2
+                            fi
+                            unset FORKRUN_EXTRA_SETUP_Q
+
+                            if [[ ! ${REPLY,,} == 'y' ]]; then
+                                echo "forkrun [ABORT]: User rejected setup commands. Resumption cancelled." >&2
+                                return 1
+                            fi
+                        fi
 
                         if (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
                             local _is_sweep=false
@@ -541,6 +646,9 @@ EOF
                             # Set positional parameters: keep resume_file at $1 so the bottom
                             # 'shift' safely drops it, then append the original arguments.
                             set -- "" "${FORKRUN_ORIG_ARGS[@]}"
+
+                            # Execute the user's custom setup environment hooks
+                            [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && eval "${FORKRUN_EXTRA_SETUP}"
                         fi
                     fi
 
@@ -876,9 +984,8 @@ toc() { :; }
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
 
                 # ALWAYS write the resume file!
-                touch '"${safe_checkpoint_file}"' 2>/dev/null
-                chmod 600 '"${safe_checkpoint_file}"' 2>/dev/null
                 ring_dump_resume > '"${safe_checkpoint_file}"'
+                chmod 600 '"${safe_checkpoint_file}"' 2>/dev/null
                 local FORKRUN_EXTRA_DEFS=""
                 for nn in ${FORKRUN_EXTRA_FUNCS:-}; do
                     declare -F -- "${nn}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -f -- "${nn}")"
@@ -893,7 +1000,6 @@ toc() { :; }
                 [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && declare -p -- FORKRUN_EXTRA_FUNCS 2>/dev/null >> '"${safe_checkpoint_file}"'
                 [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && declare -p -- FORKRUN_EXTRA_SETUP 2>/dev/null >> '"${safe_checkpoint_file}"'
                 [[ -n "${FORKRUN_EXTRA_DEFS:-}"  ]] && declare -p -- FORKRUN_EXTRA_DEFS 2>/dev/null >> '"${safe_checkpoint_file}"'
-                chmod 600 '"${safe_checkpoint_file}"' 2>/dev/null
 
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes="$(grep -E '"'"'^FORKRUN_RESUME_STDOUT_BYTES='"'"' '"${safe_checkpoint_file}"')"
