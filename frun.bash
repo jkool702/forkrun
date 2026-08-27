@@ -512,22 +512,38 @@ EOF
                         if [[ -n "$_rf_reject" ]]; then
                             echo "forkrun [SECURITY]: Resume file '$resume_file' ${_rf_reason}." >&2
                             if [[ "$_rf_reject" == "hard" ]]; then
-                                echo "                   Refusing automatic resumption." >&2
-                                echo "                   To resume anyway: FORKRUN_TRUST_RESUME=1 frun --resume ..." >&2
-                                return 1
-                            fi
-                            # Soft: interactive confirm, auto-N without a TTY
-                            if { true; } 2>/dev/null </dev/tty; then
-                                read -p $'\nforkrun [SECURITY]: Resume this group/world-writable file anyway? (y/N): ' -n 1 -r -t 60 </dev/tty
-                                echo >&2
-                                if [[ ! ${REPLY,,} == 'y' ]]; then
-                                    echo "forkrun [ABORT]: Resume cancelled by user." >&2
+                                # Foreign-owned file: show what would execute
+                                # and require explicit confirmation. This handles
+                                # the team-shared-scratch workflow cleanly.
+                                if { true; } 2>/dev/null </dev/tty; then
+                                    local _rf_orig_preview
+                                    _rf_orig_preview=$(grep -m1 '^declare -a FORKRUN_ORIG_ARGS' "$resume_file" 2>/dev/null || echo "(no FORKRUN_ORIG_ARGS found)")
+                                    read -p $'\nforkrun [SECURITY]: This resume file is owned by another user. It will re-execute:\n  '"${_rf_orig_preview}"$'\nProceed? (y/N): ' -n 1 -r -t 60 </dev/tty
+                                    echo >&2
+                                    if [[ ! ${REPLY,,} == 'y' ]]; then
+                                        echo "forkrun [ABORT]: Resume cancelled by user." >&2
+                                        return 1
+                                    fi
+                                else
+                                    # No TTY (scripts, CI, unattended): fail closed
+                                    echo "                   Refusing automatic resumption (no TTY to confirm)." >&2
+                                    echo "                   To resume anyway: FORKRUN_TRUST_RESUME=1 frun --resume ..." >&2
                                     return 1
                                 fi
                             else
-                                echo "forkrun [ABORT]: No TTY to confirm. Fix with: chmod go-w '$resume_file'" >&2
-                                echo "                Or set FORKRUN_TRUST_RESUME=1 for unattended resumption." >&2
-                                return 1
+                                # Soft: interactive confirm, auto-N without a TTY
+                                if { true; } 2>/dev/null </dev/tty; then
+                                    read -p $'\nforkrun [SECURITY]: Resume this group/world-writable file anyway? (y/N): ' -n 1 -r -t 60 </dev/tty
+                                    echo >&2
+                                    if [[ ! ${REPLY,,} == 'y' ]]; then
+                                        echo "forkrun [ABORT]: Resume cancelled by user." >&2
+                                        return 1
+                                    fi
+                                else
+                                    echo "forkrun [ABORT]: No TTY to confirm. Fix with: chmod go-w '$resume_file'" >&2
+                                    echo "                Or set FORKRUN_TRUST_RESUME=1 for unattended resumption." >&2
+                                    return 1
+                                fi
                             fi
                         fi
                     fi
