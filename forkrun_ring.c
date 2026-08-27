@@ -3179,7 +3179,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   char tail_buf[65536];
   int spin = 0;
   bool byte_mode = t_state->mode_byte;
-  bool exact_lines_l = t_state->exact_lines; // v3.5: -L bypasses the indexer
+  bool exact_lines_l = t_state->exact_lines; // v3.5: -L transfers actual_end ownership to scanner
 
   while (1) {
     if (atomic_load_relaxed(&state[0].emergency_abort)) {
@@ -3234,8 +3234,11 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     uint64_t actual_end = chunk_end;
 
     // PHYSICS FIX: Bypass delimiter search in byte mode!
-    // v3.5.0: bypass in -L mode too — the SCANNER owns actual_end there
-    // (scanner-handoff chain); the indexer is pure queue plumbing.
+    // v3.5.0: -L also skips the SEARCH — but only -L skips the PUBLICATION.
+    // Byte mode still needs the indexer to publish actual_end (= raw chunk
+    // end, no search): the scanner's byte-mode path consumes it. Ownership
+    // truth table: normal = search+publish (indexer); byte = publish only
+    // (indexer); -L = neither (scanner publishes in the handoff chain).
     if (!byte_mode && !exact_lines_l) {
       uint64_t search_end = chunk_end;
       while (search_end > meta->raw_offset) {
@@ -3291,11 +3294,12 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           }
         }
       }
-
-      // 1. Mark meta ready (indexer-owned modes only)
-      atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
     }
 
+    // 1. Mark meta ready — byte mode publishes the un-searched raw end;
+    //    -L mode does not publish here at all (scanner owns actual_end).
+    if (!exact_lines_l)
+      atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
     // 2. Put it on the Scanner's Ready Shelf
     __atomic_store_n(&t_state->chunk_ready_head, my_idx + 1, __ATOMIC_RELEASE);
 
