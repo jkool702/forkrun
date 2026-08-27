@@ -2157,6 +2157,8 @@ Three properties make this a *coordinate system* rather than a convention:
 
 **The counterfactual that proves it:** every serious bug in the v3.4→v3.5 development cycle was a coordinate-discipline violation. The multiple incompatible clamp variants of the `-n` bug were *independent numbering schemes for the same stream position*. The publication-gate failure was *state that should have been derived being instead transferred and then retracted*.
 
+**NOTE**: The "coordinate system" logic described above applies to both the global data memfd (INPUT) and the per-worker output memfds (OUTPUT). However, its worth noting that input and output have separate coordinate systems, both of which take the shape described above.
+
 ---
 
 ## §1 — The Six Shapes
@@ -2274,7 +2276,7 @@ The frame's test. Answer from §0–§3 alone, then check against the code. Wher
 
 **Drill 1 — Exactly-once resume.** *We need crash-resume with exactly-once delivery. What does the checkpoint contain?*
 Frame answer: coordinates only — a horizon (the contiguous completed prefix, in bytes) and a set of intervals (the jagged edge). Everything else re-derives: the scanner skips intervals on the plane, the orderer re-syncs on an offset match, workers re-execute what's left. No protocol state survives the crash because no protocol state *needs* to.
-Check: `ring_dump_resume` — horizon, jagged, stdout bytes. `[HOLE? The stdout-bytes field is not strictly a plane coordinate — it's an *output-plane* coordinate. The frame should acknowledge the second plane.]
+Check: `ring_dump_resume` — horizon, jagged, stdout bytes. `
 
 **Drill 2 — Output backpressure.** *A slow consumer makes memory unbounded. What's the mechanism?*
 Frame answer: find the bounded blocking channel already carrying coordinates. The ack pipe qualifies; size it to a page; the kernel does the waiting; backpressure propagates through the existing shield structure because every stage upstream already blocks on bounded coordinates.
@@ -2306,7 +2308,7 @@ Check: MAINTAINERS.md §5. Match.
 
 **Buys:** a mental model with ~10 elements (one plane, one lattice, six shapes, six laws) that predicts code locations, diagnoses hangs by shape ("this is a Shape-3 violation"), and makes mechanism reuse reviewable ("the truth table says who publishes — check all their exit paths"). It converts forkrun's density from "must memorize subsystems" to "must recognize patterns."
 
-**Doesn't buy:** performance intuition (that's PHYSICS.md + the benchmarks), the security model (that's RESILIENCE_PROTOCOL §6's three layers), or the Bash-side JIT/cleanroom machinery (which is about *shell* mechanics, not dataflow — arguably a seventh shape, "generate code once, execute many," `[REVIEW: decide whether the pCode partial-evaluation pattern deserves shape status or a footnote]`).
+**Doesn't buy:** performance intuition (that's PHYSICS.md + the benchmarks), the security model (that's RESILIENCE_PROTOCOL §6's three layers), or the Bash-side JIT/Partial-Evaluation/cleanroom machinery (which is about *shell* mechanics, not dataflow — arguably a seventh shape, "generate code once, execute many times").
 
 **The honest caveat:** this frame was reverse-engineered from working code by the people who built it. The drills are the only thing keeping it honest — each `[HOLE?]` marker above is a place where the code follows the frame by accident or habit rather than by law, and each is a candidate for either a doc patch or an architecture patch. Expect to find more when you write the next drill.
 
