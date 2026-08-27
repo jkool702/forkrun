@@ -25,15 +25,9 @@
 
 *Syntax note: Options accepting `<init>:<max>` allow you to define the starting value and the upper bound for the dynamic PID controller. Setting `<init>` and `<max>` to `0` or `-1` has special meaning. Examples: `1:0` (DEFAULT) (start at 1, scale to default max) | `0:-1` (start at default max, scale to maximum allowed) | `4:16` (start at 4, scale to max of 16).*
 
-- `-j`, `-P`, `--workers <W>` : Set the number of concurrent workers. Supports `<init>:<max>` (e.g., `-j 4:32`).
-  - **Sentinel `0` (Default):** Resolves to $\max(\text{nproc}, \text{active\_nodes})$, guaranteeing at least 1 worker per NUMA node.
-  - **Sentinel `-1` / `+0` (Hard Max):** Resolves to $\max(2 \times \text{nproc}, 2 \times \text{active\_nodes})$, guaranteeing at least 2 workers per NUMA node even under `--nodes=@N` oversubscription.
-  - **Reconciliation Policy:** If an explicit `-j N` is specified below the active node count:
-    - In `auto` mode (no `--nodes` specified), active NUMA nodes are automatically reduced to $N$ to prevent empty node queues.
-    - If `--nodes` was explicitly requested, the worker cap is floored at the node count to ensure no node ring is left unserved.
-
+- `-j`, `-P`, `--workers <W>` : Set the number of concurrent workers. Supports `<init>:<max>` (e.g., `-j 4:32`). Default max is the number of logical cores.
 - `-l`, `--lines <L>`         : Set the batch size (lines per worker). Supports `<init>:<max>` (e.g., `-l 10:10000`). Default max is 4096.
-- `-L`, `--exact-lines <N>`   : Force exactly `N` lines per batch. Native on NUMA since v3.5.0 via the Scanner-Handoff Chain (scanning is serialized across node scanners and a boundary-straddling batch may read 1..N-1 lines across sockets — prefer `-l` for maximum throughput unless exact batch sizing is strictly required).
+- `-L`, `--exact-lines <N>`   : Force exactly `N` lines per batch. In NUMA mode this automatically demotes the pipeline to UMA (uniform memory access) to preserve the exact-count contract — cross-socket traffic is then expected but correctness is maintained. (This UMA demotion is the implemented behavior; older wording described it as merely disabling stealing.)
 - `-t, --timeout <us>`: maximum time (µs) a partial batch may sit in the scanner before early flush. This bounds the wait feeding the stall/starve early-flush invariant (DESIGN.md §7, Phase 2b): when input is trickling *and* workers are idle, the scanner flushes the partial batch at this deadline instead of waiting for a full one. `--greedy` is equivalent to `-t 0`.
 - `--greedy`                  : Aggressive low-latency mode, equivalent to `-t 0`. Flushes partial batches immediately when workers are idle, minimizing latency at the cost of smaller batches during trickle input. (Alias for `--timeout 0`.)
 
@@ -44,10 +38,10 @@
 
 ### LIMITS & TOPOLOGY
 
-- `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed. In both UMA and NUMA modes (v3.5.0+), forkrun mathematically guarantees **deterministic stream prefix semantics**—the output will contain strictly the first `N` records of the input stream in exact order, with zero overshoot and zero cross-chunk race conditions.
+- `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed.
 - `--nodes`, `--numa <map>`   : Control NUMA topology mapping. Nodes that do not exist will be skipped (excluding for `@N`).
-  - `auto` (default): Autodetect all physical online nodes. If `-j N` is smaller than online nodes, scales down to $N$ nodes.
-  - `@N` : Oversubscribe / force `N` logical nodes. Worker sentinels automatically scale to ensure $\ge 1$ (default) or $\ge 2$ (`-1`) workers per logical node.
+  - `auto` (default): Autodetect all physical online nodes.
+  - `@N` : Oversubscribe / force `N` logical nodes.
   - `0,1`: Explicitly bind to physical NUMA nodes 0 and 1.
   - `0:3`: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
 - `-N`, `--dry-run`           : Dry run. Print the generated command strings instead of executing them.
@@ -85,15 +79,8 @@
 - `--resume <file>`           : Resume a previously aborted pipeline using the specified checkpoint file.
   - **Buffered/Ordered modes**: Provides "Exactly-Once" semantics. Ensure you truncate your output file to the byte count specified in the crash message before resuming.
   - **Realtime (-u) mode**: Provides "At-Least-Once" semantics. Resuming may result in a few duplicate lines at the failure boundary.
-  - **Security & Trust Model (v3.5.0+)**:
-    - **Layer 1 (Provenance & Ownership Gate):** Checks file permissions and UID.
-      - *Foreign-owned file:* In interactive shells (`/dev/tty`), displays a preview of the `FORKRUN_ORIG_ARGS` command that will execute and prompts `Proceed? (y/N): `. In unattended/headless environments (CI, cron, batch scripts), it fails closed with an exit error unless `FORKRUN_TRUST_RESUME=1` is set.
-      - *Group/world-writable file (`0o022`):* Prompts interactively to confirm permission risks; in unattended environments, fails closed with advice to run `chmod go-w <file>`.
-    - **Layer 2 (Restricted Subprocess Sandbox):** Re-extracts the execution environment inside a `PATH=''` restricted subshell (`bash --restricted`), re-renders it via `declare -p/-f`, and round-trip verifies the serialization within unguessable start/end token fences while reaping stray background jobs.
-    - **Layer 3 (Custom Setup Confirmation):** Prompts for confirmation if the resume file contains custom setup commands (`FORKRUN_EXTRA_SETUP`), functions (`FORKRUN_EXTRA_FUNCS`), or non-standard environment variables.
-- `--checkpoint-file <file>`  : Specify a custom filename for the checkpoint file written in case of failure. Checkpoint files are automatically created with private `0600` permissions. (Default: `.forkrun_resume`)
-
----
+  - SECURITY: full-auto resume re-extracts the execution environment inside a PATH-less restricted shell, re-renders it via `declare -p/-f`, and round-trip-verifies the serialization (bounded by unguessable start/end tokens) before importing anything. Resume files containing setup commands, functions, or custom variables require interactive confirmation or `FORKRUN_TRUST_RESUME=1`. Environment state whose serialization is not round-trip-stable (e.g., setups embedding command substitution) is rejected rather than imported.
+- `--checkpoint-file <file>`  : Specify a custom filename for the checkpoint file written in case of failure. (Default: .forkrun_resume)
 
 ### UNSETTING FLAGS
 
@@ -110,9 +97,6 @@
 
 ### ENVIRONMENT VARS
 
-- `FORKRUN_TRUST_RESUME` : Trust override for automated/unattended pipeline resumption.
-  - `0` (default): Enforces interactive TTY confirmation for foreign-owned checkpoints, group/world-writable files, and embedded setup commands. Unattended runs without `/dev/tty` fail closed.
-  - `1`: Unconditionally trusts the resume file provenance and bypasses all interactive confirmation prompts (Layer 1 ownership/perms and Layer 3 setup commands). Required for unattended CI/CD or Slurm batch scripts resuming cross-user or shared scratch checkpoints.
 - `FORKRUN_RETRY_LIMIT`: poison threshold. A batch is declared poisoned once it has failed **N total times** (the original attempt plus N−1 retries — i.e., up to N executions of the batch). Default 3 = up to 3 executions. N=0 and N=1 both mean "poison after the first failure" (a single execution). Negative = never poisoned. Exactly-once execution (no retries): set to 0.
 - `FORKRUN_EXTRA_FUNCS` : Use this to specify required sub-functions to pass into frun's environment.
   - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_EXTRA_FUNCS='gg hh' frun ff <inputs`.

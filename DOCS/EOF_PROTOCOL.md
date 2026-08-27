@@ -99,8 +99,6 @@ sys_write(evfd_eof_arr[0], &blast, 8);                            // 3. wake all
 
 ---
 
-> **Note on Cross-Process Dependency Gates:** While worker-to-ring polls sleep indefinitely until `evfd_data` or `evfd_eof` fires, cross-scanner synchronization gates (`cum_lines`, `-L` handoff) use **bounded polling (`poll(..., 100)`)** with terminal-state escapes (`limit_cutoff_major`, `emergency_abort`) so a scanner never sleeps through a predecessor's unnotified exit.
-
 ## §3. Simultaneous Polling Rules
 
 When a worker or scanner blocks in `poll()` waiting for events, it must follow strict rules about **which eventfds are polled simultaneously** and **in what order events are processed**.
@@ -186,14 +184,28 @@ When `ingest_complete` is observed, the scanner forces one final `pread()` to dr
 
 ## §6. Audit Checklist
 
-Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner_loop()`, or the eventfd infrastructure:
+Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner_loop()`, or the eventfd infrastructure.
 
-- [ ] **Every cross-scanner dependency gate has a terminal-state escape with a bounded poll.** A gate must never use `poll(-1)` without re-checking `limit_cutoff_major` and `emergency_abort`.
-- [ ] **Every chunk exit path publishes all handoff values (`actual_end`, `cum_lines`).** Enumerate normal end, carry/skip, cutoff-skip, and EOF sentinel—each must publish with `FLAG_META_READY` / `FLAG_CUM_READY`.
-- [ ] **Every blocking `poll()` that waits for data also polls the EOF evfd.**
-- [ ] **Every blocking `poll()` that waits for non-local work also polls the local data evfd.**
-- [ ] **Event processing follows the strict priority cascade: local → non-local → EOF.**
-- [ ] **The EOF evfd is never `sys_read()`.**
-- [ ] **The EOF evfd is written only after `scanner_finished` is set with release semantics.**
-- [ ] **The 3-condition EOF check re-verifies from C1 on any failure.**
-- [ ] **Escrow drain terminates on EAGAIN; `escrow_pending` is TATAS-consumed.**
+- [ ] **Every blocking `poll()` that waits for data also polls the EOF evfd.** A poll that only waits for data without also watching for EOF will deadlock if the scanner finishes while the worker is blocked.
+
+- [ ] **Every blocking `poll()` that waits for non-local work also polls the local data evfd.** Local work takes priority over non-local work. Failing to co-poll means the worker could process escrow while local ring data goes stale.
+
+- [ ] **Event processing follows the strict priority cascade: local → non-local → EOF.** Reordering this cascade can cause premature exit (if EOF is checked before data) or head-of-line blocking (if escrow is checked before local).
+
+- [ ] **The EOF evfd is never `sys_read()`.** Reading an eventfd resets its counter to zero. If any code reads the EOF evfd, subsequent polls on it will no longer return POLLIN, causing other workers to hang.
+
+- [ ] **The EOF evfd is written only after `scanner_finished` is set with release semantics.** If the evfd fires before `scanner_finished` is visible, workers could observe the evfd, check `scanner_finished`, see it as false, and re-enter a blocking poll that never wakes.
+
+- [ ] **The 3-condition EOF check re-verifies from C1 on any failure.** If a modification adds a `break` instead of `continue` when C2 or C3 fails, the worker could miss work that arrived between checks.
+
+- [ ] **Escrow drain must terminate on EAGAIN (never spin on an empty pipe); the per-node re-arm flag must be consumed by exactly one atomic exchange per deposit episode.** Continuous drain inversion is thread-local and must not affect global priority when idle; the `tl_drain_escrow` flag must be cleared only after EAGAIN, and `escrow_pending` must be TATAS-consumed.
+
+---
+
+## §7. Relationship to Other Documents
+
+| Document | Relationship |
+|---|---|
+| [INVARIANTS.md](INVARIANTS.md) | This protocol relies on Invariants §1 (monotonic indices), §2 (publish-before-claim), and §5 (escrow never required for progress). |
+| [DESIGN.md](DESIGN.md) | The 4-stage pipeline (Ingest → Index → Scan → Claim) provides the architectural context for where these EOF conditions are checked. |
+| [PHYSICS.md](PHYSICS.md) | The adaptive flow controller interacts with EOF via the stall/starve meters, but does not affect the correctness of EOF detection. |

@@ -145,12 +145,11 @@ Per-batch logical index + reorder buffer + emit only contiguous prefix.
 
 ## 10. NUMA-Specific Invariants
 
-* **Data is born-local** to its target node (`set_mempolicy` at ingest).  
-* **Scanners and indexers** are pinned to their respective nodes.  
-* **Per-node escrow pipes** prevent cross-socket recovery contention.  
-* **Major/minor ordering keys** enable correct global output reconstruction.  
-* **Claim-pipe backpressure** prevents unbounded memory expansion.  
-* **Active Ring Drain Guarantee:** Every active per-node ring *must* have $\ge 1$ active worker assigned. The Bash orchestrator enforces this before `ring_init` by either restricting active nodes (if `-j N < nodes` in auto mode) or raising workers to match node count (if nodes were explicitly requested). An active ring with 0 workers will stall the scanner and deadlock the orderer.
+* Data is born-local to its target node (`set_mempolicy` at ingest).  
+* Scanner pinned to its node.  
+* Per-node escrow pipes.  
+* Major/minor ordering keys for correct global reorder.  
+* Claim-pipe back-pressure prevents unbounded growth.
 
 ---
 
@@ -211,55 +210,6 @@ If all sections above remain true, **forkrun is correct** — regardless of:
 
 **Mental model reminder**  
 Progress is irreversible. Locality is structural. Contention was designed away. Workers always claim exactly one slot.
-
----
-
-## 14. Universal Coordinate Invariance
-
-**Invariant**  
-All physical byte offsets in `forkrun` refer to absolute, monotonic positions in the backing `memfd`. Offsets are never relative to a dynamic sliding window, never wrap within logical space, and are never translated across component boundaries.
-
-**Enforced by**  
-* Ingest writes sequentially at `lseek(SEEK_END)`.
-* Scanner and Ring publish absolute offsets `[offset_ring, end_ring)`.
-* Fallow punches holes in-place using absolute offsets without truncating file size.
-* Checkpoints save absolute interval ranges `[s, e)`.
-
-**Audit Rule**  
-❌ Never introduce relative offset translations, sliding-window re-indexing, or destructive file truncation on active inputs.
-
----
-
-## 15. Stream Prefix Determinism (`-n`)
-
-**Invariant**  
-When `-n N` is specified, the pipeline emits strictly records $1 \dots N$ from the original linear stream. No record $> N$ may ever be claimed or executed, and no record $\le N$ may be skipped, regardless of NUMA topology, node count, or worker scheduling skew.
-
-**Enforced by**  
-* Scanners serialize cumulative line counts via the `cum_lines` chain.
-* The chunk that crosses $N$ calculates $\text{allowed} = N - \text{prev\_cum}$, clamps its batch to that exact delimiter, and publishes `limit_cutoff_major`.
-* All chunks past `limit_cutoff_major` take the `past_cutoff` fast-skip path without scanning.
-
-**Audit Rule**  
-❌ Never rely on loose/unsynchronized global popcounts or probabilistic multi-node cutoff checks.
-
----
-
-## 16. Terminal-State Escape for Cross-Process Waits (The Hang Law)
-
-**Invariant**  
-*Never wait unboundedly for data that a process which has exited was supposed to produce.* 
-
-All cross-process and cross-scanner wait gates (such as `cum_lines` and `actual_end` handoffs) must:
-1. **Re-check globally visible terminal state** (`limit_cutoff_major`, `emergency_abort`, `scanner_finished`) on every iteration.
-2. **Use bounded polling** (`poll(..., 100)`) so the wait loop periodically unblocks to re-evaluate terminal conditions, even if no eventfd fires (e.g., when ingest queue gating pauses upstream signals).
-
-**The Producer-Side Corollary (Exhaustive Exit-Path Publishing):**  
-Every chunk-exit path of an owning process—normal completion, mid-batch carry/skip, limit cutoff skip, and `raw_length == 0` EOF sentinel—**must unconditionally publish every metadata value downstream waiters consume** (`actual_end | FLAG_META_READY`, `cum_lines | FLAG_CUM_READY`) and wake waiting consumers via SEQ_CST barriers.
-
-**Audit Rule**  
-❌ Never write a `poll(-1)` in a cross-process dependency gate without an explicit timeout and terminal-state escape.  
-❌ Never add an exit, break, or skip path in an owning scanner/indexer without publishing all handoff flags.
 
 ---
 

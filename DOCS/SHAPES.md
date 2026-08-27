@@ -151,7 +151,7 @@ The frame's test. Answer from §0–§3 alone, then check against the code. Wher
 
 **Drill 1 — Exactly-once resume.** *We need crash-resume with exactly-once delivery. What does the checkpoint contain?*
 Frame answer: coordinates only — a horizon (the contiguous completed prefix, in bytes) and a set of intervals (the jagged edge). Everything else re-derives: the scanner skips intervals on the plane, the orderer re-syncs on an offset match, workers re-execute what's left. No protocol state survives the crash because no protocol state *needs* to.
-Check: `ring_dump_resume` — horizon, jagged, stdout bytes. `
+Check: `ring_dump_resume` — horizon, jagged, stdout bytes. 
 
 **Drill 2 — Output backpressure.** *A slow consumer makes memory unbounded. What's the mechanism?*
 Frame answer: find the bounded blocking channel already carrying coordinates. The ack pipe qualifies; size it to a page; the kernel does the waiting; backpressure propagates through the existing shield structure because every stage upstream already blocks on bounded coordinates.
