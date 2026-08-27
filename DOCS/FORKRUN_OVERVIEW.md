@@ -82,7 +82,11 @@ Utilization also scales *down* correctly: `-b 512k` on a 100 MB input sustains ~
 - **Born-local NUMA placement**: file ingest measures 0.0–0.2% cross-socket chunks. Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **File vs pipe input**: zero measurable difference — the ingest pipeline handles both identically.
 
+- **`-L` mode (Exact batch sizing)**: Guarantees exactly $N$ lines per batch. In NUMA mode (v3.5.0+), this uses the **Scanner-Handoff Chain**: scanning is serialized across node scanners via cumulative line tracking, and batches that straddle a 2 MB chunk boundary pull their initial lines across the socket. Throughput is single-scanner bound ($\approx$ UMA scan speeds), but exactness is preserved without demoting the entire pipeline.
+
 ## Key Design Properties
+
+- **Deterministic Stream Prefixes (`-n`)**: Setting `-n N` mathematically guarantees that strictly the first $N$ records of the input stream are processed in exact linear order across all NUMA nodes, with zero spatial races, zero overshoot, and clean skip propagation for remaining chunks.
 
 - **Contention-free**: The fast path is intentionally boring and excessively fast (two amortized atomic RMWs (`read_idx` + `total_lines_consumed`) with no locks or CAS retry loops). All algorithmic complexity is shifted to the slow path to ensure graceful degradation, meaning contention is structurally eliminated rather than reactively avoided.
 - **Born-local NUMA**: Data is placed on the correct socket at ingest time via `set_mempolicy` using real-time backpressure (self load-balancing). Scanners and workers are pinned. Cross-socket traffic is a measured 0.0–0.2%. Stealing is permitted only when local work is exhausted.

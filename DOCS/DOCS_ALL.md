@@ -129,8 +129,9 @@ Optimistic execution with near-zero happy-path overhead, instant failure detecti
 - **H1:** C writes `RING_NUM_KILLS`/`RING_POISONED`/`RING_BATCH_IDX` only when `num_kills > 0`; wrapper must reset after every ack.
 - **M1:** Zero-length sentinel batches must be acked but not executed (`[[ "$REPLY" != "0" ]]` guard).
 - **FRUN_CLAIM_BYTES:** EXIT trap escrow deposit gated by claim-active flag to avoid double-deposit.
-
-These are currently-correct seams most at risk from refactor — preserve in both C and Bash.
+- **ACTUAL_END OWNERSHIP:** In normal/byte mode, Indexer publishes `actual_end`; in `-L` mode, Indexer skips publication and Scanner publishes in the handoff chain.
+- **GATE-RESOLVING WAKEUPS:** Any process publishing `actual_end` or `cum_lines` must execute a SEQ_CST memory barrier and write to `evfd_meta` if `meta_waiters > 0`.
+- **CROSS-PROCESS WAIT ESCAPE:** Every cross-process wait must re-check terminal flags (`limit_cutoff_major`, `emergency_abort`) on every loop and use bounded polling (`poll(..., 100)`).
 
 -----------------------------------------
 # BORN_LOCAL_NUMA.md
@@ -218,15 +219,20 @@ Prior to v3.5.0, guaranteeing exactly *N* lines per batch (`-L`) in NUMA mode re
 
 In **v3.5.0+**, `forkrun` provides **Native NUMA support for `-L`** via the **Scanner-Handoff Chain**:
 
-### 5.1 The Scanner-Handoff Mechanism
-1. **Indexer Bypass:** The per-node Indexer skips delimiter alignment. The per-node Scanners assume direct ownership of chunk boundaries (`actual_end`) and cumulative line tracking (`cum_lines`).
-2. **Serialized Scan Gate:** Because an exact batch boundary is a global sequence invariant, scanning is serialized across NUMA sockets. Scanner $M+1$ waits for Scanner $M$ to publish both its boundary and cumulative line count.
+### 5.1 The Scanner-Handoff Mechanism & Exit-Path Completeness
+1. **Indexer Bypass:** The per-node Indexer skips delimiter alignment and does *not* publish `actual_end`. The per-node Scanners assume direct, exclusive ownership of chunk boundaries (`actual_end`) and cumulative line tracking (`cum_lines`).
+2. **Serialized Scan Gate:** Because an exact batch boundary is a global sequence property, scanning is serialized across NUMA sockets. Scanner $M+1$ waits for Scanner $M$ to publish both its boundary and cumulative line count.
 3. **The Uniform Handoff:** 
    - Every scanner scans its own born-local chunk *completely* from `raw_start` to `raw_end` (zero rescanning of bytes).
    - If a chunk ends with an incomplete batch of $k < L$ lines, the scanner publishes `actual_end = batch_start` (the byte offset where the open batch originated, which may point into an earlier chunk) and `cum_lines`.
    - Scanner $M+1$ begins counting delimiters in its own chunk, seeded with `lines_in_batch = cum_lines % L`.
    - When the $L$-th line is reached in chunk $M+1$, it publishes a batch covering `[batch_start, current_delim_end)`.
-4. **The -L Locality Tax:** The worker that claims a boundary-straddling batch will read the initial $k$ lines across the NUMA interconnect. We trade a microscopic cross-socket read (at most $L-1$ lines per 2 MB chunk) to preserve exact batch sizing without abandoning NUMA topology.
+4. **Exhaustive Exit-Path Publishing (Hang Defense):** Every exit path in the `-L` scanner (normal completion, mid-batch carry, cutoff-skip, and EOF sentinel) unconditionally publishes `actual_end | FLAG_META_READY` and `cum_lines | FLAG_CUM_READY`. Successor scanners never wait on a dead predecessor.
+
+### 5.4 The Quantitative -L Locality Tax
+When an open batch straddles a NUMA chunk boundary, the worker executing that batch reads $k < L$ lines across the interconnect. The cross-socket traffic is bounded by:
+$$\text{Max Cross-Socket Bytes per Chunk} \le \left(\frac{L - 1}{2}\right) \times \text{Avg Line Length}$$
+For a typical 2 MB chunk with $L=4$ and 50-byte lines, this averages $\sim 100\text{ bytes}$ of cross-socket read per 2 MB processed ($< 0.005\%$ cross-socket memory traffic). We trade this microscopic penalty to preserve exact batch counts without abandoning NUMA execution.
 
 *(Note: Multi-parameter sweeps `:::` still run under UMA, as they require $L=1$ where the flat pipeline is naturally optimal).*
 
@@ -250,6 +256,7 @@ In `forkrun` v3.5.0+, `-n N` is guaranteed to return **strictly the first $N$ re
 4. **Clean Skip Cascade:** All subsequent chunks ($M+1, M+2, \dots$) observe that their major ID is past the cutoff and skip scanning entirely without blocking or waiting on dead predecessor scanners.
 
 **Run-length dependence of steal rate.** The 0.0–0.2% file-input cross-socket figure holds for meaningful run lengths (≥ a few hundred chunks). Micro-runs of ~50 chunks can show a single-steal 2.0% startup transient from initial load-balancing; this is expected and amortizes to <0.2% on longer streams.
+
 
 -----------------------------------------
 # C_PLUGIN.md
@@ -310,23 +317,46 @@ frun -C ./plugin.so:my_plugin < massive_dataset.txt
 
 ## §2. Advanced Usage: The Execution Context
 
-If your native C code needs to know *which* batch it is processing, its byte offset in the file, or if it is recovering from a crash, `forkrun` can pass a detailed context struct directly to your function as a 3rd argument. 
+`forkrun` supports two context ABI versions:
 
-Because `forkrun` is a zero-dependency, single-file deployment, we provide two ways to access this struct:
-
-### Option A: The Header File (For structured projects)
-Download `forkrun_plugin.h` from the repository and include it in your project.
+* **Version 1 (`forkrun_use_ctx = 1`):** Standard context struct with separate 32-bit `numa_major` and `numa_minor` fields.
+* **Version 2 (`forkrun_use_ctx = 2`, v3.5.0+):** High-precision packed context. Replaces major/minor with a 64-bit `numa_batch_id` union (`(major << 22) | minor`), preserving full 42-bit major chunk sequence numbers for billion-record runs.
 
 ```c
-#include "forkrun_plugin.h"
+#include <stdint.h>
+#include <stdio.h>
 
-// 1. Opt-in flag: Tell forkrun to pass the context pointer
-int forkrun_use_ctx = 1;
+// Opt-in flag: 1 = legacy 32-bit fields, 2 = v3.5+ packed 64-bit batch ID
+int forkrun_use_ctx = 2;
 
-// 2. Define your function with the 3-argument signature
+struct forkrun_ctx {
+    uint64_t batch_index;       // Global batch sequence number
+    uint64_t batch_offset;      // Byte offset in the shared memfd
+    uint64_t batch_byte_length; // Length of the current batch in bytes
+    uint32_t version;           // Struct version (1 or 2)
+    uint32_t worker_id;         // Internal Worker ID (0 to N)
+    uint32_t node_id;           // NUMA node ID
+    uint32_t num_kills;         // Retry count (if batch previously failed)
+    union {
+        uint64_t numa_batch_id; // Version 2: packed (42-bit major << 22 | 22-bit minor)
+        struct {
+            uint32_t numa_major; // Version 1: truncated 32-bit major
+            uint32_t numa_minor; // Version 1: 32-bit minor
+        };
+    };
+    int32_t  fd_in;             // Read-only file descriptor to the memfd
+    char     delimiter;         // The record delimiter character
+    uint8_t  cfg_state[3];      // Global configuration state
+};
+
 int my_func(int argc, char **argv, const struct forkrun_ctx *ctx) {
-    
-    printf("Worker %u processing batch %lu\n", ctx->worker_id, ctx->batch_index);
+    if (ctx->version == 2) {
+        uint64_t major = ctx->numa_batch_id >> 22;
+        uint32_t minor = ctx->numa_batch_id & 0x3FFFFF;
+        printf("Worker %u on Node %u (Major %lu, Minor %u)
+", 
+               ctx->worker_id, ctx->node_id, major, minor);
+    }
     return 0;
 }
 ```
@@ -660,9 +690,20 @@ The reorder path is the only place that may block.
 
 ---
 
+## 11. Cross-File Contracts (Seams Most at Risk from Refactor)
 
-## 12. Cross-file contracts (seams most at risk from refactor)
+These invariants span C and Bash wrapper; both sides must maintain them:
 
+1. **(H1) Poison Flag Lifecycle:** C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` *only* when `num_kills > 0`. The Bash wrapper must reset these after every `ring_ack`.
+2. **(M1) Zero-Length Sentinel Batches:** Zero-length sentinel batches (EOF markers, `FLAG_MAJOR_EOF` with 0 bytes) must be **acked but not executed** (`[[ "$REPLY" != "0" ]]`).
+3. **(FRUN_CLAIM_BYTES) Escrow Gating:** The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES > 0` to prevent duplicate deposits.
+4. **(Ownership Truth Table) `actual_end` Publisher:**
+   - Normal mode: Indexer searches and publishes.
+   - Byte mode (`-b`): Indexer skips search, publishes raw chunk end.
+   - Exact lines (`-L`): Indexer skips both; Scanner owns and publishes in the handoff chain.
+5. **(Producer Wakeup Invariant):** Scanners and indexers must unconditionally issue `sys_write(evfd_meta)` upon publishing gate-resolving state (`actual_end`, `cum_lines`) whenever waiters are present.
+
+## 12. Design Summary & Mental Model
 These invariants span C and Bash wrapper; both sides must maintain them:
 
 **(a) H1 — `RING_NUM_KILLS`/`RING_POISONED`/`RING_BATCH_IDX` lifecycle:**
@@ -677,7 +718,6 @@ The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES` (or claim-active f
 Encode these checks in both `forkrun_ring.c` and `frun.bash` comments; any change to claim/ack path must preserve them.
 
 
-## 11. Design Summary & Mental Model
 
 Key properties of the architecture:
 
@@ -867,6 +907,8 @@ sys_write(evfd_eof_arr[0], &blast, 8);                            // 3. wake all
 
 ---
 
+> **Note on Cross-Process Dependency Gates:** While worker-to-ring polls sleep indefinitely until `evfd_data` or `evfd_eof` fires, cross-scanner synchronization gates (`cum_lines`, `-L` handoff) use **bounded polling (`poll(..., 100)`)** with terminal-state escapes (`limit_cutoff_major`, `emergency_abort`) so a scanner never sleeps through a predecessor's unnotified exit.
+
 ## §3. Simultaneous Polling Rules
 
 When a worker or scanner blocks in `poll()` waiting for events, it must follow strict rules about **which eventfds are polled simultaneously** and **in what order events are processed**.
@@ -952,31 +994,17 @@ When `ingest_complete` is observed, the scanner forces one final `pread()` to dr
 
 ## §6. Audit Checklist
 
-Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner_loop()`, or the eventfd infrastructure.
+Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner_loop()`, or the eventfd infrastructure:
 
-- [ ] **Every blocking `poll()` that waits for data also polls the EOF evfd.** A poll that only waits for data without also watching for EOF will deadlock if the scanner finishes while the worker is blocked.
-
-- [ ] **Every blocking `poll()` that waits for non-local work also polls the local data evfd.** Local work takes priority over non-local work. Failing to co-poll means the worker could process escrow while local ring data goes stale.
-
-- [ ] **Event processing follows the strict priority cascade: local → non-local → EOF.** Reordering this cascade can cause premature exit (if EOF is checked before data) or head-of-line blocking (if escrow is checked before local).
-
-- [ ] **The EOF evfd is never `sys_read()`.** Reading an eventfd resets its counter to zero. If any code reads the EOF evfd, subsequent polls on it will no longer return POLLIN, causing other workers to hang.
-
-- [ ] **The EOF evfd is written only after `scanner_finished` is set with release semantics.** If the evfd fires before `scanner_finished` is visible, workers could observe the evfd, check `scanner_finished`, see it as false, and re-enter a blocking poll that never wakes.
-
-- [ ] **The 3-condition EOF check re-verifies from C1 on any failure.** If a modification adds a `break` instead of `continue` when C2 or C3 fails, the worker could miss work that arrived between checks.
-
-- [ ] **Escrow drain must terminate on EAGAIN (never spin on an empty pipe); the per-node re-arm flag must be consumed by exactly one atomic exchange per deposit episode.** Continuous drain inversion is thread-local and must not affect global priority when idle; the `tl_drain_escrow` flag must be cleared only after EAGAIN, and `escrow_pending` must be TATAS-consumed.
-
----
-
-## §7. Relationship to Other Documents
-
-| Document | Relationship |
-|---|---|
-| [INVARIANTS.md](INVARIANTS.md) | This protocol relies on Invariants §1 (monotonic indices), §2 (publish-before-claim), and §5 (escrow never required for progress). |
-| [DESIGN.md](DESIGN.md) | The 4-stage pipeline (Ingest → Index → Scan → Claim) provides the architectural context for where these EOF conditions are checked. |
-| [PHYSICS.md](PHYSICS.md) | The adaptive flow controller interacts with EOF via the stall/starve meters, but does not affect the correctness of EOF detection. |
+- [ ] **Every cross-scanner dependency gate has a terminal-state escape with a bounded poll.** A gate must never use `poll(-1)` without re-checking `limit_cutoff_major` and `emergency_abort`.
+- [ ] **Every chunk exit path publishes all handoff values (`actual_end`, `cum_lines`).** Enumerate normal end, carry/skip, cutoff-skip, and EOF sentinel—each must publish with `FLAG_META_READY` / `FLAG_CUM_READY`.
+- [ ] **Every blocking `poll()` that waits for data also polls the EOF evfd.**
+- [ ] **Every blocking `poll()` that waits for non-local work also polls the local data evfd.**
+- [ ] **Event processing follows the strict priority cascade: local → non-local → EOF.**
+- [ ] **The EOF evfd is never `sys_read()`.**
+- [ ] **The EOF evfd is written only after `scanner_finished` is set with release semantics.**
+- [ ] **The 3-condition EOF check re-verifies from C1 on any failure.**
+- [ ] **Escrow drain terminates on EAGAIN; `escrow_pending` is TATAS-consumed.**
 
 -----------------------------------------
 # FLAGS.md
@@ -1008,7 +1036,13 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 *Syntax note: Options accepting `<init>:<max>` allow you to define the starting value and the upper bound for the dynamic PID controller. Setting `<init>` and `<max>` to `0` or `-1` has special meaning. Examples: `1:0` (DEFAULT) (start at 1, scale to default max) | `0:-1` (start at default max, scale to maximum allowed) | `4:16` (start at 4, scale to max of 16).*
 
-- `-j`, `-P`, `--workers <W>` : Set the number of concurrent workers. Supports `<init>:<max>` (e.g., `-j 4:32`). Default max is the number of logical cores.
+- `-j`, `-P`, `--workers <W>` : Set the number of concurrent workers. Supports `<init>:<max>` (e.g., `-j 4:32`).
+  - **Sentinel `0` (Default):** Resolves to $\max(\text{nproc}, \text{active\_nodes})$, guaranteeing at least 1 worker per NUMA node.
+  - **Sentinel `-1` / `+0` (Hard Max):** Resolves to $\max(2 \times \text{nproc}, 2 \times \text{active\_nodes})$, guaranteeing at least 2 workers per NUMA node even under `--nodes=@N` oversubscription.
+  - **Reconciliation Policy:** If an explicit `-j N` is specified below the active node count:
+    - In `auto` mode (no `--nodes` specified), active NUMA nodes are automatically reduced to $N$ to prevent empty node queues.
+    - If `--nodes` was explicitly requested, the worker cap is floored at the node count to ensure no node ring is left unserved.
+
 - `-l`, `--lines <L>`         : Set the batch size (lines per worker). Supports `<init>:<max>` (e.g., `-l 10:10000`). Default max is 4096.
 - `-L`, `--exact-lines <N>`   : Force exactly `N` lines per batch. Native on NUMA since v3.5.0 via the Scanner-Handoff Chain (scanning is serialized across node scanners and a boundary-straddling batch may read 1..N-1 lines across sockets — prefer `-l` for maximum throughput unless exact batch sizing is strictly required).
 - `-t, --timeout <us>`: maximum time (µs) a partial batch may sit in the scanner before early flush. This bounds the wait feeding the stall/starve early-flush invariant (DESIGN.md §7, Phase 2b): when input is trickling *and* workers are idle, the scanner flushes the partial batch at this deadline instead of waiting for a full one. `--greedy` is equivalent to `-t 0`.
@@ -1023,8 +1057,8 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 - `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed. In both UMA and NUMA modes (v3.5.0+), forkrun mathematically guarantees **deterministic stream prefix semantics**—the output will contain strictly the first `N` records of the input stream in exact order, with zero overshoot and zero cross-chunk race conditions.
 - `--nodes`, `--numa <map>`   : Control NUMA topology mapping. Nodes that do not exist will be skipped (excluding for `@N`).
-  - `auto` (default): Autodetect all physical online nodes.
-  - `@N` : Oversubscribe / force `N` logical nodes.
+  - `auto` (default): Autodetect all physical online nodes. If `-j N` is smaller than online nodes, scales down to $N$ nodes.
+  - `@N` : Oversubscribe / force `N` logical nodes. Worker sentinels automatically scale to ensure $\ge 1$ (default) or $\ge 2$ (`-1`) workers per logical node.
   - `0,1`: Explicitly bind to physical NUMA nodes 0 and 1.
   - `0:3`: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
 - `-N`, `--dry-run`           : Dry run. Print the generated command strings instead of executing them.
@@ -1189,7 +1223,11 @@ Utilization also scales *down* correctly: `-b 512k` on a 100 MB input sustains ~
 - **Born-local NUMA placement**: file ingest measures 0.0–0.2% cross-socket chunks. Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **File vs pipe input**: zero measurable difference — the ingest pipeline handles both identically.
 
+- **`-L` mode (Exact batch sizing)**: Guarantees exactly $N$ lines per batch. In NUMA mode (v3.5.0+), this uses the **Scanner-Handoff Chain**: scanning is serialized across node scanners via cumulative line tracking, and batches that straddle a 2 MB chunk boundary pull their initial lines across the socket. Throughput is single-scanner bound ($\approx$ UMA scan speeds), but exactness is preserved without demoting the entire pipeline.
+
 ## Key Design Properties
+
+- **Deterministic Stream Prefixes (`-n`)**: Setting `-n N` mathematically guarantees that strictly the first $N$ records of the input stream are processed in exact linear order across all NUMA nodes, with zero spatial races, zero overshoot, and clean skip propagation for remaining chunks.
 
 - **Contention-free**: The fast path is intentionally boring and excessively fast (two amortized atomic RMWs (`read_idx` + `total_lines_consumed`) with no locks or CAS retry loops). All algorithmic complexity is shifted to the slow path to ensure graceful degradation, meaning contention is structurally eliminated rather than reactively avoided.
 - **Born-local NUMA**: Data is placed on the correct socket at ingest time via `set_mempolicy` using real-time backpressure (self load-balancing). Scanners and workers are pinned. Cross-socket traffic is a measured 0.0–0.2%. Stealing is permitted only when local work is exhausted.
@@ -1377,11 +1415,12 @@ Per-batch logical index + reorder buffer + emit only contiguous prefix.
 
 ## 10. NUMA-Specific Invariants
 
-* Data is born-local to its target node (`set_mempolicy` at ingest).  
-* Scanner pinned to its node.  
-* Per-node escrow pipes.  
-* Major/minor ordering keys for correct global reorder.  
-* Claim-pipe back-pressure prevents unbounded growth.
+* **Data is born-local** to its target node (`set_mempolicy` at ingest).  
+* **Scanners and indexers** are pinned to their respective nodes.  
+* **Per-node escrow pipes** prevent cross-socket recovery contention.  
+* **Major/minor ordering keys** enable correct global output reconstruction.  
+* **Claim-pipe backpressure** prevents unbounded memory expansion.  
+* **Active Ring Drain Guarantee:** Every active per-node ring *must* have $\ge 1$ active worker assigned. The Bash orchestrator enforces this before `ring_init` by either restricting active nodes (if `-j N < nodes` in auto mode) or raising workers to match node count (if nodes were explicitly requested). An active ring with 0 workers will stall the scanner and deadlock the orderer.
 
 ---
 
@@ -1431,8 +1470,6 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 
 ---
 
----
-
 ## 13. Checklist Summary
 
 If all sections above remain true, **forkrun is correct** — regardless of:
@@ -1478,6 +1515,23 @@ When `-n N` is specified, the pipeline emits strictly records $1 \dots N$ from t
 
 ---
 
+## 16. Terminal-State Escape for Cross-Process Waits (The Hang Law)
+
+**Invariant**  
+*Never wait unboundedly for data that a process which has exited was supposed to produce.* 
+
+All cross-process and cross-scanner wait gates (such as `cum_lines` and `actual_end` handoffs) must:
+1. **Re-check globally visible terminal state** (`limit_cutoff_major`, `emergency_abort`, `scanner_finished`) on every iteration.
+2. **Use bounded polling** (`poll(..., 100)`) so the wait loop periodically unblocks to re-evaluate terminal conditions, even if no eventfd fires (e.g., when ingest queue gating pauses upstream signals).
+
+**The Producer-Side Corollary (Exhaustive Exit-Path Publishing):**  
+Every chunk-exit path of an owning process—normal completion, mid-batch carry/skip, limit cutoff skip, and `raw_length == 0` EOF sentinel—**must unconditionally publish every metadata value downstream waiters consume** (`actual_end | FLAG_META_READY`, `cum_lines | FLAG_CUM_READY`) and wake waiting consumers via SEQ_CST barriers.
+
+**Audit Rule**  
+❌ Never write a `poll(-1)` in a cross-process dependency gate without an explicit timeout and terminal-state escape.  
+❌ Never add an exit, break, or skip path in an owning scanner/indexer without publishing all handoff flags.
+
+---
 
 **See also:** `DESIGN.md` and `PHYSICS.md`
 
@@ -1606,17 +1660,16 @@ If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under 
 
 ## §6. Final Release Criteria
 
-Before tagging a release, run one final sanity check on the benchmark output to confirm the expected number of test cases completed. From the `BENCHMARKS` directory, after running `run_benchmark.bash`, verify the line count of results:
+Before tagging a release, run the automated test suite and verify that the full test matrix completes with zero failures:
 
+$$	ext{Total Executions} = (	ext{Unit Tests} + 	ext{Benchmarks}) 	imes (	ext{UMA} + 	ext{NUMA}) 	imes (	ext{Baseline} + 	ext{TSan} + 	ext{ASan/UBSan})$$
+
+Verify test execution counts from the `BENCHMARKS` directory:
 ```bash
 grep -E '^[0-9]' benchmark.out | wc -l
 ```
 
-The output must match the expected test count for the release: **(316 unit tests + 396 benchmark runs) × (UMA + NUMA) × (baseline + TSan + ASan/UBSan) = 4,272** (recompute if you add/drop tests). A lower count indicates that one or more benchmark runs silently failed or were skipped, and the release must be held until the discrepancy is resolved.
-
-Section T (adversarial resume files, fd hygiene, oversubscription extremes) must pass before tagging.
-
-This check is the last gate before tagging. If it passes alongside the full sanitizer matrix, tag the release and publish.
+Ensure all adversarial test suites (Section T: resume sandbox, permission gates, foreign-UID rejection, fd hygiene, oversubscription extremes) pass 100% green before tagging.
 
 -----------------------------------------
 # PHYSICS.md
@@ -1707,6 +1760,14 @@ Today, whether the scanner is in Phase 0, Phase 1, or Phase 2, the worker fast-p
 **Phase 2: Flow Regulation (PID Steady-State)**
 
 Once optimal $L$ is found -- immediately via satellite, or after a short acoustic ramp -- the scanner enters a PID controller making micro-adjustments based on the `stall_meter` and `starve_meter`. Standard geophysical instrument feedback: calibrate once, regulate continuously.
+
+**The Price of Global Invariants: "When Order is Global, the Source Serializes"**
+
+In standard streaming mode (`-l`), batch sizes are locally determined and chunks execute fully independently in parallel across all NUMA nodes.
+
+However, exact line counts (`-L`) and deterministic stream limits (`-n`) are **global sequence properties**. In physical terms, you cannot know the exact boundary of the 1,000th line on Socket 1 without knowing the exact count of lines that passed through Socket 0. Therefore, under `-L` and `-n`, the scanning headwaters serialize via the `cum_lines` chain. 
+
+We do not fight this physical law; we minimize its cost: scanning serializes at memory-bus speeds (nanoseconds per chunk handoff via geometric spin-backoff), while worker payload execution remains 100% parallelized across all CPU cores.
 
 ---
 
@@ -1887,13 +1948,13 @@ With the release of v3.0.0, `forkrun` has transitioned to a high-performance C-r
 
 ## 🛣 Roadmap
 
-forkrun currently guarantees correctness under the assumption that at least one worker per NUMA node remains alive until its assigned work completes — a safe assumption for local shell operations on healthy compute nodes. 
-
 Priorities for the development roadmap include:
-- **Resume-after-interruption** state saving to gracefully handle preempted cluster/Slurm jobs.
-- **Deeper integration** with facility workload managers.
+- **Distributed Slurm Cluster Support:** Multi-node coordination across separate HPC nodes.
+- **Facility Workload Manager Integration:** Dynamic resource contraction/expansion hooks.
+- **Reproducible Bit-Identical Builds:** Cryptographic attestation of injected C loadables.
 
-*(If forkrun is saving your institution compute-hours, please consider sponsoring its development to accelerate these features!)*
+*(Intra-node checkpoint/resume with 3-layer security provenance and native NUMA `-n`/`-L` exactness are shipped in v3.5.0).*
+*
 
 -----------------------------------------
 # RESILIENCE_PROTOCOL.md
@@ -2058,3 +2119,197 @@ PATH='' exec -c bash --norc --noprofile --restricted -c '...'
 ### 6.4 Layer 3: Setup Command Authorization
 If the verified environment contains custom commands (`FORKRUN_EXTRA_SETUP`), functions (`FORKRUN_EXTRA_FUNCS`), or non-standard variables, `forkrun` displays the exact setup code and requires a final interactive confirmation unless `FORKRUN_TRUST_RESUME=1` is set.
 
+
+-----------------------------------------
+# SHAPES.md
+
+# SHAPES.md — The Control-Flow Shapes of forkrun
+
+*How to read the codebase: one coordinate system, six shapes, everything derives.*
+
+This document describes the **frame** that makes forkrun's complexity collapse into inevitability. PHYSICS.md gives you the metaphor (the river, the conservation laws); this document gives you the engineering content of that metaphor — precisely enough that you can *predict* the code before reading it. A maintainer who has loaded this frame can answer "where would X live?" and "what must Y's exit paths do?" without a tour guide.
+
+The test of the frame is §4: prediction drills. If you can answer those from the frame alone, the frame works. If you can't, the frame has a hole — and that hole is a finding about the architecture, not just the doc.
+
+---
+
+## §0 — The Coordinate System (the ground truth)
+
+**All of forkrun speaks one language: absolute byte offsets into the append-only memfd.**
+
+```
+  0 ───────────────────────────────────────────────────────────────────► EOF
+  [── Fallowed ──][── Active Workers ──][── Scanned ──][── Ingested ──]
+        │                │                  │               │
+   hole-punched      claimed slots      ring slots      raw chunks
+   (fallow)          [start, end)       [start, end)    [raw_off, raw_off+len)
+```
+
+On top of the byte plane rides one lattice: **(major, minor)** — the chunk index and within-chunk batch index — which the orderer uses to merge per-node streams into global order.
+
+Three properties make this a *coordinate system* rather than a convention:
+
+1. **Universality.** Every subsystem — ring, escrow packets, fallow intervals, orderer heap, resume ledger, plugin ABI (`batch_offset`), count chain (`cum_lines` counts *delimiters over this plane*), handoffs (`actual_end` is a coordinate) — names data by the same numbers. No subsystem maintains its own numbering. There are no conversions at subsystem boundaries.
+2. **Immutability.** A coordinate names the same bytes forever. `fallocate(PUNCH_HOLE)` removes the physical mass behind a coordinate without moving the coordinate. A batch in flight, a batch in escrow, and a batch in the resume ledger are *the same datum*.
+3. **Derivability.** State that can be computed from coordinates is computed, never stored or transferred. The canonical examples: `-L`'s pending-line carry is `cum_lines mod L` (derived, not transferred — the L0/B0 design was rejected for exactly this reason); UMA's `-n` budget derives from `total_scanned`; the resume jagged edge is a set of intervals on the plane.
+
+**Why this matters more than anything else in this doc:** mechanism reuse is only safe in a coordinate-coupled system. A pointer can be used only by whoever holds it; a number can be used by anyone who can read it. That's why one pipe can carry ordering *and* backpressure *and* checkpoint accounting — they're all numbers in the same currency. The textbook alternative — reference-coupled objects, ownership, GC — would need locks, refcounts, and would make every reuse in §2 impossible or dangerous.
+
+**The counterfactual that proves it:** every serious bug in the v3.4→v3.5 development cycle was a coordinate-discipline violation. The multiple incompatible clamp variants of the `-n` bug were *independent numbering schemes for the same stream position*. The publication-gate failure was *state that should have been derived being instead transferred and then retracted*.
+
+---
+
+## §1 — The Six Shapes
+
+These are the control-flow patterns. Every subsystem is one of these shapes wearing different constants. Learn the shapes plus §0, and the codebase is O(shapes + coordinates) to hold in your head, not O(subsystems × interactions).
+
+For each shape: the invariant, the canonical site, and what breaks without it.
+
+### Shape 1: Monotonic Claim (`atomic_fetch_add`, no rollback)
+
+**Invariant:** an index advances only, via one atomic RMW; each slot is claimed by exactly one party; there is no CAS retry loop on the fast path.
+
+**Canonical sites:** worker claim (`read_idx`), scanner chunk claim (`chunk_queue_tail`), ingest slot assignment (`chunk_queue_head`).
+
+**What breaks without it:** ABA hazards, contention (the thing CAS-retry designs trade away), and — worse — any rollback logic becomes possible, and rollback logic is where the 25/30-line bug class lived. The physics: the river flows one way. If you're tempted to write a compare-and-swap retry, the design is telling you the *structure* is wrong, not the synchronization.
+
+### Shape 2: Publish-Before-Claim (release/acquire handoff)
+
+**Invariant:** write the payload, *then* publish the index that makes it visible, with release semantics; consumers acquire-load the index, then read the payload. Readers never observe an uninitialized slot.
+
+**Canonical sites:** scanner→ring slot publication (`write_idx`), indexer→`actual_end`, scanner→`cum_lines` (the gate values of `-n`/`-L`).
+
+**What breaks without it:** torn reads on the ring arrays; a worker claiming a slot whose `end_ring` entry is stale. Memory-ordering bugs here are silent until a weakly-ordered core or an unlucky interleaving reveals them — this is why the sanitizer matrix exists.
+
+### Shape 3: Bounded Wait with Terminal-State Escape
+
+**Invariant:** *never wait, unboundedly, for data a process that has exited was supposed to produce.* Every cross-process wait must (a) re-check globally-visible terminal state every iteration — `limit_cutoff_major`, `emergency_abort`, scanner-finished flags — and (b) poll with a bounded timeout so the escape is actually re-checked.
+
+**Canonical sites:** the `-n`/`-L` scan gate (`WAIT_FOR_CUM_LINES_OR_CUTOFF`, the `-L` handoff gate), the worker EOF poll, the scanner's ingest wait.
+
+**What breaks without it:** the EOF-hang bug class. Every hang in the v3.4.x cycle was this shape missing its escape: a scanner blocked on `cum_lines[3]` whose producing scanner had already exited via `limit_reached`. The corollary invariant — **every exit path publishes every value downstream waiters consume** — is the producer-side half of this law. Enumerate the exit paths: normal completion, carry/skip, cutoff-skip, EOF sentinel, abort. Each one publishes. The byte-mode ownership bug was a violation of the corollary (an exit path — indexer publication in byte mode — silently stopped publishing a value the scanner waited on).
+
+### Shape 4: Spin-Then-Sleep with Saturated Backoff
+
+**Invariant:** for waits bounded by a *known physical timescale* (a 2MB SIMD scan is ~hundreds of µs), spin first with exponentially widening gaps, saturating the gap at tens of µs; sleep only as the unexpected regime, with the wake armed by an eventfd the producer *always* fires on the resolving publication.
+
+**Canonical sites:** the gate waits (post-v3.5.0 backoff fix), worker claim wait (spin 100 → poll), indexer meta wait.
+
+**What breaks without it:** the latency cliff. A fixed 10k-iteration spin drops into a 100ms poll while the event completes in 300µs — a 10³ discontinuity on the *serialized hot path* of `-n`/`-L`, where every gate wait is dead time on the global critical chain. The two load-bearing details: the backoff must saturate (never grow past context-switch latency), and the producer-side "always fire evfd_meta on gate-resolving publishes" rule must hold — if that `sys_write` ever looks redundant and gets optimized away, the insurance poll silently becomes the common path. That rule is currently a comment at the site; it belongs in §6 of ARCHITECTURE's contracts list.
+
+### Shape 5: Advisory Wakeups over Monotonic Truth
+
+**Invariant:** eventfds and signals gate *sleeping only*. Correctness decisions are made from indices and flags, never from wake counts, ordering, or delivery. Missed and spurious wakeups are both harmless.
+
+**Canonical sites:** every poll in the codebase; the whole reason EOF_PROTOCOL.md can say "spurious wakeups are allowed."
+
+**What breaks without it:** any code that assumes "I was woken, therefore state X" — the wakeup is evidence you may re-check truth, never truth itself. This shape is what makes Shape 3's bounded polls safe: a lost wakeup costs latency (the next timeout re-checks), never correctness.
+
+### Shape 6: Owner-Publishes-on-Every-Exit (the truth tables)
+
+**Invariant:** each piece of shared state has exactly one owner; the owner publishes it on every path by which control leaves the region where it's responsible. Ownership is written down as a truth table at the site.
+
+**Canonical site and truth table** — `actual_end` in `ChunkMeta`:
+
+| Mode | Delimiter search? | Publishes `actual_end`? | Publisher |
+|---|---|---|---|
+| normal | yes | yes (delimiter-aligned) | indexer |
+| byte | **no** | **yes (raw chunk end)** | indexer |
+| `-L` | no | no | **scanner** (handoff chain) |
+
+**What breaks without it:** the byte-mode hang — a refactor that moved publication inside the search's conditional, so byte mode (skip-search-keep-publish) and `-L` (skip-both) were collapsed into one branch. Three cases became two; the third case's consumers deadlocked. The general lesson: **when a mechanism serves multiple owners, the ownership is only as durable as the truth table that declares it.** Undeclared reuse is the gap where this bug class lives.
+
+---
+
+## §2 — The Compositions (where the complexity actually lives)
+
+Individual shapes are simple. forkrun's apparent complexity is *one mechanism serving multiple roles* — which the coordinate system makes safe. These case studies are the proof. For each: what the textbook version would look like, and why the coordinate version is smaller, faster, or both.
+
+### 2.1 The Count Chain
+
+`cum_lines` in `ChunkMeta` began life as a line count for `-n`. It became:
+
+- **the `-n` budget substrate** (scanner M's exact starting count, enabling prefix-exact clamping),
+- **the `-L` scanner-handoff channel** (gating serialized scanning; the pending carry is *derived* as `cum_lines mod L`),
+- and the candidate substrate for future **output backpressure** (a consumer-progress coordinate on the same plane).
+
+One cache-line field, release-published, consumed by three features. The textbook version: a distributed counter service for `-n`, a leader-election protocol for `-L` serialization, a separate flow-control channel. forkrun's version: one monotonic integer in the plane.
+
+### 2.2 The Ack Pipe
+
+`ring_ack`'s order pipe carries `OrderPacket`s — (major, minor, byte range, output range) in stream coordinates. Because the packets are coordinates:
+
+- they drive **the orderer's min-heap merge** (their original job),
+- they accumulate into the **resume ledger** (the seqlock tracker absorbs each packet's interval),
+- and — once the pipe is sized to one page instead of 1MB — they carry **output backpressure**: a slow consumer blocks the orderer, the orderer stops draining the pipe, workers block writing acks, `read_idx` stalls, the ring fills to the shield, the scanner stops, ingest blocks. The whole pipeline becomes a closed hydraulic system with **zero new state** — the kernel's pipe semantics were the missing mechanism all along, mispriced at 1MB.
+
+The textbook version: an explicit flow-control protocol, windowing, credit messages. forkrun's version: one `F_SETPIPE_SZ` call, because a bounded blocking channel of coordinates *is* a flow-control protocol.
+
+### 2.3 The Interval Heap
+
+One data structure — a merge-heap of `[start, end)` intervals over the byte plane — serves the orderer (hole-punch behind the emitted prefix), the fallow process (its whole reclamation algorithm), and the resume ledger (the jagged edge). Three subsystems, zero conversions, because the intervals are in the universal currency. The textbook version: three bespoke bookkeeping structures with translation layers.
+
+### 2.4 The Resume Ledger Itself
+
+The deepest demonstration of §0: a checkpoint is *just coordinates* — horizon plus jagged intervals — and every process reconstructs its role from a position on the plane. No object graphs are serialized; no protocol state is saved; resume is re-derivation. This is why exactly-once delivery is even expressible: "was this interval emitted?" is a set-membership question over coordinates, not a distributed-identity question.
+
+---
+
+## §3 — The Derivation Laws
+
+The grammar rules. INVARIANTS.md is the law; this is the worldview that makes the law feel necessary.
+
+1. **One currency.** No subsystem maintains an independent numbering. If a design introduces its own IDs for something the plane already names, it is wrong — or it is about to acquire conversion bugs. (The `-n` bug's multiple clamp variants were exactly this.)
+2. **Derive, don't transfer.** State computable from shared coordinates must be computed, never stored and shipped. Transferred state can desync and must be retracted; derived state cannot. (L0/B0 rejected; `cum mod L` adopted.)
+3. **Every exit path publishes.** When you own a value waiters consume, enumerate your exit paths and publish on each. Write the enumeration as a truth table at the site. (Shape 6's law, restated as a discipline.)
+4. **Never wait on the dead.** Terminal state is globally visible; every wait checks it; every poll is bounded so the check re-runs. (Shape 3's law, restated.)
+5. **The wakeup is not the truth.** Indices and flags decide; eventfds only decide when to sleep. (Shape 5's law, restated.)
+6. **Progress is irreversible.** No rollback of claims, no un-publication of slots, no decrements of monotonic indices. If a design seems to need "undo," redesign the structure — the undo is where the races live. (PHYSICS.md's arrow of time, stated as an audit rule.)
+
+---
+
+## §4 — Prediction Drills
+
+The frame's test. Answer from §0–§3 alone, then check against the code. Where the frame doesn't determine the answer, that's a hole worth patching — in the doc or in the architecture.
+
+**Drill 1 — Exactly-once resume.** *We need crash-resume with exactly-once delivery. What does the checkpoint contain?*
+Frame answer: coordinates only — a horizon (the contiguous completed prefix, in bytes) and a set of intervals (the jagged edge). Everything else re-derives: the scanner skips intervals on the plane, the orderer re-syncs on an offset match, workers re-execute what's left. No protocol state survives the crash because no protocol state *needs* to.
+Check: `ring_dump_resume` — horizon, jagged, stdout bytes. `[HOLE? The stdout-bytes field is not strictly a plane coordinate — it's an *output-plane* coordinate. The frame should acknowledge the second plane.]
+
+**Drill 2 — Output backpressure.** *A slow consumer makes memory unbounded. What's the mechanism?*
+Frame answer: find the bounded blocking channel already carrying coordinates. The ack pipe qualifies; size it to a page; the kernel does the waiting; backpressure propagates through the existing shield structure because every stage upstream already blocks on bounded coordinates.
+Check: H3 fix. Exact match.
+
+**Drill 3 — Exact line batches across NUMA.** *We need `-L N` with NUMA locality preserved. What rides the chain?*
+Frame answer: a *global sequence property* (batch boundaries) requires serialization, so the count chain gates scanning. The handoff must be coordinates plus derivables: `actual_end` (start of the open batch) and `cum_lines` (from which the pending carry is derived). Nothing else transfers. Delimiter ownership is exclusive, so each scanner counts only its own chunk and never rescans.
+Check: the scanner-handoff chain. Exact match — and the *reason* the first design (L0/B0 transferred state) was wrong is visible in the frame before touching code.
+
+**Drill 4 — Worker starvation on one node.** *`-j 1` on 4 nodes hangs. Where's the bug?*
+Frame answer: a per-node ring is a claim structure (Shape 1) whose consumers advance the fallow horizon; zero consumers means the ring fills to the shield and the scanner stalls — and under `-k`, the orderer waits on a (major, minor) that never arrives. The fix is structural: guarantee ≥1 drainer per active ring, at the wrapper, before `ring_init`. Note the diagnosis path the frame gives you: the hang is *downstream* of the empty ring, not in the claim loop.
+Check: the `-j 1` saga. Match.
+
+**Drill 5 — A new feature needs per-batch worker identity.** *Users want stable per-batch IDs for output files. What's the ID?*
+Frame answer: derive from the lattice — (major, minor) or the byte range — not a new counter. And indeed `{ID}` is `{NODE}.{WORKER}.{BATCH}` with an incarnation suffix for respawn disambiguation.
+Check: T11a/T11b. Match — but note the *incarnation* component is a small frame violation (a counter that isn't a coordinate; it exists because a respawned worker re-claims the same slot and must not collide on side effects like output files). `[HOLE? The frame should either admit incarnation counters as a sanctioned exception (identity of *executors*, not of *data*) or the doc has an unprincipled corner.]`
+
+**Drill 6 — EOF while gated.** *A scanner is blocked at the `-L` gate when global EOF arrives and the predecessor exits without publishing. What must be true?*
+Frame answer: it can't happen *if* Law 3 held — every exit path publishes. And if a bug means it didn't, Law 4 saves you: the wait has a terminal-state escape, so the blocked scanner observes EOF/cutoff and exits rather than hanging. Defense in depth: the producer-side law makes the consumer-side escape unnecessary; the consumer-side law makes the producer-side bug survivable.
+Check: both halves of the hang fix. Match — and the drill demonstrates *why* both halves exist.
+
+**Drill 7 — Sanitizer limitations.** *TSan passes but the ring still races in production. Why isn't that evidence of absence?*
+Frame answer: forkrun's coordination is cross-*process* on `MAP_SHARED` — TSan's shadow memory is per-process, so the inter-process acquire/release pairs (Shape 2) are invisible to it. The guarantees are enforced by the invariants and exercised by the stress matrix; sanitizers cover the intra-process fraction.
+Check: MAINTAINERS.md §5. Match.
+
+---
+
+## §5 — What This Frame Buys You (and what it doesn't)
+
+**Buys:** a mental model with ~10 elements (one plane, one lattice, six shapes, six laws) that predicts code locations, diagnoses hangs by shape ("this is a Shape-3 violation"), and makes mechanism reuse reviewable ("the truth table says who publishes — check all their exit paths"). It converts forkrun's density from "must memorize subsystems" to "must recognize patterns."
+
+**Doesn't buy:** performance intuition (that's PHYSICS.md + the benchmarks), the security model (that's RESILIENCE_PROTOCOL §6's three layers), or the Bash-side JIT/cleanroom machinery (which is about *shell* mechanics, not dataflow — arguably a seventh shape, "generate code once, execute many," `[REVIEW: decide whether the pCode partial-evaluation pattern deserves shape status or a footnote]`).
+
+**The honest caveat:** this frame was reverse-engineered from working code by the people who built it. The drills are the only thing keeping it honest — each `[HOLE?]` marker above is a place where the code follows the frame by accident or habit rather than by law, and each is a candidate for either a doc patch or an architecture patch. Expect to find more when you write the next drill.
+
+---
+
+*See also: INVARIANTS.md (the laws, as audit rules) · PHYSICS.md (the metaphor) · EOF_PROTOCOL.md (Shapes 3 & 5 in their purest form) · ARCHITECTURE.md §Core Invariant (§0's short form).*

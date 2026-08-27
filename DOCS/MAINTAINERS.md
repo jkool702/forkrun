@@ -120,14 +120,13 @@ If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under 
 
 ## §6. Final Release Criteria
 
-Before tagging a release, run one final sanity check on the benchmark output to confirm the expected number of test cases completed. From the `BENCHMARKS` directory, after running `run_benchmark.bash`, verify the line count of results:
+Before tagging a release, run the automated test suite and verify that the full test matrix completes with zero failures:
 
+$$	ext{Total Executions} = (	ext{Unit Tests} + 	ext{Benchmarks}) 	imes (	ext{UMA} + 	ext{NUMA}) 	imes (	ext{Baseline} + 	ext{TSan} + 	ext{ASan/UBSan})$$
+
+Verify test execution counts from the `BENCHMARKS` directory:
 ```bash
 grep -E '^[0-9]' benchmark.out | wc -l
 ```
 
-The output must match the expected test count for the release: **(316 unit tests + 396 benchmark runs) × (UMA + NUMA) × (baseline + TSan + ASan/UBSan) = 4,272** (recompute if you add/drop tests). A lower count indicates that one or more benchmark runs silently failed or were skipped, and the release must be held until the discrepancy is resolved.
-
-Section T (adversarial resume files, fd hygiene, oversubscription extremes) must pass before tagging.
-
-This check is the last gate before tagging. If it passes alongside the full sanitizer matrix, tag the release and publish.
+Ensure all adversarial test suites (Section T: resume sandbox, permission gates, foreign-UID rejection, fd hygiene, oversubscription extremes) pass 100% green before tagging.

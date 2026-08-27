@@ -85,6 +85,14 @@ Today, whether the scanner is in Phase 0, Phase 1, or Phase 2, the worker fast-p
 
 Once optimal $L$ is found -- immediately via satellite, or after a short acoustic ramp -- the scanner enters a PID controller making micro-adjustments based on the `stall_meter` and `starve_meter`. Standard geophysical instrument feedback: calibrate once, regulate continuously.
 
+**The Price of Global Invariants: "When Order is Global, the Source Serializes"**
+
+In standard streaming mode (`-l`), batch sizes are locally determined and chunks execute fully independently in parallel across all NUMA nodes.
+
+However, exact line counts (`-L`) and deterministic stream limits (`-n`) are **global sequence properties**. In physical terms, you cannot know the exact boundary of the 1,000th line on Socket 1 without knowing the exact count of lines that passed through Socket 0. Therefore, under `-L` and `-n`, the scanning headwaters serialize via the `cum_lines` chain. 
+
+We do not fight this physical law; we minimize its cost: scanning serializes at memory-bus speeds (nanoseconds per chunk handoff via geometric spin-backoff), while worker payload execution remains 100% parallelized across all CPU cores.
+
 ---
 
 ## 5. Fallow (Punch-Hole Reclamation) = Entropy and the Second Law

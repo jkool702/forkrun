@@ -54,23 +54,46 @@ frun -C ./plugin.so:my_plugin < massive_dataset.txt
 
 ## §2. Advanced Usage: The Execution Context
 
-If your native C code needs to know *which* batch it is processing, its byte offset in the file, or if it is recovering from a crash, `forkrun` can pass a detailed context struct directly to your function as a 3rd argument. 
+`forkrun` supports two context ABI versions:
 
-Because `forkrun` is a zero-dependency, single-file deployment, we provide two ways to access this struct:
-
-### Option A: The Header File (For structured projects)
-Download `forkrun_plugin.h` from the repository and include it in your project.
+* **Version 1 (`forkrun_use_ctx = 1`):** Standard context struct with separate 32-bit `numa_major` and `numa_minor` fields.
+* **Version 2 (`forkrun_use_ctx = 2`, v3.5.0+):** High-precision packed context. Replaces major/minor with a 64-bit `numa_batch_id` union (`(major << 22) | minor`), preserving full 42-bit major chunk sequence numbers for billion-record runs.
 
 ```c
-#include "forkrun_plugin.h"
+#include <stdint.h>
+#include <stdio.h>
 
-// 1. Opt-in flag: Tell forkrun to pass the context pointer
-int forkrun_use_ctx = 1;
+// Opt-in flag: 1 = legacy 32-bit fields, 2 = v3.5+ packed 64-bit batch ID
+int forkrun_use_ctx = 2;
 
-// 2. Define your function with the 3-argument signature
+struct forkrun_ctx {
+    uint64_t batch_index;       // Global batch sequence number
+    uint64_t batch_offset;      // Byte offset in the shared memfd
+    uint64_t batch_byte_length; // Length of the current batch in bytes
+    uint32_t version;           // Struct version (1 or 2)
+    uint32_t worker_id;         // Internal Worker ID (0 to N)
+    uint32_t node_id;           // NUMA node ID
+    uint32_t num_kills;         // Retry count (if batch previously failed)
+    union {
+        uint64_t numa_batch_id; // Version 2: packed (42-bit major << 22 | 22-bit minor)
+        struct {
+            uint32_t numa_major; // Version 1: truncated 32-bit major
+            uint32_t numa_minor; // Version 1: 32-bit minor
+        };
+    };
+    int32_t  fd_in;             // Read-only file descriptor to the memfd
+    char     delimiter;         // The record delimiter character
+    uint8_t  cfg_state[3];      // Global configuration state
+};
+
 int my_func(int argc, char **argv, const struct forkrun_ctx *ctx) {
-    
-    printf("Worker %u processing batch %lu\n", ctx->worker_id, ctx->batch_index);
+    if (ctx->version == 2) {
+        uint64_t major = ctx->numa_batch_id >> 22;
+        uint32_t minor = ctx->numa_batch_id & 0x3FFFFF;
+        printf("Worker %u on Node %u (Major %lu, Minor %u)
+", 
+               ctx->worker_id, ctx->node_id, major, minor);
+    }
     return 0;
 }
 ```

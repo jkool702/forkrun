@@ -81,15 +81,20 @@ Prior to v3.5.0, guaranteeing exactly *N* lines per batch (`-L`) in NUMA mode re
 
 In **v3.5.0+**, `forkrun` provides **Native NUMA support for `-L`** via the **Scanner-Handoff Chain**:
 
-### 5.1 The Scanner-Handoff Mechanism
-1. **Indexer Bypass:** The per-node Indexer skips delimiter alignment. The per-node Scanners assume direct ownership of chunk boundaries (`actual_end`) and cumulative line tracking (`cum_lines`).
-2. **Serialized Scan Gate:** Because an exact batch boundary is a global sequence invariant, scanning is serialized across NUMA sockets. Scanner $M+1$ waits for Scanner $M$ to publish both its boundary and cumulative line count.
+### 5.1 The Scanner-Handoff Mechanism & Exit-Path Completeness
+1. **Indexer Bypass:** The per-node Indexer skips delimiter alignment and does *not* publish `actual_end`. The per-node Scanners assume direct, exclusive ownership of chunk boundaries (`actual_end`) and cumulative line tracking (`cum_lines`).
+2. **Serialized Scan Gate:** Because an exact batch boundary is a global sequence property, scanning is serialized across NUMA sockets. Scanner $M+1$ waits for Scanner $M$ to publish both its boundary and cumulative line count.
 3. **The Uniform Handoff:** 
    - Every scanner scans its own born-local chunk *completely* from `raw_start` to `raw_end` (zero rescanning of bytes).
    - If a chunk ends with an incomplete batch of $k < L$ lines, the scanner publishes `actual_end = batch_start` (the byte offset where the open batch originated, which may point into an earlier chunk) and `cum_lines`.
    - Scanner $M+1$ begins counting delimiters in its own chunk, seeded with `lines_in_batch = cum_lines % L`.
    - When the $L$-th line is reached in chunk $M+1$, it publishes a batch covering `[batch_start, current_delim_end)`.
-4. **The -L Locality Tax:** The worker that claims a boundary-straddling batch will read the initial $k$ lines across the NUMA interconnect. We trade a microscopic cross-socket read (at most $L-1$ lines per 2 MB chunk) to preserve exact batch sizing without abandoning NUMA topology.
+4. **Exhaustive Exit-Path Publishing (Hang Defense):** Every exit path in the `-L` scanner (normal completion, mid-batch carry, cutoff-skip, and EOF sentinel) unconditionally publishes `actual_end | FLAG_META_READY` and `cum_lines | FLAG_CUM_READY`. Successor scanners never wait on a dead predecessor.
+
+### 5.4 The Quantitative -L Locality Tax
+When an open batch straddles a NUMA chunk boundary, the worker executing that batch reads $k < L$ lines across the interconnect. The cross-socket traffic is bounded by:
+$$\text{Max Cross-Socket Bytes per Chunk} \le \left(\frac{L - 1}{2}\right) \times \text{Avg Line Length}$$
+For a typical 2 MB chunk with $L=4$ and 50-byte lines, this averages $\sim 100\text{ bytes}$ of cross-socket read per 2 MB processed ($< 0.005\%$ cross-socket memory traffic). We trade this microscopic penalty to preserve exact batch counts without abandoning NUMA execution.
 
 *(Note: Multi-parameter sweeps `:::` still run under UMA, as they require $L=1$ where the flat pipeline is naturally optimal).*
 
@@ -113,3 +118,4 @@ In `forkrun` v3.5.0+, `-n N` is guaranteed to return **strictly the first $N$ re
 4. **Clean Skip Cascade:** All subsequent chunks ($M+1, M+2, \dots$) observe that their major ID is past the cutoff and skip scanning entirely without blocking or waiting on dead predecessor scanners.
 
 **Run-length dependence of steal rate.** The 0.0–0.2% file-input cross-socket figure holds for meaningful run lengths (≥ a few hundred chunks). Micro-runs of ~50 chunks can show a single-steal 2.0% startup transient from initial load-balancing; this is expected and amortizes to <0.2% on longer streams.
+
