@@ -101,7 +101,22 @@ This is the thermodynamic arrow of time made explicit. The fallow thread is the 
 
 ---
 
-## 6. Ordering Modes as Different Observers
+## 6. The Invariant Spacetime Metric: Why Coordinates Never Move
+
+In classical parallel software, buffers are circular, dynamic, or shifted in memory. Every time data moves or shrinks, pointers must be recalculated, creating race conditions and ABA hazards.
+
+In `forkrun`, the shared `memfd` is an **invariant spacetime manifold**:
+
+* The coordinate $x = 0$ is the start of the stream, and $x$ advances monotonically to $x = \text{EOF}$.
+* Data particles (bytes) stay exactly where they were born.
+* When workers finish consuming a region of spacetime, the `ring_fallow` thread uses `fallocate(PUNCH_HOLE)` to remove the *physical mass* (RAM pages) from that region of spacetime without warping or shifting the *coordinate grid*.
+* Checkpoints and resumes are trivial because the coordinates $x \in [a, b]$ mean the exact same bytes before and after a crash.
+
+Because every component (Ingest, Indexer, Scanner, Worker, Escrow, Fallow, Checkpoint) agrees on the exact same linear metric, coordination overhead collapses to zero.
+
+---
+
+## 7. Ordering Modes as Different Observers
 
 - `--realtime`: “I only care about what arrives first at the detector.” (Relativistic observer — order of arrival.)
 - `--ordered`: “I need to reconstruct the original sequence as if measured by a stationary lab frame.” (The `ring_order` thread is the Lorentz transformation that re-synchronizes the major/minor indices.)
@@ -110,7 +125,7 @@ The NUMA-aware reorder path is just special relativity for data streams.
 
 ---
 
-## 7. Why the Complexity Is Minimal, Not Maximal
+## 8. Why the Complexity Is Minimal, Not Maximal
 
 Every “weird” feature has a direct physical justification:
 
@@ -128,7 +143,7 @@ Remove any of these and the system either violates a conservation law or require
 
 ---
 
-## 8. How to Think Like a Geophysicist When Hacking forkrun
+## 9. How to Think Like a Geophysicist When Hacking forkrun
 
 1. **Start with invariants, not features.** Write the conservation laws first (see INVARIANTS.md).
 2. **Ask “what would break if this were a real river?”** If the answer is “turbulence” or “backflow,” you probably need a new physical mechanism, not a new lock.

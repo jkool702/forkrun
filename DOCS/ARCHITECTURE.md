@@ -14,6 +14,25 @@ forkrun achieves extreme performance by:
 - Using optimistic execution with cheap recovery instead of heavy coordination
 - Leveraging physical hardware constraints (NUMA, cache hierarchy, memory bandwidth)
 
+---
+
+## Core Invariant: The Universal Linear Coordinate System
+
+A cornerstone of `forkrun`'s performance and resilience is the **Universal Coordinate Plane**. All subsystems agree on a single, linear, 64-bit integer byte address space:
+
+```
+  0 ───────────────────────────────────────────────────────────────────► ∞
+  [── Fallowed (Hole-Punched) ──][── Active Workers ──][── Ingest / Scanner ──]
+  0                     Fallow Horizon            Write Head           EOF
+```
+
+1. **Zero-Copy Invariance:** Raw data bytes are written into the shared `memfd` once at ingest. No data is ever copied between intermediate queues.
+2. **Metadata-Only Routing:** Ingress, Indexers, Scanners, Rings, Workers, and Escrow communicate exclusively by passing lightweight integer slices `[start_offset, end_offset)`.
+3. **Entropy Export without Coordinate Collapse:** As workers finish batches, the background fallow thread punches physical holes via `fallocate(FALLOC_FL_PUNCH_HOLE)` behind the consumption horizon. Physical RAM is returned to the OS, but the absolute coordinate scale remains intact.
+4. **Deterministic Checkpointing:** The Seqlock crash ledger (`.forkrun_resume`) simply records the completed coordinate frontier (`resume_horizon` + `resume_jagged`). Resuming a pipeline is as simple as skipping previously committed byte intervals on the invariant coordinate plane.
+
+---
+
 ## Core Architecture Diagram
 
 ```mermaid
@@ -70,7 +89,11 @@ An intelligent controller that uses a Pre-Flight SIMD Popcount to compute the gl
 → [`PHYSICS.md`](PHYSICS.md)
 
 ### 4. Resilience & Exactly-Once Protocol
-Optimistic execution with near-zero happy-path overhead, instant failure detection via Death Pipe, per-worker recovery, and resume capability.
+Optimistic execution with near-zero happy-path overhead, instant failure detection via Death Pipe, per-worker recovery, and hardened multi-layer resume capability.
+
+- **Crash Escrow:** Lock-free transaction rollback channel for worker transient failures.
+- **Seqlock Ledger:** Monotonic `resume_horizon` and jagged-edge interval tracking.
+- **3-Layer Resume Security (v3.5.0+):** Parent-shell UID/permission provenance gate (with interactive command preview for shared scratch directories) → `PATH=''` restricted sandbox subprocess → Setup authorization gate.
 
 → [`RESILIENCE_PROTOCOL.md`](RESILIENCE_PROTOCOL.md) and [`EOF_PROTOCOL.md`](EOF_PROTOCOL.md)
 

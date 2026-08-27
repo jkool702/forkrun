@@ -75,16 +75,41 @@ Because chunks are guaranteed to be isolated to a single physical NUMA socket vi
 
 ---
 
-## §5. Architectural Trade-offs: Exact Batch Sizing (`-L`)
+## §5. Exact Batch Sizing (`-L`) & The Scanner-Handoff Chain (v3.5.0+)
 
-This architecture enforces one strict limitation: **`forkrun` cannot guarantee exactly *N* lines per batch in NUMA mode.**
+Prior to v3.5.0, guaranteeing exactly *N* lines per batch (`-L`) in NUMA mode required automatically demoting the pipeline to UMA. Because the Ingress process carves memory by physical byte sizes (2 MB) rather than line counts, chunks almost never contain an integer multiple of *N* lines.
 
-Because the Ingress chunker carves the stream based on physical byte sizes (2 MB) rather than logical line counts, a chunk will contain an arbitrary number of lines. Guaranteeing exactly *N* lines per batch would require every chunk to magically contain an integer multiple of *N* lines. 
+In **v3.5.0+**, `forkrun` provides **Native NUMA support for `-L`** via the **Scanner-Handoff Chain**:
 
-If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), fulfilling the exact-batch contract at a chunk boundary would require the worker to pull the remaining $N - M$ lines from the next chunk (which physically resides on a different NUMA socket), violating the Born-Local structural guarantee and triggering heavy cross-socket memory traffic.
+### 5.1 The Scanner-Handoff Mechanism
+1. **Indexer Bypass:** The per-node Indexer skips delimiter alignment. The per-node Scanners assume direct ownership of chunk boundaries (`actual_end`) and cumulative line tracking (`cum_lines`).
+2. **Serialized Scan Gate:** Because an exact batch boundary is a global sequence invariant, scanning is serialized across NUMA sockets. Scanner $M+1$ waits for Scanner $M$ to publish both its boundary and cumulative line count.
+3. **The Uniform Handoff:** 
+   - Every scanner scans its own born-local chunk *completely* from `raw_start` to `raw_end` (zero rescanning of bytes).
+   - If a chunk ends with an incomplete batch of $k < L$ lines, the scanner publishes `actual_end = batch_start` (the byte offset where the open batch originated, which may point into an earlier chunk) and `cum_lines`.
+   - Scanner $M+1$ begins counting delimiters in its own chunk, seeded with `lines_in_batch = cum_lines % L`.
+   - When the $L$-th line is reached in chunk $M+1$, it publishes a batch covering `[batch_start, current_delim_end)`.
+4. **The -L Locality Tax:** The worker that claims a boundary-straddling batch will read the initial $k$ lines across the NUMA interconnect. We trade a microscopic cross-socket read (at most $L-1$ lines per 2 MB chunk) to preserve exact batch sizing without abandoning NUMA topology.
 
-**The Resolution:** 
-If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), `forkrun` automatically demotes the pipeline to the traditional UMA (Uniform Memory Access) architecture. While UMA mode still benefits from the ultra-fast C-ring and zero-copy `posix_spawnp` execution paths, it will incur the standard cross-socket memory migration tax inherent to all traditional shell parallelizers.
+*(Note: Multi-parameter sweeps `:::` still run under UMA, as they require $L=1$ where the flat pipeline is naturally optimal).*
 
+---
+
+## §6. Deterministic Stream Prefix Limiting (`-n`) (v3.5.0+)
+
+In a multi-socket topology, chunks are striped round-robin across nodes (Node 0 owns chunks 0, 2, 4; Node 1 owns 1, 3, 5). 
+
+### 6.1 The Pre-v3.5.0 Pitfall: "First Encountered" vs. "True Stream Prefix"
+Traditional parallelizers with loose atomic counters suffer from spatial race conditions: a fast scanner on Node 1 processing chunk 1 could claim records before Node 0 finished scanning chunk 0. When the limit $N$ was reached, the output contained an arbitrary sample of $N$ lines from across the cluster—violating true stream-order prefix semantics, and often over-delivering due to atomic commit lag.
+
+### 6.2 The v3.5.0 Cumulative Line Count Chain
+In `forkrun` v3.5.0+, `-n N` is guaranteed to return **strictly the first $N$ records of the original input stream**:
+
+1. **Sequential Cumulative Handoff:** Scanner $M$ receives the exact total line count `prev_cum` through chunk $M-1$.
+2. **Exact Delimiter Clamping:** When chunk $M$ observes `prev_cum + local_lines >= N`, it clamps the batch to exactly:
+   $$\text{allowed} = N - \text{prev\_cum}$$
+   The SIMD scanner rewinds in-buffer to the exact terminating delimiter of the $\text{allowed}$-th line, commits the batch, and halts.
+3. **Cutoff Propagation:** Chunk $M$ publishes `limit_cutoff_major = M + 1`.
+4. **Clean Skip Cascade:** All subsequent chunks ($M+1, M+2, \dots$) observe that their major ID is past the cutoff and skip scanning entirely without blocking or waiting on dead predecessor scanners.
 
 **Run-length dependence of steal rate.** The 0.0–0.2% file-input cross-socket figure holds for meaningful run lengths (≥ a few hundred chunks). Micro-runs of ~50 chunks can show a single-steal 2.0% startup transient from initial load-balancing; this is expected and amortizes to <0.2% on longer streams.

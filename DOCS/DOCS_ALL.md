@@ -18,6 +18,25 @@ forkrun achieves extreme performance by:
 - Using optimistic execution with cheap recovery instead of heavy coordination
 - Leveraging physical hardware constraints (NUMA, cache hierarchy, memory bandwidth)
 
+---
+
+## Core Invariant: The Universal Linear Coordinate System
+
+A cornerstone of `forkrun`'s performance and resilience is the **Universal Coordinate Plane**. All subsystems agree on a single, linear, 64-bit integer byte address space:
+
+```
+  0 ───────────────────────────────────────────────────────────────────► ∞
+  [── Fallowed (Hole-Punched) ──][── Active Workers ──][── Ingest / Scanner ──]
+  0                     Fallow Horizon            Write Head           EOF
+```
+
+1. **Zero-Copy Invariance:** Raw data bytes are written into the shared `memfd` once at ingest. No data is ever copied between intermediate queues.
+2. **Metadata-Only Routing:** Ingress, Indexers, Scanners, Rings, Workers, and Escrow communicate exclusively by passing lightweight integer slices `[start_offset, end_offset)`.
+3. **Entropy Export without Coordinate Collapse:** As workers finish batches, the background fallow thread punches physical holes via `fallocate(FALLOC_FL_PUNCH_HOLE)` behind the consumption horizon. Physical RAM is returned to the OS, but the absolute coordinate scale remains intact.
+4. **Deterministic Checkpointing:** The Seqlock crash ledger (`.forkrun_resume`) simply records the completed coordinate frontier (`resume_horizon` + `resume_jagged`). Resuming a pipeline is as simple as skipping previously committed byte intervals on the invariant coordinate plane.
+
+---
+
 ## Core Architecture Diagram
 
 ```mermaid
@@ -74,7 +93,11 @@ An intelligent controller that uses a Pre-Flight SIMD Popcount to compute the gl
 → [`PHYSICS.md`](PHYSICS.md)
 
 ### 4. Resilience & Exactly-Once Protocol
-Optimistic execution with near-zero happy-path overhead, instant failure detection via Death Pipe, per-worker recovery, and resume capability.
+Optimistic execution with near-zero happy-path overhead, instant failure detection via Death Pipe, per-worker recovery, and hardened multi-layer resume capability.
+
+- **Crash Escrow:** Lock-free transaction rollback channel for worker transient failures.
+- **Seqlock Ledger:** Monotonic `resume_horizon` and jagged-edge interval tracking.
+- **3-Layer Resume Security (v3.5.0+):** Parent-shell UID/permission provenance gate (with interactive command preview for shared scratch directories) → `PATH=''` restricted sandbox subprocess → Setup authorization gate.
 
 → [`RESILIENCE_PROTOCOL.md`](RESILIENCE_PROTOCOL.md) and [`EOF_PROTOCOL.md`](EOF_PROTOCOL.md)
 
@@ -189,17 +212,42 @@ Because chunks are guaranteed to be isolated to a single physical NUMA socket vi
 
 ---
 
-## §5. Architectural Trade-offs: Exact Batch Sizing (`-L`)
+## §5. Exact Batch Sizing (`-L`) & The Scanner-Handoff Chain (v3.5.0+)
 
-This architecture enforces one strict limitation: **`forkrun` cannot guarantee exactly *N* lines per batch in NUMA mode.**
+Prior to v3.5.0, guaranteeing exactly *N* lines per batch (`-L`) in NUMA mode required automatically demoting the pipeline to UMA. Because the Ingress process carves memory by physical byte sizes (2 MB) rather than line counts, chunks almost never contain an integer multiple of *N* lines.
 
-Because the Ingress chunker carves the stream based on physical byte sizes (2 MB) rather than logical line counts, a chunk will contain an arbitrary number of lines. Guaranteeing exactly *N* lines per batch would require every chunk to magically contain an integer multiple of *N* lines. 
+In **v3.5.0+**, `forkrun` provides **Native NUMA support for `-L`** via the **Scanner-Handoff Chain**:
 
-If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), fulfilling the exact-batch contract at a chunk boundary would require the worker to pull the remaining $N - M$ lines from the next chunk (which physically resides on a different NUMA socket), violating the Born-Local structural guarantee and triggering heavy cross-socket memory traffic.
+### 5.1 The Scanner-Handoff Mechanism
+1. **Indexer Bypass:** The per-node Indexer skips delimiter alignment. The per-node Scanners assume direct ownership of chunk boundaries (`actual_end`) and cumulative line tracking (`cum_lines`).
+2. **Serialized Scan Gate:** Because an exact batch boundary is a global sequence invariant, scanning is serialized across NUMA sockets. Scanner $M+1$ waits for Scanner $M$ to publish both its boundary and cumulative line count.
+3. **The Uniform Handoff:** 
+   - Every scanner scans its own born-local chunk *completely* from `raw_start` to `raw_end` (zero rescanning of bytes).
+   - If a chunk ends with an incomplete batch of $k < L$ lines, the scanner publishes `actual_end = batch_start` (the byte offset where the open batch originated, which may point into an earlier chunk) and `cum_lines`.
+   - Scanner $M+1$ begins counting delimiters in its own chunk, seeded with `lines_in_batch = cum_lines % L`.
+   - When the $L$-th line is reached in chunk $M+1$, it publishes a batch covering `[batch_start, current_delim_end)`.
+4. **The -L Locality Tax:** The worker that claims a boundary-straddling batch will read the initial $k$ lines across the NUMA interconnect. We trade a microscopic cross-socket read (at most $L-1$ lines per 2 MB chunk) to preserve exact batch sizing without abandoning NUMA topology.
 
-**The Resolution:** 
-If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), `forkrun` automatically demotes the pipeline to the traditional UMA (Uniform Memory Access) architecture. While UMA mode still benefits from the ultra-fast C-ring and zero-copy `posix_spawnp` execution paths, it will incur the standard cross-socket memory migration tax inherent to all traditional shell parallelizers.
+*(Note: Multi-parameter sweeps `:::` still run under UMA, as they require $L=1$ where the flat pipeline is naturally optimal).*
 
+---
+
+## §6. Deterministic Stream Prefix Limiting (`-n`) (v3.5.0+)
+
+In a multi-socket topology, chunks are striped round-robin across nodes (Node 0 owns chunks 0, 2, 4; Node 1 owns 1, 3, 5). 
+
+### 6.1 The Pre-v3.5.0 Pitfall: "First Encountered" vs. "True Stream Prefix"
+Traditional parallelizers with loose atomic counters suffer from spatial race conditions: a fast scanner on Node 1 processing chunk 1 could claim records before Node 0 finished scanning chunk 0. When the limit $N$ was reached, the output contained an arbitrary sample of $N$ lines from across the cluster—violating true stream-order prefix semantics, and often over-delivering due to atomic commit lag.
+
+### 6.2 The v3.5.0 Cumulative Line Count Chain
+In `forkrun` v3.5.0+, `-n N` is guaranteed to return **strictly the first $N$ records of the original input stream**:
+
+1. **Sequential Cumulative Handoff:** Scanner $M$ receives the exact total line count `prev_cum` through chunk $M-1$.
+2. **Exact Delimiter Clamping:** When chunk $M$ observes `prev_cum + local_lines >= N`, it clamps the batch to exactly:
+   $$\text{allowed} = N - \text{prev\_cum}$$
+   The SIMD scanner rewinds in-buffer to the exact terminating delimiter of the $\text{allowed}$-th line, commits the batch, and halts.
+3. **Cutoff Propagation:** Chunk $M$ publishes `limit_cutoff_major = M + 1`.
+4. **Clean Skip Cascade:** All subsequent chunks ($M+1, M+2, \dots$) observe that their major ID is past the cutoff and skip scanning entirely without blocking or waiting on dead predecessor scanners.
 
 **Run-length dependence of steal rate.** The 0.0–0.2% file-input cross-socket figure holds for meaningful run lengths (≥ a few hundred chunks). Micro-runs of ~50 chunks can show a single-steal 2.0% startup transient from initial load-balancing; this is expected and amortizes to <0.2% on longer streams.
 
@@ -962,7 +1010,7 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 - `-j`, `-P`, `--workers <W>` : Set the number of concurrent workers. Supports `<init>:<max>` (e.g., `-j 4:32`). Default max is the number of logical cores.
 - `-l`, `--lines <L>`         : Set the batch size (lines per worker). Supports `<init>:<max>` (e.g., `-l 10:10000`). Default max is 4096.
-- `-L`, `--exact-lines <N>`   : Force exactly `N` lines per batch. In NUMA mode this automatically demotes the pipeline to UMA (uniform memory access) to preserve the exact-count contract — cross-socket traffic is then expected but correctness is maintained. (This UMA demotion is the implemented behavior; older wording described it as merely disabling stealing.)
+- `-L`, `--exact-lines <N>`   : Force exactly `N` lines per batch. Native on NUMA since v3.5.0 via the Scanner-Handoff Chain (scanning is serialized across node scanners and a boundary-straddling batch may read 1..N-1 lines across sockets — prefer `-l` for maximum throughput unless exact batch sizing is strictly required).
 - `-t, --timeout <us>`: maximum time (µs) a partial batch may sit in the scanner before early flush. This bounds the wait feeding the stall/starve early-flush invariant (DESIGN.md §7, Phase 2b): when input is trickling *and* workers are idle, the scanner flushes the partial batch at this deadline instead of waiting for a full one. `--greedy` is equivalent to `-t 0`.
 - `--greedy`                  : Aggressive low-latency mode, equivalent to `-t 0`. Flushes partial batches immediately when workers are idle, minimizing latency at the cost of smaller batches during trickle input. (Alias for `--timeout 0`.)
 
@@ -973,7 +1021,7 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 ### LIMITS & TOPOLOGY
 
-- `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed.
+- `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed. In both UMA and NUMA modes (v3.5.0+), forkrun mathematically guarantees **deterministic stream prefix semantics**—the output will contain strictly the first `N` records of the input stream in exact order, with zero overshoot and zero cross-chunk race conditions.
 - `--nodes`, `--numa <map>`   : Control NUMA topology mapping. Nodes that do not exist will be skipped (excluding for `@N`).
   - `auto` (default): Autodetect all physical online nodes.
   - `@N` : Oversubscribe / force `N` logical nodes.
@@ -1014,8 +1062,15 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 - `--resume <file>`           : Resume a previously aborted pipeline using the specified checkpoint file.
   - **Buffered/Ordered modes**: Provides "Exactly-Once" semantics. Ensure you truncate your output file to the byte count specified in the crash message before resuming.
   - **Realtime (-u) mode**: Provides "At-Least-Once" semantics. Resuming may result in a few duplicate lines at the failure boundary.
-  - SECURITY: full-auto resume re-extracts the execution environment inside a PATH-less restricted shell, re-renders it via `declare -p/-f`, and round-trip-verifies the serialization (bounded by unguessable start/end tokens) before importing anything. Resume files containing setup commands, functions, or custom variables require interactive confirmation or `FORKRUN_TRUST_RESUME=1`. Environment state whose serialization is not round-trip-stable (e.g., setups embedding command substitution) is rejected rather than imported.
-- `--checkpoint-file <file>`  : Specify a custom filename for the checkpoint file written in case of failure. (Default: .forkrun_resume)
+  - **Security & Trust Model (v3.5.0+)**:
+    - **Layer 1 (Provenance & Ownership Gate):** Checks file permissions and UID.
+      - *Foreign-owned file:* In interactive shells (`/dev/tty`), displays a preview of the `FORKRUN_ORIG_ARGS` command that will execute and prompts `Proceed? (y/N): `. In unattended/headless environments (CI, cron, batch scripts), it fails closed with an exit error unless `FORKRUN_TRUST_RESUME=1` is set.
+      - *Group/world-writable file (`0o022`):* Prompts interactively to confirm permission risks; in unattended environments, fails closed with advice to run `chmod go-w <file>`.
+    - **Layer 2 (Restricted Subprocess Sandbox):** Re-extracts the execution environment inside a `PATH=''` restricted subshell (`bash --restricted`), re-renders it via `declare -p/-f`, and round-trip verifies the serialization within unguessable start/end token fences while reaping stray background jobs.
+    - **Layer 3 (Custom Setup Confirmation):** Prompts for confirmation if the resume file contains custom setup commands (`FORKRUN_EXTRA_SETUP`), functions (`FORKRUN_EXTRA_FUNCS`), or non-standard environment variables.
+- `--checkpoint-file <file>`  : Specify a custom filename for the checkpoint file written in case of failure. Checkpoint files are automatically created with private `0600` permissions. (Default: `.forkrun_resume`)
+
+---
 
 ### UNSETTING FLAGS
 
@@ -1032,6 +1087,9 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 ### ENVIRONMENT VARS
 
+- `FORKRUN_TRUST_RESUME` : Trust override for automated/unattended pipeline resumption.
+  - `0` (default): Enforces interactive TTY confirmation for foreign-owned checkpoints, group/world-writable files, and embedded setup commands. Unattended runs without `/dev/tty` fail closed.
+  - `1`: Unconditionally trusts the resume file provenance and bypasses all interactive confirmation prompts (Layer 1 ownership/perms and Layer 3 setup commands). Required for unattended CI/CD or Slurm batch scripts resuming cross-user or shared scratch checkpoints.
 - `FORKRUN_RETRY_LIMIT`: poison threshold. A batch is declared poisoned once it has failed **N total times** (the original attempt plus N−1 retries — i.e., up to N executions of the batch). Default 3 = up to 3 executions. N=0 and N=1 both mean "poison after the first failure" (a single execution). Negative = never poisoned. Exactly-once execution (no retries): set to 0.
 - `FORKRUN_EXTRA_FUNCS` : Use this to specify required sub-functions to pass into frun's environment.
   - EXAMPLE: `hh() { echo "$@"; }; gg() { hh "$@"; }; ff() { gg "$@"; };`. If you call `frun ff <inputs` the definition for `ff` will automatically be available to `frun` but the definitions for `gg` and `hh` will not be. Instead, call `FORKRUN_EXTRA_FUNCS='gg hh' frun ff <inputs`.
@@ -1373,6 +1431,8 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 
 ---
 
+---
+
 ## 13. Checklist Summary
 
 If all sections above remain true, **forkrun is correct** — regardless of:
@@ -1386,6 +1446,38 @@ If all sections above remain true, **forkrun is correct** — regardless of:
 Progress is irreversible. Locality is structural. Contention was designed away. Workers always claim exactly one slot.
 
 ---
+
+## 14. Universal Coordinate Invariance
+
+**Invariant**  
+All physical byte offsets in `forkrun` refer to absolute, monotonic positions in the backing `memfd`. Offsets are never relative to a dynamic sliding window, never wrap within logical space, and are never translated across component boundaries.
+
+**Enforced by**  
+* Ingest writes sequentially at `lseek(SEEK_END)`.
+* Scanner and Ring publish absolute offsets `[offset_ring, end_ring)`.
+* Fallow punches holes in-place using absolute offsets without truncating file size.
+* Checkpoints save absolute interval ranges `[s, e)`.
+
+**Audit Rule**  
+❌ Never introduce relative offset translations, sliding-window re-indexing, or destructive file truncation on active inputs.
+
+---
+
+## 15. Stream Prefix Determinism (`-n`)
+
+**Invariant**  
+When `-n N` is specified, the pipeline emits strictly records $1 \dots N$ from the original linear stream. No record $> N$ may ever be claimed or executed, and no record $\le N$ may be skipped, regardless of NUMA topology, node count, or worker scheduling skew.
+
+**Enforced by**  
+* Scanners serialize cumulative line counts via the `cum_lines` chain.
+* The chunk that crosses $N$ calculates $\text{allowed} = N - \text{prev\_cum}$, clamps its batch to that exact delimiter, and publishes `limit_cutoff_major`.
+* All chunks past `limit_cutoff_major` take the `past_cutoff` fast-skip path without scanning.
+
+**Audit Rule**  
+❌ Never rely on loose/unsynchronized global popcounts or probabilistic multi-node cutoff checks.
+
+---
+
 
 **See also:** `DESIGN.md` and `PHYSICS.md`
 
@@ -1632,7 +1724,22 @@ This is the thermodynamic arrow of time made explicit. The fallow thread is the 
 
 ---
 
-## 6. Ordering Modes as Different Observers
+## 6. The Invariant Spacetime Metric: Why Coordinates Never Move
+
+In classical parallel software, buffers are circular, dynamic, or shifted in memory. Every time data moves or shrinks, pointers must be recalculated, creating race conditions and ABA hazards.
+
+In `forkrun`, the shared `memfd` is an **invariant spacetime manifold**:
+
+* The coordinate $x = 0$ is the start of the stream, and $x$ advances monotonically to $x = \text{EOF}$.
+* Data particles (bytes) stay exactly where they were born.
+* When workers finish consuming a region of spacetime, the `ring_fallow` thread uses `fallocate(PUNCH_HOLE)` to remove the *physical mass* (RAM pages) from that region of spacetime without warping or shifting the *coordinate grid*.
+* Checkpoints and resumes are trivial because the coordinates $x \in [a, b]$ mean the exact same bytes before and after a crash.
+
+Because every component (Ingest, Indexer, Scanner, Worker, Escrow, Fallow, Checkpoint) agrees on the exact same linear metric, coordination overhead collapses to zero.
+
+---
+
+## 7. Ordering Modes as Different Observers
 
 - `--realtime`: “I only care about what arrives first at the detector.” (Relativistic observer — order of arrival.)
 - `--ordered`: “I need to reconstruct the original sequence as if measured by a stationary lab frame.” (The `ring_order` thread is the Lorentz transformation that re-synchronizes the major/minor indices.)
@@ -1641,7 +1748,7 @@ The NUMA-aware reorder path is just special relativity for data streams.
 
 ---
 
-## 7. Why the Complexity Is Minimal, Not Maximal
+## 8. Why the Complexity Is Minimal, Not Maximal
 
 Every “weird” feature has a direct physical justification:
 
@@ -1659,7 +1766,7 @@ Remove any of these and the system either violates a conservation law or require
 
 ---
 
-## 8. How to Think Like a Geophysicist When Hacking forkrun
+## 9. How to Think Like a Geophysicist When Hacking forkrun
 
 1. **Start with invariants, not features.** Write the conservation laws first (see INVARIANTS.md).
 2. **Ask “what would break if this were a real river?”** If the answer is “turbulence” or “backflow,” you probably need a new physical mechanism, not a new lock.
@@ -1889,4 +1996,65 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
   Because partial output is physically reverted (`ftruncate`) inside the per-worker `memfd` upon a graceful crash, and because catastrophic crashes trigger a mathematically absolute byte-coordinate resumption, surviving data is guaranteed to be committed to the final output stream exactly once. 
 * **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY (NOT RECOMMENDED).**
   Workers write directly to `stdout`, so `forkrun` cannot recall bytes on a crash (resuming produces duplicates). Furthermore, realtime mode risks severely scrambled output (byte interleaving) and kernel lock contention. Use `--buffered` or `-k` instead.
+
+
+## §6. Resume File Security & Trust Architecture (v3.5.0+)
+
+Because a resume file encodes the command line (`FORKRUN_ORIG_ARGS`) and optional execution hooks (`FORKRUN_EXTRA_SETUP`, `FORKRUN_EXTRA_FUNCS`), executing a resume file is equivalent to executing code. `forkrun` implements a **3-Layer Defense-in-Depth Trust Model** to guarantee that malformed, intercepted, or foreign-owned resume files cannot achieve unauthorized code execution.
+
+```
+                    RESUME TRUST PIPELINE (v3.5.0+)
+ ┌───────────────────────────────────────────────────────────────────┐
+ │ Layer 1: Parent Shell Provenance Gate (stat -Lc '%u %04a')         │
+ │  ├─ Foreign UID: Interactive TTY prompt w/ command preview        │
+ │  ├─ Group/World-Writable (0o022): Interactive TTY prompt          │
+ │  └─ No TTY / Unattended: Fail CLOSED (override: TRUST_RESUME=1)   │
+ └─────────────────────────────────┬─────────────────────────────────┘
+                                   │ (Passed / Confirmed)
+                                   ▼
+ ┌───────────────────────────────────────────────────────────────────┐
+ │ Layer 2: Isolated Sandbox Subprocess (PATH='' bash --restricted)  │
+ │  ├─ Token-Fenced Extraction (unguessable start/end boundaries)    │
+ │  ├─ Round-Trip Re-Serialization Verification (assert out == check)│
+ │  └─ Rogue Subprocess Reaping (kill -9 for spawned background jobs)│
+ └─────────────────────────────────┬─────────────────────────────────┘
+                                   │ (Verified Clean)
+                                   ▼
+ ┌───────────────────────────────────────────────────────────────────┐
+ │ Layer 3: Setup Command Confirmation Gate                          │
+ │  └─ Prompts user if FORKRUN_EXTRA_SETUP / FUNCS are present       │
+ └─────────────────────────────────┬─────────────────────────────────┘
+                                   │
+                                   ▼
+                       [ Execution Re-entry ]
+```
+
+### 6.1 Checkpoint Hardening on Write
+When `forkrun` aborts and generates a checkpoint (`.forkrun_resume`), the `EXIT` trap immediately runs:
+```bash
+ring_dump_resume > "$safe_checkpoint_file"
+chmod 600 "$safe_checkpoint_file" 2>/dev/null
+```
+Setting `0600` ensures that default permissive umasks (such as `0002` common in shared group directories) do not leave the checkpoint file group-writable, preventing spurious warnings on subsequent self-resumptions.
+
+### 6.2 Layer 1: Parent-Shell Provenance Gate
+Before the resume file is ever parsed or sourced, the parent shell checks filesystem metadata using `stat -Lc '%u %04a' "$resume_file"`:
+* **Symlink Resolution:** `stat -L` resolves symlink targets, ensuring a user-owned symlink pointing to a foreign-owned target is evaluated against the target's true owner.
+* **Foreign UID Handling (Team Scratch Workflows):** In HPC environments (e.g. `/project/scratch`), team members often need to resume jobs started by colleagues. If `_rf_uid != $(id -u)`:
+  * **Interactive Shells (`/dev/tty` present):** `forkrun` greps a preview of `FORKRUN_ORIG_ARGS` and displays what will execute, asking `Proceed? (y/N): `.
+  * **Unattended Shells (No TTY):** Fails closed with an error. Automated pipelines must explicitly supply `FORKRUN_TRUST_RESUME=1`.
+* **Group/World-Writable Bits (`0o022`):** If a file owned by the user is writable by others, `forkrun` prompts interactively to confirm the risk, or advises running `chmod go-w "$resume_file"`.
+
+### 6.3 Layer 2: Restricted Subprocess Sandbox
+Once provenance is accepted, environment extraction occurs in a locked-down subprocess:
+```bash
+PATH='' exec -c bash --norc --noprofile --restricted -c '...'
+```
+* **Zero System Tools:** `PATH=''` ensures no external binaries or malicious commands embedded in the file can execute.
+* **Token Fencing:** The payload is emitted between randomized start/end tokens generated by the parent (`___FORKRUN_ENV_${BASHPID}_${RANDOM}_${RANDOM}___`).
+* **Round-Trip Serialization Verification:** The sandbox parses the variables and re-renders them using `declare -p`. It re-evaluates the rendered string and strictly asserts that the output matches byte-for-byte (`[[ "$out" == "$check" ]]`). If any dynamic command substitution or unstable state was injected, the sandbox terminates with code `1`.
+* **Rogue Job Reaping:** Any background tasks spawned during evaluation are immediately killed (`kill -9`) before returning.
+
+### 6.4 Layer 3: Setup Command Authorization
+If the verified environment contains custom commands (`FORKRUN_EXTRA_SETUP`), functions (`FORKRUN_EXTRA_FUNCS`), or non-standard variables, `forkrun` displays the exact setup code and requires a final interactive confirmation unless `FORKRUN_TRUST_RESUME=1` is set.
 

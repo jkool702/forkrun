@@ -199,6 +199,8 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 
 ---
 
+---
+
 ## 13. Checklist Summary
 
 If all sections above remain true, **forkrun is correct** — regardless of:
@@ -212,5 +214,37 @@ If all sections above remain true, **forkrun is correct** — regardless of:
 Progress is irreversible. Locality is structural. Contention was designed away. Workers always claim exactly one slot.
 
 ---
+
+## 14. Universal Coordinate Invariance
+
+**Invariant**  
+All physical byte offsets in `forkrun` refer to absolute, monotonic positions in the backing `memfd`. Offsets are never relative to a dynamic sliding window, never wrap within logical space, and are never translated across component boundaries.
+
+**Enforced by**  
+* Ingest writes sequentially at `lseek(SEEK_END)`.
+* Scanner and Ring publish absolute offsets `[offset_ring, end_ring)`.
+* Fallow punches holes in-place using absolute offsets without truncating file size.
+* Checkpoints save absolute interval ranges `[s, e)`.
+
+**Audit Rule**  
+❌ Never introduce relative offset translations, sliding-window re-indexing, or destructive file truncation on active inputs.
+
+---
+
+## 15. Stream Prefix Determinism (`-n`)
+
+**Invariant**  
+When `-n N` is specified, the pipeline emits strictly records $1 \dots N$ from the original linear stream. No record $> N$ may ever be claimed or executed, and no record $\le N$ may be skipped, regardless of NUMA topology, node count, or worker scheduling skew.
+
+**Enforced by**  
+* Scanners serialize cumulative line counts via the `cum_lines` chain.
+* The chunk that crosses $N$ calculates $\text{allowed} = N - \text{prev\_cum}$, clamps its batch to that exact delimiter, and publishes `limit_cutoff_major`.
+* All chunks past `limit_cutoff_major` take the `past_cutoff` fast-skip path without scanning.
+
+**Audit Rule**  
+❌ Never rely on loose/unsynchronized global popcounts or probabilistic multi-node cutoff checks.
+
+---
+
 
 **See also:** `DESIGN.md` and `PHYSICS.md`
