@@ -1323,25 +1323,29 @@ struct ChunkMeta {
 // holding the pre-registration (not-yet-ready, i.e. zero) value on that path.
 #define WAIT_FOR_META_READY(out_var, meta_ptr, node_var, on_abort_stmt)         \
   do {                                                                         \
-    int _wmr_spin = 0;                                                        \
+    int _wmr_spin = 0;                                                         \
+    int _wmr_budget = (global_num_nodes > (uint32_t)get_logical_cores()) ? 1000 : 10000; \
     while (!(((out_var) = atomic_load_acquire(&(meta_ptr)->actual_end)) &      \
-             FLAG_META_READY)) {                                              \
-      if (_wmr_spin < 10000) {                                                \
-        cpu_relax();                                                          \
-        _wmr_spin++;                                                          \
-      } else {                                                                \
+             FLAG_META_READY)) {                                               \
+      if (atomic_load_relaxed(&state[0].emergency_abort)) { on_abort_stmt; }    \
+      if (_wmr_spin < _wmr_budget) {                                           \
+        for (int _b = 0; _b < 16; _b++) cpu_relax();                          \
+        _wmr_spin += 16;                                                       \
+        int _del = (_wmr_spin < 3000) ? _wmr_spin : 3000;                     \
+        for (volatile int _d = 0; _d < _del; _d++) cpu_relax();                \
+      } else {                                                                 \
         __atomic_fetch_add(&state[(node_var)].meta_waiters, 1,                 \
-                            __ATOMIC_SEQ_CST);                                \
+                            __ATOMIC_SEQ_CST);                                 \
         if (((out_var) = atomic_load_acquire(&(meta_ptr)->actual_end)) &       \
             FLAG_META_READY) {                                                \
           __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
                               __ATOMIC_SEQ_CST);                              \
           break;                                                              \
         }                                                                     \
-        struct pollfd _wmr_pfds[2] = {                                        \
+        struct pollfd _wmr_pfds[2] = {                                         \
             {.fd = evfd_meta_arr[(node_var)], .events = POLLIN},              \
             {.fd = evfd_ingest_eof, .events = POLLIN}};                       \
-        poll(_wmr_pfds, 2, -1);                                               \
+        poll(_wmr_pfds, 2, 100);                                               \
         if (atomic_load_relaxed(&state[0].emergency_abort)) {                 \
           __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
                               __ATOMIC_SEQ_CST);                              \
@@ -1368,6 +1372,7 @@ struct ChunkMeta {
                                      out_past, on_abort_stmt)                   \
   do {                                                                          \
     int _wcl_spin = 0;                                                          \
+    int _wcl_budget = (global_num_nodes > (uint32_t)get_logical_cores()) ? 1000 : 10000; \
     (out_past) = false;                                                         \
     while (1) {                                                                 \
       uint64_t _raw = atomic_load_acquire(&(meta_ptr)->cum_lines);              \
@@ -1377,8 +1382,12 @@ struct ChunkMeta {
         (out_past) = true; break;                                               \
       }                                                                         \
       if (atomic_load_relaxed(&state[0].emergency_abort)) { on_abort_stmt; }    \
-      if (_wcl_spin < 10000) { cpu_relax(); _wcl_spin++; }                      \
-      else {                                                                    \
+      if (_wcl_spin < _wcl_budget) {                                            \
+        for (int _b = 0; _b < 16; _b++) cpu_relax();                           \
+        _wcl_spin += 16;                                                        \
+        int _del = (_wcl_spin < 3000) ? _wcl_spin : 3000;                      \
+        for (volatile int _d = 0; _d < _del; _d++) cpu_relax();                 \
+      } else {                                                                  \
         __atomic_fetch_add(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST);\
         _raw = atomic_load_acquire(&(meta_ptr)->cum_lines);                     \
         _co = atomic_load_acquire(&g_state->limit_cutoff_major);                \
@@ -4087,6 +4096,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
           uint32_t pnode = pm->target_node;
           int gate_spin = 0;
+          int gate_budget = (global_num_nodes > (uint32_t)get_logical_cores()) ? 1000 : 10000;
           while (1) {
             uint64_t ae = atomic_load_acquire(&pm->actual_end);
             uint64_t cl = atomic_load_acquire(&pm->cum_lines);
@@ -4105,9 +4115,11 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             }
             if (atomic_load_relaxed(&state[0].emergency_abort))
               goto unified_scanner_eof;
-            if (gate_spin < 10000) {
-              cpu_relax();
-              gate_spin++;
+            if (gate_spin < gate_budget) {
+              for (int _b = 0; _b < 16; _b++) cpu_relax();
+              gate_spin += 16;
+              int _del = (gate_spin < 3000) ? gate_spin : 3000;
+              for (volatile int _d = 0; _d < _del; _d++) cpu_relax();
             } else {
               __atomic_fetch_add(&state[pnode].meta_waiters, 1,
                                  __ATOMIC_SEQ_CST);
