@@ -1,4 +1,4 @@
-// forkrun_ring.c v3.4.3
+// forkrun_ring.c v3.5.0 - Cumulative Line Count Chain & Unified NUMA Tail Winding
 // ======================================================================================
 // ARCHITECTURE OVERVIEW:
 //
@@ -363,7 +363,10 @@ fast_count_delim(const char *p, const char *end, char delim) {
 
 #define MAX_BATCH_LINES  281474976710656ULL
 #define FLAG_MAJOR_EOF (1U << 31)
-#define PACK_KEY(maj, min) (((uint64_t)(maj) << 32) | (min))
+#define MINOR_BITS 22
+#define MINOR_MASK ((1ULL << MINOR_BITS) - 1ULL)
+#define MAJOR_MASK ((1ULL << (64 - MINOR_BITS)) - 1ULL)
+#define PACK_KEY(maj, min) ((((uint64_t)(maj) & MAJOR_MASK) << MINOR_BITS) | ((uint64_t)(min) & MINOR_MASK))
 
 #define HUGE_PAGE_SIZE (2 * 1024 * 1024)
 #define SCANNER_CHUNK_SIZE (2 * 1024 * 1024)
@@ -376,7 +379,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.4.3"
+#define FORKRUN_RING_VERSION "v3.5.0"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -708,8 +711,9 @@ static int ring_exec_main(int argc, char **argv) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd);
-    // NOTE: fd leakage into exec'd commands is prevented by MFD_CLOEXEC/O_CLOEXEC
-    // set in xcreate_anon_file(). CLOEXEC survives fork() but closes on exec().
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    // NOTE: Ingress & output memfds are created with MFD_CLOEXEC/O_CLOEXEC,
+    // while engine pipes use FD_CLOEXEC to prevent descriptor leakage into children.
 
     // 6. Spawn the child (inherits FDs natively)
     pid_t pid;
@@ -769,7 +773,13 @@ static int ring_exec_splice_main(int argc, char **argv) {
 
     // 2. Create the pipe
     int pfd[2];
+#if defined(O_CLOEXEC)
+    if (pipe2(pfd, O_CLOEXEC) != 0) return EXECUTION_FAILURE;
+#else
     if (pipe(pfd) != 0) return EXECUTION_FAILURE;
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+#endif
 
     // Optional: Maximize pipe buffer size for throughput
     fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
@@ -780,6 +790,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
     posix_spawn_file_actions_adddup2(&actions, pfd[0], STDIN_FILENO);
     posix_spawn_file_actions_addclose(&actions, pfd[1]); // Child doesn't need write end
     if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd); // Shield memfd
+    // DO NOT add /dev/null here! Child STDIN is fed by pfd[0]!
 
     // 4. Block SIGCHLD
     sigset_t set, oset;
@@ -1122,43 +1133,40 @@ static void check_thp_shmem_config(void) {
   }
 }
 
-static int xcreate_anon_file(const char *name) {
+static int xcreate_anon_file(const char *name, bool cloexec) {
   const char *force_fallback = get_string_value("FORKRUN_FORCE_FALLBACK");
   bool use_memfd = true;
   if (force_fallback && (strcmp(force_fallback, "1") == 0))
     use_memfd = false;
+  unsigned int mfd_flags = MFD_ALLOW_SEALING | (cloexec ? MFD_CLOEXEC : 0);
   if (use_memfd) {
-    // NOTE: MFD_HUGETLB is intentionally not used here. It conflicts with the
-    // shmem semantics forkrun's memfd-backed files depend on (ftruncate/fallocate
-    // PUNCH_HOLE fine-grained resizing, arbitrary-offset sparse growth, etc).
-    // Transparent Huge Pages are the supported path to hugepage-backed throughput
-    // gains for this data, but note they currently require shmem_enabled=always
-    // to take effect, since this fd is only ever accessed via read/write/
-    // copy_file_range/sendfile, not mmap -- see check_thp_shmem_config() above.
-    int fd = syscall(__NR_memfd_create, name, MFD_ALLOW_SEALING);
+    int fd = syscall(__NR_memfd_create, name, mfd_flags);
     if (fd >= 0)
       return fd;
     if (errno == EINVAL) {
-      fd = syscall(__NR_memfd_create, name, 0);
+      fd = syscall(__NR_memfd_create, name, cloexec ? MFD_CLOEXEC : 0);
       if (fd >= 0)
         return fd;
     }
   }
-  int fd = open("/dev/shm", O_TMPFILE | O_RDWR | O_EXCL, 0600);
+  int o_flags = O_TMPFILE | O_RDWR | O_EXCL | (cloexec ? O_CLOEXEC : 0);
+  int fd = open("/dev/shm", o_flags, 0600);
   if (fd >= 0)
     return fd;
-  fd = open("/tmp", O_TMPFILE | O_RDWR | O_EXCL, 0600);
+  fd = open("/tmp", o_flags, 0600);
   if (fd >= 0)
     return fd;
   char path[64];
-  snprintf(path, sizeof(path), "/dev/shm/forkrun.XXXXXX");
-  fd = mkstemp(path);
-  if (fd < 0) {
+  const char *tmpdir = getenv("TMPDIR");
+  if (tmpdir)
+    snprintf(path, sizeof(path), "%s/forkrun.XXXXXX", tmpdir);
+  else
     snprintf(path, sizeof(path), "/tmp/forkrun.XXXXXX");
-    fd = mkstemp(path);
-  }
-  if (fd >= 0)
+  fd = mkstemp(path);
+  if (fd >= 0) {
     unlink(path);
+    if (cloexec) fcntl(fd, F_SETFD, FD_CLOEXEC);
+  }
   return fd;
 }
 
@@ -1200,10 +1208,11 @@ static __thread int my_numa_node = -1;
 static __thread bool is_waiting_on_ring = false;
 static __thread off_t last_ack_offset = 0;
 static __thread int ack_cached_target_fd = -1;
+static __thread int ack_cached_order_pipe = -1;
 static __thread int ack_cached_mode = 0;
 static __thread uint64_t worker_last_idx = 0;
 static __thread uint64_t worker_last_cnt = 0;
-static __thread uint32_t worker_last_major = 0;
+static __thread uint64_t worker_last_major = 0;
 static __thread uint32_t worker_last_minor = 0;
 static __thread uint32_t worker_last_num_kills = 0;
 static __thread bool tl_drain_escrow = true;
@@ -1220,7 +1229,7 @@ struct WorkerBatchState {
     uint32_t num_kills;
     uint64_t offset;
     uint64_t length;
-    uint32_t major;
+    uint64_t major;
     uint32_t minor;
 };
 
@@ -1270,7 +1279,7 @@ struct PhysPacket {
 };
 
 struct OrderPacket {
-  uint32_t major_idx;
+  uint64_t major_idx;
   uint32_t minor_idx;
   uint32_t cnt;
   int32_t fd;
@@ -1281,6 +1290,7 @@ struct OrderPacket {
 };
 
 #define FLAG_META_READY (1ULL << 63)
+#define FLAG_CUM_READY  (1ULL << 63)  // v3.5: Cumulative line count ready flag
 #define META_RING_SIZE 4096
 #define META_RING_MASK (META_RING_SIZE - 1)
 
@@ -1293,8 +1303,11 @@ struct ChunkMeta {
   uint32_t target_node;
   // major_id aligns with chunk boundaries, minor_id will align with individual
   // records.
-  uint32_t major_id;
+  uint64_t major_id;
   volatile uint64_t actual_end ALIGNED(CACHE_LINE);
+  // v3.5: Cumulative line count through this chunk (inclusive).
+  // Published by the scanning scanner at chunk completion with FLAG_CUM_READY set.
+  volatile uint64_t cum_lines ALIGNED(CACHE_LINE);
 };
 
 // PHYSICS: Wait for (meta_ptr)->actual_end to have FLAG_META_READY set, spinning
@@ -1310,25 +1323,29 @@ struct ChunkMeta {
 // holding the pre-registration (not-yet-ready, i.e. zero) value on that path.
 #define WAIT_FOR_META_READY(out_var, meta_ptr, node_var, on_abort_stmt)         \
   do {                                                                         \
-    int _wmr_spin = 0;                                                        \
+    int _wmr_spin = 0;                                                         \
+    int _wmr_budget = (global_num_nodes > (uint32_t)get_logical_cores()) ? 1000 : 10000; \
     while (!(((out_var) = atomic_load_acquire(&(meta_ptr)->actual_end)) &      \
-             FLAG_META_READY)) {                                              \
-      if (_wmr_spin < 10000) {                                                \
-        cpu_relax();                                                          \
-        _wmr_spin++;                                                          \
-      } else {                                                                \
+             FLAG_META_READY)) {                                               \
+      if (atomic_load_relaxed(&state[0].emergency_abort)) { on_abort_stmt; }    \
+      if (_wmr_spin < _wmr_budget) {                                           \
+        for (int _b = 0; _b < 16; _b++) cpu_relax();                          \
+        _wmr_spin += 16;                                                       \
+        int _del = (_wmr_spin < 3000) ? _wmr_spin : 3000;                     \
+        for (volatile int _d = 0; _d < _del; _d++) cpu_relax();                \
+      } else {                                                                 \
         __atomic_fetch_add(&state[(node_var)].meta_waiters, 1,                 \
-                            __ATOMIC_SEQ_CST);                                \
+                            __ATOMIC_SEQ_CST);                                 \
         if (((out_var) = atomic_load_acquire(&(meta_ptr)->actual_end)) &       \
             FLAG_META_READY) {                                                \
           __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
                               __ATOMIC_SEQ_CST);                              \
           break;                                                              \
         }                                                                     \
-        struct pollfd _wmr_pfds[2] = {                                        \
+        struct pollfd _wmr_pfds[2] = {                                         \
             {.fd = evfd_meta_arr[(node_var)], .events = POLLIN},              \
             {.fd = evfd_ingest_eof, .events = POLLIN}};                       \
-        poll(_wmr_pfds, 2, -1);                                               \
+        poll(_wmr_pfds, 2, 100);                                               \
         if (atomic_load_relaxed(&state[0].emergency_abort)) {                 \
           __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1,               \
                               __ATOMIC_SEQ_CST);                              \
@@ -1344,6 +1361,61 @@ struct ChunkMeta {
       }                                                                       \
     }                                                                         \
   } while (0)
+
+
+// Like WAIT_FOR_CUM_LINES, but with a cutoff escape: if the global -n cutoff
+// is set and (my_major + 1) > cutoff, the predecessor's count will NEVER be
+// published (its scanner exited via limit_reached without claiming it).
+// Bounded poll is mandatory: ingest may be blocked in queue gating, so
+// evfd_ingest_eof may never fire and poll(-1) would sleep through the cutoff.
+#define WAIT_FOR_CUM_LINES_OR_CUTOFF(out_var, meta_ptr, node_var, my_major,    \
+                                     out_past, on_abort_stmt)                   \
+  do {                                                                          \
+    int _wcl_spin = 0;                                                          \
+    int _wcl_budget = (global_num_nodes > (uint32_t)get_logical_cores()) ? 1000 : 10000; \
+    (out_past) = false;                                                         \
+    while (1) {                                                                 \
+      uint64_t _raw = atomic_load_acquire(&(meta_ptr)->cum_lines);              \
+      if (_raw & FLAG_CUM_READY) { (out_var) = _raw; break; }                   \
+      uint64_t _co = atomic_load_acquire(&g_state->limit_cutoff_major);         \
+      if (_co > 0 && ((uint64_t)(my_major) + 1) > _co) {                        \
+        (out_past) = true; break;                                               \
+      }                                                                         \
+      if (atomic_load_relaxed(&state[0].emergency_abort)) { on_abort_stmt; }    \
+      if (_wcl_spin < _wcl_budget) {                                            \
+        for (int _b = 0; _b < 16; _b++) cpu_relax();                           \
+        _wcl_spin += 16;                                                        \
+        int _del = (_wcl_spin < 3000) ? _wcl_spin : 3000;                      \
+        for (volatile int _d = 0; _d < _del; _d++) cpu_relax();                 \
+      } else {                                                                  \
+        __atomic_fetch_add(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST);\
+        _raw = atomic_load_acquire(&(meta_ptr)->cum_lines);                     \
+        _co = atomic_load_acquire(&g_state->limit_cutoff_major);                \
+        if (_raw & FLAG_CUM_READY) {                                            \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST); \
+          (out_var) = _raw; break;                                              \
+        }                                                                       \
+        if (_co > 0 && ((uint64_t)(my_major) + 1) > _co) {                      \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST); \
+          (out_past) = true; break;                                             \
+        }                                                                       \
+        struct pollfd _wcl_pfds[2] = {                                          \
+            {.fd = evfd_meta_arr[(node_var)], .events = POLLIN},                \
+            {.fd = evfd_ingest_eof, .events = POLLIN}};                         \
+        poll(_wcl_pfds, 2, 100);                                                \
+        if (atomic_load_relaxed(&state[0].emergency_abort)) {                   \
+          __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST); \
+          on_abort_stmt;                                                        \
+        }                                                                       \
+        if (_wcl_pfds[0].revents & POLLIN) {                                    \
+          uint64_t _wcl_v; sys_read(evfd_meta_arr[(node_var)], &_wcl_v, 8);     \
+        }                                                                       \
+        __atomic_fetch_sub(&state[(node_var)].meta_waiters, 1, __ATOMIC_SEQ_CST); \
+        _wcl_spin = 0;                                                          \
+      }                                                                         \
+    }                                                                           \
+  } while (0)
+
 
 struct IntervalNode {
     uint64_t s;
@@ -1375,6 +1447,9 @@ struct GlobalState {
 
   uint32_t poisoned_count ALIGNED(CACHE_LINE);
 
+  // v3.5: 1-based limit cutoff major ID (0 = unset, M+1 = chunk M crossed the -n limit)
+  volatile uint64_t limit_cutoff_major ALIGNED(CACHE_LINE);
+
   struct ChunkMeta meta_ring[META_RING_SIZE];
 };
 
@@ -1392,7 +1467,7 @@ struct SharedState {
   uint64_t chunk_queue_tail ALIGNED(CACHE_LINE);
   uint8_t _pad_cq_tail[CACHE_LINE - sizeof(uint64_t)];
 
-  uint32_t chunk_queue[META_RING_SIZE];
+  uint64_t chunk_queue[META_RING_SIZE];
 
   uint64_t read_idx ALIGNED(CACHE_LINE);
   uint8_t _pad_read_idx[CACHE_LINE - sizeof(uint64_t)];
@@ -1455,7 +1530,7 @@ struct SharedState {
 
   uint64_t offset_ring[RING_SIZE] ALIGNED(4096);
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
-  uint32_t major_ring[RING_SIZE] ALIGNED(4096);
+  uint64_t major_ring[RING_SIZE] ALIGNED(4096);
   uint32_t minor_ring[RING_SIZE] ALIGNED(4096);
 
   // NEW: Dynamic Topology-Aware Steal Thresholds
@@ -1576,9 +1651,46 @@ static int get_cgroup_free_memory(uint64_t *free_mem) {
   return -1;
 }
 
+static inline uint64_t get_effective_total_memory(void) {
+  uint64_t mem_limit = 0;
+  int fd = open("/sys/fs/cgroup/memory.max", O_RDONLY);
+  if (fd >= 0) {
+    char buf[64];
+    ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n > 0) {
+      buf[n] = '\0';
+      if (strncmp(buf, "max", 3) != 0) {
+        mem_limit = strtoull(buf, NULL, 10);
+      }
+    }
+  }
+  if (mem_limit == 0) {
+    fd = open("/sys/fs/cgroup/memory/memory.limit_in_bytes", O_RDONLY);
+    if (fd >= 0) {
+      char buf[64];
+      ssize_t n = sys_read(fd, buf, sizeof(buf) - 1);
+      close(fd);
+      if (n > 0) {
+        buf[n] = '\0';
+        uint64_t v = strtoull(buf, NULL, 10);
+        if (v > 0 && v < 9000000000000000000ULL) mem_limit = v;
+      }
+    }
+  }
+  struct sysinfo si;
+  if (sysinfo(&si) == 0) {
+    uint64_t mu = (uint64_t)si.mem_unit ? si.mem_unit : 1;
+    uint64_t host_ram = (uint64_t)si.totalram * mu;
+    if (mem_limit == 0 || mem_limit > host_ram) mem_limit = host_ram;
+  }
+  return (mem_limit > 0) ? mem_limit : (1024ULL * 1024ULL * 1024ULL);
+}
+
 // ==============================================================================
 // OOM PROTECTION AND MEMORY SENSING
 // ==============================================================================
+
 
 // Helper to get available memory (accounting for reclaimable cache like memfd)
 static inline uint64_t get_mem_available(struct sysinfo *si) {
@@ -1783,7 +1895,6 @@ static void apply_config(char type, char sub, const char *arg) {
   if (strcmp(arg, "x") == 0) {
     if (type == 1) {
       set_mask |= M_BMODE;
-    } else if (type == 2) {
     }
   } else {
     if (arg[0] == '\0')
@@ -1925,6 +2036,15 @@ static int ring_init_main(int argc, char **argv) {
     }
     atomic_store_relaxed(&g_state->ingest_publish_idx, 0);
     atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
+    g_state->abort_reason = 0;
+    g_state->is_resume_mode = 0;
+    g_state->resume_seq = 0;
+    g_state->resume_horizon = 0;
+    g_state->resume_stdout_bytes = 0;
+    g_state->fallow_horizon_bytes = 0;
+    g_state->resume_jagged_count = 0;
+    g_state->poisoned_count = 0;
+    g_state->limit_cutoff_major = 0;
 
     // PHYSICS FIX: Comprehensively drain all eventfds to prevent false EOFs
     // and spurious wakeups from previous invocations.
@@ -1987,10 +2107,8 @@ static int ring_init_main(int argc, char **argv) {
         }
       }
     }
-    return EXECUTION_SUCCESS;
-  }
-
-  allocated_num_nodes = global_num_nodes;
+  } else {
+    allocated_num_nodes = global_num_nodes;
 
   // --- PHYSICS FIX: Force g_state size to pad out to a 4K boundary ---
   long pg_sz = sysconf(_SC_PAGESIZE);
@@ -2018,8 +2136,9 @@ static int ring_init_main(int argc, char **argv) {
   g_state = (struct GlobalState *)p;
   // Step exactly 'global_size' bytes forward so state stays 4096-aligned
   state = (struct SharedState *)((char *)p + global_size);
-  memset(p, 0, total_size);
   atomic_store_relaxed(&g_state->ingest_eof_idx, ~(uint64_t)0);
+  g_state->limit_cutoff_major = 0;
+  }
 
   // Config register: 0xBBLLWW where BB=bytes, LL=lines, WW=workers
   // Each pair is (upper nibble = max policy, lower nibble = start policy)
@@ -2158,6 +2277,15 @@ static int ring_init_main(int argc, char **argv) {
   if (vals[4] > vals[5])
     vals[4] = vals[5];
 
+  // Hard-max sentinel (-1/+0): ceiling must allow >= 2 workers per node,
+  // even under --nodes=@N oversubscription beyond core count.
+  {
+    int wb_code = (cfg_state >> SH_W_B) & 0xF;
+    if (global_num_nodes > 1 && wb_code == S_MAX &&
+        vals[1] < (uint64_t)(2 * global_num_nodes))
+      vals[1] = 2 * global_num_nodes;
+  }
+
   for (uint32_t n = 0; n < global_num_nodes; n++) {
     uint64_t w_start_balanced = vals[0] / global_num_nodes;
     if (w_start_balanced < 1)
@@ -2236,6 +2364,7 @@ static int ring_init_main(int argc, char **argv) {
     }
   }
 
+  if (evfd_data_arr == NULL) {
   evfd_data_arr = calloc(global_num_nodes, sizeof(int));
   evfd_eof_arr = calloc(global_num_nodes, sizeof(int));
   evfd_indexer_arr = calloc(global_num_nodes, sizeof(int));
@@ -2296,6 +2425,7 @@ static int ring_init_main(int argc, char **argv) {
       ring_destroy_main(0, NULL);
       return EXECUTION_FAILURE;
   }
+  }
 
   evfd_data = evfd_data_arr[0];
   fd_escrow[0] = fd_escrow_r[0];
@@ -2338,7 +2468,7 @@ static int ring_init_main(int argc, char **argv) {
     int created_cnt = 0;
     int failure = 0;
     for (uint64_t i = 0; i < actual_total_w_max; i++) {
-      int fd = xcreate_anon_file("forkrun_out");
+      int fd = xcreate_anon_file("forkrun_out", true);
       if (fd >= 0) {
         created_fds[created_cnt++] = fd;
         char val[32];
@@ -2361,7 +2491,13 @@ static int ring_init_main(int argc, char **argv) {
 
   int probe_fd[2];
   int pipe_cap = 65536;
+#if defined(O_CLOEXEC)
+  if (pipe2(probe_fd, O_CLOEXEC) == 0) {
+#else
   if (pipe(probe_fd) == 0) {
+    fcntl(probe_fd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(probe_fd[1], F_SETFD, FD_CLOEXEC);
+#endif
     int ret = fcntl(probe_fd[1], F_SETPIPE_SZ, 1048576);
     if (ret >= 0)
       pipe_cap = ret;
@@ -2500,6 +2636,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       chunk_size = mult * L;
     }
   }
+  uint64_t min_batch_sz = (state[0].mode_byte && state[0].cfg_batch_start > 0) ? state[0].cfg_batch_start : 1;
+  if (chunk_size > (MINOR_MASK * min_batch_sz)) {
+    chunk_size = MINOR_MASK * min_batch_sz;
+  }
 
   // --- OOM Protection Initialization ---
   uint64_t oom_threshold = 134217728;
@@ -2510,17 +2650,13 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     if (v > 0)
       threshold_div = v;
   }
-  struct sysinfo si_init;
-  if (sysinfo(&si_init) == 0) {
-    uint64_t mu = (uint64_t)si_init.mem_unit ? si_init.mem_unit : 1;
-    oom_threshold = ((uint64_t)si_init.totalram * mu) / (uint64_t)threshold_div;
-  }
+  oom_threshold = get_effective_total_memory() / (uint64_t)threshold_div;
   uint64_t total_moved = 0;
   uint64_t next_check = 16 * 1024 * 1024;
   // -------------------------------------
 
   uint64_t current_offset = 0;
-  uint32_t current_major = 0;
+  uint64_t current_major = 0;
   int last_target = -1;
   bool limit_reached_exit = false;
 
@@ -2642,7 +2778,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       NUMA_CHECK_SCANNERS_DONE();
 
       struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
-      if (poll(&pfd, 1, -1) > 0) {
+      if (poll(&pfd, 1, 10) > 0) {
         uint64_t v;
         sys_read(evfd_chunk_done, &v, 8);
       }
@@ -2653,9 +2789,12 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         {.fd = infd, .events = POLLIN},
         {.fd = evfd_chunk_done, .events = POLLIN}
     };
-    int p_res = poll(pfds_gate, 2, -1);
+    int p_res = poll(pfds_gate, 2, 10);
     if (p_res < 0) {
-        if (errno != EINTR && errno != EAGAIN) break;
+        if (errno != EINTR && errno != EAGAIN) {
+            pull_fire_alarm_reason(2);
+            break;
+        }
         continue;
     }
 
@@ -2752,7 +2891,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
                     {.fd = outfd, .events = POLLOUT},
                     {.fd = evfd_chunk_done, .events = POLLIN}
                 };
-                int p_out_res = poll(pfds_out, 2, -1);
+                int p_out_res = poll(pfds_out, 2, 10);
                 if (p_out_res < 0) {
                     if (errno == EINTR || errno == EAGAIN) continue;
                     if (errno == ENOMEM) {
@@ -2760,6 +2899,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
                         continue;
                     }
                     inner_fatal = true; // Hard unrecoverable error
+                    pull_fire_alarm_reason(2);
                     break;
                 }
                 if (p_out_res > 0 && (pfds_out[1].revents & POLLIN)) {
@@ -2777,6 +2917,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
               continue;
             }
             inner_fatal = true;
+            pull_fire_alarm_reason(2);
             break;
           }
           written += w;
@@ -2800,6 +2941,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         usleep(10000); // Catch ENOSPC on sendfile/copy_file_range
         continue;
       }
+      pull_fire_alarm_reason(2);
       break; // Safe hard exit
     }
     if (n == 0)
@@ -2812,6 +2954,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     meta->target_node = target_node;
     meta->major_id = current_major;
     atomic_store_relaxed(&meta->actual_end, 0);
+    atomic_store_relaxed(&meta->cum_lines, 0); // v3.5: Initialize cum_lines flag
 
     struct SharedState *t_state = &state[target_node];
     uint64_t q_idx = atomic_load_relaxed(&t_state->chunk_queue_head);
@@ -2879,6 +3022,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         uint32_t bound_b = min_buf + (12 * step);
         uint32_t max_buf = (bound_a < bound_b) ? bound_a : bound_b;
         if (max_buf > 128) max_buf = 128; // Safely absorb smaller 64KB metadata entries
+        uint32_t global_max = (META_RING_SIZE / 2) / (num_nodes > 0 ? (uint32_t)num_nodes : 1);
+        if (global_max < 4) global_max = 4;
+        if (max_buf > global_max) max_buf = global_max;
+        if (min_buf > global_max) min_buf = global_max;
 
         // Instantaneous safety clamp to keep current_buffer_limit in-bounds during transition
         if (current_buffer_limit < min_buf) {
@@ -2886,6 +3033,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
         } else if (current_buffer_limit > max_buf) {
             current_buffer_limit = max_buf;
+            atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
+        }
+        if (current_buffer_limit > global_max) {
+            current_buffer_limit = global_max;
             atomic_store_relaxed(&state[0].chunk_buffer_limit, current_buffer_limit);
         }
 
@@ -2987,6 +3138,7 @@ ingest_done:
   meta_eof->target_node = target_node_eof;
   meta_eof->major_id = current_major;
   atomic_store_relaxed(&meta_eof->actual_end, 0);
+  atomic_store_relaxed(&meta_eof->cum_lines, 0); // v3.5: Initialize cum_lines flag
 
   struct SharedState *t_state_eof = &state[target_node_eof];
   uint64_t q_idx_eof = atomic_load_relaxed(&t_state_eof->chunk_queue_head);
@@ -3036,6 +3188,7 @@ static int ring_indexer_numa_main(int argc, char **argv) {
   char tail_buf[65536];
   int spin = 0;
   bool byte_mode = t_state->mode_byte;
+  bool exact_lines_l = t_state->exact_lines; // v3.5: -L transfers actual_end ownership to scanner
 
   while (1) {
     if (atomic_load_relaxed(&state[0].emergency_abort)) {
@@ -3084,13 +3237,18 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     }
     spin = 0;
 
-    uint32_t major_id = t_state->chunk_queue[my_idx & META_RING_MASK];
+    uint64_t major_id = t_state->chunk_queue[my_idx & META_RING_MASK];
     struct ChunkMeta *meta = &g_state->meta_ring[major_id & META_RING_MASK];
     uint64_t chunk_end = meta->raw_offset + meta->raw_length;
     uint64_t actual_end = chunk_end;
 
     // PHYSICS FIX: Bypass delimiter search in byte mode!
-    if (!byte_mode) {
+    // v3.5.0: -L also skips the SEARCH — but only -L skips the PUBLICATION.
+    // Byte mode still needs the indexer to publish actual_end (= raw chunk
+    // end, no search): the scanner's byte-mode path consumes it. Ownership
+    // truth table: normal = search+publish (indexer); byte = publish only
+    // (indexer); -L = neither (scanner publishes in the handoff chain).
+    if (!byte_mode && !exact_lines_l) {
       uint64_t search_end = chunk_end;
       while (search_end > meta->raw_offset) {
         uint64_t window_size =
@@ -3147,8 +3305,10 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       }
     }
 
-    // 1. Mark meta ready
-    atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
+    // 1. Mark meta ready — byte mode publishes the un-searched raw end;
+    //    -L mode does not publish here at all (scanner owns actual_end).
+    if (!exact_lines_l)
+      atomic_store_release(&meta->actual_end, actual_end | FLAG_META_READY);
     // 2. Put it on the Scanner's Ready Shelf
     __atomic_store_n(&t_state->chunk_ready_head, my_idx + 1, __ATOMIC_RELEASE);
 
@@ -3232,17 +3392,32 @@ static int ring_indexer_numa_main(int argc, char **argv) {
                               _batch_end_offset, _out_skipped)                 \
   do {                                                                         \
     _out_skipped = false;                                                      \
+    uint64_t _eff_end = (_batch_end_offset);                                   \
     if (__builtin_expect(g_state->is_resume_mode, 0)) {                        \
-        uint64_t _s_byte = batch_start;                                        \
-        uint64_t _e_byte = _batch_end_offset;                                  \
-        if (_s_byte >= g_state->resume_horizon) {                              \
+        if (batch_start < g_state->resume_horizon) {                           \
+            if (_eff_end <= g_state->resume_horizon) {                         \
+                _out_skipped = true;                                           \
+            } else {                                                           \
+                batch_start = g_state->resume_horizon;                         \
+            }                                                                  \
+        }                                                                      \
+        if (!_out_skipped && batch_start >= g_state->resume_horizon) {         \
+            uint64_t _s_byte = batch_start;                                    \
             for (uint32_t _i = 0; _i < g_state->resume_jagged_count; _i++) {   \
-                if (_s_byte >= g_state->resume_jagged[_i].s && _e_byte <= g_state->resume_jagged[_i].e) { \
-                    _out_skipped = true; break;                                \
+                uint64_t _js = g_state->resume_jagged[_i].s;                  \
+                uint64_t _je = g_state->resume_jagged[_i].e;                  \
+                if (_s_byte >= _js && _s_byte < _je) {                         \
+                    if (_eff_end <= _je) {                                     \
+                        _out_skipped = true; break;                            \
+                    } else {                                                   \
+                        batch_start = _je;                                     \
+                        _s_byte = _je;                                         \
+                    }                                                          \
+                } else if (_s_byte < _js && _eff_end > _js) {                 \
+                    _eff_end = _js;                                            \
+                    break;                                                     \
                 }                                                              \
             }                                                                  \
-        } else if (_e_byte <= g_state->resume_horizon) {                       \
-            _out_skipped = true;                                               \
         }                                                                      \
         if (_out_skipped) break;                                               \
     }                                                                          \
@@ -3301,13 +3476,13 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     uint64_t pk = (uint64_t)batch_start;                                       \
     if (is_numa) {                                                             \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
-      local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
+      local_state->end_ring[local_scan_idx & RING_MASK] = _eff_end;            \
       local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id);         \
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
           (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
     } else {                                                                   \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
-      local_state->end_ring[local_scan_idx & RING_MASK] = (_batch_end_offset); \
+      local_state->end_ring[local_scan_idx & RING_MASK] = _eff_end;            \
     }                                                                          \
     local_scan_idx++;                                                          \
     UNIFIED_ADAPTIVE_COMMIT(false);                                            \
@@ -3510,6 +3685,10 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   uint64_t chunk_bounds[16] = {0};
   uint32_t cb_head = 0;
 
+  // v3.5: Cumulative chain state for deterministic -n
+  uint64_t prev_cum_lines = 0;
+  uint64_t chunk_lines_scanned = 0;
+
   atomic_store_relaxed(&local_state->write_idx, 0);
   atomic_store_relaxed(&local_state->read_idx, 0);
   if (!is_numa)
@@ -3705,6 +3884,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     struct ChunkMeta *meta = NULL;
     uint32_t minor_idx = 0;
     bool chunk_eof_flushed = false;
+    bool limit_reached = false;
 
     if (is_numa) {
       int steal_target = my_node_id;
@@ -3868,8 +4048,325 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                            __ATOMIC_RELAXED);
       }
 
-      uint32_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
+      uint64_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
       meta = &g_state->meta_ring[current_major & META_RING_MASK];
+
+      // ====================================================================
+      // v3.5.0: -L (exact lines) NUMA PATH — the Scanner-Handoff Chain.
+      //
+      // The indexer is bypassed and the SCANNER owns both actual_end and
+      // cum_lines for its chunk. Scanning is serialized by the cum_lines
+      // chain (scan gate) — exactly what exact batch boundaries require,
+      // since a boundary is a global-sequence property decidable only by
+      // the scanner whose turn it is.
+      //
+      // UNIFIED HANDOFF — there is no case-1/case-2 split. Every scanner
+      // traverses its ENTIRE own raw chunk exactly once (delimiter owner-
+      // ship is exclusive: a line is counted by the scanner whose raw chunk
+      // contains its terminating delimiter). The handoff is uniform:
+      //   actual_end = start of the open batch (wherever it began — possibly
+      //                in an earlier chunk), = actual_start if none is open
+      //   cum_lines  = cumulative delimiter count through this chunk
+      // The successor begins at its OWN raw_start seeded with
+      // pending = cum_lines mod L. No scanner ever re-traverses a
+      // predecessor's bytes — the open batch's earlier bytes are read only
+      // by the WORKER that executes it (the -L cross-socket tax).
+      //
+      // INVARIANT (EOF-hang class): every chunk-exit path — normal end,
+      // skip-past-cutoff, EOF sentinel — publishes BOTH values. Never wait
+      // for data a scanner that exited will not produce.
+      // ====================================================================
+      if (is_numa && exact_lines && !byte_mode) {
+        uint64_t raw_start = meta->raw_offset;
+        uint64_t raw_end = raw_start + meta->raw_length;
+
+        // ---- (1) GATE: predecessor handoff, with cutoff escape ----
+        uint64_t prev_cum = 0;
+        uint64_t handoff_start = 0;
+        bool past_cutoff = false;
+
+        if (limit_items > 0) {
+          uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
+          if (cutoff > 0 && (current_major + 1) > cutoff)
+            past_cutoff = true;
+        }
+
+        if (!past_cutoff && current_major > 0) {
+          struct ChunkMeta *pm =
+              &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
+          uint32_t pnode = pm->target_node;
+          int gate_spin = 0;
+          int gate_budget = (global_num_nodes > (uint32_t)get_logical_cores()) ? 1000 : 10000;
+          while (1) {
+            uint64_t ae = atomic_load_acquire(&pm->actual_end);
+            uint64_t cl = atomic_load_acquire(&pm->cum_lines);
+            if ((ae & FLAG_META_READY) && (cl & FLAG_CUM_READY)) {
+              handoff_start = ae & ~FLAG_META_READY;
+              prev_cum = cl & ~FLAG_CUM_READY;
+              break;
+            }
+            if (limit_items > 0) {
+              uint64_t cutoff =
+                  atomic_load_acquire(&g_state->limit_cutoff_major);
+              if (cutoff > 0 && (current_major + 1) > cutoff) {
+                past_cutoff = true;
+                break;
+              }
+            }
+            if (atomic_load_relaxed(&state[0].emergency_abort))
+              goto unified_scanner_eof;
+            if (gate_spin < gate_budget) {
+              for (int _b = 0; _b < 16; _b++) cpu_relax();
+              gate_spin += 16;
+              int _del = (gate_spin < 3000) ? gate_spin : 3000;
+              for (volatile int _d = 0; _d < _del; _d++) cpu_relax();
+            } else {
+              __atomic_fetch_add(&state[pnode].meta_waiters, 1,
+                                 __ATOMIC_SEQ_CST);
+              ae = atomic_load_acquire(&pm->actual_end);
+              cl = atomic_load_acquire(&pm->cum_lines);
+              bool resolved = (ae & FLAG_META_READY) && (cl & FLAG_CUM_READY);
+              bool escaped = false;
+              if (!resolved && limit_items > 0) {
+                uint64_t cutoff =
+                    atomic_load_acquire(&g_state->limit_cutoff_major);
+                escaped = (cutoff > 0 && (current_major + 1) > cutoff);
+              }
+              if (!resolved && !escaped &&
+                  !atomic_load_relaxed(&state[0].emergency_abort)) {
+                struct pollfd gfds[2] = {
+                    {.fd = evfd_meta_arr[pnode], .events = POLLIN},
+                    {.fd = evfd_ingest_eof, .events = POLLIN}};
+                poll(gfds, 2, 100); // bounded: cutoff/abort must be re-checked
+                if (gfds[0].revents & POLLIN) {
+                  uint64_t gv;
+                  sys_read(evfd_meta_arr[pnode], &gv, 8);
+                }
+              }
+              __atomic_fetch_sub(&state[pnode].meta_waiters, 1,
+                                 __ATOMIC_SEQ_CST);
+              if (resolved) {
+                handoff_start = ae & ~FLAG_META_READY;
+                prev_cum = cl & ~FLAG_CUM_READY;
+                break;
+              }
+              if (escaped) {
+                past_cutoff = true;
+                break;
+              }
+              gate_spin = 0;
+            }
+          }
+        }
+
+        // Belt-and-suspenders: predecessor already at/over the limit.
+        if (!past_cutoff && limit_items > 0 && prev_cum >= limit_items)
+          past_cutoff = true;
+
+        if (g_debug)
+          fprintf(stderr,
+                  "forkrun[DEBUG] -L GATE: node=%d major=%lu handoff=%lu "
+                  "prev_cum=%lu pending=%lu past_cutoff=%d\n",
+                  my_node_id, current_major, handoff_start, prev_cum,
+                  prev_cum % L, (int)past_cutoff);
+
+        // ---- (2) SKIP PATH (past cutoff): carry sentinel forward ----
+        if (past_cutoff) {
+          if (limit_items > 0)
+            prev_cum = limit_items; // sentinel: at/past the limit
+          batch_start = raw_start;
+          bool _skipped = false;
+          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, raw_start, _skipped);
+          if (!_skipped) {
+            chunk_bounds[cb_head & 15] = local_scan_idx;
+            cb_head++;
+          }
+          atomic_store_release(&meta->actual_end,
+                               raw_start | FLAG_META_READY);
+          atomic_store_release(&meta->cum_lines, prev_cum | FLAG_CUM_READY);
+          __atomic_thread_fence(__ATOMIC_SEQ_CST);
+          uint32_t mw = atomic_load_relaxed(
+              &state[meta->target_node].meta_waiters);
+          if (mw > 0) {
+            uint64_t v = mw;
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+          }
+          UNIFIED_ADAPTIVE_COMMIT(true);
+          continue;
+        }
+
+        // ---- (3) EOF SENTINEL CHUNK: flush the pending partial batch ----
+        // raw_length == 0 iff this is the ingest EOF sentinel; its
+        // raw_offset is the true end-of-stream byte offset.
+        if (meta->raw_length == 0) {
+          uint64_t eof_off = meta->raw_offset;
+          batch_start = handoff_start;
+          bool _skipped = false;
+          // Zero-length when nothing is pending: acked-not-executed (M1).
+          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, eof_off, _skipped);
+          if (!_skipped) {
+            chunk_bounds[cb_head & 15] = local_scan_idx;
+            cb_head++;
+          }
+          if (g_debug)
+            fprintf(stderr,
+                    "forkrun[DEBUG] -L EOF_TAIL: node=%d major=%lu "
+                    "[%lu,%lu)\n",
+                    my_node_id, current_major, handoff_start, eof_off);
+          atomic_store_release(&meta->actual_end, eof_off | FLAG_META_READY);
+          atomic_store_release(&meta->cum_lines, prev_cum | FLAG_CUM_READY);
+          __atomic_thread_fence(__ATOMIC_SEQ_CST);
+          uint32_t mw = atomic_load_relaxed(
+              &state[meta->target_node].meta_waiters);
+          if (mw > 0) {
+            uint64_t v = mw;
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+          }
+          UNIFIED_ADAPTIVE_COMMIT(true);
+          continue;
+        }
+
+        // ---- (4) SCAN: count own-chunk delimiters, publish exact-L batches
+        {
+          uint64_t pending_carried = prev_cum % L;
+          // Lines already sealed in complete batches. Every complete batch
+          // is exactly L lines, so the sealed portion of prev_cum is its
+          // multiple-of-L part — the open batch holds the remainder. This
+          // is what makes the -n budget exact: carried pending lines live
+          // in lines_in_batch and are absent from `sealed`, so they are
+          // never double-counted.
+          uint64_t sealed = prev_cum - pending_carried;
+
+          uint64_t lines_in_batch = pending_carried;
+          uint64_t counted = 0;   // delimiters found in THIS chunk
+          uint64_t published = 0; // lines sealed into batches by this scanner
+          uint32_t l_minor = 0;
+          bool l_last_flushed = false;
+          bool l_limit_hit = false;
+
+          batch_start = handoff_start;
+          buf_base_offset = raw_start;
+          p = buf;
+          end = buf;
+
+          while (1) {
+            if (p >= end) {
+              if (buf_base_offset + (uint64_t)(end - buf) >= raw_end)
+                break; // chunk exhausted — always scan to the very end
+              if (atomic_load_relaxed(&state[0].emergency_abort))
+                goto unified_scanner_eof;
+              uint64_t read_start = buf_base_offset + (uint64_t)(end - buf);
+              size_t to_read = chunk_sz;
+              if (read_start + to_read > raw_end)
+                to_read = raw_end - read_start;
+              ssize_t n;
+              do {
+                n = pread(fd_or_memfd, buf, to_read, (off_t)read_start);
+              } while (n < 0 && errno == EINTR);
+              if (n <= 0)
+                break; // defensive: treat as chunk end
+              buf_base_offset = read_start;
+              p = buf;
+              end = buf + n;
+            }
+
+            char *nl = memchr(p, delim, (size_t)(end - p));
+            if (!nl) {
+              p = end;
+              continue;
+            }
+            p = nl + 1;
+            lines_in_batch++;
+            counted++;
+
+            // Batches complete at exactly L; the -n budget may clamp the
+            // FINAL batch short. sealed+published+lines_in_batch is the
+            // cumulative total that will be sealed once this batch
+            // publishes; it steps by 1 per delimiter, so it reaches
+            // limit_items exactly (no under/over-delivery).
+            bool complete = (lines_in_batch >= L);
+            bool budget_hit = false;
+            if (limit_items > 0 &&
+                (sealed + published + lines_in_batch) >= limit_items)
+              budget_hit = true;
+
+            if (complete || budget_hit) {
+              uint64_t bnd = buf_base_offset + (uint64_t)(p - buf);
+              bool is_last = (bnd >= raw_end);
+              bool _skipped = false;
+              UNIFIED_SCANNER_FLUSH(is_last, meta->major_id, l_minor, bnd,
+                                    _skipped);
+              l_minor++;
+              if (is_last && !_skipped) {
+                l_last_flushed = true;
+                chunk_bounds[cb_head & 15] = local_scan_idx;
+                cb_head++;
+              }
+              batch_start = bnd;
+              published += lines_in_batch;
+              lines_in_batch = 0;
+              if (!_skipped) {
+                atomic_store_relaxed(&local_state->current_batch_size, L);
+                ADAPTIVE_FLOW_CONTROL(local_state, false, my_node_id);
+              }
+              if (budget_hit) {
+                l_limit_hit = true;
+                // Cutoff BEFORE handoff (same ordering rule as the -n path)
+                atomic_store_release(&g_state->limit_cutoff_major,
+                                     meta->major_id + 1);
+                break;
+              }
+            }
+          }
+
+          total_scanned += counted;
+          atomic_store_relaxed(&local_state->total_lines_scanned,
+                               total_scanned);
+
+          // Chunk ended with an open batch (or a skipped last batch):
+          // zero-length sentinel advances the orderer's major; the open
+          // batch transfers via actual_end = batch_start. This covers the
+          // no-complete-batch case (actual_end = actual_start) and the
+          // mid-next-batch case (actual_end = last batch boundary)
+          // identically — the unified handoff.
+          if (!l_last_flushed) {
+            bool _skipped = false;
+            UNIFIED_SCANNER_FLUSH(true, meta->major_id, l_minor, batch_start,
+                                  _skipped);
+            if (!_skipped) {
+              chunk_bounds[cb_head & 15] = local_scan_idx;
+              cb_head++;
+            }
+          }
+
+          // Publish the handoff for scanner N+1: actual_end = start of the
+          // open batch; cum_lines = cumulative count through this chunk.
+          uint64_t my_cum = prev_cum + counted;
+          atomic_store_release(&meta->actual_end,
+                               batch_start | FLAG_META_READY);
+          atomic_store_release(&meta->cum_lines, my_cum | FLAG_CUM_READY);
+          __atomic_thread_fence(__ATOMIC_SEQ_CST);
+          uint32_t mw = atomic_load_relaxed(
+              &state[meta->target_node].meta_waiters);
+          if (mw > 0) {
+            uint64_t v = mw;
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+          }
+          if (g_debug)
+            fprintf(stderr,
+                    "forkrun[DEBUG] -L CHUNK_END: node=%d major=%lu "
+                    "counted=%lu cum=%lu actual_end=%lu\n",
+                    my_node_id, current_major, counted, my_cum, batch_start);
+
+          UNIFIED_ADAPTIVE_COMMIT(true);
+
+          if (l_limit_hit)
+            break; // limit crossed; cutoff is set for all successors
+          continue;
+        }
+      }
+      // ================= end v3.5.0 -L NUMA path ========================
+
 
       uint64_t act_end_flag = atomic_load_acquire(&meta->actual_end);
       uint64_t actual_end = act_end_flag & ~FLAG_META_READY;
@@ -3883,21 +4380,98 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
         WAIT_FOR_META_READY(prev_act_end, prev_meta, tnode,
                              goto unified_scanner_eof);
         actual_start = prev_act_end & ~FLAG_META_READY;
+
+        // v3.5: Cumulative Line Count Chain Gating
+        // EOF-HANG FIX: never wait for a count a dead scanner will never
+        // publish. If the cutoff is already set and this whole chunk is past
+        // it, skip immediately; if not, the wait re-checks the cutoff every
+        // iteration (the crossing scanner can set it while we're blocked).
+        if (limit_items > 0 && !byte_mode) {
+          bool past_cutoff = false;
+          uint64_t cutoff = atomic_load_acquire(&g_state->limit_cutoff_major);
+          if (cutoff > 0 && (current_major + 1) > cutoff) {
+            past_cutoff = true;
+          } else {
+            uint64_t prev_cum_raw;
+            WAIT_FOR_CUM_LINES_OR_CUTOFF(prev_cum_raw, prev_meta, tnode,
+                                         current_major, past_cutoff,
+                                         goto unified_scanner_eof);
+            if (!past_cutoff)
+              prev_cum_lines = prev_cum_raw & ~FLAG_CUM_READY;
+          }
+
+          if (past_cutoff) {
+            // Our entire chunk is past the limit. Skip scanning!
+            // Sentinel (>= limit) so any reader that misses the cutoff still
+            // computes a zero budget and propagates the skip down the chain.
+            prev_cum_lines = limit_items;
+            batch_start = actual_start;
+            current_p_offset = actual_start;
+
+            bool _skipped = false;
+            UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
+            if (!_skipped) {
+              chunk_bounds[cb_head & 15] = local_scan_idx;
+              cb_head++;
+            }
+            // Propagate cum_lines forward so subsequent chunks also skip cleanly
+            atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
+            if (mw > 0) {
+              uint64_t v = mw;
+              sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+            }
+            UNIFIED_ADAPTIVE_COMMIT(true);
+            continue; // Move to next chunk
+          }
+        } else {
+          prev_cum_lines = 0;
+        }
+      } else {
+        prev_cum_lines = 0;
       }
+
+      chunk_lines_scanned = 0;
 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
         bool _skipped = false;
         UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start,
                               _skipped);
-        if (is_numa) {
-          if (!_skipped) {
-            chunk_bounds[cb_head & 15] = local_scan_idx;
-            cb_head++;
+        if (!_skipped) {
+          chunk_bounds[cb_head & 15] = local_scan_idx;
+          cb_head++;
+        }
+        if (limit_items > 0 && !byte_mode) {
+          atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
+          __atomic_thread_fence(__ATOMIC_SEQ_CST);
+          uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
+          if (mw > 0) {
+            uint64_t v = mw;
+            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
           }
         }
         if (!_skipped) UNIFIED_ADAPTIVE_COMMIT(true);
         continue;
+      }
+
+      // Check byte-mode limit
+      if (byte_mode && limit_items > 0) {
+        if (actual_start >= limit_items) {
+          // Entire chunk past byte limit: emit empty sentinel and continue
+          batch_start = actual_start;
+          bool _skipped = false;
+          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
+          if (!_skipped) {
+            chunk_bounds[cb_head & 15] = local_scan_idx;
+            cb_head++;
+          }
+          UNIFIED_ADAPTIVE_COMMIT(true);
+          continue;
+        } else if (actual_end > limit_items) {
+          actual_end = limit_items; // Clamp exact crossing byte
+        }
       }
 
       chunk_end = actual_end;
@@ -4054,7 +4628,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       }
 
       bool flush = false;
-      bool limit_reached = false;
       bool force_flush_bytes = false; // WORMHOLE FIX 8
 
       if (byte_mode) {
@@ -4066,10 +4639,6 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           if (!is_numa && total_scanned >= limit_items) {
             status = 1;
             break;
-          }
-          if (is_numa) {
-            uint64_t prev = __atomic_fetch_add(&state[0].global_scanned, (avail >= L ? L : avail), __ATOMIC_SEQ_CST);
-            if (prev >= limit_items) break;
           }
         }
 
@@ -4091,6 +4660,28 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               take = avail;
               flush = true;
               first_wait_ts = 0;
+            }
+          }
+        }
+
+        if (flush && limit_items > 0) {
+          if (!is_numa) {
+            if (total_scanned + take >= limit_items) {
+              take = limit_items - total_scanned;
+              status = 1;
+            }
+          } else {
+            // v3.5: NUMA byte-mode uses chunk clamping, not global_scanned
+            // actual_end was already clamped to limit_items, and chunks past limit are skipped.
+            // If we are at the limit boundary, clamp take and signal limit_reached.
+            if (current_p_offset >= limit_items) {
+              take = 0;
+              flush = false;
+              break;
+            }
+            if (current_p_offset + take > limit_items) {
+              take = limit_items - current_p_offset;
+              limit_reached = true;
             }
           }
         }
@@ -4134,20 +4725,34 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       } else {
         uint64_t scan_target = (L > pending_lines) ? (L - pending_lines) : 0;
         if (limit_items > 0) {
-          uint64_t current_global =
-              is_numa ? atomic_load_relaxed(&state[0].global_scanned)
-                      : total_scanned;
-          if (current_global >= limit_items) {
-            if (!is_numa)
+          if (!is_numa) {
+            if (total_scanned >= limit_items) {
               status = 1;
-            break;
-          }
-          uint64_t rem = limit_items - current_global;
-          if (scan_target > rem)
-            scan_target = rem;
-          if (!is_numa && rem == 0) {
-            status = 1;
-            scan_target = 0;
+              // NOTE: breaks with current_p_offset == batch_start (post-flush
+              // invariant) — the tail flush below publishes an empty
+              // [batch_start, batch_start) chunk-end marker. This is correct
+              // but depends on the invariant. Do not recompute current_p_offset
+              // here without preserving this property.
+              break;
+            }
+            uint64_t rem = limit_items - total_scanned;
+            if (scan_target > rem)
+              scan_target = rem;
+            if (rem == 0) {
+              status = 1;
+              scan_target = 0;
+            }
+          } else {
+            // v3.5: NUMA line-mode uses cumulative chain, not global_scanned
+            if (!byte_mode) {
+              uint64_t current_consumed = prev_cum_lines + chunk_lines_scanned;
+              if (current_consumed >= limit_items) {
+                break;
+              }
+              uint64_t rem = limit_items - current_consumed;
+              if (scan_target > rem)
+                scan_target = rem;
+            }
           }
         }
         if (scan_target == 0 && !limit_reached &&
@@ -4251,15 +4856,55 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           }
         }
 
-        if (is_numa && limit_items > 0 && lines_found > 0) {
-          uint64_t prev = __atomic_fetch_add(&state[0].global_scanned,
-                                             lines_found, __ATOMIC_SEQ_CST);
-          if (prev >= limit_items) {
-            lines_found = 0;
+        // v3.5: Deterministic -n Line Budget Clamping (replaces global_scanned race)
+        if (is_numa && limit_items > 0 && !byte_mode && lines_found > 0) {
+          uint64_t running_total = prev_cum_lines + chunk_lines_scanned + lines_found;
+
+          if (running_total >= limit_items) {
+            uint64_t allowed = limit_items - (prev_cum_lines + chunk_lines_scanned);
+            if (allowed < lines_found) {
+              // Rewind to the exact delimiter of the allowed-th line
+              int64_t bs_rel = (int64_t)batch_start - (int64_t)buf_base_offset;
+              if (bs_rel >= 0 && bs_rel <= (int64_t)(end - buf)) {
+                char *rewind_p = buf + bs_rel;
+                for (uint64_t _k = 0; _k < allowed; _k++) {
+                  char *nl = memchr(rewind_p, delim, end - rewind_p);
+                  if (nl) rewind_p = nl + 1;
+                  else break;
+                }
+                p = rewind_p;
+              } else {
+                uint64_t cur_pos = batch_start;
+                uint64_t found = 0;
+                char tmp_buf[4096];
+                while (found < allowed) {
+                  ssize_t rn;
+                  do {
+                    rn = pread(fd_or_memfd, tmp_buf, sizeof(tmp_buf), (off_t)cur_pos);
+                  } while (rn < 0 && errno == EINTR);
+                  if (rn <= 0) break;
+                  char *tp = tmp_buf;
+                  char *te = tmp_buf + rn;
+                  while (found < allowed && tp < te) {
+                    char *nl = memchr(tp, delim, te - tp);
+                    if (nl) { found++; tp = nl + 1; }
+                    else { tp = te; }
+                  }
+                  cur_pos += (uint64_t)(tp - tmp_buf);
+                  if (found >= allowed) break;
+                }
+                buf_base_offset = cur_pos;
+                p = buf;
+                end = buf;
+              }
+              lines_found = allowed;
+            }
             limit_reached = true;
-            break;
-          } else if (prev + lines_found >= limit_items)
-            limit_reached = true;
+
+            // Publish 1-based cutoff signal BEFORE publishing cum_lines
+            atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
+          }
+          chunk_lines_scanned += lines_found;
         }
 
         pending_lines += lines_found;
@@ -4340,14 +4985,26 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
     }
 
     if (is_numa) {
-      UNIFIED_ADAPTIVE_COMMIT(true);
+      // v3.5: Use lagging write_idx to enable tail wind-down (like UMA)
+      bool _starving = (atomic_load_relaxed(&local_state->active_waiters) > 0);
+      UNIFIED_ADAPTIVE_COMMIT(_starving);
+
+      // v3.5: Publish cumulative line count for this chunk
+      if (limit_items > 0 && !byte_mode) {
+        uint64_t my_cum_lines = prev_cum_lines + chunk_lines_scanned;
+        atomic_store_release(&meta->cum_lines, my_cum_lines | FLAG_CUM_READY);
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
+        if (mw > 0) {
+          uint64_t v = mw;
+          sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+        }
+      }
     }
 
-    // CRITICAL FIX: Universal limit break for both UMA and NUMA
-    if (limit_items > 0) {
-      uint64_t current_global = is_numa ? atomic_load_relaxed(&state[0].global_scanned) : total_scanned;
-      if (current_global >= limit_items) break;
-    }
+    if (limit_reached) break;
+    // UMA still uses total_scanned for limit break
+    if (!is_numa && limit_items > 0 && total_scanned >= limit_items) break;
   }
 
 unified_scanner_eof:
@@ -4661,6 +5318,10 @@ dlc_restart_loop:
     } else if (er < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       // Pipe fully drained. Snap back to zero-overhead fast path.
       tl_drain_escrow = false;
+    } else if (er > 0) {
+      fprintf(stderr, "forkrun [FATAL]: Escrow pipe framing corrupted (read %zd bytes, expected %zu)\n", er, sizeof(ep));
+      pull_fire_alarm();
+      return EXECUTION_FAILURE;
     }
   }
 
@@ -4690,6 +5351,10 @@ dlc_restart_loop:
         my_read_idx   = ep.idx;
         current_kills = ep.num_kills;
         break;
+      } else if (er > 0) {
+        fprintf(stderr, "forkrun [FATAL]: Escrow pipe framing corrupted (read %zd bytes, expected %zu)\n", er, sizeof(ep));
+        pull_fire_alarm();
+        return EXECUTION_FAILURE;
       }
     }
 
@@ -5013,7 +5678,7 @@ static int ring_ack_main(int argc, char **argv) {
       op.minor_idx = worker_last_minor;
       op.cnt = worker_last_cnt;
     } else {
-      op.major_idx = (uint32_t)worker_last_idx;
+      op.major_idx = worker_last_idx;
       op.minor_idx = 0;
       op.cnt = worker_last_cnt;
     }
@@ -5032,11 +5697,11 @@ static int ring_ack_main(int argc, char **argv) {
         sigaction(SIGPIPE, &sa_old, NULL);
         return EXECUTION_FAILURE;
       }
-      op.major_idx = (uint32_t)atoi(s_maj);
+      op.major_idx = (uint64_t)strtoull(s_maj, NULL, 10);
       op.minor_idx = (uint32_t)atoi(s_min);
       my_idx = (uint64_t)atoll(s_batch_idx);
     } else {
-      op.major_idx = (uint32_t)atoi(s_batch_idx);
+      op.major_idx = (uint64_t)strtoull(s_batch_idx, NULL, 10);
       op.minor_idx = 0;
       my_idx = op.major_idx;
     }
@@ -5074,9 +5739,12 @@ static int ring_ack_main(int argc, char **argv) {
           (fstat(fd_target, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
     }
     if (ack_cached_mode == 1) {
-      const char *s_order_pipe = get_string_value("FD_ORDER_PIPE");
-      if (s_order_pipe) {
-        int fd_pipe = atoi(s_order_pipe);
+      if (ack_cached_order_pipe < 0) {
+        const char *s_order_pipe = get_string_value("FD_ORDER_PIPE");
+        if (s_order_pipe) ack_cached_order_pipe = atoi(s_order_pipe);
+      }
+      if (ack_cached_order_pipe >= 0) {
+        int fd_pipe = ack_cached_order_pipe;
         off_t curr = lseek(fd_target, 0, SEEK_CUR);
         if (curr == (off_t)-1) {
           sigaction(SIGPIPE, &sa_old, NULL);
@@ -5099,6 +5767,7 @@ static int ring_ack_main(int argc, char **argv) {
     }
   }
 
+  worker_last_cnt = 0;
   sigaction(SIGPIPE, &sa_old, NULL);
   return EXECUTION_SUCCESS;
 }
@@ -5346,7 +6015,8 @@ static int ring_order_main(int argc, char **argv) {
   struct OrderFdState *fd_states = calloc(fd_states_cap, sizeof(struct OrderFdState));
   if (!fd_states) { free(heap); return EXECUTION_FAILURE; }
 
-  uint32_t expected_major = 0, expected_minor = 0;
+  uint64_t expected_major = 0;
+  uint32_t expected_minor = 0;
 
   char pkt_buf[4096];
   size_t buffered = 0;
@@ -5463,10 +6133,10 @@ static int ring_order_main(int argc, char **argv) {
         } else {
           char path[256];
           if (numa_mode)
-            snprintf(path, sizeof(path), "%s.%u.%u", prefix, op->major_idx,
+            snprintf(path, sizeof(path), "%s.%" PRIu64 ".%u", prefix, op->major_idx,
                      actual_minor);
           else
-            snprintf(path, sizeof(path), "%s.%u", prefix, op->major_idx);
+            snprintf(path, sizeof(path), "%s.%" PRIu64, prefix, op->major_idx);
           int fd_file = open(path, O_RDONLY);
           if (fd_file >= 0) {
             off_t offset = 0;
@@ -5505,11 +6175,11 @@ static int ring_order_main(int argc, char **argv) {
           } else {
             char path[256];
             if (numa_mode)
-              snprintf(path, sizeof(path), "%s.%u.%u", prefix,
+              snprintf(path, sizeof(path), "%s.%" PRIu64 ".%u", prefix,
                        top.pkt.major_idx,
                        (top.pkt.minor_idx & ~FLAG_MAJOR_EOF));
             else
-              snprintf(path, sizeof(path), "%s.%u", prefix, top.pkt.major_idx);
+              snprintf(path, sizeof(path), "%s.%" PRIu64, prefix, top.pkt.major_idx);
             int fd_file = open(path, O_RDONLY);
             if (fd_file >= 0) {
               off_t offset = 0;
@@ -5539,6 +6209,15 @@ static int ring_order_main(int argc, char **argv) {
     size_t consumed = count * pkt_sz;
     if (consumed < buffered) memmove(pkt_buf, pkt_buf + consumed, buffered - consumed);
     buffered -= consumed;
+  }
+
+  if (!unordered_mode && g_state && g_state->is_resume_mode && !resume_synced && !stdout_broken) {
+      fprintf(stderr, "forkrun [FATAL]: Resume sync failed (no batch matched horizon %" PRIu64 "). Aborting.\n",
+              g_state->resume_horizon);
+      pull_fire_alarm();
+      free(fd_states); free(heap); free(tracker_heap);
+      sigaction(SIGPIPE, &sa_old, NULL);
+      return EXECUTION_FAILURE;
   }
 
   for (int i = 0; i < fd_states_cap; i++) {
@@ -5680,20 +6359,32 @@ static int ring_lseek_main(int argc, char **argv) {
   }
 
   int whence = SEEK_CUR;
-  if (argc > 3) {
+  const char *var_name = NULL;
+  if (argc == 4) {
     if (!strcmp(argv[3], "SEEK_SET"))
       whence = SEEK_SET;
     else if (!strcmp(argv[3], "SEEK_END"))
       whence = SEEK_END;
+    else if (!strcmp(argv[3], "SEEK_CUR"))
+      whence = SEEK_CUR;
+    else
+      var_name = argv[3];
+  } else if (argc >= 5) {
+    if (!strcmp(argv[3], "SEEK_SET"))
+      whence = SEEK_SET;
+    else if (!strcmp(argv[3], "SEEK_END"))
+      whence = SEEK_END;
+    var_name = argv[4];
   }
+
   off_t no = lseek(fd, off, whence);
   if (no == -1)
     return EXECUTION_FAILURE;
-  if (argc >= 4 && argv[argc - 1][0]) {
+  if (var_name && var_name[0]) {
     char buf[32];
     snprintf(buf, 32, "%lld", (long long)no);
-    bind_var_or_array(argv[argc - 1], buf, 0);
-  } else if (argc < 4) {
+    bind_var_or_array(var_name, buf, 0);
+  } else if (!var_name) {
     printf("%lld\n", (long long)no);
   }
   return EXECUTION_SUCCESS;
@@ -5702,7 +6393,8 @@ static int ring_lseek_main(int argc, char **argv) {
 static int ring_memfd_create_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
-  int fd = xcreate_anon_file("forkrun_input");
+  bool cloexec = (argc >= 3 && atoi(argv[2]) != 0);
+  int fd = xcreate_anon_file("forkrun_input", cloexec);
   if (fd < 0) {
     builtin_error("memfd_create failed: %s", strerror(errno));
     return EXECUTION_FAILURE;
@@ -5746,10 +6438,19 @@ static int ring_pipe_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
   int pfd[2];
+#if defined(O_CLOEXEC)
+  if (pipe2(pfd, O_CLOEXEC) < 0) {
+    builtin_error("pipe failed: %s", strerror(errno));
+    return EXECUTION_FAILURE;
+  }
+#else
   if (pipe(pfd) < 0) {
     builtin_error("pipe failed: %s", strerror(errno));
     return EXECUTION_FAILURE;
   }
+  fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+  fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+#endif
   fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
 
   // PHYSICS FIX: Get the ACTUAL size granted by the kernel and export it
@@ -5998,11 +6699,7 @@ static int ring_copy_main(int argc, char **argv) {
     if (v > 0)
       threshold_div = v;
   }
-  struct sysinfo si_init;
-  if (sysinfo(&si_init) == 0) {
-    uint64_t mu = (uint64_t)si_init.mem_unit ? si_init.mem_unit : 1;
-    oom_threshold = ((uint64_t)si_init.totalram * mu) / (uint64_t)threshold_div;
-  }
+  oom_threshold = get_effective_total_memory() / (uint64_t)threshold_div;
   uint64_t total_moved = 0;
   uint64_t next_check = 16 * 1024 * 1024;
   off_t off = 0;
@@ -6146,7 +6843,7 @@ static int ring_copy_main(int argc, char **argv) {
       if (r < 0) {
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
           continue;
-        break;
+        goto err_out;
       }
       if (r == 0)
         break;
@@ -6182,8 +6879,7 @@ static int ring_copy_main(int argc, char **argv) {
             usleep(10000);
             continue;
           }
-          inner_fatal = true; // Hard unrecoverable error
-          break;
+          goto err_out;
         }
         written += w;
       }
@@ -6212,6 +6908,7 @@ static int ring_copy_main(int argc, char **argv) {
   return EXECUTION_SUCCESS;
 
 err_out:
+  pull_fire_alarm_reason(2);
   if (evfd_ingest_eof >= 0) {
     uint64_t val = 999999;
     sys_write(evfd_ingest_eof, &val, 8);
@@ -6343,8 +7040,13 @@ static int ring_escrow_put_main(int argc, char **argv) {
     else idx = strtoull(argv[2], NULL, 10);
 
     uint64_t cnt;
-    if (argv[3][0] == '-' && argv[3][1] == '\0') cnt = worker_last_cnt;
-    else cnt = strtoull(argv[3], NULL, 10);
+    if (argv[3][0] == '-' && argv[3][1] == '\0') {
+        if (worker_last_cnt == 0) return EXECUTION_SUCCESS; // batch already acked — nothing in flight
+        cnt = worker_last_cnt;
+    } else {
+        cnt = strtoull(argv[3], NULL, 10);
+        if (cnt == 0) return EXECUTION_SUCCESS;
+    }
     uint32_t kills = (uint32_t)atoi(argv[4]);
 
     if (node < 0 || node >= (int)global_num_nodes) node = 0;
@@ -6381,10 +7083,13 @@ static int ring_dump_resume_main(int argc, char **argv) {
 
     do {
         seq1 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
-        snap_horizon = g_state->resume_horizon;
-        snap_bytes = g_state->resume_stdout_bytes;
-        snap_count = atomic_load_relaxed(&g_state->resume_jagged_count);
-        for (uint32_t i = 0; i < snap_count; i++) snap_jagged[i] = g_state->resume_jagged[i];
+        snap_horizon = __atomic_load_n(&g_state->resume_horizon, __ATOMIC_RELAXED);
+        snap_bytes = __atomic_load_n(&g_state->resume_stdout_bytes, __ATOMIC_RELAXED);
+        snap_count = __atomic_load_n(&g_state->resume_jagged_count, __ATOMIC_RELAXED);
+        for (uint32_t i = 0; i < snap_count && i < 1024; i++) {
+            snap_jagged[i].s = __atomic_load_n(&g_state->resume_jagged[i].s, __ATOMIC_RELAXED);
+            snap_jagged[i].e = __atomic_load_n(&g_state->resume_jagged[i].e, __ATOMIC_RELAXED);
+        }
         seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
     } while (seq1 != seq2 || (seq1 & 1));
 
@@ -6499,7 +7204,8 @@ struct PollMeta {
     int type; // 0 = spawn, 1 = scanner, 2 = worker, 3 = trap_ack
 };
 
-static uint64_t g_poll_deadline_ms = 0;
+#define MAX_POLL_WORKERS 8192
+static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
 
 static inline uint64_t get_mono_ms(void) {
     struct timespec ts;
@@ -6513,13 +7219,23 @@ static int ring_poll_main(int argc, char **argv) {
     const char *scan_arr_name = argv[2];
     const char *work_arr_name = argv[3];
 
-    // Optional 4th arg: timer command.
+    // Optional 4th arg: Per-worker timer command (+wID, -wID, -1)
     if (argc >= 5 && argv[4][0] != '\0') {
-        int timer_arg = atoi(argv[4]);
-        if (timer_arg > 0) {
-            g_poll_deadline_ms = get_mono_ms() + (uint64_t)timer_arg;
-        } else if (timer_arg < 0) {
-            g_poll_deadline_ms = 0;
+        const char *t_cmd = argv[4];
+        if (t_cmd[0] == '+') {
+            int wid = atoi(t_cmd + 1);
+            if (wid >= 0 && wid < MAX_POLL_WORKERS) {
+                g_worker_deadlines[wid] = get_mono_ms() + 3000ULL;
+            }
+        } else if (t_cmd[0] == '-') {
+            if (strcmp(t_cmd, "-1") == 0) {
+                memset(g_worker_deadlines, 0, sizeof(g_worker_deadlines));
+            } else {
+                int wid = atoi(t_cmd + 1);
+                if (wid >= 0 && wid < MAX_POLL_WORKERS) {
+                    g_worker_deadlines[wid] = 0;
+                }
+            }
         }
     }
 
@@ -6583,7 +7299,11 @@ static int ring_poll_main(int argc, char **argv) {
     LOAD_ARRAY(scan_arr_name, 1);
     LOAD_ARRAY(work_arr_name, 2);
 
-    // If there is no core infrastructure left to poll, exit
+    uint64_t g_poll_deadline_ms = 0;
+    for (int w = 0; w < MAX_POLL_WORKERS; w++) {
+        if (g_worker_deadlines[w] > 0) { g_poll_deadline_ms = g_worker_deadlines[w]; break; }
+    }
+
     if (core_cnt == 0 && g_poll_deadline_ms == 0) {
         free(pfds); free(meta);
         return EXECUTION_FAILURE;
@@ -6597,16 +7317,35 @@ static int ring_poll_main(int argc, char **argv) {
             return EXECUTION_SUCCESS;
         }
 
-        int timeout_this_iter = 100;
-        if (g_poll_deadline_ms > 0) {
-            uint64_t now_ms = get_mono_ms();
-            if (now_ms >= g_poll_deadline_ms) {
-                g_poll_deadline_ms = 0;
-                bind_variable("POLL_EVENT", "TIMEOUT", 0);
-                free(pfds); free(meta);
-                return EXECUTION_SUCCESS;
+        uint64_t now_ms = get_mono_ms();
+        uint64_t earliest_deadline = 0;
+        int timed_out_wid = -1;
+
+        for (int w = 0; w < MAX_POLL_WORKERS; w++) {
+            if (g_worker_deadlines[w] > 0) {
+                if (now_ms >= g_worker_deadlines[w]) {
+                    timed_out_wid = w;
+                    break;
+                }
+                if (earliest_deadline == 0 || g_worker_deadlines[w] < earliest_deadline) {
+                    earliest_deadline = g_worker_deadlines[w];
+                }
             }
-            uint64_t remaining_ms = g_poll_deadline_ms - now_ms;
+        }
+
+        if (timed_out_wid >= 0) {
+            g_worker_deadlines[timed_out_wid] = 0;
+            bind_variable("POLL_EVENT", "TIMEOUT", 0);
+            char w_buf[32];
+            snprintf(w_buf, sizeof(w_buf), "%d", timed_out_wid);
+            bind_variable("POLL_ARG1", w_buf, 0);
+            free(pfds); free(meta);
+            return EXECUTION_SUCCESS;
+        }
+
+        int timeout_this_iter = 100;
+        if (earliest_deadline > 0) {
+            uint64_t remaining_ms = earliest_deadline - now_ms;
             timeout_this_iter = (remaining_ms < 100) ? (int)remaining_ms : 100;
             if (timeout_this_iter < 1) timeout_this_iter = 1;
         }
@@ -6623,7 +7362,7 @@ static int ring_poll_main(int argc, char **argv) {
         return EXECUTION_FAILURE;
     }
 
-    // 4. Process the Events
+        // 4. Process the Events
     for (int i = 0; i < p_cnt; i++) {
         if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
             if (meta[i].type == 0 || meta[i].type == 3) {
@@ -6665,6 +7404,10 @@ static int ring_poll_main(int argc, char **argv) {
                         snprintf(arg_buf, sizeof(arg_buf), "%d", node);
                         bind_variable("POLL_ARG2", arg_buf, 0);
                     } else {
+                        if (buf[0] != 'P') {
+                            int ack_wid = atoi(buf);
+                            if (ack_wid >= 0 && ack_wid < MAX_POLL_WORKERS) g_worker_deadlines[ack_wid] = 0;
+                        }
                         bind_variable("POLL_EVENT", "TRAP_ACK", 0);
                         bind_variable("POLL_ARG1", buf, 0);
                     }
@@ -6813,12 +7556,17 @@ struct forkrun_ctx {
     uint64_t batch_index;       // global batch sequence number
     uint64_t batch_offset;      // byte offset in input stream
     uint64_t batch_byte_length; // length of current batch in bytes
-    uint32_t version;           // struct version, currently 1
+    uint32_t version;           // struct version: 1 (legacy) or 2 (packed)
     uint32_t worker_id;         // RING_WID
     uint32_t node_id;           // NUMA node
     uint32_t num_kills;         // retry count for this batch
-    uint32_t numa_major;        // NUMA major sequence (0 if not NUMA)
-    uint32_t numa_minor;        // NUMA minor sequence (0 if not NUMA)
+    union {
+        uint64_t numa_batch_id; // version 2: packed (42-bit major << 22 | 22-bit minor)
+        struct {
+            uint32_t numa_major; // version 1: truncated 32-bit major
+            uint32_t numa_minor; // version 1: 32-bit minor
+        };
+    };
     int32_t  fd_in;             // input file descriptor
     char     delimiter;         // batch delimiter
     uint8_t  cfg_state[3];      // global configuration state
@@ -6826,7 +7574,8 @@ struct forkrun_ctx {
 
 // Define the user's expected function signatures
 typedef int (*forkrun_cb_t)(int argc, char **argv);
-typedef int (*forkrun_cb_ctx_t)(int argc, char **argv, void *ctx);
+struct forkrun_ctx;
+typedef int (*forkrun_cb_ctx_t)(int argc, char **argv, const struct forkrun_ctx *ctx);
 
 // Cache the loaded plugin per-worker in Thread-Local Storage
 static __thread void *tls_dl_handle = NULL;
@@ -6862,8 +7611,8 @@ static int ring_call_main(int argc, char **argv) {
         }
 
         int *has_ctx = (int *)dlsym(tls_dl_handle, "forkrun_use_ctx");
-        if (has_ctx && *has_ctx == 1) {
-            tls_use_ctx = 1;
+        if (has_ctx && (*has_ctx == 1 || *has_ctx == 2)) {
+            tls_use_ctx = *has_ctx;
             tls_callback_ctx = (forkrun_cb_ctx_t)dlsym(tls_dl_handle, func_name);
             if (!tls_callback_ctx) {
                 fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
@@ -6871,7 +7620,7 @@ static int ring_call_main(int argc, char **argv) {
                 tls_dl_handle = NULL;
                 return EXECUTION_FAILURE;
             }
-            tls_fctx.version = 1;
+            tls_fctx.version = (uint32_t)tls_use_ctx;
             const char *wid_str = get_string_value("RING_WID");
             tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
             tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
@@ -6917,16 +7666,26 @@ static int ring_call_main(int argc, char **argv) {
 
     int cb_ret;
     if (tls_use_ctx) {
+        tls_fctx.version = (uint32_t)tls_use_ctx;
         tls_fctx.batch_index = worker_last_idx;
         tls_fctx.batch_offset = (uint64_t)tls_batch_offset;
         tls_fctx.num_kills = worker_last_num_kills;
         tls_fctx.batch_byte_length = (uint64_t)length;
         if (tls_numa_enabled) {
-            tls_fctx.numa_major = worker_last_major;
-            tls_fctx.numa_minor = worker_last_minor;
+            if (tls_use_ctx == 2) {
+                uint32_t actual_minor = worker_last_minor & MINOR_MASK;
+                tls_fctx.numa_batch_id = PACK_KEY(worker_last_major, actual_minor);
+            } else {
+                tls_fctx.numa_major = (uint32_t)worker_last_major;
+                tls_fctx.numa_minor = worker_last_minor;
+            }
         } else {
-            tls_fctx.numa_major = 0;
-            tls_fctx.numa_minor = 0;
+            if (tls_use_ctx == 2) {
+                tls_fctx.numa_batch_id = 0;
+            } else {
+                tls_fctx.numa_major = 0;
+                tls_fctx.numa_minor = 0;
+            }
         }
         cb_ret = tls_callback_ctx((int)batch_argc, tls_argv, &tls_fctx);
     } else {
@@ -6936,7 +7695,9 @@ static int ring_call_main(int argc, char **argv) {
     sigprocmask(SIG_SETMASK, &oset, NULL);
 
     // If the plugin returns 0, it's a success. Otherwise, pass the failure code back.
-    return (cb_ret == 0) ? EXECUTION_SUCCESS : cb_ret;
+    if (cb_ret == 0) return EXECUTION_SUCCESS;
+    int truncated = cb_ret & 0xFF;
+    return (truncated == 0) ? 1 : truncated;
 }
 
 static int ring_list_main(int argc, char **argv) {
