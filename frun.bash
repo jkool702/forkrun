@@ -566,51 +566,60 @@ EOF
                     if (( $# == 1 )); then
                         # FULL AUTO RESUME - extract and verify execution environment
                         # NOTE: trust/ownership checks happen in the PARENT before this subprocess; this block must remain tool-free and decision-free
+                        local _rf_content
+                        _rf_content="$(< "/proc/self/fd/${_rf_fd}")"
+
                         local _secret_token="___FORKRUN_ENV_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local _secret_end="___FORKRUN_END_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local parsed_env
                         parsed_env="$(PATH='' exec -c "${BASH:-bash}" --norc --noprofile --restricted -c '
-                            source "$1" 2>/dev/null || exit 1
-                            eval "${FORKRUN_EXTRA_DEFS:-}" 2>/dev/null
+                            _sb="$1"
+                            eval "$_sb" || exit 1
+                            eval "${FORKRUN_EXTRA_DEFS:-}"
                             trap - EXIT DEBUG RETURN ERR
 
-                            # P2-1/P2-3: Capture functions BEFORE wipe and verify in isolated subshell
+                            # P2-1/P2-3: Capture functions BEFORE wipe and verify in isolated subshell via exit status
                             _fn_text=""
                             [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && {
                                 FORKRUN_EXTRA_FUNCS_A=(${FORKRUN_EXTRA_FUNCS})
-                                _fn_text="$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}" 2>/dev/null)"
+                                _fn_text="$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}")"
                                 [[ -n "$_fn_text" ]] && {
-                                    _rt="$( ( eval "$_fn_text" 2>/dev/null; builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}" 2>/dev/null ) )"
-                                    [[ "$_rt" != "$_fn_text" ]] && exit 1
+                                    (
+                                        eval "$_fn_text" || exit 1
+                                        if [[ "$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}")" == "$_fn_text" ]]; then
+                                            exit 0
+                                        fi
+                                        exit 1
+                                    ) || exit 1
                                 }
                             }
 
                             # Wipe all functions so variables and emission execute function-free
-                            while read -r _f; do unset -f "$_f" 2>/dev/null; done < <(compgen -A function)
+                            while read -r _f; do unset -f "$_f"; done < <(compgen -A function)
 
                             # Re-render variables strictly via builtin declare post-wipe (unshadowable)
                             _vars_out=""
-                            _vars_out+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT 2>/dev/null)"$'\n'
+                            _vars_out+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"$'\n'
                             FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS//[[:space:]$IFS]/ } "
                             FORKRUN_EXTRA_VARS_A=(${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /})
-                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_out+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}" 2>/dev/null)"$'\n'
-                            _vars_out+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP 2>/dev/null)"$'\n'
+                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_out+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}")"$'\n'
+                            _vars_out+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"$'\n'
 
                             # Round-trip verify variables in-place without re-arming function shadows
-                            eval "$_vars_out" 2>/dev/null || exit 1
+                            eval "$_vars_out" || exit 1
                             _vars_check=""
-                            _vars_check+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT 2>/dev/null)"$'\n'
-                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_check+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}" 2>/dev/null)"$'\n'
-                            _vars_check+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP 2>/dev/null)"$'\n'
+                            _vars_check+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"$'\n'
+                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_check+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}")"$'\n'
+                            _vars_check+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"$'\n'
 
                             if [[ "$_vars_out" != "$_vars_check" ]]; then
                                 exit 1
                             fi
 
-                            for _jp in $(jobs -p 2>/dev/null); do
-                                kill -9 "$_jp" 2>/dev/null
+                            for _jp in $(jobs -p); do
+                                kill -9 "$_jp"
                             done
-                            wait 2>/dev/null
+                            wait
 
                             # Assemble clean variables + pre-verified function text as pure string
                             out="${_vars_out}"$'\n'"${_fn_text}"$'\n'
@@ -618,7 +627,7 @@ EOF
                             # Single write: token + payload + end-token in ONE buffer
                             _emit="$2"$'\n'"$out"$'\n'"$3"$'\n'
                             printf "%s" "$_emit"
-                        ' _ "$_proc_rf" "$_secret_token" "$_secret_end" 2>/dev/null)"
+                        ' _ "$_rf_content" "$_secret_token" "$_secret_end" 2>/dev/null)"
 
                         if [[ "$parsed_env" != *"${_secret_token}"* || "$parsed_env" != *"${_secret_end}"* ]]; then
                             echo "forkrun [ABORT]: Resume file environment verification failed or was intercepted." >&2

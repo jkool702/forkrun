@@ -2439,11 +2439,6 @@ FUNCEOF
     fi
 fi
 
-# ============================================================================
-# SECTION N: Property-Based Invariants (Randomized Stress)
-# ============================================================================
-
-
 # --- M17-M21 Batch 3 additions ---
 if in_section M; then
     # M17: 3-generation resume maintaining cumulative ledger
@@ -2469,12 +2464,12 @@ EOF
     [[ -n "$_MB1" ]] && { head -c "$_MB1" "$_MD/out.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/out.txt"; }
 
     # Gen 2
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k --resume m17.chk --checkpoint-file m17.chk m17_worker" >> "$_MD/out.txt" 2>"$_MD/err2.txt" || true
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k -l 1 --resume m17.chk --checkpoint-file m17.chk m17_worker" >> "$_MD/out.txt" 2>"$_MD/err2.txt" || true
     _MB2=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err2.txt" 2>/dev/null || echo "")
     [[ -n "$_MB2" ]] && { head -c "$_MB2" "$_MD/out.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/out.txt"; }
 
     # Gen 3
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k --resume m17.chk --checkpoint-file m17.chk m17_worker" >> "$_MD/out.txt" 2>/dev/null
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k -l 1 --resume m17.chk --checkpoint-file m17.chk m17_worker" >> "$_MD/out.txt" 2>/dev/null
 
     if diff -q "$_MD/input.txt" "$_MD/out.txt" &>/dev/null; then
         TEST_RESULTS["M17: 3-generation resume maintains cumulative ledger"]="PASS"
@@ -2505,6 +2500,15 @@ EOF
         _print_result FAIL "M18: Clean no-op resume when horizon == EOF"
         ((FAILED_TESTS++))
     fi
+
+
+    # M19: Stale horizon > EOF triggers loud fatal sync failure
+    run_test_regex M "M19: Stale horizon > EOF triggers loud fatal sync failure" \
+    "echo 'FORKRUN_RESUME_HORIZON=999999999' > '$TEST_DIR/m19.chk'; \
+     echo 'FORKRUN_RESUME_STDOUT_BYTES=0' >> '$TEST_DIR/m19.chk'; \
+     echo 'FORKRUN_RESUME_JAGGED=()' >> '$TEST_DIR/m19.chk'; \
+     seq 10 | frun -k --resume '$TEST_DIR/m19.chk' cat" \
+    "Resume sync failed" 0 true
 
     # M20: Full-auto happy-path resume (no command supplied on resume)
     ((TOTAL_TESTS++))
@@ -2569,13 +2573,12 @@ EOF
     fi
 fi
 
-# M19: Stale horizon > EOF triggers loud fatal sync failure
-run_test_regex M "M19: Stale horizon > EOF triggers loud fatal sync failure" \
-    "echo 'FORKRUN_RESUME_HORIZON=999999999' > '$TEST_DIR/m19.chk'; \
-     echo 'FORKRUN_RESUME_STDOUT_BYTES=0' >> '$TEST_DIR/m19.chk'; \
-     echo 'FORKRUN_RESUME_JAGGED=()' >> '$TEST_DIR/m19.chk'; \
-     frun --resume '$TEST_DIR/m19.chk' cat <(seq 10) 2>&1 || true" \
-    "Resume sync failed" 0 true
+
+
+
+# ============================================================================
+# SECTION N: Property-Based Invariants (Randomized Stress)
+# ============================================================================
 
 
 print_section N "Property-Based Invariants (Randomized)"
@@ -2853,12 +2856,12 @@ fi
 
 # --- O10-O12 Batch 3 additions ---
 run_test_regex O "O10: -L rejects ranges (5:10)" \
-    "seq 20 | frun -L 5:10 cat 2>&1 || true" \
-    "ERROR.*-L.*single positive integer" 0 true
+    "seq 20 | frun -L 5:10 cat" \
+    "ERROR.*-L.*single positive integer" 1 true
 
 run_test_regex O "O11: -L rejects zero (0, 0k)" \
-    "seq 20 | frun -L 0k cat 2>&1 || true" \
-    "ERROR.*-L.*positive integer" 0 true
+    "seq 20 | frun -L 0k cat" \
+    "ERROR.*-L.*positive integer" 1 true
 
 run_test_exact O "O12a: -b + -L: output intact (lines mode, stdin delivery)" \
     "seq 8 | frun -b 32 -L 4 -k cat" \
@@ -3707,8 +3710,8 @@ printf() {
 declare -a FORKRUN_ORIG_ARGS=('/bin/true')
 EOF
     sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1f.chk"
-    bash -c "source '$FRUN_SOURCE'; FORKRUN_TRUST_RESUME=1 frun --resume '$_MD/t1f.chk' < /dev/null" >/dev/null 2>&1 || true
-    if [[ ! -f "$_MARK" ]]; then
+    bash -c "source '$FRUN_SOURCE'; frun --resume '$_MD/t1f.chk' < /dev/null" >/dev/null 2>"$_MD/err.txt" || true
+    if [[ ! -f "$_MARK" ]] && grep -qE "User rejected setup commands|Custom setup commands" "$_MD/err.txt"; then
         TEST_RESULTS["T1f: EXTRA_FUNCS shadow forgery rejected by subshell function isolation"]="PASS"
         _print_result PASS "T1f: EXTRA_FUNCS shadow forgery rejected by subshell function isolation"
         ((PASSED_TESTS++))
