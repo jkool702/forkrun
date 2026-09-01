@@ -397,18 +397,9 @@ run_test "Exact lines (-L 3)" \
   "$(cat "$LINE_INPUT")"
 
 # FIXED: Expect the output AND the stderr warning
-# On NUMA hardware, -L with -n emits a warning; on UMA, no warning is emitted
-if $IS_NUMA; then
-  run_test_stderr "Exact lines with limit (-L 4 -n 8)" \
-    "cat '$LINE_INPUT' | frun -k -L 4 -n 8 printf \"%s\\n\" >/dev/null" \
-    "NUMA optimizations prevent -L from working properly" \
-    0
-else
-  # On UMA: no NUMA warning, just verify exit 0 and correct stdout
-  run_test "Exact lines with limit (-L 4 -n 8)" \
-    "cat '$LINE_INPUT' | frun -k -L 4 -n 8 printf \"%s\\n\"" \
-    "$(head -n 8 "$LINE_INPUT")"
-fi
+run_test "Exact lines with limit (-L 4 -n 8)" \
+  "cat '$LINE_INPUT' | frun -k -L 4 -n 8 printf \"%s\\n\"" \
+  "$(head -n 8 "$LINE_INPUT")"
 
 # ============================================================================
 # WORKER SCALING
@@ -534,19 +525,9 @@ run_test "Multi-node (--nodes=2)" \
   "cat '$LINE_INPUT' | frun --nodes=2 -j 4 printf \"%s\\n\"" \
   "$(cat "$LINE_INPUT")"
 
-# FIXED: Check stderr for downgrade warning using regex
-# On NUMA hardware, --nodes=2 -L emits a downgrade warning; on UMA, no warning
-if $IS_NUMA; then
-  run_test_stderr "Exact lines with NUMA (downgrade warning)" \
-    "cat '$LINE_INPUT' | frun --nodes=2 -L 3 printf \"%s\\n\" >/dev/null" \
-    "cannot guarantee exactly|NUMA optimizations prevent -L from working properly" \
-    0
-else
-  # On UMA: --nodes=2 is silently downgraded; just verify correct output
-  run_test "Exact lines with NUMA (downgrade warning)" \
-    "cat '$LINE_INPUT' | frun --nodes=2 -L 3 printf \"%s\\n\"" \
-    "$(cat "$LINE_INPUT")"
-fi
+run_test "Exact lines with NUMA" \
+  "cat '$LINE_INPUT' | frun --nodes=2 -L 3 -k printf \"%s\\n\"" \
+  "$(cat "$LINE_INPUT")"
 
 # ============================================================================
 # SPECIAL FLAGS
