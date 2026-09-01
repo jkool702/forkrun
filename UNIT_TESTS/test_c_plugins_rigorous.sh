@@ -1,0 +1,229 @@
+#!/bin/bash
+# =============================================================================
+# forkrun v3.4.4 - C Plugin Rigorous Test Suite
+# =============================================================================
+
+set -o pipefail
+
+UNIT_TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEST_DIR="${UNIT_TESTS_DIR}/c_plugin_test"
+FRUN_SCRIPT="${UNIT_TESTS_DIR}/../frun.bash"
+HEADER="${UNIT_TESTS_DIR}/../ring_loadables/forkrun_plugin.h"
+
+mkdir -p "$TEST_DIR"
+cd "$TEST_DIR"
+
+echo "=== forkrun v3.5.0 C Plugin Rigorous Test Suite ==="
+
+# Source frun
+. "$FRUN_SCRIPT"
+
+if [ ! -f "$HEADER" ]; then
+    echo "ERROR: Cannot find forkrun_plugin.h at $HEADER"
+    exit 1
+fi
+cp "$HEADER" forkrun_plugin.h
+
+# ====================== Compile Plugins ======================
+echo "Compiling Native Plugins..."
+
+# 1. Echo Plugin: Strictly prints what it receives
+cat > plugin_echo.c << 'EOF'
+#include <stdio.h>
+int plugin_echo(int argc, char **argv) {
+    for (int i = 0; i < argc; i++) printf("%s\n", argv[i]);
+    return 0;
+}
+EOF
+
+# 2. Context Math Plugin: Prints the byte length of each batch
+cat > plugin_ctx_math.c << 'EOF'
+#include <stdio.h>
+#include "forkrun_plugin.h"
+int forkrun_use_ctx = 1;
+
+int plugin_ctx_math(int argc, char **argv, void *ctx_ptr) {
+    struct forkrun_ctx *ctx = (struct forkrun_ctx *)ctx_ptr;
+    printf("%lu\n", ctx->batch_byte_length);
+    return 0;
+}
+EOF
+
+# 3. Poison/Retry Plugin: Intentionally fails the first time it sees batch #7
+cat > plugin_poison.c << 'EOF'
+#include <stdio.h>
+#include "forkrun_plugin.h"
+int forkrun_use_ctx = 1;
+
+int plugin_poison(int argc, char **argv, void *ctx_ptr) {
+    struct forkrun_ctx *ctx = (struct forkrun_ctx *)ctx_ptr;
+
+    // Simulate a segfault/crash on batch index 7, ONLY on the first attempt
+    if (ctx->batch_index == 7 && ctx->num_kills == 0) {
+        return 1; // Trigger failure!
+    }
+
+    // On retry (num_kills > 0) or normal batches, process normally
+    for (int i = 0; i < argc; i++) printf("%s\n", argv[i]);
+    return 0;
+}
+EOF
+
+gcc -O3 -shared -fPIC -I. plugin_echo.c -o plugin_echo.so
+gcc -O3 -shared -fPIC -I. plugin_ctx_math.c -o plugin_ctx_math.so
+gcc -O3 -shared -fPIC -I. plugin_poison.c -o plugin_poison.so
+
+# ====================== Generate Test Data ======================
+echo "Generating Deterministic Test Inputs..."
+seq 1 1000000 > input_1M.txt
+
+# Create a variable length file via awk (much faster and more reliable than find /usr)
+awk 'BEGIN { for(i=1;i<=500000;i++) {
+    s="DATA-"; for(j=0;j<i%50;j++) s=s"X"; print s "-" i
+}}' > input_var.txt
+
+FILE_1M_BYTES=$(stat -c %s input_1M.txt)
+FILE_VAR_BYTES=$(stat -c %s input_var.txt)
+
+# ====================== Test Assertions ======================
+
+echo "------------------------------------------------------"
+echo "TEST 1: Ordered Data Integrity (-k + Basic Echo)"
+# The output must exactly match the input file
+frun -k -C ./plugin_echo.so:plugin_echo < input_1M.txt > out_1.txt
+if cmp -s input_1M.txt out_1.txt; then
+    echo "✓ Passed: Output perfectly matches input (Zero Data Loss)"
+else
+    echo "✗ FAILED: Data corruption in basic echo plugin"
+    exit 1
+fi
+
+echo "------------------------------------------------------"
+echo "TEST 2: Context Math & Byte Accountability"
+# Sum of all batch_byte_length fields must equal the exact file size
+frun -k -C ./plugin_ctx_math.so:plugin_ctx_math < input_var.txt > out_math.txt
+# Sum the integers printed by the plugin
+TOTAL_BYTES=$(awk '{s+=$1} END {print s}' out_math.txt)
+
+if [ "$TOTAL_BYTES" -eq "$FILE_VAR_BYTES" ]; then
+    echo "✓ Passed: Context batch_byte_length accurately tracks all $TOTAL_BYTES bytes"
+else
+    echo "✗ FAILED: Byte sum mismatch! Expected $FILE_VAR_BYTES, Got $TOTAL_BYTES"
+    exit 1
+fi
+
+echo "------------------------------------------------------"
+echo "TEST 3: Fault Injection & Retry Semantics (-E)"
+# We use the poison plugin. It returns '1' on batch 7, triggering a worker death.
+# With -E (Retry active), forkrun should respawn the worker, pass num_kills=1,
+# and the plugin will succeed. Final output MUST still be perfectly ordered.
+frun -k -E -C ./plugin_poison.so:plugin_poison < input_1M.txt > out_poison.txt
+if cmp -s input_1M.txt out_poison.txt; then
+    echo "✓ Passed: Poisoned batch successfully recovered and ordered exactly-once"
+else
+    echo "✗ FAILED: Data loss or sequence corruption during fault recovery"
+    exit 1
+fi
+
+echo "------------------------------------------------------"
+echo "
+# --- TEST 4: ABI v2 Packed Key Progression ---
+cat <<'EOF' > test_abi_v2.c
+#include <stdint.h>
+#include <stdio.h>
+
+int forkrun_use_ctx = 2;
+
+struct forkrun_ctx {
+    uint64_t batch_index;
+    uint64_t batch_offset;
+    uint64_t batch_byte_length;
+    uint32_t version;
+    uint32_t worker_id;
+    uint32_t node_id;
+    uint32_t num_kills;
+    union {
+        uint64_t numa_batch_id;
+        struct {
+            uint32_t numa_major;
+            uint32_t numa_minor;
+        };
+    };
+    int32_t  fd_in;
+    char     delimiter;
+    uint8_t  cfg_state[4];
+};
+
+int test_abi_v2(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    if (ctx->version != 2) return 1;
+    uint64_t major = ctx->numa_batch_id >> 22;
+    uint32_t minor = ctx->numa_batch_id & 0x3FFFFF;
+    printf("%lu:%u\n", (unsigned long)major, minor);
+    return 0;
+}
+EOF
+gcc -O3 -shared -fPIC test_abi_v2.c -o test_abi_v2.so
+
+echo "------------------------------------------------------"
+echo "TEST 4: Context ABI v2 Packed Key Progression"
+seq 50000 | frun --nodes=2 -k -C ./test_abi_v2.so:test_abi_v2 > abi_v2_out.txt
+
+awk -F: '
+BEGIN { last_maj = 0; last_min = -1; err = 0; }
+{
+    maj = $1 + 0; min = $2 + 0;
+    if (maj < last_maj || (maj == last_maj && min <= last_min)) {
+        print "ERROR: Non-increasing sequence at line " NR ": " $0 " (last: " last_maj ":" last_min ")";
+        err = 1;
+        exit 1;
+    }
+    last_maj = maj; last_min = min;
+}
+END { if (!err) exit 0; else exit 1; }
+' abi_v2_out.txt
+
+if (( $? == 0 )); then
+    echo "✓ Passed: ABI v2 packed sequence strictly monotonic across NUMA chunks"
+else
+    echo "✗ Failed: Non-monotonic ABI v2 key progression detected"
+    exit 1
+fi
+
+# --- TEST 5: C Plugin Fixed Command-Line Arguments (D1) ---
+cat <<'EOF' > test_fixed_args.c
+#include <stdio.h>
+#include <string.h>
+
+int test_fixed(int argc, char **argv) {
+    // Print first fixed argument and total argc
+    printf("A0=%s argc=%d\n", argv[0], argc);
+    return 0;
+}
+EOF
+gcc -O3 -shared -fPIC test_fixed_args.c -o test_fixed_args.so
+
+echo "------------------------------------------------------"
+echo "TEST 5: C Plugin Fixed Arguments Passthrough (D1)"
+
+# 5a: With fixed arguments
+out_fixed=$(seq 10 | frun -l 5 -k -C ./test_fixed_args.so:test_fixed --mode fast)
+if grep -q "A0=--mode argc=7" <<< "$out_fixed"; then
+    echo "✓ Passed: Fixed args correctly prepended to plugin argv"
+else
+    echo "✗ Failed: Fixed args mismatch: $out_fixed"
+    exit 1
+fi
+
+# 5b: With NO fixed arguments (must not contain phantom empty argv[0])
+out_nofixed=$(seq 10 | frun -l 5 -k -C ./test_fixed_args.so:test_fixed)
+if grep -q "A0=1 argc=5" <<< "$out_nofixed"; then
+    echo "✓ Passed: No-args invocation contains zero phantom arguments"
+else
+    echo "✗ Failed: No-args phantom argument detected: $out_nofixed"
+    exit 1
+fi
+
+
+echo "------------------------------------------------------"
+=== All C Plugin Rigorous Tests Completed Successfully ==="
+rm -f out_*.txt input_*.txt
