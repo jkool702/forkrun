@@ -1645,45 +1645,40 @@ run_test_regex L "L17e: Scanner failure in -s mode: no deadlock" \
     "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -s -l 1 cat 2>/dev/null; true'" \
     ".*" 0 false
 
-# ============================================================================
-# SECTION M: Checkpoint & Resume
-# ============================================================================
 
-
-# --- A2: Fallow death triggers emergency abort (Batch 3) ---
 if in_section L; then
     ((TOTAL_TESTS++))
-    _MD="$TEST_DIR/fallow_a2"; mkdir -p "$_MD"
+    _MD="$TEST_DIR/fallow_la2"; mkdir -p "$_MD"
     rm -f "$_MD/fallow.pid" "$_MD/chk.out"
 
     (
-        export FORKRUN_EXTRA_VARS='FORKRUN_TEST_FALLOW_PIDFILE'
-        export FORKRUN_TEST_FALLOW_PIDFILE="$_MD/fallow.pid"
-        bash -c "source '$FRUN_SOURCE'; seq 50000 | frun -k --checkpoint-file '$_MD/chk.out' sleep 0.001" &
+        export FORKRUN_TEST_FALLOW_PIDFILE="$_MD/fallow.pid"   # wrapper's own
+        timeout -s KILL 60 bash -c "source '$FRUN_SOURCE';     # propagation line
+            seq 50000 | frun -k -s -l 100 --checkpoint-file '$_MD/chk.out' sleep 0.01" &
         WPID=$!
         _waited=0
         while [[ ! -s "$_MD/fallow.pid" ]] && (( _waited < 3000 )); do
-            sleep 0.01
-            (( _waited++ ))
+            sleep 0.01; (( _waited++ ))
         done
-        if [[ -s "$_MD/fallow.pid" ]]; then
-            kill -9 $(cat "$_MD/fallow.pid") 2>/dev/null || true
-        fi
+        [[ -s "$_MD/fallow.pid" ]] && kill -9 "$(cat "$_MD/fallow.pid")" 2>/dev/null || true
         wait $WPID 2>/dev/null || true
     ) >/dev/null 2>"$_MD/err.txt" || true
 
-    if [[ -s "$_MD/chk.out" ]]; then
-        TEST_RESULTS["A2: Fallow death triggers emergency abort"]="PASS"
-        _print_result PASS "A2: Fallow death triggers emergency abort"
+    if [[ -s "$_MD/chk.out" ]] && grep -q "Pipeline aborted" "$_MD/err.txt"; then
+        TEST_RESULTS["LA2: Fallow death triggers emergency abort"]="PASS"
+        _print_result PASS "LA2: Fallow death triggers emergency abort"
         ((PASSED_TESTS++))
     else
-        TEST_RESULTS["A2: Fallow death triggers emergency abort"]="FAIL"
-        _print_result FAIL "A2: Fallow death triggers emergency abort"
+        TEST_RESULTS["LA2: Fallow death triggers emergency abort"]="FAIL"
+        _print_result FAIL "LA2: Fallow death triggers emergency abort"
         ((FAILED_TESTS++))
     fi
 fi
 
 
+# ============================================================================
+# SECTION M: Checkpoint & Resume
+# ============================================================================
 print_section M "Checkpoint & Resume"
 
 # ============================================================================
