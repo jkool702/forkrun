@@ -5866,6 +5866,8 @@ static void heap_pop(struct HeapNode *heap, int *sz, struct HeapNode *out) {
   heap[i] = tmp;
 }
 
+static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len);
+
 static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset,
                                size_t count) {
   size_t total = 0;
@@ -6341,15 +6343,6 @@ static int ring_order_main(int argc, char **argv) {
   }
 
   if (!unordered_mode && g_state && g_state->is_resume_mode && !resume_synced && !stdout_broken) {
-      if (heap_sz == 0) {
-          // A4.1: Zero packets received -> entire stream was already completed -> clean no-op (M18)
-          for (int i = 0; i < fd_states_cap; i++) {
-              if (fd_states[i].heap) free(fd_states[i].heap);
-          }
-          free(fd_states); free(heap); free(tracker_heap);
-          sigaction(SIGPIPE, &sa_old, NULL);
-          return EXECUTION_SUCCESS;
-      }
       fprintf(stderr, "forkrun [FATAL]: Resume sync failed (no batch matched horizon %" PRIu64 "). Aborting.\n",
               g_state->resume_horizon);
       pull_fire_alarm();
