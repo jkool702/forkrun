@@ -576,9 +576,15 @@ EOF
                             _sb="$1"
                             eval "$_sb" || exit 1
                             eval "${FORKRUN_EXTRA_DEFS:-}"
+                            unset FORKRUN_EXTRA_DEFS
                             trap - EXIT DEBUG RETURN ERR
 
-                            # P2-1/P2-3: Capture functions BEFORE wipe and verify in isolated subshell via exit status
+                            # P2-4: newline variable that survives single-quote embedding.
+                            # NOTE: $(printf "\n") strips to empty — the trailing "." prevents that.
+                            _NL="$(printf "\n.")"
+                            _NL="${_NL%.}"
+
+                            # P2-1/P2-3: capture functions BEFORE wipe, verify in isolated subshell
                             _fn_text=""
                             [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && {
                                 FORKRUN_EXTRA_FUNCS_A=(${FORKRUN_EXTRA_FUNCS})
@@ -586,9 +592,7 @@ EOF
                                 [[ -n "$_fn_text" ]] && {
                                     (
                                         eval "$_fn_text" || exit 1
-                                        if [[ "$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}")" == "$_fn_text" ]]; then
-                                            exit 0
-                                        fi
+                                        [[ "$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}")" == "$_fn_text" ]] && exit 0
                                         exit 1
                                     ) || exit 1
                                 }
@@ -597,35 +601,28 @@ EOF
                             # Wipe all functions so variables and emission execute function-free
                             while read -r _f; do unset -f "$_f"; done < <(compgen -A function)
 
-                            # Re-render variables strictly via builtin declare post-wipe (unshadowable)
+                            # Render existing variables only, one declaration per line
+                            _nv() { local _v; for _v in "$@"; do [[ -n "${!_v+x}" ]] && builtin declare -p -- "$_v"; done; return 0; }
                             _vars_out=""
-                            _vars_out+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"$'\n'
+                            _vars_out+="$(_nv FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"${_NL}
                             FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS//[[:space:]$IFS]/ } "
                             FORKRUN_EXTRA_VARS_A=(${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /})
-                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_out+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}")"$'\n'
-                            _vars_out+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"$'\n'
+                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_out+="$(_nv "${FORKRUN_EXTRA_VARS_A[@]}")"${_NL}
+                            _vars_out+="$(_nv FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"${_NL}
 
-                            # Round-trip verify variables in-place without re-arming function shadows
+                            # Round-trip verify variables in-place
                             eval "$_vars_out" || exit 1
                             _vars_check=""
-                            _vars_check+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"$'\n'
-                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_check+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}")"$'\n'
-                            _vars_check+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"$'\n'
+                            _vars_check+="$(_nv FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"${_NL}
+                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_check+="$(_nv "${FORKRUN_EXTRA_VARS_A[@]}")"${_NL}
+                            _vars_check+="$(_nv FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"${_NL}
+                            [[ "$_vars_out" != "$_vars_check" ]] && exit 1
 
-                            if [[ "$_vars_out" != "$_vars_check" ]]; then
-                                exit 1
-                            fi
-
-                            for _jp in $(jobs -p); do
-                                kill -9 "$_jp"
-                            done
+                            for _jp in $(jobs -p); do kill -9 "$_jp"; done
                             wait
 
-                            # Assemble clean variables + pre-verified function text as pure string
-                            out="${_vars_out}"$'\n'"${_fn_text}"$'\n'
-
-                            # Single write: token + payload + end-token in ONE buffer
-                            _emit="$2"$'\n'"$out"$'\n'"$3"$'\n'
+                            out="${_vars_out}${_NL}${_fn_text}${_NL}"
+                            _emit="$2${_NL}$out${_NL}$3${_NL}"
                             printf "%s" "$_emit"
                         ' _ "$_rf_content" "$_secret_token" "$_secret_end" 2>/dev/null)"
 

@@ -3406,8 +3406,26 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         if (batch_start < g_state->resume_horizon) {                           \
             if (_eff_end <= g_state->resume_horizon) {                         \
                 _out_skipped = true;                                           \
+                /* DBG: scanner resume-skip trace (temporary) */                   \
+                {                                                                  \
+                    static int _dbg_skip_n = 0;                                    \
+                    if (_dbg_skip_n++ < 20) {                                      \
+                        fprintf(stderr, "forkrun[DBG] SKIP: batch [%lu,%lu) entirely below horizon=%lu -> skipped\n", \
+                                (unsigned long)batch_start, (unsigned long)_eff_end, \
+                                (unsigned long)g_state->resume_horizon);           \
+                    }                                                              \
+                }                                                                  \
             } else {                                                           \
                 batch_start = g_state->resume_horizon;                         \
+                /* DBG: clamped batch trace (temporary) */                         \
+                {                                                                  \
+                    static int _dbg_clamp_n = 0;                                   \
+                    if (_dbg_clamp_n++ < 20) {                                     \
+                        fprintf(stderr, "forkrun[DBG] CLAMP: batch straddles horizon: clamped start %lu -> horizon=%lu, end=%lu\n", \
+                                (unsigned long)0 /*original start not retained; prints 0 placeholder*/, \
+                                (unsigned long)g_state->resume_horizon, (unsigned long)_eff_end); \
+                    }                                                              \
+                }                                                                  \
             }                                                                  \
         }                                                                      \
         if (!_out_skipped && batch_start >= g_state->resume_horizon) {         \
@@ -6121,6 +6139,15 @@ static int ring_order_main(int argc, char **argv) {
       struct OrderPacket *op = &ops[i];
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
       uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
+      /* DBG: resume-sync trace (temporary — remove before release) */
+      if (!unordered_mode && g_state && g_state->is_resume_mode && !resume_synced) {
+          static int _dbg_sync_n = 0;
+          if (_dbg_sync_n++ < 40) {
+              fprintf(stderr, "forkrun[DBG] SYNC: pkt in_off=%lu len=%lu horizon=%lu heap=%d\n",
+                      (unsigned long)op->in_off, (unsigned long)op->in_len,
+                      (unsigned long)g_state->resume_horizon, heap_sz);
+          }
+      }
 
       if (!unordered_mode) {
         heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
