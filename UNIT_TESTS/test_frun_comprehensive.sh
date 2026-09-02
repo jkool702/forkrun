@@ -2576,7 +2576,6 @@ EOF
     fi
 fi
 
-
     # M17: 3-generation resume maintaining cumulative ledger
     # DIAGNOSTICS ON FAILURE: prints checkpoint horizon/bytes across
     # generations, marker states, per-generation line counts, and the
@@ -2719,7 +2718,11 @@ FUNCEOF
 
     _S2L=$(wc -l < "$_MD/output.txt")
     _CKPT=$([[ -s "$_MD/.forkrun_resume" ]] && echo "present(after S1)" || echo "absent-after-S1")
-    if diff -q    if diff -q "$_MD/input.txt" "$_MD/output.txt" &>/dev/null; then
+    MD=$(ls -dt /tmp/tmp.*/resume_M20 | head -1)
+wc -l "$MD/output.txt" "$MD/input.txt"
+diff "$MD/input.txt" "$MD/output.txt" | head
+tail -3 "$MD/output.txt"
+    if diff -q "$_MD/input.txt" "$_MD/output.txt" &>/dev/null; then
         TEST_RESULTS["M20: Full-auto resume extracts and re-executes command exactly-once"]="PASS"
         _print_result PASS "M20: Full-auto resume extracts and re-executes command exactly-once"
         ((PASSED_TESTS++))
