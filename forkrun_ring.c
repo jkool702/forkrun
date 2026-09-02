@@ -3406,26 +3406,8 @@ static int ring_indexer_numa_main(int argc, char **argv) {
         if (batch_start < g_state->resume_horizon) {                           \
             if (_eff_end <= g_state->resume_horizon) {                         \
                 _out_skipped = true;                                           \
-                /* DBG: scanner resume-skip trace (temporary) */                   \
-                {                                                                  \
-                    static int _dbg_skip_n = 0;                                    \
-                    if (_dbg_skip_n++ < 20) {                                      \
-                        fprintf(stderr, "forkrun[DBG] SKIP: batch [%lu,%lu) entirely below horizon=%lu -> skipped\n", \
-                                (unsigned long)batch_start, (unsigned long)_eff_end, \
-                                (unsigned long)g_state->resume_horizon);           \
-                    }                                                              \
-                }                                                                  \
             } else {                                                           \
                 batch_start = g_state->resume_horizon;                         \
-                /* DBG: clamped batch trace (temporary) */                         \
-                {                                                                  \
-                    static int _dbg_clamp_n = 0;                                   \
-                    if (_dbg_clamp_n++ < 20) {                                     \
-                        fprintf(stderr, "forkrun[DBG] CLAMP: batch straddles horizon: clamped start %lu -> horizon=%lu, end=%lu\n", \
-                                (unsigned long)0 /*original start not retained; prints 0 placeholder*/, \
-                                (unsigned long)g_state->resume_horizon, (unsigned long)_eff_end); \
-                    }                                                              \
-                }                                                                  \
             }                                                                  \
         }                                                                      \
         if (!_out_skipped && batch_start >= g_state->resume_horizon) {         \
@@ -5788,14 +5770,6 @@ static int ring_ack_main(int argc, char **argv) {
         op.fd = fd_target;
         op.off = (uint64_t)last_ack_offset;
         op.len = (uint64_t)(curr - last_ack_offset);
-        /* DBG (temporary) */
-        {
-          static int _dbg_ack = 0;
-          if (_dbg_ack++ < 40)
-            fprintf(stderr, "forkrun[DBG] ACK: worker in_off=%lu out=[%lu,%lu) fd=%d\n",
-                    (unsigned long)op.in_off, (unsigned long)op.off,
-                    (unsigned long)(op.off + op.len), op.fd);
-        }
         if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) {
             pull_fire_alarm_reason(2); // A2: Prevent silent exit-0 truncation
             sigaction(SIGPIPE, &sa_old, NULL);
@@ -5902,18 +5876,9 @@ static int forkrun_emit_with_fallback(int out_fd, int src_fd, off_t off, size_t 
     off_t _off = off;
     ssize_t s = robust_sendfile(out_fd, src_fd, &_off, len);
     if (s >= 0 && (size_t)s == len) {
-      /* DBG (temporary) */
-      static int _dbg_ok = 0;
-      if (_dbg_ok++ < 10)
-        fprintf(stderr, "forkrun[DBG] EMIT-OK: sent %lu bytes from fd=%d\n",
-                (unsigned long)len, src_fd);
       return 0;
     }
     if (s < 0) {
-      /* DBG (temporary) */
-      fprintf(stderr, "forkrun[DBG] SENDFILE-FAIL: fd=%d off=%lu len=%lu errno=%d(%s)\n",
-              src_fd, (unsigned long)off, (unsigned long)len,
-              errno, strerror(errno));
       if (errno == EPIPE) return -2;
     }
     /* fall through to copy on ANY other sendfile failure (EINVAL for O_APPEND,
@@ -6177,9 +6142,6 @@ static int ring_order_main(int argc, char **argv) {
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
     if (n_read <= 0) {
-      /* DBG (temporary) */
-      fprintf(stderr, "forkrun[DBG] ORD-EOF: read=%zd synced=%d heap=%d tracker_bytes=%lu\n",
-              n_read, resume_synced, heap_sz, (unsigned long)tracker_bytes);
       break;
     }
 
@@ -6192,15 +6154,6 @@ static int ring_order_main(int argc, char **argv) {
       struct OrderPacket *op = &ops[i];
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
       uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
-      /* DBG: resume-sync trace (temporary — remove before release) */
-      if (!unordered_mode && g_state && g_state->is_resume_mode && !resume_synced) {
-          static int _dbg_sync_n = 0;
-          if (_dbg_sync_n++ < 40) {
-              fprintf(stderr, "forkrun[DBG] SYNC: pkt in_off=%lu len=%lu horizon=%lu heap=%d\n",
-                      (unsigned long)op->in_off, (unsigned long)op->in_len,
-                      (unsigned long)g_state->resume_horizon, heap_sz);
-          }
-      }
 
       if (!unordered_mode) {
         heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
@@ -6267,11 +6220,6 @@ static int ring_order_main(int argc, char **argv) {
         while (heap_sz > 0) {
           uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
           if (heap[0].key != expected_key) {
-            /* DBG (temporary) */
-            static int _dbg_brk = 0;
-            if (_dbg_brk++ < 10)
-              fprintf(stderr, "forkrun[DBG] EMIT-BREAK: heap0.key=%lu expected=%lu heap=%d\n",
-                      (unsigned long)heap[0].key, (unsigned long)expected_key, heap_sz);
             break;
           }
           struct HeapNode top;

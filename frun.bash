@@ -633,9 +633,14 @@ EOF
                             return 1
                         fi
 
+                        # Extract values via a sacrificial subshell: hostile functions
+                        # defined by eval cannot execute in the parent.
                         parsed_env="${parsed_env##*"${_secret_token}"$'\n'}"
                         parsed_env="${parsed_env%%$'\n'"${_secret_end}"*}"
-                        eval "$parsed_env"
+                        _clean_env="$( ( eval "$parsed_env"; \
+                            builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT \
+                            FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP 2>/dev/null ) )"
+                        eval "$_clean_env"
 
                         local has_custom_vars=0
                         for var in ${FORKRUN_EXTRA_VARS:-}; do
