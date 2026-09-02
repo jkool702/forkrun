@@ -2664,11 +2664,11 @@ FUNCEOF
             echo "--- first divergence (first 6 lines) ---"
             diff "$_MD/input.txt" "$_MD/out.txt" 2>/dev/null | head -6
             echo "--- err1 (Gen1 stderr, WARN/FATAL/truncate only) ---"
-            grep -hE 'FATAL|WARN|truncate|ABORT|TIMEOUT|ERROR' "$_MD/err1.txt" 2>/dev/null | head -6
-            echo "--- err2 (Gen2 stderr, same filter) ---"
-            grep -hE 'FATAL|WARN|truncate|ABORT|TIMEOUT|ERROR' "$_MD/err2.txt" 2>/dev/null | head -6
-            echo "--- err3 (Gen3 stderr, same filter) ---"
-            grep -hE 'FATAL|WARN|truncate|ABORT|TIMEOUT|ERROR' "$_MD/err3.txt" 2>/dev/null | head -6
+            head -25 "$_MD/err1.txt" 2>/dev/null
+            echo "--- err2 (Gen2 stderr, unfiltered) ---"
+            head -25 "$_MD/err2.txt" 2>/dev/null
+            echo "--- err3 (Gen3, unfiltered) ---"
+            head -25 "$_MD/err3.txt" 2>/dev/null
             echo "=========== END M17 DIAGNOSTIC ==========="
         } >&2
     fi
@@ -2715,6 +2715,7 @@ FUNCEOF
     bash -c "cd '$_MD'; source '$FRUN_SOURCE'; \
              cat input.txt | FORKRUN_TRUST_RESUME=1 frun --resume .forkrun_resume" \
         >> "$_MD/output.txt" 2> "$_MD/err2.txt" || true
+    echo "STAGE2_RC=$?" >> "$_MD/err2.txt"
 
     _S2L=$(wc -l < "$_MD/output.txt")
     _CKPT=$([[ -s "$_MD/.forkrun_resume" ]] && echo "present(after S1)" || echo "absent-after-S1")
@@ -2826,6 +2827,7 @@ FUNCEOF
     bash -c "cd '$_MD'; source '$FRUN_SOURCE'; \
              cat input.txt | FORKRUN_TRUST_RESUME=1 frun --resume .forkrun_resume" \
         >> "$_MD/output.txt" 2> "$_MD/err2.txt" || true
+    echo "STAGE2_RC=$?" >> "$_MD/err2.txt"
 
     _S2L=$(wc -l < "$_MD/output.txt")
     _S2ERR_CN=$(grep -c 'command not found\|m21_tag: command' "$_MD/err2.txt" 2>/dev/null || echo 0)

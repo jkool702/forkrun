@@ -5788,6 +5788,14 @@ static int ring_ack_main(int argc, char **argv) {
         op.fd = fd_target;
         op.off = (uint64_t)last_ack_offset;
         op.len = (uint64_t)(curr - last_ack_offset);
+        /* DBG (temporary) */
+        {
+          static int _dbg_ack = 0;
+          if (_dbg_ack++ < 40)
+            fprintf(stderr, "forkrun[DBG] ACK: worker in_off=%lu out=[%lu,%lu) fd=%d\n",
+                    (unsigned long)op.in_off, (unsigned long)op.off,
+                    (unsigned long)(op.off + op.len), op.fd);
+        }
         if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) {
             pull_fire_alarm_reason(2); // A2: Prevent silent exit-0 truncation
             sigaction(SIGPIPE, &sa_old, NULL);
@@ -6128,7 +6136,12 @@ static int ring_order_main(int argc, char **argv) {
 
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0) break;
+    if (n_read <= 0) {
+      /* DBG (temporary) */
+      fprintf(stderr, "forkrun[DBG] ORD-EOF: read=%zd synced=%d heap=%d tracker_bytes=%lu\n",
+              n_read, resume_synced, heap_sz, (unsigned long)tracker_bytes);
+      break;
+    }
 
     buffered += n_read;
 
@@ -6201,13 +6214,32 @@ static int ring_order_main(int argc, char **argv) {
       if (!unordered_mode && !stdout_broken && resume_synced) {
         while (heap_sz > 0) {
           uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
-          if (heap[0].key != expected_key) break;
+          if (heap[0].key != expected_key) {
+            /* DBG (temporary) */
+            static int _dbg_brk = 0;
+            if (_dbg_brk++ < 10)
+              fprintf(stderr, "forkrun[DBG] EMIT-BREAK: heap0.key=%lu expected=%lu heap=%d\n",
+                      (unsigned long)heap[0].key, (unsigned long)expected_key, heap_sz);
+            break;
+          }
           struct HeapNode top;
           heap_pop(heap, &heap_sz, &top);
           if (memfd_mode) {
             off_t offset = (off_t)top.pkt.off;
             if (use_zerocopy) {
-              if (robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len) < 0) stdout_broken = true;
+              if (robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len) < 0) {
+                /* DBG (temporary) */
+                fprintf(stderr, "forkrun[DBG] SENDFILE-FAIL: fd=%d off=%lu len=%lu errno=%d(%s)\n",
+                        top.pkt.fd, (unsigned long)top.pkt.off, (unsigned long)top.pkt.len,
+                        errno, strerror(errno));
+                stdout_broken = true;
+              } else {
+                /* DBG (temporary) */
+                static int _dbg_ok = 0;
+                if (_dbg_ok++ < 10)
+                  fprintf(stderr, "forkrun[DBG] EMIT-OK: sent %lu bytes from fd=%d\n",
+                          (unsigned long)top.pkt.len, top.pkt.fd);
+              }
             } else {
               if (ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len) < 0) stdout_broken = true;
             }
