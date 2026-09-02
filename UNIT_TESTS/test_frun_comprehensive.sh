@@ -2450,7 +2450,7 @@ m17_worker() {
     for a in "$@"; do
         if (( a == 1000 )) && ! [[ -f ./.m17a ]]; then
             touch ./.m17a; kill -9 $BASHPID
-        elif (( a == 2000 )) && ! [[ -f ./.m17b ]]; then
+        elif (( a == 2000 )) && [[ -f m17.chk ]] && ! [[ -f ./.m17b ]]; then
             touch ./.m17b; kill -9 $BASHPID
         else
             echo "$a"
@@ -2598,7 +2598,7 @@ m17_worker() {
     for a in "$@"; do
         if   (( a == 1000 )) && ! [[ -f ./.m17a ]]; then
             touch ./.m17a; kill -9 $BASHPID
-        elif (( a == 2000 )) && ! [[ -f ./.m17b ]]; then
+        elif (( a == 2000 )) && [[ -f m17.chk ]] && ! [[ -f ./.m17b ]]; then
             touch ./.m17b; kill -9 $BASHPID
         else
             echo "$a"
@@ -2719,50 +2719,7 @@ FUNCEOF
 
     _S2L=$(wc -l < "$_MD/output.txt")
     _CKPT=$([[ -s "$_MD/.forkrun_resume" ]] && echo "present(after S1)" || echo "absent-after-S1")
-
-      MD=$(ls -dt /tmp/tmp.*/resume_M20 2>/dev/null | head -1)
-cat "$MD/.forkrun_resume"   # confirm it's the same clean file
-# then instrument the sandbox directly — same invocation, stderr VISIBLE:
-bash --norc --noprofile --restricted -c '
-    _sb="$1"
-    eval "$_sb" || { echo "DBG: _sb eval failed rc=$?" >&2; exit 1; }
-    eval "${FORKRUN_EXTRA_DEFS:-}" || { echo "DBG: EXTRA_DEFS eval failed" >&2; }
-    trap - EXIT DEBUG RETURN ERR
-    echo "DBG: post-eval: EXTRA_FUNCS=<${FORKRUN_EXTRA_FUNCS:-unset}>" >&2
-    _fn_text=""
-    [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && {
-        FORKRUN_EXTRA_FUNCS_A=(${FORKRUN_EXTRA_FUNCS})
-        _fn_text="$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}")"
-        echo "DBG: _fn_text length=${#_fn_text}" >&2
-        [[ -n "$_fn_text" ]] && {
-            (
-                eval "$_fn_text" || exit 1
-                if [[ "$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}")" == "$_fn_text" ]]; then exit 0; fi
-                exit 1
-            ) || { echo "DBG: roundtrip FAILED" >&2; exit 1; }
-            echo "DBG: roundtrip ok" >&2
-        }
-    }
-    while read -r _f; do unset -f "$_f"; done < <(compgen -A function)
-    _vars_out=""
-    _vars_out+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"$'\n'
-    FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS//[[:space:]$IFS]/ } "
-    FORKRUN_EXTRA_VARS_A=(${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /})
-    (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_out+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}")"$'\n'
-    _vars_out+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"$'\n'
-    echo "DBG: _vars_out len=${#_vars_out}; tail:" >&2; printf "%s" "${_vars_out: -200}" >&2
-    eval "$_vars_out" || { echo "DBG: vars eval FAILED rc=$?" >&2; exit 1; }
-    echo "DBG: vars eval ok" >&2
-    _vars_check=""
-    _vars_check+="$(builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"$'\n'
-    (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_check+="$(builtin declare -p -- "${FORKRUN_EXTRA_VARS_A[@]}")"$'\n'
-    _vars_check+="$(builtin declare -p -- FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"$'\n'
-    [[ "$_vars_out" != "$_vars_check" ]] && { echo "DBG: vars roundtrip MISMATCH" >&2; exit 1; }
-    echo "DBG: all checks passed, emitting" >&2
-    printf "%s\n%s\n%s\n" "TOKEN_X" "$_vars_out" "END_X"
-' _ "$(cat "$MD/.forkrun_resume")" "TOKEN_X" "END_X"
-
-    if diff -q "$_MD/input.txt" "$_MD/output.txt" &>/dev/null; then
+    if diff -q    if diff -q "$_MD/input.txt" "$_MD/output.txt" &>/dev/null; then
         TEST_RESULTS["M20: Full-auto resume extracts and re-executes command exactly-once"]="PASS"
         _print_result PASS "M20: Full-auto resume extracts and re-executes command exactly-once"
         ((PASSED_TESTS++))
@@ -2851,7 +2808,7 @@ FUNCEOF
             grep -c 'm21_tag ()' "$_MD/.forkrun_resume" 2>/dev/null
             grep -A2 'm21_tag ()' "$_MD/.forkrun_resume" 2>/dev/null | head -4
             echo "--- err2 FULL (stage-2 stderr — the key evidence) ---"
-            cat "$_MD/err2.txt" 2>/dev/null | head -20
+            grep -E 'DBG|WARN|FATAL|ABORT' "$_MD/err2.txt" 2>/dev/null | head -30
             echo "--- first divergence (first 6 lines) ---"
             diff <(seq 1000 | sed 's/^/F:/') "$_MD/output.txt" 2>/dev/null | head -6
             echo "=========== END M21 DIAGNOSTIC ==========="
