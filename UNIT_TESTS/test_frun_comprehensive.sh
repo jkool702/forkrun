@@ -56,6 +56,19 @@ if [[ -z "$FRUN_SOURCE" ]]; then
     exit 1
 fi
 
+# Version Pin & Run Stamp at top of comprehensive suite:
+FRUN_VER="$(bash -c "source '$FRUN_SOURCE' && frun -V" 2>/dev/null || echo 'unknown')"
+if [[ "$FRUN_VER" != "forkrun v3.5.0" ]]; then
+    echo "FATAL: Comprehensive suite requires 'forkrun v3.5.0', got '$FRUN_VER'" >&2
+    exit 1
+fi
+echo "==================================================================" >&2
+echo "RUN STAMP: $(date -u '+%Y-%m-%dT%H:%M:%SZ') | Version: $FRUN_VER" >&2
+echo "Topology:  $(nproc) CPUs | NUMA nodes: $(cat /sys/devices/system/node/online 2>/dev/null || echo '1')" >&2
+echo "==================================================================" >&2
+
+
+
 VERBOSE="${VERBOSE:-false}"
 SECTION_FILTER="${SECTION:-}"
 
@@ -827,6 +840,28 @@ B:6"
 # Verify ring_destroy + ring_init works correctly for multiple frun calls
 # in the same shell session. This tests state reset between invocations.
 # ============================================================================
+
+# --- F7: -L 7 carry math across 2 nodes (Batch 3) ---
+if in_section F; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/batch_F7"; mkdir -p "$_MD"
+    cat > "$_MD/funcs.sh" << 'EOF'
+f7_count() { echo "$#"; }
+EOF
+    res="$(bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; seq 400000 | FORKRUN_EXTRA_FUNCS='f7_count' frun --nodes=2 -L 7 -k f7_count")"
+    expected="$(for ((i=0; i<57142; i++)); do echo "7"; done; echo "6")"
+    if [[ "$res" == "$expected" ]]; then
+        TEST_RESULTS["F7: -L 7 carry math across 2 nodes"]="PASS"
+        _print_result PASS "F7: -L 7 carry math across 2 nodes"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["F7: -L 7 carry math across 2 nodes"]="FAIL"
+        _print_result FAIL "F7: -L 7 carry math across 2 nodes"
+        ((FAILED_TESTS++))
+    fi
+fi
+
+
 print_section G "Sequential Invocations: Ring Reuse"
 
 # Two frun calls back-to-back in one script.
@@ -1610,10 +1645,40 @@ run_test_regex L "L17e: Scanner failure in -s mode: no deadlock" \
     "timeout 20 bash -c 'source \"$FRUN_SOURCE\" && (seq 1 3; exit 1) | frun -s -l 1 cat 2>/dev/null; true'" \
     ".*" 0 false
 
+
+if in_section L; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/fallow_la2"; mkdir -p "$_MD"
+    rm -f "$_MD/fallow.pid" "$_MD/chk.out"
+
+    (
+        export FORKRUN_TEST_FALLOW_PIDFILE="$_MD/fallow.pid"   # wrapper's own
+        timeout -s KILL 60 bash -c "source '$FRUN_SOURCE';     # propagation line
+            seq 50000 | frun -k -s -l 100 --checkpoint-file '$_MD/chk.out' sleep 0.01" &
+        WPID=$!
+        _waited=0
+        while [[ ! -s "$_MD/fallow.pid" ]] && (( _waited < 3000 )); do
+            sleep 0.01; (( _waited++ ))
+        done
+        [[ -s "$_MD/fallow.pid" ]] && kill -9 "$(cat "$_MD/fallow.pid")" 2>/dev/null || true
+        wait $WPID 2>/dev/null || true
+    ) >/dev/null 2>"$_MD/err.txt" || true
+
+    if [[ -s "$_MD/chk.out" ]] && grep -q "Pipeline aborted" "$_MD/err.txt"; then
+        TEST_RESULTS["LA2: Fallow death triggers emergency abort"]="PASS"
+        _print_result PASS "LA2: Fallow death triggers emergency abort"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["LA2: Fallow death triggers emergency abort"]="FAIL"
+        _print_result FAIL "LA2: Fallow death triggers emergency abort"
+        ((FAILED_TESTS++))
+    fi
+fi
+
+
 # ============================================================================
 # SECTION M: Checkpoint & Resume
 # ============================================================================
-
 print_section M "Checkpoint & Resume"
 
 # ============================================================================
@@ -2374,9 +2439,392 @@ FUNCEOF
     fi
 fi
 
+# --- M17-M21 Batch 3 additions ---
+if in_section M; then
+    # M17: 3-generation resume maintaining cumulative ledger
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M17"; mkdir -p "$_MD"
+    seq 3000 > "$_MD/input.txt"; rm -f "$_MD/m17.chk" "$_MD/.m17a" "$_MD/.m17b" "$_MD/out.txt"
+    cat > "$_MD/funcs.sh" << 'EOF'
+m17_worker() {
+    for a in "$@"; do
+        if (( a == 1000 )) && ! [[ -f ./.m17a ]]; then
+            touch ./.m17a; kill -9 $BASHPID
+        elif (( a == 2000 )) && [[ -f m17.chk ]] && ! [[ -f ./.m17b ]]; then
+            touch ./.m17b; kill -9 $BASHPID
+        else
+            echo "$a"
+        fi
+    done
+}
+EOF
+    # Gen 1
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k -l 1 --checkpoint-file m17.chk m17_worker" > "$_MD/out.txt" 2>"$_MD/err1.txt" || true
+    _MB1=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+    [[ -n "$_MB1" ]] && { head -c "$_MB1" "$_MD/out.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/out.txt"; }
+
+    # Gen 2
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k -l 1 --resume m17.chk --checkpoint-file m17.chk m17_worker" >> "$_MD/out.txt" 2>"$_MD/err2.txt" || true
+    _MB2=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err2.txt" 2>/dev/null || echo "")
+    [[ -n "$_MB2" ]] && { head -c "$_MB2" "$_MD/out.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/out.txt"; }
+
+    # Gen 3
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k -l 1 --resume m17.chk --checkpoint-file m17.chk m17_worker" >> "$_MD/out.txt" 2>/dev/null
+
+    #for nn in "$_MD"/*.txt; do printf '\n--------------\n%s\n\n' "$nn"; cat "$nn"; done
+
+    if diff -q "$_MD/input.txt" "$_MD/out.txt" &>/dev/null; then
+        TEST_RESULTS["M17: 3-generation resume maintains cumulative ledger"]="PASS"
+        _print_result PASS "M17: 3-generation resume maintains cumulative ledger"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["M17: 3-generation resume maintains cumulative ledger"]="FAIL"
+        _print_result FAIL "M17: 3-generation resume maintains cumulative ledger"
+        ((FAILED_TESTS++))
+    fi
+
+    # M18: Clean no-op resume when horizon == EOF
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M18"; mkdir -p "$_MD"
+    cat <<'EOF' > "$_MD/m18.chk"
+FORKRUN_RESUME_HORIZON=21
+FORKRUN_RESUME_STDOUT_BYTES=21
+FORKRUN_RESUME_JAGGED=()
+EOF
+    res=$(bash -c "source '$FRUN_SOURCE'; seq 10 | frun --resume '$_MD/m18.chk' cat" 2>/dev/null)
+    rc=$?
+    if (( rc == 0 )) && [[ -z "$res" ]]; then
+        TEST_RESULTS["M18: Clean no-op resume when horizon == EOF"]="PASS"
+        _print_result PASS "M18: Clean no-op resume when horizon == EOF"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["M18: Clean no-op resume when horizon == EOF"]="FAIL"
+        _print_result FAIL "M18: Clean no-op resume when horizon == EOF"
+        ((FAILED_TESTS++))
+    fi
+
+
+    # M19: Stale horizon > EOF triggers loud fatal sync failure
+    run_test_regex M "M19: Stale horizon > EOF triggers loud fatal sync failure" \
+    "echo 'FORKRUN_RESUME_HORIZON=999999999' > '$TEST_DIR/m19.chk'; \
+     echo 'FORKRUN_RESUME_STDOUT_BYTES=0' >> '$TEST_DIR/m19.chk'; \
+     echo 'FORKRUN_RESUME_JAGGED=()' >> '$TEST_DIR/m19.chk'; \
+     seq 10 | frun -k --resume '$TEST_DIR/m19.chk' cat" \
+    "Resume sync failed" 0 true
+
+    # M20: Full-auto happy-path resume (no command supplied on resume)
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M20"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume" "$_MD/.m20a" "$_MD/output.txt"
+    cat > "$_MD/funcs.sh" << 'EOF'
+m20_worker() {
+    for a in "$@"; do
+        if (( a == 500 )) && ! [[ -f ./.m20a ]]; then
+            touch ./.m20a; kill -9 $BASHPID
+        else
+            echo "$a"
+        fi
+    done
+}
+EOF
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m20_worker' frun -k -l 1 m20_worker" > "$_MD/output.txt" 2>"$_MD/err.txt" || true
+    _MB=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err.txt" 2>/dev/null || echo "")
+    [[ -n "$_MB" ]] && { head -c "$_MB" "$_MD/output.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/output.txt"; }
+    cat "$_MD/err.txt"
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; cat input.txt | FORKRUN_TRUST_RESUME=1 frun --resume .forkrun_resume" >> "$_MD/output.txt" 2>/dev/null
+
+    if diff -q "$_MD/input.txt" "$_MD/output.txt" &>/dev/null; then
+        TEST_RESULTS["M20: Full-auto resume extracts and re-executes command exactly-once"]="PASS"
+        _print_result PASS "M20: Full-auto resume extracts and re-executes command exactly-once"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["M20: Full-auto resume extracts and re-executes command exactly-once"]="FAIL"
+        _print_result FAIL "M20: Full-auto resume extracts and re-executes command exactly-once"
+        ((FAILED_TESTS++))
+    fi
+
+    # M21: Full-auto resume reconstructs functions through sandbox (P2-1 verification)
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M21"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume" "$_MD/.m21a" "$_MD/output.txt"
+    cat > "$_MD/funcs.sh" << 'EOF'
+m21_tag() {
+    for a in "$@"; do
+        if (( a == 400 )) && ! [[ -f ./.m21a ]]; then
+            touch ./.m21a; kill -9 $BASHPID
+        else
+            printf 'F:%s\n' "$a"
+        fi
+    done
+}
+EOF
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m21_tag' frun -k -l 1 m21_tag" > "$_MD/output.txt" 2>"$_MD/err.txt" || true
+    _MB=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err.txt" 2>/dev/null || echo "")
+    [[ -n "$_MB" ]] && { head -c "$_MB" "$_MD/output.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/output.txt"; }
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; cat input.txt | FORKRUN_TRUST_RESUME=1 frun --resume .forkrun_resume" >> "$_MD/output.txt" 2>/dev/null
+
+    if diff -q <(seq 1000 | sed 's/^/F:/') "$_MD/output.txt" &>/dev/null; then
+        TEST_RESULTS["M21: Full-auto resume reconstructs functions through sandbox"]="PASS"
+        _print_result PASS "M21: Full-auto resume reconstructs functions through sandbox"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["M21: Full-auto resume reconstructs functions through sandbox"]="FAIL"
+        _print_result FAIL "M21: Full-auto resume reconstructs functions through sandbox"
+        ((FAILED_TESTS++))
+    fi
+fi
+
+    # M17: 3-generation resume maintaining cumulative ledger
+    # DIAGNOSTICS ON FAILURE: prints checkpoint horizon/bytes across
+    # generations, marker states, per-generation line counts, and the
+    # first divergence against the reference. Failure modes map to:
+    #   - Gen2 lines == Gen1 lines and .m17b absent      -> Gen2 skipped all
+    #     input (horizon covers input; ledger/scan mismatch)
+    #   - .m17b present but output short                 -> Gen3 under-ran
+    #   - diff shows duplicates                          -> truncation/horizon
+    #   - diff shows missing interior lines              -> generation skipped
+    #     a range (jagged-interval subtraction)
+    if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M17"; mkdir -p "$_MD"
+    seq 3000 > "$_MD/input.txt"
+    rm -f "$_MD/m17.chk" "$_MD/.m17a" "$_MD/.m17b" "$_MD/out.txt" "$_MD"/err?.txt "$_MD"/chk?.copy
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+m17_worker() {
+    for a in "$@"; do
+        if   (( a == 1000 )) && ! [[ -f ./.m17a ]]; then
+            touch ./.m17a; kill -9 $BASHPID
+        elif (( a == 2000 )) && [[ -f m17.chk ]] && ! [[ -f ./.m17b ]]; then
+            touch ./.m17b; kill -9 $BASHPID
+        else
+            echo "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    # GEN 1 — crash at line 1000
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; \
+             cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' \
+             frun -k -l 1 --checkpoint-file m17.chk m17_worker" \
+        > "$_MD/out.txt" 2> "$_MD/err1.txt" || true
+    cp "$_MD/m17.chk" "$_MD/chk1.copy" 2>/dev/null
+
+    _G1L=$(wc -l < "$_MD/out.txt")
+    _MB1=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+    [[ -n "$_MB1" ]] && { head -c "$_MB1" "$_MD/out.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/out.txt"; }
+
+    # GEN 2 — crash at line 2000
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; \
+             cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' \
+             frun -k -l 1 --resume m17.chk --checkpoint-file m17.chk m17_worker" \
+        >> "$_MD/out.txt" 2> "$_MD/err2.txt" || true
+    cp "$_MD/m17.chk" "$_MD/chk2.copy" 2>/dev/null
+
+    _G2L=$(wc -l < "$_MD/out.txt")
+    _MB2=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err2.txt" 2>/dev/null || echo "")
+    [[ -n "$_MB2" ]] && { head -c "$_MB2" "$_MD/out.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/out.txt"; }
+
+    # GEN 3 — completes
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; \
+             cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' \
+             frun -k -l 1 --resume m17.chk --checkpoint-file m17.chk m17_worker" \
+        >> "$_MD/out.txt" 2> "$_MD/err3.txt" || true
+
+    _G3L=$(wc -l < "$_MD/out.txt")
+    _DUP=$(sort "$_MD/out.txt" | uniq -d | wc -l)
+    _MISS=$(comm -23 <(sort "$_MD/input.txt") <(sort "$_MD/out.txt") | wc -l)
+    _CHK1_H=$(grep -oP '^FORKRUN_RESUME_HORIZON=\K[0-9]+' "$_MD/chk1.copy" 2>/dev/null || echo "n/a")
+    _CHK1_B=$(grep -oP '^FORKRUN_RESUME_STDOUT_BYTES=\K[0-9]+' "$_MD/chk1.copy" 2>/dev/null || echo "n/a")
+    _CHK2_H=$(grep -oP '^FORKRUN_RESUME_HORIZON=\K[0-9]+' "$_MD/chk2.copy" 2>/dev/null || echo "n/a")
+    _CHK2_B=$(grep -oP '^FORKRUN_RESUME_STDOUT_BYTES=\K[0-9]+' "$_MD/chk2.copy" 2>/dev/null || echo "n/a")
+
+    if diff -q "$_MD/input.txt" "$_MD/out.txt" &>/dev/null; then
+        TEST_RESULTS["M17: 3-generation resume maintains cumulative ledger"]="PASS"
+        _print_result PASS "M17: 3-generation resume maintains cumulative ledger"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["M17: 3-generation resume maintains cumulative ledger"]="FAIL"
+        TEST_ERRORS["M17: 3-generation resume maintains cumulative ledger"]="lines: G1=$_G1L G2=$_G2L G3=$_G3L (want 3000); dup=$_DUP miss=$_MISS"
+        ((FAILED_TESTS++))
+        _print_result FAIL "M17: 3-generation resume maintains cumulative ledger" "G1=$_G1L G2=$_G2L G3=$_G3L dup=$_DUP miss=$_MISS"
+
+        # ---- DIAGNOSTIC DUMP (failure only) ----
+        {
+            echo "=========== M17 DIAGNOSTIC ==========="
+            echo "markers:  m17a=$([[ -f $_MD/.m17a ]] && echo y || echo n)  m17b=$([[ -f $_MD/.m17b ]] && echo y || echo n)"
+            echo "bytes:    MB1='$_MB1'  MB2='$_MB2'"
+            echo "chk1:     HORIZON=$_CHK1_H  STDOUT_BYTES=$_CHK1_B"
+            echo "chk2:     HORIZON=$_CHK2_H  STDOUT_BYTES=$_CHK2_B"
+            echo "--- reference for horizon sanity: line 1000 ends at byte $(head -c 4000 "$_MD/input.txt" | grep -b -o $'\n1000\n' | head -1 | cut -d: -f1 | awk '{print $1+1+4}') (approx); input size $(stat -c %s "$_MD/input.txt") ---"
+            echo "--- first divergence (first 6 lines) ---"
+            diff "$_MD/input.txt" "$_MD/out.txt" 2>/dev/null | head -6
+            echo "--- err1 (Gen1 stderr, WARN/FATAL/truncate only) ---"
+            head -25 "$_MD/err1.txt" 2>/dev/null
+            echo "--- err2 (Gen2 stderr, unfiltered) ---"
+            head -25 "$_MD/err2.txt" 2>/dev/null
+            echo "--- err3 (Gen3, unfiltered) ---"
+            head -25 "$_MD/err3.txt" 2>/dev/null
+            echo "=========== END M17 DIAGNOSTIC ==========="
+        } >&2
+    fi
+    fi
+
+        # M20: Full-auto happy-path resume (no command supplied on resume)
+    # Stage 2 stderr is CAPTURED, not discarded — on failure it is printed.
+    # Failure-mode map:
+    #   - "verification failed"    -> sandbox issue (localize from stderr tail)
+    #   - "User rejected"          -> TRUST not propagating through extraction
+    #   - runs but wrong output    -> truncation or ORIG_ARGS reconstruction
+    if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M20"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"
+    rm -f "$_MD/.forkrun_resume" "$_MD/.m20a" "$_MD/output.txt" "$_MD"/err?.txt
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+m20_worker() {
+    for a in "$@"; do
+        if (( a == 500 )) && ! [[ -f ./.m20a ]]; then
+            touch ./.m20a; kill -9 $BASHPID
+        else
+            echo "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    # Stage 1: crash at line 500 (checkpoint written by trap)
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; \
+             cat input.txt | FORKRUN_EXTRA_FUNCS='m20_worker' \
+             frun -k -l 1 m20_worker" \
+        > "$_MD/output.txt" 2> "$_MD/err1.txt" || true
+
+    _S1L=$(wc -l < "$_MD/output.txt")
+    _MB=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+    [[ -n "$_MB" ]] && { head -c "$_MB" "$_MD/output.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/output.txt"; }
+    _S1T=$(wc -l < "$_MD/output.txt")
+
+    # Stage 2: FULL-AUTO resume — no command, no EXTRA_FUNCS re-supplied.
+    # stderr is captured for diagnosis (the old test discarded it, which is
+    # why every prior failure was a black box).
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; \
+             cat input.txt | FORKRUN_TRUST_RESUME=1 frun --resume .forkrun_resume" \
+        >> "$_MD/output.txt" 2> "$_MD/err2.txt" || true
+    echo "STAGE2_RC=$?" >> "$_MD/err2.txt"
+
+    _S2L=$(wc -l < "$_MD/output.txt")
+    _CKPT=$([[ -s "$_MD/.forkrun_resume" ]] && echo "present(after S1)" || echo "absent-after-S1")
+    MD=$(ls -dt /tmp/tmp.*/resume_M20 | head -1)
+wc -l "$MD/output.txt" "$MD/input.txt"
+diff "$MD/input.txt" "$MD/output.txt" | head
+tail -3 "$MD/output.txt"
+    if diff -q "$_MD/input.txt" "$_MD/output.txt" &>/dev/null; then
+        TEST_RESULTS["M20: Full-auto resume extracts and re-executes command exactly-once"]="PASS"
+        _print_result PASS "M20: Full-auto resume extracts and re-executes command exactly-once"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["M20: Full-auto resume extracts and re-executes command exactly-once"]="FAIL"
+        TEST_ERRORS["M20: Full-auto resume extracts and re-executes command exactly-once"]="S1raw=$_S1L S1trunc=$_S1T S2total=$_S2L (want 1000)"
+        ((FAILED_TESTS++))
+        _print_result FAIL "M20: Full-auto resume extracts and re-executes command exactly-once" "S1raw=$_S1L trunc=$_S1T total=$_S2L"
+
+        {
+            echo "=========== M20 DIAGNOSTIC ==========="
+            echo "checkpoint: $_CKPT ; marker m20a=$([[ -f $_MD/.m20a ]] && echo y || echo n)"
+            echo "MB(truncation bytes)='$_MB'"
+            echo "--- checkpoint head (first 4 lines) ---"
+            head -4 "$_MD/.forkrun_resume" 2>/dev/null
+            echo "--- err2 FULL (stage-2 stderr — the key evidence) ---"
+            cat "$_MD/err2.txt" 2>/dev/null
+            echo "--- first divergence (first 6 lines) ---"
+            diff "$_MD/input.txt" "$_MD/output.txt" 2>/dev/null | head -6
+            echo "=========== END M20 DIAGNOSTIC ==========="
+        } >&2
+    fi
+    fi
+
+
+
+        # M21: Full-auto resume reconstructs functions through sandbox (P2-1 verification)
+    # Same diagnostic discipline as M20; additionally prints whether the
+    # function was FOUND but undefined (command-not-found in workers) vs
+    # never extracted at all.
+    if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M21"; mkdir -p "$_MD"
+    seq 1000 > "$_MD/input.txt"
+    rm -f "$_MD/.forkrun_resume" "$_MD/.m21a" "$_MD/output.txt" "$_MD"/err?.txt
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+m21_tag() {
+    for a in "$@"; do
+        if (( a == 400 )) && ! [[ -f ./.m21a ]]; then
+            touch ./.m21a; kill -9 $BASHPID
+        else
+            printf 'F:%s\n' "$a"
+        fi
+    done
+}
+FUNCEOF
+
+    # Stage 1: crash at line 400
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; \
+             cat input.txt | FORKRUN_EXTRA_FUNCS='m21_tag' \
+             frun -k -l 1 m21_tag" \
+        > "$_MD/output.txt" 2> "$_MD/err1.txt" || true
+
+    _S1L=$(wc -l < "$_MD/output.txt")
+    _MB=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
+    [[ -n "$_MB" ]] && { head -c "$_MB" "$_MD/output.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/output.txt"; }
+    _S1T=$(wc -l < "$_MD/output.txt")
+
+    # Stage 2: full-auto. Nothing defined in this shell — the function must
+    # arrive via sandbox capture-before-wipe -> _fn_text -> parsed_env -> eval.
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; \
+             cat input.txt | FORKRUN_TRUST_RESUME=1 frun --resume .forkrun_resume" \
+        >> "$_MD/output.txt" 2> "$_MD/err2.txt" || true
+    echo "STAGE2_RC=$?" >> "$_MD/err2.txt"
+
+    _S2L=$(wc -l < "$_MD/output.txt")
+    _S2ERR_CN=$(grep -c 'command not found\|m21_tag: command' "$_MD/err2.txt" 2>/dev/null || echo 0)
+
+    if diff -q <(seq 1000 | sed 's/^/F:/') "$_MD/output.txt" &>/dev/null; then
+        TEST_RESULTS["M21: Full-auto resume reconstructs functions through sandbox"]="PASS"
+        _print_result PASS "M21: Full-auto resume reconstructs functions through sandbox"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["M21: Full-auto resume reconstructs functions through sandbox"]="FAIL"
+        TEST_ERRORS["M21: Full-auto resume reconstructs functions through sandbox"]="S1raw=$_S1L trunc=$_S1T total=$_S2L (want 1000 F: lines) cmd-not-found=$_S2ERR_CN"
+        ((FAILED_TESTS++))
+        _print_result FAIL "M21: Full-auto resume reconstructs functions through sandbox" "total=$_S2L notfound=$_S2ERR_CN"
+
+        {
+            echo "=========== M21 DIAGNOSTIC ==========="
+            echo "checkpoint: $([[ -s $_MD/.forkrun_resume ]] && echo present || echo absent) ; marker m21a=$([[ -f $_MD/.m21a ]] && echo y || echo n)"
+            echo "S1: raw=$_S1L truncated=$_S1T ; S2 total=$_S2L ; 'command not found' hits in err2: $_S2ERR_CN"
+            echo "MB='$_MB'"
+            echo "--- checkpoint: does it contain the function? ---"
+            grep -c 'm21_tag ()' "$_MD/.forkrun_resume" 2>/dev/null
+            grep -A2 'm21_tag ()' "$_MD/.forkrun_resume" 2>/dev/null | head -4
+            echo "--- err2 FULL (stage-2 stderr — the key evidence) ---"
+            grep -E 'DBG|WARN|FATAL|ABORT' "$_MD/err2.txt" 2>/dev/null | head -30
+            echo "--- first divergence (first 6 lines) ---"
+            diff <(seq 1000 | sed 's/^/F:/') "$_MD/output.txt" 2>/dev/null | head -6
+            echo "=========== END M21 DIAGNOSTIC ==========="
+        } >&2
+    fi
+    fi
+
+
+
 # ============================================================================
 # SECTION N: Property-Based Invariants (Randomized Stress)
 # ============================================================================
+
 
 print_section N "Property-Based Invariants (Randomized)"
 
@@ -2650,6 +3098,25 @@ fi
 # SECTION P: Exit Code Correctness
 # ============================================================================
 
+
+# --- O10-O12 Batch 3 additions ---
+run_test_regex O "O10: -L rejects ranges (5:10)" \
+    "seq 20 | frun -L 5:10 cat" \
+    "ERROR.*-L.*single positive integer" 1 true
+
+run_test_regex O "O11: -L rejects zero (0, 0k)" \
+    "seq 20 | frun -L 0k cat" \
+    "ERROR.*-L.*positive integer" 1 true
+
+run_test_exact O "O12a: -b + -L: output intact (lines mode, stdin delivery)" \
+    "seq 8 | frun -b 32 -L 4 -k cat" \
+    "$(seq 8)"
+
+run_test_regex O "O12b: -b + -L emits override warning" \
+    "seq 8 | frun -b 32 -L 4 -k cat >/dev/null" \
+    "WARNING.*-L.*overrides.*-b" 0 true
+
+
 print_section P "Exit Code Correctness"
 
 # --- P1: Successful run exits 0 ---
@@ -2780,6 +3247,17 @@ fi
 # ============================================================================
 # SECTION Q: Concurrent Invocation Stress
 # ============================================================================
+
+
+# --- P9-P10 Batch 3 additions ---
+run_test_regex P "P9: -E + false exits 3 (default mode)" \
+    "seq 5 | frun -l 1 -E false 2>/dev/null; echo rc=\$?" \
+    "rc=3" 0 false
+
+run_test_regex P "P10: -E + false exits 3 (-X mode)" \
+    "seq 5 | frun -l 1 -X -E false 2>/dev/null; echo rc=\$?" \
+    "rc=3" 0 false
+
 
 print_section Q "Concurrent Invocation Stress"
 
@@ -3412,6 +3890,89 @@ fi
 # T12: jagged-interval straddle resume (interval subtraction code path)
 # T13: mid-claim worker death under ordered mode (stress form)
 # ============================================================================
+
+# --- T14-T15 + T1d/T1f Batch 3 additions ---
+run_test_exact T "T14: +s -b -X does not silently drop data" \
+    "printf 'abcdefghij' | frun +s -b 5 -X -k printf '%s'" \
+    "abcdefghij"
+
+run_test_exact T "T15: Ingest probe data reuse under FORKRUN_DISABLE_MEMPOLY" \
+    "seq 10000 > '$TEST_DIR/t15_in.txt'; \
+     FORKRUN_EXTRA_VARS='FORKRUN_DISABLE_MEMPOLY' FORKRUN_DISABLE_MEMPOLY=1 \
+     frun --nodes=@2 -k printf '%s\n' < '$TEST_DIR/t15_in.txt'" \
+    "$(seq 10000)"
+
+if in_section T; then
+    # T1d: Plain shadow rejected
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1d"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1d.chk"
+    cat <<'EOF' > "$_MD/t1d.chk"
+FORKRUN_RESUME_HORIZON=0
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+printf() {
+    local _emit="$2"
+    local _tok="${_emit%%$'\n'*}"
+    local _rest="${_emit#*$'\n'}"
+    local _end="${_rest##*$'\n'}"; _end="${_end%$'\n'}"
+    command printf '%s' "$_emit"
+    command printf '%s\n%s\n%s\n' "$_tok" "declare -a FORKRUN_ORIG_ARGS=(\$(touch '__MARK__'))" "$_end"
+}
+declare -a FORKRUN_ORIG_ARGS=('/bin/true')
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1d.chk"
+    bash -c "source '$FRUN_SOURCE'; FORKRUN_TRUST_RESUME=1 frun --resume '$_MD/t1d.chk' < /dev/null" >/dev/null 2>&1 || true
+    if [[ ! -f "$_MARK" ]]; then
+        TEST_RESULTS["T1d: printf-shadow frame forgery rejected by compgen function wipe"]="PASS"
+        _print_result PASS "T1d: printf-shadow frame forgery rejected by compgen function wipe"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["T1d: printf-shadow frame forgery rejected by compgen function wipe"]="FAIL"
+        _print_result FAIL "T1d: Sandbox function wipe failed — marker file was created"
+        ((FAILED_TESTS++))
+    fi
+
+    # T1f: FORKRUN_EXTRA_FUNCS="printf" shadow variant rejected
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1f"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1f.chk"
+    cat <<'EOF' > "$_MD/t1f.chk"
+FORKRUN_RESUME_HORIZON=0
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+FORKRUN_EXTRA_FUNCS="printf"
+printf() {
+    echo "SHADOW-CALLED: depth=$BASH_SUBSHELL funcstack=${FUNCNAME[*]}" >> /tmp/t1f_trace
+    command touch '__MARK__'    # keep the original marker semantics
+    local _emit="$2"
+    local _tok="${_emit%%$'\n'*}"
+    local _rest="${_emit#*$'\n'}"
+    local _end="${_rest##*$'\n'}"; _end="${_end%$'\n'}"
+    command printf '%s' "$_emit"
+    command printf '%s\n%s\n%s\n' "$_tok" "declare -a FORKRUN_ORIG_ARGS=(\$(touch '__MARK__'))" "$_end"
+}
+declare -a FORKRUN_ORIG_ARGS=('/bin/true')
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1f.chk"
+    bash -c "source '$FRUN_SOURCE'; frun --resume '$_MD/t1f.chk' < /dev/null" >/dev/null 2>"$_MD/err.txt" || true
+    #cat  /tmp/t1f_trace "$_MD"/*.txt
+    #cat "$TEST_DIR"/sandbox_t1f*/err.txt 2>/dev/null || cat /tmp/tmp.*/sandbox_t1f/err.txt 2>/dev/null | tail -5
+    #ls /tmp/tmp.*/sandbox_t1f/__MARK__ 2>&1
+    if [[ ! -f "$_MARK" ]] && grep -qE "User rejected setup commands|Custom setup commands|verification failed|function frame missing" "$_MD/err.txt"; then
+        TEST_RESULTS["T1f: EXTRA_FUNCS shadow forgery rejected by subshell function isolation"]="PASS"
+        _print_result PASS "T1f: EXTRA_FUNCS shadow forgery rejected by subshell function isolation"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["T1f: EXTRA_FUNCS shadow forgery re-armed printf in emission shell"]="FAIL"
+        _print_result FAIL "T1f: EXTRA_FUNCS shadow forgery re-armed printf in emission shell"
+        ((FAILED_TESTS++))
+    fi
+fi
+
+
 print_section T2 "v3.4.4 Hardening Regressions (W1, M2, W2, resume)"
 
 # --- T7a: ordered resume, NON-reproducible boundaries (-l 1000 → -l 777) ---
@@ -3981,7 +4542,7 @@ if in_section T2; then
         # Only kill children (workers spawn as subshell bashes); avoid the root
         for _v in $_VICTIMS; do
             _KIDS=$(ps -o pid= --ppid "$_v" 2>/dev/null | tr -d ' ')
-            _KIDS="$(sort -nr <<<"$_KIDS" | head -n $(( $(wc -l <<<"$_KIDS") >> 1 )) )"
+            _KIDS="$(sort -nr <<<"$_KIDS" | head -n $(( 1 + $(wc -l <<<"$_KIDS") >> 2 )) )"
             needKillFlag=true
             for _kid in $_KIDS; do
                 # Kill grandchildren (worker subshells) with 30% probability. guarantee killing at least 1.
@@ -4060,3 +4621,4 @@ else
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     exit 0
 fi
+

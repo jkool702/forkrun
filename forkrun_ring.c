@@ -1217,6 +1217,9 @@ static __thread uint32_t worker_last_minor = 0;
 static __thread uint32_t worker_last_num_kills = 0;
 static __thread bool tl_drain_escrow = true;
 
+#define MAX_POLL_WORKERS 8192
+static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
+
 
 // ------------------------------------------------------------------
 // WorkerBatchState: Pure value struct returned by do_lockfree_claim.
@@ -2045,6 +2048,7 @@ static int ring_init_main(int argc, char **argv) {
     g_state->resume_jagged_count = 0;
     g_state->poisoned_count = 0;
     g_state->limit_cutoff_major = 0;
+    memset(g_worker_deadlines, 0, sizeof(g_worker_deadlines));
 
     // PHYSICS FIX: Comprehensively drain all eventfds to prevent false EOFs
     // and spurious wakeups from previous invocations.
@@ -2522,6 +2526,7 @@ static int ring_init_main(int argc, char **argv) {
 static int ring_destroy_main(int argc, char **argv) {
   (void)argc;
   (void)argv;
+  memset(g_worker_deadlines, 0, sizeof(g_worker_deadlines));
   if (g_state) {
     long pg_sz = sysconf(_SC_PAGESIZE);
     uint64_t align_sz = (pg_sz > 0) ? (uint64_t)pg_sz : 4096ULL;
@@ -2670,6 +2675,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       (syscall(__NR_set_mempolicy, MPOL_BIND, &test_mask, 64) == 0);
   if (numa_enabled)
     syscall(__NR_set_mempolicy, MPOL_DEFAULT, NULL, 0);
+  const char *disable_mp = get_string_value("FORKRUN_DISABLE_MEMPOLY");
+  if (disable_mp && strcmp(disable_mp, "1") == 0) {
+    numa_enabled = false;
+  }
 
 #define BITS_PER_LONG (sizeof(unsigned long) * 8)
   uint32_t max_phys_id = 0;
@@ -2695,6 +2704,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   for (int i = 0; i < num_nodes * 2; i++) {
     sys_write(evfd_chunk_done, &one, 8);
   }
+  bool probe_transferred = false;
 
 #define NUMA_CHECK_SCANNERS_DONE() do { \
   if (atomic_load_relaxed(&state[0].emergency_abort)) { \
@@ -2710,6 +2720,19 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       } \
     } \
     if (_all_done) { \
+      limit_reached_exit = true; \
+      goto ingest_done; \
+    } \
+    /* NEW: -n cutoff escape — the limit_cutoff_major is globally set,
+       monotonic, and published-before-handoff (v3.5.0 ordering rule).
+       Once set, the scanners past the cutoff run their skip path and
+       finish WITHOUT consuming further input; ingest waiting for them
+       while still feeding chunks creates a feed/finish standoff when
+       the last pre-cutoff scanner's skip chain hasn't drained ingest's
+       published tail. If ingest has already published AT or PAST the
+       cutoff major, no future chunk can matter: exit now. */ \
+    uint64_t _co = atomic_load_acquire(&g_state->limit_cutoff_major); \
+    if (_co > 0 && current_major >= _co) { \
       limit_reached_exit = true; \
       goto ingest_done; \
     } \
@@ -2833,10 +2856,12 @@ static int ring_numa_ingest_main(int argc, char **argv) {
           n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
           if (n >= 0) {
             transfer_method = TM_COPY_FILE_RANGE;
+            probe_transferred = true;
           } else {
             n = sendfile(outfd, infd, NULL, chunk_size);
             if (n >= 0) {
               transfer_method = TM_SENDFILE;
+              probe_transferred = true;
             }
           }
         }
@@ -2850,6 +2875,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         if (bounce_buf == MAP_FAILED) {
           bounce_buf = NULL; // Prevent invalid munmap in ingest_done
           free(nodemask);
+          nodemask = NULL;   // A4.8: Prevent double-free in ingest_done
           builtin_error("forkrun: mmap failed for ingest bounce buffer (OOM)");
           limit_reached_exit = true;
           goto ingest_done;
@@ -2857,7 +2883,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       }
     }
 
-    if (transfer_method != TM_UNKNOWN) {
+    if (transfer_method != TM_UNKNOWN && !probe_transferred) {
       switch (transfer_method) {
       case TM_COPY_FILE_RANGE:
         n = copy_file_range(infd, NULL, outfd, NULL, chunk_size, 0);
@@ -2934,6 +2960,7 @@ static int ring_numa_ingest_main(int argc, char **argv) {
         break;
       }
     }
+    probe_transferred = false; // A1: Reset one-shot flag so subsequent chunks run switch cleanly
 
     if (n < 0) {
       if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
@@ -3483,6 +3510,16 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     } else {                                                                   \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = _eff_end;            \
+      /* D2-fix: stamp the global slot index into minor_ring so v2's           \
+         packed numa_batch_id is globally unique on UMA too.                   \
+         Without this, minor_ring stays all-zero in UMA mode and every         \
+         plugin ctx reports the same key (0:0) — the ABI contract              \
+         ("numa_batch_id is THE global identity key") silently breaks.         \
+         Bit 31 (FLAG_MAJOR_EOF) is never set on UMA (no chunk ends),         \
+         so the full 31-bit minor space is free for the slot index. */         \
+      local_state->major_ring[local_scan_idx & RING_MASK] = 0;                 \
+      local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
+          (uint32_t)(local_scan_idx & 0x7FFFFFFF);                             \
     }                                                                          \
     local_scan_idx++;                                                          \
     UNIFIED_ADAPTIVE_COMMIT(false);                                            \
@@ -5051,7 +5088,7 @@ unified_scanner_eof:
     // --- PHYSICS FIX: Prevent UMA ghost batches violating exact limit ---
     bool limit_hit = (limit_items > 0 && total_scanned >= limit_items);
 
-    if (!byte_mode && !limit_hit && !atomic_load_relaxed(&state[0].emergency_abort)) {
+    if (!byte_mode && !exact_lines && !fixed_batch && !limit_hit && !atomic_load_relaxed(&state[0].emergency_abort)) {
       // v3.3.0 tail: Force-commit all locally-written ring slots before computing
       // L_tail, ensuring local_write_idx == local_scan_idx here so that only
       // pending_lines and the current read buffer need to be counted below.
@@ -5489,8 +5526,11 @@ dlc_evaluate_claim:
     out->major = local_state->major_ring[my_read_idx & RING_MASK];
     out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
   } else {
+    /* D2-fix: UMA mode — major is always 0; minor is the global slot index
+       (stamped by UNIFIED_SCANNER_FLUSH), making v2's packed
+       numa_batch_id globally unique per batch as the ABI documents. */
     out->major = 0;
-    out->minor = 0;
+    out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
   }
 
   return 0;
@@ -5714,12 +5754,14 @@ static int ring_ack_main(int argc, char **argv) {
       uint64_t end = local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
       struct PhysPacket pp = {.off = start, .len = end - start};
       if (robust_pipe_write(fd_fallow, &pp, sizeof(pp)) < 0) {
+          pull_fire_alarm_reason(2); // A2: Prevent silent exit-0 truncation
           sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
       }
     } else {
       struct IndexPacket ip = {.idx = op.major_idx, .cnt = op.cnt};
       if (robust_pipe_write(fd_fallow, &ip, sizeof(ip)) < 0) {
+          pull_fire_alarm_reason(2); // A2: Prevent silent exit-0 truncation
           sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
       }
@@ -5743,6 +5785,12 @@ static int ring_ack_main(int argc, char **argv) {
         const char *s_order_pipe = get_string_value("FD_ORDER_PIPE");
         if (s_order_pipe) ack_cached_order_pipe = atoi(s_order_pipe);
       }
+      if (ack_cached_order_pipe < 0) {
+        builtin_error("forkrun: FD_ORDER_PIPE unset during ordered ack");
+        pull_fire_alarm_reason(2);
+        sigaction(SIGPIPE, &sa_old, NULL);
+        return EXECUTION_FAILURE;
+      }
       if (ack_cached_order_pipe >= 0) {
         int fd_pipe = ack_cached_order_pipe;
         off_t curr = lseek(fd_target, 0, SEEK_CUR);
@@ -5754,6 +5802,7 @@ static int ring_ack_main(int argc, char **argv) {
         op.off = (uint64_t)last_ack_offset;
         op.len = (uint64_t)(curr - last_ack_offset);
         if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) {
+            pull_fire_alarm_reason(2); // A2: Prevent silent exit-0 truncation
             sigaction(SIGPIPE, &sa_old, NULL);
             return EXECUTION_FAILURE;
         }
@@ -5761,6 +5810,7 @@ static int ring_ack_main(int argc, char **argv) {
       }
     } else {
       if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) {
+          pull_fire_alarm_reason(2); // A2: Prevent silent exit-0 truncation
           sigaction(SIGPIPE, &sa_old, NULL);
           return EXECUTION_FAILURE;
       }
@@ -5821,6 +5871,8 @@ static void heap_pop(struct HeapNode *heap, int *sz, struct HeapNode *out) {
   heap[i] = tmp;
 }
 
+static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len);
+
 static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset,
                                size_t count) {
   size_t total = 0;
@@ -5845,6 +5897,29 @@ static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset,
     total += s;
   }
   return (ssize_t)total;
+}
+
+/* Robust emit with fallback: try sendfile only when legal, fall back to
+   read/write copy which handles O_APPEND correctly. Returns 0 on success,
+   -2 on EPIPE (downstream closed), -1 on other error. */
+static int forkrun_emit_with_fallback(int out_fd, int src_fd, off_t off, size_t len, bool use_zerocopy) {
+  if (use_zerocopy) {
+    off_t _off = off;
+    ssize_t s = robust_sendfile(out_fd, src_fd, &_off, len);
+    if (s >= 0 && (size_t)s == len) {
+      return 0;
+    }
+    if (s < 0) {
+      if (errno == EPIPE) return -2;
+    }
+    /* fall through to copy on ANY other sendfile failure (EINVAL for O_APPEND,
+       partial, ENOSYS, etc.) */
+  }
+  if (ring_copy_chunk(src_fd, out_fd, off, len) < 0) {
+    if (errno == EPIPE) return -2;
+    return -1;
+  }
+  return 0;
 }
 
 #define BUF_SIZE 65536
@@ -6004,7 +6079,13 @@ static int ring_order_main(int argc, char **argv) {
 
   bool use_zerocopy = false;
   struct stat st_out;
-  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
+  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) {
+    /* sendfile() returns EINVAL on O_APPEND outputs (position-based writes
+       contradict append semantics) — fall back to the read/write copy path,
+       which handles O_APPEND correctly. Fixes silent zero-output on `>>`. */
+    int _outfl = fcntl(1, F_GETFL);
+    use_zerocopy = (_outfl >= 0 && !(_outfl & O_APPEND));
+  }
 
   int heap_cap = 1024;
   struct HeapNode *heap = malloc(heap_cap * sizeof(struct HeapNode));
@@ -6091,7 +6172,9 @@ static int ring_order_main(int argc, char **argv) {
 
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0) break;
+    if (n_read <= 0) {
+      break;
+    }
 
     buffered += n_read;
 
@@ -6118,14 +6201,16 @@ static int ring_order_main(int argc, char **argv) {
       } else {
         if (memfd_mode) {
           off_t offset = (off_t)op->off;
-          if (use_zerocopy) {
-            if (robust_sendfile(1, op->fd, &offset, op->len) < 0) stdout_broken = true;
-          } else {
-            if (ring_copy_chunk(op->fd, 1, offset, op->len) < 0) stdout_broken = true;
-          }
-          if (stdout_broken) {
-              pull_fire_alarm_reason(1);   // downstream close, not internal fault
-              break;
+          int _emit_rc = forkrun_emit_with_fallback(1, op->fd, offset, op->len, use_zerocopy);
+          if (_emit_rc == -2) {
+            stdout_broken = true;
+            pull_fire_alarm_reason(1);
+            break;
+          } else if (_emit_rc != 0) {
+            builtin_error("forkrun: orderer emit failed: %s", strerror(errno));
+            pull_fire_alarm_reason(2);
+            stdout_broken = true;
+            break;
           }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
           TRACK_COMPLETED_BATCH(*op);
@@ -6142,11 +6227,21 @@ static int ring_order_main(int argc, char **argv) {
             off_t offset = 0;
             struct stat st;
             if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-              if (robust_sendfile(1, fd_file, &offset, st.st_size) < 0) stdout_broken = true;
+              int _emit_rc = forkrun_emit_with_fallback(1, fd_file, offset, st.st_size, use_zerocopy);
+              if (_emit_rc == -2) {
+                stdout_broken = true;
+              } else if (_emit_rc != 0) {
+                builtin_error("forkrun: orderer emit (file) failed: %s", strerror(errno));
+                stdout_broken = true;
+              }
             }
             close(fd_file);
             unlink(path);
-            if (stdout_broken) { pull_fire_alarm_reason(1); break; }
+            if (stdout_broken) {
+              if (errno == EPIPE) pull_fire_alarm_reason(1);
+              else pull_fire_alarm_reason(2);
+              break;
+            }
             TRACK_COMPLETED_BATCH(*op);
           }
         }
@@ -6155,19 +6250,23 @@ static int ring_order_main(int argc, char **argv) {
       if (!unordered_mode && !stdout_broken && resume_synced) {
         while (heap_sz > 0) {
           uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
-          if (heap[0].key != expected_key) break;
+          if (heap[0].key != expected_key) {
+            break;
+          }
           struct HeapNode top;
           heap_pop(heap, &heap_sz, &top);
           if (memfd_mode) {
             off_t offset = (off_t)top.pkt.off;
-            if (use_zerocopy) {
-              if (robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len) < 0) stdout_broken = true;
-            } else {
-              if (ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len) < 0) stdout_broken = true;
-            }
-            if (stdout_broken) {
-                pull_fire_alarm_reason(1);   // downstream close, not internal fault
-                break;
+            int _emit_rc = forkrun_emit_with_fallback(1, top.pkt.fd, offset, top.pkt.len, use_zerocopy);
+            if (_emit_rc == -2) {
+              stdout_broken = true;
+              pull_fire_alarm_reason(1);
+              break;
+            } else if (_emit_rc != 0) {
+              builtin_error("forkrun: orderer emit failed: %s", strerror(errno));
+              pull_fire_alarm_reason(2);
+              stdout_broken = true;
+              break;
             }
             safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
             TRACK_COMPLETED_BATCH(top.pkt);
@@ -6185,11 +6284,22 @@ static int ring_order_main(int argc, char **argv) {
               off_t offset = 0;
               struct stat st;
               if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-                if (robust_sendfile(1, fd_file, &offset, st.st_size) < 0) stdout_broken = true;
+                int _emit_rc = forkrun_emit_with_fallback(1, fd_file, offset, st.st_size, use_zerocopy);
+                if (_emit_rc == -2) {
+                  stdout_broken = true;
+                } else if (_emit_rc != 0) {
+                  builtin_error("forkrun: orderer emit (file) failed: %s", strerror(errno));
+                  /* file-prefix path: treat non-EPIPE as reason 2 as well */
+                  stdout_broken = true;
+                }
               }
               close(fd_file);
               unlink(path);
-              if (stdout_broken) { pull_fire_alarm_reason(1); break; }
+              if (stdout_broken) {
+                if (errno == EPIPE) pull_fire_alarm_reason(1);
+                else pull_fire_alarm_reason(2);
+                break;
+              }
               TRACK_COMPLETED_BATCH(top.pkt);
             }
           }
@@ -6215,6 +6325,9 @@ static int ring_order_main(int argc, char **argv) {
       fprintf(stderr, "forkrun [FATAL]: Resume sync failed (no batch matched horizon %" PRIu64 "). Aborting.\n",
               g_state->resume_horizon);
       pull_fire_alarm();
+      for (int i = 0; i < fd_states_cap; i++) {
+          if (fd_states[i].heap) free(fd_states[i].heap);
+      }
       free(fd_states); free(heap); free(tracker_heap);
       sigaction(SIGPIPE, &sa_old, NULL);
       return EXECUTION_FAILURE;
@@ -6451,7 +6564,16 @@ static int ring_pipe_main(int argc, char **argv) {
   fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
   fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
 #endif
-  fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
+
+  // B2: Disambiguate optional capacity parameter: bash var names cannot start with a digit.
+  int req_cap = 1048576;
+  if (argc == 3 && isdigit((unsigned char)argv[2][0])) {
+    req_cap = atoi(argv[2]);
+  } else if (argc >= 4 && isdigit((unsigned char)argv[3][0])) {
+    req_cap = atoi(argv[3]);
+  }
+
+  fcntl(pfd[1], F_SETPIPE_SZ, req_cap);
 
   // PHYSICS FIX: Get the ACTUAL size granted by the kernel and export it
   // dynamically
@@ -6464,7 +6586,7 @@ static int ring_pipe_main(int argc, char **argv) {
   snprintf(buf, sizeof(buf), "%d", pipe_cap);
   bind_variable("RING_PIPE_CAPACITY_CUR", buf, 0);
 
-  if (argc == 2) {
+  if (argc == 2 || (argc == 3 && isdigit((unsigned char)argv[2][0]))) {
     const char *arr_name = argv[1];
     SHELL_VAR *v = find_variable(arr_name);
     if (v && !array_p(v)) {
@@ -7204,9 +7326,6 @@ struct PollMeta {
     int type; // 0 = spawn, 1 = scanner, 2 = worker, 3 = trap_ack
 };
 
-#define MAX_POLL_WORKERS 8192
-static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
-
 static inline uint64_t get_mono_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -7569,7 +7688,7 @@ struct forkrun_ctx {
     };
     int32_t  fd_in;             // input file descriptor
     char     delimiter;         // batch delimiter
-    uint8_t  cfg_state[3];      // global configuration state
+    uint8_t  cfg_state[4];      // global configuration state
 };
 
 // Define the user's expected function signatures
@@ -7601,6 +7720,7 @@ static int ring_call_main(int argc, char **argv) {
     char delim = argv[3][0];
     const char *plugin_path = argv[4];
     const char *func_name = argv[5];
+    int fixed_argc = argc - 6;
 
     // 1. Lazy-load the plugin (Only happens on the first batch for this worker)
     if (!tls_dl_handle) {
@@ -7629,6 +7749,7 @@ static int ring_call_main(int argc, char **argv) {
             tls_fctx.cfg_state[0] = (cfg_state >> 16) & 0xFF;
             tls_fctx.cfg_state[1] = (cfg_state >> 8) & 0xFF;
             tls_fctx.cfg_state[2] = cfg_state & 0xFF;
+            tls_fctx.cfg_state[3] = (cfg_state >> 24) & 0xFF; // D2: Expose SH_STDIN and SH_BMODE
             tls_numa_enabled = (state && state[0].numa_enabled) ? 1 : 0;
         } else {
             tls_use_ctx = 0;
@@ -7642,21 +7763,32 @@ static int ring_call_main(int argc, char **argv) {
         }
     }
 
-    // 2. Tokenize the batch directly into tls_argv (starting at index 0)
-    size_t batch_argc = 0;
-    int ret = do_tokenize(fd, length, tls_batch_offset, delim, NULL, 0, &batch_argc);
-    if (ret != EXECUTION_SUCCESS) return ret;
-
-    // 3. Ensure capacity and terminate argv array (standard C convention)
-    if (batch_argc + 1 > tls_argv_cap) {
-        tls_argv_cap = tls_argv_cap ? tls_argv_cap * 2 : 1024;
+    // 2. Load fixed command-line arguments into tls_argv (D1)
+    if (tls_argv_cap < (size_t)(fixed_argc + 1024)) {
+        tls_argv_cap = fixed_argc + 1024;
         char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
         if (!new_argv) return 254;
         tls_argv = new_argv;
     }
-    tls_argv[batch_argc] = NULL;
+    for (int i = 0; i < fixed_argc; i++) {
+        tls_argv[i] = argv[6 + i];
+    }
 
-    // 4. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
+    // 3. Tokenize the batch directly into tls_argv (starting at fixed_argc)
+    size_t batch_argc = 0;
+    int ret = do_tokenize(fd, length, tls_batch_offset, delim, NULL, fixed_argc, &batch_argc);
+    if (ret != EXECUTION_SUCCESS) return ret;
+
+    // 4. Ensure capacity and terminate argv array
+    if (fixed_argc + batch_argc + 1 > tls_argv_cap) {
+        tls_argv_cap = fixed_argc + batch_argc + 1024;
+        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+        if (!new_argv) return 254;
+        tls_argv = new_argv;
+    }
+    tls_argv[fixed_argc + batch_argc] = NULL;
+
+    // 5. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
 
     // PHYSICS FIX: Shield the C-Plugin against Bash's SIGCHLD reaper
     sigset_t set, oset;
@@ -7681,15 +7813,16 @@ static int ring_call_main(int argc, char **argv) {
             }
         } else {
             if (tls_use_ctx == 2) {
-                tls_fctx.numa_batch_id = 0;
+                uint32_t actual_minor = worker_last_minor & MINOR_MASK;
+                tls_fctx.numa_batch_id = PACK_KEY(worker_last_major, actual_minor);
             } else {
                 tls_fctx.numa_major = 0;
-                tls_fctx.numa_minor = 0;
+                tls_fctx.numa_minor = worker_last_minor;
             }
         }
-        cb_ret = tls_callback_ctx((int)batch_argc, tls_argv, &tls_fctx);
+        cb_ret = tls_callback_ctx((int)(fixed_argc + batch_argc), tls_argv, &tls_fctx);
     } else {
-        cb_ret = tls_callback((int)batch_argc, tls_argv);
+        cb_ret = tls_callback((int)(fixed_argc + batch_argc), tls_argv);
     }
 
     sigprocmask(SIG_SETMASK, &oset, NULL);
