@@ -3492,6 +3492,16 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     } else {                                                                   \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = _eff_end;            \
+      /* D2-fix: stamp the global slot index into minor_ring so v2's           \
+         packed numa_batch_id is globally unique on UMA too.                   \
+         Without this, minor_ring stays all-zero in UMA mode and every         \
+         plugin ctx reports the same key (0:0) — the ABI contract              \
+         ("numa_batch_id is THE global identity key") silently breaks.         \
+         Bit 31 (FLAG_MAJOR_EOF) is never set on UMA (no chunk ends),         \
+         so the full 31-bit minor space is free for the slot index. */         \
+      local_state->major_ring[local_scan_idx & RING_MASK] = 0;                 \
+      local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
+          (uint32_t)(local_scan_idx & 0x7FFFFFFF);                             \
     }                                                                          \
     local_scan_idx++;                                                          \
     UNIFIED_ADAPTIVE_COMMIT(false);                                            \
@@ -5498,8 +5508,11 @@ dlc_evaluate_claim:
     out->major = local_state->major_ring[my_read_idx & RING_MASK];
     out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
   } else {
+    /* D2-fix: UMA mode — major is always 0; minor is the global slot index
+       (stamped by UNIFIED_SCANNER_FLUSH), making v2's packed
+       numa_batch_id globally unique per batch as the ABI documents. */
     out->major = 0;
-    out->minor = 0;
+    out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
   }
 
   return 0;
@@ -5840,6 +5853,8 @@ static void heap_pop(struct HeapNode *heap, int *sz, struct HeapNode *out) {
   heap[i] = tmp;
 }
 
+static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len);
+
 static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset,
                                size_t count) {
   size_t total = 0;
@@ -5864,6 +5879,29 @@ static ssize_t robust_sendfile(int out_fd, int in_fd, off_t *offset,
     total += s;
   }
   return (ssize_t)total;
+}
+
+/* Robust emit with fallback: try sendfile only when legal, fall back to
+   read/write copy which handles O_APPEND correctly. Returns 0 on success,
+   -2 on EPIPE (downstream closed), -1 on other error. */
+static int forkrun_emit_with_fallback(int out_fd, int src_fd, off_t off, size_t len, bool use_zerocopy) {
+  if (use_zerocopy) {
+    off_t _off = off;
+    ssize_t s = robust_sendfile(out_fd, src_fd, &_off, len);
+    if (s >= 0 && (size_t)s == len) {
+      return 0;
+    }
+    if (s < 0) {
+      if (errno == EPIPE) return -2;
+    }
+    /* fall through to copy on ANY other sendfile failure (EINVAL for O_APPEND,
+       partial, ENOSYS, etc.) */
+  }
+  if (ring_copy_chunk(src_fd, out_fd, off, len) < 0) {
+    if (errno == EPIPE) return -2;
+    return -1;
+  }
+  return 0;
 }
 
 #define BUF_SIZE 65536
@@ -6023,7 +6061,13 @@ static int ring_order_main(int argc, char **argv) {
 
   bool use_zerocopy = false;
   struct stat st_out;
-  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) use_zerocopy = true;
+  if (fstat(1, &st_out) == 0 && S_ISREG(st_out.st_mode)) {
+    /* sendfile() returns EINVAL on O_APPEND outputs (position-based writes
+       contradict append semantics) — fall back to the read/write copy path,
+       which handles O_APPEND correctly. Fixes silent zero-output on `>>`. */
+    int _outfl = fcntl(1, F_GETFL);
+    use_zerocopy = (_outfl >= 0 && !(_outfl & O_APPEND));
+  }
 
   int heap_cap = 1024;
   struct HeapNode *heap = malloc(heap_cap * sizeof(struct HeapNode));
@@ -6110,7 +6154,9 @@ static int ring_order_main(int argc, char **argv) {
 
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0) break;
+    if (n_read <= 0) {
+      break;
+    }
 
     buffered += n_read;
 
@@ -6137,14 +6183,16 @@ static int ring_order_main(int argc, char **argv) {
       } else {
         if (memfd_mode) {
           off_t offset = (off_t)op->off;
-          if (use_zerocopy) {
-            if (robust_sendfile(1, op->fd, &offset, op->len) < 0) stdout_broken = true;
-          } else {
-            if (ring_copy_chunk(op->fd, 1, offset, op->len) < 0) stdout_broken = true;
-          }
-          if (stdout_broken) {
-              pull_fire_alarm_reason(1);   // downstream close, not internal fault
-              break;
+          int _emit_rc = forkrun_emit_with_fallback(1, op->fd, offset, op->len, use_zerocopy);
+          if (_emit_rc == -2) {
+            stdout_broken = true;
+            pull_fire_alarm_reason(1);
+            break;
+          } else if (_emit_rc != 0) {
+            builtin_error("forkrun: orderer emit failed: %s", strerror(errno));
+            pull_fire_alarm_reason(2);
+            stdout_broken = true;
+            break;
           }
           safe_hole_punch(op->fd, op->off, op->len, &fd_states, &fd_states_cap);
           TRACK_COMPLETED_BATCH(*op);
@@ -6161,11 +6209,21 @@ static int ring_order_main(int argc, char **argv) {
             off_t offset = 0;
             struct stat st;
             if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-              if (robust_sendfile(1, fd_file, &offset, st.st_size) < 0) stdout_broken = true;
+              int _emit_rc = forkrun_emit_with_fallback(1, fd_file, offset, st.st_size, use_zerocopy);
+              if (_emit_rc == -2) {
+                stdout_broken = true;
+              } else if (_emit_rc != 0) {
+                builtin_error("forkrun: orderer emit (file) failed: %s", strerror(errno));
+                stdout_broken = true;
+              }
             }
             close(fd_file);
             unlink(path);
-            if (stdout_broken) { pull_fire_alarm_reason(1); break; }
+            if (stdout_broken) {
+              if (errno == EPIPE) pull_fire_alarm_reason(1);
+              else pull_fire_alarm_reason(2);
+              break;
+            }
             TRACK_COMPLETED_BATCH(*op);
           }
         }
@@ -6174,19 +6232,23 @@ static int ring_order_main(int argc, char **argv) {
       if (!unordered_mode && !stdout_broken && resume_synced) {
         while (heap_sz > 0) {
           uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
-          if (heap[0].key != expected_key) break;
+          if (heap[0].key != expected_key) {
+            break;
+          }
           struct HeapNode top;
           heap_pop(heap, &heap_sz, &top);
           if (memfd_mode) {
             off_t offset = (off_t)top.pkt.off;
-            if (use_zerocopy) {
-              if (robust_sendfile(1, top.pkt.fd, &offset, top.pkt.len) < 0) stdout_broken = true;
-            } else {
-              if (ring_copy_chunk(top.pkt.fd, 1, offset, top.pkt.len) < 0) stdout_broken = true;
-            }
-            if (stdout_broken) {
-                pull_fire_alarm_reason(1);   // downstream close, not internal fault
-                break;
+            int _emit_rc = forkrun_emit_with_fallback(1, top.pkt.fd, offset, top.pkt.len, use_zerocopy);
+            if (_emit_rc == -2) {
+              stdout_broken = true;
+              pull_fire_alarm_reason(1);
+              break;
+            } else if (_emit_rc != 0) {
+              builtin_error("forkrun: orderer emit failed: %s", strerror(errno));
+              pull_fire_alarm_reason(2);
+              stdout_broken = true;
+              break;
             }
             safe_hole_punch(top.pkt.fd, top.pkt.off, top.pkt.len, &fd_states, &fd_states_cap);
             TRACK_COMPLETED_BATCH(top.pkt);
@@ -6204,11 +6266,22 @@ static int ring_order_main(int argc, char **argv) {
               off_t offset = 0;
               struct stat st;
               if (fstat(fd_file, &st) == 0 && st.st_size > 0) {
-                if (robust_sendfile(1, fd_file, &offset, st.st_size) < 0) stdout_broken = true;
+                int _emit_rc = forkrun_emit_with_fallback(1, fd_file, offset, st.st_size, use_zerocopy);
+                if (_emit_rc == -2) {
+                  stdout_broken = true;
+                } else if (_emit_rc != 0) {
+                  builtin_error("forkrun: orderer emit (file) failed: %s", strerror(errno));
+                  /* file-prefix path: treat non-EPIPE as reason 2 as well */
+                  stdout_broken = true;
+                }
               }
               close(fd_file);
               unlink(path);
-              if (stdout_broken) { pull_fire_alarm_reason(1); break; }
+              if (stdout_broken) {
+                if (errno == EPIPE) pull_fire_alarm_reason(1);
+                else pull_fire_alarm_reason(2);
+                break;
+              }
               TRACK_COMPLETED_BATCH(top.pkt);
             }
           }
@@ -6231,15 +6304,6 @@ static int ring_order_main(int argc, char **argv) {
   }
 
   if (!unordered_mode && g_state && g_state->is_resume_mode && !resume_synced && !stdout_broken) {
-      if (heap_sz == 0) {
-          // A4.1: Zero packets received -> entire stream was already completed -> clean no-op (M18)
-          for (int i = 0; i < fd_states_cap; i++) {
-              if (fd_states[i].heap) free(fd_states[i].heap);
-          }
-          free(fd_states); free(heap); free(tracker_heap);
-          sigaction(SIGPIPE, &sa_old, NULL);
-          return EXECUTION_SUCCESS;
-      }
       fprintf(stderr, "forkrun [FATAL]: Resume sync failed (no batch matched horizon %" PRIu64 "). Aborting.\n",
               g_state->resume_horizon);
       pull_fire_alarm();

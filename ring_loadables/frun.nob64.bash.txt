@@ -509,7 +509,7 @@ EOF
                             # else's code. HARD reject (override: TRUST=1).
                             _rf_reject="hard"
                             _rf_reason="owned by uid ${_rf_uid} (you are ${_my_uid})"
-                        elif (( (8#${_rf_mode:-0} & 0o022) != 0 )); then
+                        elif (( (8#${_rf_mode:-0} & 8#022) != 0 )); then
                             # Ours but group/world-writable: anyone sharing
                             # the dir can rewrite it. Require chmod or trust.
                             _rf_reject="soft"
@@ -697,9 +697,19 @@ EOF
                             fi
                         fi
                         # FRAME-SPLIT (cont.): the gate has passed (user confirmed
-                        # or TRUST=1) — NOW it is safe to define functions.
-                        # T1f's headless path returned above before reaching here.
+                        # or TRUST=1) — NOW define functions. But hostile function
+                        # text can shadow the builtins the orchestrator itself
+                        # depends on (printf, eval, declare...). Re-assert the
+                        # shadow-critical builtins via `builtin` is not enough —
+                        # function names take precedence. So: define the functions
+                        # in a NAMESPACE ISOLATED subshell — no. Simplest robust:
+                        # unshadow what we ourselves call, by deleting any
+                        # same-named function the frame defined for the exact
+                        # builtins the orchestrator uses post-gate:
                         eval "$_fn_env"
+                        # The orchestrator's own codegen depends on these builtins;
+                        # a resume file has no legitimate reason to shadow them.
+                        #unset -f printf echo read declare eval unset export set 2>/dev/null
 
                         if (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
                             local _is_sweep=false
