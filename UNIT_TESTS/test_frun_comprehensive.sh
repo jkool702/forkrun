@@ -2471,7 +2471,7 @@ EOF
     # Gen 3
     bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k -l 1 --resume m17.chk --checkpoint-file m17.chk m17_worker" >> "$_MD/out.txt" 2>/dev/null
 
-    for nn in "$_MD"/*.txt; do printf '\n--------------\n%s\n\n' "$nn"; cat "$nn"; done
+    #for nn in "$_MD"/*.txt; do printf '\n--------------\n%s\n\n' "$nn"; cat "$nn"; done
 
     if diff -q "$_MD/input.txt" "$_MD/out.txt" &>/dev/null; then
         TEST_RESULTS["M17: 3-generation resume maintains cumulative ledger"]="PASS"
@@ -3958,9 +3958,9 @@ declare -a FORKRUN_ORIG_ARGS=('/bin/true')
 EOF
     sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1f.chk"
     bash -c "source '$FRUN_SOURCE'; frun --resume '$_MD/t1f.chk' < /dev/null" >/dev/null 2>"$_MD/err.txt" || true
-    cat  /tmp/t1f_trace "$_MD"/*.txt
-    cat "$TEST_DIR"/sandbox_t1f*/err.txt 2>/dev/null || cat /tmp/tmp.*/sandbox_t1f/err.txt 2>/dev/null | tail -5
-    ls /tmp/tmp.*/sandbox_t1f/__MARK__ 2>&1
+    #cat  /tmp/t1f_trace "$_MD"/*.txt
+    #cat "$TEST_DIR"/sandbox_t1f*/err.txt 2>/dev/null || cat /tmp/tmp.*/sandbox_t1f/err.txt 2>/dev/null | tail -5
+    #ls /tmp/tmp.*/sandbox_t1f/__MARK__ 2>&1
     if [[ ! -f "$_MARK" ]] && grep -qE "User rejected setup commands|Custom setup commands|verification failed|function frame missing" "$_MD/err.txt"; then
         TEST_RESULTS["T1f: EXTRA_FUNCS shadow forgery rejected by subshell function isolation"]="PASS"
         _print_result PASS "T1f: EXTRA_FUNCS shadow forgery rejected by subshell function isolation"

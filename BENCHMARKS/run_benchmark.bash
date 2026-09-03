@@ -86,6 +86,8 @@
                     { time { cat $Fk | frun --stats $GCk 2>&$fd2 | wc -l; } 1>&$fd1; } 2>&1 | sed -zE 's/^.*real/real/' | tee ./.time
                     getCPU
 
+		    read -r -u ${fd_sleep} -t 1
+
                 done
             done
 
@@ -95,7 +97,7 @@
                 printf '\n\nNAME: %s\nSIZE: %s bytes\nLINE COUNT: %s lines\n' "$f" "$(du -d 0 -b "$f" | sed -E s/'[ \t].*$//')" "$(wc -l <"$f")"
             done
 
-        )
+	    ) {fd_sleep}<><(:)
 
         unset outA
         declare -A outA
