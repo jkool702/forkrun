@@ -1112,33 +1112,53 @@ toc() { :; }
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
 
                 local _target_chk="${checkpoint_file:-.forkrun_resume}"
-                # ALWAYS write the resume file!
-                ring_dump_resume > "$_target_chk"
-                chmod 600 "$_target_chk" 2>/dev/null
-                local FORKRUN_EXTRA_DEFS=""
-                for nn in ${FORKRUN_EXTRA_FUNCS:-}; do
-                    declare -F -- "${nn}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -f -- "${nn}")"
-                done
-                for vv in ${FORKRUN_EXTRA_VARS:-}; do
-                    declare -p -- "${vv}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -p -- "${vv}")"
-                done
+                # v3.5.0: atomic publication — write to a temp sibling, then
+                # rename. Readers see either the old complete file or the new
+                # complete file, never a torn one. If ANY stage of content
+                # generation fails, publish NOTHING (keep the previous
+                # checkpoint intact) rather than a header-less fragment.
+                local _target_tmp="${_target_chk}.tmp.$$"
+                local _publish_ok=0
+                if ring_dump_resume > "$_target_tmp"; then
+                    _publish_ok=1
+                    local FORKRUN_EXTRA_DEFS=""
+                    for nn in ${FORKRUN_EXTRA_FUNCS:-}; do
+                        declare -F -- "${nn}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -f -- "${nn}")"
+                    done
+                    for vv in ${FORKRUN_EXTRA_VARS:-}; do
+                        declare -p -- "${vv}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -p -- "${vv}")"
+                    done
 
-                declare -p -- FORKRUN_ORIG_ARGS 2>/dev/null >> "$_target_chk"
-                [[ -n "${FORKRUN_RETRY_LIMIT:-}" ]] && declare -p -- FORKRUN_RETRY_LIMIT 2>/dev/null >> "$_target_chk"
-                [[ -n "${FORKRUN_EXTRA_VARS:-}"  ]] && declare -p -- FORKRUN_EXTRA_VARS 2>/dev/null >> "$_target_chk"
-                [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && declare -p -- FORKRUN_EXTRA_FUNCS 2>/dev/null >> "$_target_chk"
-                [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && declare -p -- FORKRUN_EXTRA_SETUP 2>/dev/null >> "$_target_chk"
-                [[ -n "${FORKRUN_EXTRA_DEFS:-}"  ]] && declare -p -- FORKRUN_EXTRA_DEFS 2>/dev/null >> "$_target_chk"
+                    declare -p -- FORKRUN_ORIG_ARGS 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_RETRY_LIMIT:-}" ]] && declare -p -- FORKRUN_RETRY_LIMIT 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_EXTRA_VARS:-}"  ]] && declare -p -- FORKRUN_EXTRA_VARS 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && declare -p -- FORKRUN_EXTRA_FUNCS 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && declare -p -- FORKRUN_EXTRA_SETUP 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_EXTRA_DEFS:-}"  ]] && declare -p -- FORKRUN_EXTRA_DEFS 2>/dev/null >> "$_target_tmp"
+                    chmod 600 "$_target_tmp" 2>/dev/null
+                    mv -f "$_target_tmp" "$_target_chk" 2>/dev/null || _publish_ok=0
+                fi
+                [[ "$_publish_ok" == 0 ]] && rm -f "$_target_tmp" 2>/dev/null
 
                 if [[ "${order_mode}" != "realtime" ]]; then
-                    local safe_bytes="$(grep -E '^FORKRUN_RESUME_STDOUT_BYTES=' "$_target_chk")"
+                    local safe_bytes="$(grep -E '^FORKRUN_RESUME_STDOUT_BYTES=' "$_target_chk" 2>/dev/null)"
                     safe_bytes="${safe_bytes#*=}"
-                    echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
-                    echo "         then re-run your exact command with: --resume $_target_chk" >&2
+                    if [[ -n "$safe_bytes" && "$_publish_ok" == 1 ]]; then
+                        echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
+                        echo "         then re-run your exact command with: --resume $_target_chk" >&2
+                    else
+                        echo "forkrun: Checkpoint generation FAILED; previous checkpoint (if any) left untouched." >&2
+                        echo "         Re-run with --resume $_target_chk to retry from the last good state." >&2
+                    fi
                 else
-                    echo "forkrun: Warning - Realtime mode (-u) checkpoint generated." >&2
-                    echo "         Resuming will result in some duplicate lines at the failure boundary (At-Least-Once semantics)." >&2
-                    echo "         Re-run your exact command with: --resume $_target_chk" >&2
+                    if [[ "$_publish_ok" == 1 ]]; then
+                        echo "forkrun: Warning - Realtime mode (-u) checkpoint generated." >&2
+                        echo "         Resuming will result in some duplicate lines at the failure boundary (At-Least-Once semantics)." >&2
+                        echo "         Re-run your exact command with: --resume $_target_chk" >&2
+                    else
+                        echo "forkrun: Checkpoint generation FAILED; previous checkpoint (if any) left untouched." >&2
+                        echo "         Re-run with --resume $_target_chk to retry from the last good state." >&2
+                    fi
                 fi
             fi
             # Clean up memory only AFTER the trap is done with it!
@@ -1147,24 +1167,23 @@ toc() { :; }
         ' EXIT
 
 _forkrun_checkpoint_signal() {
-    NORMAL_EXIT_FLAG=false
+    # v3.5.0: record the signal; do NOT exit here. The reactor loop
+    # observes _fr_signalled on its next iteration (≤100ms latency via
+    # ring_poll's bounded timeout) and enters the standard ABORT shutdown:
+    # fd choreography, wait, frozen ledger, then EXIT trap checkpoints.
+    _fr_signalled="$1"
     _ret_val="$2"
+    NORMAL_EXIT_FLAG=false
     echo "forkrun [WARN]: Caught SIG${1}. Freezing pipeline..." >&2
     ring_abort
-    exit "$2"
 }
         trap '_forkrun_checkpoint_signal HUP  129' HUP
         trap '_forkrun_checkpoint_signal INT  130' INT
         trap '_forkrun_checkpoint_signal QUIT 131' QUIT
 
-        # If Preemption Support is active, trap SLURM signals
         if (( preempt_mode == 1 )); then
-            # SLURM default preemption / scancel signal
-            trap 'NORMAL_EXIT_FLAG=false; _ret_val=143; echo "forkrun [WARN]: Caught SIGTERM (SLURM Preemption). Freezing pipeline..." >&2; ring_abort; exit 143' TERM
-
-            # Common alternative pre-kill signal used via SLURM --signal=B:USR1@<time>
-            trap 'NORMAL_EXIT_FLAG=false; _ret_val=138; echo "forkrun [WARN]: Caught SIGUSR1 (SLURM Warning). Freezing pipeline..." >&2; ring_abort; exit 138' USR1
-
+            trap '_forkrun_checkpoint_signal TERM 143' TERM
+            trap '_forkrun_checkpoint_signal USR1 138' USR1
             trap '_forkrun_checkpoint_signal USR2 140' USR2
             trap '_forkrun_checkpoint_signal XCPU 152' XCPU
             trap '_forkrun_checkpoint_signal XFSZ 153' XFSZ
@@ -1328,8 +1347,8 @@ _forkrun_checkpoint_signal() {
                 return 1
             fi
 
-            if ${stdin_flag:-false} || ${byte_mode_flag:-false} || ${insert_args_flag:-false}; then
-                echo "forkrun [WARNING]: -s, -b, and -i flags are currently ignored in C plugin (-C) mode (support planned for v3.5.1)." >&2
+            if ${stdin_flag:-false} || ${byte_mode_flag:-false} || ${insert_args_flag:-false} || ${insert_id_flag:-false}; then
+                echo "forkrun [WARNING]: -s and -b are currently ignored in C plugin (-C) mode (stdin/stdin-chunk data delivery via forkrun_ctx is planned for v3.5.1). -i and -I insert-mode arguments are passed as fixed plugin arguments and DO work." >&2
             fi
 
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
@@ -1610,7 +1629,14 @@ worker_func_src+='
         worker_func_src+="${pCode}"'
             fi
         fi
-        '"${ring_ack_str}"' || break
+        '"${ring_ack_str}"' || {
+            # A2 hardening: ring_ack alarms internally on pipe failure; the
+            # non-zero return here is the worker-side acknowledgement of an
+            # infrastructure fault. Exit non-zero so the death-pipe/escrow
+            # machinery sees a failed worker (not a clean loop exit), which
+            # keeps TRAP_ACK accounting and respawn decisions consistent.
+            exit $?
+        }
 
         # Reset variables natively in Bash so C does not have to allocate them
         RING_POISONED=0
@@ -1638,6 +1664,7 @@ W_NODE[$3]=$2
         local -A trap_ack_pending
         local _poll_timer_cmd=""
         local _ret_val=0
+        local _fr_signalled=""
         local -a POISONED_BATCHES=()
 
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
@@ -1653,18 +1680,24 @@ W_NODE[$3]=$2
         while ring_poll "$fd_spawn_arg" fd_scan_death_r fd_worker_r "$_poll_timer_cmd" "$fd_trap_ack_r"; do
             _poll_timer_cmd=""
 
+            # v3.5.0: external signal observed → treat as ABORT with the
+            # signal's exit code (set in _ret_val by the recorder above).
+            if [[ -n "$_fr_signalled" ]]; then
+                POLL_EVENT="ABORT"
+            fi
+
             case "$POLL_EVENT" in
                 IGNORE) ;;
                 ABORT)
-                    # Query WHY the fire alarm was pulled.
-                    # reason 1 = downstream SIGPIPE (e.g. `| head -c 100`):
-                    #   the consumer closed the pipe. This is a normal, clean
-                    #   termination — no checkpoint, no error message, exit 0.
-                    # reason 2 (or 0) = internal fault (worker crash, scanner
-                    #   death, OOM): generate a checkpoint for resume.
                     local _abort_reason=0
                     ring_abort_reason _abort_reason 2>/dev/null
-                    if (( _abort_reason == 1 )); then
+                    if [[ -n "$_fr_signalled" ]]; then
+                        # A trapped external signal takes precedence: the user
+                        # asked for a checkpoint-and-freeze. Never let a
+                        # concurrent SIGPIPE-class (reason 1) abort turn this
+                        # into a silent clean exit 0 with no checkpoint.
+                        NORMAL_EXIT_FLAG=false
+                    elif (( _abort_reason == 1 )); then
                         NORMAL_EXIT_FLAG=true
                         _ret_val=0
                     else
