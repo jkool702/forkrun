@@ -3945,6 +3945,8 @@ FORKRUN_RESUME_STDOUT_BYTES=0
 FORKRUN_RESUME_JAGGED=()
 FORKRUN_EXTRA_FUNCS="printf"
 printf() {
+    echo "SHADOW-CALLED: depth=$BASH_SUBSHELL funcstack=${FUNCNAME[*]}" >> /tmp/t1f_trace
+    command touch '__MARK__'    # keep the original marker semantics
     local _emit="$2"
     local _tok="${_emit%%$'\n'*}"
     local _rest="${_emit#*$'\n'}"
@@ -3956,7 +3958,10 @@ declare -a FORKRUN_ORIG_ARGS=('/bin/true')
 EOF
     sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1f.chk"
     bash -c "source '$FRUN_SOURCE'; frun --resume '$_MD/t1f.chk' < /dev/null" >/dev/null 2>"$_MD/err.txt" || true
-    if [[ ! -f "$_MARK" ]] && grep -qE "User rejected setup commands|Custom setup commands" "$_MD/err.txt"; then
+    cat  /tmp/t1f_trace "$_MD"/*.txt
+    cat "$TEST_DIR"/sandbox_t1f*/err.txt 2>/dev/null || cat /tmp/tmp.*/sandbox_t1f/err.txt 2>/dev/null | tail -5
+    ls /tmp/tmp.*/sandbox_t1f/__MARK__ 2>&1
+    if [[ ! -f "$_MARK" ]] && grep -qE "User rejected setup commands|Custom setup commands|verification failed|function frame missing" "$_MD/err.txt"; then
         TEST_RESULTS["T1f: EXTRA_FUNCS shadow forgery rejected by subshell function isolation"]="PASS"
         _print_result PASS "T1f: EXTRA_FUNCS shadow forgery rejected by subshell function isolation"
         ((PASSED_TESTS++))

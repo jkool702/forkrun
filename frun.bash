@@ -566,13 +566,15 @@ EOF
                     if (( $# == 1 )); then
                         # FULL AUTO RESUME - extract and verify execution environment
                         # NOTE: trust/ownership checks happen in the PARENT before this subprocess; this block must remain tool-free and decision-free
-                        local _rf_content
+                        local _rf_content _vars_env _fn_env
                         _rf_content="$(< "/proc/self/fd/${_rf_fd}")"
 
                         local _secret_token="___FORKRUN_ENV_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local _secret_end="___FORKRUN_END_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        local _fn_token="___FORKRUN_FN_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        local _fn_end="___FORKRUN_FNEND_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local parsed_env
-                        parsed_env="$(PATH='' exec -c "${BASH:-bash}" --norc --noprofile --restricted -c '
+                         parsed_env="$(env -i PATH='' "${BASH:-bash}" --norc --noprofile --restricted -c '
                             _sb="$1"
                             eval "$_sb" || exit 1
                             eval "${FORKRUN_EXTRA_DEFS:-}"
@@ -621,10 +623,16 @@ EOF
                             for _jp in $(jobs -p); do kill -9 "$_jp"; done
                             wait
 
-                            out="${_vars_out}${_NL}${_fn_text}${_NL}"
-                            _emit="$2${_NL}$out${_NL}$3${_NL}"
-                            printf "%s" "$_emit"
-                        ' _ "$_rf_content" "$_secret_token" "$_secret_end" 2>/dev/null)"
+                            # FRAME-SPLIT: variables and function text cross in
+                            # SEPARATE token-bounded frames. The parent evals
+                            # the vars frame immediately; the function frame is
+                            # evald ONLY AFTER the layer-3 gate passes. This
+                            # guarantees the gates own printf -v / declare -f
+                            # previews run with NO hostile functions in scope.
+                            _emit_vars="$2${_NL}${_vars_out}${_NL}$3${_NL}"
+                            _emit_fns="$4${_NL}${_fn_text}${_NL}$5${_NL}"
+                            printf "%s" "${_emit_vars}${_emit_fns}"
+                        ' _ "$_rf_content" "$_secret_token" "$_secret_end" "$_fn_token" "$_fn_end" 2>/dev/null)"
 
                         if [[ "$parsed_env" != *"${_secret_token}"* || "$parsed_env" != *"${_secret_end}"* ]]; then
                             echo "forkrun [ABORT]: Resume file environment verification failed or was intercepted." >&2
@@ -632,15 +640,29 @@ EOF
                             NORMAL_EXIT_FLAG=true
                             return 1
                         fi
+                        # FRAME-SPLIT: vars frame must also be well-formed at the
+                        # fn boundary; a hostile file that eats/forgets the fn
+                        # tokens simply yields an empty (or failed) function
+                        # frame below — fail-closed, not fail-open.
+                        if [[ "$parsed_env" != *"${_fn_token}"* || "$parsed_env" != *"${_fn_end}"* ]]; then
+                            echo "forkrun [ABORT]: Resume file function frame missing or intercepted." >&2
+                            exec {_rf_fd}<&-
+                            NORMAL_EXIT_FLAG=true
+                            return 1
+                        fi
 
-                        # Extract values via a sacrificial subshell: hostile functions
-                        # defined by eval cannot execute in the parent.
-                        parsed_env="${parsed_env##*"${_secret_token}"$'\n'}"
-                        parsed_env="${parsed_env%%$'\n'"${_secret_end}"*}"
-                        _clean_env="$( ( eval "$parsed_env"; \
-                            builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT \
-                            FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP 2>/dev/null ) )"
-                        eval "$_clean_env"
+                        # Extract BOTH frames.
+                        _vars_env="${parsed_env##*"${_secret_token}"$'\n'}"
+                        _vars_env="${_vars_env%%$'\n'"${_secret_end}"*}"
+                        _fn_env="${parsed_env##*"${_fn_token}"$'\n'}"
+                        _fn_env="${_fn_env%%$'\n'"${_fn_end}"*}"
+
+                        # VARS ONLY — eval'd now. No function text has crossed.
+                        eval "$_vars_env"
+                        #_clean_env="$( ( eval "$parsed_env"; \
+                        #    builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT \
+                        #    FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP 2>/dev/null ) )"
+                        #eval "$_clean_env"
 
                         local has_custom_vars=0
                         for var in ${FORKRUN_EXTRA_VARS:-}; do
@@ -674,6 +696,10 @@ EOF
                                 return 1
                             fi
                         fi
+                        # FRAME-SPLIT (cont.): the gate has passed (user confirmed
+                        # or TRUST=1) — NOW it is safe to define functions.
+                        # T1f's headless path returned above before reaching here.
+                        eval "$_fn_env"
 
                         if (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
                             local _is_sweep=false

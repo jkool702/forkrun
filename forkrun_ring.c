@@ -3492,6 +3492,16 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     } else {                                                                   \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = _eff_end;            \
+      /* D2-fix: stamp the global slot index into minor_ring so v2's           \
+         packed numa_batch_id is globally unique on UMA too.                   \
+         Without this, minor_ring stays all-zero in UMA mode and every         \
+         plugin ctx reports the same key (0:0) — the ABI contract              \
+         ("numa_batch_id is THE global identity key") silently breaks.         \
+         Bit 31 (FLAG_MAJOR_EOF) is never set on UMA (no chunk ends),         \
+         so the full 31-bit minor space is free for the slot index. */         \
+      local_state->major_ring[local_scan_idx & RING_MASK] = 0;                 \
+      local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
+          (uint32_t)(local_scan_idx & 0x7FFFFFFF);                             \
     }                                                                          \
     local_scan_idx++;                                                          \
     UNIFIED_ADAPTIVE_COMMIT(false);                                            \
@@ -5498,8 +5508,11 @@ dlc_evaluate_claim:
     out->major = local_state->major_ring[my_read_idx & RING_MASK];
     out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
   } else {
+    /* D2-fix: UMA mode — major is always 0; minor is the global slot index
+       (stamped by UNIFIED_SCANNER_FLUSH), making v2's packed
+       numa_batch_id globally unique per batch as the ABI documents. */
     out->major = 0;
-    out->minor = 0;
+    out->minor = local_state->minor_ring[my_read_idx & RING_MASK];
   }
 
   return 0;

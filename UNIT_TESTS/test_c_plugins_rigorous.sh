@@ -126,8 +126,7 @@ else
 fi
 
 echo "------------------------------------------------------"
-echo "
-# --- TEST 4: ABI v2 Packed Key Progression ---
+echo "TEST 4: ABI v2 Packed Key Progression"
 cat <<'EOF' > test_abi_v2.c
 #include <stdint.h>
 #include <stdio.h>
@@ -157,16 +156,14 @@ struct forkrun_ctx {
 int test_abi_v2(int argc, char **argv, const struct forkrun_ctx *ctx) {
     if (ctx->version != 2) return 1;
     uint64_t major = ctx->numa_batch_id >> 22;
-    uint32_t minor = ctx->numa_batch_id & 0x3FFFFF;
+    uint32_t minor = (uint32_t)(ctx->numa_batch_id & 0x3FFFFF);
     printf("%lu:%u\n", (unsigned long)major, minor);
     return 0;
 }
 EOF
 gcc -O3 -shared -fPIC test_abi_v2.c -o test_abi_v2.so
 
-echo "------------------------------------------------------"
-echo "TEST 4: Context ABI v2 Packed Key Progression"
-seq 50000 | frun --nodes=2 -k -C ./test_abi_v2.so:test_abi_v2 > abi_v2_out.txt
+seq 50000 | frun --nodes=@2 -k -C ./test_abi_v2.so:test_abi_v2 > abi_v2_out.txt
 
 awk -F: '
 BEGIN { last_maj = 0; last_min = -1; err = 0; }
@@ -195,7 +192,6 @@ cat <<'EOF' > test_fixed_args.c
 #include <string.h>
 
 int test_fixed(int argc, char **argv) {
-    // Print first fixed argument and total argc
     printf("A0=%s argc=%d\n", argv[0], argc);
     return 0;
 }
@@ -205,7 +201,6 @@ gcc -O3 -shared -fPIC test_fixed_args.c -o test_fixed_args.so
 echo "------------------------------------------------------"
 echo "TEST 5: C Plugin Fixed Arguments Passthrough (D1)"
 
-# 5a: With fixed arguments
 out_fixed=$(seq 10 | frun -l 5 -k -C ./test_fixed_args.so:test_fixed --mode fast)
 if grep -q "A0=--mode argc=7" <<< "$out_fixed"; then
     echo "✓ Passed: Fixed args correctly prepended to plugin argv"
@@ -214,7 +209,6 @@ else
     exit 1
 fi
 
-# 5b: With NO fixed arguments (must not contain phantom empty argv[0])
 out_nofixed=$(seq 10 | frun -l 5 -k -C ./test_fixed_args.so:test_fixed)
 if grep -q "A0=1 argc=5" <<< "$out_nofixed"; then
     echo "✓ Passed: No-args invocation contains zero phantom arguments"
@@ -223,7 +217,7 @@ else
     exit 1
 fi
 
-
 echo "------------------------------------------------------"
-=== All C Plugin Rigorous Tests Completed Successfully ==="
-rm -f out_*.txt input_*.txt
+echo "=== All C Plugin Rigorous Tests Completed Successfully ==="
+rm -f out_*.txt input_*.txt abi_v2_out.txt
+
