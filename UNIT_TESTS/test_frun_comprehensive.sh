@@ -3379,8 +3379,8 @@ if in_section R; then
     seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
 
     # FIXED: Added -s so sleep reads from stdin and actually sleeps, keeping frun alive.
-    # Use pgrep to find the cleanroom bash (child of FPID) and signal it directly
-    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 frun -k -s -l 1 sleep 0.1 & FPID=\$!; sleep 0.3; CPID=\$(ps -o pid= --ppid \$FPID 2>/dev/null | tr -d ' '); [[ -n \"\$CPID\" ]] && (( CPID = CPID + 3 )) && kill -USR1 \$CPID; wait \$FPID" \
+    # Use pgrep to find the cleanroom bash (child of FPID) and signal it directl
+    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 frun -k -s -l 1 sleep 0.1 & FPID=\$!; sleep 0.3; CPID=\$(ps -o pid= --ppid \$FPID 2>/dev/null | tr -d ' '); [[ -n \"\$CPID\" ]] && (( CPID = CPID + 7 )) && kill -USR1 \$CPID; wait \$FPID" \
         > "$_MD/output.txt" 2>"$_MD/err.txt"
     _REXIT=$?
 
@@ -3565,7 +3565,7 @@ if in_section R; then
     _MD="$TEST_DIR/R_SLURM_TERM"; mkdir -p "$_MD"
     seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
 
-    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 frun -k -s -l 1 sleep 0.1 & FPID=\$!; sleep 0.3; CPID=\$(ps -o pid= --ppid \$FPID 2>/dev/null | tr -d ' '); [[ -n \"\$CPID\" ]] && (( CPID = CPID + 3 )) && kill -TERM \$CPID 2>/dev/null || kill -TERM \$FPID 2>/dev/null; wait \$FPID" \
+    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 frun -k -s -l 1 sleep 0.1 & FPID=\$!; sleep 0.3; CPID=\$(ps -o pid= --ppid \$FPID 2>/dev/null | tr -d ' '); [[ -n \"\$CPID\" ]] && (( CPID = CPID + 7 )) && kill -TERM \$CPID 2>/dev/null || kill -TERM \$FPID 2>/dev/null; wait \$FPID" \
         > "$_MD/output.txt" 2>"$_MD/err.txt"
     _REXIT=$?
 
