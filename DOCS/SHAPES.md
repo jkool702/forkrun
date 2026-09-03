@@ -94,6 +94,13 @@ For each shape: the invariant, the canonical site, and what breaks without it.
 | byte | **no** | **yes (raw chunk end)** | indexer |
 | `-L` | no | no | **scanner** (handoff chain) |
 
+### Cross-File Contracts Summary
+
+- **(H1) Poison Flag Lifecycle:** C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` only when `num_kills > 0`; wrapper clears them after every ack.
+- **(M1) Zero-Length Sentinel Batches:** Zero-length sentinel batches must be acked but never executed (`[[ "$REPLY" != "0" ]]`).
+- **(H2) `actual_end` Ownership:** Enforces the truth table above across indexers and scanners.
+- **(H3) Closed Hydraulic Backpressure:** Sizing the worker→orderer ack pipe to 4 KiB propagates consumer backpressure through the ring buffer.
+
 **What breaks without it:** the byte-mode hang — a refactor that moved publication inside the search's conditional, so byte mode (skip-search-keep-publish) and `-L` (skip-both) were collapsed into one branch. Three cases became two; the third case's consumers deadlocked. The general lesson: **when a mechanism serves multiple owners, the ownership is only as durable as the truth table that declares it.** Undeclared reuse is the gap where this bug class lives.
 
 ---

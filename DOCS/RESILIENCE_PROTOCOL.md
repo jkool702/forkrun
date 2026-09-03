@@ -97,3 +97,15 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
 * **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY (NOT RECOMMENDED).**
   Workers write directly to `stdout`, so `forkrun` cannot recall bytes on a crash (resuming produces duplicates). Furthermore, realtime mode risks severely scrambled output (byte interleaving) and kernel lock contention. Use `--buffered` or `-k` instead.
 
+---
+
+## §6. Security Sandbox & Provenance Model
+
+Because resume files dictate commands and environment restoration, `forkrun` enforces a strict 3-layer security model to prevent code execution vulnerabilities when resuming in shared cluster scratch directories:
+
+1. **Layer 1 (Provenance & Permission Gate):** UID ownership and permission check (`8#022`).
+2. **Layer 2 (Restricted Subshell Sandbox):** `env -i PATH='' bash --restricted` execution, function wiping, and round-trip variable serialization verification.
+3. **Layer 3 (Authorization Decision Gate):** Double-token frame split; custom setup commands and functions are evaluated only after interactive user authorization.
+
+See [`SECURITY.md`](SECURITY.md) for the complete security specification.
+

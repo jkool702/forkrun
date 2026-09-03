@@ -153,9 +153,16 @@ Per-batch logical index + reorder buffer + emit only contiguous prefix.
 
 ---
 
-## 11. (reserved)
+## 11. Gate Publication & Producer Wakeup Invariant
 
-This section number is intentionally reserved to preserve numbering stability after v3.4 refactors (original §11 merged into §5 during single-slot simplification). Keeping the number reserved avoids breaking external references in papers and facility docs.
+**Invariant**
+Any process publishing gate-resolving state (`actual_end`, `cum_lines`, `write_idx`) must execute a `SEQ_CST` memory barrier and issue `sys_write` to the corresponding metadata/data eventfd whenever waiters are present (`meta_waiters > 0` or `active_waiters > 0`).
+
+**Enforced by**
+All publication sites in `forkrun_ring.c` issue release stores followed by an explicit `__atomic_thread_fence(__ATOMIC_SEQ_CST)` before checking waiter counters and waking sleeping threads.
+
+**Audit Rule**
+❌ Never remove or conditionally optimize away eventfd wakeups on gate-resolving state publications.
 
 ---
 
@@ -199,9 +206,82 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 
 ---
 
-## 13. Checklist Summary
+## 14. No Sole-Path Data Movement
 
-If all sections above remain true, **forkrun is correct** — regardless of:
+**Invariant**
+Every byte-mover (`sendfile`, `copy_file_range`, `splice`, `write`) must have a fallback
+path that is exercised by the test matrix, not merely present in the code.
+
+**Enforced by**
+The orderer's emit path falls back from `sendfile` to `read`/`write` on *any* failure
+(`O_APPEND` → `EINVAL`, partial sends, environment-specific `EINVAL`). `ring_copy`'s
+cascade (`copy_file_range` → `sendfile` → `read`/`write`) is the canonical form. `FORKRUN_DISABLE_MEMPOLY`
+is the pattern for per-mover forced-fallback test hooks.
+
+**Origin**
+`sendfile` + `O_APPEND` returned `EINVAL`; the failure was classified as "downstream
+closed" → clean exit 0 → every `frun ... >> log` silently produced zero output.
+The fallback existed elsewhere in the codebase for years but was never exercised.
+
+**Audit Rule**
+❌ Any `sendfile`/`splice`/`copy_file_range` call site whose failure mode
+terminates the operation rather than degrading. A zero-copy path that cannot fail
+on *some* supported kernel/filesystem/fd-configuration does not exist. An
+unexercised fallback is a comment, not a fallback.
+
+**Companion rule — failures must be loud before they can be silent.** `EPIPE` means
+"downstream closed" (the only clean-exit condition); everything else is an internal
+fault (checkpoint + non-zero exit). Any error path that can produce a successful-
+looking exit from a failed operation is a taxonomy bug independent of the operation.
+
+---
+
+## 15. Gates Inspect Text, Never Live State
+
+**Invariant**
+A security gate must make its decision from *serialized text*, never from state
+derived from executing the text it is gating. The layer-3 resume gate previews
+content built from raw strings; function definitions cross only after the gate's
+decision. (The frame-split emission exists to make this true: variables and
+function text are separate token-bounded frames.)
+
+**Origin**
+The pre-split design eval'd functions before the gate ran, so the gate's own
+`printf -v` preview could execute the very functions it was asking the user about.
+
+**Audit Rule**
+❌ Any gate whose preview/decision commands can be shadowed by content the gate
+has already imported into scope. If the gate needs functions to make its decision,
+the design is wrong — the decision must be derivable from text.
+
+---
+
+## 16. Sanitize by Construction, Not by Clearing
+
+**Invariant**
+A hostile environment must be *constructed* (execve-time `env -i` + explicit
+values), never assumed to result from clearing or assigning. Shell-level
+assignment can be vetoed (restricted mode: `PATH` is readonly); environment
+clearing can be defeated by the target's re-seeding defaults (unset `PATH` →
+bash's compiled-in default). The construction layer is below the shell's opinion.
+
+**Origin**
+Three successive "sanitizations," each falsified by a twenty-second probe:
+`PATH=''` prefix (cleared by `exec -c`), unset `PATH` (bash re-seeds defaults),
+in-sandbox `PATH=/nonexistent` (readonly under `--restricted`). The fourth —
+`env -i` at exec time — holds because it operates where the shell cannot veto it.
+
+**Audit Rule**
+❌ Any security property that depends on a variable surviving an `exec -c`, or
+on "unset" meaning "unsearchable." Verify each sanitization mechanism empirically,
+per mechanism, with a probe — and make the adversarial tests (T1b/T1d/T1f) the
+permanent runtime tripwire.
+
+---
+
+## 17. Checklist Summary
+
+If sections §1–16 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement
@@ -209,7 +289,7 @@ If all sections above remain true, **forkrun is correct** — regardless of:
 * input arrival rate (trickle or burst)
 
 **Mental model reminder**  
-Progress is irreversible. Locality is structural. Contention was designed away. Workers always claim exactly one slot.
+Progress is irreversible. Locality is structural. Contention was designed away. Workers always claim exactly one slot. Gates read text. Data movers degrade. Environments are built, not cleared.
 
 ---
 

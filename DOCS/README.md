@@ -90,10 +90,10 @@ With the release of v3.0.0, `forkrun` has transitioned to a high-performance C-r
 
 ## 🛣 Roadmap
 
-forkrun currently guarantees correctness under the assumption that at least one worker per NUMA node remains alive until its assigned work completes — a safe assumption for local shell operations on healthy compute nodes. 
+forkrun features robust intra-node fault tolerance and preemption recovery (automatically trapping worker failures and Slurm signals to generate exactly-once checkpoints).
 
 Priorities for the development roadmap include:
-- **Resume-after-interruption** state saving to gracefully handle preempted cluster/Slurm jobs.
-- **Deeper integration** with facility workload managers.
+- **Cluster-level multi-node resume support** across distributed compute fabrics.
+- **Deeper integration** with facility workload managers for dynamic resource elasticity.
 
 *(If forkrun is saving your institution compute-hours, please consider sponsoring its development to accelerate these features!)*

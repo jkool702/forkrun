@@ -75,16 +75,14 @@ Because chunks are guaranteed to be isolated to a single physical NUMA socket vi
 
 ---
 
-## §5. Architectural Trade-offs: Exact Batch Sizing (`-L`)
+## §5. Architectural Trade-offs: Exact Batch Sizing (`-L`) (v3.5.0+)
 
-This architecture enforces one strict limitation: **`forkrun` cannot guarantee exactly *N* lines per batch in NUMA mode.**
+In versions prior to v3.5.0, `-L` demoted the pipeline to UMA to maintain exact record boundaries. In v3.5.0+, **`forkrun` provides native NUMA execution for exact-line batches (`-L`) via the Scanner-Handoff Chain.**
 
-Because the Ingress chunker carves the stream based on physical byte sizes (2 MB) rather than logical line counts, a chunk will contain an arbitrary number of lines. Guaranteeing exactly *N* lines per batch would require every chunk to magically contain an integer multiple of *N* lines. 
+Because the Ingress chunker carves the stream based on physical byte sizes (2 MB) rather than logical line counts, a chunk contains an arbitrary number of lines. Guaranteeing exactly *N* lines per batch across NUMA sockets requires serialization of the scanning phase across node scanners via cumulative line count tracking (`cum_lines`).
 
-If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), fulfilling the exact-batch contract at a chunk boundary would require the worker to pull the remaining $N - M$ lines from the next chunk (which physically resides on a different NUMA socket), violating the Born-Local structural guarantee and triggering heavy cross-socket memory traffic.
-
-**The Resolution:** 
-If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), `forkrun` automatically demotes the pipeline to the traditional UMA (Uniform Memory Access) architecture. While UMA mode still benefits from the ultra-fast C-ring and zero-copy `posix_spawnp` execution paths, it will incur the standard cross-socket memory migration tax inherent to all traditional shell parallelizers.
+**The Physics Trade-off:** 
+When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker executing that boundary batch must read the initial $N - M$ lines from the predecessor chunk across the socket boundary ($1 \dots N-1$ lines of cross-socket traffic per chunk boundary). Delimiter counting remains strictly local (zero duplicate scans), while worker execution remains 100% parallelized and pinned across all cores. Throughput during the scan phase is single-scanner bound ($\approx$ UMA scan speeds), but exactness and NUMA worker distribution are structurally preserved.
 
 
 **Run-length dependence of steal rate.** The 0.0–0.2% file-input cross-socket figure holds for meaningful run lengths (≥ a few hundred chunks). Micro-runs of ~50 chunks can show a single-steal 2.0% startup transient from initial load-balancing; this is expected and amortizes to <0.2% on longer streams.

@@ -213,19 +213,134 @@ Because chunks are guaranteed to be isolated to a single physical NUMA socket vi
 
 ---
 
-## §5. Architectural Trade-offs: Exact Batch Sizing (`-L`)
+## §5. Architectural Trade-offs: Exact Batch Sizing (`-L`) (v3.5.0+)
 
-This architecture enforces one strict limitation: **`forkrun` cannot guarantee exactly *N* lines per batch in NUMA mode.**
+In versions prior to v3.5.0, `-L` demoted the pipeline to UMA to maintain exact record boundaries. In v3.5.0+, **`forkrun` provides native NUMA execution for exact-line batches (`-L`) via the Scanner-Handoff Chain.**
 
-Because the Ingress chunker carves the stream based on physical byte sizes (2 MB) rather than logical line counts, a chunk will contain an arbitrary number of lines. Guaranteeing exactly *N* lines per batch would require every chunk to magically contain an integer multiple of *N* lines. 
+Because the Ingress chunker carves the stream based on physical byte sizes (2 MB) rather than logical line counts, a chunk contains an arbitrary number of lines. Guaranteeing exactly *N* lines per batch across NUMA sockets requires serialization of the scanning phase across node scanners via cumulative line count tracking (`cum_lines`).
 
-If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), fulfilling the exact-batch contract at a chunk boundary would require the worker to pull the remaining $N - M$ lines from the next chunk (which physically resides on a different NUMA socket), violating the Born-Local structural guarantee and triggering heavy cross-socket memory traffic.
-
-**The Resolution:** 
-If a user's workload strictly requires exactly *N* lines per batch (`-L` flag), `forkrun` automatically demotes the pipeline to the traditional UMA (Uniform Memory Access) architecture. While UMA mode still benefits from the ultra-fast C-ring and zero-copy `posix_spawnp` execution paths, it will incur the standard cross-socket memory migration tax inherent to all traditional shell parallelizers.
+**The Physics Trade-off:** 
+When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker executing that boundary batch must read the initial $N - M$ lines from the predecessor chunk across the socket boundary ($1 \dots N-1$ lines of cross-socket traffic per chunk boundary). Delimiter counting remains strictly local (zero duplicate scans), while worker execution remains 100% parallelized and pinned across all cores. Throughput during the scan phase is single-scanner bound ($\approx$ UMA scan speeds), but exactness and NUMA worker distribution are structurally preserved.
 
 
 **Run-length dependence of steal rate.** The 0.0–0.2% file-input cross-socket figure holds for meaningful run lengths (≥ a few hundred chunks). Micro-runs of ~50 chunks can show a single-steal 2.0% startup transient from initial load-balancing; this is expected and amortizes to <0.2% on longer streams.
+
+-----------------------------------------
+# CHANGELOG.md
+
+# forkrun Changelog
+
+## v3.5.0 — 2026-09-03
+
+The headline of this release is a fully-rearchitected resume subsystem: NUMA-native
+exact-line batching, a hardened multi-layer resume sandbox that has now been validated
+under adversarial attack, atomic checkpoint publication, and coordinated signal-driven
+shutdown. It also fixes a serious pre-existing bug where ordered/buffered output could
+be silently lost when appending.
+
+### Highlights
+
+- **`-L` (exact lines) is now NUMA-native.** The Scanner-Handoff Chain serializes
+  scanning across nodes via the cumulative line-count chain, preserving exact batch
+  boundaries without demoting the pipeline to UMA. A batch may straddle a NUMA chunk
+  boundary (1..L−1 lines of cross-socket read per boundary — the price of exactness).
+  Deterministic `-n` is likewise now exact on NUMA via the same chain.
+- **Resume files are now defended in depth** — see SECURITY.md for the full model:
+  ownership/permission gate → restricted, PATH-dead sandbox with function wipe and
+  split-frame emission → interactive authorization for functions/setup/custom vars.
+  Every adversarial test in the suite (hostile substitutions, function shadows, output
+  injection, frame forgery) executes against a live sandbox and is rejected.
+- **`>>` append redirect no longer silently discards output.** A pre-existing bug:
+  `sendfile()` returns EINVAL on O_APPEND output files, and the orderer classified
+  the failure as "downstream closed" — clean exit 0, zero output, no error. All
+  orderer emit paths now fall back from sendfile to read/write on any failure
+  (O_APPEND, partial sends, environment-specific EINVAL), with EPIPE properly
+  distinguished as the only clean-exit condition.
+- **Checkpoints are published atomically** (temp + rename): a crash mid-write or a
+  racing reader sees either the old complete checkpoint or the new one, never a torn
+  fragment. Failed checkpoint generation leaves the previous checkpoint untouched.
+- **External signals now coordinate shutdown.** SIGTERM/SIGUSR1 (SLURM preemption)
+  and friends route through the reactor's abort path — fd choreography, worker
+  reaping, frozen ledger — *before* the checkpoint is written, instead of exiting
+  from the signal handler mid-flight. A trapped signal can never be downgraded to a
+  silent clean exit by a concurrent SIGPIPE.
+
+### Bug Fixes
+
+- **C engine:**
+  - NUMA ingest probe-transfer data loss: when `set_mempolicy` is unavailable
+    (containers, non-NUMA kernels) with forced multi-node, the transfer-method probe
+    moved data without accounting it — files ≥ chunk size lost their tail; files
+    smaller than a chunk produced zero output. Both exited success. (A1)
+  - Fallow-death silent truncation: a killed fallow process caused every worker's
+    next ack to fail with exit 0 — no escrow, no respawn, no checkpoint, silently
+    truncated output. Ack pipe failures now fire the global alarm (reason 2), and
+    the fallow subprocess aborts the pipeline on abnormal exit. (A2)
+  - `ring_numa_ingest` double-free of `nodemask` on the OOM path. (A4.8)
+  - v2 plugin ABI: `numa_batch_id` is now globally unique on UMA as documented
+    (the slot index populates the packed key's minor field); previously every UMA
+    batch reported the same key (0:0). (D2)
+  - Orderer: `FD_ORDER_PIPE` missing during an ordered ack now fails loudly with
+    the alarm instead of hanging the pipeline. (A4.4)
+  - Non-EPIPE orderer write failures are now internal faults (checkpoint + non-zero
+    exit) rather than silent clean exits.
+- **Bash wrapper:**
+  - `-L` validation: ranges (`-L 5:10`), zero (incl. `0k`), and negatives are
+    rejected as errors instead of silently breaking the exact-lines contract.
+    `-L` combined with `-b` emits an override warning (line mode wins, stdin
+    delivery preserved). (W3)
+  - `-E` appendage hardening: the error-check flag is now explicitly initialized;
+    previously the appendage relied on unset-variable semantics that a future
+    quoting change could silently invert. (W1)
+  - `+s -b -X` no longer runs the command on empty input: the mis-generated
+    zero-argument spawn path is removed; byte data is delivered as arguments. (W5)
+  - Checkpoint filename quoting: `--checkpoint-file` with spaces/specials now
+    writes the correct file (dynamic trap-time reference instead of an embedded
+    %-quoted literal). (W4)
+  - Permission gate: the group/world-writable check used `0o022` (invalid bash
+    octal) — the soft reject silently never fired. Now `8#022`, verified.
+  - Early fatal errors (bad `-C` invocation, etc.) no longer write spurious
+    "Pipeline aborted" checkpoints.
+- **Resume sandbox:**
+  - The sandbox never executed under `--restricted` (output redirection in its
+    first line was prohibited; `source` with a slash path was prohibited). Rewritten:
+    content passed by value, builtins only, environment *constructed* via
+    `env -i` (an empty PATH is not a dead PATH — bash re-seeds defaults; the
+    environment must be built, not cleared).
+  - Function definitions cross in a separate token frame and are eval'd only after
+    the interactive authorization gate passes. The gate's own preview commands run
+    with no resume-supplied functions in scope.
+  - Resume of an already-complete stream is a clean no-op; a stale horizon
+    (beyond EOF) fails loudly.
+
+### Performance
+
+- Order-pipe backpressure: the worker→orderer ack pipe is sized to one page (4 KiB),
+  closing the hydraulic loop (slow stdout → orderer blocks → acks block → workers
+  stop claiming → scanner/ingest yield) with bounded in-flight output state.
+- A forced-path regression test (`FORKRUN_DISABLE_MEMPOLY=1`) now covers the NUMA
+  ingest fallback; per-mover fallback coverage is a standing suite category.
+
+### Known Issues
+
+- `-C` + `-s`/`-b`: stdin/stdin-chunk delivery to C plugins is not yet implemented;
+  the flags are ignored with a warning. Access batch data via `forkrun_ctx`
+  (`batch_offset`/`batch_byte_length`/`fd_in`) in the meantime; full support is
+  planned for v3.5.1. `-i`/`-I` with `-C` DO work (substitutions arrive as fixed
+  plugin arguments).
+- Interactive resume prompts wait 60 s for input when a TTY is present but
+  unattended (test runs from a terminal). This is the documented fail-closed
+  default; tests should run with detached stdin.
+- Sanitizer note (unchanged): TSan observes intra-process races only; forkrun's
+  coordination is cross-process on MAP_SHARED memory and is validated by the
+  invariant set + full matrix, not TSan.
+
+### Invariants (new in this release — see INVARIANTS.md §11, §14–16)
+
+- Gate publication & producer wakeup invariant.
+- No sole-path data movement: every zero-copy syscall has an exercised fallback.
+- Gates inspect text, never live state derived from executing that text.
+- Sanitize by construction (`env -i` + explicit values), not by clearing.
 
 -----------------------------------------
 # C_PLUGIN.md
@@ -289,7 +404,7 @@ frun -C ./plugin.so:my_plugin < massive_dataset.txt
 `forkrun` supports two context ABI versions:
 
 * **Version 1 (`forkrun_use_ctx = 1`):** Standard context struct with separate 32-bit `numa_major` and `numa_minor` fields.
-* **Version 2 (`forkrun_use_ctx = 2`, v3.5.0+):** High-precision packed context. Replaces major/minor with a 64-bit `numa_batch_id` union (`(major << 22) | minor`), preserving full 42-bit major chunk sequence numbers for billion-record runs.
+* **Version 2 (`forkrun_use_ctx = 2`, v3.5.0+):** High-precision packed context. Replaces major/minor with a 64-bit `numa_batch_id` union (`(major << 22) | minor`), preserving full 42-bit major chunk sequence numbers for billion-record runs. Globally unique on both UMA and NUMA.
 
 ```c
 #include <stdint.h>
@@ -315,15 +430,14 @@ struct forkrun_ctx {
     };
     int32_t  fd_in;             // Read-only file descriptor to the memfd
     char     delimiter;         // The record delimiter character
-    uint8_t  cfg_state[3];      // Global configuration state
+    uint8_t  cfg_state[4];      // Global config state: [0]=cfg_w, [1]=cfg_l, [2]=cfg_b, [3]=flags (SH_STDIN, SH_BMODE)
 };
 
 int my_func(int argc, char **argv, const struct forkrun_ctx *ctx) {
     if (ctx->version == 2) {
         uint64_t major = ctx->numa_batch_id >> 22;
         uint32_t minor = ctx->numa_batch_id & 0x3FFFFF;
-        printf("Worker %u on Node %u (Major %lu, Minor %u)
-", 
+        printf("Worker %u on Node %u (Major %lu, Minor %u)\n", 
                ctx->worker_id, ctx->node_id, major, minor);
     }
     return 0;
@@ -337,32 +451,35 @@ You do not actually *need* the header file. Because C only cares about memory la
 #include <stdint.h>
 #include <stdio.h>
 
-// 1. Opt-in flag: Tell forkrun we want the context!
-int forkrun_use_ctx = 1;
+// 1. Opt-in flag: 2 = v3.5.0+ packed 64-bit batch ID, 1 = legacy 32-bit fields
+int forkrun_use_ctx = 2;
 
-// 2. The Context Struct (Matches forkrun v3.3.0+ layout)
+// 2. The Context Struct (Matches forkrun v3.5.0+ layout, 64 bytes aligned)
 struct forkrun_ctx {
     uint64_t batch_index;       // Global batch sequence number
     uint64_t batch_offset;      // Byte offset in the shared memfd
     uint64_t batch_byte_length; // Length of the current batch in bytes
-    uint32_t version;           // Struct version (currently 1)
+    uint32_t version;           // Struct version (1 or 2)
     uint32_t worker_id;         // Internal Worker ID (0 to N)
     uint32_t node_id;           // NUMA node ID
     uint32_t num_kills;         // Retry count (if batch previously failed)
-    uint32_t numa_major;        // NUMA major sequence (0 if UMA)
-    uint32_t numa_minor;        // NUMA minor sequence (0 if UMA)
+    union {
+        uint64_t numa_batch_id; // Version 2: packed (42-bit major << 22 | 22-bit minor)
+        struct {
+            uint32_t numa_major; // Version 1: truncated 32-bit major
+            uint32_t numa_minor; // Version 1: 32-bit minor
+        };
+    };
     int32_t  fd_in;             // Read-only file descriptor to the memfd
     char     delimiter;         // The record delimiter character
-    uint8_t  cfg_state[3];      // Global configuration state (unpacked from 24-bit cfg_state)
+    uint8_t  cfg_state[4];      // Global configuration state
 };
 
 // 3. Process the data
 int my_func(int argc, char **argv, const struct forkrun_ctx *ctx) {
-    
-    // Safely check ABI version before accessing newer fields
-    if (ctx->version >= 1) {
-        printf("Worker %u mapping %lu bytes at offset %lu\n", 
-               ctx->worker_id, ctx->batch_byte_length, ctx->batch_offset);
+    if (ctx->version >= 2) {
+        printf("Worker %u mapping %lu bytes at offset %lu (Batch ID: %lu)\n", 
+               ctx->worker_id, ctx->batch_byte_length, ctx->batch_offset, ctx->numa_batch_id);
     }
     
     return 0;
@@ -379,7 +496,7 @@ If you are a systems hacker, you might wonder how `forkrun` handles dynamically 
 * If it finds the flag and it equals `1`, `forkrun` executes the callback using the 3-argument signature, passing the context pointer. 
 * If it does not find the flag, it falls back to the standard 2-argument signature.
 
-This guarantees total POSIX compliance and avoids Undefined Behavior, while giving power-users zero-overhead access to `forkrun`'s internal ring metadata. Furthermore, the `cfg_state[3]` array exposes the engine's internal configuration state while maintaining strictly aligned 8-byte memory boundaries regardless of underlying hardware architecture, and the `version` tag allows us to expand the context in future v3.x releases without breaking older plugins.
+This guarantees total POSIX compliance and avoids Undefined Behavior, while giving power-users zero-overhead access to `forkrun`'s internal ring metadata. Furthermore, the `cfg_state[4]` array exposes the engine's internal configuration state while maintaining strictly aligned 8-byte memory boundaries regardless of underlying hardware architecture, and the `version` tag allows us to expand the context in future v3.x releases without breaking older plugins.
 
 -----------------------------------------
 # DESIGN.md
@@ -661,33 +778,19 @@ The reorder path is the only place that may block.
 
 ## 11. Cross-File Contracts (Seams Most at Risk from Refactor)
 
-These invariants span C and Bash wrapper; both sides must maintain them:
+These invariants span C and the Bash wrapper; both sides must maintain them:
 
 1. **(H1) Poison Flag Lifecycle:** C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` *only* when `num_kills > 0`. The Bash wrapper must reset these after every `ring_ack`.
 2. **(M1) Zero-Length Sentinel Batches:** Zero-length sentinel batches (EOF markers, `FLAG_MAJOR_EOF` with 0 bytes) must be **acked but not executed** (`[[ "$REPLY" != "0" ]]`).
-3. **(FRUN_CLAIM_BYTES) Escrow Gating:** The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES > 0` to prevent duplicate deposits.
-4. **(Ownership Truth Table) `actual_end` Publisher:**
+3. **(FRUN_CLAIM_BYTES) Escrow Gating:** The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES > 0` (or `worker_last_cnt > 0`) to prevent duplicate deposits.
+4. **(H2) `actual_end` Publisher Truth Table:**
    - Normal mode: Indexer searches and publishes.
    - Byte mode (`-b`): Indexer skips search, publishes raw chunk end.
    - Exact lines (`-L`): Indexer skips both; Scanner owns and publishes in the handoff chain.
-5. **(Producer Wakeup Invariant):** Scanners and indexers must unconditionally issue `sys_write(evfd_meta)` upon publishing gate-resolving state (`actual_end`, `cum_lines`) whenever waiters are present.
+5. **(H3) Closed Hydraulic Loop:** The worker→orderer ack pipe is sized to 4 KiB (1 page) to enforce direct output backpressure through the ring buffer.
+6. **(Producer Wakeup Invariant):** Scanners and indexers must unconditionally issue `sys_write(evfd_meta)` upon publishing gate-resolving state (`actual_end`, `cum_lines`) whenever waiters are present.
 
 ## 12. Design Summary & Mental Model
-These invariants span C and Bash wrapper; both sides must maintain them:
-
-**(a) H1 — `RING_NUM_KILLS`/`RING_POISONED`/`RING_BATCH_IDX` lifecycle:**
-C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` *only* when `num_kills > 0` (poison/escrow path). The Bash wrapper *must* reset/clear these after every `ring_ack` (it does via `RING_NUM_KILLS=0; RING_POISONED=0` etc.). If C ever writes them unconditionally, or wrapper fails to reset, a later batch could inherit a stale poison flag.
-
-**(b) M1 — zero-length sentinel batches:**
-Zero-length sentinel batches (EOF markers, `FLAG_MAJOR_EOF` with 0 bytes) must be **acked but not executed**. Wrapper guards with `[[ "$REPLY" != "0" ]]` (or byte-length check) before invoking user command. Executing them would invoke the user command with empty input, breaking exactly-once accounting.
-
-**(c) `FRUN_CLAIM_BYTES` gating of trap's escrow deposit:**
-The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES` (or claim-active flag). Only when a batch has been claimed and not yet acked should the trap deposit to escrow. This prevents double-deposit on successful ack or on pre-claim failures.
-
-Encode these checks in both `forkrun_ring.c` and `frun.bash` comments; any change to claim/ack path must preserve them.
-
-
-
 Key properties of the architecture:
 
 * Lock-free fast path
@@ -1019,7 +1122,12 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 - `-j`, `-P`, `--workers <W>` : Set the number of concurrent workers. Supports `<init>:<max>` (e.g., `-j 4:32`). Default max is the number of logical cores.
 - `-l`, `--lines <L>`         : Set the batch size (lines per worker). Supports `<init>:<max>` (e.g., `-l 10:10000`). Default max is 4096.
-- `-L`, `--exact-lines <N>`   : Force exactly `N` lines per batch. In NUMA mode this automatically demotes the pipeline to UMA (uniform memory access) to preserve the exact-count contract — cross-socket traffic is then expected but correctness is maintained. (This UMA demotion is the implemented behavior; older wording described it as merely disabling stealing.)
+- `-L`, `--exact-lines <N>`   : Force exactly `N` lines per batch. NUMA-native since v3.5.0 (scanning is serialized across nodes via the cumulative line-count chain, and a batch may straddle a NUMA chunk boundary — prefer `-l` unless exact counts are required). Rejects ranges (`M:N`), 0, or negative values. If combined with `-b`, `-L` takes precedence and emits an override warning (lines mode wins, stdin delivery preserved).
+
+| Flag | Batch Semantics |
+|---|---|
+| `-l M:N` | **Adaptive range:** batches may be smaller when forced by EOF, limits, or trickle inputs. |
+| `-L N` | **Exact:** every non-sentinel batch contains exactly `N` records. |
 - `-t, --timeout <us>`: maximum time (µs) a partial batch may sit in the scanner before early flush. This bounds the wait feeding the stall/starve early-flush invariant (DESIGN.md §7, Phase 2b): when input is trickling *and* workers are idle, the scanner flushes the partial batch at this deadline instead of waiting for a full one. `--greedy` is equivalent to `-t 0`.
 - `--greedy`                  : Aggressive low-latency mode, equivalent to `-t 0`. Flushes partial batches immediately when workers are idle, minimizing latency at the cost of smaller batches during trickle input. (Alias for `--timeout 0`.)
 
@@ -1030,7 +1138,7 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 ### LIMITS & TOPOLOGY
 
-- `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed.
+- `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed. (In byte mode `-b`, `-n` specifies the exact byte limit).
 - `--nodes`, `--numa <map>`   : Control NUMA topology mapping. Nodes that do not exist will be skipped (excluding for `@N`).
   - `auto` (default): Autodetect all physical online nodes.
   - `@N` : Oversubscribe / force `N` logical nodes.
@@ -1212,7 +1320,7 @@ GNU Parallel's per-item Perl initialization overhead and NUMA-oblivious scheduli
 
 ## Current Limitations & Roadmap for Resilience
 
-While `forkrun` now features robust intra-node fault tolerance (automatically recovering from individual worker crashes without data loss), transitioning it into a hardened, facility-wide utility requires advancing its cluster-level and system-state capabilities. Priorities for the development roadmap include:
+While `forkrun` features robust intra-node fault tolerance (automatically recovering from individual worker crashes and preemptions without data loss), transitioning it into a hardened, facility-wide utility requires advancing its multi-node cluster capabilities. Priorities for the development roadmap include:
 
 - **Enhanced checkpoint portability** and cluster-level resume support (e.g., seamless Slurm integration for preempted multi-node jobs).
 - **Deeper integration** with facility workload managers to dynamically expand or contract resource usage.
@@ -1388,9 +1496,16 @@ Per-batch logical index + reorder buffer + emit only contiguous prefix.
 
 ---
 
-## 11. (reserved)
+## 11. Gate Publication & Producer Wakeup Invariant
 
-This section number is intentionally reserved to preserve numbering stability after v3.4 refactors (original §11 merged into §5 during single-slot simplification). Keeping the number reserved avoids breaking external references in papers and facility docs.
+**Invariant**
+Any process publishing gate-resolving state (`actual_end`, `cum_lines`, `write_idx`) must execute a `SEQ_CST` memory barrier and issue `sys_write` to the corresponding metadata/data eventfd whenever waiters are present (`meta_waiters > 0` or `active_waiters > 0`).
+
+**Enforced by**
+All publication sites in `forkrun_ring.c` issue release stores followed by an explicit `__atomic_thread_fence(__ATOMIC_SEQ_CST)` before checking waiter counters and waking sleeping threads.
+
+**Audit Rule**
+❌ Never remove or conditionally optimize away eventfd wakeups on gate-resolving state publications.
 
 ---
 
@@ -1434,9 +1549,82 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 
 ---
 
-## 13. Checklist Summary
+## 14. No Sole-Path Data Movement
 
-If all sections above remain true, **forkrun is correct** — regardless of:
+**Invariant**
+Every byte-mover (`sendfile`, `copy_file_range`, `splice`, `write`) must have a fallback
+path that is exercised by the test matrix, not merely present in the code.
+
+**Enforced by**
+The orderer's emit path falls back from `sendfile` to `read`/`write` on *any* failure
+(`O_APPEND` → `EINVAL`, partial sends, environment-specific `EINVAL`). `ring_copy`'s
+cascade (`copy_file_range` → `sendfile` → `read`/`write`) is the canonical form. `FORKRUN_DISABLE_MEMPOLY`
+is the pattern for per-mover forced-fallback test hooks.
+
+**Origin**
+`sendfile` + `O_APPEND` returned `EINVAL`; the failure was classified as "downstream
+closed" → clean exit 0 → every `frun ... >> log` silently produced zero output.
+The fallback existed elsewhere in the codebase for years but was never exercised.
+
+**Audit Rule**
+❌ Any `sendfile`/`splice`/`copy_file_range` call site whose failure mode
+terminates the operation rather than degrading. A zero-copy path that cannot fail
+on *some* supported kernel/filesystem/fd-configuration does not exist. An
+unexercised fallback is a comment, not a fallback.
+
+**Companion rule — failures must be loud before they can be silent.** `EPIPE` means
+"downstream closed" (the only clean-exit condition); everything else is an internal
+fault (checkpoint + non-zero exit). Any error path that can produce a successful-
+looking exit from a failed operation is a taxonomy bug independent of the operation.
+
+---
+
+## 15. Gates Inspect Text, Never Live State
+
+**Invariant**
+A security gate must make its decision from *serialized text*, never from state
+derived from executing the text it is gating. The layer-3 resume gate previews
+content built from raw strings; function definitions cross only after the gate's
+decision. (The frame-split emission exists to make this true: variables and
+function text are separate token-bounded frames.)
+
+**Origin**
+The pre-split design eval'd functions before the gate ran, so the gate's own
+`printf -v` preview could execute the very functions it was asking the user about.
+
+**Audit Rule**
+❌ Any gate whose preview/decision commands can be shadowed by content the gate
+has already imported into scope. If the gate needs functions to make its decision,
+the design is wrong — the decision must be derivable from text.
+
+---
+
+## 16. Sanitize by Construction, Not by Clearing
+
+**Invariant**
+A hostile environment must be *constructed* (execve-time `env -i` + explicit
+values), never assumed to result from clearing or assigning. Shell-level
+assignment can be vetoed (restricted mode: `PATH` is readonly); environment
+clearing can be defeated by the target's re-seeding defaults (unset `PATH` →
+bash's compiled-in default). The construction layer is below the shell's opinion.
+
+**Origin**
+Three successive "sanitizations," each falsified by a twenty-second probe:
+`PATH=''` prefix (cleared by `exec -c`), unset `PATH` (bash re-seeds defaults),
+in-sandbox `PATH=/nonexistent` (readonly under `--restricted`). The fourth —
+`env -i` at exec time — holds because it operates where the shell cannot veto it.
+
+**Audit Rule**
+❌ Any security property that depends on a variable surviving an `exec -c`, or
+on "unset" meaning "unsearchable." Verify each sanitization mechanism empirically,
+per mechanism, with a probe — and make the adversarial tests (T1b/T1d/T1f) the
+permanent runtime tripwire.
+
+---
+
+## 17. Checklist Summary
+
+If sections §1–16 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement
@@ -1444,7 +1632,7 @@ If all sections above remain true, **forkrun is correct** — regardless of:
 * input arrival rate (trickle or burst)
 
 **Mental model reminder**  
-Progress is irreversible. Locality is structural. Contention was designed away. Workers always claim exactly one slot.
+Progress is irreversible. Locality is structural. Contention was designed away. Workers always claim exactly one slot. Gates read text. Data movers degrade. Environments are built, not cleared.
 
 ---
 
@@ -1568,6 +1756,8 @@ We maintain two dedicated branches specifically configured for sanitizer testing
    ```
 
 **What the sanitizers do and do not validate:** TSan observes races only within a single process. forkrun's core coordination is *cross-process* (forked scanner/worker/orderer processes on a shared `MAP_ANONYMOUS` mapping); TSan cannot instrument cross-process shared-memory accesses, as each process has private shadow memory. The matrix validates intra-process threading and general memory hygiene; the cross-process ordering protocol is guaranteed by INVARIANTS.md and exercised by the full stress matrix. ASan/UBSan coverage is process-local and applies fully.
+
+**Matrix Policy Rule:** Sanitizer runs execute once, on frozen code; any post-run code change invalidates the full matrix and requires a complete re-run.
 
 If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under both standard and sanitized conditions, the build is considered stable and ready for release.
 
@@ -1863,11 +2053,11 @@ With the release of v3.0.0, `forkrun` has transitioned to a high-performance C-r
 
 ## 🛣 Roadmap
 
-forkrun currently guarantees correctness under the assumption that at least one worker per NUMA node remains alive until its assigned work completes — a safe assumption for local shell operations on healthy compute nodes. 
+forkrun features robust intra-node fault tolerance and preemption recovery (automatically trapping worker failures and Slurm signals to generate exactly-once checkpoints).
 
 Priorities for the development roadmap include:
-- **Resume-after-interruption** state saving to gracefully handle preempted cluster/Slurm jobs.
-- **Deeper integration** with facility workload managers.
+- **Cluster-level multi-node resume support** across distributed compute fabrics.
+- **Deeper integration** with facility workload managers for dynamic resource elasticity.
 
 *(If forkrun is saving your institution compute-hours, please consider sponsoring its development to accelerate these features!)*
 
@@ -1973,6 +2163,86 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
 * **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY (NOT RECOMMENDED).**
   Workers write directly to `stdout`, so `forkrun` cannot recall bytes on a crash (resuming produces duplicates). Furthermore, realtime mode risks severely scrambled output (byte interleaving) and kernel lock contention. Use `--buffered` or `-k` instead.
 
+---
+
+## §6. Security Sandbox & Provenance Model
+
+Because resume files dictate commands and environment restoration, `forkrun` enforces a strict 3-layer security model to prevent code execution vulnerabilities when resuming in shared cluster scratch directories:
+
+1. **Layer 1 (Provenance & Permission Gate):** UID ownership and permission check (`8#022`).
+2. **Layer 2 (Restricted Subshell Sandbox):** `env -i PATH='' bash --restricted` execution, function wiping, and round-trip variable serialization verification.
+3. **Layer 3 (Authorization Decision Gate):** Double-token frame split; custom setup commands and functions are evaluated only after interactive user authorization.
+
+See [`SECURITY.md`](SECURITY.md) for the complete security specification.
+
+
+-----------------------------------------
+# SECURITY.md
+
+# forkrun Security Model
+
+## Threat Model
+
+A resume file (`.forkrun_resume`) is a file that tells forkrun *what to execute*.
+By design, it is written by forkrun itself — but files can be shared, spooled,
+left in scratch directories, or tampered with between crash and resume. forkrun
+treats the resume file as **untrusted input that must prove itself** before any
+of its content executes.
+
+## The Three Layers
+
+### Layer 1 — Filesystem ownership (primary trust boundary)
+
+Only the file's owner may dictate what an auto-resume executes. Checked before
+the sandbox runs:
+
+- Foreign-owned file → hard reject; interactive preview + confirmation if a TTY
+  is available, fail closed otherwise.
+- Own file with group/world-writable bits → soft reject: fix with `chmod go-w`,
+  confirm interactively, or `FORKRUN_TRUST_RESUME=1`.
+- Un-stat-able file (broken symlink, race) → fail closed.
+
+### Layer 2 — The restricted sandbox (secondary boundary)
+
+Full-auto resume (`frun --resume FILE` with no command re-supplied) reconstructs
+the execution environment inside a `bash --restricted` sandbox with an
+environment that is **constructed, not cleared** (`env -i PATH='' ...`):
+
+- External binaries cannot resolve (PATH is set-empty at execve time; note: an
+  *unset* PATH would trigger bash's compiled-in default — this is why the
+  environment is built explicitly).
+- Output redirection is prohibited (restricted mode) — no file writes.
+- `source`/`.` with path arguments is prohibited.
+- All shell functions are **wiped** after the file's definitions have been
+  captured (as verified text) and before any variable rendering or emission.
+- Variable state is re-rendered via `declare -p` and **round-trip verified**:
+  serialization that does not survive eval→re-render→compare is rejected rather
+  than imported (this rejects e.g. setups embedding command substitution).
+- Emission is bounded by unguessable per-run tokens; the parent rejects output
+  not framed by both tokens.
+
+### Layer 3 — Interactive authorization (decision point)
+
+Variables cross immediately. **Function definitions and setup commands cross in
+a separate frame and are eval'd only after this gate**: the user must confirm
+(y) interactively, or the environment must carry `FORKRUN_TRUST_RESUME=1`.
+Headless + untrusted content = fail closed. The gate's own preview commands run
+before any resume-supplied function exists in scope.
+
+## Documented residuals (accepted for v3.5.0)
+
+1. **Same-UID hostile content can shadow the interactive `read` prompt** (the
+   layer-3 prompt itself is a builtin that hostile functions could shadow, if the
+   hostile file already passed the sandbox — which requires same-UID write access
+   to a resume file you own). Boundary of the threat model; fix candidate 3.5.1
+   (prompt in a function-free subshell).
+2. **Capture-time `builtin` shadowing** could forge the verified function text;
+   the forged text still lands behind the layer-3 gate, so no additional
+   privilege is gained.
+3. **"Fallow may precede checkpoint" is safe only while resume semantics remain
+   regenerate-from-source.** The input memfd may have holes beyond the checkpoint
+   horizon; resume re-ingests the original stream, so this is invisible. Any
+   future feature that reuses a crashed run's memfd must re-derive this proof.
 
 -----------------------------------------
 # SHAPES.md
@@ -2072,6 +2342,13 @@ For each shape: the invariant, the canonical site, and what breaks without it.
 | normal | yes | yes (delimiter-aligned) | indexer |
 | byte | **no** | **yes (raw chunk end)** | indexer |
 | `-L` | no | no | **scanner** (handoff chain) |
+
+### Cross-File Contracts Summary
+
+- **(H1) Poison Flag Lifecycle:** C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` only when `num_kills > 0`; wrapper clears them after every ack.
+- **(M1) Zero-Length Sentinel Batches:** Zero-length sentinel batches must be acked but never executed (`[[ "$REPLY" != "0" ]]`).
+- **(H2) `actual_end` Ownership:** Enforces the truth table above across indexers and scanners.
+- **(H3) Closed Hydraulic Backpressure:** Sizing the worker→orderer ack pipe to 4 KiB propagates consumer backpressure through the ring buffer.
 
 **What breaks without it:** the byte-mode hang — a refactor that moved publication inside the search's conditional, so byte mode (skip-search-keep-publish) and `-L` (skip-both) were collapsed into one branch. Three cases became two; the third case's consumers deadlocked. The general lesson: **when a mechanism serves multiple owners, the ownership is only as durable as the truth table that declares it.** Undeclared reuse is the gap where this bug class lives.
 

@@ -275,33 +275,19 @@ The reorder path is the only place that may block.
 
 ## 11. Cross-File Contracts (Seams Most at Risk from Refactor)
 
-These invariants span C and Bash wrapper; both sides must maintain them:
+These invariants span C and the Bash wrapper; both sides must maintain them:
 
 1. **(H1) Poison Flag Lifecycle:** C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` *only* when `num_kills > 0`. The Bash wrapper must reset these after every `ring_ack`.
 2. **(M1) Zero-Length Sentinel Batches:** Zero-length sentinel batches (EOF markers, `FLAG_MAJOR_EOF` with 0 bytes) must be **acked but not executed** (`[[ "$REPLY" != "0" ]]`).
-3. **(FRUN_CLAIM_BYTES) Escrow Gating:** The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES > 0` to prevent duplicate deposits.
-4. **(Ownership Truth Table) `actual_end` Publisher:**
+3. **(FRUN_CLAIM_BYTES) Escrow Gating:** The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES > 0` (or `worker_last_cnt > 0`) to prevent duplicate deposits.
+4. **(H2) `actual_end` Publisher Truth Table:**
    - Normal mode: Indexer searches and publishes.
    - Byte mode (`-b`): Indexer skips search, publishes raw chunk end.
    - Exact lines (`-L`): Indexer skips both; Scanner owns and publishes in the handoff chain.
-5. **(Producer Wakeup Invariant):** Scanners and indexers must unconditionally issue `sys_write(evfd_meta)` upon publishing gate-resolving state (`actual_end`, `cum_lines`) whenever waiters are present.
+5. **(H3) Closed Hydraulic Loop:** The worker→orderer ack pipe is sized to 4 KiB (1 page) to enforce direct output backpressure through the ring buffer.
+6. **(Producer Wakeup Invariant):** Scanners and indexers must unconditionally issue `sys_write(evfd_meta)` upon publishing gate-resolving state (`actual_end`, `cum_lines`) whenever waiters are present.
 
 ## 12. Design Summary & Mental Model
-These invariants span C and Bash wrapper; both sides must maintain them:
-
-**(a) H1 — `RING_NUM_KILLS`/`RING_POISONED`/`RING_BATCH_IDX` lifecycle:**
-C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` *only* when `num_kills > 0` (poison/escrow path). The Bash wrapper *must* reset/clear these after every `ring_ack` (it does via `RING_NUM_KILLS=0; RING_POISONED=0` etc.). If C ever writes them unconditionally, or wrapper fails to reset, a later batch could inherit a stale poison flag.
-
-**(b) M1 — zero-length sentinel batches:**
-Zero-length sentinel batches (EOF markers, `FLAG_MAJOR_EOF` with 0 bytes) must be **acked but not executed**. Wrapper guards with `[[ "$REPLY" != "0" ]]` (or byte-length check) before invoking user command. Executing them would invoke the user command with empty input, breaking exactly-once accounting.
-
-**(c) `FRUN_CLAIM_BYTES` gating of trap's escrow deposit:**
-The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES` (or claim-active flag). Only when a batch has been claimed and not yet acked should the trap deposit to escrow. This prevents double-deposit on successful ack or on pre-claim failures.
-
-Encode these checks in both `forkrun_ring.c` and `frun.bash` comments; any change to claim/ack path must preserve them.
-
-
-
 Key properties of the architecture:
 
 * Lock-free fast path

@@ -106,7 +106,7 @@ GNU Parallel's per-item Perl initialization overhead and NUMA-oblivious scheduli
 
 ## Current Limitations & Roadmap for Resilience
 
-While `forkrun` now features robust intra-node fault tolerance (automatically recovering from individual worker crashes without data loss), transitioning it into a hardened, facility-wide utility requires advancing its cluster-level and system-state capabilities. Priorities for the development roadmap include:
+While `forkrun` features robust intra-node fault tolerance (automatically recovering from individual worker crashes and preemptions without data loss), transitioning it into a hardened, facility-wide utility requires advancing its multi-node cluster capabilities. Priorities for the development roadmap include:
 
 - **Enhanced checkpoint portability** and cluster-level resume support (e.g., seamless Slurm integration for preempted multi-node jobs).
 - **Deeper integration** with facility workload managers to dynamically expand or contract resource usage.
