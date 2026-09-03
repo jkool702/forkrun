@@ -126,5 +126,98 @@ else
 fi
 
 echo "------------------------------------------------------"
+echo "TEST 4: ABI v2 Packed Key Progression"
+cat <<'EOF' > test_abi_v2.c
+#include <stdint.h>
+#include <stdio.h>
+
+int forkrun_use_ctx = 2;
+
+struct forkrun_ctx {
+    uint64_t batch_index;
+    uint64_t batch_offset;
+    uint64_t batch_byte_length;
+    uint32_t version;
+    uint32_t worker_id;
+    uint32_t node_id;
+    uint32_t num_kills;
+    union {
+        uint64_t numa_batch_id;
+        struct {
+            uint32_t numa_major;
+            uint32_t numa_minor;
+        };
+    };
+    int32_t  fd_in;
+    char     delimiter;
+    uint8_t  cfg_state[4];
+};
+
+int test_abi_v2(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    if (ctx->version != 2) return 1;
+    uint64_t major = ctx->numa_batch_id >> 22;
+    uint32_t minor = (uint32_t)(ctx->numa_batch_id & 0x3FFFFF);
+    printf("%lu:%u\n", (unsigned long)major, minor);
+    return 0;
+}
+EOF
+gcc -O3 -shared -fPIC test_abi_v2.c -o test_abi_v2.so
+
+seq 50000 | frun --nodes=@2 -k -C ./test_abi_v2.so:test_abi_v2 > abi_v2_out.txt
+
+awk -F: '
+BEGIN { last_maj = 0; last_min = -1; err = 0; }
+{
+    maj = $1 + 0; min = $2 + 0;
+    if (maj < last_maj || (maj == last_maj && min <= last_min)) {
+        print "ERROR: Non-increasing sequence at line " NR ": " $0 " (last: " last_maj ":" last_min ")";
+        err = 1;
+        exit 1;
+    }
+    last_maj = maj; last_min = min;
+}
+END { if (!err) exit 0; else exit 1; }
+' abi_v2_out.txt
+
+if (( $? == 0 )); then
+    echo "✓ Passed: ABI v2 packed sequence strictly monotonic across NUMA chunks"
+else
+    echo "✗ Failed: Non-monotonic ABI v2 key progression detected"
+    exit 1
+fi
+
+# --- TEST 5: C Plugin Fixed Command-Line Arguments (D1) ---
+cat <<'EOF' > test_fixed_args.c
+#include <stdio.h>
+#include <string.h>
+
+int test_fixed(int argc, char **argv) {
+    printf("A0=%s argc=%d\n", argv[0], argc);
+    return 0;
+}
+EOF
+gcc -O3 -shared -fPIC test_fixed_args.c -o test_fixed_args.so
+
+echo "------------------------------------------------------"
+echo "TEST 5: C Plugin Fixed Arguments Passthrough (D1)"
+
+out_fixed=$(seq 10 | frun -l 5 -k -C ./test_fixed_args.so:test_fixed --mode fast)
+if grep -q "A0=--mode argc=7" <<< "$out_fixed"; then
+    echo "✓ Passed: Fixed args correctly prepended to plugin argv"
+else
+    echo "✗ Failed: Fixed args mismatch: $out_fixed"
+    exit 1
+fi
+
+out_nofixed=$(seq 10 | frun -l 5 -k -C ./test_fixed_args.so:test_fixed)
+if grep -q "A0=1 argc=5" <<< "$out_nofixed"; then
+    echo "✓ Passed: No-args invocation contains zero phantom arguments"
+else
+    echo "✗ Failed: No-args phantom argument detected: $out_nofixed"
+    exit 1
+fi
+
+echo "------------------------------------------------------"
 echo "=== All C Plugin Rigorous Tests Completed Successfully ==="
-rm -f out_*.txt input_*.txt
+rm -f out_*.txt input_*.txt abi_v2_out.txt
+
