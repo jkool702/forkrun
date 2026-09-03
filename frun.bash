@@ -1811,6 +1811,12 @@ W_NODE[$3]=$2
                     unset 'fd_scan_death_r[$sID]' 'SCANNER_P[$sID]'
                     ;;
                 EOF)
+                    if [[ "$fd_spawn_arg" == "-1" ]]; then
+                        # Spawn pipe already EOF'd and another watched fd is
+                        # persistently signaling (trap-ack HUP) — nothing
+                        # left to wait for. Exit the reactor.
+                        break
+                    fi
                     fd_spawn_arg="-1"
                     ;;
             esac
