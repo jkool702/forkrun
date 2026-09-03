@@ -2718,6 +2718,19 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       limit_reached_exit = true; \
       goto ingest_done; \
     } \
+    /* NEW: -n cutoff escape — the limit_cutoff_major is globally set,
+       monotonic, and published-before-handoff (v3.5.0 ordering rule).
+       Once set, the scanners past the cutoff run their skip path and
+       finish WITHOUT consuming further input; ingest waiting for them
+       while still feeding chunks creates a feed/finish standoff when
+       the last pre-cutoff scanner's skip chain hasn't drained ingest's
+       published tail. If ingest has already published AT or PAST the
+       cutoff major, no future chunk can matter: exit now. */ \
+    uint64_t _co = atomic_load_acquire(&g_state->limit_cutoff_major); \
+    if (_co > 0 && current_major >= _co) { \
+      limit_reached_exit = true; \
+      goto ingest_done; \
+    } \
   } \
 } while(0)
 
