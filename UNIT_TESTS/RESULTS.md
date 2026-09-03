@@ -1,4 +1,4 @@
-=== forkrun v3.4.4 C Plugin Test Suite ===
+=== forkrun v3.5.0 C Plugin Test Suite ===
 UNIT_TESTS_DIR : /mnt/ramdisk/forkrun/UNIT_TESTS
 FRUN_SCRIPT    : /mnt/ramdisk/forkrun/UNIT_TESTS/frun.bash
 Sourcing frun.bash...
@@ -39,7 +39,7 @@ Cmd : frun -k -C ./test_basic.so:test_basic < input_1M.txt
 
 === All C Plugin Tests Completed Successfully ===
 
-=== forkrun v3.4.4 C Plugin Rigorous Test Suite ===
+=== forkrun v3.5.0 C Plugin Rigorous Test Suite ===
 Compiling Native Plugins...
 Generating Deterministic Test Inputs...
 ------------------------------------------------------
@@ -51,6 +51,27 @@ TEST 2: Context Math & Byte Accountability
 ------------------------------------------------------
 TEST 3: Fault Injection & Retry Semantics (-E)
 ✓ Passed: Poisoned batch successfully recovered and ordered exactly-once
+------------------------------------------------------
+=== All C Plugin Rigorous Tests Completed Successfully ===
+=== forkrun v3.5.0 C Plugin Rigorous Test Suite ===
+Compiling Native Plugins...
+Generating Deterministic Test Inputs...
+------------------------------------------------------
+TEST 1: Ordered Data Integrity (-k + Basic Echo)
+✓ Passed: Output perfectly matches input (Zero Data Loss)
+------------------------------------------------------
+TEST 2: Context Math & Byte Accountability
+✓ Passed: Context batch_byte_length accurately tracks all 18638895 bytes
+------------------------------------------------------
+TEST 3: Fault Injection & Retry Semantics (-E)
+✓ Passed: Poisoned batch successfully recovered and ordered exactly-once
+------------------------------------------------------
+TEST 4: ABI v2 Packed Key Progression
+✓ Passed: ABI v2 packed sequence strictly monotonic across NUMA chunks
+------------------------------------------------------
+TEST 5: C Plugin Fixed Arguments Passthrough (D1)
+✓ Passed: Fixed args correctly prepended to plugin argv
+✓ Passed: No-args invocation contains zero phantom arguments
 ------------------------------------------------------
 === All C Plugin Rigorous Tests Completed Successfully ===
 
@@ -113,7 +134,7 @@ TEST 3: Fault Injection & Retry Semantics (-E)
   [0;32m✓[0m Auto NUMA (--nodes=auto)
   [0;32m✓[0m Explicit nodes (--nodes=0)
   [0;32m✓[0m Multi-node (--nodes=2)
-  [0;32m✓[0m Exact lines with NUMA (downgrade warning)
+  [0;32m✓[0m Exact lines with NUMA
 
 [1;34m[1m▶ Special Flags[0m
 [1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
@@ -214,14 +235,16 @@ TEST 3: Fault Injection & Retry Semantics (-E)
   [0;32m✓[0m Byte mode: UTF-8 character integrity (10 bytes for 5 Greek chars)
   [0;32m✓[0m Operates correctly under moderate FD limits (ulimit -n 256)
   [0;32m✓[0m Timeout flush: 50ms timeout delivers trickle input
+  [0;32m✓[0m NUMA-native -L 4 assigns work across multiple nodes
+  [0;32m✓[0m NUMA-native -L 4 -n 8 produces exact record prefix
 
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 [1;36m[1m  FORKRUN TEST SUITE[0m
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 [1mTEST SUMMARY[0m
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total:   89
-Passed:  89 ([0;32m100.0%[0m)
+Total:   91
+Passed:  91 ([0;32m100.0%[0m)
 Failed:   0 ([0;31m0.0%[0m)
 Skipped:   0 ([1;33m0.0%[0m)
 
@@ -319,6 +342,7 @@ Skipped:   0 ([1;33m0.0%[0m)
   [0;32m✓[0m -L 4 (exact): verify all batch sizes are 4 (with 8 lines)
   [0;32m✓[0m -l 3 -k: first batch contains correct args in order
   [0;32m✓[0m -l 3 -s -k: batch content passed as stdin correctly
+  [0;32m✓[0m F7: -L 7 carry math across 2 nodes
 
 [1;34m[1m▶ Section G: Sequential Invocations: Ring Reuse[0m
 [1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
@@ -429,6 +453,7 @@ Verifying run_test_sorted catches duplicate lines...
   [0;32m✓[0m L17c: Scanner failure with -k: pipeline terminates (no hang)
   [0;32m✓[0m L17d: Scanner failure mid-processing: no corrupted output
   [0;32m✓[0m L17e: Scanner failure in -s mode: no deadlock
+  [0;32m✓[0m LA2: Fallow death triggers emergency abort
 
 [1;34m[1m▶ Section M: Checkpoint & Resume[0m
 [1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
@@ -448,6 +473,25 @@ Verifying run_test_sorted catches duplicate lines...
   [0;32m✓[0m M14: No duplicates after resume (exactly-once)
   [0;32m✓[0m M15: Resume with -i insert mode
   [0;32m✓[0m M16: Checkpoint byte count produces clean truncation
+  [0;32m✓[0m M17: 3-generation resume maintains cumulative ledger
+  [0;32m✓[0m M18: Clean no-op resume when horizon == EOF
+  [0;32m✓[0m M19: Stale horizon > EOF triggers loud fatal sync failure
+forkrun [WARN]: Worker 6 (node 0) exited with status 137. Waiting up to 3s for EXIT trap confirmation.
+forkrun [FATAL]: Worker 6 exited non-zero and EXIT trap did not confirm recovery within 3s grace period. Aborting.
+forkrun [FATAL]: Pipeline aborted. Generating checkpoint...
+forkrun: To resume safely, truncate your output file to exactly 1888 bytes,
+         then re-run your exact command with: --resume .forkrun_resume
+  [0;32m✓[0m M20: Full-auto resume extracts and re-executes command exactly-once
+  [0;32m✓[0m M21: Full-auto resume reconstructs functions through sandbox
+  [0;32m✓[0m M17: 3-generation resume maintains cumulative ledger
+1000 /tmp/tmp.4lojBwG13A/resume_M20/output.txt
+1000 /tmp/tmp.4lojBwG13A/resume_M20/input.txt
+2000 total
+998
+999
+1000
+  [0;32m✓[0m M20: Full-auto resume extracts and re-executes command exactly-once
+  [0;32m✓[0m M21: Full-auto resume reconstructs functions through sandbox
 
 [1;34m[1m▶ Section N: Property-Based Invariants (Randomized)[0m
 [1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
@@ -468,6 +512,10 @@ Verifying run_test_sorted catches duplicate lines...
   [0;32m✓[0m O7: Zero batch size defaults correctly
   [0;32m✓[0m O8: -b 1G large chunk size works
   [0;32m✓[0m O9: -b 16E overflow clamps with warning
+  [0;32m✓[0m O10: -L rejects ranges (5:10)
+  [0;32m✓[0m O11: -L rejects zero (0, 0k)
+  [0;32m✓[0m O12a: -b + -L: output intact (lines mode, stdin delivery)
+  [0;32m✓[0m O12b: -b + -L emits override warning
 
 [1;34m[1m▶ Section P: Exit Code Correctness[0m
 [1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
@@ -479,6 +527,8 @@ Verifying run_test_sorted catches duplicate lines...
   [0;32m✓[0m P6: Partial poisoning: 99/100 lines + non-zero exit
   [0;32m✓[0m P7: Setup failure propagates exit 42
   [0;32m✓[0m P8: SIGPIPE exits cleanly
+  [0;32m✓[0m P9: -E + false exits 3 (default mode)
+  [0;32m✓[0m P10: -E + false exits 3 (-X mode)
 
 [1;34m[1m▶ Section Q: Concurrent Invocation Stress[0m
 [1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
@@ -515,6 +565,10 @@ Verifying run_test_sorted catches duplicate lines...
   [0;32m✓[0m T4b: --nodes=@512 terminates with intact data
   [0;32m✓[0m T5: plugin return-code mapping (0/1/200/256→1/257→1/139/-7→249)
   [0;32m✓[0m T6: ring_lseek argc forms disambiguated
+  [0;32m✓[0m T14: +s -b -X does not silently drop data
+  [0;32m✓[0m T15: Ingest probe data reuse under FORKRUN_DISABLE_MEMPOLY
+  [0;32m✓[0m T1d: printf-shadow frame forgery rejected by compgen function wipe
+  [0;32m✓[0m T1f: EXTRA_FUNCS shadow forgery rejected by subshell function isolation
 
 [1;34m[1m▶ Section T2: v3.4.4 Hardening Regressions (W1, M2, W2, resume)[0m
 [1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
@@ -595,8 +649,8 @@ forkrun[DEBUG] Enabled
 [1;36m[1m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
 [1mSUMMARY[0m
 [1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m
-Total:   234
-Passed:  234  ([0;32m100.0%[0m)
+Total:   254
+Passed:  254  ([0;32m100.0%[0m)
 Failed:    0  ([0;31m0.0%[0m)
 Skipped:   0  ([1;33m0.0%[0m)
 
