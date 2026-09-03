@@ -1217,6 +1217,9 @@ static __thread uint32_t worker_last_minor = 0;
 static __thread uint32_t worker_last_num_kills = 0;
 static __thread bool tl_drain_escrow = true;
 
+#define MAX_POLL_WORKERS 8192
+static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
+
 
 // ------------------------------------------------------------------
 // WorkerBatchState: Pure value struct returned by do_lockfree_claim.
@@ -2045,6 +2048,7 @@ static int ring_init_main(int argc, char **argv) {
     g_state->resume_jagged_count = 0;
     g_state->poisoned_count = 0;
     g_state->limit_cutoff_major = 0;
+    memset(g_worker_deadlines, 0, sizeof(g_worker_deadlines));
 
     // PHYSICS FIX: Comprehensively drain all eventfds to prevent false EOFs
     // and spurious wakeups from previous invocations.
@@ -2522,6 +2526,7 @@ static int ring_init_main(int argc, char **argv) {
 static int ring_destroy_main(int argc, char **argv) {
   (void)argc;
   (void)argv;
+  memset(g_worker_deadlines, 0, sizeof(g_worker_deadlines));
   if (g_state) {
     long pg_sz = sysconf(_SC_PAGESIZE);
     uint64_t align_sz = (pg_sz > 0) ? (uint64_t)pg_sz : 4096ULL;
@@ -7321,9 +7326,6 @@ struct PollMeta {
     int type; // 0 = spawn, 1 = scanner, 2 = worker, 3 = trap_ack
 };
 
-#define MAX_POLL_WORKERS 8192
-static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
-
 static inline uint64_t get_mono_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -7811,10 +7813,11 @@ static int ring_call_main(int argc, char **argv) {
             }
         } else {
             if (tls_use_ctx == 2) {
-                tls_fctx.numa_batch_id = 0;
+                uint32_t actual_minor = worker_last_minor & MINOR_MASK;
+                tls_fctx.numa_batch_id = PACK_KEY(worker_last_major, actual_minor);
             } else {
                 tls_fctx.numa_major = 0;
-                tls_fctx.numa_minor = 0;
+                tls_fctx.numa_minor = worker_last_minor;
             }
         }
         cb_ret = tls_callback_ctx((int)(fixed_argc + batch_argc), tls_argv, &tls_fctx);
