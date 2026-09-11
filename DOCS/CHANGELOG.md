@@ -10,6 +10,12 @@ be silently lost when appending.
 
 ### Highlights
 
+- **Plugin context ABI v2 frozen at 128 bytes (append-only):** new `batch_lines`,
+  `struct_size`, `worker_incarn`, `flags_granted`; `forkrun_use_ctx` now encodes
+  a dialect byte plus optional behavior-flag bits with engine-side grant negotiation
+  (no flags granted in 3.5.0 — the machinery is frozen; first flag,
+  `FORKRUN_CTX_FLAG_RAW`, planned for 3.5.1). UMA `numa_batch_id` is derived from
+  the 64-bit claim index and is globally unique (equals `batch_index`).
 - **`-L` (exact lines) is now NUMA-native.** The Scanner-Handoff Chain serializes
   scanning across nodes via the cumulative line-count chain, preserving exact batch
   boundaries without demoting the pipeline to UMA. A batch may straddle a NUMA chunk
@@ -47,9 +53,17 @@ be silently lost when appending.
     truncated output. Ack pipe failures now fire the global alarm (reason 2), and
     the fallow subprocess aborts the pipeline on abnormal exit. (A2)
   - `ring_numa_ingest` double-free of `nodemask` on the OOM path. (A4.8)
-  - v2 plugin ABI: `numa_batch_id` is now globally unique on UMA as documented
-    (the slot index populates the packed key's minor field); previously every UMA
-    batch reported the same key (0:0). (D2)
+  - v2 plugin ABI: `numa_batch_id` is now globally unique on UMA as documented;
+    derived from the authoritative 64-bit claim index, guaranteeing strict
+    monotonicity past the 2^22 threshold (previously every UMA batch reported
+    the same key 0:0). (D2)
+  - Plugin context `cfg_state[4]` byte order aligned: fixed an inverted extraction
+    where bytes and workers were transposed. Now strictly `[0]=cfg_w`, `[1]=cfg_l`,
+    `[2]=cfg_b`, `[3]=flags`. (D3)
+  - Scanner-side resume snapshot: Seqlock-consistent frozen copy of resume intervals
+    prevents tearing and shared-cache read contention. (A4.9)
+  - Topology ceiling: `--nodes=@N` capped at 512 (previously accepted up to 1024)
+    to preserve `meta_ring` bounds. (A4.10)
   - Orderer: `FD_ORDER_PIPE` missing during an ordered ack now fails loudly with
     the alarm instead of hanging the pipeline. (A4.4)
   - Non-EPIPE orderer write failures are now internal faults (checkpoint + non-zero

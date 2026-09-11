@@ -368,6 +368,11 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define MAJOR_MASK ((1ULL << (64 - MINOR_BITS)) - 1ULL)
 #define PACK_KEY(maj, min) ((((uint64_t)(maj) & MAJOR_MASK) << MINOR_BITS) | ((uint64_t)(min) & MINOR_MASK))
 
+#define FORKRUN_CTX_ENABLE          2u
+#define FORKRUN_CTX_VERSION_MASK    0xFFu
+/* v3.5.0: no behavior flags implemented -> ENGINE_KNOWN_FLAGS is empty */
+#define ENGINE_KNOWN_FLAGS          0u
+
 #define HUGE_PAGE_SIZE (2 * 1024 * 1024)
 #define SCANNER_CHUNK_SIZE (2 * 1024 * 1024)
 #define RING_SIZE_LOG2 20
@@ -525,6 +530,7 @@ static inline ssize_t sys_write(int fd, const void *buf, size_t count) {
 }
 
 static __thread off_t tls_batch_offset = 0;
+static __thread uint32_t tls_batch_lines = 0;
 
 extern char **environ; // Required for posix_spawnp
 
@@ -1229,6 +1235,7 @@ static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
 struct WorkerBatchState {
     uint64_t idx;
     uint64_t cnt;
+    uint32_t lines;
     uint32_t num_kills;
     uint64_t offset;
     uint64_t length;
@@ -1426,6 +1433,12 @@ struct IntervalNode {
     uint64_t e;
 };
 
+static int cmp_interval(const void *a, const void *b) {
+    uint64_t sa = ((const struct IntervalNode *)a)->s;
+    uint64_t sb = ((const struct IntervalNode *)b)->s;
+    return (sa < sb) ? -1 : ((sa > sb) ? 1 : 0);
+}
+
 // GlobalState: Contains cross-socket coordination for the pipeline,
 struct GlobalState {
   uint64_t ingest_publish_idx ALIGNED(CACHE_LINE);
@@ -1535,6 +1548,7 @@ struct SharedState {
   uint64_t end_ring[RING_SIZE] ALIGNED(4096);
   uint64_t major_ring[RING_SIZE] ALIGNED(4096);
   uint32_t minor_ring[RING_SIZE] ALIGNED(4096);
+  uint32_t lines_ring[RING_SIZE] ALIGNED(4096);
 
   // NEW: Dynamic Topology-Aware Steal Thresholds
   uint8_t steal_threshold[1024] ALIGNED(CACHE_LINE);
@@ -2017,9 +2031,9 @@ static int ring_init_main(int argc, char **argv) {
     g_logical_to_phys_map[0] = 0;
   }
 
-  // CRITICAL FIX: Prevent buffer overflow in steal_threshold arrays
-  if (global_num_nodes > 1024) {
-    builtin_error("forkrun: global_num_nodes exceeds maximum limit of 1024");
+    // C3-fix: meta_ring in-flight bound. 512 logical nodes leaves safe headroom.
+  if (global_num_nodes > 512) {
+    builtin_error("forkrun: --nodes=@N above 512 is not supported (meta_ring capacity); got %u", global_num_nodes);
     if (g_logical_to_phys_map) {
       free(g_logical_to_phys_map);
       g_logical_to_phys_map = NULL;
@@ -3415,24 +3429,24 @@ static int ring_indexer_numa_main(int argc, char **argv) {
  * 1. Slot-based wrap-around shield boundary is hit (applies to BOTH UMA and NUMA)
  * 2. Chunk-based memory shield boundary is hit (applies ONLY to NUMA)
  */
-#define UNIFIED_SCANNER_FLUSH(_is_last, _maj_id, _minor_val,                   \
+#define UNIFIED_SCANNER_FLUSH(_lines, _is_last, _maj_id, _minor_val,           \
                               _batch_end_offset, _out_skipped)                 \
   do {                                                                         \
     _out_skipped = false;                                                      \
     uint64_t _eff_end = (_batch_end_offset);                                   \
-    if (__builtin_expect(g_state->is_resume_mode, 0)) {                        \
-        if (batch_start < g_state->resume_horizon) {                           \
-            if (_eff_end <= g_state->resume_horizon) {                         \
+    if (__builtin_expect(is_resume, 0)) {                                      \
+        if (batch_start < rs_horizon) {                                        \
+            if (_eff_end <= rs_horizon) {                                      \
                 _out_skipped = true;                                           \
             } else {                                                           \
-                batch_start = g_state->resume_horizon;                         \
+                batch_start = rs_horizon;                                      \
             }                                                                  \
         }                                                                      \
-        if (!_out_skipped && batch_start >= g_state->resume_horizon) {         \
+        if (!_out_skipped && batch_start >= rs_horizon) {                      \
             uint64_t _s_byte = batch_start;                                    \
-            for (uint32_t _i = 0; _i < g_state->resume_jagged_count; _i++) {   \
-                uint64_t _js = g_state->resume_jagged[_i].s;                  \
-                uint64_t _je = g_state->resume_jagged[_i].e;                  \
+            for (uint32_t _i = 0; _i < rs_jagged_count; _i++) {                \
+                uint64_t _js = rs_jagged[_i].s;                                \
+                uint64_t _je = rs_jagged[_i].e;                                \
                 if (_s_byte >= _js && _s_byte < _je) {                         \
                     if (_eff_end <= _je) {                                     \
                         _out_skipped = true; break;                            \
@@ -3507,19 +3521,15 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       local_state->major_ring[local_scan_idx & RING_MASK] = (_maj_id);         \
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
           (_minor_val) | ((_is_last) ? FLAG_MAJOR_EOF : 0);                    \
+      local_state->lines_ring[local_scan_idx & RING_MASK] = (uint32_t)(_lines);\
     } else {                                                                   \
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = _eff_end;            \
-      /* D2-fix: stamp the global slot index into minor_ring so v2's           \
-         packed numa_batch_id is globally unique on UMA too.                   \
-         Without this, minor_ring stays all-zero in UMA mode and every         \
-         plugin ctx reports the same key (0:0) — the ABI contract              \
-         ("numa_batch_id is THE global identity key") silently breaks.         \
-         Bit 31 (FLAG_MAJOR_EOF) is never set on UMA (no chunk ends),         \
-         so the full 31-bit minor space is free for the slot index. */         \
       local_state->major_ring[local_scan_idx & RING_MASK] = 0;                 \
+      /* C2-fix: stamp the FULL global slot index into minor_ring on UMA. */   \
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
-          (uint32_t)(local_scan_idx & 0x7FFFFFFF);                             \
+          (uint32_t)(local_scan_idx & 0xFFFFFFFFu);                            \
+      local_state->lines_ring[local_scan_idx & RING_MASK] = (uint32_t)(_lines);\
     }                                                                          \
     local_scan_idx++;                                                          \
     UNIFIED_ADAPTIVE_COMMIT(false);                                            \
@@ -3719,7 +3729,14 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   uint64_t first_wait_ts = 0;
   uint64_t limit_items = local_state->cfg_limit;
 
-  uint64_t chunk_bounds[16] = {0};
+  
+  // C1-fix: snapshot the resume state ONCE per scanner invocation
+  bool is_resume = (g_state && g_state->is_resume_mode);
+  uint64_t rs_horizon = 0;
+  uint32_t rs_jagged_count = 0;
+  struct IntervalNode rs_jagged[1024];
+
+uint64_t chunk_bounds[16] = {0};
   uint32_t cb_head = 0;
 
   // v3.5: Cumulative chain state for deterministic -n
@@ -3756,6 +3773,25 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   uint64_t pending_lines = 0;
 
   // -----------------------------------------------------------------
+
+  if (is_resume) {
+      uint32_t seq1, seq2;
+      uint32_t cnt = 0;
+      do {
+          seq1 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+          rs_horizon = __atomic_load_n(&g_state->resume_horizon, __ATOMIC_RELAXED);
+          cnt = __atomic_load_n(&g_state->resume_jagged_count, __ATOMIC_RELAXED);
+          if (cnt > 1024) cnt = 1024;
+          for (uint32_t i = 0; i < cnt; i++) {
+              rs_jagged[i].s = __atomic_load_n(&g_state->resume_jagged[i].s, __ATOMIC_RELAXED);
+              rs_jagged[i].e = __atomic_load_n(&g_state->resume_jagged[i].e, __ATOMIC_RELAXED);
+          }
+          seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+      } while (seq1 != seq2 || (seq1 & 1));
+      rs_jagged_count = cnt;
+      qsort(rs_jagged, rs_jagged_count, sizeof(struct IntervalNode), cmp_interval);
+  }
+
   // PHASE 1 (v3.3): PRE-FLIGHT POPCOUNT — Latency Hiding
   // -----------------------------------------------------------------
   // During the Bash fork latency (workers spinning up), do a pure
@@ -4213,7 +4249,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             prev_cum = limit_items; // sentinel: at/past the limit
           batch_start = raw_start;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, raw_start, _skipped);
+          UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, 0, raw_start, _skipped);
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
@@ -4239,8 +4275,8 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           uint64_t eof_off = meta->raw_offset;
           batch_start = handoff_start;
           bool _skipped = false;
-          // Zero-length when nothing is pending: acked-not-executed (M1).
-          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, eof_off, _skipped);
+          // Flush pending carried lines; zero-length sentinel (0) when none pending
+          UNIFIED_SCANNER_FLUSH(prev_cum % L, true, meta->major_id, 0, eof_off, _skipped);
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
@@ -4331,8 +4367,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
               uint64_t bnd = buf_base_offset + (uint64_t)(p - buf);
               bool is_last = (bnd >= raw_end);
               bool _skipped = false;
-              UNIFIED_SCANNER_FLUSH(is_last, meta->major_id, l_minor, bnd,
-                                    _skipped);
+              UNIFIED_SCANNER_FLUSH(lines_in_batch, is_last, meta->major_id, l_minor, bnd, _skipped);
               l_minor++;
               if (is_last && !_skipped) {
                 l_last_flushed = true;
@@ -4368,8 +4403,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           // identically — the unified handoff.
           if (!l_last_flushed) {
             bool _skipped = false;
-            UNIFIED_SCANNER_FLUSH(true, meta->major_id, l_minor, batch_start,
-                                  _skipped);
+            UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, l_minor, batch_start, _skipped);
             if (!_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
@@ -4446,7 +4480,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
             current_p_offset = actual_start;
 
             bool _skipped = false;
-            UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
+            UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, 0, actual_start, _skipped);
             if (!_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
@@ -4474,8 +4508,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
       if (actual_start >= actual_end) {
         batch_start = actual_start;
         bool _skipped = false;
-        UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start,
-                              _skipped);
+        UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, 0, actual_start, _skipped);
         if (!_skipped) {
           chunk_bounds[cb_head & 15] = local_scan_idx;
           cb_head++;
@@ -4499,7 +4532,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           // Entire chunk past byte limit: emit empty sentinel and continue
           batch_start = actual_start;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(true, meta->major_id, 0, actual_start, _skipped);
+          UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, 0, actual_start, _skipped);
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
@@ -4531,7 +4564,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
           uint64_t final_off = buf_base_offset + (uint64_t)(p - buf);
           if (batch_start < final_off) {
             bool _skipped = false;
-            UNIFIED_SCANNER_FLUSH(false, 0, 0, final_off, _skipped);
+            UNIFIED_SCANNER_FLUSH(1, false, 0, 0, final_off, _skipped);
             batch_start = final_off;
           }
         }
@@ -4732,9 +4765,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
           bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(is_last,
-                                is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, _skipped);
+          UNIFIED_SCANNER_FLUSH(0, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
@@ -4981,9 +5012,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(is_last,
-                                is_numa ? meta->major_id : 0, minor_idx,
-                                current_p_offset, _skipped);
+          UNIFIED_SCANNER_FLUSH(pending_lines, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
@@ -5010,8 +5039,7 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
     if (is_numa && !chunk_eof_flushed) {
       bool _skipped = false;
-      UNIFIED_SCANNER_FLUSH(true, meta->major_id,
-                            minor_idx, current_p_offset, _skipped);
+      UNIFIED_SCANNER_FLUSH(pending_lines, true, meta->major_id, minor_idx, current_p_offset, _skipped);
       minor_idx++;
       if (!_skipped) {
         chunk_bounds[cb_head & 15] = local_scan_idx;
@@ -5243,8 +5271,7 @@ unified_scanner_eof:
         if (lines_found > 0) {
           uint64_t current_p_offset = buf_base_offset + (uint64_t)(p - buf);
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(false, 0, 0, current_p_offset,
-                                _skipped);
+          UNIFIED_SCANNER_FLUSH(lines_found, false, 0, 0, current_p_offset, _skipped);
           batch_start = current_p_offset;
           L_tail_done += lines_found;
         } else
@@ -5258,6 +5285,7 @@ tail_abort:
         (uint64_t)final_sentinel;
     local_state->end_ring[local_scan_idx & RING_MASK] =
         (uint64_t)final_sentinel;
+    local_state->lines_ring[local_scan_idx & RING_MASK] = 0;
     local_scan_idx++;
 
     atomic_store_release(&local_state->write_idx, local_scan_idx);
@@ -5518,6 +5546,7 @@ dlc_evaluate_claim:
 
   out->idx       = my_read_idx;
   out->cnt       = 1;
+  out->lines     = local_state->lines_ring[my_read_idx & RING_MASK];
   out->num_kills = current_kills;
   out->offset    = start;
   out->length    = end - start;
@@ -5615,6 +5644,7 @@ static int ring_claim_main(int argc, char **argv) {
   worker_last_num_kills = batch.num_kills;
   worker_last_major     = batch.major;
   worker_last_minor     = batch.minor;
+  tls_batch_lines       = batch.lines;
   tls_batch_offset      = (off_t)batch.offset;
 
   // --- Bind the byte-length to the target Bash variable ---
@@ -7187,12 +7217,7 @@ static int ring_escrow_put_main(int argc, char **argv) {
 }
 
 
-// Qsort helper for the exporter
-static int cmp_interval(const void *a, const void *b) {
-    uint64_t sa = ((struct IntervalNode *)a)->s;
-    uint64_t sb = ((struct IntervalNode *)b)->s;
-    return (sa < sb) ? -1 : ((sa > sb) ? 1 : 0);
-}
+
 
 static int ring_dump_resume_main(int argc, char **argv) {
     if (!g_state) return EXECUTION_FAILURE;
@@ -7282,14 +7307,19 @@ static int ring_set_resume_main(int argc, char **argv) {
     }
 
     for (int i = start_idx; i < argc && g_state->resume_jagged_count < 1024; i++) {
-        char *colon = strchr(argv[i], ':');
+                char *colon = strchr(argv[i], ':');
         if (colon) {
             *colon = '\0';
-            g_state->resume_jagged[g_state->resume_jagged_count].s = strtoull(argv[i], NULL, 10);
-            g_state->resume_jagged[g_state->resume_jagged_count].e = strtoull(colon + 1, NULL, 10);
-            g_state->resume_jagged_count++;
+            uint64_t s = strtoull(argv[i], NULL, 10);
+            uint64_t e = strtoull(colon + 1, NULL, 10);
+            if (e > s) {
+                g_state->resume_jagged[g_state->resume_jagged_count].s = s;
+                g_state->resume_jagged[g_state->resume_jagged_count].e = e;
+                g_state->resume_jagged_count++;
+            }
         }
     }
+    qsort(g_state->resume_jagged, g_state->resume_jagged_count, sizeof(struct IntervalNode), cmp_interval);
     return EXECUTION_SUCCESS;
 }
 
@@ -7689,6 +7719,13 @@ struct forkrun_ctx {
     int32_t  fd_in;             // input file descriptor
     char     delimiter;         // batch delimiter
     uint8_t  cfg_state[4];      // global configuration state
+    /* v2 extension zone (frozen layout; see forkrun_plugin.h) */
+    uint32_t batch_lines;       // records in batch; 0 = undefined (-b byte mode)
+    uint32_t struct_size;       // sizeof(struct) as built by THIS engine
+    uint32_t worker_incarn;     // respawn generation of this worker
+    uint32_t flags_granted;     // req & ENGINE_KNOWN_FLAGS; dialect >= 2 only
+    uint32_t reserved32;        // zero; alignment
+    uint64_t reserved[6];       // v3 fields land here; zero in v2
 };
 
 // Define the user's expected function signatures
@@ -7701,6 +7738,7 @@ static __thread void *tls_dl_handle = NULL;
 static __thread forkrun_cb_t tls_callback = NULL;
 static __thread forkrun_cb_ctx_t tls_callback_ctx = NULL;
 static __thread int tls_use_ctx = 0;
+static __thread unsigned tls_flags_granted = 0;
 static __thread int tls_numa_enabled = 0;
 static __thread struct forkrun_ctx tls_fctx;
 
@@ -7730,9 +7768,12 @@ static int ring_call_main(int argc, char **argv) {
             return EXECUTION_FAILURE;
         }
 
-        int *has_ctx = (int *)dlsym(tls_dl_handle, "forkrun_use_ctx");
-        if (has_ctx && (*has_ctx == 1 || *has_ctx == 2)) {
-            tls_use_ctx = *has_ctx;
+                int *has_ctx = (int *)dlsym(tls_dl_handle, "forkrun_use_ctx");
+        unsigned req = has_ctx ? (unsigned)*has_ctx : 0;
+        unsigned ver = req & FORKRUN_CTX_VERSION_MASK;
+        if (ver == 1 || ver == 2) {
+            tls_use_ctx = (int)ver;
+            tls_flags_granted = req & ENGINE_KNOWN_FLAGS;
             tls_callback_ctx = (forkrun_cb_ctx_t)dlsym(tls_dl_handle, func_name);
             if (!tls_callback_ctx) {
                 fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
@@ -7740,15 +7781,19 @@ static int ring_call_main(int argc, char **argv) {
                 tls_dl_handle = NULL;
                 return EXECUTION_FAILURE;
             }
-            tls_fctx.version = (uint32_t)tls_use_ctx;
+            memset(&tls_fctx, 0, sizeof(tls_fctx));
+            tls_fctx.version = ver;
+            tls_fctx.struct_size = (uint32_t)sizeof(struct forkrun_ctx);
             const char *wid_str = get_string_value("RING_WID");
-            tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
+                        tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
+            const char *winc_str = get_string_value("RING_WINCARN");
+            tls_fctx.worker_incarn = winc_str ? (uint32_t)strtoul(winc_str, NULL, 10) : 0;
             tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
             tls_fctx.fd_in = fd;
             tls_fctx.delimiter = delim;
-            tls_fctx.cfg_state[0] = (cfg_state >> 16) & 0xFF;
-            tls_fctx.cfg_state[1] = (cfg_state >> 8) & 0xFF;
-            tls_fctx.cfg_state[2] = cfg_state & 0xFF;
+            tls_fctx.cfg_state[0] = cfg_state & 0xFF;         // cfg_w
+            tls_fctx.cfg_state[1] = (cfg_state >> 8) & 0xFF;  // cfg_l
+            tls_fctx.cfg_state[2] = (cfg_state >> 16) & 0xFF; // cfg_b
             tls_fctx.cfg_state[3] = (cfg_state >> 24) & 0xFF; // D2: Expose SH_STDIN and SH_BMODE
             tls_numa_enabled = (state && state[0].numa_enabled) ? 1 : 0;
         } else {
@@ -7803,6 +7848,8 @@ static int ring_call_main(int argc, char **argv) {
         tls_fctx.batch_offset = (uint64_t)tls_batch_offset;
         tls_fctx.num_kills = worker_last_num_kills;
         tls_fctx.batch_byte_length = (uint64_t)length;
+        tls_fctx.batch_lines = tls_batch_lines;
+        tls_fctx.flags_granted = (tls_use_ctx >= 2) ? tls_flags_granted : 0;
         if (tls_numa_enabled) {
             if (tls_use_ctx == 2) {
                 uint32_t actual_minor = worker_last_minor & MINOR_MASK;
@@ -7811,10 +7858,11 @@ static int ring_call_main(int argc, char **argv) {
                 tls_fctx.numa_major = (uint32_t)worker_last_major;
                 tls_fctx.numa_minor = worker_last_minor;
             }
-        } else {
+                } else {
             if (tls_use_ctx == 2) {
-                uint32_t actual_minor = worker_last_minor & MINOR_MASK;
-                tls_fctx.numa_batch_id = PACK_KEY(worker_last_major, actual_minor);
+                /* C2-fix: derive UMA numa_batch_id from authoritative 64-bit claim index */
+                tls_fctx.numa_batch_id =
+                    PACK_KEY(worker_last_idx >> MINOR_BITS, worker_last_idx & MINOR_MASK);
             } else {
                 tls_fctx.numa_major = 0;
                 tls_fctx.numa_minor = worker_last_minor;

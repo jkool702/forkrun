@@ -46,7 +46,7 @@
 - `-n`, `--limit <N>`         : Stop processing after exactly `N` records have been claimed. (In byte mode `-b`, `-n` specifies the exact byte limit).
 - `--nodes`, `--numa <map>`   : Control NUMA topology mapping. Nodes that do not exist will be skipped (excluding for `@N`).
   - `auto` (default): Autodetect all physical online nodes.
-  - `@N` : Oversubscribe / force `N` logical nodes.
+  - `@N` : Oversubscribe / force `N` logical nodes (N ≤ 512; larger values are rejected to preserve internal ring bounds).
   - `0,1`: Explicitly bind to physical NUMA nodes 0 and 1.
   - `0:3`: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
 - `-N`, `--dry-run`           : Dry run. Print the generated command strings instead of executing them.

@@ -28,10 +28,23 @@ int my_plugin(int argc, char **argv) {
     }
     
     // Return 0 on success. 
-    // Returning 200 (or returning any non-zero code while the -E flag is active) automatically triggers forkruns resilience machinery.
+    // Returning 200 (or returning any non-zero code while the -E flag is active) automatically triggers forkrun's resilience machinery.
+    // Return code 201 is RESERVED (planned v3.5.1): permanent skip — poison this batch immediately, no retry. Do not use yet.
     return 0; 
 }
 ```
+
+### Plugin Return Codes
+
+| Return | Meaning |
+|---|---|
+| `0` | Success |
+| `1`–`199` | Failure — retried while `-E` is active; poisoned after `FORKRUN_RETRY_LIMIT` |
+| `200` | Explicit retry request (always retried regardless of `-E`) |
+| `201` | *Reserved (planned v3.5.1)*: Permanent skip (poison immediately, never retry) |
+| `137` / `139` | SIGKILL-class / SIGSEGV-class fatal failure (always retried) |
+| `254` | Internal engine error |
+| `≥ 256` | Truncated to low 8 bits (`256`→`1`, `257`→`1`) |
 
 ### 2. Compile as a Shared Library
 Compile your C file into an optimized, position-independent shared object (`.so`):
@@ -57,7 +70,7 @@ frun -C ./plugin.so:my_plugin < massive_dataset.txt
 `forkrun` supports two context ABI versions:
 
 * **Version 1 (`forkrun_use_ctx = 1`):** Standard context struct with separate 32-bit `numa_major` and `numa_minor` fields.
-* **Version 2 (`forkrun_use_ctx = 2`, v3.5.0+):** High-precision packed context. Replaces major/minor with a 64-bit `numa_batch_id` union (`(major << 22) | minor`), preserving full 42-bit major chunk sequence numbers for billion-record runs. Globally unique on both UMA and NUMA.
+* **Version 2 (`forkrun_use_ctx = 2`, v3.5.0+):** High-precision packed context (128-byte frozen cache-aligned layout). Replaces major/minor with a 64-bit `numa_batch_id` union (`(major << 22) | minor`), preserving full 42-bit major chunk sequence numbers for billion-record runs. Globally unique on both UMA and NUMA; on UMA it equals `batch_index` exactly (derived from the 64-bit claim index).
 
 ```c
 #include <stdint.h>
@@ -84,10 +97,17 @@ struct forkrun_ctx {
     int32_t  fd_in;             // Read-only file descriptor to the memfd
     char     delimiter;         // The record delimiter character
     uint8_t  cfg_state[4];      // Global config state: [0]=cfg_w, [1]=cfg_l, [2]=cfg_b, [3]=flags (SH_STDIN, SH_BMODE)
+    /* ---- v2 extension zone (append-only forever) ---- */
+    uint32_t batch_lines;       // Records in batch; 0 = undefined (-b byte mode)
+    uint32_t struct_size;       // sizeof(struct) as built by THIS engine
+    uint32_t worker_incarn;     // Respawn generation of this worker
+    uint32_t flags_granted;     // Behavior flags negotiated; dialect >= 2 only
+    uint32_t reserved32;        // Alignment padding (zero)
+    uint64_t reserved[6];       // Future extension fields (zero in v2)
 };
 
 int my_func(int argc, char **argv, const struct forkrun_ctx *ctx) {
-    if (ctx->version == 2) {
+    if (ctx->version >= 2) {
         uint64_t major = ctx->numa_batch_id >> 22;
         uint32_t minor = ctx->numa_batch_id & 0x3FFFFF;
         printf("Worker %u on Node %u (Major %lu, Minor %u)\n", 
@@ -107,7 +127,7 @@ You do not actually *need* the header file. Because C only cares about memory la
 // 1. Opt-in flag: 2 = v3.5.0+ packed 64-bit batch ID, 1 = legacy 32-bit fields
 int forkrun_use_ctx = 2;
 
-// 2. The Context Struct (Matches forkrun v3.5.0+ layout, 64 bytes aligned)
+// 2. The Context Struct (Matches forkrun v3.5.0+ layout, 128 bytes aligned)
 struct forkrun_ctx {
     uint64_t batch_index;       // Global batch sequence number
     uint64_t batch_offset;      // Byte offset in the shared memfd
@@ -125,7 +145,13 @@ struct forkrun_ctx {
     };
     int32_t  fd_in;             // Read-only file descriptor to the memfd
     char     delimiter;         // The record delimiter character
-    uint8_t  cfg_state[4];      // Global configuration state
+    uint8_t  cfg_state[4];      // Global configuration state: [0]=cfg_w, [1]=cfg_l, [2]=cfg_b, [3]=flags
+    uint32_t batch_lines;       // Records in batch; 0 = undefined (-b byte mode)
+    uint32_t struct_size;       // sizeof(struct) as built by THIS engine
+    uint32_t worker_incarn;     // Respawn generation of this worker
+    uint32_t flags_granted;     // Behavior flags negotiated; dialect >= 2 only
+    uint32_t reserved32;        // Alignment padding (zero)
+    uint64_t reserved[6];       // Future extension fields (zero in v2)
 };
 
 // 3. Process the data
@@ -146,7 +172,19 @@ int my_func(int argc, char **argv, const struct forkrun_ctx *ctx) {
 If you are a systems hacker, you might wonder how `forkrun` handles dynamically loading functions that might have 2 arguments OR 3 arguments without corrupting the stack.
 
 `forkrun` uses `dlsym` to inspect the loaded `.so` for the `forkrun_use_ctx` variable. 
-* If it finds the flag and it equals `1`, `forkrun` executes the callback using the 3-argument signature, passing the context pointer. 
-* If it does not find the flag, it falls back to the standard 2-argument signature.
+* If it finds the flag and its dialect byte equals `1` or `2`, `forkrun` executes the callback using the 3-argument signature, passing the context pointer. 
+* If it does not find the flag (or the dialect is unknown), it falls back to the standard 2-argument signature.
+* Plugins test `ctx->version >= 2`, never `== 2`.
+* Unknown flags on a known dialect are simply ungranted (`(ctx->flags_granted & FLAG) == 0`); they never trigger legacy fallback.
+* Slices into `cfg_state[4]` are: `[0]=cfg_w`, `[1]=cfg_l`, `[2]=cfg_b`, and `[3]=flags (SH_STDIN, SH_BMODE)`.
+* `batch_lines` counts delimiter-terminated records (`wc -l` semantics). A final unterminated record may be delivered by the tokenizer as one additional record beyond this count. `0` = undefined (`-b` byte mode).
+* Guard tail-field reads with `ctx->struct_size >= offsetof(struct forkrun_ctx, field) + sizeof(field)`; the engine's value is authoritative for what is populated—never compare it to your own `sizeof`.
 
-This guarantees total POSIX compliance and avoids Undefined Behavior, while giving power-users zero-overhead access to `forkrun`'s internal ring metadata. Furthermore, the `cfg_state[4]` array exposes the engine's internal configuration state while maintaining strictly aligned 8-byte memory boundaries regardless of underlying hardware architecture, and the `version` tag allows us to expand the context in future v3.x releases without breaking older plugins.
+Calling a 2-argument function through a 3-argument function pointer call site is technically Undefined Behavior by strict ISO C, but is reliable on all supported hardware ABIs (surplus register arguments like RDX or X2 are simply ignored by the callee) — relying on the exact same platform calling-convention invariant as `main(int, char **, char **[])`.
+
+### Zero-Copy Memory Stability (`mmap`)
+During the callback invocation, the byte window `[batch_offset, batch_offset + batch_byte_length)` in the shared `memfd` (`fd_in`) is immutable and guaranteed stable. Background fallow hole-punching operates strictly behind the acknowledged consumption horizon, and a worker's batch is acknowledged only *after* the callback returns. Native C plugins and Python/ctypes bindings may therefore safely `mmap` that page-aligned window from `fd_in` and zero-copy read directly (the Apache Arrow / NumPy `frombuffer` pattern).
+
+Note that `mmap` offsets must be page-aligned (`sysconf(_SC_PAGESIZE)`), so consumers must map the *containing* page-aligned window of an unaligned `batch_offset` and adjust their internal pointer accordingly.
+
+*Warning:* Only map within your batch's active byte window; regions behind the fallow horizon may already be hole-punched (reading them yields zeroes).

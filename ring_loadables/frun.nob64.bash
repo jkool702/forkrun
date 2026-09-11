@@ -1559,6 +1559,7 @@ _forkrun_checkpoint_signal() {
   export RING_NODE_ID="$2"
   export RING_WID="$3"
   export FD_TRAP_ACK_W="$4"
+  export RING_WINCARN="$5"
 
   _ring_registered=false
 

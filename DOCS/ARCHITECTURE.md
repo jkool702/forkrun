@@ -128,3 +128,4 @@ Optimistic execution with near-zero happy-path overhead, instant failure detecti
 - **ACTUAL_END OWNERSHIP:** In normal/byte mode, Indexer publishes `actual_end`; in `-L` mode, Indexer skips publication and Scanner publishes in the handoff chain.
 - **GATE-RESOLVING WAKEUPS:** Any process publishing `actual_end` or `cum_lines` must execute a SEQ_CST memory barrier and write to `evfd_meta` if `meta_waiters > 0`.
 - **CROSS-PROCESS WAIT ESCAPE:** Every cross-process wait must re-check terminal flags (`limit_cutoff_major`, `emergency_abort`) on every loop and use bounded polling (`poll(..., 100)`).
+- **RESUME-SNAPSHOT:** scanners consult resume jagged intervals only via a frozen, sorted, seqlock-consistent snapshot taken once at scanner entry; the live `g_state` copies are orderer-owned and heap-ordered.
