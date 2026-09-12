@@ -112,18 +112,23 @@ We maintain two dedicated branches specifically configured for sanitizer testing
    ASAN_OPTIONS=detect_leaks=0 LD_PRELOAD=$(ldconfig -p | grep libasan | awk 'NR==1{print $NF}') "${BASH:-bash}" ./test_frun.sh
    ```
 
+**What the sanitizers do and do not validate:** TSan observes races only within a single process. forkrun's core coordination is *cross-process* (forked scanner/worker/orderer processes on a shared `MAP_ANONYMOUS` mapping); TSan cannot instrument cross-process shared-memory accesses, as each process has private shadow memory. The matrix validates intra-process threading and general memory hygiene; the cross-process ordering protocol is guaranteed by INVARIANTS.md and exercised by the full stress matrix. ASan/UBSan coverage is process-local and applies fully.
+
+**Matrix Policy Rule:** Sanitizer runs execute once, on frozen code; any post-run code change invalidates the full matrix and requires a complete re-run.
+
 If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under both standard and sanitized conditions, the build is considered stable and ready for release.
 
 ---
 
 ## §6. Final Release Criteria
 
-Before tagging a release, run one final sanity check on the benchmark output to confirm the expected number of test cases completed. From the `BENCHMARKS` directory, after running `run_benchmark.bash`, verify the line count of results:
+Before tagging a release, run the automated test suite and verify that the full test matrix completes with zero failures:
 
+$$\text{Total Executions} = (\text{Unit Tests} + \text{Benchmarks}) \times (\text{UMA} + \text{NUMA}) \times (\text{Baseline} + \text{TSan} + \text{ASan/UBSan}) = 4{,}500$$
+
+Verify test execution counts from the `BENCHMARKS` directory:
 ```bash
 grep -E '^[0-9]' benchmark.out | wc -l
 ```
 
-The output must match the expected test count for the release. A lower count indicates that one or more benchmark runs silently failed or were skipped, and the release must be held until the discrepancy is resolved.
-
-This check is the last gate before tagging. If it passes alongside the full sanitizer matrix, tag the release and publish.
+Ensure all adversarial test suites (Section T: resume sandbox, permission gates, foreign-UID rejection, fd hygiene, oversubscription extremes) pass 100% green before tagging.

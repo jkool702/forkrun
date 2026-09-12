@@ -85,6 +85,14 @@ Today, whether the scanner is in Phase 0, Phase 1, or Phase 2, the worker fast-p
 
 Once optimal $L$ is found -- immediately via satellite, or after a short acoustic ramp -- the scanner enters a PID controller making micro-adjustments based on the `stall_meter` and `starve_meter`. Standard geophysical instrument feedback: calibrate once, regulate continuously.
 
+**The Price of Global Invariants: "When Order is Global, the Source Serializes"**
+
+In standard streaming mode (`-l`), batch sizes are locally determined and chunks execute fully independently in parallel across all NUMA nodes.
+
+However, exact line counts (`-L`) and deterministic stream limits (`-n`) are **global sequence properties**. In physical terms, you cannot know the exact boundary of the 1,000th line on Socket 1 without knowing the exact count of lines that passed through Socket 0. Therefore, under `-L` and `-n`, the scanning headwaters serialize via the `cum_lines` chain. 
+
+We do not fight this physical law; we minimize its cost: scanning serializes at memory-bus speeds (nanoseconds per chunk handoff via geometric spin-backoff), while worker payload execution remains 100% parallelized across all CPU cores.
+
 ---
 
 ## 5. Fallow (Punch-Hole Reclamation) = Entropy and the Second Law
@@ -101,7 +109,22 @@ This is the thermodynamic arrow of time made explicit. The fallow thread is the 
 
 ---
 
-## 6. Ordering Modes as Different Observers
+## 6. The Invariant Spacetime Metric: Why Coordinates Never Move
+
+In classical parallel software, buffers are circular, dynamic, or shifted in memory. Every time data moves or shrinks, pointers must be recalculated, creating race conditions and ABA hazards.
+
+In `forkrun`, the shared `memfd` is an **invariant spacetime manifold**:
+
+* The coordinate $x = 0$ is the start of the stream, and $x$ advances monotonically to $x = \text{EOF}$.
+* Data particles (bytes) stay exactly where they were born.
+* When workers finish consuming a region of spacetime, the `ring_fallow` thread uses `fallocate(PUNCH_HOLE)` to remove the *physical mass* (RAM pages) from that region of spacetime without warping or shifting the *coordinate grid*.
+* Checkpoints and resumes are trivial because the coordinates $x \in [a, b]$ mean the exact same bytes before and after a crash.
+
+Because every component (Ingest, Indexer, Scanner, Worker, Escrow, Fallow, Checkpoint) agrees on the exact same linear metric, coordination overhead collapses to zero.
+
+---
+
+## 7. Ordering Modes as Different Observers
 
 - `--realtime`: “I only care about what arrives first at the detector.” (Relativistic observer — order of arrival.)
 - `--ordered`: “I need to reconstruct the original sequence as if measured by a stationary lab frame.” (The `ring_order` thread is the Lorentz transformation that re-synchronizes the major/minor indices.)
@@ -110,7 +133,7 @@ The NUMA-aware reorder path is just special relativity for data streams.
 
 ---
 
-## 7. Why the Complexity Is Minimal, Not Maximal
+## 8. Why the Complexity Is Minimal, Not Maximal
 
 Every “weird” feature has a direct physical justification:
 
@@ -121,14 +144,14 @@ Every “weird” feature has a direct physical justification:
 | Escrow pipe                        | Inertial correction / diffusion           | Blocking or retries on every claim                  |
 | Pre-Flight SIMD Popcount           | Satellite surveying the river basin       | Workers guessing bucket sizes; PID oscillation on startup |
 | Single-slot claim (atomic_fetch_add +1) | Inertial bucket with fixed handle    | CAS storms and speculative arithmetic on fast path  |
-| Stride Ring Boundary Flag          | Chunk event horizon                       | Workers reading across NUMA fault lines             |
+| `FLAG_MAJOR_EOF` chunk-end marker | Chunk event horizon | Orderer stalls at chunk boundaries; workers reading across NUMA fault lines |
 | Fallow punch-hole                  | Second law + event horizon                | Unbounded memory growth                             |
 
 Remove any of these and the system either violates a conservation law or requires locks/polling to compensate — exactly like adding friction to a frictionless model.
 
 ---
 
-## 8. How to Think Like a Geophysicist When Hacking forkrun
+## 9. How to Think Like a Geophysicist When Hacking forkrun
 
 1. **Start with invariants, not features.** Write the conservation laws first (see INVARIANTS.md).
 2. **Ask “what would break if this were a real river?”** If the answer is “turbulence” or “backflow,” you probably need a new physical mechanism, not a new lock.

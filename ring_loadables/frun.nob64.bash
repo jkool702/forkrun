@@ -146,8 +146,10 @@ frun() {
         for nn in "${@##\-*}"; do
             [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && ! [[ " ${FORKRUN_EXTRA_FUNCS} " == *" ${nn} "* ]] && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
-        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} ${FORKRUN_TRUST_RESUME:+FORKRUN_TRUST_RESUME} "
+        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} ${FORKRUN_TRUST_RESUME:+FORKRUN_TRUST_RESUME} ${FORKRUN_DEBUG:+FORKRUN_DEBUG} ${FORKRUN_TEST_FALLOW_PIDFILE:+FORKRUN_TEST_FALLOW_PIDFILE} "
 
+
+        local FORKRUN_FRUN_SRC="ulimit -n $(ulimit -Hn)"$'\n'
         FORKRUN_FRUN_SRC+=$'\n'"$(declare -f -- frun ${FORKRUN_EXTRA_FUNCS:-} 2>/dev/null; declare -p -- ${FORKRUN_EXTRA_VARS} 2>/dev/null)"
         [[ -n "${FORKRUN_EXTRA_SETUP}" ]] && FORKRUN_FRUN_SRC+=$'\n'"${FORKRUN_EXTRA_SETUP}"
 
@@ -207,6 +209,7 @@ frun __exec__ "$@"
         val="${1,,}"
         iec=false
         [[ "${val#[+-]}" == '0' ]] && { REPLY="${val}"; return 0; }
+        [[ "${val}" == *.* ]] && val="${val%%.*}"
         [[ "${val}" == +* ]] && { iec=true; val="${val#+}"; }
         num="${val//[^0-9]/}"
         [[ $num ]] || if [[ ${val} ]]; then return 1; else REPLY=''; return 0; fi
@@ -295,7 +298,7 @@ EOF
 
   -j, -P, --workers <W> : Set the number of concurrent workers. Supports <init>:<max> (e.g., -j 4:32). Default max is the number of logical cores.
   -l, --lines <L>       : Set the batch size (lines per worker). Supports <init>:<max> (e.g., -l 10:10000). Default max is 4096.
-  -L, --exact-lines <N> : Force exactly N lines per batch. (Warning: Disables NUMA topological stealing to guarantee exact counts).
+  -L, --exact-lines <N> : Force exactly N lines per batch. NUMA-native since v3.5.0 (scanning is serialized across nodes and a batch may straddle a NUMA chunk boundary — prefer -l unless exact counts are required).
   -t, --timeout <us>    : Set the maximum wait time (in microseconds) for a partial batch before flushing early.
 
 ### STRING SUBSTITUTION
@@ -403,8 +406,8 @@ EOF
             -U|--unsafe|--UNSAFE)                   unsafe_flag=true  ;;
             +U|--safe|--SAFE)                       unsafe_flag=false ;;
 
-            -s|--stdin)                              stdin_flag=true  ;;
-            +s|--no-stdin)                           stdin_flag=false ;;
+            -s|--stdin)                              ${is_sweep:-false} || stdin_flag=true  ;;
+            +s|--no-stdin)                           ${is_sweep:-false} || stdin_flag=false ;;
 
             -N|--dry-run|--DRY-RUN)                dry_run_flag=true  ;;
             +N|--no-dry-run|--NO-DRY-RUN)          dry_run_flag=false ;;
@@ -447,38 +450,219 @@ EOF
                 [[ ${arg} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && resume_file="${arg}"
                 if [[ -f "$resume_file" ]]; then
+                    local _rf_fd
+                    exec {_rf_fd}<"$resume_file"
+                    local _proc_rf="/proc/self/fd/$_rf_fd"
 
-                    local parsed_state
-                    parsed_state="$(PATH='' exec -c "${BASH:-bash}" --norc --noprofile --restricted -c '
-                        eval "$1";
-                        eval "${FORKRUN_EXTRA_DEFS:-}";
-                        echo "___FORKRUN_SAFE_STATE_BOUNDARY___";
-                        builtin declare -p FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES FORKRUN_RESUME_JAGGED;
-                        echo "___FORKRUN_RESUME_STATE_BOUNDARY___";
-                        FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS//[[:space:]$IFS]/ } ";
-                        FORKRUN_EXTRA_VARS_A=(${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /});
-                        builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT "${FORKRUN_EXTRA_VARS_A[@]}";
-                        [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && {
-                            FORKRUN_EXTRA_FUNCS_A=(${FORKRUN_EXTRA_FUNCS})
-                            builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}"
-                        }
-                    ' _ "$(< "$resume_file")" 2>/dev/null)"
+                    # 1. Parse Stream Coordinates safely line-by-line without arbitrary code execution
+                    local _res_line
+                    while IFS= read -r _res_line || [[ -n "$_res_line" ]]; do
+                        case "$_res_line" in
+                            FORKRUN_RESUME_HORIZON=+([0-9]))
+                                FORKRUN_RESUME_HORIZON="${_res_line#*=}" ;;
+                            FORKRUN_RESUME_STDOUT_BYTES=+([0-9]))
+                                FORKRUN_RESUME_STDOUT_BYTES="${_res_line#*=}" ;;
+                            FORKRUN_RESUME_JAGGED=\(*\))
+                                if [[ "${_res_line#*=}" =~ ^\(\ *(\"[0-9]+:[0-9]+\"\ *)*\)$ ]]; then
+                                    eval "$_res_line"
+                                fi
+                                ;;
+                        esac
+                    done < "$_proc_rf"
 
-                    # Security Check: Ensure the restricted shell actually finished successfully
-                    if [[ "$parsed_state" != *___FORKRUN_SAFE_STATE_BOUNDARY___* ]]; then
-                        echo "forkrun [ABORT]: Resume file evaluation failed or was intercepted." >&2
+                    if [[ -z "${FORKRUN_RESUME_HORIZON:-}" ]]; then
+                        echo "forkrun [ERROR]: Invalid or corrupt resume file '$resume_file' (missing stream coordinates)." >&2
+                        exec {_rf_fd}<&-
+                        NORMAL_EXIT_FLAG=true
                         return 1
                     fi
 
-                    # GREEDY MATCH: Erase all untrusted stdout (including the delimiter itself)
-                    parsed_state="${parsed_state##*___FORKRUN_SAFE_STATE_BOUNDARY___$'\n'}"
-
-                    # BOTH modes require this flag to tell the C-engine to actually resume
                     resume_flag=true
 
+                    # --- v3.5.0: RESUME FILE OWNERSHIP / PERMISSION GATE ---
+                    # The resume file encodes commands (FORKRUN_ORIG_ARGS,
+                    # EXTRA_SETUP/FUNCS/VARS). Filesystem ownership is the
+                    # primary trust boundary: only the file's owner should
+                    # be able to dictate what a resume executes. The sandbox
+                    # below remains the secondary boundary against partial
+                    # tampering (shared dirs, spool artifacts). Both stay.
+                    if (( $# == 1 )) && [[ "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
+                        local _rf_uid _rf_mode _my_uid
+                        read -r _rf_uid _rf_mode < <(stat -Lc '%u %04a' "$_proc_rf" 2>/dev/null)
+
+                        if [[ -z "${_rf_uid:-}" ]]; then
+                            # Cannot stat (broken symlink, race, perms):
+                            # fail CLOSED. An unvalidatable command file
+                            # must never auto-execute.
+                            echo "forkrun [ABORT]: Cannot stat resume file '$resume_file'. Refusing auto-resume." >&2
+                            exec {_rf_fd}<&-
+                            NORMAL_EXIT_FLAG=true
+                            return 1
+                        fi
+
+                        local _rf_reject=""
+                        local _rf_reason=""
+                        _my_uid=$(id -u)
+
+                        if (( _rf_uid != _my_uid )); then
+                            # Not ours: someone else's file is someone
+                            # else's code. HARD reject (override: TRUST=1).
+                            _rf_reject="hard"
+                            _rf_reason="owned by uid ${_rf_uid} (you are ${_my_uid})"
+                        elif (( (8#${_rf_mode:-0} & 8#022) != 0 )); then
+                            # Ours but group/world-writable: anyone sharing
+                            # the dir can rewrite it. Require chmod or trust.
+                            _rf_reject="soft"
+                            _rf_reason="mode ${_rf_mode} is group/world-writable"
+                        fi
+
+                        if [[ -n "$_rf_reject" ]]; then
+                            echo "forkrun [SECURITY]: Resume file '$resume_file' ${_rf_reason}." >&2
+                            if [[ "$_rf_reject" == "hard" ]]; then
+                                # Foreign-owned file: show what would execute
+                                # and require explicit confirmation. This handles
+                                # the team-shared-scratch workflow cleanly.
+                                if { true; } 2>/dev/null </dev/tty; then
+                                    local _rf_orig_preview
+                                    _rf_orig_preview=$(grep -m1 '^declare -a FORKRUN_ORIG_ARGS' "$_proc_rf" 2>/dev/null || echo "(no FORKRUN_ORIG_ARGS found)")
+                                    read -p $'\nforkrun [SECURITY]: This resume file is owned by another user. It will re-execute:\n  '"${_rf_orig_preview}"$'\nProceed? (y/N): ' -n 1 -r -t 60 </dev/tty
+                                    echo >&2
+                                    if [[ ! ${REPLY,,} == 'y' ]]; then
+                                        echo "forkrun [ABORT]: Resume cancelled by user." >&2
+                                        exec {_rf_fd}<&-
+                                        NORMAL_EXIT_FLAG=true
+                                        return 1
+                                    fi
+                                else
+                                    # No TTY (scripts, CI, unattended): fail closed
+                                    echo "                   Refusing automatic resumption (no TTY to confirm)." >&2
+                                    echo "                   To resume anyway: FORKRUN_TRUST_RESUME=1 frun --resume ..." >&2
+                                    exec {_rf_fd}<&-
+                                    NORMAL_EXIT_FLAG=true
+                                    return 1
+                                fi
+                            else
+                                # Soft: interactive confirm, auto-N without a TTY
+                                if { true; } 2>/dev/null </dev/tty; then
+                                    read -p $'\nforkrun [SECURITY]: Resume this group/world-writable file anyway? (y/N): ' -n 1 -r -t 60 </dev/tty
+                                    echo >&2
+                                    if [[ ! ${REPLY,,} == 'y' ]]; then
+                                        echo "forkrun [ABORT]: Resume cancelled by user." >&2
+                                        exec {_rf_fd}<&-
+                                        NORMAL_EXIT_FLAG=true
+                                        return 1
+                                    fi
+                                else
+                                    echo "forkrun [ABORT]: No TTY to confirm. Fix with: chmod go-w '$resume_file'" >&2
+                                    echo "                Or set FORKRUN_TRUST_RESUME=1 for unattended resumption." >&2
+                                    exec {_rf_fd}<&-
+                                    NORMAL_EXIT_FLAG=true
+                                    return 1
+                                fi
+                            fi
+                        fi
+                    fi
+
                     if (( $# == 1 )); then
-                        # FULL AUTO RESUME - extract and use ALL info from resume file
-                        eval "${parsed_state/___FORKRUN_RESUME_STATE_BOUNDARY___/}"
+                        # FULL AUTO RESUME - extract and verify execution environment
+                        # NOTE: trust/ownership checks happen in the PARENT before this subprocess; this block must remain tool-free and decision-free
+                        local _rf_content _vars_env _fn_env
+                        _rf_content="$(< "/proc/self/fd/${_rf_fd}")"
+
+                        local _secret_token="___FORKRUN_ENV_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        local _secret_end="___FORKRUN_END_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        local _fn_token="___FORKRUN_FN_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        local _fn_end="___FORKRUN_FNEND_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        local parsed_env
+                         parsed_env="$(env -i PATH='' "${BASH:-bash}" --norc --noprofile --restricted -c '
+                            _sb="$1"
+                            eval "$_sb" || exit 1
+                            eval "${FORKRUN_EXTRA_DEFS:-}"
+                            unset FORKRUN_EXTRA_DEFS
+                            trap - EXIT DEBUG RETURN ERR
+
+                            # P2-4: newline variable that survives single-quote embedding.
+                            # NOTE: $(printf "\n") strips to empty — the trailing "." prevents that.
+                            _NL="$(printf "\n.")"
+                            _NL="${_NL%.}"
+
+                            # P2-1/P2-3: capture functions BEFORE wipe, verify in isolated subshell
+                            _fn_text=""
+                            [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && {
+                                FORKRUN_EXTRA_FUNCS_A=(${FORKRUN_EXTRA_FUNCS})
+                                _fn_text="$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}")"
+                                [[ -n "$_fn_text" ]] && {
+                                    (
+                                        eval "$_fn_text" || exit 1
+                                        [[ "$(builtin declare -f -- "${FORKRUN_EXTRA_FUNCS_A[@]}")" == "$_fn_text" ]] && exit 0
+                                        exit 1
+                                    ) || exit 1
+                                }
+                            }
+
+                            # Wipe all functions so variables and emission execute function-free
+                            while read -r _f; do unset -f "$_f"; done < <(compgen -A function)
+
+                            # Render existing variables only, one declaration per line
+                            _nv() { local _v; for _v in "$@"; do [[ -n "${!_v+x}" ]] && builtin declare -p -- "$_v"; done; return 0; }
+                            _vars_out=""
+                            _vars_out+="$(_nv FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"${_NL}
+                            FORKRUN_EXTRA_VARS=" ${FORKRUN_EXTRA_VARS//[[:space:]$IFS]/ } "
+                            FORKRUN_EXTRA_VARS_A=(${FORKRUN_EXTRA_VARS// FORKRUN_TRUST_RESUME /})
+                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_out+="$(_nv "${FORKRUN_EXTRA_VARS_A[@]}")"${_NL}
+                            _vars_out+="$(_nv FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"${_NL}
+
+                            # Round-trip verify variables in-place
+                            eval "$_vars_out" || exit 1
+                            _vars_check=""
+                            _vars_check+="$(_nv FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT)"${_NL}
+                            (( ${#FORKRUN_EXTRA_VARS_A[@]} > 0 )) && _vars_check+="$(_nv "${FORKRUN_EXTRA_VARS_A[@]}")"${_NL}
+                            _vars_check+="$(_nv FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP)"${_NL}
+                            [[ "$_vars_out" != "$_vars_check" ]] && exit 1
+
+                            for _jp in $(jobs -p); do kill -9 "$_jp"; done
+                            wait
+
+                            # FRAME-SPLIT: variables and function text cross in
+                            # SEPARATE token-bounded frames. The parent evals
+                            # the vars frame immediately; the function frame is
+                            # evald ONLY AFTER the layer-3 gate passes. This
+                            # guarantees the gates own printf -v / declare -f
+                            # previews run with NO hostile functions in scope.
+                            _emit_vars="$2${_NL}${_vars_out}${_NL}$3${_NL}"
+                            _emit_fns="$4${_NL}${_fn_text}${_NL}$5${_NL}"
+                            printf "%s" "${_emit_vars}${_emit_fns}"
+                        ' _ "$_rf_content" "$_secret_token" "$_secret_end" "$_fn_token" "$_fn_end" 2>/dev/null)"
+
+                        if [[ "$parsed_env" != *"${_secret_token}"* || "$parsed_env" != *"${_secret_end}"* ]]; then
+                            echo "forkrun [ABORT]: Resume file environment verification failed or was intercepted." >&2
+                            exec {_rf_fd}<&-
+                            NORMAL_EXIT_FLAG=true
+                            return 1
+                        fi
+                        # FRAME-SPLIT: vars frame must also be well-formed at the
+                        # fn boundary; a hostile file that eats/forgets the fn
+                        # tokens simply yields an empty (or failed) function
+                        # frame below — fail-closed, not fail-open.
+                        if [[ "$parsed_env" != *"${_fn_token}"* || "$parsed_env" != *"${_fn_end}"* ]]; then
+                            echo "forkrun [ABORT]: Resume file function frame missing or intercepted." >&2
+                            exec {_rf_fd}<&-
+                            NORMAL_EXIT_FLAG=true
+                            return 1
+                        fi
+
+                        # Extract BOTH frames.
+                        _vars_env="${parsed_env##*"${_secret_token}"$'\n'}"
+                        _vars_env="${_vars_env%%$'\n'"${_secret_end}"*}"
+                        _fn_env="${parsed_env##*"${_fn_token}"$'\n'}"
+                        _fn_env="${_fn_env%%$'\n'"${_fn_end}"*}"
+
+                        # VARS ONLY — eval'd now. No function text has crossed.
+                        eval "$_vars_env"
+                        #_clean_env="$( ( eval "$parsed_env"; \
+                        #    builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT \
+                        #    FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP 2>/dev/null ) )"
+                        #eval "$_clean_env"
 
                         local has_custom_vars=0
                         for var in ${FORKRUN_EXTRA_VARS:-}; do
@@ -507,9 +691,25 @@ EOF
 
                             if [[ ! ${REPLY,,} == 'y' ]]; then
                                 echo "forkrun [ABORT]: User rejected setup commands. Resumption cancelled." >&2
+                                exec {_rf_fd}<&-
+                                NORMAL_EXIT_FLAG=true
                                 return 1
                             fi
                         fi
+                        # FRAME-SPLIT (cont.): the gate has passed (user confirmed
+                        # or TRUST=1) — NOW define functions. But hostile function
+                        # text can shadow the builtins the orchestrator itself
+                        # depends on (printf, eval, declare...). Re-assert the
+                        # shadow-critical builtins via `builtin` is not enough —
+                        # function names take precedence. So: define the functions
+                        # in a NAMESPACE ISOLATED subshell — no. Simplest robust:
+                        # unshadow what we ourselves call, by deleting any
+                        # same-named function the frame defined for the exact
+                        # builtins the orchestrator uses post-gate:
+                        eval "$_fn_env"
+                        # The orchestrator's own codegen depends on these builtins;
+                        # a resume file has no legitimate reason to shadow them.
+                        #unset -f printf echo read declare eval unset export set 2>/dev/null
 
                         if (( ${#FORKRUN_ORIG_ARGS[@]} > 0 )); then
                             local _is_sweep=false
@@ -528,6 +728,7 @@ EOF
                                     export -f "$func" 2>/dev/null || true
                                 done
 
+                                exec {_rf_fd}<&-
                                 # Restart the sweep pipeline
                                 frun --resume "$resume_file" "${FORKRUN_ORIG_ARGS[@]}"
                                 return $?
@@ -540,10 +741,8 @@ EOF
                             # Execute the user's custom setup environment hooks
                             [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && eval "${FORKRUN_EXTRA_SETUP}"
                         fi
-                    else
-                        # MANUAL RESUME - only extract stream coordinates. User provides execution environment.
-                        eval "${parsed_state%%___FORKRUN_RESUME_STATE_BOUNDARY___*}"
                     fi
+                    exec {_rf_fd}<&-
 
                     # We intentionally do NOT call 'continue' here!
                     # This allows the loop to hit the 'shift' at the bottom of the case statement,
@@ -551,20 +750,53 @@ EOF
                     # newly injected FORKRUN_ORIG_ARGS on the next iteration.
                 else
                     echo "forkrun [ERROR]: Resume file '$resume_file' not found." >&2
+                    NORMAL_EXIT_FLAG=true
                     return 1
                 fi ;;
 
             # --- LIMIT (-n 100) ---
-            @(-n|--limit)?(?([= $'\t'])+([0-9+-])))
+            @(-n|--limit)?(?([= $'\t'])*))
                 arg="${1##@(-n|--limit)?([= $'\t'])}";
-                [[ ${arg}${2//+([0-9+-])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--limit='"$REPLY") ;;
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                if [[ -z "${arg}" ]]; then
+                    echo "forkrun [ERROR]: -n / --limit requires a value." >&2
+                    NORMAL_EXIT_FLAG=true
+                    return 1
+                fi
+                if [[ "$arg" == -+([0-9]) ]]; then
+                    echo "forkrun [ERROR]: -n / --limit cannot be negative: '$arg'" >&2
+                    NORMAL_EXIT_FLAG=true
+                    return 1
+                fi
+                if ! _expand_unit "${arg}"; then
+                    echo "forkrun [ERROR]: Invalid value for -n / --limit: '$arg'" >&2
+                    NORMAL_EXIT_FLAG=true
+                    return 1
+                fi
+                ring_init_opts+=('--limit='"$REPLY") ;;
 
             # --- EXACT LINES (-L 100) ---
-            @(-L|--exact-lines|--LINES|--EXACT-LINES)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
+            @(-L|--exact-lines|--LINES|--EXACT-LINES)?(?([= $'\t'])*))
                 arg="${1##@(-L|--exact-lines|--LINES|--EXACT-LINES)?([= $'\t'])}";
-                [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && { exact_lines_val="${arg}"; last_conflict="exact_lines"; } ;;
+                [[ ${arg} ]] || { shift; arg="$1"; }
+                if [[ -z "${arg}" ]]; then
+                    echo "forkrun [ERROR]: -L / --exact-lines requires a value." >&2
+                    NORMAL_EXIT_FLAG=true
+                    return 1
+                fi
+                # Reject ranges (M:N), 0, and negative values
+                if [[ "$arg" == *:* || "$arg" == "0" || "$arg" == -* ]]; then
+                    echo "forkrun [ERROR]: -L / --exact-lines requires a single positive integer (ranges like '$arg' are rejected; use -l for adaptive ranges)." >&2
+                    NORMAL_EXIT_FLAG=true
+                    return 1
+                fi
+                if ! _expand_unit "${arg}" || (( REPLY == 0 )); then
+                    echo "forkrun [ERROR]: -L / --exact-lines must be a positive integer." >&2
+                    NORMAL_EXIT_FLAG=true
+                    return 1
+                fi
+                exact_lines_val="${REPLY}"
+                last_conflict="exact_lines" ;;
 
             # --- LINES / BATCH (-l 1k or -l 100:1k) ---
             @(-l|--lines|--batchsize)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
@@ -576,13 +808,15 @@ EOF
             @(-b|--bytes)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-b|--bytes)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                _parse_count "bytes" "${arg:-}" ;;
+                ${is_sweep:-false} || _parse_count "bytes" "${arg:-}" ;;
 
             # --- WORKERS (-j 4 or -j 1:8) ---
             @(-j|-P|--workers)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-j|-P|--workers)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
                 [[ ${arg} ]] && _parse_count "workers" "${arg}" ;;
+
+            --greedy|--GREEDY)                ring_init_opts+=('--greedy') ;;
 
             # --- TIMEOUT (-t 5000) ---
             @(-t|--timeout)?(?([= $'\t'])+([0-9.+-])))
@@ -613,7 +847,7 @@ EOF
                 if [[ -z "${arg}" && "$1" == @(-d|--delim|--delimiter) ]]; then
                     shift; arg="$1";
                 fi
-                delimiter_val="${arg:0:1}" ;;
+                ${is_sweep:-false} || delimiter_val="${arg:0:1}" ;;
 
             # --- HALT (--halt) ---
             @(--halt)?(?([= $'\t'])*))
@@ -624,7 +858,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.4.3';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.5.0';  return 0  ;;
 
             --) shift; break ;;
 
@@ -689,7 +923,7 @@ toc() {
 toc() { :; }
     fi
 
-    : "${nWorkersMax:=$(nproc)}"
+    : "${nWorkersMax:=0}"
 
     # Resolve Default Modes
     [[ -z ${stdin_flag} ]] && {
@@ -715,6 +949,12 @@ toc() { :; }
     ring_init_opts+=("--delim=${delimiter_val}")
 
     [[ "${order_mode}" == "realtime" ]] || ring_init_opts+=('--out=fd_out')
+
+    if ${byte_mode_flag:-false} && [[ -n "${exact_lines_val:-}" ]]; then
+        echo "forkrun [WARNING]: -L (exact lines) overrides -b (byte mode chunking). Data will still be delivered via stdin as -b implies." >&2
+        byte_mode_flag=false
+        stdin_flag=true
+    fi
 
     # --- NUMA Node Discovery and Topology Mapping ---
     : "${parsed_numa_nodes_arg:=auto}"
@@ -808,27 +1048,38 @@ toc() { :; }
         fi
     fi
 
-    # --- Feature 2: -L vs NUMA Conflict Resolution ---
-    if [[ -n "${exact_lines_val:-}" ]] && (( FORKRUN_NUM_NODES > 1 )); then
-        if ${is_sweep:-false}; then
-            # Silent fallback to UMA for sweeps
-            _forkrun_build_numa_map "1"
-        elif [[ "$last_conflict" == "exact_lines" ]]; then
-            printf '\nforkrun [WARNING]: To facilitate using exactly %s arguments per batch, forkrun will run in UMA mode. NUMA optimizations prevent -L from working properly, and will be disabled.\n\n' "${exact_lines_val}" >&2
-            # Force UMA mode by re-building the map with exactly 1 node
-            _forkrun_build_numa_map "1"
-        else
-            printf '\nforkrun [WARNING]: forkrun cannot guarantee exactly %s lines per batch in NUMA mode. The -L option has been downgraded to -l, which guarantees a maximum of %s lines per batch. If you need exactly %s lines per batch, remove the --nodes option from the invocation.\n\n' "${exact_lines_val}" "${exact_lines_val}" "${exact_lines_val}" >&2
-            # Downgrade to -l (clear exact lines flag so it just parses normally below)
-            _parse_count "lines" "${exact_lines_val}"
-            exact_lines_val=""
-        fi
+    # --- -L vs NUMA: v3.5.0 — native NUMA support (scanner-handoff chain) ---
+    # Exact batches are now preserved in NUMA mode: the cum_lines chain gates
+    # scanning (serialized across node scanners), and a batch of L lines may
+    # straddle a chunk boundary (1..L-1 lines of cross-socket traffic per
+    # boundary — the price of exactness). Sweeps still run UMA: they need
+    # L=1 per batch and the flat pipeline is the right tool for that.
+    if ${is_sweep:-false} && (( FORKRUN_NUM_NODES > 1 )); then
+        _forkrun_build_numa_map "1"
     fi
 
     # If exact_lines_val survived (either it was UMA, or we forced UMA), apply it
     if [[ -n "${exact_lines_val:-}" ]]; then
         _parse_count "lines" "${exact_lines_val}"
         ring_init_opts+=("--exact-lines")
+    fi
+
+    # --- WORKER-COUNT SENTINEL RESOLUTION (topology-aware) ---
+    #   0  = default max -> max(nproc, active_nodes)      [>= 1 worker/node]
+    #   -1 = hard max    -> max(2*nproc, 2*active_nodes)  [>= 2 workers/node]
+    case "${nWorkersMax}" in
+        -1) nWorkersMax=$(( $(nproc) * 2 > FORKRUN_NUM_NODES * 2 ? $(nproc) * 2 : FORKRUN_NUM_NODES * 2 )) ;;
+        0)  nWorkersMax=$(( $(nproc) > FORKRUN_NUM_NODES ? $(nproc) : FORKRUN_NUM_NODES )) ;;
+    esac
+
+    # --- WORKER / NUMA RECONCILIATION ---
+    # Ensure no NUMA node is left with 0 workers (which causes starvation/hangs).
+    if (( FORKRUN_NUM_NODES > 1 && nWorkersMax < FORKRUN_NUM_NODES )); then
+        if [[ "${parsed_numa_nodes_arg}" == "auto" ]]; then
+            _forkrun_build_numa_map "$nWorkersMax"
+        else
+            nWorkersMax=$FORKRUN_NUM_NODES
+        fi
     fi
 
     if [[ -n "$numa_map_str" ]]; then
@@ -840,13 +1091,10 @@ toc() { :; }
     : "${FORKRUN_NUM_NODES:=1}" # Fallback safety
 
     # Create Data Memfd
-    ring_memfd_create ingress_memfd
+    ring_memfd_create ingress_memfd 1
 
     # NEW: Apply Checkpoint if Resuming
      ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "$FORKRUN_RESUME_STDOUT_BYTES" "${FORKRUN_RESUME_JAGGED[@]}"
-
-    # sanitize checkpoint file
-    printf -v safe_checkpoint_file '%q' "${checkpoint_file}"
 
     # # # # # MAIN # # # # #
     {
@@ -863,32 +1111,54 @@ toc() { :; }
                 echo "forkrun [FATAL]: Pipeline aborted. Generating checkpoint..." >&2
                 ${NORMAL_EXIT_FLAG:-true} || ring_abort
 
-                # ALWAYS write the resume file!
-                ring_dump_resume > '"${safe_checkpoint_file}"'
-                local FORKRUN_EXTRA_DEFS=""
-                for nn in ${FORKRUN_EXTRA_FUNCS:-}; do
-                    declare -F -- "${nn}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -f -- "${nn}")"
-                done
-                for vv in ${FORKRUN_EXTRA_VARS:-}; do
-                    declare -p -- "${vv}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -p -- "${vv}")"
-                done
+                local _target_chk="${checkpoint_file:-.forkrun_resume}"
+                # v3.5.0: atomic publication — write to a temp sibling, then
+                # rename. Readers see either the old complete file or the new
+                # complete file, never a torn one. If ANY stage of content
+                # generation fails, publish NOTHING (keep the previous
+                # checkpoint intact) rather than a header-less fragment.
+                local _target_tmp="${_target_chk}.tmp.$$"
+                local _publish_ok=0
+                if ring_dump_resume > "$_target_tmp"; then
+                    _publish_ok=1
+                    local FORKRUN_EXTRA_DEFS=""
+                    for nn in ${FORKRUN_EXTRA_FUNCS:-}; do
+                        declare -F -- "${nn}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -f -- "${nn}")"
+                    done
+                    for vv in ${FORKRUN_EXTRA_VARS:-}; do
+                        declare -p -- "${vv}" &>/dev/null && FORKRUN_EXTRA_DEFS+=$'"'"'\n'"'"'"$(declare -p -- "${vv}")"
+                    done
 
-                declare -p -- FORKRUN_ORIG_ARGS 2>/dev/null >> '"${safe_checkpoint_file}"'
-                [[ -n "${FORKRUN_RETRY_LIMIT:-}" ]] && declare -p -- FORKRUN_RETRY_LIMIT 2>/dev/null >> '"${safe_checkpoint_file}"'
-                [[ -n "${FORKRUN_EXTRA_VARS:-}"  ]] && declare -p -- FORKRUN_EXTRA_VARS 2>/dev/null >> '"${safe_checkpoint_file}"'
-                [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && declare -p -- FORKRUN_EXTRA_FUNCS 2>/dev/null >> '"${safe_checkpoint_file}"'
-                [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && declare -p -- FORKRUN_EXTRA_SETUP 2>/dev/null >> '"${safe_checkpoint_file}"'
-                [[ -n "${FORKRUN_EXTRA_DEFS:-}"  ]] && declare -p -- FORKRUN_EXTRA_DEFS 2>/dev/null >> '"${safe_checkpoint_file}"'
+                    declare -p -- FORKRUN_ORIG_ARGS 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_RETRY_LIMIT:-}" ]] && declare -p -- FORKRUN_RETRY_LIMIT 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_EXTRA_VARS:-}"  ]] && declare -p -- FORKRUN_EXTRA_VARS 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && declare -p -- FORKRUN_EXTRA_FUNCS 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_EXTRA_SETUP:-}" ]] && declare -p -- FORKRUN_EXTRA_SETUP 2>/dev/null >> "$_target_tmp"
+                    [[ -n "${FORKRUN_EXTRA_DEFS:-}"  ]] && declare -p -- FORKRUN_EXTRA_DEFS 2>/dev/null >> "$_target_tmp"
+                    chmod 600 "$_target_tmp" 2>/dev/null
+                    mv -f "$_target_tmp" "$_target_chk" 2>/dev/null || _publish_ok=0
+                fi
+                [[ "$_publish_ok" == 0 ]] && rm -f "$_target_tmp" 2>/dev/null
 
                 if [[ "${order_mode}" != "realtime" ]]; then
-                    local safe_bytes="$(grep -E '"'"'^FORKRUN_RESUME_STDOUT_BYTES='"'"' '"${safe_checkpoint_file}"')"
+                    local safe_bytes="$(grep -E '^FORKRUN_RESUME_STDOUT_BYTES=' "$_target_chk" 2>/dev/null)"
                     safe_bytes="${safe_bytes#*=}"
-                    echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
-                    echo "         then re-run your exact command with: --resume "'"${safe_checkpoint_file}"' >&2
+                    if [[ -n "$safe_bytes" && "$_publish_ok" == 1 ]]; then
+                        echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
+                        echo "         then re-run your exact command with: --resume $_target_chk" >&2
+                    else
+                        echo "forkrun: Checkpoint generation FAILED; previous checkpoint (if any) left untouched." >&2
+                        echo "         Re-run with --resume $_target_chk to retry from the last good state." >&2
+                    fi
                 else
-                    echo "forkrun: Warning - Realtime mode (-u) checkpoint generated." >&2
-                    echo "         Resuming will result in some duplicate lines at the failure boundary (At-Least-Once semantics)." >&2
-                    echo "         Re-run your exact command with: --resume "'"${safe_checkpoint_file}"' >&2
+                    if [[ "$_publish_ok" == 1 ]]; then
+                        echo "forkrun: Warning - Realtime mode (-u) checkpoint generated." >&2
+                        echo "         Resuming will result in some duplicate lines at the failure boundary (At-Least-Once semantics)." >&2
+                        echo "         Re-run your exact command with: --resume $_target_chk" >&2
+                    else
+                        echo "forkrun: Checkpoint generation FAILED; previous checkpoint (if any) left untouched." >&2
+                        echo "         Re-run with --resume $_target_chk to retry from the last good state." >&2
+                    fi
                 fi
             fi
             # Clean up memory only AFTER the trap is done with it!
@@ -897,24 +1167,23 @@ toc() { :; }
         ' EXIT
 
 _forkrun_checkpoint_signal() {
-    NORMAL_EXIT_FLAG=false
+    # v3.5.0: record the signal; do NOT exit here. The reactor loop
+    # observes _fr_signalled on its next iteration (≤100ms latency via
+    # ring_poll's bounded timeout) and enters the standard ABORT shutdown:
+    # fd choreography, wait, frozen ledger, then EXIT trap checkpoints.
+    _fr_signalled="$1"
     _ret_val="$2"
+    NORMAL_EXIT_FLAG=false
     echo "forkrun [WARN]: Caught SIG${1}. Freezing pipeline..." >&2
     ring_abort
-    exit "$2"
 }
         trap '_forkrun_checkpoint_signal HUP  129' HUP
         trap '_forkrun_checkpoint_signal INT  130' INT
         trap '_forkrun_checkpoint_signal QUIT 131' QUIT
 
-        # If Preemption Support is active, trap SLURM signals
         if (( preempt_mode == 1 )); then
-            # SLURM default preemption / scancel signal
-            trap 'NORMAL_EXIT_FLAG=false; _ret_val=143; echo "forkrun [WARN]: Caught SIGTERM (SLURM Preemption). Freezing pipeline..." >&2; ring_abort; exit 143' TERM
-
-            # Common alternative pre-kill signal used via SLURM --signal=B:USR1@<time>
-            trap 'NORMAL_EXIT_FLAG=false; _ret_val=138; echo "forkrun [WARN]: Caught SIGUSR1 (SLURM Warning). Freezing pipeline..." >&2; ring_abort; exit 138' USR1
-
+            trap '_forkrun_checkpoint_signal TERM 143' TERM
+            trap '_forkrun_checkpoint_signal USR1 138' USR1
             trap '_forkrun_checkpoint_signal USR2 140' USR2
             trap '_forkrun_checkpoint_signal XCPU 152' XCPU
             trap '_forkrun_checkpoint_signal XFSZ 153' XFSZ
@@ -937,10 +1206,10 @@ _forkrun_checkpoint_signal() {
                 ordered_flag=0
                 [[ "${order_mode}" == "ordered" ]] && ordered_flag=1
 
-                ( exec {fd_trap_ack_w}>&-; ring_numa_ingest ${fd0} ${fd_write} $FORKRUN_NUM_NODES $ordered_flag ) &
+                ( exec {fd_trap_ack_w}>&-; ring_numa_ingest ${fd0} ${fd_write} $FORKRUN_NUM_NODES $ordered_flag || ring_abort ) &
 
                 for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                    ( exec {fd_trap_ack_w}>&-; ring_indexer_numa ${fd_scan} $i ) &
+                    ( exec {fd_trap_ack_w}>&-; ring_indexer_numa ${fd_scan} $i || ring_abort ) &
                 done
 
                 for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
@@ -955,7 +1224,7 @@ _forkrun_checkpoint_signal() {
 
             else
                 # LEGACY FLAT PIPELINE
-                ( exec {fd_trap_ack_w}>&-; ring_copy ${fd_write} ${fd0}; ring_signal ) &
+                ( exec {fd_trap_ack_w}>&-; ring_copy ${fd_write} ${fd0} && ring_signal || ring_abort ) &
                 ring_pipe fd_scan_death_r[0] fd_scan_death_w[0]
                 (
                     exec {fd_spawn_r}<&- {fd_trap_ack_w}>&-
@@ -969,18 +1238,20 @@ _forkrun_checkpoint_signal() {
 
         (
             exec {fd_fallow_w}>&- {fd_trap_ack_w}>&-
+            [[ -n "${FORKRUN_TEST_FALLOW_PIDFILE:-}" ]] && echo "$BASHPID" > "$FORKRUN_TEST_FALLOW_PIDFILE"
             fallow_args=( "${fd_fallow_r}" "${fd_write}" )
             if (( FORKRUN_NUM_NODES > 1 )); then
-                ring_fallow_phys "${fallow_args[@]}"
+                ring_fallow_phys "${fallow_args[@]}" || ring_abort
             else
-                ring_fallow "${fallow_args[@]}"
+                ring_fallow "${fallow_args[@]}" || ring_abort
             fi
         ) &
         exec {fd_fallow_r}<&-
 
         # --- 4. RING ORDER ---
         [[ "${order_mode}" == "realtime" ]] || {
-            ring_pipe fd_order_r fd_order_w
+            # B2: Size order ack pipe to 4096 (1 page) for closed hydraulic backpressure
+            ring_pipe fd_order_r fd_order_w 4096
             (
                 exec {fd_order_w}>&- {fd_trap_ack_w}>&-
 
@@ -988,7 +1259,7 @@ _forkrun_checkpoint_signal() {
                 [[ "${order_mode}" == "buffered" ]] && order_args+=( "unordered" )
                 (( FORKRUN_NUM_NODES > 1 )) && order_args+=( "numa" )
 
-                ring_order "${order_args[@]}" >&${fd1}
+                ring_order "${order_args[@]}" >&${fd1} || ring_abort
             ) &
             exec {fd_order_r}<&-
             export FD_ORDER_PIPE=$fd_order_w
@@ -1047,6 +1318,7 @@ _forkrun_checkpoint_signal() {
             cmd_type=$(type -t "$1" 2>/dev/null)
         fi
         local use_ultra_fast_path=false
+        local needs_external_error_check=true
 
         # Only use the fast path if it's an external file, safe mode, and no {} insertions
         if [[ "$cmd_type" == "file" ]] && ! ${unsafe_flag:-false} && ! ${insert_args_flag:-false} && ! ${is_sweep:-false}; then
@@ -1065,12 +1337,18 @@ _forkrun_checkpoint_signal() {
             # Ensure the user actually passed a colon!
             if [[ "$c_plugin_arg" != *:* ]]; then
                 echo "forkrun [FATAL]: -C requires format 'path/to/plugin.so:function_name'" >&2
+                NORMAL_EXIT_FLAG=true
                 return 1
             fi
 
             if ${is_sweep:-false}; then
                 echo "forkrun [FATAL]: C Plugins (-C) cannot be combined with multi-parameter sweeps (:::)." >&2
+                NORMAL_EXIT_FLAG=true
                 return 1
+            fi
+
+            if ${stdin_flag:-false} || ${byte_mode_flag:-false} || ${insert_args_flag:-false} || ${insert_id_flag:-false}; then
+                echo "forkrun [WARNING]: -s and -b are currently ignored in C plugin (-C) mode (stdin/stdin-chunk data delivery via forkrun_ctx is planned for v3.5.1). -i and -I insert-mode arguments are passed as fixed plugin arguments and DO work." >&2
             fi
 
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
@@ -1095,7 +1373,7 @@ _forkrun_checkpoint_signal() {
 
                     if $use_memfd; then
                         ${verbose_flag} && echo "forkrun [INFO]: Read-only filesystem detected. Compiling $plugin_c to memfd..." >&2
-                        ring_memfd_create plugin_memfd
+                        ring_memfd_create plugin_memfd 0
                         target_so="/proc/self/fd/$plugin_memfd"
                     else
                         ${verbose_flag} && echo "forkrun [INFO]: Auto-compiling $plugin_c -> $plugin_so" >&2
@@ -1105,6 +1383,7 @@ _forkrun_checkpoint_signal() {
                     # Compile directly to the target (Disk or RAM)
                     gcc -O3 -shared -fPIC -march=native "$plugin_c" -o "$target_so" || {
                         echo "forkrun [FATAL]: Auto-compilation of $plugin_c failed." >&2
+                        NORMAL_EXIT_FLAG=true
                         return 1
                     }
 
@@ -1115,6 +1394,7 @@ _forkrun_checkpoint_signal() {
                     fi
                 else
                     echo "forkrun [FATAL]: 'gcc' is not installed to compile $plugin_c." >&2
+                    NORMAL_EXIT_FLAG=true
                     return 1
                 fi
             fi
@@ -1122,6 +1402,7 @@ _forkrun_checkpoint_signal() {
             # Sanity check: Ensure we actually have a target to execute before spawning workers
             if [[ ! -f "$plugin_so" ]] && [[ ! -r "$plugin_so" ]]; then
                 echo "forkrun [FATAL]: Plugin '$plugin_so' not found/readable or could not be compiled." >&2
+                NORMAL_EXIT_FLAG=true
                 return 1
             fi
 
@@ -1134,11 +1415,13 @@ _forkrun_checkpoint_signal() {
             printf -v plugin_so_Q '%q' "${plugin_so}"
             printf -v plugin_fn_Q '%q' "${plugin_fn}"
 
-            local needs_external_error_check=true
+            # D1: Fixed command-line arguments string (guarded on $# to prevent phantom argv[0]="")
+            local _fixed_args_str=""
+            (( $# > 0 )) && _fixed_args_str=" ${cmdline_str% }"
 
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)
             pCode='
-            ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so_Q} ${plugin_fn_Q}"
+            ring_call $fd_read $REPLY '"${delimiter_str} ${plugin_so_Q} ${plugin_fn_Q}${_fixed_args_str}"
 
         elif ${stdin_flag}; then
             # STDIN PAYLOAD
@@ -1204,15 +1487,11 @@ _forkrun_checkpoint_signal() {
                 cmdline_str+=" $array_var"
             fi
 
-            if $use_ultra_fast_path; then
-                # Length 0 bypasses do_tokenize and acts as pure vfork wrapper
-                pCode='ring_exec 0 0 '\'''\'' '"$cmdline_str"
-            else
                 pCode='
                 ring_lseek $fd_read - SEEK_SET _dummy
                 read -r -u $fd_read -N $REPLY A
                 '"$cmdline_str"
-            fi
+
 
         else
             # LINE ARGS PAYLOAD (Default)
@@ -1280,6 +1559,7 @@ _forkrun_checkpoint_signal() {
   export RING_NODE_ID="$2"
   export RING_WID="$3"
   export FD_TRAP_ACK_W="$4"
+  export RING_WINCARN="$5"
 
   _ring_registered=false
 
@@ -1287,7 +1567,7 @@ _forkrun_checkpoint_signal() {
     status=${trap_status:-$?}
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
 
-    if (( status != 0 && ${FRUN_CLAIM_BYTES:-0} > 0 )); then
+    if (( status != 0 )); then
         (( RING_NUM_KILLS++ ))'
         [[ "$order_mode" != "realtime" ]] && worker_func_src+='
         [[ -n "${fd_out[$RING_WID]:-}" ]] && ring_revert_output "${fd_out[$RING_WID]}"
@@ -1320,7 +1600,9 @@ trap '"'"'trap_status=138; trap - USR1; kill -USR1 ${BASHPID}'"'"' USR1
     fi
 worker_func_src+='
   {
-    ID="$1" # ID is passed purely for user payload compatibility/insertion
+    local w_alias="$1"
+    (( ${5:-0} > 0 )) && w_alias="${1}.r${5}"
+    ID="$w_alias"
     RING_NUM_KILLS=0
     RING_POISONED=0
     FRUN_CLAIM_BYTES=0
@@ -1348,7 +1630,14 @@ worker_func_src+='
         worker_func_src+="${pCode}"'
             fi
         fi
-        '"${ring_ack_str}"' || break
+        '"${ring_ack_str}"' || {
+            # A2 hardening: ring_ack alarms internally on pipe failure; the
+            # non-zero return here is the worker-side acknowledgement of an
+            # infrastructure fault. Exit non-zero so the death-pipe/escrow
+            # machinery sees a failed worker (not a clean loop exit), which
+            # keeps TRAP_ACK accounting and respawn decisions consistent.
+            exit $?
+        }
 
         # Reset variables natively in Bash so C does not have to allocate them
         RING_POISONED=0
@@ -1356,7 +1645,11 @@ worker_func_src+='
         FRUN_CLAIM_BYTES=0
         REPLY=0
     done
-  } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'" 1>&${fd1} 2>&${fd2}
+  } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'"'
+  if ! ${stdin_flag}; then
+      worker_func_src+=' 0</dev/null'
+  fi
+  worker_func_src+=' 1>&${fd1} 2>&${fd2}
 ) &
 P[$3]=$!
 W_NODE[$3]=$2
@@ -1367,11 +1660,12 @@ W_NODE[$3]=$2
         # --- SPAWN LOOP REACTOR ---
         nWorkers=0
         local -a node_workers W_NODE fd_worker_r fd_worker_w P wID_free
+        local -a W_INCARN=()
 
         local -A trap_ack_pending
-        local _poll_timer_cmd=0
-        local _timer_armed=false
+        local _poll_timer_cmd=""
         local _ret_val=0
+        local _fr_signalled=""
         local -a POISONED_BATCHES=()
 
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
@@ -1385,20 +1679,26 @@ W_NODE[$3]=$2
         done
 
         while ring_poll "$fd_spawn_arg" fd_scan_death_r fd_worker_r "$_poll_timer_cmd" "$fd_trap_ack_r"; do
-            _poll_timer_cmd=0
+            _poll_timer_cmd=""
+
+            # v3.5.0: external signal observed → treat as ABORT with the
+            # signal's exit code (set in _ret_val by the recorder above).
+            if [[ -n "$_fr_signalled" ]]; then
+                POLL_EVENT="ABORT"
+            fi
 
             case "$POLL_EVENT" in
                 IGNORE) ;;
                 ABORT)
-                    # Query WHY the fire alarm was pulled.
-                    # reason 1 = downstream SIGPIPE (e.g. `| head -c 100`):
-                    #   the consumer closed the pipe. This is a normal, clean
-                    #   termination — no checkpoint, no error message, exit 0.
-                    # reason 2 (or 0) = internal fault (worker crash, scanner
-                    #   death, OOM): generate a checkpoint for resume.
                     local _abort_reason=0
                     ring_abort_reason _abort_reason 2>/dev/null
-                    if (( _abort_reason == 1 )); then
+                    if [[ -n "$_fr_signalled" ]]; then
+                        # A trapped external signal takes precedence: the user
+                        # asked for a checkpoint-and-freeze. Never let a
+                        # concurrent SIGPIPE-class (reason 1) abort turn this
+                        # into a silent clean exit 0 with no checkpoint.
+                        NORMAL_EXIT_FLAG=false
+                    elif (( _abort_reason == 1 )); then
                         NORMAL_EXIT_FLAG=true
                         _ret_val=0
                     else
@@ -1408,13 +1708,11 @@ W_NODE[$3]=$2
                     break
                     ;;
                 TIMEOUT)
-                    _timer_armed=false
-                    if (( ${#trap_ack_pending[@]} > 0 )); then
-                        echo "forkrun [FATAL]: Worker(s) [ ${!trap_ack_pending[@]} ] exited non-zero and EXIT trap did not confirm recovery within 3s grace period. Aborting." >&2
-                        ring_abort
-                        NORMAL_EXIT_FLAG=false
-                        _ret_val=2
-                    fi
+                    echo "forkrun [FATAL]: Worker $POLL_ARG1 exited non-zero and EXIT trap did not confirm recovery within 3s grace period. Aborting." >&2
+                    ring_abort
+                    NORMAL_EXIT_FLAG=false
+                    _ret_val=2
+                    break
                     ;;
                 TRAP_ACK)
                     # NEW: Catch Poisoned Batch Signals
@@ -1431,15 +1729,21 @@ W_NODE[$3]=$2
                     if (( trap_ack_pending[$wID] == 0 )); then
                         unset 'trap_ack_pending[$wID]'
                     fi
-
-                    if (( ${#trap_ack_pending[@]} == 0 )); then
-                        _poll_timer_cmd=-1 # Cancel timer cleanly
-                        _timer_armed=false
-                    fi
                     ;;
                 SPAWN)
                     spawn_count=$POLL_ARG1
                     node_idx=$POLL_ARG2
+
+                    # TOTAL WORKER CAP: Cap total workers across all nodes at
+                    # nWorkersMax. Without this, -j N with N < NUM_NODES spawns
+                    # NUM_NODES workers (per-node max 1 × NUM_NODES), violating
+                    # the user's -j N request. E.g., -j 1 on 4 nodes → 4 workers.
+                    if (( nWorkers >= nWorkersMax )); then
+                        continue
+                    fi
+                    if (( spawn_count > nWorkersMax - nWorkers )); then
+                        spawn_count=$(( nWorkersMax - nWorkers ))
+                    fi
 
                     target=$(( node_workers[node_idx] + spawn_count ))
                     (( target > node_worker_max )) && target=$node_worker_max
@@ -1449,7 +1753,7 @@ W_NODE[$3]=$2
                         unset 'wID_free[$wID]'
 
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
-                        spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}"
+                        spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}" "${W_INCARN[$wID]:-0}"
                         exec {fd_worker_w[$wID]}>&-
                         ((nWorkers++))
                     done
@@ -1466,6 +1770,9 @@ W_NODE[$3]=$2
                     unset 'W_NODE[$wID]'
 
                     (( node_workers[node_idx]-- ))
+                    # Decrement total live worker count so the SPAWN cap
+                    # tracks live workers, not cumulative spawn events.
+                    (( nWorkers-- ))
 
                     if (( status != 0 )); then
                         (( trap_ack_pending[$wID]++ ))
@@ -1474,17 +1781,14 @@ W_NODE[$3]=$2
                             # TRAP_ACK already arrived! Clean up safely.
                             unset 'trap_ack_pending[$wID]'
                         elif (( trap_ack_pending[$wID] > 0 )); then
-                            # Death arrived before TRAP_ACK. Arm the 3-second deadline.
-                            if ! $_timer_armed; then
-                                _poll_timer_cmd=3000
-                                _timer_armed=true
-                                echo "forkrun [WARN]: Worker $wID (node ${node_idx}) exited with status $status. Waiting up to 3s for EXIT trap confirmation." >&2
-                            fi
+                            _poll_timer_cmd="+$wID"
+                            echo "forkrun [WARN]: Worker $wID (node ${node_idx}) exited with status $status. Waiting up to 3s for EXIT trap confirmation." >&2
                         fi
 
+                        (( W_INCARN[$wID]++ ))
                         # Unconditionally respawn replacement worker
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
-                        spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}"
+                        spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}" "${W_INCARN[$wID]}"
                         exec {fd_worker_w[$wID]}>&-
                         ((nWorkers++))
                         (( node_workers[node_idx]++ ))
@@ -1508,6 +1812,12 @@ W_NODE[$3]=$2
                     unset 'fd_scan_death_r[$sID]' 'SCANNER_P[$sID]'
                     ;;
                 EOF)
+                    if [[ "$fd_spawn_arg" == "-1" ]]; then
+                        # Spawn pipe already EOF'd and another watched fd is
+                        # persistently signaling (trap-ack HUP) — nothing
+                        # left to wait for. Exit the reactor.
+                        break
+                    fi
                     fd_spawn_arg="-1"
                     ;;
             esac
@@ -1628,7 +1938,7 @@ _forkrun_base64_to_file() {
     local b b0 b1 k kk fd0 fd1 out0 out outC outN outF outB outFile nnSum nnSum_md5 nnSum_sha256 noVerifyFlag doneFlag IFS extglobState legacyFlag noCompressFlag
     local -a compressV compressI outA
     #local LC_ALL=C
-    local -I extglobState
+    local extglobState
 
     {
 
@@ -1948,7 +2258,7 @@ while True: time.sleep(60)'
         ${force_flag} && ! ${need_memfd_b64_flag} && exec {FORKRUN_MEMFD_LOADABLES_BASE64}>&-
 
         # open a memfd, write b64 to it, and seal it
-        ring_memfd_create 'FORKRUN_MEMFD_LOADABLES_BASE64'
+        ring_memfd_create 'FORKRUN_MEMFD_LOADABLES_BASE64' 0
         export FORKRUN_MEMFD_LOADABLES_BASE64="${FORKRUN_MEMFD_LOADABLES_BASE64}"
         declare -p b64 >&${FORKRUN_MEMFD_LOADABLES_BASE64}
         ring_seal "${FORKRUN_MEMFD_LOADABLES_BASE64}"
@@ -1958,7 +2268,7 @@ while True: time.sleep(60)'
     # open a memfd, extract loadable .so to it, and seal it
     ${force_flag} && ${have_memfd_loadables_flag} && exec {FORKRUN_MEMFD_LOADABLES}>&-
     unset "FORKRUN_MEMFD_LOADABLES"
-    ring_memfd_create 'FORKRUN_MEMFD_LOADABLES'
+    ring_memfd_create 'FORKRUN_MEMFD_LOADABLES' 0
     export FORKRUN_MEMFD_LOADABLES="${FORKRUN_MEMFD_LOADABLES}"
     truncate -s "${b64[$ARCH]%% *}" "/proc/self/fd/${FORKRUN_MEMFD_LOADABLES}"
     _forkrun_base64_to_file <<<"${b64[$ARCH]}" "/proc/self/fd/${FORKRUN_MEMFD_LOADABLES}"
@@ -1979,6 +2289,7 @@ while True: time.sleep(60)'
 
     # clear massive b64 array
     unset "b64"
+    export FORKRUN_RING_ENABLED=true
 
     return 0
 }
@@ -1988,7 +2299,7 @@ while True: time.sleep(60)'
 _forkrun_file_to_base64() {
 
    # local nn kk kk0 k1 k2 out out0 outF outN v1 v2 nnSum hexProg quoteFlag noCompressFlag IFS IFS0
-    local -I extglobState
+    local extglobState
 
  #   local -a charmap compressI compressV outA nnSumA
     local LC_ALL=C
@@ -2142,7 +2453,6 @@ _forkrun_file_to_base64() {
     { (( ${#FUNCNAME[@]} > 1 )) && [[ "${FUNCNAME[1]}" == *'frun'* ]]; } || shopt ${extglobState} extglob
 }
 
-FORKRUN_FRUN_SRC="ulimit -n $(ulimit -Hn)"$'\n'
 unset "b64"
 
 # <@@@@@< _BASE64_START_ >@@@@@> #

@@ -49,6 +49,19 @@ if [[ ! -f "$FRUN_SOURCE" ]]; then
   exit 1
 fi
 
+# Sourced after FRUN_SOURCE validation:
+FRUN_VER="$(bash -c "source '$FRUN_SOURCE' && frun -V" 2>/dev/null || echo 'unknown')"
+if [[ "$FRUN_VER" != "forkrun v3.5.0" ]]; then
+    echo "FATAL: Test runner requires 'forkrun v3.5.0', got '$FRUN_VER'" >&2
+    exit 1
+fi
+echo "==================================================================" >&2
+echo "RUN STAMP: $(date -u '+%Y-%m-%dT%H:%M:%SZ') | Version: $FRUN_VER" >&2
+echo "Topology:  $(nproc) CPUs | NUMA nodes: $(cat /sys/devices/system/node/online 2>/dev/null || echo '1')" >&2
+echo "==================================================================" >&2
+
+
+
 # ============================================================================
 # TEST UTILITY FUNCTIONS
 # ============================================================================
@@ -83,10 +96,10 @@ print_test_result() {
 compare_token_sets() {
     local actual="$1"
     local expected="$2"
-    
+
     local actual_sorted=$(echo "$actual" | tr -s ' \t\n' '\n' | sort)
     local expected_sorted=$(echo "$expected" | tr -s ' \t\n' '\n' | sort)
-    
+
     if [[ "$actual_sorted" == "$expected_sorted" ]]; then
         return 0
     else
@@ -384,18 +397,9 @@ run_test "Exact lines (-L 3)" \
   "$(cat "$LINE_INPUT")"
 
 # FIXED: Expect the output AND the stderr warning
-# On NUMA hardware, -L with -n emits a warning; on UMA, no warning is emitted
-if $IS_NUMA; then
-  run_test_stderr "Exact lines with limit (-L 4 -n 8)" \
-    "cat '$LINE_INPUT' | frun -k -L 4 -n 8 printf \"%s\\n\" >/dev/null" \
-    "NUMA optimizations prevent -L from working properly" \
-    0
-else
-  # On UMA: no NUMA warning, just verify exit 0 and correct stdout
-  run_test "Exact lines with limit (-L 4 -n 8)" \
-    "cat '$LINE_INPUT' | frun -k -L 4 -n 8 printf \"%s\\n\"" \
-    "$(head -n 8 "$LINE_INPUT")"
-fi
+run_test "Exact lines with limit (-L 4 -n 8)" \
+  "cat '$LINE_INPUT' | frun -k -L 4 -n 8 printf \"%s\\n\"" \
+  "$(head -n 8 "$LINE_INPUT")"
 
 # ============================================================================
 # WORKER SCALING
@@ -521,19 +525,9 @@ run_test "Multi-node (--nodes=2)" \
   "cat '$LINE_INPUT' | frun --nodes=2 -j 4 printf \"%s\\n\"" \
   "$(cat "$LINE_INPUT")"
 
-# FIXED: Check stderr for downgrade warning using regex
-# On NUMA hardware, --nodes=2 -L emits a downgrade warning; on UMA, no warning
-if $IS_NUMA; then
-  run_test_stderr "Exact lines with NUMA (downgrade warning)" \
-    "cat '$LINE_INPUT' | frun --nodes=2 -L 3 printf \"%s\\n\" >/dev/null" \
-    "cannot guarantee exactly|NUMA optimizations prevent -L from working properly" \
-    0
-else
-  # On UMA: --nodes=2 is silently downgraded; just verify correct output
-  run_test "Exact lines with NUMA (downgrade warning)" \
-    "cat '$LINE_INPUT' | frun --nodes=2 -L 3 printf \"%s\\n\"" \
-    "$(cat "$LINE_INPUT")"
-fi
+run_test "Exact lines with NUMA" \
+  "cat '$LINE_INPUT' | frun --nodes=2 -L 3 -k printf \"%s\\n\"" \
+  "$(cat "$LINE_INPUT")"
 
 # ============================================================================
 # SPECIAL FLAGS
@@ -938,6 +932,19 @@ run_test "Timeout flush: 50ms timeout delivers trickle input" \
 "{ echo 'a'; sleep 0.1; echo 'b'; } | frun --timeout 50000 -l 100 -k -s cat" \
 "a
 b"
+
+
+
+# NUMA Telemetry and Prefix Invariants (5-arg signature):
+if grep -q '0-' /sys/devices/system/node/online 2>/dev/null; then
+    run_test_regex "NUMA-native -L 4 assigns work across multiple nodes" \
+        "seq 500000 | frun --nodes=2 -L 4 --stats -k printf '%s\n' >/dev/null" \
+        "Node 1 [(]Phys [0-9]+[)]: [0-9]+ assigned [|] [1-9][0-9]* processed" 0 true
+
+    run_test "NUMA-native -L 4 -n 8 produces exact record prefix" \
+        "seq 500000 | frun --nodes=2 -L 4 -n 8 -k printf '%s\n'" \
+        "$(seq 8)"
+fi
 
 
 # ============================================================================

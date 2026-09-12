@@ -21,6 +21,8 @@ The guiding philosophy is:
 
 ## 2. High-Level Model
 
+**Process model:** although docs speak of ingest/scanner/orderer/fallow "threads" (and the C code uses TLS for per-worker state), each role is at runtime a *forked process* sharing one `MAP_SHARED` anonymous mapping. There are no user threads in the pipeline; the atomics on the shared mapping are inter-process operations, and all TLS state is per-process.
+
 forkrun consists of four cooperating roles (three in legacy flat mode, four when NUMA is active):
 
 1. **NUMA Ingest** – Zero-copy splice from stdin into the shared memfd, routing data to the correct socket via `set_mempolicy`.
@@ -33,6 +35,11 @@ All coordination is done through shared memory, atomic operations, and kernel pr
 When `--nodes=1` (or auto-detected as single node) the system falls back to the classic flat pipeline while preserving every invariant.
 
 ---
+
+
+### No-load / bring-up time
+
+Full NUMA pipeline bring-up — including `memfd` creation, per-node ring setup, `madvise(MADV_HUGEPAGE)`, pinning, and clean-room exec environment extraction — completes in ~30 ms on the reference 14-core machine. This is not just overhead; it is the basis of trickle-friendliness: sub-second jobs (<100 ms) correctly show lower core utilization because the engine declines to over-spawn for work that will finish during fork latency. For ≥1B-line sustained workloads the fixed cost is negligible.
 
 ## 3. The Ring Buffer
 
@@ -76,18 +83,32 @@ Memory ordering:
 
 In NUMA mode each socket has its own independent `SharedState` ring; the invariants hold per node.
 
+## 3.4 Ring-full semantics (never-wraps design)
+
+The ring is sized to *never wrap* in normal operation, which eliminates ABA and overwrite hazards.
+
+- **UMA mode:** the ring is shielded by `W_max * 64` slots with a floor of 1024 slots. The scanner is throttled by `active_workers` and the fallow horizon — it never publishes beyond `read_idx + shield`.
+- **NUMA mode:** per-node ring size is `RING_SIZE/2` usable, with the same fallow-horizon shield.
+- **Fallow-horizon shield:** the scanner may not advance `write_idx` beyond the minimum active worker offset plus shield; `fallocate(PUNCH_HOLE)` reclaims physical pages behind the horizon without moving the logical offsets.
+
+If a ring were to fill (pathological oversubscription or stalled orderer), workers block on `evfd_data` rather than overwriting — correctness is preserved, throughput degrades gracefully. This invariant is structural: no slot is ever reused before all workers have passed it.
+
+
 ---
 
 ## 4. Claiming Work
 
 ### 4.1 Fast Path Claim
 
-The fast path is intentionally simple:
+The fast path is intentionally simple (two amortized RMWs per batch):
 
 1. Load `write_idx`
-2. Atomically increment `read_idx` by exactly **1**
-3. Compute offsets from the single claimed ring slot
-4. Execute batch
+2. Atomically increment `read_idx` by exactly **1** (claim)
+3. Atomically add to `total_lines_consumed` (accounting — same cache line, sharded per NUMA node)
+4. Compute offsets from the single claimed ring slot
+5. Execute batch
+
+No locks, no CAS retry loops. Amortized contention is still negligible — both RMWs are per-NUMA sharded and the second is often on a hot cache line.
 
 No polling, no blocking, no branching beyond bounds checks. The scanner has already pre-calculated the byte/line boundaries for this slot. If sufficient data exists, the worker never sleeps.
 
@@ -116,7 +137,7 @@ A worker always claims exactly 1 slot (1 batch) per atomic operation. Because th
 To handle fault-resilience, forkrun repurposes the **escrow** pipe:
 
 * A non-blocking anonymous pipe (per-node in NUMA mode)
-* Entries contain: starting offset + line count of the aborted batch
+* Entries contain: the ring slot index of the aborted batch, its slot count (always 1 under the single-slot invariant), and the batch's `num_kills` counter (24-byte packet).
 
 If a worker process crashes, is killed by OOM, or explicitly fails, its active transaction is rolled back:
 
@@ -149,7 +170,7 @@ There are multiple eventfds:
 
 Properties:
 
-* Semaphore mode prevents counter overflow
+* Semaphore mode makes each wakeup a consumable unit (a read decrements by 1), so one blast wakes exactly N waiters.
 * Spurious wakeups are allowed
 * Missed wakeups are impossible due to monotonic indices
 
@@ -236,6 +257,7 @@ A background GC process:
 * Punches holes behind it using `fallocate(PUNCH_HOLE)`
 
 This:
+
 * Preserves offsets
 * Avoids fragmentation
 * Requires no coordination with workers
@@ -251,8 +273,21 @@ The reorder path is the only place that may block.
 
 ---
 
-## 11. Design Summary & Mental Model
+## 11. Cross-File Contracts (Seams Most at Risk from Refactor)
 
+These invariants span C and the Bash wrapper; both sides must maintain them:
+
+1. **(H1) Poison Flag Lifecycle:** C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` *only* when `num_kills > 0`. The Bash wrapper must reset these after every `ring_ack`.
+2. **(M1) Zero-Length Sentinel Batches:** Zero-length sentinel batches (EOF markers, `FLAG_MAJOR_EOF` with 0 bytes) must be **acked but not executed** (`[[ "$REPLY" != "0" ]]`).
+3. **(FRUN_CLAIM_BYTES) Escrow Gating:** The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES > 0` (or `worker_last_cnt > 0`) to prevent duplicate deposits.
+4. **(H2) `actual_end` Publisher Truth Table:**
+   - Normal mode: Indexer searches and publishes.
+   - Byte mode (`-b`): Indexer skips search, publishes raw chunk end.
+   - Exact lines (`-L`): Indexer skips both; Scanner owns and publishes in the handoff chain.
+5. **(H3) Closed Hydraulic Loop:** The worker→orderer ack pipe is sized to 4 KiB (1 page) to enforce direct output backpressure through the ring buffer.
+6. **(Producer Wakeup Invariant):** Scanners and indexers must unconditionally issue `sys_write(evfd_meta)` upon publishing gate-resolving state (`actual_end`, `cum_lines`) whenever waiters are present.
+
+## 12. Design Summary & Mental Model
 Key properties of the architecture:
 
 * Lock-free fast path
