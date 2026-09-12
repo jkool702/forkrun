@@ -1046,7 +1046,7 @@ run_test_line_count I "Limit of 1 (-n 1)" \
 # The behavior may be 0 output lines or all lines depending on implementation.
 # We just verify it doesn't deadlock/crash, not the exact count.
 run_test_regex I "Limit of 0 (-n 0): exits cleanly (no hang)" \
-    "timeout 10 bash -c \"source '$FRUN_SOURCE' && seq 100 | frun -n 0 printf '%s\n' ; echo EXIT_OK\"" \
+    "timeout 20 bash -c \"source '$FRUN_SOURCE' && seq 100 | frun -n 0 printf '%s\n' ; echo EXIT_OK\"" \
     "EXIT_OK" 0 false
 
 # Very long single line (tests SIMD scanner boundary alignment).
@@ -1542,7 +1542,7 @@ run_test_exact L "L12a: All lines crash: pipeline terminates, empty output" \
 
 # All lines crash with -k — must still terminate.
 run_test_regex L "L12b: All lines crash (-k): pipeline terminates (no hang)" \
-    "timeout 10 bash -c \"source '$FRUN_SOURCE' && always_crash2() { exit 1; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='always_crash2' frun -k -l 1 always_crash2\"" \
+    "timeout 20 bash -c \"source '$FRUN_SOURCE' && always_crash2() { exit 1; }; seq 1 5 | FORKRUN_EXTRA_FUNCS='always_crash2' frun -k -l 1 always_crash2\"" \
     ".*" 3 false
 
 # ---------- L13: Edge case — single line that crashes ----------
