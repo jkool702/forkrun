@@ -124,7 +124,7 @@ If all unit tests and benchmarks pass cleanly on UMA and NUMA topologies, under 
 
 Before tagging a release, run the automated test suite and verify that the full test matrix completes with zero failures:
 
-$$	ext{Total Executions} = (	ext{Unit Tests} + 	ext{Benchmarks}) 	imes (	ext{UMA} + 	ext{NUMA}) 	imes (	ext{Baseline} + 	ext{TSan} + 	ext{ASan/UBSan})$$
+$$\text{Total Executions} = (\text{Unit Tests} + \text{Benchmarks}) \times (\text{UMA} + \text{NUMA}) \times (\text{Baseline} + \text{TSan} + \text{ASan/UBSan}) = 4{,}500$$
 
 Verify test execution counts from the `BENCHMARKS` directory:
 ```bash
