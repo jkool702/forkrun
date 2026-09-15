@@ -231,6 +231,37 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## v3.5.x (unreleased) — precondition-gate engine fixes
+
+Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,
+independent of the Python-frontend work:
+
+- **Resume-ledger seqlock publish fence:** `TRACK_COMPLETED_BATCH` now issues
+  `__atomic_thread_fence(__ATOMIC_RELEASE)` before the second `resume_seq`
+  bump, ordering the RELAXED horizon/jagged data stores against the closing
+  seqlock read on weakly-ordered architectures (ARM/AArch64). Reader-side
+  pairing protocol documented at both read sites (scanner snapshot and
+  `ring_dump_resume`).
+
+- **Kernel-observable indexer death (NUMA):** one liveness pipe per NUMA
+  node, created by the orchestrator (not the engine): the indexer child
+  inherits the write end, the parent closes its copy at spawn, and the
+  reactor polls the read end via `ring_poll`'s new optional 6th argument
+  (Bash array name; omitted/empty = old behavior). Indexer SIGKILL/OOM —
+  which runs no exit code, so `|| ring_abort` and traps structurally
+  cannot catch it — now produces POLLHUP → `INDEXER_DEATH` →
+  wait-for-status: clean EOF drain continues; non-zero aborts with
+  reason 2 (checkpoint + non-zero exit, never a silent clean exit).
+  The fork-order constraint at the spawn site is documented: scanner and
+  worker forks must come after every indexer write-end is closed in the
+  parent, or a later-forked child masks that indexer's death.
+
+- **Single-source packing constants:** `MINOR_BITS`/`MINOR_MASK`/
+  `MAJOR_MASK`/`PACK_KEY` now come from `forkrun_substrate.h` (`FR_*`),
+  whose static asserts tie `fr_state_t` widths to the frozen plugin-ABI
+  packing; the strong tie is enforced by including the frozen
+  `ring_loadables/forkrun_plugin.h` before the engine's ctx struct.
+
 ## v3.5.0 — 2026-09-03
 
 The headline of this release is a fully-rearchitected resume subsystem: NUMA-native

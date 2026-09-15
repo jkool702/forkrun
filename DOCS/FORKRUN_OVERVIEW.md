@@ -5,7 +5,7 @@
 **forkrun achieves:**
 
 - **200,000+ batch dispatches/sec** (vs ~500 for GNU Parallel)
-- **87–99% CPU utilization** across all cores depending on mode and input size (vs ~6% for GNU Parallel) — ~95–99% for sustained default/external modes, ~90% aggregate across mixed benchmarks
+- **87–99% CPU utilization** across all cores depending on mode and input size (vs ~6% for GNU Parallel) — ~95–99% for sustained default/external modes, ~90% aggregate across 396 mixed benchmarks
 - **Born-local NUMA placement**: file ingest measures 0.0–0.2% cross-socket chunks. Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **Automatic recovery and retry** when a worker unexpectedly dies processing a batch
 

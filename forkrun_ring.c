@@ -31,11 +31,15 @@
 // CRITICAL INVARIANT: The fast path has no locks and no CAS retry loops.
 
 
-// forkrun_substrate.h — Stage 1 state-ownership boundary (v1.3 §2.1).
-// Included here so PACK_KEY / MINOR_BITS / ENGINE_KNOWN_FLAGS stay in one
-// place with the fr_config_t/fr_state_t contract they also constrain.
-#include "forkrun_substrate.h"
-
+// FEATURE-TEST MACROS FIRST — this ordering is load-bearing.
+// Canonical order: FTMs -> system headers -> bash headers -> project headers.
+// glibc's <features.h> evaluates feature-test macros exactly once, the first
+// time ANY libc header is included, and bakes the result into __USE_GNU etc.
+// A header (or anything else) included before the #define closes the gate:
+// every GNU extension below silently loses its declaration (pipe2, splice,
+// CPU_*/sched_setaffinity, F_GETPIPE_SZ, copy_file_range, memrchr, fallocate,
+// fputs_unlocked...) — the exact failure this file hit when the
+// substrate include sat above this block.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
@@ -69,6 +73,21 @@
 #include <dlfcn.h>      // dlopen/dlsym for -C plugin loading
 #include <spawn.h>
 #include <sys/wait.h>
+
+// forkrun_substrate.h — Stage 1 state-ownership boundary (v1.3 §2.1).
+// Included AFTER the FTMs and system headers (project-header rule): the
+// header is FTM-independent and self-contained, so it compiles from any
+// position — but keeping it here preserves the canonical order above.
+// PACK_KEY / FR_MINOR_BITS / ENGINE_KNOWN_FLAGS stay in one place with the
+// fr_config_t/fr_state_t contract they also constrain.
+#include "forkrun_substrate.h"
+
+// The FROZEN plugin-ABI header (v2, frozen at v3.5.0) — single source for
+// struct forkrun_ctx, the use_ctx encoding (FORKRUN_CTX_ENABLE /
+// VERSION_MASK / FLAG_RAW), and the strong substrate<->ABI packing asserts.
+// Quoted include resolves relative to THIS file's directory, so it works
+// in-repo (product + canary), in CI (full checkout), and from any cwd.
+#include "ring_loadables/forkrun_plugin.h"
 
 // ==============================================================================
 // AVX2 FAST DELIMITER SCANNER
@@ -368,13 +387,12 @@ fast_count_delim(const char *p, const char *end, char delim) {
 
 #define MAX_BATCH_LINES  281474976710656ULL
 #define FLAG_MAJOR_EOF (1U << 31)
-#define MINOR_BITS 22
-#define MINOR_MASK ((1ULL << MINOR_BITS) - 1ULL)
-#define MAJOR_MASK ((1ULL << (64 - MINOR_BITS)) - 1ULL)
-#define PACK_KEY(maj, min) ((((uint64_t)(maj) & MAJOR_MASK) << MINOR_BITS) | ((uint64_t)(min) & MINOR_MASK))
+/* Packing constants (FR_MINOR_BITS/FR_MINOR_MASK/FR_MAJOR_MASK/FR_PACK_KEY),
+ * the use_ctx encoding (FORKRUN_CTX_*), and struct forkrun_ctx all come
+ * from the substrate + frozen plugin headers — single source, no local
+ * aliases. ENGINE_KNOWN_FLAGS is engine-side only (the plugin header
+ * explicitly does not define it) and lives here. */
 
-#define FORKRUN_CTX_ENABLE          2u
-#define FORKRUN_CTX_VERSION_MASK    0xFFu
 /* v3.5.0: no behavior flags implemented -> ENGINE_KNOWN_FLAGS is empty */
 #define ENGINE_KNOWN_FLAGS          0u
 
@@ -1254,15 +1272,22 @@ static int *evfd_indexer_arr = NULL;
 static int *evfd_meta_arr = NULL;
 static int *fd_escrow_r = NULL;
 static int *fd_escrow_w = NULL;
-// Preconditions gate (v1.3 §2.0): kernel-observable indexer death pipes.
-// One per NUMA node, mirroring fd_scan_death_*: parent holds the read end,
-// the indexer child inherits the write end; the parent closes its write
-// copy at spawn. Indexer SIGKILL/OOM destroys the write end in-kernel ->
-// POLLHUP on the read end -> reactor alarm. Traps/`|| ring_abort` in the
-// spawning subshell structurally cannot be the mechanism: a SIGKILLed
-// indexer runs no exit code at all.
-static int *fd_indexer_death_r = NULL;
-static int *fd_indexer_death_w = NULL;
+// Preconditions gate (v1.3 §2.0): kernel-observable indexer death detection.
+// The MECHANISM is bash-owned (frun.bash creates one pipe per node via
+// ring_pipe into the fd_indexer_death_r/w arrays): the indexer child
+// inherits the write end, the parent closes its write copy at spawn, and
+// ring_poll's optional 6th argument (the fd_indexer_death_r array name)
+// turns in-kernel write-end teardown on indexer SIGKILL/OOM into POLLHUP
+// -> INDEXER_DEATH -> ring_abort. Traps/`|| ring_abort` in the spawning
+// subshell structurally cannot be the mechanism: a SIGKILLed indexer runs
+// no exit code at all.
+// The engine deliberately does NOT create or hold these pipes: the
+// orchestrator owns their lifecycle (this is exactly the §2.1 taxonomy —
+// pipe topology is frontend orchestration, the poll/abort path is
+// mechanism). A C-side twin previously lived here and was removed as dead
+// infrastructure: never polled, held open tree-wide, could never fire
+// POLLHUP, and looked load-bearing to future readers — the worst kind of
+// dead code (v1.3 preconditions prune).
 
 static int evfd_data = -1;
 static int evfd_ingest_data = -1;
@@ -2403,11 +2428,9 @@ static int ring_init_main(int argc, char **argv) {
   evfd_meta_arr = calloc(global_num_nodes, sizeof(int));
   fd_escrow_r = calloc(global_num_nodes, sizeof(int));
   fd_escrow_w = calloc(global_num_nodes, sizeof(int));
-  fd_indexer_death_r = calloc(global_num_nodes, sizeof(int));
-  fd_indexer_death_w = calloc(global_num_nodes, sizeof(int));
 
   if (!evfd_data_arr || !evfd_eof_arr || !evfd_indexer_arr || !evfd_meta_arr ||
-      !fd_escrow_r || !fd_escrow_w || !fd_indexer_death_r || !fd_indexer_death_w) {
+      !fd_escrow_r || !fd_escrow_w) {
     builtin_error("forkrun: malloc failed during ring_init");
     return EXECUTION_FAILURE;
   }
@@ -2419,8 +2442,6 @@ static int ring_init_main(int argc, char **argv) {
     evfd_meta_arr[i] = -1;
     fd_escrow_r[i] = -1;
     fd_escrow_w[i] = -1;
-    fd_indexer_death_r[i] = -1;
-    fd_indexer_death_w[i] = -1;
   }
 
   for (uint32_t n = 0; n < global_num_nodes; n++) {
@@ -2451,17 +2472,8 @@ static int ring_init_main(int argc, char **argv) {
       fd_escrow_w[n] = -1;
     }
 
-    // Indexer death pipe: plain kernel-teardown sensor, never read for data.
-    // Parent polls the read end for POLLHUP/POLLERR; liveness only.
-    if (pipe(pfd) == 0) {
-      fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
-      fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
-      fd_indexer_death_r[n] = pfd[0];
-      fd_indexer_death_w[n] = pfd[1];
-    } else {
-      fd_indexer_death_r[n] = -1;
-      fd_indexer_death_w[n] = -1;
-    }
+    // (Indexer death pipes are bash-owned — see the fd_escrow declaration
+    // comment above. The engine creates no pipe here.)
   }
 
   evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
@@ -2596,10 +2608,6 @@ static int ring_destroy_main(int argc, char **argv) {
         close(fd_escrow_r[n]);
       if (fd_escrow_w && fd_escrow_w[n] >= 0)
         close(fd_escrow_w[n]);
-      if (fd_indexer_death_r && fd_indexer_death_r[n] >= 0)
-        close(fd_indexer_death_r[n]);
-      if (fd_indexer_death_w && fd_indexer_death_w[n] >= 0)
-        close(fd_indexer_death_w[n]);
     }
     free(evfd_data_arr);
     evfd_data_arr = NULL;
@@ -2619,14 +2627,6 @@ static int ring_destroy_main(int argc, char **argv) {
     fd_escrow_r = NULL;
     free(fd_escrow_w);
     fd_escrow_w = NULL;
-    if (fd_indexer_death_r) {
-      free(fd_indexer_death_r);
-      fd_indexer_death_r = NULL;
-    }
-    if (fd_indexer_death_w) {
-      free(fd_indexer_death_w);
-      fd_indexer_death_w = NULL;
-    }
   }
   if (g_logical_to_phys_map) {
     free(g_logical_to_phys_map);
@@ -2698,8 +2698,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     }
   }
   uint64_t min_batch_sz = (state[0].mode_byte && state[0].cfg_batch_start > 0) ? state[0].cfg_batch_start : 1;
-  if (chunk_size > (MINOR_MASK * min_batch_sz)) {
-    chunk_size = MINOR_MASK * min_batch_sz;
+  if (chunk_size > (FR_MINOR_MASK * min_batch_sz)) {
+    chunk_size = FR_MINOR_MASK * min_batch_sz;
   }
 
   // --- OOM Protection Initialization ---
@@ -6272,7 +6272,7 @@ static int ring_order_main(int argc, char **argv) {
     for (size_t i = 0; i < count; i++) {
       struct OrderPacket *op = &ops[i];
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
-      uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
+      uint64_t op_key = numa_mode ? FR_PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
       if (!unordered_mode) {
         heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
@@ -6337,7 +6337,7 @@ static int ring_order_main(int argc, char **argv) {
 
       if (!unordered_mode && !stdout_broken && resume_synced) {
         while (heap_sz > 0) {
-          uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
+          uint64_t expected_key = numa_mode ? FR_PACK_KEY(expected_major, expected_minor) : expected_major;
           if (heap[0].key != expected_key) {
             break;
           }
@@ -7793,33 +7793,30 @@ FORKRUN_LOADABLES(DEFINE_STRUCT_X)
 // ---------------------------------------------------------
 // ring_call: Zero-Tax C Plugin Callback Execution
 // ---------------------------------------------------------
+// struct forkrun_ctx is NOT defined here — it comes from the frozen
+// ring_loadables/forkrun_plugin.h (included at the top of this file).
+// Hand-maintaining a second copy of a frozen ABI is exactly the drift
+// pattern the v2 freeze and the single-source rule exist to prevent.
+// What IS enforced here: the substrate<->plugin-ABI tie (both views of
+// one coordinate system) and the frozen 128-byte layout.
 
-struct forkrun_ctx {
-    uint64_t batch_index;       // global batch sequence number
-    uint64_t batch_offset;      // byte offset in input stream
-    uint64_t batch_byte_length; // length of current batch in bytes
-    uint32_t version;           // struct version: 1 (legacy) or 2 (packed)
-    uint32_t worker_id;         // RING_WID
-    uint32_t node_id;           // NUMA node
-    uint32_t num_kills;         // retry count for this batch
-    union {
-        uint64_t numa_batch_id; // version 2: packed (42-bit major << 22 | 22-bit minor)
-        struct {
-            uint32_t numa_major; // version 1: truncated 32-bit major
-            uint32_t numa_minor; // version 1: 32-bit minor
-        };
-    };
-    int32_t  fd_in;             // input file descriptor
-    char     delimiter;         // batch delimiter
-    uint8_t  cfg_state[4];      // global configuration state
-    /* v2 extension zone (frozen layout; see forkrun_plugin.h) */
-    uint32_t batch_lines;       // records in batch; 0 = undefined (-b byte mode)
-    uint32_t struct_size;       // sizeof(struct) as built by THIS engine
-    uint32_t worker_incarn;     // respawn generation of this worker
-    uint32_t flags_granted;     // req & ENGINE_KNOWN_FLAGS; dialect >= 2 only
-    uint32_t reserved32;        // zero; alignment
-    uint64_t reserved[6];       // v3 fields land here; zero in v2
-};
+
+/* Substrate<->plugin-ABI tie (v1.3 §2.1, N1 guard): both views of one
+ * coordinate system, now provably consistent. Both headers are included
+ * unconditionally above; the guards make the tie self-documenting and the
+ * #error a tripwire against future reordering. */
+#if defined(FORKRUN_PLUGIN_H) && defined(FORKRUN_SUBSTRATE_H)
+typedef char fr_ctx_abi_minor_split_frozen[(FR_MINOR_BITS == 22) ? 1 : -1];
+typedef char fr_ctx_state_major_holds_packed_majors[
+    (sizeof(((fr_state_t *)0)->major) * 8 >= 64 - FR_MINOR_BITS) ? 1 : -1];
+typedef char fr_ctx_state_minor_holds_packed_minors[
+    (sizeof(((fr_state_t *)0)->minor) * 8 >= FR_MINOR_BITS) ? 1 : -1];
+typedef char fr_ctx_engine_known_flags_matches_v2_grant_semantics[
+    (ENGINE_KNOWN_FLAGS == 0u) ? 1 : -1];
+typedef char fr_ctx_frozen_size_128_bytes[(sizeof(struct forkrun_ctx) == 128) ? 1 : -1];
+#else
+#error "forkrun_ring.c: both forkrun_substrate.h and ring_loadables/forkrun_plugin.h must be included before the ctx tie asserts."
+#endif
 
 // Define the user's expected function signatures
 typedef int (*forkrun_cb_t)(int argc, char **argv);
@@ -7945,8 +7942,8 @@ static int ring_call_main(int argc, char **argv) {
         tls_fctx.flags_granted = (tls_use_ctx >= 2) ? tls_flags_granted : 0;
         if (tls_numa_enabled) {
             if (tls_use_ctx == 2) {
-                uint32_t actual_minor = worker_last_minor & MINOR_MASK;
-                tls_fctx.numa_batch_id = PACK_KEY(worker_last_major, actual_minor);
+                uint32_t actual_minor = worker_last_minor & FR_MINOR_MASK;
+                tls_fctx.numa_batch_id = FR_PACK_KEY(worker_last_major, actual_minor);
             } else {
                 tls_fctx.numa_major = (uint32_t)worker_last_major;
                 tls_fctx.numa_minor = worker_last_minor;
@@ -7955,7 +7952,7 @@ static int ring_call_main(int argc, char **argv) {
             if (tls_use_ctx == 2) {
                 /* C2-fix: derive UMA numa_batch_id from authoritative 64-bit claim index */
                 tls_fctx.numa_batch_id =
-                    PACK_KEY(worker_last_idx >> MINOR_BITS, worker_last_idx & MINOR_MASK);
+                    FR_PACK_KEY(worker_last_idx >> FR_MINOR_BITS, worker_last_idx & FR_MINOR_MASK);
             } else {
                 tls_fctx.numa_major = 0;
                 tls_fctx.numa_minor = worker_last_minor;

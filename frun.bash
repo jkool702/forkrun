@@ -1222,6 +1222,12 @@ _forkrun_checkpoint_signal() {
                 #   mask that indexer's death (POLLHUP fires only when ALL
                 #   write ends close). Nothing structural enforces this yet —
                 #   the loop ordering below is the enforcement.
+                # ABORT-PATH SYMMETRY: no per-slot teardown is wired for
+                #   INDEXER_P on ring_abort paths — by design, identical to
+                #   SCANNER_P: ring_abort signals the whole tree and the
+                #   global `wait` after the reactor reaps every indexer;
+                #   slot arrays only need to stay coherent for the reactor's
+                #   live loop.
                 for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
                     ring_pipe fd_indexer_death_r[$i] fd_indexer_death_w[$i] || ring_abort
                     (
@@ -1879,6 +1885,15 @@ W_NODE[$3]=$2
         exec {fd_spawn_r}<&- {fd_fallow_w}>&- {fd_trap_ack_r}<&- {fd_trap_ack_w}>&-
         [[ "${order_mode}" == "realtime" ]] || exec {fd_order_w}>&-
 
+        # Global reap: covers SCANNER_P and any INDEXER_P slots that outlive
+        # the reactor (see the INDEXER_DEATH drain note — drain events are
+        # best-effort, this wait is the authoritative reaper).
+        # Drain-safety invariant: an indexer crash in the post-reactor
+        # window is shutdown-only, never data loss — scanners cannot exit
+        # before ingest published EOF (every chunk + sentinel) AND every
+        # chunk any scanner claimed got its actual_end, which only the
+        # indexers publish. By reactor-exit time all data-relevant indexer
+        # work is done; do NOT wire per-slot teardown for this window.
         wait
 
         { ${stats_flag} || ${verbose_flag}; } && (( FORKRUN_NUM_NODES > 1 )) && ring_numa_stats

@@ -22,7 +22,10 @@ substratestubs.o: substratestubs.c forkrun_substrate.h
 	$(CC) $(CFLAGS) -c substratestubs.c -o $@
 
 forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h
-	$(CC) $(CFLAGS) -D_GNU_SOURCE=1 -DSHELL -DHAVE_CONFIG_H $(INCLUDES) -c forkrun_ring.c -o $@
+	# NOTE: no -D_GNU_SOURCE here — the TU must set its own FTMs (before any
+	# libc include). A CLI define would mask exactly the include-order bug
+	# class the canary exists to catch.
+	$(CC) $(CFLAGS) -DSHELL -DHAVE_CONFIG_H $(INCLUDES) -c forkrun_ring.c -o $@
 
 libforkrun.so: forkrun_ring_canary.o $(CANARY_STUBS)
 	$(CC) -shared -o $@ forkrun_ring_canary.o $(CANARY_STUBS) \

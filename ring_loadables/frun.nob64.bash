@@ -1199,6 +1199,7 @@ _forkrun_checkpoint_signal() {
 
         # --- 2 & 3. THE PRODUCER PLUMBING ---
             declare -a fd_scan_death_r fd_scan_death_w SCANNER_P
+            declare -a fd_indexer_death_r fd_indexer_death_w INDEXER_P
             ring_pipe fd_trap_ack_r fd_trap_ack_w
 
             if (( FORKRUN_NUM_NODES > 1 )); then
@@ -1208,8 +1209,33 @@ _forkrun_checkpoint_signal() {
 
                 ( exec {fd_trap_ack_w}>&-; ring_numa_ingest ${fd0} ${fd_write} $FORKRUN_NUM_NODES $ordered_flag || ring_abort ) &
 
+                # INDEXER DEATH-PIPE TOPOLOGY (preconditions gate, v1.3 §2.0):
+                # fd_indexer_death_r[i]: parent-held read end, polled by the
+                #   reactor for POLLHUP (kernel teardown on indexer SIGKILL/OOM).
+                # fd_indexer_death_w[i]: inherited by indexer child i, closed
+                #   by the parent immediately after spawn.
+                # UMA/flat pipeline has no indexer_numa: arrays stay unset and
+                #   the reactor's 6th arg is empty (no-op, old behavior).
+                # FORK-ORDER CONSTRAINT: scanner/worker forks MUST come after
+                #   every indexer write-end is closed in the parent. A later-
+                #   forked child holding an earlier indexer's write end would
+                #   mask that indexer's death (POLLHUP fires only when ALL
+                #   write ends close). Nothing structural enforces this yet —
+                #   the loop ordering below is the enforcement.
+                # ABORT-PATH SYMMETRY: no per-slot teardown is wired for
+                #   INDEXER_P on ring_abort paths — by design, identical to
+                #   SCANNER_P: ring_abort signals the whole tree and the
+                #   global `wait` after the reactor reaps every indexer;
+                #   slot arrays only need to stay coherent for the reactor's
+                #   live loop.
                 for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
-                    ( exec {fd_trap_ack_w}>&-; ring_indexer_numa ${fd_scan} $i || ring_abort ) &
+                    ring_pipe fd_indexer_death_r[$i] fd_indexer_death_w[$i] || ring_abort
+                    (
+                        exec {fd_indexer_death_r[$i]}<&- {fd_trap_ack_w}>&-
+                        ring_indexer_numa ${fd_scan} $i || ring_abort
+                    ) &
+                    INDEXER_P[$i]=$!
+                    exec {fd_indexer_death_w[$i]}>&-
                 done
 
                 for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
@@ -1678,7 +1704,7 @@ W_NODE[$3]=$2
             wID_free[$nn]=''
         done
 
-        while ring_poll "$fd_spawn_arg" fd_scan_death_r fd_worker_r "$_poll_timer_cmd" "$fd_trap_ack_r"; do
+        while ring_poll "$fd_spawn_arg" fd_scan_death_r fd_worker_r "$_poll_timer_cmd" "$fd_trap_ack_r" fd_indexer_death_r; do
             _poll_timer_cmd=""
 
             # v3.5.0: external signal observed → treat as ABORT with the
@@ -1811,6 +1837,35 @@ W_NODE[$3]=$2
                     exec {fd_scan_death_r[$sID]}<&-
                     unset 'fd_scan_death_r[$sID]' 'SCANNER_P[$sID]'
                     ;;
+                INDEXER_DEATH)
+                    # Preconditions gate (v1.3 §2.0): kernel-observed indexer
+                    # death (SIGKILL/OOM runs no exit code, so || ring_abort
+                    # and traps structurally cannot fire — POLLHUP is the
+                    # only observable). POLLHUP fires on ANY death, including
+                    # clean EOF shutdown — so wait for the exit status exactly
+                    # like SCAN_DEATH: status 0 = normal end-of-stream drain,
+                    # close the fd, drop the slot, continue. Non-zero (e.g.
+                    # 137 = SIGKILL) = chunk-boundary alignment lost; fail
+                    # loud via ring_abort (reason 2 = internal fault ->
+                    # checkpoint + non-zero exit, never a silent clean exit).
+                    sID=$POLL_ARG1
+                    if [[ -n "${INDEXER_P[$sID]:-}" ]]; then
+                        wait "${INDEXER_P[$sID]}" 2>/dev/null
+                        status=$?
+                    else
+                        status=0
+                    fi
+
+                    exec {fd_indexer_death_r[$sID]}<&- 2>/dev/null
+                    unset 'fd_indexer_death_r[$sID]' 'INDEXER_P[$sID]'
+
+                    if (( status != 0 )); then
+                        echo "forkrun [FATAL]: Indexer $sID died unexpectedly (status $status). Aborting to prevent data loss." >&2
+                        ring_abort
+                        NORMAL_EXIT_FLAG=false
+                        _ret_val=1
+                    fi
+                    ;;
                 EOF)
                     if [[ "$fd_spawn_arg" == "-1" ]]; then
                         # Spawn pipe already EOF'd and another watched fd is
@@ -1830,6 +1885,15 @@ W_NODE[$3]=$2
         exec {fd_spawn_r}<&- {fd_fallow_w}>&- {fd_trap_ack_r}<&- {fd_trap_ack_w}>&-
         [[ "${order_mode}" == "realtime" ]] || exec {fd_order_w}>&-
 
+        # Global reap: covers SCANNER_P and any INDEXER_P slots that outlive
+        # the reactor (see the INDEXER_DEATH drain note — drain events are
+        # best-effort, this wait is the authoritative reaper).
+        # Drain-safety invariant: an indexer crash in the post-reactor
+        # window is shutdown-only, never data loss — scanners cannot exit
+        # before ingest published EOF (every chunk + sentinel) AND every
+        # chunk any scanner claimed got its actual_end, which only the
+        # indexers publish. By reactor-exit time all data-relevant indexer
+        # work is done; do NOT wire per-slot teardown for this window.
         wait
 
         { ${stats_flag} || ${verbose_flag}; } && (( FORKRUN_NUM_NODES > 1 )) && ring_numa_stats

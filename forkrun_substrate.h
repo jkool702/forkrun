@@ -32,11 +32,28 @@
  * physical split into forkrun_core.c comes later — the boundary is what
  * matters first). libforkrun.so (canary) enforces zero bash linkage via
  * -Wl,--no-undefined + explicit allowed-dependency set (see Makefile).
+ *
+ * Header hygiene rules (v1.3; hardened after the FTMs-after-include bug):
+ *   1. Self-contained: includes everything it uses; compiles standalone
+ *      (`echo '#include "forkrun_substrate.h"' | gcc -x c - -fsyntax-only`).
+ *   2. Include-guarded.
+ *   3. FTM-INDEPENDENT: never defines or relies on feature-test macros
+ *      (_GNU_SOURCE et al). Structs and integer constants need none, and
+ *      FTMs in headers silently alter the ABI of every including TU.
+ *   4. No inclusion-order dependencies, ever: compiles from any position
+ *      in the TU — before or after system and bash headers.
+ *
+ * The plugin-ABI tie: <forkrun_plugin.h> is the packing's second consumer
+ * (frozen v2 uint32 numa_major|numa_minor split). The fallback asserts
+ * below hold on ABI-derivable bounds alone; the strong tie (split width
+ * == 22 against the frozen header) activates in TUs that include the
+ * plugin header. The engine TU includes both headers unconditionally at
+ * the top of forkrun_ring.c.
  */
 #ifndef FORKRUN_SUBSTRATE_H
 #define FORKRUN_SUBSTRATE_H
 
-#include <stdint.h>
+#include <stdint.h> /* self-contained: uint64_t/uint32_t for the structs below */
 
 #ifdef __cplusplus
 extern "C" {
@@ -83,6 +100,20 @@ typedef struct fr_state {
 typedef char fr_assert_major_width[(sizeof(((fr_state_t *)0)->major) >= 8) ? 1 : -1];
 typedef char fr_assert_minor_width[(sizeof(((fr_state_t *)0)->minor) >= 4) ? 1 : -1];
 typedef char fr_assert_pack_roundtrip[(FR_MINOR_BITS == 22) ? 1 : -1];
+
+/* ABI-derivable bounds (true without seeing the plugin header): the ABI's
+ * frozen v2 numa_minor field is uint32, so a minor split wider than 32
+ * bits could not round-trip through the frozen struct; and the packed key
+ * must exactly fill 64 bits (42 + 22) — the packing is the full word, so
+ * the sign bit is necessarily part of the major and must stay positive
+ * (the hazard the plugin header's offset comment documents). */
+typedef char fr_assert_abi_minor_fits_u32[(FR_MINOR_BITS <= 32) ? 1 : -1];
+typedef char fr_assert_packing_fills_word[(FR_MINOR_BITS + 42 == 64) ? 1 : -1];
+#ifdef FORKRUN_PLUGIN_H
+/* Strong tie: active only in TUs that included the frozen plugin header
+ * first — the split width must equal the ABI's frozen 22. */
+typedef char fr_assert_abi_packing_frozen[(FR_MINOR_BITS == 22) ? 1 : -1];
+#endif
 
 #ifdef __cplusplus
 }
