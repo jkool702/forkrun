@@ -31,6 +31,11 @@
 // CRITICAL INVARIANT: The fast path has no locks and no CAS retry loops.
 
 
+// forkrun_substrate.h — Stage 1 state-ownership boundary (v1.3 §2.1).
+// Included here so PACK_KEY / MINOR_BITS / ENGINE_KNOWN_FLAGS stay in one
+// place with the fr_config_t/fr_state_t contract they also constrain.
+#include "forkrun_substrate.h"
+
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
@@ -916,7 +921,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats",                  \
     "Print NUMA telemetry")                                                    \
   X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")            \
-  X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr>", "Poll FDs") \
+  X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr> [timer] [trap_ack] [indexer_arr]", "Poll FDs") \
   X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
   X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
   X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow") \
@@ -1249,6 +1254,15 @@ static int *evfd_indexer_arr = NULL;
 static int *evfd_meta_arr = NULL;
 static int *fd_escrow_r = NULL;
 static int *fd_escrow_w = NULL;
+// Preconditions gate (v1.3 §2.0): kernel-observable indexer death pipes.
+// One per NUMA node, mirroring fd_scan_death_*: parent holds the read end,
+// the indexer child inherits the write end; the parent closes its write
+// copy at spawn. Indexer SIGKILL/OOM destroys the write end in-kernel ->
+// POLLHUP on the read end -> reactor alarm. Traps/`|| ring_abort` in the
+// spawning subshell structurally cannot be the mechanism: a SIGKILLed
+// indexer runs no exit code at all.
+static int *fd_indexer_death_r = NULL;
+static int *fd_indexer_death_w = NULL;
 
 static int evfd_data = -1;
 static int evfd_ingest_data = -1;
@@ -2389,9 +2403,11 @@ static int ring_init_main(int argc, char **argv) {
   evfd_meta_arr = calloc(global_num_nodes, sizeof(int));
   fd_escrow_r = calloc(global_num_nodes, sizeof(int));
   fd_escrow_w = calloc(global_num_nodes, sizeof(int));
+  fd_indexer_death_r = calloc(global_num_nodes, sizeof(int));
+  fd_indexer_death_w = calloc(global_num_nodes, sizeof(int));
 
   if (!evfd_data_arr || !evfd_eof_arr || !evfd_indexer_arr || !evfd_meta_arr ||
-      !fd_escrow_r || !fd_escrow_w) {
+      !fd_escrow_r || !fd_escrow_w || !fd_indexer_death_r || !fd_indexer_death_w) {
     builtin_error("forkrun: malloc failed during ring_init");
     return EXECUTION_FAILURE;
   }
@@ -2403,6 +2419,8 @@ static int ring_init_main(int argc, char **argv) {
     evfd_meta_arr[i] = -1;
     fd_escrow_r[i] = -1;
     fd_escrow_w[i] = -1;
+    fd_indexer_death_r[i] = -1;
+    fd_indexer_death_w[i] = -1;
   }
 
   for (uint32_t n = 0; n < global_num_nodes; n++) {
@@ -2431,6 +2449,18 @@ static int ring_init_main(int argc, char **argv) {
     } else {
       fd_escrow_r[n] = -1;
       fd_escrow_w[n] = -1;
+    }
+
+    // Indexer death pipe: plain kernel-teardown sensor, never read for data.
+    // Parent polls the read end for POLLHUP/POLLERR; liveness only.
+    if (pipe(pfd) == 0) {
+      fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+      fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+      fd_indexer_death_r[n] = pfd[0];
+      fd_indexer_death_w[n] = pfd[1];
+    } else {
+      fd_indexer_death_r[n] = -1;
+      fd_indexer_death_w[n] = -1;
     }
   }
 
@@ -2566,6 +2596,10 @@ static int ring_destroy_main(int argc, char **argv) {
         close(fd_escrow_r[n]);
       if (fd_escrow_w && fd_escrow_w[n] >= 0)
         close(fd_escrow_w[n]);
+      if (fd_indexer_death_r && fd_indexer_death_r[n] >= 0)
+        close(fd_indexer_death_r[n]);
+      if (fd_indexer_death_w && fd_indexer_death_w[n] >= 0)
+        close(fd_indexer_death_w[n]);
     }
     free(evfd_data_arr);
     evfd_data_arr = NULL;
@@ -2585,6 +2619,14 @@ static int ring_destroy_main(int argc, char **argv) {
     fd_escrow_r = NULL;
     free(fd_escrow_w);
     fd_escrow_w = NULL;
+    if (fd_indexer_death_r) {
+      free(fd_indexer_death_r);
+      fd_indexer_death_r = NULL;
+    }
+    if (fd_indexer_death_w) {
+      free(fd_indexer_death_w);
+      fd_indexer_death_w = NULL;
+    }
   }
   if (g_logical_to_phys_map) {
     free(g_logical_to_phys_map);
@@ -3775,6 +3817,10 @@ uint64_t chunk_bounds[16] = {0};
   // -----------------------------------------------------------------
 
   if (is_resume) {
+      // SEQLOCK READ PROTOCOL (pair of TRACK_COMPLETED_BATCH publish side):
+      // ACQUIRE seq1 -> RELAXED data -> ACQUIRE seq2, retry while odd or
+      // mismatched. The ACQUIREs pair with the publisher's ACQ_REL first
+      // bump and RELEASE-fenced second bump; do not weaken to RELAXED.
       uint32_t seq1, seq2;
       uint32_t cnt = 0;
       do {
@@ -6172,6 +6218,16 @@ static int ring_order_main(int argc, char **argv) {
   }
 
   // NEW: Macro to absorb a successfully written batch into the Ledger
+  // SEQLOCK PUBLISH PROTOCOL (litmus note — read before weakening orderings):
+  //   bump(seq, ACQ_REL) -> RELAXED data stores -> fence(RELEASE) ->
+  //   bump(seq, RELEASE). Readers snapshot with ACQUIRE seq1 -> RELAXED data
+  //   -> ACQUIRE seq2 and retry while (seq1 != seq2 || seq1 & 1). The ACQ_REL
+  //   on the FIRST bump pairs with readers' ACQUIRE seq1 (no torn read of an
+  //   in-progress publish); the explicit RELEASE fence before the SECOND bump
+  //   is what orders the RELAXED data stores before seq2 becomes even on
+  //   weakly-ordered arches (ARM/POWER/RISC-V) — without it a reader can
+  //   observe a new even seq2 with stale horizon/jagged (x86-TSO hides this).
+  //   Tracked under the preconditions gate (Python-frontend port, v1.3 §2.0).
   #define TRACK_COMPLETED_BATCH(_op) do { \
       tracker_bytes += (_op).len; \
       uint64_t _s = (_op).in_off; \
@@ -6196,6 +6252,8 @@ static int ring_order_main(int argc, char **argv) {
               __atomic_store_n(&g_state->resume_jagged[_i].s, tracker_heap[_i].s, __ATOMIC_RELAXED); \
               __atomic_store_n(&g_state->resume_jagged[_i].e, tracker_heap[_i].e, __ATOMIC_RELAXED); \
           } \
+          /* Release fence: order RELAXED data above before seq2 goes even. */ \
+          __atomic_thread_fence(__ATOMIC_RELEASE); \
           __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_RELEASE); \
       } \
   } while(0)
@@ -7222,7 +7280,9 @@ static int ring_escrow_put_main(int argc, char **argv) {
 static int ring_dump_resume_main(int argc, char **argv) {
     if (!g_state) return EXECUTION_FAILURE;
 
-    // NEW: Safe Seqlock read into local variables
+    // SEQLOCK READ PROTOCOL (pair of TRACK_COMPLETED_BATCH publish side):
+    // ACQUIRE seq1 -> RELAXED data -> ACQUIRE seq2, retry while odd or
+    // mismatched. Do not weaken the seq loads to RELAXED.
     uint32_t seq1, seq2;
     uint64_t snap_horizon, snap_bytes;
     uint32_t snap_count;
@@ -7353,7 +7413,7 @@ static int ring_abort_reason_main(int argc, char **argv) {
 
 struct PollMeta {
     arrayind_t id;
-    int type; // 0 = spawn, 1 = scanner, 2 = worker, 3 = trap_ack
+    int type; // 0 = spawn, 1 = scanner, 2 = worker, 3 = trap_ack, 4 = indexer
 };
 
 static inline uint64_t get_mono_ms(void) {
@@ -7390,6 +7450,11 @@ static int ring_poll_main(int argc, char **argv) {
 
     // Optional 5th arg: trap ack pipe
     int fd_trap_ack_r = (argc >= 6 && argv[5][0] != '\0') ? atoi(argv[5]) : -1;
+
+    // Optional 6th arg: indexer-death array name (preconditions gate, v1.3 §2.0).
+    // When omitted the reactor behaves exactly as before (bash passes its
+    // fd_indexer_death_r array; UMA/flat mode passes an empty/unset name).
+    const char *indexer_arr_name = (argc >= 7 && argv[6][0] != '\0') ? argv[6] : NULL;
 
     int max_poll = 8192;
     struct pollfd *pfds = malloc(max_poll * sizeof(struct pollfd));
@@ -7447,6 +7512,31 @@ static int ring_poll_main(int argc, char **argv) {
     // 3. Load Scanner and Worker Death Pipes
     LOAD_ARRAY(scan_arr_name, 1);
     LOAD_ARRAY(work_arr_name, 2);
+
+    // 3b. Load Indexer Death Pipes (kernel-observable liveness; POLLHUP on
+    // indexer SIGKILL/OOM). Not core_cnt: an indexer death reports via
+    // INDEXER_DEATH -> ring_abort, it never keeps a drained loop alive.
+    // (UMA/flat pipeline has no indexer_numa: array unset/empty -> no-op.)
+    if (indexer_arr_name) {
+        SHELL_VAR *xiv = find_variable(indexer_arr_name);
+        if (xiv && array_p(xiv)) {
+            ARRAY *xarr = array_cell(xiv);
+            if (xarr) {
+                ARRAY_ELEMENT *xae;
+                for (xae = element_forw(xarr->head); xae != xarr->head; xae = element_forw(xae)) {
+                    if (p_cnt >= max_poll) break;
+                    char *xval = element_value(xae);
+                    if (xval && xval[0]) {
+                        pfds[p_cnt].fd = atoi(xval);
+                        pfds[p_cnt].events = POLLHUP | POLLIN | POLLERR;
+                        meta[p_cnt].id = element_index(xae);
+                        meta[p_cnt].type = 4;
+                        p_cnt++;
+                    }
+                }
+            }
+        }
+    }
 
     uint64_t g_poll_deadline_ms = 0;
     for (int w = 0; w < MAX_POLL_WORKERS; w++) {
@@ -7572,8 +7662,11 @@ static int ring_poll_main(int argc, char **argv) {
                     return EXECUTION_SUCCESS;
                 }
             } else {
-                // --- DEATH PIPES (Scanner or Worker) ---
-                bind_variable("POLL_EVENT", meta[i].type == 1 ? "SCAN_DEATH" : "WORKER_DEATH", 0);
+                // --- DEATH PIPES (Scanner, Worker, or Indexer) ---
+                const char *ev = "WORKER_DEATH";
+                if (meta[i].type == 1) ev = "SCAN_DEATH";
+                else if (meta[i].type == 4) ev = "INDEXER_DEATH";
+                bind_variable("POLL_EVENT", ev, 0);
                 char arg_buf[32];
                 snprintf(arg_buf, sizeof(arg_buf), "%lld", (long long)meta[i].id);
                 bind_variable("POLL_ARG1", arg_buf, 0);

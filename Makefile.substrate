@@ -1,0 +1,38 @@
+# Stage 1 canary build (v1.3 §2.1): link-checks the substrate boundary.
+# libforkrun.so must carry ZERO bash linkage — enforced by
+# -Wl,--no-undefined plus an explicit allowed-dependency set.
+# The canary compiles the engine TU against stub bash symbols and fails
+# the build if any new bash-internal reference is introduced.
+#
+# Usage:
+#   make -f Makefile.substrate canary   # link check only
+#   make -f Makefile.substrate check    # canary + Stage-0 python tests
+CC      ?= gcc
+CFLAGS  ?= -O1 -fPIC -Wall -Wextra
+INCLUDES = -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins
+
+# Allowed shared deps for the standalone substrate (explicit set).
+ALLOWED_DEPS = -ldl -lrt
+
+CANARY_STUBS = substratestubs.o
+
+all: canary
+
+substratestubs.o: substratestubs.c forkrun_substrate.h
+	$(CC) $(CFLAGS) -c substratestubs.c -o $@
+
+forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h
+	$(CC) $(CFLAGS) -D_GNU_SOURCE=1 -DSHELL -DHAVE_CONFIG_H $(INCLUDES) -c forkrun_ring.c -o $@
+
+libforkrun.so: forkrun_ring_canary.o $(CANARY_STUBS)
+	$(CC) -shared -o $@ forkrun_ring_canary.o $(CANARY_STUBS) \
+		-Wl,--no-undefined $(ALLOWED_DEPS)
+
+canary: libforkrun.so
+	@echo "canary OK: libforkrun.so links with no undefined symbols"
+
+check: canary
+	python3 -m unittest discover -s python/tests
+
+clean:
+	rm -f *.o *.so
