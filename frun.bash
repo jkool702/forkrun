@@ -479,93 +479,16 @@ EOF
 
                     resume_flag=true
 
-                    # --- v3.5.0: RESUME FILE OWNERSHIP / PERMISSION GATE ---
-                    # The resume file encodes commands (FORKRUN_ORIG_ARGS,
-                    # EXTRA_SETUP/FUNCS/VARS). Filesystem ownership is the
-                    # primary trust boundary: only the file's owner should
-                    # be able to dictate what a resume executes. The sandbox
-                    # below remains the secondary boundary against partial
-                    # tampering (shared dirs, spool artifacts). Both stay.
-                    if (( $# == 1 )) && [[ "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
-                        local _rf_uid _rf_mode _my_uid
-                        read -r _rf_uid _rf_mode < <(stat -Lc '%u %04a' "$_proc_rf" 2>/dev/null)
-
-                        if [[ -z "${_rf_uid:-}" ]]; then
-                            # Cannot stat (broken symlink, race, perms):
-                            # fail CLOSED. An unvalidatable command file
-                            # must never auto-execute.
-                            echo "forkrun [ABORT]: Cannot stat resume file '$resume_file'. Refusing auto-resume." >&2
-                            exec {_rf_fd}<&-
-                            NORMAL_EXIT_FLAG=true
-                            return 1
-                        fi
-
-                        local _rf_reject=""
-                        local _rf_reason=""
-                        _my_uid=$(id -u)
-
-                        if (( _rf_uid != _my_uid )); then
-                            # Not ours: someone else's file is someone
-                            # else's code. HARD reject (override: TRUST=1).
-                            _rf_reject="hard"
-                            _rf_reason="owned by uid ${_rf_uid} (you are ${_my_uid})"
-                        elif (( (8#${_rf_mode:-0} & 8#022) != 0 )); then
-                            # Ours but group/world-writable: anyone sharing
-                            # the dir can rewrite it. Require chmod or trust.
-                            _rf_reject="soft"
-                            _rf_reason="mode ${_rf_mode} is group/world-writable"
-                        fi
-
-                        if [[ -n "$_rf_reject" ]]; then
-                            echo "forkrun [SECURITY]: Resume file '$resume_file' ${_rf_reason}." >&2
-                            if [[ "$_rf_reject" == "hard" ]]; then
-                                # Foreign-owned file: show what would execute
-                                # and require explicit confirmation. This handles
-                                # the team-shared-scratch workflow cleanly.
-                                if { true; } 2>/dev/null </dev/tty; then
-                                    local _rf_orig_preview
-                                    _rf_orig_preview=$(grep -m1 '^declare -a FORKRUN_ORIG_ARGS' "$_proc_rf" 2>/dev/null || echo "(no FORKRUN_ORIG_ARGS found)")
-                                    read -p $'\nforkrun [SECURITY]: This resume file is owned by another user. It will re-execute:\n  '"${_rf_orig_preview}"$'\nProceed? (y/N): ' -n 1 -r -t 60 </dev/tty
-                                    echo >&2
-                                    if [[ ! ${REPLY,,} == 'y' ]]; then
-                                        echo "forkrun [ABORT]: Resume cancelled by user." >&2
-                                        exec {_rf_fd}<&-
-                                        NORMAL_EXIT_FLAG=true
-                                        return 1
-                                    fi
-                                else
-                                    # No TTY (scripts, CI, unattended): fail closed
-                                    echo "                   Refusing automatic resumption (no TTY to confirm)." >&2
-                                    echo "                   To resume anyway: FORKRUN_TRUST_RESUME=1 frun --resume ..." >&2
-                                    exec {_rf_fd}<&-
-                                    NORMAL_EXIT_FLAG=true
-                                    return 1
-                                fi
-                            else
-                                # Soft: interactive confirm, auto-N without a TTY
-                                if { true; } 2>/dev/null </dev/tty; then
-                                    read -p $'\nforkrun [SECURITY]: Resume this group/world-writable file anyway? (y/N): ' -n 1 -r -t 60 </dev/tty
-                                    echo >&2
-                                    if [[ ! ${REPLY,,} == 'y' ]]; then
-                                        echo "forkrun [ABORT]: Resume cancelled by user." >&2
-                                        exec {_rf_fd}<&-
-                                        NORMAL_EXIT_FLAG=true
-                                        return 1
-                                    fi
-                                else
-                                    echo "forkrun [ABORT]: No TTY to confirm. Fix with: chmod go-w '$resume_file'" >&2
-                                    echo "                Or set FORKRUN_TRUST_RESUME=1 for unattended resumption." >&2
-                                    exec {_rf_fd}<&-
-                                    NORMAL_EXIT_FLAG=true
-                                    return 1
-                                fi
-                            fi
-                        fi
-                    fi
+                    # NOTE: the ownership/permission gate used to live here.
+                    # F29-B moved it AFTER the sandbox extraction below, so
+                    # every consent prompt previews post-parse extracted
+                    # values (what will RUN) instead of raw file text.
 
                     if (( $# == 1 )); then
                         # FULL AUTO RESUME - extract and verify execution environment
-                        # NOTE: trust/ownership checks happen in the PARENT before this subprocess; this block must remain tool-free and decision-free
+                        # NOTE: the sandbox extraction runs first so every
+                        # consent prompt below previews post-parse extracted
+                        # values (F29-B); the ownership gate follows it.
                         local _rf_content _vars_env _fn_env
                         _rf_content="$(< "/proc/self/fd/${_rf_fd}")"
 
@@ -574,9 +497,20 @@ EOF
                         local _fn_token="___FORKRUN_FN_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local _fn_end="___FORKRUN_FNEND_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local parsed_env
-                         parsed_env="$(env -i PATH='' "${BASH:-bash}" --norc --noprofile --restricted -c '
-                            _sb="$1"
-                            eval "$_sb" || exit 1
+                         parsed_env="$(env -i PATH=/nonexistent "${BASH:-bash}" --norc --noprofile --restricted -c '
+                             # F29-A1: frame tokens arrive positionally ($2-$5)
+                             # but are IMMEDIATELY bound to readonly names and
+                             # shifted away. Hostile file content executes first
+                             # (eval "$_sb" below) and could otherwise read the
+                             # tokens from $2-$5 (or /proc/self/cmdline), emit
+                             # a forged token-bounded frame, and `exit 0` to
+                             # suppress the legitimate emission. After the
+                             # shift, early-exit forgers emit token-less output
+                             # the parent rejects fail-closed.
+                             _sb="$1"; _tok_v="$2"; _tok_ve="$3"; _tok_f="$4"; _tok_fe="$5"
+                             readonly _tok_v _tok_ve _tok_f _tok_fe
+                             shift 5
+                             eval "$_sb" || exit 1
                             eval "${FORKRUN_EXTRA_DEFS:-}"
                             unset FORKRUN_EXTRA_DEFS
                             trap - EXIT DEBUG RETURN ERR
@@ -629,9 +563,28 @@ EOF
                             # evald ONLY AFTER the layer-3 gate passes. This
                             # guarantees the gates own printf -v / declare -f
                             # previews run with NO hostile functions in scope.
-                            _emit_vars="$2${_NL}${_vars_out}${_NL}$3${_NL}"
-                            _emit_fns="$4${_NL}${_fn_text}${_NL}$5${_NL}"
-                            printf "%s" "${_emit_vars}${_emit_fns}"
+                             _emit_vars="${_tok_v}${_NL}${_vars_out}${_NL}${_tok_ve}${_NL}"
+                             _emit_fns="${_tok_f}${_NL}${_fn_text}${_NL}${_tok_fe}${_NL}"
+                             # F29-A2: emission via EXIT trap, installed AFTER
+                             # the wipe and round-trip verification above (that
+                             # ordering also blocks a hostile FORKRUN_EXTRA_VARS
+                             # overwrite of the emit variables). A hostile early `exit 0` fires no trap → no
+                             # emission → the parent rejects fail-closed; a
+                             # hostile continuation is followed by the
+                             # legitimate emission, and the parent greedy
+                             # ##*token parse anchors to the last
+                             # (legitimate) frame. The `trap - EXIT ...`
+                             # above stays the only earlier EXIT disposition.
+                             # NOTE: this -c script must stay free of single
+                             # quotes, trap action included: the script itself
+                             # is single-quoted on the parent command line, so
+                             # the first lone quote anywhere up here would end
+                             # the script word early and scramble every
+                             # argument after it into the sandbox positionals
+                             # (silent, total emission loss; the file still
+                             # parses). Double quotes only below.
+                             _emit_all() { printf "%s" "${_emit_vars}${_emit_fns}"; }
+                             trap _emit_all EXIT
                         ' _ "$_rf_content" "$_secret_token" "$_secret_end" "$_fn_token" "$_fn_end" 2>/dev/null)"
 
                         if [[ "$parsed_env" != *"${_secret_token}"* || "$parsed_env" != *"${_secret_end}"* ]]; then
@@ -657,12 +610,202 @@ EOF
                         _fn_env="${parsed_env##*"${_fn_token}"$'\n'}"
                         _fn_env="${_fn_env%%$'\n'"${_fn_end}"*}"
 
-                        # VARS ONLY — eval'd now. No function text has crossed.
-                        eval "$_vars_env"
-                        #_clean_env="$( ( eval "$parsed_env"; \
-                        #    builtin declare -p -- FORKRUN_ORIG_ARGS FORKRUN_RETRY_LIMIT \
-                        #    FORKRUN_EXTRA_VARS FORKRUN_EXTRA_FUNCS FORKRUN_EXTRA_SETUP 2>/dev/null ) )"
-                        #eval "$_clean_env"
+                        # VARS ONLY — the parent NEVER evals the extracted frame
+                        # directly (F29-A3). (3a) shape filter on the raw text,
+                        # (3b) round-trip re-render inside a PATH-dead
+                        # restricted shell (constructed identically to the main
+                        # sandbox: one mechanism, one probe), (3c) denylist on
+                        # the re-render name list. Only the re-rendered frame
+                        # is eval'd below. The fn frame gets NO structural
+                        # validation — function bodies are arbitrary by nature
+                        # and cross only after the layer-3 gate by design.
+                        # (3a) Shape filter: every non-empty line must be a
+                        # declare. The double-dash form is legitimate
+                        # (`declare -- FORKRUN_EXTRA_VARS=...` appears in real
+                        # checkpoints) — a single-letter-only regex would
+                        # break every legitimate resume carrying a plain
+                        # variable. Cheap pre-filter only, not the boundary.
+                        if grep -qEv '^declare -+[a-zA-Z]* |^$' <<<"$_vars_env"; then
+                            echo "forkrun [ABORT]: Resume file environment verification failed or was intercepted." >&2
+                            exec {_rf_fd}<&-
+                            NORMAL_EXIT_FLAG=true
+                            return 1
+                        fi
+                        # (3c) Denylist — names a forged frame must never
+                        # (re)bind: the resume path's own locals (e.g.
+                        # _rf_fd=1 would make the later `exec {_rf_fd}<&-`
+                        # close stdout) and FORKRUN_TRUST_RESUME (the sandbox
+                        # strips it from legitimate emissions by design — any
+                        # frame containing it is forged, and rebinding it
+                        # would skip the layer-3 gate entirely).
+                        _deny=" _rf_fd _vars_env _vars_safe _fn_env _v_names _secret_token _secret_end _fn_token _fn_end _sb _tok_v _tok_ve _tok_f _tok_fe FORKRUN_TRUST_RESUME "
+                        _v_names=()
+                        while IFS= read -r _line; do
+                            [[ -z "$_line" ]] && continue
+                            _name="$(sed -nE 's/^declare -+[a-zA-Z]* +([^=]+)=.*/\1/p' <<<"$_line")"
+                            [[ -z "$_name" ]] && continue
+                            [[ " $_deny " == *" $_name "* ]] && continue
+                            _v_names+=("$_name")
+                        done <<<"$_vars_env"
+                        # (3b) Round-trip re-render. Airtight because
+                        # `declare -p` escapes $, backtick, and " in values:
+                        # the re-rendered frame cannot contain an executable
+                        # command substitution — any unescaped $(...) in a
+                        # forgery executes inside the PATH-less restricted
+                        # shell (external binaries can't resolve; rbash
+                        # prohibits slashed command names), producing a value
+                        # whose re-render differs from the forged text; the
+                        # parent then evals only the escaped, neutralized
+                        # form. An empty name list means the frame declared
+                        # nothing verifiable — reject fail-closed (otherwise
+                        # a bare `declare -p` would dump the helper shell's
+                        # ambient variables into the parent).
+                        _vars_safe=""
+                        if (( ${#_v_names[@]} > 0 )); then
+                            # NOTE: the work-order sketch put a 2>/dev/null on
+                            # the inner declare -p, but output redirection is
+                            # prohibited inside --restricted, so that form can
+                            # never run. The redirect lives on the whole
+                            # invocation instead (identical error-swallowing).
+                            # F29-F6: PATH=/nonexistent (not empty): an empty
+                            # PATH component means CWD in bash, so PATH=empty
+                            # resolved a CWD-planted binary from inside the
+                            # sandbox (proven by a self-recursing planted
+                            # touch probe). A nonexistent directory can never
+                            # contain an executable, so CWD resolution is
+                            # impossible by construction.
+                            _vars_safe="$(env -i PATH=/nonexistent "${BASH:-bash}" --norc --noprofile --restricted -c '
+                                eval "$1" || exit 1
+                                shift
+                                declare -p "$@"
+                            ' _ "$_vars_env" "${_v_names[@]}" 2>/dev/null)"
+                        fi
+                        if [[ -z "$_vars_safe" ]]; then
+                            echo "forkrun [ABORT]: Resume file environment verification failed or was intercepted." >&2
+                            exec {_rf_fd}<&-
+                            NORMAL_EXIT_FLAG=true
+                            return 1
+                        fi
+                        eval "$_vars_safe"
+
+                        # Preview helper (F29-B): render POST-PARSE extracted
+                        # values the resume WILL execute — never raw file text.
+                        # A token-knowing forger can swap FORKRUN_ORIG_ARGS as
+                        # data and make the user confirm the file's benign
+                        # text while the forged values execute; previewing the
+                        # extracted frames closes that gap. $1 = re-rendered
+                        # vars frame (safe text), $2 = fn frame text. Text
+                        # only — never eval'd (INVARIANTS §15: gates inspect
+                        # text, never live state). One helper, three call
+                        # sites: hard-reject, soft-reject, layer-3 gate.
+                        _forkrun_resume_preview() {
+                            local _pv_vars="$1" _pv_fns="$2"
+                            echo "  [command] (FORKRUN_ORIG_ARGS as extracted):" >&2
+                            grep -E '^declare -a FORKRUN_ORIG_ARGS=' <<<"$_pv_vars" >&2 \
+                                || echo "  (no FORKRUN_ORIG_ARGS in frame)" >&2
+                            echo "  [setup] (FORKRUN_EXTRA_SETUP as extracted):" >&2
+                            grep -E '^declare -+[^ ]* FORKRUN_EXTRA_SETUP=' <<<"$_pv_vars" >&2 \
+                                || echo "  (no FORKRUN_EXTRA_SETUP in frame)" >&2
+                            echo "  [functions] (first 2048 bytes of extracted fn frame):" >&2
+                            if [[ -n "$_pv_fns" ]]; then
+                                head -c 2048 <<<"$_pv_fns" >&2; echo >&2
+                            else
+                                echo "  (no functions in frame)" >&2
+                            fi
+                            echo "  [variables] (extracted vars frame):" >&2
+                            grep -vE '^declare -a FORKRUN_ORIG_ARGS=' <<<"$_pv_vars" >&2 \
+                                || echo "  (no other variables in frame)" >&2
+                        }
+
+                        # --- v3.5.0: RESUME FILE OWNERSHIP / PERMISSION GATE ---
+                        # (F29-B: runs AFTER the sandbox extraction above, so
+                        # both prompts preview extracted values.) The resume
+                        # file encodes commands (FORKRUN_ORIG_ARGS,
+                        # EXTRA_SETUP/FUNCS/VARS). Filesystem ownership is the
+                        # primary trust boundary: only the file's owner should
+                        # be able to dictate what a resume executes. The
+                        # sandbox remains the secondary boundary against
+                        # partial tampering (shared dirs, spool artifacts).
+                        # Both stay.
+                        if [[ "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
+                            local _rf_uid _rf_mode _my_uid
+                            read -r _rf_uid _rf_mode < <(stat -Lc '%u %04a' "$_proc_rf" 2>/dev/null)
+
+                            if [[ -z "${_rf_uid:-}" ]]; then
+                                # Cannot stat (broken symlink, race, perms):
+                                # fail CLOSED. An unvalidatable command file
+                                # must never auto-execute.
+                                echo "forkrun [ABORT]: Cannot stat resume file '$resume_file'. Refusing auto-resume." >&2
+                                exec {_rf_fd}<&-
+                                NORMAL_EXIT_FLAG=true
+                                return 1
+                            fi
+
+                            local _rf_reject=""
+                            local _rf_reason=""
+                            _my_uid=$(id -u)
+
+                            if (( _rf_uid != _my_uid )); then
+                                # Not ours: someone else's file is someone
+                                # else's code. HARD reject (override: TRUST=1).
+                                _rf_reject="hard"
+                                _rf_reason="owned by uid ${_rf_uid} (you are ${_my_uid})"
+                            elif (( (8#${_rf_mode:-0} & 8#022) != 0 )); then
+                                # Ours but group/world-writable: anyone sharing
+                                # the dir can rewrite it. Require chmod or trust.
+                                _rf_reject="soft"
+                                _rf_reason="mode ${_rf_mode} is group/world-writable"
+                            fi
+
+                            if [[ -n "$_rf_reject" ]]; then
+                                echo "forkrun [SECURITY]: Resume file '$resume_file' ${_rf_reason}." >&2
+                                if [[ "$_rf_reject" == "hard" ]]; then
+                                    # Foreign-owned file: show what would
+                                    # execute (extracted values, never raw
+                                    # file text) and require explicit
+                                    # confirmation. This handles the
+                                    # team-shared-scratch workflow cleanly.
+                                    _forkrun_resume_preview "$_vars_safe" "$_fn_env"
+                                    if { true; } 2>/dev/null </dev/tty; then
+                                        read -p $'\nforkrun [SECURITY]: This resume file is owned by another user. Proceed with the above? (y/N): ' -n 1 -r -t 60 </dev/tty
+                                        echo >&2
+                                        if [[ ! ${REPLY,,} == 'y' ]]; then
+                                            echo "forkrun [ABORT]: Resume cancelled by user." >&2
+                                            exec {_rf_fd}<&-
+                                            NORMAL_EXIT_FLAG=true
+                                            return 1
+                                        fi
+                                    else
+                                        # No TTY (scripts, CI, unattended): fail closed
+                                        echo "                   Refusing automatic resumption (no TTY to confirm)." >&2
+                                        echo "                   To resume anyway: FORKRUN_TRUST_RESUME=1 frun --resume ..." >&2
+                                        exec {_rf_fd}<&-
+                                        NORMAL_EXIT_FLAG=true
+                                        return 1
+                                    fi
+                                else
+                                    # Soft: show what would execute, then
+                                    # interactive confirm, auto-N without a TTY
+                                    _forkrun_resume_preview "$_vars_safe" "$_fn_env"
+                                    if { true; } 2>/dev/null </dev/tty; then
+                                        read -p $'\nforkrun [SECURITY]: Resume this group/world-writable file with the above? (y/N): ' -n 1 -r -t 60 </dev/tty
+                                        echo >&2
+                                        if [[ ! ${REPLY,,} == 'y' ]]; then
+                                            echo "forkrun [ABORT]: Resume cancelled by user." >&2
+                                            exec {_rf_fd}<&-
+                                            NORMAL_EXIT_FLAG=true
+                                            return 1
+                                        fi
+                                    else
+                                        echo "forkrun [ABORT]: No TTY to confirm. Fix with: chmod go-w '$resume_file'" >&2
+                                        echo "                Or set FORKRUN_TRUST_RESUME=1 for unattended resumption." >&2
+                                        exec {_rf_fd}<&-
+                                        NORMAL_EXIT_FLAG=true
+                                        return 1
+                                    fi
+                                fi
+                            fi
+                        fi
 
                         local has_custom_vars=0
                         for var in ${FORKRUN_EXTRA_VARS:-}; do
@@ -673,21 +816,22 @@ EOF
                         done
 
                         if [[ ( -n "${FORKRUN_EXTRA_SETUP:-}" || -n "${FORKRUN_EXTRA_FUNCS:-}" || "${has_custom_vars:-0}" == "1" ) && "${FORKRUN_TRUST_RESUME:-0}" != "1" ]]; then
-                            local FORKRUN_EXTRA_SETUP_Q
-                            printf -v FORKRUN_EXTRA_SETUP_Q '%q' "${FORKRUN_EXTRA_SETUP}"
-                            [[ -n "${FORKRUN_EXTRA_FUNCS:-}" ]] && FORKRUN_EXTRA_SETUP_Q+=$'\n'"$(declare -f ${FORKRUN_EXTRA_FUNCS})"
-                            (( has_custom_vars == 1 )) && FORKRUN_EXTRA_SETUP_Q+=$'\n'"$(declare -p ${FORKRUN_EXTRA_VARS})"
+                            # F29-B: preview what WOULD execute — the extracted
+                            # frames as text, never live state. The fn frame is
+                            # still uneval'd here by design, so `declare -f`
+                            # would show the CALLER's functions, not the
+                            # resume's — previewing the frame shows the truth.
+                            _forkrun_resume_preview "$_vars_safe" "$_fn_env"
 
                             # Check if we have an interactive terminal to prompt the user
                             if { true; } 2>/dev/null </dev/tty; then
-                                read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands, functions, or variables. Execute them?\n[Setup]: '"${FORKRUN_EXTRA_SETUP_Q}"$'\n(y/N): ' -n 1 -r -t 60 </dev/tty
+                                read -p $'\nforkrun [SECURITY]: The resume file contains custom setup commands, functions, or variables (previewed above). Execute them?\n(y/N): ' -n 1 -r -t 60 </dev/tty
                                 echo >&2
                             else
                                 REPLY="N"
                                 echo "forkrun [SECURITY]: Custom setup commands detected in resume file, but no interactive TTY is available." >&2
                                 echo "Set FORKRUN_TRUST_RESUME=1 to allow unattended resumption." >&2
                             fi
-                            unset FORKRUN_EXTRA_SETUP_Q
 
                             if [[ ! ${REPLY,,} == 'y' ]]; then
                                 echo "forkrun [ABORT]: User rejected setup commands. Resumption cancelled." >&2
