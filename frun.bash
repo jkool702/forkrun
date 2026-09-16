@@ -995,8 +995,10 @@ toc() { :; }
             # F30: mirror the C-side ceiling (meta_ring capacity, C3-fix)
             # so --nodes=@513 is rejected with a clean error at the call
             # site instead of a loud engine failure mid-pipeline.
-            if (( c > 512 )); then
-                echo "forkrun [ERROR]: --nodes=@N above 512 is not supported (meta_ring capacity); got $c" >&2
+            # Bounded regex ^[0-9]{1,9}$ ensures no oversized literal triggers
+            # bash arithmetic errors or causes silent UMA degradation.
+            if [[ ! "$c" =~ ^[0-9]{1,9}$ ]] || (( c > 512 || c < 1 )); then
+                echo "forkrun [ERROR]: --nodes=@N must be an integer between 1 and 512 (meta_ring capacity); got $c" >&2
                 FORKRUN_NUM_NODES=1
                 numa_map_str=""
                 return 1

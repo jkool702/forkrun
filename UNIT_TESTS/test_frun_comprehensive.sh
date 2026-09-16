@@ -1732,7 +1732,7 @@ if in_section L; then
     _MD="$TEST_DIR/indexer_clean_abort"; mkdir -p "$_MD"
     # @2 = forced-count syntax: guarantees the NUMA indexer path runs even
     # on single-socket hosts (plain --nodes=2 degrades to UMA there).
-    _la4_out="$(timeout -s KILL 60 bash -c "source '$FRUN_SOURCE';
+    _la4_out="$(timeout -s KILL 60 bash -c "set -o pipefail; source '$FRUN_SOURCE';
         seq 100000 | frun --nodes=@2 -k printf '%s\n' | head -n 5" 2>"$_MD/err.txt")"
     _la4_rc=$?
     if (( _la4_rc == 0 )) && [[ "$(wc -l <<<"$_la4_out")" -eq 5 ]] \
@@ -4662,6 +4662,59 @@ if in_section T2; then
         TEST_RESULTS["T13: external SIGKILL stress under -k terminates exactly-once"]="FAIL"
         TEST_ERRORS["T13: external SIGKILL stress under -k terminates exactly-once"]="exit=$_TRC, no checkpoint, output incomplete"
         ((FAILED_TESTS++)); _print_result FAIL "T13: external SIGKILL stress under -k terminates exactly-once" "exit=$_TRC, no cp"
+    fi
+fi
+
+# ----------
+# T14: F30 --nodes=@N ceiling and input hardening rejection
+# Rejection of @N > 512 (meta_ring capacity) and non-numeric / overflow inputs.
+# Must fail loud with [ERROR] on stderr, non-zero exit, exit != 139 (no SIGSEGV),
+# and no checkpoint file written (NORMAL_EXIT_FLAG=true early-fatal pattern).
+# ----------
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/f30_nodes_ceiling"; mkdir -p "$_MD"
+    rm -rf "$_MD"/*
+
+    # Run in isolated directory so default .forkrun_resume cannot land elsewhere
+    _f30_pass=true
+    _f30_err=""
+
+    # 1. @513 ceiling check
+    ( cd "$_MD" && seq 100 | frun --nodes=@513 true ) >"$_MD/out_513.txt" 2>"$_MD/err_513.txt"
+    _rc_513=$?
+    if (( _rc_513 == 0 )) || (( _rc_513 == 139 )) || ! grep -q "\[ERROR\]: --nodes=@N" "$_MD/err_513.txt" || [[ -e "$_MD/.forkrun_resume" ]]; then
+        _f30_pass=false
+        _f30_err="@513 failed: rc=$_rc_513, cp=$([[ -e "$_MD/.forkrun_resume" ]] && echo yes || echo no)"
+    fi
+
+    # 2. @abc non-numeric check
+    if $_f30_pass; then
+        ( cd "$_MD" && seq 100 | frun --nodes=@abc true ) >"$_MD/out_abc.txt" 2>"$_MD/err_abc.txt"
+        _rc_abc=$?
+        if (( _rc_abc == 0 )) || (( _rc_abc == 139 )) || ! grep -q "\[ERROR\]: --nodes=@N" "$_MD/err_abc.txt" || [[ -e "$_MD/.forkrun_resume" ]]; then
+            _f30_pass=false
+            _f30_err="@abc failed: rc=$_rc_abc"
+        fi
+    fi
+
+    # 3. @999999999999999999999 overflow check
+    if $_f30_pass; then
+        ( cd "$_MD" && seq 100 | frun --nodes=@999999999999999999999 true ) >"$_MD/out_ovf.txt" 2>"$_MD/err_ovf.txt"
+        _rc_ovf=$?
+        if (( _rc_ovf == 0 )) || (( _rc_ovf == 139 )) || ! grep -q "\[ERROR\]: --nodes=@N" "$_MD/err_ovf.txt" || [[ -e "$_MD/.forkrun_resume" ]]; then
+            _f30_pass=false
+            _f30_err="@overflow failed: rc=$_rc_ovf"
+        fi
+    fi
+
+    if $_f30_pass; then
+        TEST_RESULTS["T14: F30 --nodes=@N ceiling and input hardening rejection"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T14: F30 --nodes=@N ceiling and input hardening rejection"
+    else
+        TEST_RESULTS["T14: F30 --nodes=@N ceiling and input hardening rejection"]="FAIL"
+        TEST_ERRORS["T14: F30 --nodes=@N ceiling and input hardening rejection"]="$_f30_err"
+        ((FAILED_TESTS++)); _print_result FAIL "T14: F30 --nodes=@N ceiling and input hardening rejection" "$_f30_err"
     fi
 fi
 

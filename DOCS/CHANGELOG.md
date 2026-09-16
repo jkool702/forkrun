@@ -47,6 +47,20 @@ independent of the Python-frontend work:
   packing; the strong tie is enforced by including the frozen
   `ring_loadables/forkrun_plugin.h` before the engine's ctx struct.
 
+- **F30: topology validation & `--nodes=@N` ceiling:** `ring_init` now
+  returns `EXECUTION_FAILURE` on invalid topology (e.g. `--nodes=@N`
+  exceeding the 512 `meta_ring` capacity). Previously, running on with
+  unchecked `ring_init` failure left ring pointers NULL, producing a
+  cleanroom SIGSEGV mid-pipeline on `--nodes=@513`. Both `ring_init` and
+  `_forkrun_build_numa_map` now enforce early-fatal handling
+  (`NORMAL_EXIT_FLAG=true; return 1`) with clean `[ERROR]` messages on
+  stderr and no spurious checkpoint emission. Input parsing in
+  `_forkrun_build_numa_map`'s `@*` branch is hardened with a bounded digit
+  regex (`^[0-9]{1,9}$`), preventing non-numeric or overflow-length
+  literals from triggering bash arithmetic errors or causing silent UMA
+  degradation. Lock-in test T14 validates `@513`, `@abc`, and
+  `@999999999999999999999` rejections in an isolated temporary directory.
+
 ## v3.5.0 — 2026-09-03
 
 The headline of this release is a fully-rearchitected resume subsystem: NUMA-native
