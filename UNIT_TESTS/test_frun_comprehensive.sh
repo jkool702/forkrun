@@ -1765,24 +1765,17 @@ fi
 # x {default, -s}. rc==0 + byte-exact output is required unconditionally:
 # every F15 manifestation breaks one of them (orphaned chunks = missing
 # bytes; successor/handoff hangs = timeout rc). Telemetry balance is
-# asserted whenever Node frames are present; a frame-less run is NOT a
-# failure by itself (see below) — but a total -s blackout is (fail-closed).
-#
-# KNOWN FLAKE (pre-existing, unrelated to F15 — own F-item pending): in
-# external-ARG (default) mode the cleanroom main shell's fd 2 is sometimes
-# aliased to a transient fd-1 target (or /dev/null) by shutdown time, so
-# ALL post-reactor stderr — telemetry, verbose, checkpoint hints — vanishes
-# while stdout stays byte-exact and rc stays 0 (measured 9/10 missing in
-# default mode vs 10/10 present in -s mode). The C fix cannot cause this
-# (source-only; the shipped blob predates it). Until that item lands, the
-# balance check applies to present frames only.
+# asserted in EVERY combo: post-reactor stderr must carry Node frames.
+# (D8: the INDEXER_DEATH handler's bare `exec ... 2>/dev/null` persistently
+# redirected fd 2 to /dev/null, swallowing telemetry/verbose/checkpoint
+# hints in default mode. Fixed by matching SCAN_DEATH's close form; the
+# earlier "pre-existing flake" attribution was wrong.)
 # ----------
 if in_section L; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/f15_conservation"; mkdir -p "$_MD"
     seq 50000 > "$_MD/input.txt"
     _f15_fail=""
-    _f15_seen_s=0
     for _src in file pipe; do
         for _nodes in @2 @4; do
             for _mode in default s; do
@@ -1804,23 +1797,22 @@ if in_section L; then
                     _f15_fail+=" (rc=$_f15_rc output-mismatch-or-timeout);"
                     continue
                 fi
-                if grep -qE 'Node [0-9]+ \(Phys' "$_MD/err.txt" 2>/dev/null; then
-                    [[ "$_mode" == s ]] && _f15_seen_s=1
-                    _sa=$(grep -oE '[0-9]+ assigned' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-                    _sp=$(grep -oE '[0-9]+ processed' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-                    _ss=$(grep -oE '[0-9]+ I stole' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-                    _sf=$(grep -oE '[0-9]+ stolen from me' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-                    if (( _sa <= 0 )) || (( _sa != _sp )) || (( _ss != _sf )); then
-                        _f15_fail+=" src=$_src nodes=$_nodes mode=$_mode"
-                        _f15_fail+=" (rc=$_f15_rc a=$_sa p=$_sp s=$_ss f=$_sf);"
-                    fi
+                if ! grep -qE 'Node [0-9]+ \(Phys' "$_MD/err.txt" 2>/dev/null; then
+                    _f15_fail+=" src=$_src nodes=$_nodes mode=$_mode"
+                    _f15_fail+=" (rc=$_f15_rc missing-Node-telemetry-frames);"
+                    continue
+                fi
+                _sa=$(grep -oE '[0-9]+ assigned' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                _sp=$(grep -oE '[0-9]+ processed' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                _ss=$(grep -oE '[0-9]+ I stole' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                _sf=$(grep -oE '[0-9]+ stolen from me' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                if (( _sa <= 0 )) || (( _sa != _sp )) || (( _ss != _sf )); then
+                    _f15_fail+=" src=$_src nodes=$_nodes mode=$_mode"
+                    _f15_fail+=" (rc=$_f15_rc a=$_sa p=$_sp s=$_ss f=$_sf);"
                 fi
             done
         done
     done
-    if (( _f15_seen_s == 0 )); then
-        _f15_fail+=" telemetry-blackout(no -s Node frames at all);"
-    fi
     if [[ -z "$_f15_fail" ]]; then
         TEST_RESULTS["F15a: NUMA chunk conservation (assigned==processed, steals balance)"]="PASS"
         _print_result PASS "F15a: NUMA chunk conservation (assigned==processed, steals balance)"
@@ -1838,11 +1830,7 @@ fi
 # moment ingest can no longer backfill over-claims — the worst point for the
 # orphan window. 10 iterations of >=1M lines. rc==0 + byte-exact is required
 # every iteration (hangs and truncations both fail here); telemetry balance
-# is asserted whenever Node frames are present. No presence requirement:
-# this stress runs the external-ARG mode whose post-reactor stderr is
-# subject to the KNOWN FLAKE documented in F15a (fail-closed presence would
-# flake ~90%/iteration there) — the byte-exact + timeout gate carries the
-# regression teeth, and F15a's -s combos carry the always-on balance proof.
+# is asserted every iteration with Node frames required (D8 — see F15a).
 # Honest scope: the pre-fix race is narrow, so this is a regression net, not
 # a proof — the justification is the structural argument above.
 # ----------
@@ -1859,14 +1847,16 @@ if in_section L; then
             _f15_fail+=" iter=$_it (rc=$_f15_rc output-mismatch-or-timeout);"
             continue
         fi
-        if grep -qE 'Node [0-9]+ \(Phys' "$_MD/err.txt" 2>/dev/null; then
-            _sa=$(grep -oE '[0-9]+ assigned' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-            _sp=$(grep -oE '[0-9]+ processed' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-            _ss=$(grep -oE '[0-9]+ I stole' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-            _sf=$(grep -oE '[0-9]+ stolen from me' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
-            if (( _sa <= 0 )) || (( _sa != _sp )) || (( _ss != _sf )); then
-                _f15_fail+=" iter=$_it (rc=$_f15_rc a=$_sa p=$_sp s=$_ss f=$_sf);"
-            fi
+        if ! grep -qE 'Node [0-9]+ \(Phys' "$_MD/err.txt" 2>/dev/null; then
+            _f15_fail+=" iter=$_it (rc=$_f15_rc missing-Node-telemetry-frames);"
+            continue
+        fi
+        _sa=$(grep -oE '[0-9]+ assigned' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+        _sp=$(grep -oE '[0-9]+ processed' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+        _ss=$(grep -oE '[0-9]+ I stole' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+        _sf=$(grep -oE '[0-9]+ stolen from me' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+        if (( _sa <= 0 )) || (( _sa != _sp )) || (( _ss != _sf )); then
+            _f15_fail+=" iter=$_it (rc=$_f15_rc a=$_sa p=$_sp s=$_ss f=$_sf);"
         fi
     done
     if [[ -z "$_f15_fail" ]]; then

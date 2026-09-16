@@ -2062,7 +2062,7 @@ W_NODE[$3]=$2
                         status=0
                     fi
 
-                    exec {fd_indexer_death_r[$sID]}<&- 2>/dev/null
+                    exec {fd_indexer_death_r[$sID]}<&-
                     unset 'fd_indexer_death_r[$sID]' 'INDEXER_P[$sID]'
 
                     if (( status != 0 )); then

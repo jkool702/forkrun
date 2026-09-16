@@ -80,12 +80,26 @@ independent of the Python-frontend work:
   Σ`I stole` == Σ`stolen from me` from the per-node `--stats` telemetry,
   across {file, pipe} × {@2, @4} × {default, `-s`}) and F15b (EOF-herd
   stress: 10× ≥1M-line fast-draining pipe runs, byte-exact + conservation
-  each iteration). Note: in external-ARG (default) mode the post-reactor
-  stderr carrying `--stats` is intermittently lost to a pre-existing fd-2
-  aliasing flake (pipeline stays byte-exact, rc stays 0; own F-item
-  pending), so the balance check applies to present Node frames only while
-  rc==0 + byte-exact stay unconditional — every F15 manifestation breaks
-  one of those two deterministically.
+  each iteration). Post-reactor stderr is required to carry Node frames in
+  every combo/iteration (D8 below closed the fd-2 poisoning that used to
+  swallow it) — rc==0 + byte-exact stay unconditional, and every F15
+  manifestation breaks one of those two deterministically.
+
+- **D8: INDEXER_DEATH handler permanently redirected fd 2 to /dev/null:**
+  the handler ran `exec {fd_indexer_death_r[$sID]}<&- 2>/dev/null` as a
+  bare `exec` (no command words), so the `2>/dev/null` persisted in the
+  main shell for the rest of the run — the `wait`, `ring_numa_stats`
+  telemetry, verbose output, and EXIT-trap checkpoint hints all vanished
+  while stdout stayed byte-exact and rc stayed 0. Mode-correlated (~90%
+  default vs ~0% `-s`) because the poisoning requires the reactor loop to
+  still be polling when the indexer POLLHUP arrives — a drain-timing race
+  (indexer fds are deliberately not in `core_cnt`). Introduced by the D6
+  indexer work this cycle (v3.5.0's 396-run benchmark suite showed
+  default-mode telemetry fine), so the earlier "pre-existing flake"
+  attribution was wrong. One-line fix matching SCAN_DEATH's close form
+  (`exec {fd_indexer_death_r[$sID]}<&-`); F15a/F15b tightened to require
+  Node frames in every combo/iteration. User-facing impact: on NUMA aborts
+  in default mode the checkpoint-hint messages could be silently lost.
 
 ## v3.5.0 — 2026-09-03
 
