@@ -3449,16 +3449,21 @@ run_test_exact R "R1: TUI flag accepted and pipeline completes (headless safe)" 
     "$(seq 10)"
 
 # --- R2: SLURM SIGUSR1 triggers checkpoint and exit 138 ---
+# W-B: deterministic targeting via FORKRUN_TEST_CLEANROOM_PIDFILE. The pidfile
+# write doubles as a readiness signal (traps installed), so wait on the file
+# instead of sleeping and guessing PIDs. --nodes=@2 runs indexers, locking in
+# D6's exit-code preservation (138, not 1) under NUMA.
 if in_section R; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/R_SLURM"; mkdir -p "$_MD"
-    seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume" "$_MD/cleanroom.pid"
 
     # FIXED: Added -s so sleep reads from stdin and actually sleeps, keeping frun alive.
-    # Use pgrep to find the cleanroom bash (child of FPID) and signal it directly
-    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 frun -k -s -l 1 sleep 0.1 & FPID=\$!; sleep 0.3; CPID=\$(ps -o pid= --ppid \$FPID 2>/dev/null | tr -d ' '); [[ -n \"\$CPID\" ]] && (( CPID = CPID + 3 )) && kill -USR1 \$CPID; wait \$FPID" \
+    export FORKRUN_TEST_CLEANROOM_PIDFILE="$_MD/cleanroom.pid"
+    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 FORKRUN_TEST_CLEANROOM_PIDFILE='$_MD/cleanroom.pid' frun --nodes=@2 -k -s -l 1 sleep 0.1 & FPID=\$!; for (( _w=0; _w<1000; _w++ )); do [[ -f '$_MD/cleanroom.pid' ]] && break; sleep 0.01; done; kill -USR1 \$(cat '$_MD/cleanroom.pid'); wait \$FPID" \
         > "$_MD/output.txt" 2>"$_MD/err.txt"
     _REXIT=$?
+    unset FORKRUN_TEST_CLEANROOM_PIDFILE
 
     if (( _REXIT == 138 )) && [[ -f "$_MD/.forkrun_resume" ]] && grep -q "Caught SIGUSR1" "$_MD/err.txt"; then
         TEST_RESULTS["R2: SLURM SIGUSR1 triggers checkpoint and exit 138"]="PASS"; ((PASSED_TESTS++))
@@ -3636,14 +3641,18 @@ fi
 
 # --- R10: SLURM SIGTERM triggers checkpoint and exit 143 ---
 # Verifies that standard SLURM scancel/preemption (SIGTERM) is caught and handled identically to SIGUSR1
+# W-B: deterministic targeting via FORKRUN_TEST_CLEANROOM_PIDFILE (see R2).
+# --nodes=@2 runs indexers, locking in D6's exit-code preservation (143, not 1).
 if in_section R; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/R_SLURM_TERM"; mkdir -p "$_MD"
-    seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume" "$_MD/cleanroom.pid"
 
-    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 frun -k -s -l 1 sleep 0.1 & FPID=\$!; sleep 0.3; CPID=\$(ps -o pid= --ppid \$FPID 2>/dev/null | tr -d ' '); [[ -n \"\$CPID\" ]] && (( CPID = CPID + 3 )) && kill -TERM \$CPID 2>/dev/null || kill -TERM \$FPID 2>/dev/null; wait \$FPID" \
+    export FORKRUN_TEST_CLEANROOM_PIDFILE="$_MD/cleanroom.pid"
+    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 FORKRUN_TEST_CLEANROOM_PIDFILE='$_MD/cleanroom.pid' frun --nodes=@2 -k -s -l 1 sleep 0.1 & FPID=\$!; for (( _w=0; _w<1000; _w++ )); do [[ -f '$_MD/cleanroom.pid' ]] && break; sleep 0.01; done; kill -TERM \$(cat '$_MD/cleanroom.pid'); wait \$FPID" \
         > "$_MD/output.txt" 2>"$_MD/err.txt"
     _REXIT=$?
+    unset FORKRUN_TEST_CLEANROOM_PIDFILE
 
     if (( _REXIT == 143 )) && [[ -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["R10: SLURM SIGTERM triggers checkpoint and exit 143"]="PASS"; ((PASSED_TESTS++))
