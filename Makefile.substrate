@@ -7,9 +7,21 @@
 # Usage:
 #   make -f Makefile.substrate canary   # link check only
 #   make -f Makefile.substrate check    # canary + Stage-0 python tests
+#   make -f Makefile.substrate canary CC=aarch64-linux-gnu-gcc OUT=libforkrun.aarch64.so
+#
+# FALSE-GREEN GUARD: make tracks timestamps, not command lines, so switching CC
+# between invocations used to leave the previous arch's objects AND output in
+# place while this target (whose recipe is only an echo) still printed
+# "canary OK" — reporting success for a stale artifact of the wrong arch. Two
+# defenses: the CCSTAMP prerequisite forces a full rebuild whenever the
+# compiler identity changes, and the arch check below refuses to report OK
+# when the artifact's ELF machine doesn't match the requested compiler.
 CC      ?= gcc
 CFLAGS  ?= -O1 -fPIC -Wall -Wextra
 INCLUDES = -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins
+
+OUT     ?= libforkrun.so
+CCSTAMP  = .canary-cc
 
 # Allowed shared deps for the standalone substrate (explicit set).
 ALLOWED_DEPS = -ldl -lrt
@@ -18,24 +30,41 @@ CANARY_STUBS = substratestubs.o
 
 all: canary
 
-substratestubs.o: substratestubs.c forkrun_substrate.h
+.PHONY: all canary check clean FORCE
+
+# Rewritten only when the compiler identity/options actually change, so its
+# mtime bumps exactly when dependent objects must rebuild.
+$(CCSTAMP): FORCE
+	@printf '%s\n' '$(CC) :: $(CFLAGS)' | cmp -s - $@ || \
+		printf '%s\n' '$(CC) :: $(CFLAGS)' > $@
+
+FORCE:
+
+substratestubs.o: substratestubs.c forkrun_substrate.h $(CCSTAMP)
 	$(CC) $(CFLAGS) -c substratestubs.c -o $@
 
-forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h
+forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h $(CCSTAMP)
 	# NOTE: no -D_GNU_SOURCE here — the TU must set its own FTMs (before any
 	# libc include). A CLI define would mask exactly the include-order bug
 	# class the canary exists to catch.
 	$(CC) $(CFLAGS) -DSHELL -DHAVE_CONFIG_H $(INCLUDES) -c forkrun_ring.c -o $@
 
-libforkrun.so: forkrun_ring_canary.o $(CANARY_STUBS)
+$(OUT): forkrun_ring_canary.o $(CANARY_STUBS)
 	$(CC) -shared -o $@ forkrun_ring_canary.o $(CANARY_STUBS) \
 		-Wl,--no-undefined $(ALLOWED_DEPS)
 
-canary: libforkrun.so
-	@echo "canary OK: libforkrun.so links with no undefined symbols"
+canary: $(OUT)
+	@file $(OUT) | sed 's/^/canary artifact: /'
+	@case "$(CC)" in \
+	  *aarch64*) file $(OUT) | grep -q 'aarch64' || \
+	      { echo "canary FAIL: $(CC) requested but $(OUT) is not aarch64 (stale/wrong-arch artifact)" >&2; exit 1; } ;; \
+	  *x86_64*|*gcc*|*cc*) file $(OUT) | grep -q 'x86-64' || \
+	      { echo "canary FAIL: $(OUT) is not x86-64 for CC=$(CC)" >&2; exit 1; } ;; \
+	esac
+	@echo "canary OK: $(OUT) links with no undefined symbols"
 
 check: canary
 	python3 -m unittest discover -s python/tests
 
 clean:
-	rm -f *.o *.so
+	rm -f *.o *.so $(CCSTAMP)

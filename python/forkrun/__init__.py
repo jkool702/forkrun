@@ -1,6 +1,16 @@
-"""forkrun Python frontend package (Stage 0 stub)."""
+"""forkrun Python frontend package (Stage 0 stub).
+
+Naming note: this is a namespaced API, so `forkrun.map` deliberately shadows
+the builtin `map` *inside this namespace only* (`forkrun.map(...)`, never a
+bare `map(...)`). The alias is chosen to match the mental model of the
+incumbents we benchmark against (`ProcessPoolExecutor.map`, `joblib`, and the
+DataLoader idiom), which is the point of the convenience wrappers. `import
+forkrun` does not shadow anything at the call site of the importer.
+"""
 
 from forkrun._api import RunConfig  # noqa: F401
+# Private in _api (not part of the v0 surface); re-exported here only so the
+# Stage 0 harness and tests can assert validation without reaching into _api.
 from forkrun._api import _validate as _validate_config  # noqa: F401
 
 
