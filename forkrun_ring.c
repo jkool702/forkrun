@@ -4184,8 +4184,17 @@ uint64_t chunk_bounds[16] = {0};
       }
 
       if (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
-        // We reached EOF and the claimed chunk does not exist. Safe to exit.
-        goto unified_scanner_eof;
+        /* F15: this claim over-ran the victim's published chunks. Exiting
+         * here is safe ONLY for a scanner over-claiming its OWN queue (the
+         * exit condition implies everything published there is claimed by
+         * someone). A THIEF's own queue was last seen empty and may have
+         * received chunks since (indexer lag; ingest's min-backlog routing
+         * feeds empty nodes) — exiting now orphans them. Re-check our own
+         * queue instead; termination routes through the Instant NUMA
+         * Tear-down path (global_eof && own publish-head exhausted), which
+         * converges at global EOF. The own-scanner over-claim case reaches
+         * the identical clean exit, so this change is strictly safe. */
+        continue;
       }
 
       // PHYSICS FIX: Double-entry chunk accounting.

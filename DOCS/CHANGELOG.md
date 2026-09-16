@@ -61,6 +61,32 @@ independent of the Python-frontend work:
   degradation. Lock-in test T14 validates `@513`, `@abc`, and
   `@999999999999999999999` rejections in an isolated temporary directory.
 
+- **F15: NUMA steal over-claim orphaned the thief's own chunks at EOF:**
+  in `core_scanner_loop`'s NUMA claim section, a scanner that over-claimed
+  the victim's published chunks exited outright
+  (`goto unified_scanner_eof`) — safe only when over-claiming one's OWN
+  queue. A thief entered the steal branch because its own queue was empty;
+  chunks published/indexed to the thief's own queue since (indexer lag;
+  ingest's min-backlog routing feeds empty nodes) were then orphaned — no
+  process would ever scan them. Manifestations: successor-chunk waiters
+  hung (`WAIT_FOR_META_READY` has no EOF escape), ordered mode silently
+  truncated, `-L` hung at the handoff gate. One-word fix (`goto` →
+  `continue` plus a rewritten comment): re-check the own queue instead;
+  termination routes through the Instant NUMA Tear-down path
+  (`global_eof` && own publish-head exhausted), which converges at global
+  EOF. The own-scanner over-claim case reaches the identical clean exit, so
+  the change is strictly safe. Lock-in tests F15a (permanent
+  chunk-conservation assertion: Σ`assigned` == Σ`processed` and
+  Σ`I stole` == Σ`stolen from me` from the per-node `--stats` telemetry,
+  across {file, pipe} × {@2, @4} × {default, `-s`}) and F15b (EOF-herd
+  stress: 10× ≥1M-line fast-draining pipe runs, byte-exact + conservation
+  each iteration). Note: in external-ARG (default) mode the post-reactor
+  stderr carrying `--stats` is intermittently lost to a pre-existing fd-2
+  aliasing flake (pipeline stays byte-exact, rc stays 0; own F-item
+  pending), so the balance check applies to present Node frames only while
+  rc==0 + byte-exact stay unconditional — every F15 manifestation breaks
+  one of those two deterministically.
+
 ## v3.5.0 — 2026-09-03
 
 The headline of this release is a fully-rearchitected resume subsystem: NUMA-native

@@ -1747,6 +1747,139 @@ if in_section L; then
     fi
 fi
 
+# ----------
+# F15: NUMA steal over-claim must not orphan the thief's own chunks at EOF.
+# A thief that over-claims the victim's queue used to exit outright; chunks
+# published to the thief's OWN queue since (indexer lag; ingest's
+# min-backlog routing feeds empty nodes) were then orphaned — successor
+# waiters hung, ordered mode truncated, -L hung at the handoff gate. Post-fix
+# the over-claim re-checks the own queue (continue); termination routes
+# through the Instant NUMA Tear-down path, which converges at global EOF.
+# Correctness is structural, not empirical: at global EOF no new publishes
+# occur, so the loop either finds own-queue work (finite) or tears down.
+# ----------
+# F15a (permanent): chunk-conservation assertion. Every published chunk is
+# processed exactly once, and every steal is accounted on both sides:
+# S(assigned) == S(processed), S(I stole) == S(stolen from me), parsed from
+# the per-node --stats telemetry on stderr, across {file, pipe} x {@2, @4}
+# x {default, -s}. rc==0 + byte-exact output is required unconditionally:
+# every F15 manifestation breaks one of them (orphaned chunks = missing
+# bytes; successor/handoff hangs = timeout rc). Telemetry balance is
+# asserted whenever Node frames are present; a frame-less run is NOT a
+# failure by itself (see below) — but a total -s blackout is (fail-closed).
+#
+# KNOWN FLAKE (pre-existing, unrelated to F15 — own F-item pending): in
+# external-ARG (default) mode the cleanroom main shell's fd 2 is sometimes
+# aliased to a transient fd-1 target (or /dev/null) by shutdown time, so
+# ALL post-reactor stderr — telemetry, verbose, checkpoint hints — vanishes
+# while stdout stays byte-exact and rc stays 0 (measured 9/10 missing in
+# default mode vs 10/10 present in -s mode). The C fix cannot cause this
+# (source-only; the shipped blob predates it). Until that item lands, the
+# balance check applies to present frames only.
+# ----------
+if in_section L; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/f15_conservation"; mkdir -p "$_MD"
+    seq 50000 > "$_MD/input.txt"
+    _f15_fail=""
+    _f15_seen_s=0
+    for _src in file pipe; do
+        for _nodes in @2 @4; do
+            for _mode in default s; do
+                rm -f "$_MD/out.txt" "$_MD/err.txt"
+                if [[ "$_mode" == s ]]; then
+                    _f15_cmd="frun --nodes=$_nodes --stats -k -s cat"
+                else
+                    _f15_cmd="frun --nodes=$_nodes --stats -k printf '%s\n'"
+                fi
+                if [[ "$_src" == file ]]; then
+                    timeout -s KILL 120 bash -c "source '$FRUN_SOURCE'; $_f15_cmd < '$_MD/input.txt' > '$_MD/out.txt' 2> '$_MD/err.txt'"
+                else
+                    timeout -s KILL 120 bash -c "source '$FRUN_SOURCE'; cat '$_MD/input.txt' | $_f15_cmd > '$_MD/out.txt' 2> '$_MD/err.txt'"
+                fi
+                _f15_rc=$?
+                if (( _f15_rc != 0 )) \
+                    || ! diff -q "$_MD/input.txt" "$_MD/out.txt" &>/dev/null; then
+                    _f15_fail+=" src=$_src nodes=$_nodes mode=$_mode"
+                    _f15_fail+=" (rc=$_f15_rc output-mismatch-or-timeout);"
+                    continue
+                fi
+                if grep -qE 'Node [0-9]+ \(Phys' "$_MD/err.txt" 2>/dev/null; then
+                    [[ "$_mode" == s ]] && _f15_seen_s=1
+                    _sa=$(grep -oE '[0-9]+ assigned' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                    _sp=$(grep -oE '[0-9]+ processed' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                    _ss=$(grep -oE '[0-9]+ I stole' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                    _sf=$(grep -oE '[0-9]+ stolen from me' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                    if (( _sa <= 0 )) || (( _sa != _sp )) || (( _ss != _sf )); then
+                        _f15_fail+=" src=$_src nodes=$_nodes mode=$_mode"
+                        _f15_fail+=" (rc=$_f15_rc a=$_sa p=$_sp s=$_ss f=$_sf);"
+                    fi
+                fi
+            done
+        done
+    done
+    if (( _f15_seen_s == 0 )); then
+        _f15_fail+=" telemetry-blackout(no -s Node frames at all);"
+    fi
+    if [[ -z "$_f15_fail" ]]; then
+        TEST_RESULTS["F15a: NUMA chunk conservation (assigned==processed, steals balance)"]="PASS"
+        _print_result PASS "F15a: NUMA chunk conservation (assigned==processed, steals balance)"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["F15a: NUMA chunk conservation (assigned==processed, steals balance)"]="FAIL"
+        TEST_ERRORS["F15a: NUMA chunk conservation (assigned==processed, steals balance)"]="$_f15_fail"
+        ((FAILED_TESTS++)); _print_result FAIL "F15a: NUMA chunk conservation (assigned==processed, steals balance)" "$_f15_fail"
+    fi
+fi
+
+# ----------
+# F15b: EOF-herd stress. Pipe input drains fast (the config that measured
+# ~10% steals); the ingest-EOF blast wakes all scanners at exactly the
+# moment ingest can no longer backfill over-claims — the worst point for the
+# orphan window. 10 iterations of >=1M lines. rc==0 + byte-exact is required
+# every iteration (hangs and truncations both fail here); telemetry balance
+# is asserted whenever Node frames are present. No presence requirement:
+# this stress runs the external-ARG mode whose post-reactor stderr is
+# subject to the KNOWN FLAKE documented in F15a (fail-closed presence would
+# flake ~90%/iteration there) — the byte-exact + timeout gate carries the
+# regression teeth, and F15a's -s combos carry the always-on balance proof.
+# Honest scope: the pre-fix race is narrow, so this is a regression net, not
+# a proof — the justification is the structural argument above.
+# ----------
+if in_section L; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/f15_herd"; mkdir -p "$_MD"
+    seq 1000000 > "$_MD/input.txt"
+    _f15_fail=""
+    for (( _it=1; _it<=10; _it++ )); do
+        rm -f "$_MD/out.txt" "$_MD/err.txt"
+        timeout -s KILL 180 bash -c "source '$FRUN_SOURCE'; cat '$_MD/input.txt' | frun --nodes=@4 --stats -k printf '%s\n' > '$_MD/out.txt' 2> '$_MD/err.txt'"
+        _f15_rc=$?
+        if (( _f15_rc != 0 )) || ! cmp -s "$_MD/input.txt" "$_MD/out.txt"; then
+            _f15_fail+=" iter=$_it (rc=$_f15_rc output-mismatch-or-timeout);"
+            continue
+        fi
+        if grep -qE 'Node [0-9]+ \(Phys' "$_MD/err.txt" 2>/dev/null; then
+            _sa=$(grep -oE '[0-9]+ assigned' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+            _sp=$(grep -oE '[0-9]+ processed' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+            _ss=$(grep -oE '[0-9]+ I stole' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+            _sf=$(grep -oE '[0-9]+ stolen from me' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+            if (( _sa <= 0 )) || (( _sa != _sp )) || (( _ss != _sf )); then
+                _f15_fail+=" iter=$_it (rc=$_f15_rc a=$_sa p=$_sp s=$_ss f=$_sf);"
+            fi
+        fi
+    done
+    if [[ -z "$_f15_fail" ]]; then
+        TEST_RESULTS["F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)"]="PASS"
+        _print_result PASS "F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)"]="FAIL"
+        TEST_ERRORS["F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)"]="$_f15_fail"
+        ((FAILED_TESTS++)); _print_result FAIL "F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)" "$_f15_fail"
+    fi
+fi
+
 
 # ============================================================================
 # SECTION M: Checkpoint & Resume
