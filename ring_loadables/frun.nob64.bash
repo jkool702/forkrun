@@ -668,12 +668,10 @@ EOF
                             # never run. The redirect lives on the whole
                             # invocation instead (identical error-swallowing).
                             # PATH-SANDBOX: PATH='' retained per owner
-                            # determination (equivalent to a nonexistent-path
-                            # construction under restricted bash; an empty
-                            # component cannot name an existing directory).
-                            # The CWD-planted-binary question is documented
-                            # as characterize-only in SECURITY.md; the
-                            # load-bearing guarantees are value
+                            # determination. F6 characterizes the residual:
+                            # on bash 5.3 an empty PATH resolves CWD-planted
+                            # binaries inside the sandbox (see SECURITY.md);
+                            # the load-bearing guarantees are value
                             # neutralization (re-render), TRUST non-rebinding
                             # (denylist), and no parent-side execution of
                             # extracted text.

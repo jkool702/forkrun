@@ -3877,8 +3877,8 @@ print_section T "Adversarial & Periphery (resume sandbox, fd hygiene, extremes)"
 # The resume file backgrounds a pure-builtin orphan that waits for the sandbox
 # to print its boundary, then appends a payload line to the same captured
 # stdout. The payload must NEVER execute in the cleanroom (no marker file).
-# NOTE: this is the acceptance test for the token+end-token hardening.
-#       It is EXPECTED TO FAIL until that patch lands.
+# NOTE: acceptance test for the token+end-token hardening (landed: A-C).
+# T1a covers the no-token-knowledge orphan; T1a-ext covers token knowledge.
 if in_section T; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/T1a"; mkdir -p "$_MD"
@@ -4180,6 +4180,239 @@ EOF
     fi
 fi
 
+
+# --- T1g: positional-token forgery (early exit over $2-$5) ---
+# The resume body prints the sandbox positionals and exits before the EXIT
+# trap is installed. Post-fix the frame tokens are bound to readonly names
+# and shifted away on entry, so an early-exit forger emits token-less output
+# the parent rejects fail-closed. Assert rejection + marker absent.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1g"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1g.chk"
+cat <<'EOF' > "$_MD/t1g.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+printf '%s\n%s\n%s\n%s\n%s\n' "$2" "touch __MARK__" "$3" "$4" "" "$5"; exit 0
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1g.chk"
+    timeout 60 bash -c "source '$FRUN_SOURCE' && printf 'a\n' | frun --resume '$_MD/t1g.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if [[ ! -f "$_MARK" ]] && (( _TX != 0 )) && grep -q "verification failed" "$_MD/err.txt"; then
+        TEST_RESULTS["T1g: positional-token forgery rejected fail-closed"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1g: positional-token forgery rejected fail-closed"
+    else
+        TEST_RESULTS["T1g: positional-token forgery rejected fail-closed"]="FAIL"
+        TEST_ERRORS["T1g: positional-token forgery rejected fail-closed"]="marker=$([[ -f "$_MARK" ]] && echo PRESENT || echo absent) rc=$_TX"
+        ((FAILED_TESTS++)); _print_result FAIL "T1g: positional-token forgery rejected fail-closed" "marker present or not rejected"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- T1h: cmdline-token forgery, strongest form (re-render neutralization) ---
+# The body scrapes the four ___FORKRUN_*___ tokens from /proc/self/cmdline
+# (the positional close cannot remove kernel argv), emits a token-bounded
+# vars frame carrying an UNESCAPED declare-shaped substitution plus a benign
+# ORIG_ARGS, and exits before the trap. The shape filter passes it, but the
+# PATH-dead restricted re-render neutralizes the substitution; the parent
+# evals only the escaped form and runs the benign command. Assert rc==0
+# (deterministic termination via the benign ORIG_ARGS) + marker absent.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1h"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1h.chk"
+cat <<'EOF' > "$_MD/t1h.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+_v=""; _ve=""; _f2=""; _fe=""
+while IFS= read -r -d '' _f; do
+  case "$_f" in
+    ___FORKRUN_FNEND_*) _fe="$_f";;
+    ___FORKRUN_FN_*) _f2="$_f";;
+    ___FORKRUN_END_*) _ve="$_f";;
+    ___FORKRUN_ENV_*) _v="$_f";;
+  esac
+done < /proc/self/cmdline
+printf '%s\n%s\n%s\n%s\n' "$_v" "declare -a FORKRUN_ORIG_ARGS=('/bin/true')" 'declare -x FORKRUN_EXTRA_SETUP="$(touch __MARK__)"' "$_ve"
+printf '%s\n\n%s\n' "$_f2" "$_fe"
+exit 0
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1h.chk"
+    timeout 60 bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1h.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if [[ ! -f "$_MARK" ]] && (( _TX == 0 )); then
+        TEST_RESULTS["T1h: cmdline-token forgery neutralized by re-render"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1h: cmdline-token forgery neutralized by re-render"
+    else
+        TEST_RESULTS["T1h: cmdline-token forgery neutralized by re-render"]="FAIL"
+        TEST_ERRORS["T1h: cmdline-token forgery neutralized by re-render"]="marker=$([[ -f "$_MARK" ]] && echo PRESENT || echo absent) rc=$_TX"
+        ((FAILED_TESTS++)); _print_result FAIL "T1h: cmdline-token forgery neutralized by re-render" "marker present or rc!=0"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- T1i(i): non-overblocking — plain setup declare reaches the layer-3 gate ---
+# A token-bounded `declare -- FORKRUN_EXTRA_SETUP="echo SETUP_RAN"` (no
+# substitution, early exit) must NOT trip the shape filter: it round-trips
+# the re-render identically, lands in the parent, and aborts at the layer-3
+# consent gate. Headless: "Custom setup commands detected". Nothing executes.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1i1"; mkdir -p "$_MD"
+    rm -f "$_MD/t1i1.chk"
+cat <<'EOF' > "$_MD/t1i1.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+_v=""; _ve=""; _f2=""; _fe=""
+while IFS= read -r -d '' _f; do
+  case "$_f" in
+    ___FORKRUN_FNEND_*) _fe="$_f";;
+    ___FORKRUN_FN_*) _f2="$_f";;
+    ___FORKRUN_END_*) _ve="$_f";;
+    ___FORKRUN_ENV_*) _v="$_f";;
+  esac
+done < /proc/self/cmdline
+printf '%s\n%s\n%s\n' "$_v" 'declare -- FORKRUN_EXTRA_SETUP="echo SETUP_RAN"' "$_ve"
+printf '%s\n\n%s\n' "$_f2" "$_fe"
+exit 0
+EOF
+    timeout 60 bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1i1.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if (( _TX != 0 )) && grep -q "Custom setup commands detected" "$_MD/err.txt" \
+        && ! grep -q "verification failed" "$_MD/err.txt"; then
+        TEST_RESULTS["T1i(i): plain setup declare reaches layer-3 gate (no overblock)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1i(i): plain setup declare reaches layer-3 gate (no overblock)"
+    else
+        TEST_RESULTS["T1i(i): plain setup declare reaches layer-3 gate (no overblock)"]="FAIL"
+        TEST_ERRORS["T1i(i): plain setup declare reaches layer-3 gate (no overblock)"]="rc=$_TX gate=$(grep -c 'Custom setup commands detected' "$_MD/err.txt")"
+        ((FAILED_TESTS++)); _print_result FAIL "T1i(i): plain setup declare reaches layer-3 gate (no overblock)" "gate not reached or shape overblocked"
+    fi
+fi
+
+# --- T1i(ii): non-overblocking — escaped substitution stays a literal ---
+# `declare -- X="\$(touch MARK)"` round-trips the re-render byte-identical
+# (nothing to neutralize) and is accepted as a literal string alongside a
+# benign ORIG_ARGS. Assert no shape rejection + marker absent.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1i2"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1i2.chk"
+cat <<'EOF' > "$_MD/t1i2.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+_v=""; _ve=""; _f2=""; _fe=""
+while IFS= read -r -d '' _f; do
+  case "$_f" in
+    ___FORKRUN_FNEND_*) _fe="$_f";;
+    ___FORKRUN_FN_*) _f2="$_f";;
+    ___FORKRUN_END_*) _ve="$_f";;
+    ___FORKRUN_ENV_*) _v="$_f";;
+  esac
+done < /proc/self/cmdline
+printf '%s\n%s\n%s\n%s\n' "$_v" "declare -a FORKRUN_ORIG_ARGS=('/bin/true')" 'declare -- X="\$(touch __MARK__)"' "$_ve"
+printf '%s\n\n%s\n' "$_f2" "$_fe"
+exit 0
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1i2.chk"
+    timeout 60 bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1i2.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if [[ ! -f "$_MARK" ]] && ! grep -q "verification failed" "$_MD/err.txt"; then
+        TEST_RESULTS["T1i(ii): escaped substitution accepted as literal"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1i(ii): escaped substitution accepted as literal"
+    else
+        TEST_RESULTS["T1i(ii): escaped substitution accepted as literal"]="FAIL"
+        TEST_ERRORS["T1i(ii): escaped substitution accepted as literal"]="marker=$([[ -f "$_MARK" ]] && echo PRESENT || echo absent) rc=$_TX"
+        ((FAILED_TESTS++)); _print_result FAIL "T1i(ii): escaped substitution accepted as literal" "marker present or shape overblocked"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- T1a-ext: delayed orphan WITH token knowledge (greedy-anchor gauntlet) ---
+# T1a's orphan plus /proc/self/cmdline scraping: a double-forked grandchild
+# (the sandbox kills its direct jobs before emission, so a single-background
+# orphan never survives to write) waits out the legitimate emission, then
+# appends a token-bounded forged vars frame carrying an unescaped
+# substitution. The parent's greedy ##*token parse anchors to the orphan's
+# frame — which then runs the shape filter + re-render gauntlet. Both frames
+# carry benign ORIG_ARGS so the run terminates deterministically either way;
+# the assertions (rc==0, marker absent) are order-independent: legit-wins
+# ignores the forgery, orphan-wins neutralizes it. The 4s SECONDS-delay
+# exceeds sandbox lifetime on any machine while fitting the timeout.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1aext"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1aext.chk"
+cat <<'EOF' > "$_MD/t1aext.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+declare -a FORKRUN_ORIG_ARGS=('/bin/true')
+( ( while (( SECONDS < 4 )); do :; done
+  _v=""; _ve=""
+  while IFS= read -r -d '' _f; do
+    case "$_f" in
+      ___FORKRUN_END_*) _ve="$_f";;
+      ___FORKRUN_ENV_*) _v="$_f";;
+    esac
+  done < /proc/self/cmdline
+  printf '%s\n%s\n%s\n%s\n' "$_v" "declare -a FORKRUN_ORIG_ARGS=('/bin/true')" 'declare -x FORKRUN_EXTRA_SETUP="$(touch __MARK__)"' "$_ve" ) & ) &
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1aext.chk"
+    timeout 60 bash -c "source '$FRUN_SOURCE'; printf 'a\nb\n' | frun --resume '$_MD/t1aext.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if [[ ! -f "$_MARK" ]] && (( _TX == 0 )); then
+        TEST_RESULTS["T1a-ext: token-knowing delayed orphan forgery neutralized"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1a-ext: token-knowing delayed orphan forgery neutralized"
+    else
+        TEST_RESULTS["T1a-ext: token-knowing delayed orphan forgery neutralized"]="FAIL"
+        TEST_ERRORS["T1a-ext: token-knowing delayed orphan forgery neutralized"]="marker=$([[ -f "$_MARK" ]] && echo PRESENT || echo absent) rc=$_TX"
+        ((FAILED_TESTS++)); _print_result FAIL "T1a-ext: token-knowing delayed orphan forgery neutralized" "marker present or rc!=0"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- F6: CWD-planted touch characterization (record only, NOT an assertion) ---
+# Plants an exec-form touch wrapper (`exec /usr/bin/touch` — cannot
+# self-recurse regardless of PATH semantics) in the isolated resume CWD and
+# runs a T1b-shaped content injection from that CWD. The observation (marker
+# present/absent) is recorded in SECURITY.md with date/bash-version; the
+# test itself always passes. Hard assertions are only the invariant ones:
+# forged values neutralized (T1b/T1h), FORKRUN_TRUST_RESUME not rebindable,
+# nothing executes parent-side (T1a/T1d/T1f/T1g).
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_f6"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/touch" "$_MD/f6.chk"
+    printf '#!/bin/bash\nexec /usr/bin/touch "$@"\n' > "$_MD/touch"
+    chmod +x "$_MD/touch"
+cat <<'EOF' > "$_MD/f6.chk"
+FORKRUN_RESUME_HORIZON=5
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+declare -a FORKRUN_ORIG_ARGS=("safe" "$(touch __MARK__)")
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/f6.chk"
+    ( cd "$_MD" && timeout 60 bash -c "source '$FRUN_SOURCE' && printf 'a\n' | frun --resume 'f6.chk'" \
+        >/dev/null 2>"$_MD/err.txt" ) || true
+    if [[ -f "$_MARK" ]]; then _F6_OBS="MARKER PRESENT — CWD-planted binary executed in-sandbox (see SECURITY.md)"; else _F6_OBS="marker absent — no CWD-resolved execution"; fi
+    TEST_RESULTS["F6: CWD-planted touch probe ($_F6_OBS)"]="PASS"; ((PASSED_TESTS++))
+    _print_result PASS "F6: CWD-planted touch probe ($_F6_OBS)"
+    rm -f "$_MD/touch" "$_MARK"
+fi
 
 print_section T2 "v3.4.4 Hardening Regressions (W1, M2, W2, resume)"
 

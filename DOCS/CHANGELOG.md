@@ -101,6 +101,28 @@ independent of the Python-frontend work:
   Node frames in every combo/iteration. User-facing impact: on NUMA aborts
   in default mode the checkpoint-hint messages could be silently lost.
 
+- **F29: resume consent-gate integrity (informed consent):** forkrun is an
+  engine for running arbitrary code by design; what F29 closed was code
+  executing without ever appearing in a preview, and forged data executing
+  while the preview showed the file's benign text. Three components: (A)
+  positional token close + EXIT-trap emission — frame tokens arrive
+  positionally, are bound to readonly names and shifted away on entry, and
+  emission goes only through a trap installed after wipe/verification, so
+  early-exit forgeries emit token-less output the parent rejects (T1g); the
+  quoteless-`_emit_all` invariant keeps the `-c` script's positionals
+  unscrambled. (B) Ownership gate relocated after extraction + preview helper
+  at all three consent sites — prompts preview extracted values (what will
+  RUN), never raw file text. (C) Parent-side re-render — declare-only shape
+  filter (double-dash-permitting) + round-trip `declare -p` re-render in a
+  PATH-dead restricted shell + denylist (`FORKRUN_TRUST_RESUME` et al):
+  unescaped substitutions execute only in-sandbox and the parent evals just
+  the neutralized form (T1b/T1h/T1a-ext); plain setup declares pass through
+  to the layer-3 gate (T1i). Token secrecy is not a security property. M20 /
+  M21 / T7 re-verified byte-exact after the `PATH=''` revert (D9). Lock-in:
+  T1a-ext/T1g/T1h/T1i (+T1a/T1b/T1d/T1f); F6 characterize-only probe
+  (CWD-planted `touch` executes in-sandbox on bash 5.3 — contained, see
+  SECURITY.md). `PATH=''` retained per owner determination.
+
 ## v3.5.0 — 2026-09-03
 
 The headline of this release is a fully-rearchitected resume subsystem: NUMA-native
