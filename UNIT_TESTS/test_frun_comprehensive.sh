@@ -4813,7 +4813,7 @@ if in_section T; then
     _f30_err=""
 
     # 1. @513 ceiling check
-    ( cd "$_MD" && seq 100 | frun --nodes=@513 true ) >"$_MD/out_513.txt" 2>"$_MD/err_513.txt"
+    ( cd "$_MD" && seq 100 | bash -c "source '$FRUN_SOURCE' && frun --nodes=@513 true" ) >"$_MD/out_513.txt" 2>"$_MD/err_513.txt"
     _rc_513=$?
     if (( _rc_513 == 0 )) || (( _rc_513 == 139 )) || ! grep -q "\[ERROR\]: --nodes=@N" "$_MD/err_513.txt" || [[ -e "$_MD/.forkrun_resume" ]]; then
         _f30_pass=false
@@ -4822,7 +4822,7 @@ if in_section T; then
 
     # 2. @abc non-numeric check
     if $_f30_pass; then
-        ( cd "$_MD" && seq 100 | frun --nodes=@abc true ) >"$_MD/out_abc.txt" 2>"$_MD/err_abc.txt"
+        ( cd "$_MD" && seq 100 | bash -c "source '$FRUN_SOURCE' && frun --nodes=@abc true" ) >"$_MD/out_abc.txt" 2>"$_MD/err_abc.txt"
         _rc_abc=$?
         if (( _rc_abc == 0 )) || (( _rc_abc == 139 )) || ! grep -q "\[ERROR\]: --nodes=@N" "$_MD/err_abc.txt" || [[ -e "$_MD/.forkrun_resume" ]]; then
             _f30_pass=false
@@ -4832,7 +4832,7 @@ if in_section T; then
 
     # 3. @999999999999999999999 overflow check
     if $_f30_pass; then
-        ( cd "$_MD" && seq 100 | frun --nodes=@999999999999999999999 true ) >"$_MD/out_ovf.txt" 2>"$_MD/err_ovf.txt"
+        ( cd "$_MD" && seq 100 | bash -c "source '$FRUN_SOURCE' && frun --nodes=@999999999999999999999 true" ) >"$_MD/out_ovf.txt" 2>"$_MD/err_ovf.txt"
         _rc_ovf=$?
         if (( _rc_ovf == 0 )) || (( _rc_ovf == 139 )) || ! grep -q "\[ERROR\]: --nodes=@N" "$_MD/err_ovf.txt" || [[ -e "$_MD/.forkrun_resume" ]]; then
             _f30_pass=false
