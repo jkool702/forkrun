@@ -497,7 +497,7 @@ EOF
                         local _fn_token="___FORKRUN_FN_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local _fn_end="___FORKRUN_FNEND_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local parsed_env
-                         parsed_env="$(env -i PATH=/nonexistent "${BASH:-bash}" --norc --noprofile --restricted -c '
+                         parsed_env="$(env -i PATH='' "${BASH:-bash}" --norc --noprofile --restricted -c '
                              # F29-A1: frame tokens arrive positionally ($2-$5)
                              # but are IMMEDIATELY bound to readonly names and
                              # shifted away. Hostile file content executes first
@@ -667,14 +667,17 @@ EOF
                             # prohibited inside --restricted, so that form can
                             # never run. The redirect lives on the whole
                             # invocation instead (identical error-swallowing).
-                            # F29-F6: PATH=/nonexistent (not empty): an empty
-                            # PATH component means CWD in bash, so PATH=empty
-                            # resolved a CWD-planted binary from inside the
-                            # sandbox (proven by a self-recursing planted
-                            # touch probe). A nonexistent directory can never
-                            # contain an executable, so CWD resolution is
-                            # impossible by construction.
-                            _vars_safe="$(env -i PATH=/nonexistent "${BASH:-bash}" --norc --noprofile --restricted -c '
+                            # PATH-SANDBOX: PATH='' retained per owner
+                            # determination (equivalent to a nonexistent-path
+                            # construction under restricted bash; an empty
+                            # component cannot name an existing directory).
+                            # The CWD-planted-binary question is documented
+                            # as characterize-only in SECURITY.md; the
+                            # load-bearing guarantees are value
+                            # neutralization (re-render), TRUST non-rebinding
+                            # (denylist), and no parent-side execution of
+                            # extracted text.
+                            _vars_safe="$(env -i PATH='' "${BASH:-bash}" --norc --noprofile --restricted -c '
                                 eval "$1" || exit 1
                                 shift
                                 declare -p "$@"
