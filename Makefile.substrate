@@ -55,12 +55,24 @@ $(OUT): forkrun_ring_canary.o $(CANARY_STUBS)
 
 canary: $(OUT)
 	@file $(OUT) | sed 's/^/canary artifact: /'
-	@case "$(CC)" in \
-	  *aarch64*) file $(OUT) | grep -q 'aarch64' || \
-	      { echo "canary FAIL: $(CC) requested but $(OUT) is not aarch64 (stale/wrong-arch artifact)" >&2; exit 1; } ;; \
-	  *x86_64*|*gcc*|*cc*) file $(OUT) | grep -q 'x86-64' || \
-	      { echo "canary FAIL: $(OUT) is not x86-64 for CC=$(CC)" >&2; exit 1; } ;; \
-	esac
+	# ARCH ASSERTION uses the compiler's own TARGET TRIPLE, not its NAME:
+	# pattern-matching on $(CC) false-REDs on a native aarch64 host running
+	# plain `gcc` (the old *gcc* arm grepped for x86-64 and failed a correct
+	# artifact). `$(CC) -dumpmachine` is the correct identity source.
+	# Arches with no mapping below (ppc64le / s390x / riscv64) get the link
+	# check only: on those the canary's job is -Wl,--no-undefined, not an
+	# ELF-machine assertion.
+	@trip="$$($(CC) -dumpmachine 2>/dev/null)"; \
+	case "$$trip" in \
+	  *aarch64*) want=aarch64 ;; \
+	  *x86_64*)  want=x86-64 ;; \
+	  *)         want="" ;; \
+	esac; \
+	echo "canary compiler: $(CC) -> $${trip:-unknown} (expecting ELF machine: $${want:-<link-check only>})"; \
+	if [ -n "$$want" ] && ! file $(OUT) | grep -q "$$want"; then \
+	  echo "canary FAIL: $(CC) targets '$$trip' but $(OUT) is not '$$want' (stale/wrong-arch artifact)" >&2; \
+	  exit 1; \
+	fi
 	@echo "canary OK: $(OUT) links with no undefined symbols"
 
 check: canary

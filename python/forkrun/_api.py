@@ -34,16 +34,31 @@ def _reject_iterable_source(source: Any) -> None:
     kernel-fed streaming independently of Python scheduling. Python is
     never an input pump.
     """
-    # Allowed: path-like, int fd, file/socket objects with fileno().
-    if isinstance(source, (str, bytes, os.PathLike, int)):
+    # bool is an int subclass and would otherwise sail straight through as a
+    # file descriptor (True == fd 1 == stdout). It is never a real source.
+    if isinstance(source, bool):
+        raise TypeError(
+            "forkrun.run() source must be path | fd | pipe/socket (object with "
+            f"fileno()); got bool ({source!r}) — bool is an int subclass but is "
+            "not a file descriptor"
+        )
+    # Allowed: path-like, non-negative int fd, file/socket objects with fileno().
+    if isinstance(source, (str, bytes, os.PathLike)):
         return
+    if isinstance(source, int):
+        if source >= 0:
+            return
+        raise TypeError(
+            "forkrun.run() source fd must be non-negative, "
+            f"got {source!r} — negative values are not open descriptors"
+        )
     if hasattr(source, "fileno"):
         try:
             fd = source.fileno()
         except (io.UnsupportedOperation, OSError):
             pass
         else:
-            if isinstance(fd, int) and fd >= 0:
+            if isinstance(fd, int) and not isinstance(fd, bool) and fd >= 0:
                 return
     raise TypeError(
         "forkrun.run() source must be path | fd | pipe/socket (object with "

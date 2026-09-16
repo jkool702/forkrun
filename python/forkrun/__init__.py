@@ -21,6 +21,11 @@ def run(payload, source, *, mode="python", sink=None, order="none",
 
     Stage 0 stub: validates arguments, then raises NotImplementedError.
     Stage 4 wires the substrate.
+
+    NOTE: the `bytes=` keyword deliberately shadows the builtin `bytes` inside
+    this function only. It is inherited from the frozen §3.0 API sketch (the
+    -l / -b analogues) and kept for plan fidelity; use `builtins.bytes` if this
+    body ever needs the builtin.
     """
     _validate_config(payload, source, mode=mode, sink=sink, order=order,
                      lines=lines, bytes_=bytes, workers=workers, nodes=nodes,

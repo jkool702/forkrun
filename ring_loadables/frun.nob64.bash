@@ -1228,11 +1228,22 @@ _forkrun_checkpoint_signal() {
                 #   global `wait` after the reactor reaps every indexer;
                 #   slot arrays only need to stay coherent for the reactor's
                 #   live loop.
+                # DEATH-CLASS FIDELITY (D2): the indexer subshell deliberately
+                #   has NO `|| ring_abort` — scanners never had one either.
+                #   ring_abort is a C builtin that returns EXECUTION_SUCCESS, so
+                #   `|| ring_abort` would convert a GRACEFUL indexer failure
+                #   into subshell exit 0, and the INDEXER_DEATH handler would
+                #   classify it as a clean EOF drain: the diagnostic is lost and
+                #   any FUTURE non-zero return added to ring_indexer_numa is
+                #   silently absorbed. Letting the subshell exit with the
+                #   indexer's own status makes the death pipe carry BOTH death
+                #   classes — 0 = clean drain, non-zero = fail loud via
+                #   ring_abort (reason 2: checkpoint + non-zero exit).
                 for (( i=0; i<FORKRUN_NUM_NODES; i++ )); do
                     ring_pipe fd_indexer_death_r[$i] fd_indexer_death_w[$i] || ring_abort
                     (
                         exec {fd_indexer_death_r[$i]}<&- {fd_trap_ack_w}>&-
-                        ring_indexer_numa ${fd_scan} $i || ring_abort
+                        ring_indexer_numa ${fd_scan} $i
                     ) &
                     INDEXER_P[$i]=$!
                     exec {fd_indexer_death_w[$i]}>&-

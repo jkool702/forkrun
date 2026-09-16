@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import platform
 import sys
 
@@ -37,22 +38,45 @@ TABLE_COLUMNS = (
 STRONG_WIN_THRESHOLD = "3-5x per niche (strong-win threshold, not minimum viability)"
 
 
-def hardware_label() -> str:
-    """Hardware disclosure column value for this machine."""
+def _cpu_model() -> str:
+    """CPU model string, with a non-x86 fallback.
+
+    x86 /proc/cpuinfo exposes "model name"; aarch64 exposes "CPU part"
+    instead, so the old x86-only lookup reported `unknown-cpu` on the ARM leg.
+    The hardware column is the gate's disclosure mechanism, so losing it on an
+    arch would defeat the column's purpose.
+    """
+    fields: dict[str, str] = {}
     try:
         with open("/proc/cpuinfo") as fh:
-            model = next(
-                (ln.split(":", 1)[1].strip() for ln in fh
-                 if ln.startswith("model name")), "unknown-cpu")
+            for ln in fh:
+                key, sep, val = ln.partition(":")
+                if not sep:
+                    continue
+                key = key.strip()
+                if key in ("model name", "CPU part") and key not in fields:
+                    fields[key] = val.strip()
     except OSError:
-        model = "unknown-cpu"
-    return f"{platform.node()} | {model} | {platform.machine()} | {platform.python_version()}"
+        pass
+    for key in ("model name", "CPU part"):
+        if fields.get(key):
+            return fields[key]
+    return platform.processor() or "unknown-cpu"
+
+
+def hardware_label() -> str:
+    """Hardware disclosure column value for this machine."""
+    return (f"{platform.node()} | {_cpu_model()} | {platform.machine()} | "
+            f"{platform.python_version()}")
 
 
 def check_surface() -> list[str]:
     """Import the shipping surface and exercise validation (no engine)."""
     errors: list[str] = []
-    sys.path.insert(0, "python")
+    # Import from THIS file's directory, not the CWD-relative "python" (the
+    # harness is runnable from anywhere).
+    pkg_root = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, pkg_root)
     try:
         import forkrun  # noqa: PLC0415
         # Validation paths must work pre-engine:
@@ -75,7 +99,7 @@ def check_surface() -> list[str]:
         errors.append(f"surface import/validation failed: {exc}")
     finally:
         try:
-            sys.path.remove("python")
+            sys.path.remove(pkg_root)
         except ValueError:
             pass
     return errors

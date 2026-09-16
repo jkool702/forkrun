@@ -2418,7 +2418,11 @@ FUNCEOF
         head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
 
         # The truncated output should end with a newline (no partial lines)
-        _MLAST=$(tail -c 1 "$_MD/output1_trunc.txt" | xxd -p)
+        # od, NOT xxd: xxd ships in vim-common and is absent from minimal
+        # QEMU/container rootfs images, so the last-byte CHECK went blind on
+        # the aarch64 leg (M16) while the truncation itself was correct.
+        # `od -An -tx1` is POSIX and always present.
+        _MLAST=$(tail -c 1 "$_MD/output1_trunc.txt" | od -An -tx1 | tr -d ' \n')
         _MLINES=$(wc -l < "$_MD/output1_trunc.txt" | tr -d ' ')
 
         if [[ "$_MLAST" == "0a" ]] && (( _MLINES > 0 )); then

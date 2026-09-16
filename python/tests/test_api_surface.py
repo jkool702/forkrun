@@ -31,10 +31,22 @@ class TestSourceValidation(unittest.TestCase):
     def test_pipe_accepted_shape(self):
         r, w = os.pipe()
         try:
-            with self.assertRaises(NotImplementedError):
-                forkrun.run("pkg.mod:func", source=os.fdopen(r, "rb"))
+            with os.fdopen(r, "rb") as reader:
+                with self.assertRaises(NotImplementedError):
+                    forkrun.run("pkg.mod:func", source=reader)
         finally:
             os.close(w)
+
+    def test_bool_rejected(self):
+        # bool is an int subclass: True would otherwise pass as fd 1.
+        with self.assertRaisesRegex(TypeError, "bool is an int subclass"):
+            forkrun.run("pkg.mod:func", source=True)
+        with self.assertRaisesRegex(TypeError, "bool is an int subclass"):
+            forkrun.run("pkg.mod:func", source=False)
+
+    def test_negative_fd_rejected(self):
+        with self.assertRaisesRegex(TypeError, "must be non-negative"):
+            forkrun.run("pkg.mod:func", source=-1)
 
 
 class TestOptionValidation(unittest.TestCase):

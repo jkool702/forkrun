@@ -3817,10 +3817,38 @@ uint64_t chunk_bounds[16] = {0};
   // -----------------------------------------------------------------
 
   if (is_resume) {
-      // SEQLOCK READ PROTOCOL (pair of TRACK_COMPLETED_BATCH publish side):
-      // ACQUIRE seq1 -> RELAXED data -> ACQUIRE seq2, retry while odd or
-      // mismatched. The ACQUIREs pair with the publisher's ACQ_REL first
-      // bump and RELEASE-fenced second bump; do not weaken to RELAXED.
+      // SEQLOCK READ PROTOCOL — the LOAD-BEARING half of the fence PAIR
+      // (writer side: TRACK_COMPLETED_BATCH in ring_order; reader side: here
+      // and ring_dump_resume).
+      //
+      //   seq1 = load_acquire(seq)     closes window (b)
+      //   RELAXED data loads           horizon / stdout_bytes / jagged / count
+      //   fence(ACQUIRE)  <- REQUIRED  closes window (c)
+      //   seq2 = load_acquire(seq)
+      //   retry while (seq1 != seq2 || seq1 & 1)
+      //
+      // Two windows exist in a seqlock reader, and they close differently:
+      //   (b) data loads hoisting ABOVE seq1 — closed by seq1's acquire, which
+      //       pins *subsequent* operations.
+      //   (c) seq2 hoisting ABOVE the data loads — NOT closed by any acquire
+      //       load: acquire semantics are one-directional (they order later
+      //       operations, never the acquire load itself). Both the compiler
+      //       (LLVM does perform this) and hardware (on aarch64 an earlier
+      //       `ldr` waiting on a cache miss can be satisfied after a later
+      //       `ldar`) may reorder it.
+      //   Without the fence, a legal execution is: seq1 = v; the data loads
+      //   observe a later, partially-visible generation; seq2 = v (satisfied
+      //   from the older coherence state); seq1 == seq2 and even -> a TORN
+      //   SNAPSHOT IS ACCEPTED. Consequence here is high: torn jagged
+      //   intervals mean wrong skip ranges, i.e. silent loss/duplication on
+      //   resume. Narrow window, high consequence.
+      // The explicit ACQUIRE fence before seq2 is what closes (c): on aarch64
+      // it emits `dmb ishld` (the kernel's smp_rmb in read_seqretry); on x86
+      // it is a compiler barrier only, which is all TSO needs.
+      // DO NOT drop the fence; do not weaken the seq loads to RELAXED.
+      // NOTE: qemu-aarch64 cannot validate this (it does not faithfully model
+      // weak reordering) — this is static-review-correct plus functional-green,
+      // not empirically proven until real ARM hardware runs it.
       uint32_t seq1, seq2;
       uint32_t cnt = 0;
       do {
@@ -3832,6 +3860,9 @@ uint64_t chunk_bounds[16] = {0};
               rs_jagged[i].s = __atomic_load_n(&g_state->resume_jagged[i].s, __ATOMIC_RELAXED);
               rs_jagged[i].e = __atomic_load_n(&g_state->resume_jagged[i].e, __ATOMIC_RELAXED);
           }
+          /* LoadLoad: pin the RELAXED data loads above this fence (window c,
+           * see the reader-pair comment above). Load-bearing — do not delete. */
+          __atomic_thread_fence(__ATOMIC_ACQUIRE);
           seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
       } while (seq1 != seq2 || (seq1 & 1));
       rs_jagged_count = cnt;
@@ -6221,12 +6252,23 @@ static int ring_order_main(int argc, char **argv) {
   // SEQLOCK PUBLISH PROTOCOL (litmus note — read before weakening orderings):
   //   bump(seq, ACQ_REL) -> RELAXED data stores -> fence(RELEASE) ->
   //   bump(seq, RELEASE). Readers snapshot with ACQUIRE seq1 -> RELAXED data
-  //   -> ACQUIRE seq2 and retry while (seq1 != seq2 || seq1 & 1). The ACQ_REL
-  //   on the FIRST bump pairs with readers' ACQUIRE seq1 (no torn read of an
-  //   in-progress publish); the explicit RELEASE fence before the SECOND bump
-  //   is what orders the RELAXED data stores before seq2 becomes even on
-  //   weakly-ordered arches (ARM/POWER/RISC-V) — without it a reader can
-  //   observe a new even seq2 with stale horizon/jagged (x86-TSO hides this).
+  //   -> fence(ACQUIRE) -> ACQUIRE seq2 and retry while (seq1 != seq2 ||
+  //   seq1 & 1). The READER half of the pair lives in the scanner's is_resume
+  //   block and in ring_dump_resume (full two-window rationale there).
+  //   The ACQ_REL on the FIRST bump pairs with readers' ACQUIRE seq1 (no torn
+  //   read of an in-progress publish, so the retry window is correct); the
+  //   RELEASE fence before the SECOND bump is the publish-side analog of the
+  //   kernel's smp_wmb before a final increment.
+  //   HONEST SCOPE — this fence is NOT what makes readers safe. Under the C11
+  //   model it is REDUNDANT here: the RELEASE RMW immediately below already
+  //   orders the RELAXED stores above it. It is kept as belt-and-suspenders —
+  //   toolchain defense on ppc64le/riscv64 (release-RMW codegen has historical
+  //   gaps) and the kernel-analogous publish shape — at zero cost on the
+  //   orderer path. The LOAD-BEARING half of the pair is the READER's ACQUIRE
+  //   fence before seq2: an acquire load cannot order itself, so without it
+  //   seq2 may be satisfied before the data loads and a torn snapshot is
+  //   accepted (x86-TSO hides that; ARM/POWER/RISC-V do not). Fixing the
+  //   writer does NOT fix the reader.
   //   Tracked under the preconditions gate (Python-frontend port, v1.3 §2.0).
   #define TRACK_COMPLETED_BATCH(_op) do { \
       tracker_bytes += (_op).len; \
@@ -6252,7 +6294,8 @@ static int ring_order_main(int argc, char **argv) {
               __atomic_store_n(&g_state->resume_jagged[_i].s, tracker_heap[_i].s, __ATOMIC_RELAXED); \
               __atomic_store_n(&g_state->resume_jagged[_i].e, tracker_heap[_i].e, __ATOMIC_RELAXED); \
           } \
-          /* Release fence: order RELAXED data above before seq2 goes even. */ \
+          /* Publish-side fence: belt-and-suspenders (see the pair note above). */ \
+          /* The LOAD-BEARING half is the reader's ACQUIRE fence before seq2. */    \
           __atomic_thread_fence(__ATOMIC_RELEASE); \
           __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_RELEASE); \
       } \
@@ -7280,9 +7323,17 @@ static int ring_escrow_put_main(int argc, char **argv) {
 static int ring_dump_resume_main(int argc, char **argv) {
     if (!g_state) return EXECUTION_FAILURE;
 
-    // SEQLOCK READ PROTOCOL (pair of TRACK_COMPLETED_BATCH publish side):
-    // ACQUIRE seq1 -> RELAXED data -> ACQUIRE seq2, retry while odd or
-    // mismatched. Do not weaken the seq loads to RELAXED.
+    // SEQLOCK READ PROTOCOL — reader side of the fence PAIR. The scanner's
+    // is_resume block carries the full two-window rationale; the writer side
+    // is TRACK_COMPLETED_BATCH in ring_order.
+    //   ACQUIRE seq1 -> RELAXED data -> fence(ACQUIRE) -> ACQUIRE seq2,
+    //   retry while odd or mismatched.
+    // The fence is REQUIRED, not decorative: acquire semantics order later
+    // operations but never the acquire load itself, so without it seq2 can be
+    // satisfied before the data loads and a torn checkpoint (wrong horizon /
+    // jagged ranges) is accepted at abort time — one generation later than the
+    // scanner's window, same silent loss/duplication class.
+    // Do NOT weaken the seq loads to RELAXED.
     uint32_t seq1, seq2;
     uint64_t snap_horizon, snap_bytes;
     uint32_t snap_count;
@@ -7297,6 +7348,9 @@ static int ring_dump_resume_main(int argc, char **argv) {
             snap_jagged[i].s = __atomic_load_n(&g_state->resume_jagged[i].s, __ATOMIC_RELAXED);
             snap_jagged[i].e = __atomic_load_n(&g_state->resume_jagged[i].e, __ATOMIC_RELAXED);
         }
+        /* LoadLoad: pin the RELAXED data loads above this fence (reader-pair
+         * window c). Load-bearing — do not delete. */
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
         seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
     } while (seq1 != seq2 || (seq1 & 1));
 
@@ -7517,6 +7571,13 @@ static int ring_poll_main(int argc, char **argv) {
     // indexer SIGKILL/OOM). Not core_cnt: an indexer death reports via
     // INDEXER_DEATH -> ring_abort, it never keeps a drained loop alive.
     // (UMA/flat pipeline has no indexer_numa: array unset/empty -> no-op.)
+    // CEILING TIE (D5 / F23b): indexer entries draw on the SAME pfds/meta
+    // budget as the spawn, trap-ack, scanner and worker entries — `max_poll`
+    // (== FR_MAX_POLL_WORKERS) is ONE ceiling for all classes, and at extreme
+    // @N oversubscription exceeding it drops death-watch coverage SILENTLY
+    // (the `p_cnt >= max_poll` guard just breaks out). Any future bound
+    // consolidation must treat these as a single budget, never as independent
+    // per-class limits.
     if (indexer_arr_name) {
         SHELL_VAR *xiv = find_variable(indexer_arr_name);
         if (xiv && array_p(xiv)) {

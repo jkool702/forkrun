@@ -55,9 +55,10 @@ Stated so the log cannot be read as broader than it is:
    `qemu-aarch64-static` user-mode emulation. QEMU does not faithfully model
    weak-memory reordering and serialises many accesses, so these runs show
    *functional* correctness and the absence of architectural regressions — they
-   are **not** an empirical validation of the fence's ordering property. That
-   still requires ARM hardware (or a reordering-aware model); the fence remains
-   static-review-correct plus these functional runs.
+   are **not** an empirical validation of either fence's ordering property,
+   including the D1 reader-side `__atomic_thread_fence(__ATOMIC_ACQUIRE)`.
+   That still requires ARM hardware (or a reordering-aware model); the D1
+   writer/reader pair remains static-review-correct plus these functional runs.
 2. **One physical NUMA node.** Every "NUMA" cell above is software-partitioned
    via `--nodes=N`. Real multi-socket topology, born-local affinity and
    cross-node escrow behaviour are not covered by this log.

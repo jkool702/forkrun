@@ -5,12 +5,16 @@
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,
 independent of the Python-frontend work:
 
-- **Resume-ledger seqlock publish fence:** `TRACK_COMPLETED_BATCH` now issues
+- **Resume-ledger seqlock fence PAIR:** `TRACK_COMPLETED_BATCH` keeps
   `__atomic_thread_fence(__ATOMIC_RELEASE)` before the second `resume_seq`
-  bump, ordering the RELAXED horizon/jagged data stores against the closing
-  seqlock read on weakly-ordered architectures (ARM/AArch64). Reader-side
-  pairing protocol documented at both read sites (scanner snapshot and
-  `ring_dump_resume`).
+  bump. Both readers — the scanner resume snapshot and `ring_dump_resume` —
+  now issue `__atomic_thread_fence(__ATOMIC_ACQUIRE)` immediately before
+  their closing `resume_seq` loads. The reader fence is the load-bearing
+  half: an acquire load cannot prevent itself from being satisfied before
+  the RELAXED data loads. The writer RELEASE fence is explicitly
+  belt-and-suspenders under C11, because the closing RELEASE RMW already
+  orders the preceding RELAXED stores; it remains as toolchain defense and
+  to preserve the kernel-analogous publish shape.
 
 - **Kernel-observable indexer death (NUMA):** one liveness pipe per NUMA
   node, created by the orchestrator (not the engine): the indexer child
