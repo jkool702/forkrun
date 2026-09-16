@@ -1675,6 +1675,78 @@ if in_section L; then
     fi
 fi
 
+# ----------
+# LA3: Indexer violent death (SIGKILL) — NUMA only. The kernel-observable
+# death pipe (POLLHUP on the orchestrator-held read end) is the ONLY
+# detector: SIGKILL/OOM runs no exit code, so `|| ring_abort` and traps
+# structurally cannot fire. An indexer death loses chunk-boundary alignment
+# (only the indexer publishes actual_end), so the reactor MUST fail loud:
+# FATAL + ring_abort → checkpoint + non-zero exit, never a silent clean exit.
+# D6 lock-in: uses FORKRUN_TEST_INDEXER_PIDFILE (FORKRUN_TEST_FALLOW_PIDFILE
+# pattern; appended to FORKRUN_EXTRA_VARS so it survives the exec -c
+# cleanroom). head -n 1: one pidfile line per indexer slot.
+# ----------
+if in_section L; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/indexer_death"; mkdir -p "$_MD"
+    rm -f "$_MD/indexer.pid" "$_MD/chk.out" "$_MD/err.txt"
+
+    (
+        export FORKRUN_TEST_INDEXER_PIDFILE="$_MD/indexer.pid"
+        # @2 = forced-count syntax: oversubscribes 2 logical nodes onto the
+        # physical nodes. Plain --nodes=2 silently degrades to UMA on
+        # single-socket hosts (no indexers exist there), which would make
+        # this test vacuous — @2 guarantees the indexer path runs.
+        timeout -s KILL 60 bash -c "source '$FRUN_SOURCE';
+            seq 500000 | frun --nodes=@2 -k -l 100 --checkpoint-file '$_MD/chk.out' sleep 0.01" &
+        WPID=$!
+        _waited=0
+        while [[ ! -s "$_MD/indexer.pid" ]] && (( _waited < 3000 )); do
+            sleep 0.01; (( _waited++ ))
+        done
+        [[ -s "$_MD/indexer.pid" ]] && kill -9 "$(head -n 1 "$_MD/indexer.pid")" 2>/dev/null || true
+        wait $WPID 2>/dev/null || true
+    ) >/dev/null 2>"$_MD/err.txt" || true
+
+    if [[ -s "$_MD/chk.out" ]] && grep -q "died unexpectedly" "$_MD/err.txt"; then
+        TEST_RESULTS["LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"]="PASS"
+        _print_result PASS "LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"]="FAIL"
+        _print_result FAIL "LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"
+        ((FAILED_TESTS++))
+    fi
+fi
+
+# ----------
+# LA4 (D6): a clean early-exit must NOT be misclassified as an indexer
+# death. On ANY pipeline abort the indexer's own emergency path exits
+# non-zero (ring_indexer_numa returns EXECUTION_FAILURE when it observes
+# the alarm); the handler used to classify that as a death — spurious FATAL
+# on every clean reason-1 exit, and SLURM 143 clobbered to 1. Post-fix the
+# classification is abort-aware: `| head` exits 0 with NO indexer FATAL.
+# ----------
+if in_section L; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/indexer_clean_abort"; mkdir -p "$_MD"
+    # @2 = forced-count syntax: guarantees the NUMA indexer path runs even
+    # on single-socket hosts (plain --nodes=2 degrades to UMA there).
+    _la4_out="$(timeout -s KILL 60 bash -c "source '$FRUN_SOURCE';
+        seq 100000 | frun --nodes=@2 -k printf '%s\n' | head -n 5" 2>"$_MD/err.txt")"
+    _la4_rc=$?
+    if (( _la4_rc == 0 )) && [[ "$(wc -l <<<"$_la4_out")" -eq 5 ]] \
+        && ! grep -q "Indexer .* died unexpectedly" "$_MD/err.txt"; then
+        TEST_RESULTS["LA4: Clean abort emits no spurious indexer FATAL"]="PASS"
+        _print_result PASS "LA4: Clean abort emits no spurious indexer FATAL"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["LA4: Clean abort emits no spurious indexer FATAL"]="FAIL"
+        _print_result FAIL "LA4: Clean abort emits no spurious indexer FATAL"
+        ((FAILED_TESTS++))
+    fi
+fi
+
 
 # ============================================================================
 # SECTION M: Checkpoint & Resume

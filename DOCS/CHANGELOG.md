@@ -23,8 +23,20 @@ independent of the Python-frontend work:
   (Bash array name; omitted/empty = old behavior). Indexer SIGKILL/OOM —
   which runs no exit code, so `|| ring_abort` and traps structurally
   cannot catch it — now produces POLLHUP → `INDEXER_DEATH` →
-  wait-for-status: clean EOF drain continues; non-zero aborts with
-  reason 2 (checkpoint + non-zero exit, never a silent clean exit).
+  wait-for-status: clean EOF drain continues; a non-zero status aborts
+  ONLY when no abort is already in flight — the classification is
+  abort-aware (`ring_abort_reason`). An indexer's non-zero exit is its
+  EXPECTED emergency path on any pipeline abort (`ring_indexer_numa`
+  returns EXECUTION_FAILURE once it observes the alarm), so re-aborting
+  there would print a spurious FATAL on every clean early exit and
+  clobber trapped-signal exit codes (SLURM 143/138 → 1). Only an
+  alarm-unset non-zero status — a genuine violent death (e.g. SIGKILL),
+  which loses chunk-boundary alignment — aborts with reason 2
+  (checkpoint + non-zero exit, never a silent clean exit). Test-only
+  chaos hook `FORKRUN_TEST_INDEXER_PIDFILE` (same pattern as the fallow
+  pidfile) targets one indexer by PID; lock-in tests LA3 (violent death
+  → FATAL + checkpoint + non-zero exit) and LA4 (clean `| head` abort →
+  exit 0, no spurious FATAL).
   The fork-order constraint at the spawn site is documented: scanner and
   worker forks must come after every indexer write-end is closed in the
   parent, or a later-forked child masks that indexer's death.

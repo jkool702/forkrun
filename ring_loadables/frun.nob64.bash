@@ -146,7 +146,7 @@ frun() {
         for nn in "${@##\-*}"; do
             [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && ! [[ " ${FORKRUN_EXTRA_FUNCS} " == *" ${nn} "* ]] && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
-        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} ${FORKRUN_TRUST_RESUME:+FORKRUN_TRUST_RESUME} ${FORKRUN_DEBUG:+FORKRUN_DEBUG} ${FORKRUN_TEST_FALLOW_PIDFILE:+FORKRUN_TEST_FALLOW_PIDFILE} "
+        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} ${FORKRUN_TRUST_RESUME:+FORKRUN_TRUST_RESUME} ${FORKRUN_DEBUG:+FORKRUN_DEBUG} ${FORKRUN_TEST_FALLOW_PIDFILE:+FORKRUN_TEST_FALLOW_PIDFILE} ${FORKRUN_TEST_INDEXER_PIDFILE:+FORKRUN_TEST_INDEXER_PIDFILE} ${FORKRUN_TEST_CLEANROOM_PIDFILE:+FORKRUN_TEST_CLEANROOM_PIDFILE} "
 
 
         local FORKRUN_FRUN_SRC="ulimit -n $(ulimit -Hn)"$'\n'
@@ -992,6 +992,15 @@ toc() { :; }
         elif [[ "$req" == @* ]]; then
             # Oversubscribe / Forced Count mode: --nodes=@N
             c="${req#@}"
+            # F30: mirror the C-side ceiling (meta_ring capacity, C3-fix)
+            # so --nodes=@513 is rejected with a clean error at the call
+            # site instead of a loud engine failure mid-pipeline.
+            if (( c > 512 )); then
+                echo "forkrun [ERROR]: --nodes=@N above 512 is not supported (meta_ring capacity); got $c" >&2
+                FORKRUN_NUM_NODES=1
+                numa_map_str=""
+                return 1
+            fi
             for (( i=0; i<c; i++ )); do map+=("${online[ i % ${#online[@]} ]}"); done
         elif [[ "$req" == *[,:\-]* ]]; then
             # Explicit list mode
@@ -1029,7 +1038,17 @@ toc() { :; }
     }
 
     local numa_map_str
-     _forkrun_build_numa_map "$parsed_numa_nodes_arg"
+    # F30: the @N branch of _forkrun_build_numa_map rejects @N > 512
+    # (mirroring the C-side meta_ring ceiling). Propagate that failure at
+    # the call site — otherwise the reset state would silently downgrade
+    # an out-of-range @N request to a UMA run. Established early-fatal
+    # pattern: NORMAL_EXIT_FLAG=true so no spurious "Pipeline aborted"
+    # checkpoint is written for a pipeline that never ran.
+    _forkrun_build_numa_map "$parsed_numa_nodes_arg" || {
+        echo "forkrun [ERROR]: invalid --nodes topology" >&2
+        NORMAL_EXIT_FLAG=true
+        return 1
+    }
 
     # PHYSICS FIX: Small File NUMA Starvation Prevention
     # If the input is a regular file and is too small to benefit from NUMA,
@@ -1087,7 +1106,17 @@ toc() { :; }
     fi
 
     # Initialize Ring
-    ring_init "${ring_init_opts[@]}"
+    # F30: ring_init validates topology (e.g. --nodes=@N above the 512
+    # meta_ring ceiling returns EXECUTION_FAILURE). Running on without the
+    # ring leaves g_state/state NULL and the next engine builtin
+    # dereferences them — SIGSEGV instead of a clean error. Mirror of the
+    # established early-fatal pattern: NORMAL_EXIT_FLAG=true prevents the
+    # spurious "Pipeline aborted" checkpoint for a pipeline that never ran.
+    ring_init "${ring_init_opts[@]}" || {
+        echo "forkrun [ERROR]: ring_init failed (invalid topology or option combination)" >&2
+        NORMAL_EXIT_FLAG=true
+        return 1
+    }
     : "${FORKRUN_NUM_NODES:=1}" # Fallback safety
 
     # Create Data Memfd
@@ -1243,6 +1272,12 @@ _forkrun_checkpoint_signal() {
                     ring_pipe fd_indexer_death_r[$i] fd_indexer_death_w[$i] || ring_abort
                     (
                         exec {fd_indexer_death_r[$i]}<&- {fd_trap_ack_w}>&-
+                        # Test-only indexer PID hook (same pattern as the
+                        # fallow pidfile): lets chaos tests kill a specific
+                        # indexer by PID instead of guessing. Appended to
+                        # FORKRUN_EXTRA_VARS so it survives the exec -c
+                        # cleanroom. Production runs never set it.
+                        [[ -n "${FORKRUN_TEST_INDEXER_PIDFILE:-}" ]] && echo "$BASHPID" >> "$FORKRUN_TEST_INDEXER_PIDFILE"
                         ring_indexer_numa ${fd_scan} $i
                     ) &
                     INDEXER_P[$i]=$!
@@ -1855,10 +1890,18 @@ W_NODE[$3]=$2
                     # only observable). POLLHUP fires on ANY death, including
                     # clean EOF shutdown — so wait for the exit status exactly
                     # like SCAN_DEATH: status 0 = normal end-of-stream drain,
-                    # close the fd, drop the slot, continue. Non-zero (e.g.
-                    # 137 = SIGKILL) = chunk-boundary alignment lost; fail
-                    # loud via ring_abort (reason 2 = internal fault ->
-                    # checkpoint + non-zero exit, never a silent clean exit).
+                    # close the fd, drop the slot, continue.
+                    # DEATH-CLASS FIDELITY (D6): a non-zero status means an
+                    # UNEXPECTED death ONLY when no pipeline abort is already
+                    # in flight. ring_indexer_numa returns EXECUTION_FAILURE
+                    # whenever its loop observes the fire alarm, so on ANY
+                    # abort (clean reason-1 SIGPIPE, fault, or trapped-signal
+                    # shutdown) every indexer exits 1 via its own EXPECTED
+                    # emergency path. Classifying that as a death prints a
+                    # spurious FATAL on every clean early-exit and clobbers
+                    # SLURM exit codes (143 -> 1). ring_abort_reason returns
+                    # 0 when the alarm is unset; the reason check MUST run
+                    # before this handler's own ring_abort call.
                     sID=$POLL_ARG1
                     if [[ -n "${INDEXER_P[$sID]:-}" ]]; then
                         wait "${INDEXER_P[$sID]}" 2>/dev/null
@@ -1871,10 +1914,19 @@ W_NODE[$3]=$2
                     unset 'fd_indexer_death_r[$sID]' 'INDEXER_P[$sID]'
 
                     if (( status != 0 )); then
-                        echo "forkrun [FATAL]: Indexer $sID died unexpectedly (status $status). Aborting to prevent data loss." >&2
-                        ring_abort
-                        NORMAL_EXIT_FLAG=false
-                        _ret_val=1
+                        _idx_reason=0
+                        ring_abort_reason _idx_reason 2>/dev/null
+                        if (( _idx_reason == 0 )); then
+                            echo "forkrun [FATAL]: Indexer $sID died unexpectedly (status $status). Aborting to prevent data loss." >&2
+                            ring_abort
+                            NORMAL_EXIT_FLAG=false
+                            _ret_val=1
+                        fi
+                        # _idx_reason != 0: the pipeline is already aborting.
+                        # The indexer's non-zero exit is its EXPECTED
+                        # emergency_abort path (ring_indexer_numa returns
+                        # EXECUTION_FAILURE when it observes the alarm), not
+                        # an independent death — see the D6 note above.
                     fi
                     ;;
                 EOF)
