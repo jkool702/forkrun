@@ -218,3 +218,30 @@ CI confirmation of PF-1: `twin-check` green on run 35174209682
 2026 — pre-existing lint noise; differential shellcheck shows zero new
 findings from the v3.5.1 work (SC2016 count identical pre/post D10).
 Release runbook: `docs_port/RELEASE_RUNBOOK.md` (owner's manual matrix).
+
+## 17. F31 — emit fallback resumes after partial sendfile (v3.5.1)
+
+A v3.5.0-review finding, confirmed still present: after a
+positive-short sendfile, `forkrun_emit_with_fallback` fell through to a
+full-range `ring_copy_chunk(off, len)`, duplicating the emitted prefix.
+Pre-existing (v3.4.3 O_APPEND fallback), exotic trigger, ordering and
+ledger untouched. Fix (commit 8265251, one function): resume at
+`(off+s, len-s)` on `s > 0`; keep the full-range copy on `s < 0`
+non-EPIPE (`robust_sendfile` returns -1 only with zero progress — the
+review sketch's resume arithmetic is valid for `s > 0` only).
+
+Verification, all green: LD_PRELOAD sendfile/sendfile64-interposition
+harness against the exact TU (glibc routes sendfile→sendfile64; both
+symbols interposed) — old code +64 duplicated bytes (bug reproduced),
+fixed code byte-exact, hard-fail-first exact in both; basic suite 89/89
+on a locally built v4 blob (CI-identical flags, 208008 bytes); CI
+rebuild run 35175902953 success (VERIFY-OK all 7 keys, canary OK),
+auto-PR #537 merged (merge e862a59); post-pull smoke: local v4
+decode-and-cmp OK, `ring_version -a`/`frun -V` v3.5.1 (built Sep 17
+02:51 UTC), `test_frun.sh` 89/89, 10k sanity exact, canary OK, python
+14 OK. Intermediate owner-merged PR #536 (run 35175093479, pre-F31
+blobs) superseded by #537 as the shipped-blob source.
+
+**Engine change: the owner matrix must be re-run before tag**
+(MAINTAINERS §5 Matrix Policy Rule) — the §16 smoke results predate
+this fix.
