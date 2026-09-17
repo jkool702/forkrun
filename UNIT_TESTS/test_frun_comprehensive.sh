@@ -866,12 +866,14 @@ fi
 # Exercises the F28 need-clamp/budget arms: -L 4 -n 37 (partial final batch),
 # -L 7 -n 37, and -L 100 -n 37 (L > n: clamp from the first batch). All must
 # deliver exactly lines 1..37 in order under -k.
+# NEW-D1: @2 is forced-count — plain --nodes=2 silently degrades to UMA on
+# single-socket hosts, which would never enter the is_numa handoff arms.
 if in_section F; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/batch_F8"; mkdir -p "$_MD"
     _f8_fail=""
     for _L in 4 7 100; do
-        _got="$(bash -c "cd '$_MD'; source '$FRUN_SOURCE'; seq 200 | frun --nodes=2 -L $_L -n 37 -k printf '%s\n'" 2>/dev/null)"
+        _got="$(bash -c "cd '$_MD'; source '$FRUN_SOURCE'; seq 200 | frun --nodes=@2 -L $_L -n 37 -k printf '%s\n'" 2>/dev/null)"
         if [[ "$_got" != "$(seq 37)" ]]; then
             _f8_fail+=" L=$_L(got $(echo "$_got" | wc -l | tr -d ' ') lines);"
         fi
