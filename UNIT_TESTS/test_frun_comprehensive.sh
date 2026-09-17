@@ -4203,7 +4203,7 @@ printf '%s\n%s\n%s\n' "$_v" 'declare -- FORKRUN_EXTRA_SETUP="echo SETUP_RAN"' "$
 printf '%s\n\n%s\n' "$_f2" "$_fe"
 exit 0
 EOF
-    timeout 60 bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1i1.chk'" \
+    timeout 60 setsid bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1i1.chk'" \
         >/dev/null 2>"$_MD/err.txt"
     _TX=$?
     if (( _TX != 0 )) && grep -q "Custom setup commands detected" "$_MD/err.txt" \
@@ -4244,7 +4244,7 @@ printf '%s\n\n%s\n' "$_f2" "$_fe"
 exit 0
 EOF
     sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1i2.chk"
-    timeout 60 bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1i2.chk'" \
+    timeout 60 setsid bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1i2.chk'" \
         >/dev/null 2>"$_MD/err.txt"
     _TX=$?
     if [[ ! -f "$_MARK" ]] && ! grep -q "verification failed" "$_MD/err.txt"; then
