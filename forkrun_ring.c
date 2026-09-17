@@ -284,6 +284,46 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
   return NULL;
 }
 
+/* TLS-cached SIMD capability probe: the dispatch predicate of try_simd_scan
+ * above, factored out WITHOUT touching try_simd_scan (whose NULL-means-
+ * unsupported-or-not-found contract its callers depend on). */
+static inline bool fr_simd_available(void) {
+#if defined(__x86_64__) || defined(__i386__)
+  static __thread int avx2_supported = -1;
+  if (__builtin_expect(avx2_supported == -1, 0)) {
+    __builtin_cpu_init();
+    avx2_supported = __builtin_cpu_supports("avx2") &&
+                     __builtin_cpu_supports("popcnt");
+  }
+  return avx2_supported;
+#elif defined(__aarch64__)
+  return true;
+#else
+  return false;
+#endif
+}
+
+/* -L path only: pointer past the Nth delimiter in [p, end), or NULL if
+ * fewer than N exist. Scalar fallback reproduces the current -L semantics
+ * exactly on non-SIMD arches — zero behavior change where the test matrix
+ * cannot reach. try_simd_scan's contract is untouched. */
+static inline char *scan_nth_delim(char *p, char *end, uint64_t n, char delim) {
+  char *hit = try_simd_scan(p, end, n, delim);
+  if (hit)
+    return hit;
+  if (!fr_simd_available()) { /* NULL = unsupported, not not-found */
+    while (n > 0 && p < end) {
+      char *nl = memchr(p, delim, (size_t)(end - p));
+      if (!nl)
+        return NULL;
+      p = nl + 1;
+      n--;
+    }
+    return (n == 0) ? p : NULL;
+  }
+  return NULL; /* SIMD live: genuinely fewer than n */
+}
+
 // Architecture-dispatched delimiter popcount. O(N) over the buffer, no
 // per-delimiter position extraction. Used exclusively by the pre-flight scan.
 static inline uint64_t
@@ -4429,20 +4469,81 @@ uint64_t chunk_bounds[16] = {0};
               end = buf + n;
             }
 
-            char *nl = memchr(p, delim, (size_t)(end - p));
-            if (!nl) {
-              p = end;
-              continue;
+            {
+              // F28: jump straight to the need-th delimiter (SIMD
+              // skip-ahead where available) instead of one memchr per
+              // line. need is clamped by the -n budget below, so a hit
+              // completes at most one batch and crosses the limit at most
+              // exactly. No BytesMax capping: exact lines cannot be
+              // byte-capped (see the -L/-b override warning).
+              uint64_t need = L - lines_in_batch;
+              if (limit_items > 0) {
+                uint64_t spent = sealed + published + lines_in_batch;
+                uint64_t budget =
+                    (spent >= limit_items) ? 0 : (limit_items - spent);
+                if (budget == 0) {
+                  // No budget left for even one more line: seal the open
+                  // partial (if any) as the final limited batch, publish
+                  // the cutoff BEFORE the handoff, and stop. The per-line
+                  // path below can never observe this state (it breaks on
+                  // the budget_hit flush), so this arm is reachable only
+                  // defensively — and it must not emit a spurious 0-line
+                  // batch.
+                  if (lines_in_batch > 0) {
+                    uint64_t _bnd =
+                        buf_base_offset + (uint64_t)(p - buf);
+                    bool _is_last = (_bnd >= raw_end);
+                    bool _skipped = false;
+                    UNIFIED_SCANNER_FLUSH(lines_in_batch, _is_last,
+                                          meta->major_id, l_minor, _bnd,
+                                          _skipped);
+                    l_minor++;
+                    if (_is_last && !_skipped) {
+                      l_last_flushed = true;
+                      chunk_bounds[cb_head & 15] = local_scan_idx;
+                      cb_head++;
+                    }
+                    batch_start = _bnd;
+                    published += lines_in_batch;
+                    lines_in_batch = 0;
+                  }
+                  l_limit_hit = true;
+                  atomic_store_release(&g_state->limit_cutoff_major,
+                                       meta->major_id + 1);
+                  break;
+                }
+                if (need > budget)
+                  need = budget;
+              }
+              char *hit = scan_nth_delim(p, end, need, delim);
+              if (!hit) {
+                // Fewer than need delimiters in [p, end): no complete
+                // batch (and no budget crossing) can form here.
+                if (buf_base_offset + (uint64_t)(end - buf) >= raw_end) {
+                  // Buffer already covers the chunk tail: count the
+                  // stragglers once and transfer the open batch via the
+                  // handoff below.
+                  uint64_t tail =
+                      fast_count_delim(p, end, delim);
+                  counted += tail;
+                  lines_in_batch += tail;
+                  p = end;
+                  break;
+                }
+                p = end; // trigger the pread refill above
+                continue;
+              }
+              p = hit;
+              counted += need;
+              lines_in_batch += need;
             }
-            p = nl + 1;
-            lines_in_batch++;
-            counted++;
 
             // Batches complete at exactly L; the -n budget may clamp the
             // FINAL batch short. sealed+published+lines_in_batch is the
-            // cumulative total that will be sealed once this batch
-            // publishes; it steps by 1 per delimiter, so it reaches
-            // limit_items exactly (no under/over-delivery).
+            // cumulative total sealed once this batch publishes; the F28
+            // jump claims up to `need` lines at once (need <= L -
+            // lines_in_batch, budget-clamped), so it reaches limit_items
+            // exactly (no under/over-delivery).
             bool complete = (lines_in_batch >= L);
             bool budget_hit = false;
             if (limit_items > 0 &&

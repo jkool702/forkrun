@@ -354,6 +354,37 @@ independent of the Python-frontend work:
   (CWD-planted `touch` executes in-sandbox on bash 5.3 — contained, see
   SECURITY.md). `PATH=''` retained per owner determination.
 
+- **F28: `-L` scan loop off memchr-per-line (SIMD skip-ahead, perf-neutral):**
+  the `-L` Scanner-Handoff Chain loop walked one `memchr` per line on the
+  serialized scanner. New `-L`-only helper `scan_nth_delim()` jumps straight
+  to the need-th delimiter (`try_simd_scan` skip-ahead on SIMD arches, exact
+  memchr-per-line fallback elsewhere); the loop claims `need = L -
+  lines_in_batch` clamped by the `-n` budget, tail-counts stragglers once
+  with `fast_count_delim`, and flushes via the unchanged
+  `UNIFIED_SCANNER_FLUSH` sites (`counted` still counts every delimiter in
+  `[raw_start, raw_end)` exactly once; `is_last` still `bnd >= raw_end`; no
+  `BytesMax` capping — exact lines cannot be byte-capped). `try_simd_scan`
+  is byte-identical (its NULL-means-unsupported-or-not-found contract is
+  load-bearing for the normal scanner). Measured before/after on 100M-line
+  `seq` input (889MB, `--nodes=@2` to hit the handoff path, x86_64_v4,
+  single runs): -L 1000 file/pipe x default/-k 9.78–9.99s before vs
+  10.00–10.15s after; -L 10000 9.46–9.55s before vs 9.67–9.78s after;
+  interleaved A/B re-runs (L1000 file default x3 each) 10.02–10.15s vs
+  10.09–10.18s — noise, no systematic gap. Verdict: scan is not the binding
+  constraint here (no-op-payload isolation: `-L 1000 :` 5.82s vs `-l 1000 :`
+  5.78s; ingest/payload dominate), so the change is a structural
+  call-amortization win that does not move end-to-end on this box.
+  BORN_LOCAL_NUMA §5's "≈ UMA scan speeds" claim re-confirmed, no update.
+  Acceptance: F7 carry-math exact, T9/T10 `-n`-clamp unchanged, new F8
+  (`-L`+`-n` clamp L=4/7/100 x n=37) green on both blobs, `-L`+`-n` probes
+  bit-identical across 4 shapes. Notes: initial UMA befores measured the
+  wrong path (handoff requires `is_numa`) and are superseded; `-L 100000`
+  is pre-existing-unstable on BOTH blobs (intermittent worker-139/trap-grace
+  aborts with clean-prefix truncation, rare count anomalies) — out of scope;
+  one unreproduced `-L 100` short-count transient (99 lines, 1 of 8 runs,
+  rc=0) on the pre-W-E tree; system `sort` segfaults on 889MB here, so
+  content checks used awk count+sum+min+max instead.
+
 ## v3.5.0 — 2026-09-03
 
 The headline of this release is a fully-rearchitected resume subsystem: NUMA-native
