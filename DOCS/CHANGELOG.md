@@ -1,6 +1,6 @@
 # forkrun Changelog
 
-## v3.5.x (unreleased) — precondition-gate engine fixes
+## v3.5.1 — 2026-09-17
 
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,
 independent of the Python-frontend work:
@@ -40,6 +40,14 @@ independent of the Python-frontend work:
   The fork-order constraint at the spawn site is documented: scanner and
   worker forks must come after every indexer write-end is closed in the
   parent, or a later-forked child masks that indexer's death.
+
+- **W-B: cleanroom test determinism (pidfile + R2/R10):** the chaos pidfile
+  (`FORKRUN_TEST_INDEXER_PIDFILE`, same pattern as the fallow pidfile) is
+  written after trap install so signal tests target the right process;
+  R2/R10 rewritten with bounded pidfile waits on `--nodes=@2`; D6
+  exit-code preservation locked (trapped-signal codes survive, no spurious
+  FATAL on clean early exit). Lock-in: LA3 (violent indexer death) / LA4
+  (clean `| head` abort) plus the R2/R10 signal tests.
 
 - **Single-source packing constants:** `MINOR_BITS`/`MINOR_MASK`/
   `MAJOR_MASK`/`PACK_KEY` now come from `forkrun_substrate.h` (`FR_*`),
@@ -153,6 +161,13 @@ independent of the Python-frontend work:
   one unreproduced `-L 100` short-count transient (99 lines, 1 of 8 runs,
   rc=0) on the pre-W-E tree; system `sort` segfaults on 889MB here, so
   content checks used awk count+sum+min+max instead.
+
+- **New/changed tests this release:** T14 (F30 ceiling; invocation fixed by
+  W-D4), F15a/F15b (conservation + herd; Node-frame presence tightened by
+  D8), T1g/T1h/T1i(i/ii)/T1a-ext (token-knowledge forgeries, F29), F6
+  (characterize-only CWD probe), F8 (`-L`+`-n` clamp, F28). Deduplicated:
+  simple M17/M20/M21 removed (diagnostic variants kept), both T10b_diag
+  blocks removed (diagnostics folded into T10b's failure path).
 
 ## v3.5.0 — 2026-09-03
 

@@ -58,8 +58,8 @@ fi
 
 # Version Pin & Run Stamp at top of comprehensive suite:
 FRUN_VER="$(bash -c "source '$FRUN_SOURCE' && frun -V" 2>/dev/null || echo 'unknown')"
-if [[ "$FRUN_VER" != "forkrun v3.5.0" ]]; then
-    echo "FATAL: Comprehensive suite requires 'forkrun v3.5.0', got '$FRUN_VER'" >&2
+if [[ "$FRUN_VER" != "forkrun v3.5.1" ]]; then
+    echo "FATAL: Comprehensive suite requires 'forkrun v3.5.1', got '$FRUN_VER'" >&2
     exit 1
 fi
 echo "==================================================================" >&2
