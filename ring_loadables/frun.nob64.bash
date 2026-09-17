@@ -496,8 +496,30 @@ EOF
                         local _secret_end="___FORKRUN_END_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local _fn_token="___FORKRUN_FN_${BASHPID}_${RANDOM}_${RANDOM}___"
                         local _fn_end="___FORKRUN_FNEND_${BASHPID}_${RANDOM}_${RANDOM}___"
+                        # D10: PATH for BOTH restricted shells (the extraction
+                        # sandbox and the re-render shell) points at a freshly
+                        # created, then DELETED, mktemp directory. POSIX PATH
+                        # search treats an empty component as CWD (F6 probe:
+                        # a CWD-planted binary executed under PATH=''), so
+                        # empty is not dead. A deleted directory cannot
+                        # contain an executable, and its random name cannot
+                        # be pre-created or guessed. The name lives in environ
+                        # (not cmdline): readable at worst via /proc/self/environ,
+                        # and unexploitable from inside -- rbash permits
+                        # neither directory creation nor output redirection,
+                        # and no builtin creates directories; live same-UID
+                        # processes are outside the documented threat model.
+                        # One construction, both shells: one mechanism, one probe.
+                        local _epd
+                        _epd="$(mktemp -d)" || {
+                            echo "forkrun [ABORT]: mktemp failed constructing sandbox PATH." >&2
+                            exec {_rf_fd}<&-
+                            NORMAL_EXIT_FLAG=true
+                            return 1
+                        }
+                        \rm -rf "${_epd}"
                         local parsed_env
-                         parsed_env="$(env -i PATH='' "${BASH:-bash}" --norc --noprofile --restricted -c '
+                         parsed_env="$(env -i PATH="${_epd}" "${BASH:-bash}" --norc --noprofile --restricted -c '
                              # F29-A1: frame tokens arrive positionally ($2-$5)
                              # but are IMMEDIATELY bound to readonly names and
                              # shifted away. Hostile file content executes first
@@ -667,15 +689,13 @@ EOF
                             # prohibited inside --restricted, so that form can
                             # never run. The redirect lives on the whole
                             # invocation instead (identical error-swallowing).
-                            # PATH-SANDBOX: PATH='' retained per owner
-                            # determination. F6 characterizes the residual:
-                            # on bash 5.3 an empty PATH resolves CWD-planted
-                            # binaries inside the sandbox (see SECURITY.md);
-                            # the load-bearing guarantees are value
+                            # D10: re-render shell uses the same deleted-dir
+                            # PATH constructed above — one mechanism, one
+                            # probe. The load-bearing guarantees are value
                             # neutralization (re-render), TRUST non-rebinding
                             # (denylist), and no parent-side execution of
                             # extracted text.
-                            _vars_safe="$(env -i PATH='' "${BASH:-bash}" --norc --noprofile --restricted -c '
+                            _vars_safe="$(env -i PATH="${_epd}" "${BASH:-bash}" --norc --noprofile --restricted -c '
                                 eval "$1" || exit 1
                                 shift
                                 declare -p "$@"

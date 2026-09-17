@@ -4304,14 +4304,14 @@ EOF
     rm -f "$_MARK"
 fi
 
-# --- F6: CWD-planted touch characterization (record only, NOT an assertion) ---
+# --- F6: CWD-planted touch vs dead-PATH construction (hard assertion) ---
 # Plants an exec-form touch wrapper (`exec /usr/bin/touch` — cannot
 # self-recurse regardless of PATH semantics) in the isolated resume CWD and
-# runs a T1b-shaped content injection from that CWD. The observation (marker
-# present/absent) is recorded in SECURITY.md with date/bash-version; the
-# test itself always passes. Hard assertions are only the invariant ones:
-# forged values neutralized (T1b/T1h), FORKRUN_TRUST_RESUME not rebindable,
-# nothing executes parent-side (T1a/T1d/T1f/T1g).
+# runs a T1b-shaped content injection from that CWD. Under D10 both
+# restricted shells run with PATH at a freshly-created, immediately-deleted
+# mktemp directory, so the planted binary must NOT resolve — marker absent
+# is a hard PASS. (Was characterize-only under PATH='': POSIX PATH search
+# treats an empty component as CWD, confirmed by the F6 probe on bash 5.3.9.)
 if in_section T; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/sandbox_f6"; mkdir -p "$_MD"
@@ -4328,9 +4328,14 @@ EOF
     sed -i "s|__MARK__|${_MARK}|g" "$_MD/f6.chk"
     ( cd "$_MD" && timeout 60 bash -c "source '$FRUN_SOURCE' && printf 'a\n' | frun --resume 'f6.chk'" \
         >/dev/null 2>"$_MD/err.txt" ) || true
-    if [[ -f "$_MARK" ]]; then _F6_OBS="MARKER PRESENT — CWD-planted binary executed in-sandbox (see SECURITY.md)"; else _F6_OBS="marker absent — no CWD-resolved execution"; fi
-    TEST_RESULTS["F6: CWD-planted touch probe ($_F6_OBS)"]="PASS"; ((PASSED_TESTS++))
-    _print_result PASS "F6: CWD-planted touch probe ($_F6_OBS)"
+    if [[ ! -f "$_MARK" ]]; then
+        TEST_RESULTS["F6: CWD-planted binary does not resolve (dead-PATH construction)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "F6: CWD-planted binary does not resolve (dead-PATH construction)"
+    else
+        TEST_RESULTS["F6: CWD-planted binary does not resolve (dead-PATH construction)"]="FAIL"
+        TEST_ERRORS["F6: CWD-planted binary does not resolve (dead-PATH construction)"]="marker PRESENT under dead-PATH construction"
+        ((FAILED_TESTS++)); _print_result FAIL "F6: CWD-planted binary does not resolve (dead-PATH construction)" "marker present"
+    fi
     rm -f "$_MD/touch" "$_MARK"
 fi
 

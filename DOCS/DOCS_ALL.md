@@ -360,7 +360,21 @@ independent of the Python-frontend work:
   M21 / T7 re-verified byte-exact after the `PATH=''` revert (D9). Lock-in:
   T1a-ext/T1g/T1h/T1i (+T1a/T1b/T1d/T1f); F6 characterize-only probe
   (CWD-planted `touch` executes in-sandbox on bash 5.3 — contained, see
-  SECURITY.md). `PATH=''` retained per owner determination.
+  SECURITY.md). `PATH=''` retained per owner determination at the time —
+  superseded by D10 below, which closes F6 by construction.
+
+- **D10: dead-PATH construction for both restricted shells:** POSIX PATH search
+  treats an empty component as the current working directory, so `PATH=''`
+  is NOT a dead PATH (F6 probe: a CWD-planted binary executed under `PATH=''`;
+  no default-PATH fallback). Both restricted shells (the extraction sandbox
+  and the re-render shell) now run with `PATH` at a freshly-created,
+  immediately-deleted mktemp directory: it cannot contain an executable and
+  its random name cannot be pre-created or guessed (mktemp creates it 0700;
+  only mktemp failure is fatal — an empty name would silently restore CWD
+  semantics — and aborts before either shell runs). F6 is upgraded from a
+  characterize-only probe to a hard assertion (marker absent = PASS); the
+  sandbox's remaining pre-consent execution surface is pure builtins
+  (DoS-only). See SECURITY.md Layer 2.
 
 - **F28: `-L` scan loop off memchr-per-line (SIMD skip-ahead, perf-neutral):**
   the `-L` Scanner-Handoff Chain loop walked one `memchr` per line on the
@@ -2437,10 +2451,20 @@ fail closed before any parent-side eval.
 
 Full-auto resume (`frun --resume FILE` with no command re-supplied) reconstructs
 the execution environment inside a `bash --restricted` sandbox with an
-environment that is **constructed, not cleared** (`env -i PATH='' ...`):
+environment that is **constructed, not cleared** (`env -i PATH="<deleted-mktemp-dir>" ...`,
+one D10 construction shared by both the extraction sandbox and the re-render shell):
 
-- PATH is set-empty at execve time (note: an *unset* PATH would trigger bash's
-  compiled-in default — this is why the environment is built explicitly).
+- PATH points at a freshly-created, immediately-deleted mktemp directory at
+  execve time (D10). POSIX PATH search treats an empty component as the current
+  working directory — `PATH=''` is therefore NOT a dead PATH (F6 probe: a
+  CWD-planted binary executed under `PATH=''` on bash 5.3.9; the v3.5.0
+  "set-empty" claim was incorrect in general). A deleted directory cannot
+  contain an executable, and its random name cannot be pre-created or guessed
+  (mktemp creates it 0700, so even the brief existence window is private and
+  empty; `rm` failure degrades harmlessly to an empty private dir). Only mktemp
+  failure is fatal — an empty name would silently restore CWD semantics — and
+  aborts before either shell runs. An *unset* PATH would trigger bash's
+  compiled-in default — this is why the environment is built explicitly.
 - Output redirection is prohibited (restricted mode) — no file writes.
 - `source`/`.` with path arguments is prohibited.
 - All shell functions are **wiped** after the file's definitions have been
@@ -2458,15 +2482,15 @@ environment that is **constructed, not cleared** (`env -i PATH='' ...`):
   **Token secrecy is therefore NOT a security property** — tokens are an
   integrity mechanism (framing), not a secret. Tests T1g/T1h/T1a-ext forge
   with full token knowledge and still execute nothing.
-- CWD-planted binaries (F6 characterization, 2026-09-16, bash 5.3.9): an empty
-  PATH resolves CWD (`command -v touch` → `./touch` when a wrapper is planted;
-  `command not found` with no planted binary — there is no default-PATH
-  fallback). So a same-UID attacker who can write the resume CWD can get a
-  planted binary executed pre-consent, in-sandbox, as the victim. Contained by
-  design: restricted mode, function wipe, value neutralization (T1b/T1h prove
-  the VALUES still don't cross), TRUST non-rebinding (denylist), and no
-  parent-side execution of extracted text. Characterize-only (probe F6); the
-  residual below states the boundary.
+- CWD-planted binaries: CLOSED by construction (D10; F6 is now a hard test).
+  The F6 probe (2026-09-16, bash 5.3.9) showed an empty PATH resolves CWD
+  (`command -v touch` → `./touch` when a wrapper is planted; `command not
+  found` with no planted binary — there is no default-PATH fallback). Under
+  D10 the planted binary cannot resolve (deleted directory), so marker absent
+  is asserted. The directory name lives in environ (not cmdline): readable at
+  worst via /proc/self/environ, and unexploitable from inside — rbash permits
+  neither directory creation nor output redirection, and no builtin creates
+  directories; live same-UID processes are outside the documented threat model.
 
 ### Layer 3 — Interactive authorization (decision point)
 
@@ -2482,9 +2506,10 @@ what will run.
 
 1. **Pre-consent code execution is limited to same-UID file tampering.**
    Reaching the sandbox requires local write access to the victim's resume file
-   or resume CWD (F6's planted binary included); cross-UID attack is stopped by
-   the ownership gate. Mitigated by the permission gate + informed consent —
-   the documented threat boundary.
+   or resume CWD; cross-UID attack is stopped by the ownership gate. CWD
+   planting (F6) is closed by the D10 dead-PATH construction — the remaining
+   in-sandbox execution surface is pure builtins (DoS-only). Mitigated by the
+   permission gate + informed consent — the documented threat boundary.
 2. **Same-UID hostile content can shadow the interactive `read` prompt** (the
    layer-3 prompt itself is a builtin that hostile functions could shadow, if the
    hostile file already passed the sandbox — which requires same-UID write access

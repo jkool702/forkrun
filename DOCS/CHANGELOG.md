@@ -129,7 +129,21 @@ independent of the Python-frontend work:
   M21 / T7 re-verified byte-exact after the `PATH=''` revert (D9). Lock-in:
   T1a-ext/T1g/T1h/T1i (+T1a/T1b/T1d/T1f); F6 characterize-only probe
   (CWD-planted `touch` executes in-sandbox on bash 5.3 — contained, see
-  SECURITY.md). `PATH=''` retained per owner determination.
+  SECURITY.md). `PATH=''` retained per owner determination at the time —
+  superseded by D10 below, which closes F6 by construction.
+
+- **D10: dead-PATH construction for both restricted shells:** POSIX PATH search
+  treats an empty component as the current working directory, so `PATH=''`
+  is NOT a dead PATH (F6 probe: a CWD-planted binary executed under `PATH=''`;
+  no default-PATH fallback). Both restricted shells (the extraction sandbox
+  and the re-render shell) now run with `PATH` at a freshly-created,
+  immediately-deleted mktemp directory: it cannot contain an executable and
+  its random name cannot be pre-created or guessed (mktemp creates it 0700;
+  only mktemp failure is fatal — an empty name would silently restore CWD
+  semantics — and aborts before either shell runs). F6 is upgraded from a
+  characterize-only probe to a hard assertion (marker absent = PASS); the
+  sandbox's remaining pre-consent execution surface is pure builtins
+  (DoS-only). See SECURITY.md Layer 2.
 
 - **F28: `-L` scan loop off memchr-per-line (SIMD skip-ahead, perf-neutral):**
   the `-L` Scanner-Handoff Chain loop walked one `memchr` per line on the
