@@ -245,3 +245,36 @@ blobs) superseded by #537 as the shipped-blob source.
 **Engine change: the owner matrix must be re-run before tag**
 (MAINTAINERS §5 Matrix Policy Rule) — the §16 smoke results predate
 this fix.
+
+## 18. Test-findings round (NEW-D1 + W-LA3; no engine changes)
+
+NEW-D1 closed: F8 now `--nodes=@2` (forced-count NUMA arms, both test
+twins), still green — the F28 clamp coverage is real, not vacuous.
+
+W-LA3: LA3's every-budget wedge was 84-minute payloads, not an engine
+hang — line-args mode runs `sleep 0.01 ${lines}` and GNU sleep SUMS
+operands (batch 1 ≈ 5050 s; ≈ 3,970 CPU-years total). Consequences,
+all verified: Bug Z dissolves (healthy pipeline doing requested work;
+0-bytes-ever is the only consistent signature); the emulated abort-hang
+dissolves into teardown bounded by in-flight payload duration (benign,
+pre-existing, now a documented characteristic — R2/R10 abort fast only
+because their payloads are 0.1 s); the §3 orderer/fallow loose end
+resolves present (census: 28 workers + anon_pipe_read pair + timer;
+indexers/scanners healthily exited post-ingest); no engine defect found
+anywhere in the violent-death chain. Redesign, test-side only, both
+twins: `printf` payload, endless SIGPIPE-clean feeder, liveness-gated
+kill, five-fact failure capture. Acceptance: 3× standalone green plus
+full Section L 57/57 on x86_64 (LA3 in-suite green, incl. LA4/F15a/F15b).
+
+Hygiene incident: /tmp filled to 81% (a 15 GB census out.txt of mine
+plus pre-existing W-E artifacts), making the suite gate FATAL on
+here-docs ("Disk quota exceeded") until cleaned. Rule going forward:
+endless-feeder outputs go to /dev/null or bounded files, and diag
+artifacts are removed the same session. My /tmp/la3_* files are gone;
+wE_* and the previous session's /tmp/la3dbg left untouched. The three
+Sep-16 orphaned `seq 500000`s (PIDs verified pre-kill) were reaped.
+
+Parked (non-release): the `.txt`-twin triplication decision (reference
+snapshot vs twin-check membership); NEW-D2/D3 folded into Stage 1 /
+convenience per the audit. aarch64 leg resumes after LA3 green with a
+re-synced copy (banked: basic 89/89, D 11/11, L-minus-LA3).

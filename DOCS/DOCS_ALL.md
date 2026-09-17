@@ -395,6 +395,21 @@ independent of the Python-frontend work:
   Engine change — blobs rebuilt via CI; the owner matrix must be re-run
   before tag.
 
+- **W-LA3: LA3 violent-death test redesign (sleep-operand root cause):**
+  LA3 wedged on every budget — not an engine hang but 84-minute payloads:
+  line-args mode runs `sleep 0.01 ${lines}`, and GNU sleep SUMS operands
+  (batch 1 ≈ 5050 s; ≈ 3,970 CPU-years total). The same root cause explains
+  the emulated abort-hang (teardown waits on in-flight payloads — benign,
+  pre-existing, now documented) and why R2/R10/LA4 always passed (`-s` /
+  `printf` payloads). No engine defect found anywhere in the chain.
+  Redesign, test-side only, both twins: `printf` payload, endless
+  SIGPIPE-clean feeder (indexers exit status-0 at ingest EOF, so finite
+  input lets them die before the kill), liveness-gated kill (kill -0
+  before, death-verified after), five-fact failure capture
+  (rc/live/sent/dead/fatal/gen/cp/tmp). Verified 3× standalone plus full
+  Section L 57/57 on x86_64. Also fixed in this round: NEW-D1 (F8 now
+  `--nodes=@2`, forced-count NUMA arms, still green).
+
 - **F28: `-L` scan loop off memchr-per-line (SIMD skip-ahead, perf-neutral):**
   the `-L` Scanner-Handoff Chain loop walked one `memchr` per line on the
   serialized scanner. New `-L`-only helper `scan_nth_delim()` jumps straight

@@ -1713,11 +1713,22 @@ fi
 # D6 lock-in: uses FORKRUN_TEST_INDEXER_PIDFILE (FORKRUN_TEST_FALLOW_PIDFILE
 # pattern; appended to FORKRUN_EXTRA_VARS so it survives the exec -c
 # cleanroom). head -n 1: one pidfile line per indexer slot.
+# W-LA3 design notes (read before touching this test):
+# - Payload MUST be line-args safe. The old `sleep 0.01` summed batch
+#   lines as durations (batch 1 ≈ 84 min) and wedged every time budget —
+#   the "hang" was work, not a wedge. printf exercises the orderer instead.
+# - Feeder MUST NOT terminate: indexers exit status-0 at ingest EOF (the
+#   healthy lifecycle), so a finite `seq` lets them die naturally before
+#   the kill lands. The endless feeder keeps them killable indefinitely
+#   (it EPIPEs via `|| break` and dies on the abort).
+# - Kill MUST be liveness-gated: kill -0 before AND death-verified after,
+#   or a pre-dead/recycled pid makes the failure uninterpretable. The five
+#   facts below make every future failure self-classify.
 # ----------
 if in_section L; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/indexer_death"; mkdir -p "$_MD"
-    rm -f "$_MD/indexer.pid" "$_MD/chk.out" "$_MD/err.txt"
+    rm -f "$_MD/indexer.pid" "$_MD/chk.out" "$_MD/err.txt" "$_MD/facts.sh"
 
     (
         export FORKRUN_TEST_INDEXER_PIDFILE="$_MD/indexer.pid"
@@ -1726,24 +1737,48 @@ if in_section L; then
         # single-socket hosts (no indexers exist there), which would make
         # this test vacuous — @2 guarantees the indexer path runs.
         timeout -s KILL 60 bash -c "source '$FRUN_SOURCE';
-            seq 500000 | frun --nodes=@2 -k -l 100 --checkpoint-file '$_MD/chk.out' sleep 0.01" &
+            ( while :; do seq 100000 || break; done ) | frun --nodes=@2 -k -l 100 --checkpoint-file '$_MD/chk.out' printf '%s\n'" &
         WPID=$!
+        # Wait for BOTH indexer pids (two lines), bounded.
         _waited=0
-        while [[ ! -s "$_MD/indexer.pid" ]] && (( _waited < 3000 )); do
+        while (( $(wc -l < "$_MD/indexer.pid" 2>/dev/null || echo 0) < 2 )) && (( _waited < 3000 )); do
             sleep 0.01; (( _waited++ ))
         done
-        [[ -s "$_MD/indexer.pid" ]] && kill -9 "$(head -n 1 "$_MD/indexer.pid")" 2>/dev/null || true
-        wait $WPID 2>/dev/null || true
+        sleep 1  # kill at t≈+1s into steady state
+        _victim="$(head -n 1 "$_MD/indexer.pid" 2>/dev/null)"
+        _la3_live=0; _la3_sent=0; _la3_dead=0
+        if [[ -n "$_victim" ]] && kill -0 "$_victim" 2>/dev/null; then
+            _la3_live=1
+            if kill -9 "$_victim" 2>/dev/null; then
+                _la3_sent=1
+                _k=0
+                while kill -0 "$_victim" 2>/dev/null && (( _k < 200 )); do
+                    sleep 0.01; ((_k++))
+                done
+                kill -0 "$_victim" 2>/dev/null || _la3_dead=1
+            fi
+        fi
+        wait $WPID 2>/dev/null; _la3_rc=$?
+        declare -p _la3_rc _la3_live _la3_sent _la3_dead > "$_MD/facts.sh"
     ) >/dev/null 2>"$_MD/err.txt" || true
 
-    if [[ -s "$_MD/chk.out" ]] && grep -q "died unexpectedly" "$_MD/err.txt"; then
+    _la3_rc=137 _la3_live=0 _la3_sent=0 _la3_dead=0
+    [[ -f "$_MD/facts.sh" ]] && source "$_MD/facts.sh"
+    _la3_fatal=0; grep -q "died unexpectedly" "$_MD/err.txt" 2>/dev/null && _la3_fatal=1
+    _la3_gen=0; grep -q "Generating checkpoint" "$_MD/err.txt" 2>/dev/null && _la3_gen=1
+    _la3_cp=0; [[ -s "$_MD/chk.out" ]] && _la3_cp=1
+    _la3_tmp=0
+    for _t in "$_MD"/chk.out.tmp.*; do [[ -e "$_t" ]] && _la3_tmp=1; done
+    _la3_facts="rc=$_la3_rc live=$_la3_live sent=$_la3_sent dead=$_la3_dead fatal=$_la3_fatal gen=$_la3_gen cp=$_la3_cp tmp=$_la3_tmp"
+
+    if (( _la3_dead == 1 )) && (( _la3_fatal == 1 )) && (( _la3_cp == 1 )) && (( _la3_rc != 0 )); then
         TEST_RESULTS["LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"]="PASS"
         _print_result PASS "LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"
         ((PASSED_TESTS++))
     else
         TEST_RESULTS["LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"]="FAIL"
-        _print_result FAIL "LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"
-        ((FAILED_TESTS++))
+        TEST_ERRORS["LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"]="$_la3_facts"
+        ((FAILED_TESTS++)); _print_result FAIL "LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)" "$_la3_facts"
     fi
 fi
 
