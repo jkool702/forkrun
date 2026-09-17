@@ -259,8 +259,15 @@ jobs:
       - name: Substrate canary (zero bash linkage)
         shell: bash
         run: |
-          sudo dnf install -y bash-devel gcc make file || true
-          make -f Makefile.substrate canary
+          # Fedora for everything: the link check runs in fedora:latest
+          # (native x86_64, no QEMU needed), where bash-devel exists —
+          # ubuntu runners carry no bash headers package. Canary artifacts
+          # are gitignored, so the workspace stays PR-clean.
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            fedora:latest \
+            bash -c 'dnf install -y bash-devel gcc make file && make -f Makefile.substrate canary'
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
