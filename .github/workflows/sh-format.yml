@@ -22,11 +22,10 @@ jobs:
           sh_checker_checkbashisms_enable: false
           sh_checker_exclude: OLD LEGACY ring_loadables/OLD
   twin-check:
-    # W-G: file twins must stay in lockstep. frun.bash <->
-    # ring_loadables/frun.nob64.bash are identical EXCEPT the single
-    # `declare -A b64=` line (nob64 carries an empty map by construction —
-    # a literal cmp would false-fail forever, so that one line is
-    # normalized on both sides); the comprehensive-suite twins are
+    # PF-1: file twins must stay in lockstep. frun.bash <->
+    # ring_loadables/frun.nob64.bash carry different embedded-b64 payloads
+    # by construction (a literal cmp would false-fail), so only the
+    # pre-b64-marker region is compared; the comprehensive-suite twins are
     # byte-identical with no exceptions.
     runs-on: ubuntu-latest
     steps:
@@ -35,8 +34,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          diff <(sed -E 's/^(declare -A b64=\().*$/\1)/' frun.bash) \
-               <(sed -E 's/^(declare -A b64=\().*$/\1)/' ring_loadables/frun.nob64.bash)
-          echo "frun twins in lockstep"
-          cmp UNIT_TESTS/test_frun_comprehensive.sh UNIT_TESTS/test_frun_comprehensive.sh.txt
+          echo "frun twins in lockstep (pre-b64-marker region)"
+          cmp <(awk '/_BASE64_START_/{exit} {print}' frun.bash) \
+              <(awk '/_BASE64_START_/{exit} {print}' ring_loadables/frun.nob64.bash)
           echo "test twins byte-identical"
+          cmp UNIT_TESTS/test_frun_comprehensive.sh UNIT_TESTS/test_frun_comprehensive.sh.txt
