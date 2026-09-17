@@ -278,3 +278,21 @@ Parked (non-release): the `.txt`-twin triplication decision (reference
 snapshot vs twin-check membership); NEW-D2/D3 folded into Stage 1 /
 convenience per the audit. aarch64 leg resumes after LA3 green with a
 re-synced copy (banked: basic 89/89, D 11/11, L-minus-LA3).
+
+## 19. Signal-state init race (R2/R10 exit=1 on the aarch64 leg)
+
+The emulated Section R failed exactly R2/R10 with exit=1/cp=yes (trap
+ran, checkpoint published, wrong code). Root cause: the reactor's
+`local _ret_val=0; local _fr_signalled=""` ran ~500 lines AFTER the
+pidfile readiness write, so a signal landing in the spawn window had
+its trap-recorded values reset before the ABORT case read them —
+falling into the reason≠1 arm (exit 1). Deterministic where the spawn
+window spans seconds (emulation), rare natively (millisecond window),
+which is the whole arch split. Fix, both frun twins, no blob impact:
+initialize the two locals immediately before the pidfile write (with a
+do-not-move-back comment at the old site). Verified: x86_64 Section R
+13/13 unchanged, emulated Section R 11/13 → **13/13** (R2/R10 at
+138/143), `-L 100` spot-check 10×100 on aarch64. Full aarch64 UMA leg
+now green: basic 89/89, D 11/11, L 57/57 (LA3 in-suite), T 21/21,
+M 21/21, F 8/8, R 13/13. NUMA-topology portion still waits on the
+`numa=fake=4` reboot.

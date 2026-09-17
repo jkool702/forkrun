@@ -1391,6 +1391,14 @@ _forkrun_checkpoint_signal() {
         # signal traps are guaranteed installed, so signal tests wait on the
         # file instead of sleeping and guessing PIDs (a signal arriving before
         # trap installation was R10's clean-143-without-checkpoint failure).
+        # The signal-state locals MUST be initialized before this write: the
+        # reactor's own `local _ret_val=0; local _fr_signalled=""` used to run
+        # ~500 lines later, so a signal landing in the spawn window had its
+        # trap-recorded values reset to ""/0 and the abort exited 1 with a
+        # checkpoint instead of the trapped code (deterministic on slow
+        # targets where the spawn window spans seconds; rare natively).
+        local _ret_val=0
+        local _fr_signalled=""
         [[ -n "${FORKRUN_TEST_CLEANROOM_PIDFILE:-}" ]] && echo "$BASHPID" > "$FORKRUN_TEST_CLEANROOM_PIDFILE"
         ring_pipe fd_spawn_r fd_spawn_w
 
@@ -1909,8 +1917,9 @@ W_NODE[$3]=$2
 
         local -A trap_ack_pending
         local _poll_timer_cmd=""
-        local _ret_val=0
-        local _fr_signalled=""
+        # NOTE: `local _ret_val` / `local _fr_signalled` are initialized up
+        # at the pidfile readiness write (they must predate it); re-declaring
+        # them here would reset trap-recorded signal state. Do not add back.
         local -a POISONED_BATCHES=()
 
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
