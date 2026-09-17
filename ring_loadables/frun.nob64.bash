@@ -1391,7 +1391,7 @@ _forkrun_checkpoint_signal() {
         # signal traps are guaranteed installed, so signal tests wait on the
         # file instead of sleeping and guessing PIDs (a signal arriving before
         # trap installation was R10's clean-143-without-checkpoint failure).
-        [[ -n "${FORKRUN_TEST_CLEANROOM_PIDFILE:-}" ]] && echo "$$" > "$FORKRUN_TEST_CLEANROOM_PIDFILE"
+        [[ -n "${FORKRUN_TEST_CLEANROOM_PIDFILE:-}" ]] && echo "$BASHPID" > "$FORKRUN_TEST_CLEANROOM_PIDFILE"
         ring_pipe fd_spawn_r fd_spawn_w
 
         # SPAWN BACKGROUND PROCESSES
