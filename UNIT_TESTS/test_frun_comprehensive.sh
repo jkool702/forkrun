@@ -58,8 +58,8 @@ fi
 
 # Version Pin & Run Stamp at top of comprehensive suite:
 FRUN_VER="$(bash -c "source '$FRUN_SOURCE' && frun -V" 2>/dev/null || echo 'unknown')"
-if [[ "$FRUN_VER" != "forkrun v3.5.0" ]]; then
-    echo "FATAL: Comprehensive suite requires 'forkrun v3.5.0', got '$FRUN_VER'" >&2
+if [[ "$FRUN_VER" != "forkrun v3.5.1" ]]; then
+    echo "FATAL: Comprehensive suite requires 'forkrun v3.5.1', got '$FRUN_VER'" >&2
     exit 1
 fi
 echo "==================================================================" >&2
@@ -861,6 +861,34 @@ EOF
     fi
 fi
 
+
+# --- F8: -L + -n budget clamp exactness across 2 nodes (W-E lock-in) ---
+# Exercises the F28 need-clamp/budget arms: -L 4 -n 37 (partial final batch),
+# -L 7 -n 37, and -L 100 -n 37 (L > n: clamp from the first batch). All must
+# deliver exactly lines 1..37 in order under -k.
+# NEW-D1: @2 is forced-count — plain --nodes=2 silently degrades to UMA on
+# single-socket hosts, which would never enter the is_numa handoff arms.
+if in_section F; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/batch_F8"; mkdir -p "$_MD"
+    _f8_fail=""
+    for _L in 4 7 100; do
+        _got="$(bash -c "cd '$_MD'; source '$FRUN_SOURCE'; seq 200 | frun --nodes=@2 -L $_L -n 37 -k printf '%s\n'" 2>/dev/null)"
+        if [[ "$_got" != "$(seq 37)" ]]; then
+            _f8_fail+=" L=$_L(got $(echo "$_got" | wc -l | tr -d ' ') lines);"
+        fi
+    done
+    if [[ -z "$_f8_fail" ]]; then
+        TEST_RESULTS["F8: -L + -n clamp exact (L=4/7/100, n=37)"]="PASS"
+        _print_result PASS "F8: -L + -n clamp exact (L=4/7/100, n=37)"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["F8: -L + -n clamp exact (L=4/7/100, n=37)"]="FAIL"
+        TEST_ERRORS["F8: -L + -n clamp exact (L=4/7/100, n=37)"]="$_f8_fail"
+        _print_result FAIL "F8: -L + -n clamp exact (L=4/7/100, n=37)" "$_f8_fail"
+        ((FAILED_TESTS++))
+    fi
+fi
 
 print_section G "Sequential Invocations: Ring Reuse"
 
@@ -1675,6 +1703,236 @@ if in_section L; then
     fi
 fi
 
+# ----------
+# LA3: Indexer violent death (SIGKILL) — NUMA only. The kernel-observable
+# death pipe (POLLHUP on the orchestrator-held read end) is the ONLY
+# detector: SIGKILL/OOM runs no exit code, so `|| ring_abort` and traps
+# structurally cannot fire. An indexer death loses chunk-boundary alignment
+# (only the indexer publishes actual_end), so the reactor MUST fail loud:
+# FATAL + ring_abort → checkpoint + non-zero exit, never a silent clean exit.
+# D6 lock-in: uses FORKRUN_TEST_INDEXER_PIDFILE (FORKRUN_TEST_FALLOW_PIDFILE
+# pattern; appended to FORKRUN_EXTRA_VARS so it survives the exec -c
+# cleanroom). head -n 1: one pidfile line per indexer slot.
+# W-LA3 design notes (read before touching this test):
+# - Payload MUST be line-args safe. The old `sleep 0.01` summed batch
+#   lines as durations (batch 1 ≈ 84 min) and wedged every time budget —
+#   the "hang" was work, not a wedge. printf exercises the orderer instead.
+# - Feeder MUST NOT terminate: indexers exit status-0 at ingest EOF (the
+#   healthy lifecycle), so a finite `seq` lets them die naturally before
+#   the kill lands. The endless feeder keeps them killable indefinitely
+#   (it EPIPEs via `|| break` and dies on the abort).
+# - Kill MUST be liveness-gated: kill -0 before AND death-verified after,
+#   or a pre-dead/recycled pid makes the failure uninterpretable. The five
+#   facts below make every future failure self-classify.
+# ----------
+if in_section L; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/indexer_death"; mkdir -p "$_MD"
+    rm -f "$_MD/indexer.pid" "$_MD/chk.out" "$_MD/err.txt" "$_MD/facts.sh"
+
+    (
+        export FORKRUN_TEST_INDEXER_PIDFILE="$_MD/indexer.pid"
+        # @2 = forced-count syntax: oversubscribes 2 logical nodes onto the
+        # physical nodes. Plain --nodes=2 silently degrades to UMA on
+        # single-socket hosts (no indexers exist there), which would make
+        # this test vacuous — @2 guarantees the indexer path runs.
+        timeout -s KILL 60 bash -c "source '$FRUN_SOURCE';
+            ( while :; do seq 100000 || break; done ) | frun --nodes=@2 -k -l 100 --checkpoint-file '$_MD/chk.out' printf '%s\n'" &
+        WPID=$!
+        # Wait for BOTH indexer pids (two lines), bounded.
+        _waited=0
+        while (( $(wc -l < "$_MD/indexer.pid" 2>/dev/null || echo 0) < 2 )) && (( _waited < 3000 )); do
+            sleep 0.01; (( _waited++ ))
+        done
+        sleep 1  # kill at t≈+1s into steady state
+        _victim="$(head -n 1 "$_MD/indexer.pid" 2>/dev/null)"
+        _la3_live=0; _la3_sent=0; _la3_dead=0
+        if [[ -n "$_victim" ]] && kill -0 "$_victim" 2>/dev/null; then
+            _la3_live=1
+            if kill -9 "$_victim" 2>/dev/null; then
+                _la3_sent=1
+                _k=0
+                while kill -0 "$_victim" 2>/dev/null && (( _k < 200 )); do
+                    sleep 0.01; ((_k++))
+                done
+                kill -0 "$_victim" 2>/dev/null || _la3_dead=1
+            fi
+        fi
+        wait $WPID 2>/dev/null; _la3_rc=$?
+        declare -p _la3_rc _la3_live _la3_sent _la3_dead > "$_MD/facts.sh"
+    ) >/dev/null 2>"$_MD/err.txt" || true
+
+    _la3_rc=137 _la3_live=0 _la3_sent=0 _la3_dead=0
+    [[ -f "$_MD/facts.sh" ]] && source "$_MD/facts.sh"
+    _la3_fatal=0; grep -q "died unexpectedly" "$_MD/err.txt" 2>/dev/null && _la3_fatal=1
+    _la3_gen=0; grep -q "Generating checkpoint" "$_MD/err.txt" 2>/dev/null && _la3_gen=1
+    _la3_cp=0; [[ -s "$_MD/chk.out" ]] && _la3_cp=1
+    _la3_tmp=0
+    for _t in "$_MD"/chk.out.tmp.*; do [[ -e "$_t" ]] && _la3_tmp=1; done
+    _la3_facts="rc=$_la3_rc live=$_la3_live sent=$_la3_sent dead=$_la3_dead fatal=$_la3_fatal gen=$_la3_gen cp=$_la3_cp tmp=$_la3_tmp"
+
+    if (( _la3_dead == 1 )) && (( _la3_fatal == 1 )) && (( _la3_cp == 1 )) && (( _la3_rc != 0 )); then
+        TEST_RESULTS["LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"]="PASS"
+        _print_result PASS "LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"]="FAIL"
+        TEST_ERRORS["LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)"]="$_la3_facts"
+        ((FAILED_TESTS++)); _print_result FAIL "LA3: Indexer SIGKILL fails loud (FATAL + checkpoint)" "$_la3_facts"
+    fi
+fi
+
+# ----------
+# LA4 (D6): a clean early-exit must NOT be misclassified as an indexer
+# death. On ANY pipeline abort the indexer's own emergency path exits
+# non-zero (ring_indexer_numa returns EXECUTION_FAILURE when it observes
+# the alarm); the handler used to classify that as a death — spurious FATAL
+# on every clean reason-1 exit, and SLURM 143 clobbered to 1. Post-fix the
+# classification is abort-aware: `| head` exits 0 with NO indexer FATAL.
+# ----------
+if in_section L; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/indexer_clean_abort"; mkdir -p "$_MD"
+    # @2 = forced-count syntax: guarantees the NUMA indexer path runs even
+    # on single-socket hosts (plain --nodes=2 degrades to UMA there).
+    _la4_out="$(timeout -s KILL 60 bash -c "set -o pipefail; source '$FRUN_SOURCE';
+        seq 100000 | frun --nodes=@2 -k printf '%s\n' | head -n 5" 2>"$_MD/err.txt")"
+    _la4_rc=$?
+    if (( _la4_rc == 0 )) && [[ "$(wc -l <<<"$_la4_out")" -eq 5 ]] \
+        && ! grep -q "Indexer .* died unexpectedly" "$_MD/err.txt"; then
+        TEST_RESULTS["LA4: Clean abort emits no spurious indexer FATAL"]="PASS"
+        _print_result PASS "LA4: Clean abort emits no spurious indexer FATAL"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["LA4: Clean abort emits no spurious indexer FATAL"]="FAIL"
+        _print_result FAIL "LA4: Clean abort emits no spurious indexer FATAL"
+        ((FAILED_TESTS++))
+    fi
+fi
+
+# ----------
+# F15: NUMA steal over-claim must not orphan the thief's own chunks at EOF.
+# A thief that over-claims the victim's queue used to exit outright; chunks
+# published to the thief's OWN queue since (indexer lag; ingest's
+# min-backlog routing feeds empty nodes) were then orphaned — successor
+# waiters hung, ordered mode truncated, -L hung at the handoff gate. Post-fix
+# the over-claim re-checks the own queue (continue); termination routes
+# through the Instant NUMA Tear-down path, which converges at global EOF.
+# Correctness is structural, not empirical: at global EOF no new publishes
+# occur, so the loop either finds own-queue work (finite) or tears down.
+# ----------
+# F15a (permanent): chunk-conservation assertion. Every published chunk is
+# processed exactly once, and every steal is accounted on both sides:
+# S(assigned) == S(processed), S(I stole) == S(stolen from me), parsed from
+# the per-node --stats telemetry on stderr, across {file, pipe} x {@2, @4}
+# x {default, -s}. rc==0 + byte-exact output is required unconditionally:
+# every F15 manifestation breaks one of them (orphaned chunks = missing
+# bytes; successor/handoff hangs = timeout rc). Telemetry balance is
+# asserted in EVERY combo: post-reactor stderr must carry Node frames.
+# (D8: the INDEXER_DEATH handler's bare `exec ... 2>/dev/null` persistently
+# redirected fd 2 to /dev/null, swallowing telemetry/verbose/checkpoint
+# hints in default mode. Fixed by matching SCAN_DEATH's close form; the
+# earlier "pre-existing flake" attribution was wrong.)
+# ----------
+if in_section L; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/f15_conservation"; mkdir -p "$_MD"
+    seq 50000 > "$_MD/input.txt"
+    _f15_fail=""
+    for _src in file pipe; do
+        for _nodes in @2 @4; do
+            for _mode in default s; do
+                rm -f "$_MD/out.txt" "$_MD/err.txt"
+                if [[ "$_mode" == s ]]; then
+                    _f15_cmd="frun --nodes=$_nodes --stats -k -s cat"
+                else
+                    _f15_cmd="frun --nodes=$_nodes --stats -k printf '%s\n'"
+                fi
+                if [[ "$_src" == file ]]; then
+                    timeout -s KILL 120 bash -c "source '$FRUN_SOURCE'; $_f15_cmd < '$_MD/input.txt' > '$_MD/out.txt' 2> '$_MD/err.txt'"
+                else
+                    timeout -s KILL 120 bash -c "source '$FRUN_SOURCE'; cat '$_MD/input.txt' | $_f15_cmd > '$_MD/out.txt' 2> '$_MD/err.txt'"
+                fi
+                _f15_rc=$?
+                if (( _f15_rc != 0 )) \
+                    || ! diff -q "$_MD/input.txt" "$_MD/out.txt" &>/dev/null; then
+                    _f15_fail+=" src=$_src nodes=$_nodes mode=$_mode"
+                    _f15_fail+=" (rc=$_f15_rc output-mismatch-or-timeout);"
+                    continue
+                fi
+                if ! grep -qE 'Node [0-9]+ \(Phys' "$_MD/err.txt" 2>/dev/null; then
+                    _f15_fail+=" src=$_src nodes=$_nodes mode=$_mode"
+                    _f15_fail+=" (rc=$_f15_rc missing-Node-telemetry-frames);"
+                    continue
+                fi
+                _sa=$(grep -oE '[0-9]+ assigned' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                _sp=$(grep -oE '[0-9]+ processed' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                _ss=$(grep -oE '[0-9]+ I stole' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                _sf=$(grep -oE '[0-9]+ stolen from me' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+                if (( _sa <= 0 )) || (( _sa != _sp )) || (( _ss != _sf )); then
+                    _f15_fail+=" src=$_src nodes=$_nodes mode=$_mode"
+                    _f15_fail+=" (rc=$_f15_rc a=$_sa p=$_sp s=$_ss f=$_sf);"
+                fi
+            done
+        done
+    done
+    if [[ -z "$_f15_fail" ]]; then
+        TEST_RESULTS["F15a: NUMA chunk conservation (assigned==processed, steals balance)"]="PASS"
+        _print_result PASS "F15a: NUMA chunk conservation (assigned==processed, steals balance)"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["F15a: NUMA chunk conservation (assigned==processed, steals balance)"]="FAIL"
+        TEST_ERRORS["F15a: NUMA chunk conservation (assigned==processed, steals balance)"]="$_f15_fail"
+        ((FAILED_TESTS++)); _print_result FAIL "F15a: NUMA chunk conservation (assigned==processed, steals balance)" "$_f15_fail"
+    fi
+fi
+
+# ----------
+# F15b: EOF-herd stress. Pipe input drains fast (the config that measured
+# ~10% steals); the ingest-EOF blast wakes all scanners at exactly the
+# moment ingest can no longer backfill over-claims — the worst point for the
+# orphan window. 10 iterations of >=1M lines. rc==0 + byte-exact is required
+# every iteration (hangs and truncations both fail here); telemetry balance
+# is asserted every iteration with Node frames required (D8 — see F15a).
+# Honest scope: the pre-fix race is narrow, so this is a regression net, not
+# a proof — the justification is the structural argument above.
+# ----------
+if in_section L; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/f15_herd"; mkdir -p "$_MD"
+    seq 1000000 > "$_MD/input.txt"
+    _f15_fail=""
+    for (( _it=1; _it<=10; _it++ )); do
+        rm -f "$_MD/out.txt" "$_MD/err.txt"
+        timeout -s KILL 180 bash -c "source '$FRUN_SOURCE'; cat '$_MD/input.txt' | frun --nodes=@4 --stats -k printf '%s\n' > '$_MD/out.txt' 2> '$_MD/err.txt'"
+        _f15_rc=$?
+        if (( _f15_rc != 0 )) || ! cmp -s "$_MD/input.txt" "$_MD/out.txt"; then
+            _f15_fail+=" iter=$_it (rc=$_f15_rc output-mismatch-or-timeout);"
+            continue
+        fi
+        if ! grep -qE 'Node [0-9]+ \(Phys' "$_MD/err.txt" 2>/dev/null; then
+            _f15_fail+=" iter=$_it (rc=$_f15_rc missing-Node-telemetry-frames);"
+            continue
+        fi
+        _sa=$(grep -oE '[0-9]+ assigned' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+        _sp=$(grep -oE '[0-9]+ processed' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+        _ss=$(grep -oE '[0-9]+ I stole' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+        _sf=$(grep -oE '[0-9]+ stolen from me' "$_MD/err.txt" 2>/dev/null | awk '{s+=$1} END{print s+0}')
+        if (( _sa <= 0 )) || (( _sa != _sp )) || (( _ss != _sf )); then
+            _f15_fail+=" iter=$_it (rc=$_f15_rc a=$_sa p=$_sp s=$_ss f=$_sf);"
+        fi
+    done
+    if [[ -z "$_f15_fail" ]]; then
+        TEST_RESULTS["F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)"]="PASS"
+        _print_result PASS "F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)"
+        ((PASSED_TESTS++))
+    else
+        TEST_RESULTS["F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)"]="FAIL"
+        TEST_ERRORS["F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)"]="$_f15_fail"
+        ((FAILED_TESTS++)); _print_result FAIL "F15b: EOF-herd stress (10x 1M-line pipe, @4, byte-exact)" "$_f15_fail"
+    fi
+fi
+
 
 # ============================================================================
 # SECTION M: Checkpoint & Resume
@@ -2418,7 +2676,11 @@ FUNCEOF
         head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/output1_trunc.txt"
 
         # The truncated output should end with a newline (no partial lines)
-        _MLAST=$(tail -c 1 "$_MD/output1_trunc.txt" | xxd -p)
+        # od, NOT xxd: xxd ships in vim-common and is absent from minimal
+        # QEMU/container rootfs images, so the last-byte CHECK went blind on
+        # the aarch64 leg (M16) while the truncation itself was correct.
+        # `od -An -tx1` is POSIX and always present.
+        _MLAST=$(tail -c 1 "$_MD/output1_trunc.txt" | od -An -tx1 | tr -d ' \n')
         _MLINES=$(wc -l < "$_MD/output1_trunc.txt" | tr -d ' ')
 
         if [[ "$_MLAST" == "0a" ]] && (( _MLINES > 0 )); then
@@ -2439,49 +2701,8 @@ FUNCEOF
     fi
 fi
 
-# --- M17-M21 Batch 3 additions ---
+# --- M18-M19 Batch 3 additions (M17/M20/M21 live below as diagnostic variants) ---
 if in_section M; then
-    # M17: 3-generation resume maintaining cumulative ledger
-    ((TOTAL_TESTS++))
-    _MD="$TEST_DIR/resume_M17"; mkdir -p "$_MD"
-    seq 3000 > "$_MD/input.txt"; rm -f "$_MD/m17.chk" "$_MD/.m17a" "$_MD/.m17b" "$_MD/out.txt"
-    cat > "$_MD/funcs.sh" << 'EOF'
-m17_worker() {
-    for a in "$@"; do
-        if (( a == 1000 )) && ! [[ -f ./.m17a ]]; then
-            touch ./.m17a; kill -9 $BASHPID
-        elif (( a == 2000 )) && [[ -f m17.chk ]] && ! [[ -f ./.m17b ]]; then
-            touch ./.m17b; kill -9 $BASHPID
-        else
-            echo "$a"
-        fi
-    done
-}
-EOF
-    # Gen 1
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k -l 1 --checkpoint-file m17.chk m17_worker" > "$_MD/out.txt" 2>"$_MD/err1.txt" || true
-    _MB1=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
-    [[ -n "$_MB1" ]] && { head -c "$_MB1" "$_MD/out.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/out.txt"; }
-
-    # Gen 2
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k -l 1 --resume m17.chk --checkpoint-file m17.chk m17_worker" >> "$_MD/out.txt" 2>"$_MD/err2.txt" || true
-    _MB2=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err2.txt" 2>/dev/null || echo "")
-    [[ -n "$_MB2" ]] && { head -c "$_MB2" "$_MD/out.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/out.txt"; }
-
-    # Gen 3
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m17_worker' frun -k -l 1 --resume m17.chk --checkpoint-file m17.chk m17_worker" >> "$_MD/out.txt" 2>/dev/null
-
-    #for nn in "$_MD"/*.txt; do printf '\n--------------\n%s\n\n' "$nn"; cat "$nn"; done
-
-    if diff -q "$_MD/input.txt" "$_MD/out.txt" &>/dev/null; then
-        TEST_RESULTS["M17: 3-generation resume maintains cumulative ledger"]="PASS"
-        _print_result PASS "M17: 3-generation resume maintains cumulative ledger"
-        ((PASSED_TESTS++))
-    else
-        TEST_RESULTS["M17: 3-generation resume maintains cumulative ledger"]="FAIL"
-        _print_result FAIL "M17: 3-generation resume maintains cumulative ledger"
-        ((FAILED_TESTS++))
-    fi
 
     # M18: Clean no-op resume when horizon == EOF
     ((TOTAL_TESTS++))
@@ -2512,68 +2733,7 @@ EOF
      seq 10 | frun -k --resume '$TEST_DIR/m19.chk' cat" \
     "Resume sync failed" 0 true
 
-    # M20: Full-auto happy-path resume (no command supplied on resume)
-    ((TOTAL_TESTS++))
-    _MD="$TEST_DIR/resume_M20"; mkdir -p "$_MD"
-    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume" "$_MD/.m20a" "$_MD/output.txt"
-    cat > "$_MD/funcs.sh" << 'EOF'
-m20_worker() {
-    for a in "$@"; do
-        if (( a == 500 )) && ! [[ -f ./.m20a ]]; then
-            touch ./.m20a; kill -9 $BASHPID
-        else
-            echo "$a"
-        fi
-    done
-}
-EOF
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m20_worker' frun -k -l 1 m20_worker" > "$_MD/output.txt" 2>"$_MD/err.txt" || true
-    _MB=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err.txt" 2>/dev/null || echo "")
-    [[ -n "$_MB" ]] && { head -c "$_MB" "$_MD/output.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/output.txt"; }
-    cat "$_MD/err.txt"
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; cat input.txt | FORKRUN_TRUST_RESUME=1 frun --resume .forkrun_resume" >> "$_MD/output.txt" 2>/dev/null
-
-    if diff -q "$_MD/input.txt" "$_MD/output.txt" &>/dev/null; then
-        TEST_RESULTS["M20: Full-auto resume extracts and re-executes command exactly-once"]="PASS"
-        _print_result PASS "M20: Full-auto resume extracts and re-executes command exactly-once"
-        ((PASSED_TESTS++))
-    else
-        TEST_RESULTS["M20: Full-auto resume extracts and re-executes command exactly-once"]="FAIL"
-        _print_result FAIL "M20: Full-auto resume extracts and re-executes command exactly-once"
-        ((FAILED_TESTS++))
-    fi
-
-    # M21: Full-auto resume reconstructs functions through sandbox (P2-1 verification)
-    ((TOTAL_TESTS++))
-    _MD="$TEST_DIR/resume_M21"; mkdir -p "$_MD"
-    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume" "$_MD/.m21a" "$_MD/output.txt"
-    cat > "$_MD/funcs.sh" << 'EOF'
-m21_tag() {
-    for a in "$@"; do
-        if (( a == 400 )) && ! [[ -f ./.m21a ]]; then
-            touch ./.m21a; kill -9 $BASHPID
-        else
-            printf 'F:%s\n' "$a"
-        fi
-    done
-}
-EOF
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='m21_tag' frun -k -l 1 m21_tag" > "$_MD/output.txt" 2>"$_MD/err.txt" || true
-    _MB=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err.txt" 2>/dev/null || echo "")
-    [[ -n "$_MB" ]] && { head -c "$_MB" "$_MD/output.txt" > "$_MD/ot.txt" && mv "$_MD/ot.txt" "$_MD/output.txt"; }
-
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; cat input.txt | FORKRUN_TRUST_RESUME=1 frun --resume .forkrun_resume" >> "$_MD/output.txt" 2>/dev/null
-
-    if diff -q <(seq 1000 | sed 's/^/F:/') "$_MD/output.txt" &>/dev/null; then
-        TEST_RESULTS["M21: Full-auto resume reconstructs functions through sandbox"]="PASS"
-        _print_result PASS "M21: Full-auto resume reconstructs functions through sandbox"
-        ((PASSED_TESTS++))
-    else
-        TEST_RESULTS["M21: Full-auto resume reconstructs functions through sandbox"]="FAIL"
-        _print_result FAIL "M21: Full-auto resume reconstructs functions through sandbox"
-        ((FAILED_TESTS++))
-    fi
 fi
 
     # M17: 3-generation resume maintaining cumulative ledger
@@ -2718,10 +2878,6 @@ FUNCEOF
 
     _S2L=$(wc -l < "$_MD/output.txt")
     _CKPT=$([[ -s "$_MD/.forkrun_resume" ]] && echo "present(after S1)" || echo "absent-after-S1")
-    MD=$(ls -dt /tmp/tmp.*/resume_M20 | head -1)
-wc -l "$MD/output.txt" "$MD/input.txt"
-diff "$MD/input.txt" "$MD/output.txt" | head
-tail -3 "$MD/output.txt"
     if diff -q "$_MD/input.txt" "$_MD/output.txt" &>/dev/null; then
         TEST_RESULTS["M20: Full-auto resume extracts and re-executes command exactly-once"]="PASS"
         _print_result PASS "M20: Full-auto resume extracts and re-executes command exactly-once"
@@ -3373,16 +3529,21 @@ run_test_exact R "R1: TUI flag accepted and pipeline completes (headless safe)" 
     "$(seq 10)"
 
 # --- R2: SLURM SIGUSR1 triggers checkpoint and exit 138 ---
+# W-B: deterministic targeting via FORKRUN_TEST_CLEANROOM_PIDFILE. The pidfile
+# write doubles as a readiness signal (traps installed), so wait on the file
+# instead of sleeping and guessing PIDs. --nodes=@2 runs indexers, locking in
+# D6's exit-code preservation (138, not 1) under NUMA.
 if in_section R; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/R_SLURM"; mkdir -p "$_MD"
-    seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume" "$_MD/cleanroom.pid"
 
     # FIXED: Added -s so sleep reads from stdin and actually sleeps, keeping frun alive.
-    # Use pgrep to find the cleanroom bash (child of FPID) and signal it directly
-    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 frun -k -s -l 1 sleep 0.1 & FPID=\$!; sleep 0.3; CPID=\$(ps -o pid= --ppid \$FPID 2>/dev/null | tr -d ' '); [[ -n \"\$CPID\" ]] && (( CPID = CPID + 3 )) && kill -USR1 \$CPID; wait \$FPID" \
+    export FORKRUN_TEST_CLEANROOM_PIDFILE="$_MD/cleanroom.pid"
+    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 FORKRUN_TEST_CLEANROOM_PIDFILE='$_MD/cleanroom.pid' frun --nodes=@2 -k -s -l 1 sleep 0.1 & FPID=\$!; for (( _w=0; _w<1000; _w++ )); do [[ -f '$_MD/cleanroom.pid' ]] && break; sleep 0.01; done; kill -USR1 \$(cat '$_MD/cleanroom.pid'); wait \$FPID" \
         > "$_MD/output.txt" 2>"$_MD/err.txt"
     _REXIT=$?
+    unset FORKRUN_TEST_CLEANROOM_PIDFILE
 
     if (( _REXIT == 138 )) && [[ -f "$_MD/.forkrun_resume" ]] && grep -q "Caught SIGUSR1" "$_MD/err.txt"; then
         TEST_RESULTS["R2: SLURM SIGUSR1 triggers checkpoint and exit 138"]="PASS"; ((PASSED_TESTS++))
@@ -3560,14 +3721,18 @@ fi
 
 # --- R10: SLURM SIGTERM triggers checkpoint and exit 143 ---
 # Verifies that standard SLURM scancel/preemption (SIGTERM) is caught and handled identically to SIGUSR1
+# W-B: deterministic targeting via FORKRUN_TEST_CLEANROOM_PIDFILE (see R2).
+# --nodes=@2 runs indexers, locking in D6's exit-code preservation (143, not 1).
 if in_section R; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/R_SLURM_TERM"; mkdir -p "$_MD"
-    seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 10000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume" "$_MD/cleanroom.pid"
 
-    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 frun -k -s -l 1 sleep 0.1 & FPID=\$!; sleep 0.3; CPID=\$(ps -o pid= --ppid \$FPID 2>/dev/null | tr -d ' '); [[ -n \"\$CPID\" ]] && (( CPID = CPID + 3 )) && kill -TERM \$CPID 2>/dev/null || kill -TERM \$FPID 2>/dev/null; wait \$FPID" \
+    export FORKRUN_TEST_CLEANROOM_PIDFILE="$_MD/cleanroom.pid"
+    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_PREEMPT_MODE=1 FORKRUN_TEST_CLEANROOM_PIDFILE='$_MD/cleanroom.pid' frun --nodes=@2 -k -s -l 1 sleep 0.1 & FPID=\$!; for (( _w=0; _w<1000; _w++ )); do [[ -f '$_MD/cleanroom.pid' ]] && break; sleep 0.01; done; kill -TERM \$(cat '$_MD/cleanroom.pid'); wait \$FPID" \
         > "$_MD/output.txt" 2>"$_MD/err.txt"
     _REXIT=$?
+    unset FORKRUN_TEST_CLEANROOM_PIDFILE
 
     if (( _REXIT == 143 )) && [[ -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["R10: SLURM SIGTERM triggers checkpoint and exit 143"]="PASS"; ((PASSED_TESTS++))
@@ -3669,8 +3834,8 @@ print_section T "Adversarial & Periphery (resume sandbox, fd hygiene, extremes)"
 # The resume file backgrounds a pure-builtin orphan that waits for the sandbox
 # to print its boundary, then appends a payload line to the same captured
 # stdout. The payload must NEVER execute in the cleanroom (no marker file).
-# NOTE: this is the acceptance test for the token+end-token hardening.
-#       It is EXPECTED TO FAIL until that patch lands.
+# NOTE: acceptance test for the token+end-token hardening (landed: A-C).
+# T1a covers the no-token-knowledge orphan; T1a-ext covers token knowledge.
 if in_section T; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/T1a"; mkdir -p "$_MD"
@@ -3973,6 +4138,244 @@ EOF
 fi
 
 
+# --- T1g: positional-token forgery (early exit over $2-$5) ---
+# The resume body prints the sandbox positionals and exits before the EXIT
+# trap is installed. Post-fix the frame tokens are bound to readonly names
+# and shifted away on entry, so an early-exit forger emits token-less output
+# the parent rejects fail-closed. Assert rejection + marker absent.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1g"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1g.chk"
+cat <<'EOF' > "$_MD/t1g.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+printf '%s\n%s\n%s\n%s\n%s\n' "$2" "touch __MARK__" "$3" "$4" "" "$5"; exit 0
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1g.chk"
+    timeout 60 bash -c "source '$FRUN_SOURCE' && printf 'a\n' | frun --resume '$_MD/t1g.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if [[ ! -f "$_MARK" ]] && (( _TX != 0 )) && grep -q "verification failed" "$_MD/err.txt"; then
+        TEST_RESULTS["T1g: positional-token forgery rejected fail-closed"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1g: positional-token forgery rejected fail-closed"
+    else
+        TEST_RESULTS["T1g: positional-token forgery rejected fail-closed"]="FAIL"
+        TEST_ERRORS["T1g: positional-token forgery rejected fail-closed"]="marker=$([[ -f "$_MARK" ]] && echo PRESENT || echo absent) rc=$_TX"
+        ((FAILED_TESTS++)); _print_result FAIL "T1g: positional-token forgery rejected fail-closed" "marker present or not rejected"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- T1h: cmdline-token forgery, strongest form (re-render neutralization) ---
+# The body scrapes the four ___FORKRUN_*___ tokens from /proc/self/cmdline
+# (the positional close cannot remove kernel argv), emits a token-bounded
+# vars frame carrying an UNESCAPED declare-shaped substitution plus a benign
+# ORIG_ARGS, and exits before the trap. The shape filter passes it, but the
+# PATH-dead restricted re-render neutralizes the substitution; the parent
+# evals only the escaped form and runs the benign command. Assert rc==0
+# (deterministic termination via the benign ORIG_ARGS) + marker absent.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1h"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1h.chk"
+cat <<'EOF' > "$_MD/t1h.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+_v=""; _ve=""; _f2=""; _fe=""
+while IFS= read -r -d '' _f; do
+  case "$_f" in
+    ___FORKRUN_FNEND_*) _fe="$_f";;
+    ___FORKRUN_FN_*) _f2="$_f";;
+    ___FORKRUN_END_*) _ve="$_f";;
+    ___FORKRUN_ENV_*) _v="$_f";;
+  esac
+done < /proc/self/cmdline
+printf '%s\n%s\n%s\n%s\n' "$_v" "declare -a FORKRUN_ORIG_ARGS=('/bin/true')" 'declare -x FORKRUN_EXTRA_SETUP="$(touch __MARK__)"' "$_ve"
+printf '%s\n\n%s\n' "$_f2" "$_fe"
+exit 0
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1h.chk"
+    timeout 60 bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1h.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if [[ ! -f "$_MARK" ]] && (( _TX == 0 )); then
+        TEST_RESULTS["T1h: cmdline-token forgery neutralized by re-render"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1h: cmdline-token forgery neutralized by re-render"
+    else
+        TEST_RESULTS["T1h: cmdline-token forgery neutralized by re-render"]="FAIL"
+        TEST_ERRORS["T1h: cmdline-token forgery neutralized by re-render"]="marker=$([[ -f "$_MARK" ]] && echo PRESENT || echo absent) rc=$_TX"
+        ((FAILED_TESTS++)); _print_result FAIL "T1h: cmdline-token forgery neutralized by re-render" "marker present or rc!=0"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- T1i(i): non-overblocking — plain setup declare reaches the layer-3 gate ---
+# A token-bounded `declare -- FORKRUN_EXTRA_SETUP="echo SETUP_RAN"` (no
+# substitution, early exit) must NOT trip the shape filter: it round-trips
+# the re-render identically, lands in the parent, and aborts at the layer-3
+# consent gate. Headless: "Custom setup commands detected". Nothing executes.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1i1"; mkdir -p "$_MD"
+    rm -f "$_MD/t1i1.chk"
+cat <<'EOF' > "$_MD/t1i1.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+_v=""; _ve=""; _f2=""; _fe=""
+while IFS= read -r -d '' _f; do
+  case "$_f" in
+    ___FORKRUN_FNEND_*) _fe="$_f";;
+    ___FORKRUN_FN_*) _f2="$_f";;
+    ___FORKRUN_END_*) _ve="$_f";;
+    ___FORKRUN_ENV_*) _v="$_f";;
+  esac
+done < /proc/self/cmdline
+printf '%s\n%s\n%s\n' "$_v" 'declare -- FORKRUN_EXTRA_SETUP="echo SETUP_RAN"' "$_ve"
+printf '%s\n\n%s\n' "$_f2" "$_fe"
+exit 0
+EOF
+    timeout 60 setsid bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1i1.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if (( _TX != 0 )) && grep -q "Custom setup commands detected" "$_MD/err.txt" \
+        && ! grep -q "verification failed" "$_MD/err.txt"; then
+        TEST_RESULTS["T1i(i): plain setup declare reaches layer-3 gate (no overblock)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1i(i): plain setup declare reaches layer-3 gate (no overblock)"
+    else
+        TEST_RESULTS["T1i(i): plain setup declare reaches layer-3 gate (no overblock)"]="FAIL"
+        TEST_ERRORS["T1i(i): plain setup declare reaches layer-3 gate (no overblock)"]="rc=$_TX gate=$(grep -c 'Custom setup commands detected' "$_MD/err.txt")"
+        ((FAILED_TESTS++)); _print_result FAIL "T1i(i): plain setup declare reaches layer-3 gate (no overblock)" "gate not reached or shape overblocked"
+    fi
+fi
+
+# --- T1i(ii): non-overblocking — escaped substitution stays a literal ---
+# `declare -- X="\$(touch MARK)"` round-trips the re-render byte-identical
+# (nothing to neutralize) and is accepted as a literal string alongside a
+# benign ORIG_ARGS. Assert no shape rejection + marker absent.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1i2"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1i2.chk"
+cat <<'EOF' > "$_MD/t1i2.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+_v=""; _ve=""; _f2=""; _fe=""
+while IFS= read -r -d '' _f; do
+  case "$_f" in
+    ___FORKRUN_FNEND_*) _fe="$_f";;
+    ___FORKRUN_FN_*) _f2="$_f";;
+    ___FORKRUN_END_*) _ve="$_f";;
+    ___FORKRUN_ENV_*) _v="$_f";;
+  esac
+done < /proc/self/cmdline
+printf '%s\n%s\n%s\n%s\n' "$_v" "declare -a FORKRUN_ORIG_ARGS=('/bin/true')" 'declare -- X="\$(touch __MARK__)"' "$_ve"
+printf '%s\n\n%s\n' "$_f2" "$_fe"
+exit 0
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1i2.chk"
+    timeout 60 setsid bash -c "source '$FRUN_SOURCE'; printf 'a\n' | frun --resume '$_MD/t1i2.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if [[ ! -f "$_MARK" ]] && ! grep -q "verification failed" "$_MD/err.txt"; then
+        TEST_RESULTS["T1i(ii): escaped substitution accepted as literal"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1i(ii): escaped substitution accepted as literal"
+    else
+        TEST_RESULTS["T1i(ii): escaped substitution accepted as literal"]="FAIL"
+        TEST_ERRORS["T1i(ii): escaped substitution accepted as literal"]="marker=$([[ -f "$_MARK" ]] && echo PRESENT || echo absent) rc=$_TX"
+        ((FAILED_TESTS++)); _print_result FAIL "T1i(ii): escaped substitution accepted as literal" "marker present or shape overblocked"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- T1a-ext: delayed orphan WITH token knowledge (greedy-anchor gauntlet) ---
+# T1a's orphan plus /proc/self/cmdline scraping: a double-forked grandchild
+# (the sandbox kills its direct jobs before emission, so a single-background
+# orphan never survives to write) waits out the legitimate emission, then
+# appends a token-bounded forged vars frame carrying an unescaped
+# substitution. The parent's greedy ##*token parse anchors to the orphan's
+# frame — which then runs the shape filter + re-render gauntlet. Both frames
+# carry benign ORIG_ARGS so the run terminates deterministically either way;
+# the assertions (rc==0, marker absent) are order-independent: legit-wins
+# ignores the forgery, orphan-wins neutralizes it. The 4s SECONDS-delay
+# exceeds sandbox lifetime on any machine while fitting the timeout.
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_t1aext"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/t1aext.chk"
+cat <<'EOF' > "$_MD/t1aext.chk"
+FORKRUN_RESUME_HORIZON=10
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+declare -a FORKRUN_ORIG_ARGS=('/bin/true')
+( ( while (( SECONDS < 4 )); do :; done
+  _v=""; _ve=""
+  while IFS= read -r -d '' _f; do
+    case "$_f" in
+      ___FORKRUN_END_*) _ve="$_f";;
+      ___FORKRUN_ENV_*) _v="$_f";;
+    esac
+  done < /proc/self/cmdline
+  printf '%s\n%s\n%s\n%s\n' "$_v" "declare -a FORKRUN_ORIG_ARGS=('/bin/true')" 'declare -x FORKRUN_EXTRA_SETUP="$(touch __MARK__)"' "$_ve" ) & ) &
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/t1aext.chk"
+    timeout 60 bash -c "source '$FRUN_SOURCE'; printf 'a\nb\n' | frun --resume '$_MD/t1aext.chk'" \
+        >/dev/null 2>"$_MD/err.txt"
+    _TX=$?
+    if [[ ! -f "$_MARK" ]] && (( _TX == 0 )); then
+        TEST_RESULTS["T1a-ext: token-knowing delayed orphan forgery neutralized"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T1a-ext: token-knowing delayed orphan forgery neutralized"
+    else
+        TEST_RESULTS["T1a-ext: token-knowing delayed orphan forgery neutralized"]="FAIL"
+        TEST_ERRORS["T1a-ext: token-knowing delayed orphan forgery neutralized"]="marker=$([[ -f "$_MARK" ]] && echo PRESENT || echo absent) rc=$_TX"
+        ((FAILED_TESTS++)); _print_result FAIL "T1a-ext: token-knowing delayed orphan forgery neutralized" "marker present or rc!=0"
+    fi
+    rm -f "$_MARK"
+fi
+
+# --- F6: CWD-planted touch vs dead-PATH construction (hard assertion) ---
+# Plants an exec-form touch wrapper (`exec /usr/bin/touch` — cannot
+# self-recurse regardless of PATH semantics) in the isolated resume CWD and
+# runs a T1b-shaped content injection from that CWD. Under D10 both
+# restricted shells run with PATH at a freshly-created, immediately-deleted
+# mktemp directory, so the planted binary must NOT resolve — marker absent
+# is a hard PASS. (Was characterize-only under PATH='': POSIX PATH search
+# treats an empty component as CWD, confirmed by the F6 probe on bash 5.3.9.)
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/sandbox_f6"; mkdir -p "$_MD"
+    _MARK="$_MD/__MARK__"
+    rm -f "$_MARK" "$_MD/touch" "$_MD/f6.chk"
+    printf '#!/bin/bash\nexec /usr/bin/touch "$@"\n' > "$_MD/touch"
+    chmod +x "$_MD/touch"
+cat <<'EOF' > "$_MD/f6.chk"
+FORKRUN_RESUME_HORIZON=5
+FORKRUN_RESUME_STDOUT_BYTES=0
+FORKRUN_RESUME_JAGGED=()
+declare -a FORKRUN_ORIG_ARGS=("safe" "$(touch __MARK__)")
+EOF
+    sed -i "s|__MARK__|${_MARK}|g" "$_MD/f6.chk"
+    ( cd "$_MD" && timeout 60 bash -c "source '$FRUN_SOURCE' && printf 'a\n' | frun --resume 'f6.chk'" \
+        >/dev/null 2>"$_MD/err.txt" ) || true
+    if [[ ! -f "$_MARK" ]]; then
+        TEST_RESULTS["F6: CWD-planted binary does not resolve (dead-PATH construction)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "F6: CWD-planted binary does not resolve (dead-PATH construction)"
+    else
+        TEST_RESULTS["F6: CWD-planted binary does not resolve (dead-PATH construction)"]="FAIL"
+        TEST_ERRORS["F6: CWD-planted binary does not resolve (dead-PATH construction)"]="marker PRESENT under dead-PATH construction"
+        ((FAILED_TESTS++)); _print_result FAIL "F6: CWD-planted binary does not resolve (dead-PATH construction)" "marker present"
+    fi
+    rm -f "$_MD/touch" "$_MARK"
+fi
+
 print_section T2 "v3.4.4 Hardening Regressions (W1, M2, W2, resume)"
 
 # --- T7a: ordered resume, NON-reproducible boundaries (-l 1000 → -l 777) ---
@@ -4271,44 +4674,14 @@ if in_section T2; then
     fi
 fi
 
-# --- T10b-diag: 100KB lines + -n 25, with full diagnostics ---
-if in_section T2; then
-    ((TOTAL_TESTS++))
-    _MD="$TEST_DIR/T10bdiag"; mkdir -p "$_MD"
-    for (( i=1; i<=60; i++ )); do
-        printf '%03d ' "$i"; head -c 99995 /dev/zero | tr '\0' 'y'; echo
-    done > "$_MD/in.txt"
 
-    for (( _r=0; _r<5; _r++ )); do
-        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | frun --nodes=2 -l 8 -n 25 -k -s cat" 2>"$_MD/err${_r}.txt" | tee "$_MD/out${_r}.txt" | wc -l | tr -d ' ')
-        #bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -l 8 -n 25 -k -s cat" | wc -l
-        _TRC=$?
-        # What did we actually get?
-        _TFIRST=$(head -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4)
-        _TLAST=$(tail -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4)
-        _TSTDERR=$(grep -c "WARN\|FATAL\|ERROR" "$_MD/err${_r}.txt" 2>/dev/null || echo 0)
-        echo "  iter=$_r: lines=$_TN (want 25) first=$_TFIRST last=$_TLAST err_lines=$_TSTDERR rc=$_TRC"
-        cat "$_MD/err${_r}.txt"
-        printf '\n---------------------\n'
-    done
-
-    # Also try UMA for comparison
-    _TU=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | frun --nodes=0 -l 8 -n 25 -k -s cat"  | wc -l | tr -d ' ')
-    echo "  UMA comparison: lines=$_TU (want 25)"
-    printf '\n---------------------\n'
-
-    # And --nodes=2 with -j 1 to isolate worker count
-    _TJ1=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | frun --nodes=2 -j 1 -l 8 -n 25 -k -s cat" | wc -l | tr -d ' ')
-    echo "  nodes=2 j=1 lines=$_TJ1 (want 25)"
-    printf '\n---------------------\n'
-    ((PASSED_TESTS++)); _print_result PASS "T10b_diag"
-fi
-
-# --- T10b (v2): 100KB lines + -n across refills — fixed: -s, 5 iterations ---
+# --- T10b: 100KB lines + -n across refills — -s, 5 iterations ---
 # The wild-pointer rewind (batch_start < buf_base_offset) fires only when the
 # limit-crossing scan spans a buffer refill AND a concurrent scanner's
 # reservation forces the rewind — probabilistic per run, so iterate.
 # Under ASan this crashes if unfixed; without, wrong counts.
+# (W-G: the old always-green T10b_diag probes are folded into this failure
+# path; FORKRUN_DEBUG stays on so failures carry engine evidence.)
 if in_section T2; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/T10b"; mkdir -p "$_MD"
@@ -4317,7 +4690,7 @@ if in_section T2; then
     done > "$_MD/in.txt"
     _TOK=0
     for (( _r=0; _r<5; _r++ )); do
-        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | frun --nodes=2 -l 8 -n 25 -k -s cat" | wc -l | tr -d ' ')
+        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -l 8 -n 25 -k -s cat" 2>"$_MD/err${_r}.txt" | tee "$_MD/out${_r}.txt" | wc -l | tr -d ' ')
         [[ "$_TN" == "25" ]] && _TOK=$((_TOK+1))
     done
     if (( _TOK == 5 )); then
@@ -4327,68 +4700,19 @@ if in_section T2; then
         TEST_RESULTS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="FAIL"
         TEST_ERRORS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="$_TOK/5 iterations gave exactly 25 lines"
         ((FAILED_TESTS++)); _print_result FAIL "T10b: 100KB lines + -n 25 across buffer refills (5x)" "$_TOK/5"
+        {
+            echo "=========== T10b DIAGNOSTIC (folded from T10b_diag) ==========="
+            for (( _r=0; _r<5; _r++ )); do
+                echo "--- iter=$_r: lines=$(wc -l < "$_MD/out${_r}.txt" | tr -d ' ') first=$(head -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4) last=$(tail -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4) ---"
+                grep -h "WARN\|FATAL\|ERROR" "$_MD/err${_r}.txt" 2>/dev/null | head -10
+            done
+            echo "=========== END T10b DIAGNOSTIC ==========="
+        } >&2
     fi
 fi
 
 
-# --- T10b-diag: 100KB lines + -n 25, with full diagnostics ---
-if in_section T2; then
-    ((TOTAL_TESTS++))
-    _MD="$TEST_DIR/T10bdiag"; mkdir -p "$_MD"
-    for (( i=1; i<=60; i++ )); do
-        printf '%03d ' "$i"; head -c 99995 /dev/zero | tr '\0' 'y'; echo
-    done > "$_MD/in.txt"
 
-    for (( _r=0; _r<5; _r++ )); do
-        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -l 8 -n 25 -k -s cat" 2>"$_MD/err${_r}.txt" | tee "$_MD/out${_r}.txt" | wc -l | tr -d ' ')
-        #bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -l 8 -n 25 -k -s cat" | wc -l
-        _TRC=$?
-        # What did we actually get?
-        _TFIRST=$(head -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4)
-        _TLAST=$(tail -1 "$_MD/out${_r}.txt" 2>/dev/null | cut -c1-4)
-        _TSTDERR=$(grep -c "WARN\|FATAL\|ERROR" "$_MD/err${_r}.txt" 2>/dev/null || echo 0)
-        echo "  iter=$_r: lines=$_TN (want 25) first=$_TFIRST last=$_TLAST err_lines=$_TSTDERR rc=$_TRC"
-        cat "$_MD/err${_r}.txt"
-        printf '\n---------------------\n'
-    done
-
-    # Also try UMA for comparison
-    _TU=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=0 -l 8 -n 25 -k -s cat"  | wc -l | tr -d ' ')
-    echo "  UMA comparison: lines=$_TU (want 25)"
-    printf '\n---------------------\n'
-
-    # And --nodes=2 with -j 1 to isolate worker count
-    _TJ1=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -j 1 -l 8 -n 25 -k -s cat" | wc -l | tr -d ' ')
-    echo "  nodes=2 j=1 lines=$_TJ1 (want 25)"
-    printf '\n---------------------\n'
-    ((PASSED_TESTS++)); _print_result PASS "T10b_diag (DEBUG)"
-fi
-
-# --- T10b (v2): 100KB lines + -n across refills — fixed: -s, 5 iterations ---
-# The wild-pointer rewind (batch_start < buf_base_offset) fires only when the
-# limit-crossing scan spans a buffer refill AND a concurrent scanner's
-# reservation forces the rewind — probabilistic per run, so iterate.
-# Under ASan this crashes if unfixed; without, wrong counts.
-if in_section T2; then
-    ((TOTAL_TESTS++))
-    _MD="$TEST_DIR/T10b"; mkdir -p "$_MD"
-    for (( i=1; i<=60; i++ )); do
-        printf '%03d ' "$i"; head -c 99995 /dev/zero | tr '\0' 'y'; echo
-    done > "$_MD/in.txt"
-    _TOK=0
-    for (( _r=0; _r<5; _r++ )); do
-        _TN=$(timeout 60 bash -c "source '$FRUN_SOURCE' && cat '$_MD/in.txt' | FORKRUN_DEBUG=1 frun --nodes=2 -l 8 -n 25 -k -s cat" | wc -l | tr -d ' ')
-        [[ "$_TN" == "25" ]] && _TOK=$((_TOK+1))
-    done
-    if (( _TOK == 5 )); then
-        TEST_RESULTS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "T10b: 100KB lines + -n 25 across buffer refills (5x) (DEBUG)"
-    else
-        TEST_RESULTS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="FAIL"
-        TEST_ERRORS["T10b: 100KB lines + -n 25 across buffer refills (5x)"]="$_TOK/5 iterations gave exactly 25 lines"
-        ((FAILED_TESTS++)); _print_result FAIL "T10b: 100KB lines + -n 25 across buffer refills (5x) (DEBUG)" "$_TOK/5"
-    fi
-fi
 
 # --- T11a (v2): {ID} incarnation on respawn — deterministic (-j 1) ---
 # Uses ${ID}.${W_BATCH} directly (both visible in the worker shell — the same
@@ -4586,6 +4910,59 @@ if in_section T2; then
         TEST_RESULTS["T13: external SIGKILL stress under -k terminates exactly-once"]="FAIL"
         TEST_ERRORS["T13: external SIGKILL stress under -k terminates exactly-once"]="exit=$_TRC, no checkpoint, output incomplete"
         ((FAILED_TESTS++)); _print_result FAIL "T13: external SIGKILL stress under -k terminates exactly-once" "exit=$_TRC, no cp"
+    fi
+fi
+
+# ----------
+# T14: F30 --nodes=@N ceiling and input hardening rejection
+# Rejection of @N > 512 (meta_ring capacity) and non-numeric / overflow inputs.
+# Must fail loud with [ERROR] on stderr, non-zero exit, exit != 139 (no SIGSEGV),
+# and no checkpoint file written (NORMAL_EXIT_FLAG=true early-fatal pattern).
+# ----------
+if in_section T; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/f30_nodes_ceiling"; mkdir -p "$_MD"
+    rm -rf "$_MD"/*
+
+    # Run in isolated directory so default .forkrun_resume cannot land elsewhere
+    _f30_pass=true
+    _f30_err=""
+
+    # 1. @513 ceiling check
+    ( cd "$_MD" && seq 100 | bash -c "source '$FRUN_SOURCE' && frun --nodes=@513 true" ) >"$_MD/out_513.txt" 2>"$_MD/err_513.txt"
+    _rc_513=$?
+    if (( _rc_513 == 0 )) || (( _rc_513 == 139 )) || ! grep -q "\[ERROR\]: --nodes=@N" "$_MD/err_513.txt" || [[ -e "$_MD/.forkrun_resume" ]]; then
+        _f30_pass=false
+        _f30_err="@513 failed: rc=$_rc_513, cp=$([[ -e "$_MD/.forkrun_resume" ]] && echo yes || echo no)"
+    fi
+
+    # 2. @abc non-numeric check
+    if $_f30_pass; then
+        ( cd "$_MD" && seq 100 | bash -c "source '$FRUN_SOURCE' && frun --nodes=@abc true" ) >"$_MD/out_abc.txt" 2>"$_MD/err_abc.txt"
+        _rc_abc=$?
+        if (( _rc_abc == 0 )) || (( _rc_abc == 139 )) || ! grep -q "\[ERROR\]: --nodes=@N" "$_MD/err_abc.txt" || [[ -e "$_MD/.forkrun_resume" ]]; then
+            _f30_pass=false
+            _f30_err="@abc failed: rc=$_rc_abc"
+        fi
+    fi
+
+    # 3. @999999999999999999999 overflow check
+    if $_f30_pass; then
+        ( cd "$_MD" && seq 100 | bash -c "source '$FRUN_SOURCE' && frun --nodes=@999999999999999999999 true" ) >"$_MD/out_ovf.txt" 2>"$_MD/err_ovf.txt"
+        _rc_ovf=$?
+        if (( _rc_ovf == 0 )) || (( _rc_ovf == 139 )) || ! grep -q "\[ERROR\]: --nodes=@N" "$_MD/err_ovf.txt" || [[ -e "$_MD/.forkrun_resume" ]]; then
+            _f30_pass=false
+            _f30_err="@overflow failed: rc=$_rc_ovf"
+        fi
+    fi
+
+    if $_f30_pass; then
+        TEST_RESULTS["T14: F30 --nodes=@N ceiling and input hardening rejection"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "T14: F30 --nodes=@N ceiling and input hardening rejection"
+    else
+        TEST_RESULTS["T14: F30 --nodes=@N ceiling and input hardening rejection"]="FAIL"
+        TEST_ERRORS["T14: F30 --nodes=@N ceiling and input hardening rejection"]="$_f30_err"
+        ((FAILED_TESTS++)); _print_result FAIL "T14: F30 --nodes=@N ceiling and input hardening rejection" "$_f30_err"
     fi
 fi
 
