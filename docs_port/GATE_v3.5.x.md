@@ -172,8 +172,49 @@ single-box table). Additionally: (a) W-E before/after is one box, one arch
 (x86_64_v4), single runs plus one interleaved triple — a structural-neutral
 reading, not a cross-platform performance claim; the `-L 100000`
 instability note in §13 is observational (n≈12 across both blobs), not a
-root-caused finding. (b) F6 is a bash-5.3.9 characterization; other
-bash versions may resolve empty-PATH differently — the construction stays
-`PATH=''` per owner determination regardless. (c) Test-count arithmetic for
+root-caused finding. (b) D10's F6 closure is bash-5.3.9-verified plus POSIX-reasoned (an
+empty PATH component means CWD by specification, so no bash version
+resolves a deleted directory); the hard F6 assertion re-verifies it on
+every Section-T run. (c) Test-count arithmetic for
 the release matrix belongs to W-I; §14's dedup changed comprehensive-suite
 totals (see the W-I reconciliation).
+
+## 16. D10 + PF-1 + W-I.1 blob rebuild (final-prep state)
+
+D10 (dead-PATH construction, both restricted shells, both frun twins;
+F6 characterize-only → hard assertion; SECURITY/CHANGELOG + DOCS_ALL
+twins in lockstep): SECTION=T 21/21 (T1a/b/d/f/g/h/i, T1a-ext, F6-hard
+green), SECTION=M 21/21 (M20/M21 green), SECTION=F 8/8 (F8 green).
+
+PF-1: `twin-check` now compares the frun twins' pre-b64-marker region
+(`cmp <(awk '/_BASE64_START_/{exit} ...')`, robust to multi-line payload
+drift) plus the byte-identical test-twin cmp; verified locally.
+
+Canary-in-CI fix (first live runs): run 35172127607 showed VERIFY 7/7
+OK but the new canary step failed — `apt-get install libbash-dev`
+(no such package on ubuntu runners; `config.h` missing). Per owner
+direction (Fedora for everything) the step now runs
+`make -f Makefile.substrate canary` in `fedora:latest` docker with
+`dnf install bash-devel` (commits ce06110, 56584e6).
+
+W-I.1 rebuild: run 35173548966 (manual dispatch of the fixed workflow)
+conclusion success — VERIFY-OK for all 7 keys (x86_64_v2/v3/v4,
+aarch64, ppc64le, s390x, riscv64; no WARNs), `canary OK: libforkrun.so
+links with no undefined symbols`, auto-PR #534 (frun.bash + 7 blobs;
+pre-marker region verified identical, D10 intact). The 56584e6 push had
+also auto-triggered duplicate run 35173547278 (success, PR #535).
+Merged #534 (merge commit 7e5d014; x86-64 blobs 203912 → 208008 bytes
+with F28 + v3.5.1); closed #533 as stale (blobs predated F28 and the
+version bump) and #535 as a duplicate of #534.
+
+Post-pull smoke (minutes only, all green): `ring_version -a` →
+v3.5.1 (x86-64-v4, Fedora GCC 16.2.1, built Sep 17 02:14 UTC);
+`frun -V` → v3.5.1; `test_frun.sh` 89/89; `seq 10000 | frun -k
+printf '%s\n' | wc -l` → 10000; local canary OK; python unittests 14 OK.
+
+CI confirmation of PF-1: `twin-check` green on run 35174209682
+(manual `sh-format.yml` dispatch of the merged state). The sibling
+`sh-checker` job is red there, but it has failed on `main` since July
+2026 — pre-existing lint noise; differential shellcheck shows zero new
+findings from the v3.5.1 work (SC2016 count identical pre/post D10).
+Release runbook: `docs_port/RELEASE_RUNBOOK.md` (owner's manual matrix).
