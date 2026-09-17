@@ -217,7 +217,64 @@ else
     exit 1
 fi
 
+# --- TEST 6: UMA numa_batch_id uniqueness across 2^22 (C2) ---
+cat <<'EOF' > test_abi_v2_uma.c
+#include <stdint.h>
+#include <stdio.h>
+
+int forkrun_use_ctx = 2;
+
+struct forkrun_ctx {
+    uint64_t batch_index;
+    uint64_t batch_offset;
+    uint64_t batch_byte_length;
+    uint32_t version;
+    uint32_t worker_id;
+    uint32_t node_id;
+    uint32_t num_kills;
+    union {
+        uint64_t numa_batch_id;
+        struct {
+            uint32_t numa_major;
+            uint32_t numa_minor;
+        };
+    };
+    int32_t  fd_in;
+    char     delimiter;
+    uint8_t  cfg_state[4];
+};
+
+int test_abi_v2_uma(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    if (ctx->version < 2) return 1;
+    printf("%lu\n", (unsigned long)ctx->numa_batch_id);
+    return 0;
+}
+EOF
+gcc -O3 -shared -fPIC test_abi_v2_uma.c -o test_abi_v2_uma.so
+
+echo "------------------------------------------------------"
+echo "TEST 6: UMA numa_batch_id uniqueness across 2^22 (C2)"
+
+# Force UMA pipeline explicitly via --nodes=0 so NUMA topology doesn't mask the test
+seq 5000000 | frun --nodes=0 -l 1 -k -C ./test_abi_v2_uma.so:test_abi_v2_uma > abi_v2_uma_out.txt
+
+LINES=$(wc -l < abi_v2_uma_out.txt | tr -d ' ')
+if (( LINES != 5000000 )); then
+    echo "✗ Failed: expected 5000000 ids, got $LINES (plugin not invoked per batch?)"
+    exit 1
+fi
+
+awk 'NR>1 && $1 <= prev { print "ERROR: non-monotonic id at line " NR ": " $1 " (prev " prev ")"; exit 1 } { prev = $1 }' abi_v2_uma_out.txt
+
+if (( $? == 0 )); then
+    echo "✓ Passed: UMA numa_batch_id strictly monotonic across 2^22 boundary"
+else
+    echo "✗ Failed: UMA numa_batch_id wraps at 2^22 (C-2 regression)"
+    exit 1
+fi
+rm -f test_abi_v2_uma.c test_abi_v2_uma.so abi_v2_uma_out.txt
+
 echo "------------------------------------------------------"
 echo "=== All C Plugin Rigorous Tests Completed Successfully ==="
-rm -f out_*.txt input_*.txt abi_v2_out.txt
+rm -f out_*.txt input_*.txt abi_v2_out.txt test_fixed_args.c test_fixed_args.so test_abi_v2.c test_abi_v2.so
 
