@@ -259,7 +259,7 @@ jobs:
       - name: Substrate canary (zero bash linkage)
         shell: bash
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq libbash-dev gcc make file || true
+          sudo dnf install -y bash-devel gcc make file || true
           make -f Makefile.substrate canary
 
       - name: Create Pull Request
