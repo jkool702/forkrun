@@ -6128,6 +6128,16 @@ static int forkrun_emit_with_fallback(int out_fd, int src_fd, off_t off, size_t 
     }
     if (s < 0) {
       if (errno == EPIPE) return -2;
+      /* Hard failure with zero progress: robust_sendfile returns -1 only
+         when total == 0, so the full-range copy below is exact. */
+    } else if (s > 0) {
+      /* F31 (v3.5.0 review finding): partial sendfile already emitted
+         [off, off+s). Resume the fallback copy after the emitted prefix —
+         re-emitting [off, off+len) would duplicate the prefix bytes in the
+         output stream. errno is not consulted here: whatever the failing
+         call left is superseded by the copy below (EPIPE surfaces there). */
+      off += s;
+      len -= (size_t)s;
     }
     /* fall through to copy on ANY other sendfile failure (EINVAL for O_APPEND,
        partial, ENOSYS, etc.) */

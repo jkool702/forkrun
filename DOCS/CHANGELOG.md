@@ -145,6 +145,25 @@ independent of the Python-frontend work:
   sandbox's remaining pre-consent execution surface is pure builtins
   (DoS-only). See SECURITY.md Layer 2.
 
+- **F31: emit fallback resumes after a partial sendfile (v3.5.0 review
+  finding, still present):** `forkrun_emit_with_fallback` fell through to
+  a full-range `ring_copy_chunk(off, len)` after ANY non-EPIPE sendfile
+  outcome — including a positive-short partial, which re-emitted the
+  already-written `[off, off+s)` prefix (duplicated bytes in that batch's
+  output). Pre-existing since the v3.4.3 O_APPEND fallback with an exotic
+  trigger (short-positive followed by a hard error in the same batch);
+  ordering and the resume ledger are untouched (duplication is
+  content-within-one-batch; `TRACK_COMPLETED_BATCH` tracks declared
+  length). Fix: on `s > 0` resume the copy at `(off+s, len-s)`; on `s < 0`
+  non-EPIPE keep the full-range copy (`robust_sendfile` returns -1 only
+  with zero progress, so it is exact — this differs from the review
+  sketch, whose resume arithmetic is only valid for `s > 0`). Verified by
+  an LD_PRELOAD sendfile-interposition harness against the exact TU
+  (old: +64 duplicated bytes; fixed: byte-exact; hard-fail-first: exact
+  in both) plus the basic suite 89/89 on a locally built v4 blob.
+  Engine change — blobs rebuilt via CI; the owner matrix must be re-run
+  before tag.
+
 - **F28: `-L` scan loop off memchr-per-line (SIMD skip-ahead, perf-neutral):**
   the `-L` Scanner-Handoff Chain loop walked one `memchr` per line on the
   serialized scanner. New `-L`-only helper `scan_nth_delim()` jumps straight
