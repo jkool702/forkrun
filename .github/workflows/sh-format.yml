@@ -21,3 +21,22 @@ jobs:
         with:
           sh_checker_checkbashisms_enable: false
           sh_checker_exclude: OLD LEGACY ring_loadables/OLD
+  twin-check:
+    # W-G: file twins must stay in lockstep. frun.bash <->
+    # ring_loadables/frun.nob64.bash are identical EXCEPT the single
+    # `declare -A b64=` line (nob64 carries an empty map by construction —
+    # a literal cmp would false-fail forever, so that one line is
+    # normalized on both sides); the comprehensive-suite twins are
+    # byte-identical with no exceptions.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: File twins in lockstep
+        shell: bash
+        run: |
+          set -euo pipefail
+          diff <(sed -E 's/^(declare -A b64=\().*$/\1)/' frun.bash) \
+               <(sed -E 's/^(declare -A b64=\().*$/\1)/' ring_loadables/frun.nob64.bash)
+          echo "frun twins in lockstep"
+          cmp UNIT_TESTS/test_frun_comprehensive.sh UNIT_TESTS/test_frun_comprehensive.sh.txt
+          echo "test twins byte-identical"

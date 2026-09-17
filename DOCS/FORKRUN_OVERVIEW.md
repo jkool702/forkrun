@@ -68,8 +68,8 @@ Under the hood, forkrun is a **contention-free *(no userspace locks or CAS retry
 (Default-mode rate implies a settled average batch of roughly 2,000–2,500 lines; `-X` mode telemetry confirms the controller saturates at Lmax = 4096.)
 
 **Average CPU utilization across 396 benchmarks (mix-dependent)**
-- forkrun:      ~90% aggregate across 400 mixed runs (27.1 / 28 cores in steady-state default mode = 95%; 27.6/28 = 98.6% for sustained default tests; `-U` unsafe mode hits 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28)  (no centralized dispatcher - all cores doing work when work exists)
-- GNU Parallel:  6%  (2.68 / 28 cores)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
+- forkrun:      ~90% aggregate across 400 mixed runs (27.1 / 28 cores in steady-state default mode = 95%; 27.6/28 = 98.6% for sustained default tests at ≥1B-line scale (100M-scale measures 24.5–25.5/28 for default -X); `-U` unsafe mode hits 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28)  (no centralized dispatcher - all cores doing work when work exists)
+- GNU Parallel:  9.6% total  (2.68 / 28 cores; 6% useful work = 1.68 / 28)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
 
 Utilization also scales *down* correctly: `-b 512k` on a 100 MB input sustains ~2.6/28 cores because the engine declines to spawn a full worker pool for a sub-second job — the same auto-tuning that saturates 27/28 cores on billion-line streams.
 

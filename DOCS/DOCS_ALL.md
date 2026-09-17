@@ -504,7 +504,7 @@ be silently lost when appending.
   coordination is cross-process on MAP_SHARED memory and is validated by the
   invariant set + full matrix, not TSan.
 
-### Invariants (new in this release — see INVARIANTS.md §11, §14–16)
+### Invariants (new in this release — see INVARIANTS.md §11, §13–15)
 
 - Gate publication & producer wakeup invariant.
 - No sole-path data movement: every zero-copy syscall has an exercised fallback.
@@ -1489,8 +1489,8 @@ Under the hood, forkrun is a **contention-free *(no userspace locks or CAS retry
 (Default-mode rate implies a settled average batch of roughly 2,000–2,500 lines; `-X` mode telemetry confirms the controller saturates at Lmax = 4096.)
 
 **Average CPU utilization across 396 benchmarks (mix-dependent)**
-- forkrun:      ~90% aggregate across 400 mixed runs (27.1 / 28 cores in steady-state default mode = 95%; 27.6/28 = 98.6% for sustained default tests; `-U` unsafe mode hits 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28)  (no centralized dispatcher - all cores doing work when work exists)
-- GNU Parallel:  6%  (2.68 / 28 cores)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
+- forkrun:      ~90% aggregate across 400 mixed runs (27.1 / 28 cores in steady-state default mode = 95%; 27.6/28 = 98.6% for sustained default tests at ≥1B-line scale (100M-scale measures 24.5–25.5/28 for default -X); `-U` unsafe mode hits 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28)  (no centralized dispatcher - all cores doing work when work exists)
+- GNU Parallel:  9.6% total  (2.68 / 28 cores; 6% useful work = 1.68 / 28)  (1 full core used strictly for dispatching work - 1.68 cores doing actual work)
 
 Utilization also scales *down* correctly: `-b 512k` on a 100 MB input sustains ~2.6/28 cores because the engine declines to spawn a full worker pool for a sub-second job — the same auto-tuning that saturates 27/28 cores on billion-line streams.
 
@@ -1756,7 +1756,7 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 
 ---
 
-## 14. No Sole-Path Data Movement
+## 13. No Sole-Path Data Movement
 
 **Invariant**
 Every byte-mover (`sendfile`, `copy_file_range`, `splice`, `write`) must have a fallback
@@ -1786,7 +1786,7 @@ looking exit from a failed operation is a taxonomy bug independent of the operat
 
 ---
 
-## 15. Gates Inspect Text, Never Live State
+## 14. Gates Inspect Text, Never Live State
 
 **Invariant**
 A security gate must make its decision from *serialized text*, never from state
@@ -1806,7 +1806,7 @@ the design is wrong — the decision must be derivable from text.
 
 ---
 
-## 16. Sanitize by Construction, Not by Clearing
+## 15. Sanitize by Construction, Not by Clearing
 
 **Invariant**
 A hostile environment must be *constructed* (execve-time `env -i` + explicit
@@ -1829,7 +1829,7 @@ permanent runtime tripwire.
 
 ---
 
-## 17. Checklist Summary
+## 16. Checklist Summary
 
 If sections §1–16 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
@@ -2227,8 +2227,8 @@ frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output na
 > **Note on benchmark basis:** headline throughputs above are *conservative* 100M-line measurements. Top modes (`-s`, `-b`, external-binary) are limited by a ~30 ms fixed pipeline bring-up cost; ≥1B-line runs remove this fixed cost and show 30–50% higher peak rates. The 50×–400× range quoted in the intro is the typical shell-builtin range; microbenchmark extremes (`/bin/true`, `-l 1:-1`) reach ~1500–3300× due to GNU Parallel's per-item Perl fork overhead.
 
 **Average CPU utilization across 396 benchmarks (mix-dependent)**  
-- **forkrun:** ~90% aggregate (27.1 / 28 cores in steady-state default mode = 97%; 27.6/28 = 98.6% for default-mode sustained runs; `-U` unsafe runs hit 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28) — *No centralized dispatcher; all cores do actual work when work exists.*
-- **GNU Parallel:** 6% (2.68 / 28 cores) — *1 full core used strictly for dispatching work; 1.68 cores doing actual work.*
+- **forkrun:** ~90% aggregate (27.1 / 28 cores in steady-state default mode = 97%; 27.6/28 = 98.6% for default-mode sustained runs at ≥1B-line scale (100M-scale measures 24.5–25.5/28 for default -X); `-U` unsafe runs hit 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28) — *No centralized dispatcher; all cores do actual work when work exists.*
+- **GNU Parallel:** 9.6% total (2.68 / 28 cores), 6% useful work (1.68 / 28) — *1 full core used strictly for dispatching work; 1.68 cores doing actual work.*
 
 ---
 

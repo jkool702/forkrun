@@ -206,7 +206,7 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 
 ---
 
-## 14. No Sole-Path Data Movement
+## 13. No Sole-Path Data Movement
 
 **Invariant**
 Every byte-mover (`sendfile`, `copy_file_range`, `splice`, `write`) must have a fallback
@@ -236,7 +236,7 @@ looking exit from a failed operation is a taxonomy bug independent of the operat
 
 ---
 
-## 15. Gates Inspect Text, Never Live State
+## 14. Gates Inspect Text, Never Live State
 
 **Invariant**
 A security gate must make its decision from *serialized text*, never from state
@@ -256,7 +256,7 @@ the design is wrong — the decision must be derivable from text.
 
 ---
 
-## 16. Sanitize by Construction, Not by Clearing
+## 15. Sanitize by Construction, Not by Clearing
 
 **Invariant**
 A hostile environment must be *constructed* (execve-time `env -i` + explicit
@@ -279,7 +279,7 @@ permanent runtime tripwire.
 
 ---
 
-## 17. Checklist Summary
+## 16. Checklist Summary
 
 If sections §1–16 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)

@@ -273,7 +273,7 @@ be silently lost when appending.
   coordination is cross-process on MAP_SHARED memory and is validated by the
   invariant set + full matrix, not TSan.
 
-### Invariants (new in this release — see INVARIANTS.md §11, §14–16)
+### Invariants (new in this release — see INVARIANTS.md §11, §13–15)
 
 - Gate publication & producer wakeup invariant.
 - No sole-path data movement: every zero-copy syscall has an exercised fallback.
