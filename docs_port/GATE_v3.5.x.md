@@ -297,6 +297,26 @@ now green: basic 89/89, D 11/11, L 57/57 (LA3 in-suite), T 21/21,
 M 21/21, F 8/8, R 13/13. NUMA-topology portion still waits on the
 `numa=fake=4` reboot.
 
+## 20. aarch64 NUMA leg (fake=4 topology) — green, matrix complete
+
+Host rebooted to `numa=fake=4` (nodes 0-3 online, ~32 GB each);
+leg re-run from a fresh copy of the final tree (owner's test fixes
+in: BASHPID pidfile, T1i setsid, timeout bumps) in a rebuilt
+podman+qemu-user container (tmpfs wipes the old one on reboot;
+recreated + deps reinstalled). Full leg, all green: basic **91/91**
+(two tests added since the UMA leg), D 11/11, L 57/57 (LA3/LA4/F15a/
+F15b), T 21/21 (full battery incl. T1a-ext/F6/T1i/T14), M 21/21
+(M16/M20/M21), F 8/8 (F8 with `@2`), R 13/13 (R2/R10 at 138/143 —
+the §19 fix holds where it was diagnosed). Targeted probes: `-L 100`
+spot-check 10×100 (no transient); `--nodes=@4 --stats` shows live
+Node frames with conservation (assigned 19 == processed 19 across
+the four fake nodes; steals balance) and a 50k-line ordered run
+byte-exact. No deltas vs the UMA leg — every expected first-time
+item (Section-T battery, LA3/LA4/T14/F15a/F15b/F8, M16, R2/R10)
+passes on both topologies. qemu≠silicon caveat (§7/§15) still
+applies to the fence pair; one physical socket still applies to
+born-local affinity realism.
+
 ## 20. Sanitizer-leg stale-engine incident (W-SLA3-D/E/F)
 
 Second member of the stale-artifact class (#533, this). LA3 failed on
