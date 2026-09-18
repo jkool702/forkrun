@@ -31,6 +31,15 @@
 // CRITICAL INVARIANT: The fast path has no locks and no CAS retry loops.
 
 
+// FEATURE-TEST MACROS FIRST — this ordering is load-bearing.
+// Canonical order: FTMs -> system headers -> bash headers -> project headers.
+// glibc's <features.h> evaluates feature-test macros exactly once, the first
+// time ANY libc header is included, and bakes the result into __USE_GNU etc.
+// A header (or anything else) included before the #define closes the gate:
+// every GNU extension below silently loses its declaration (pipe2, splice,
+// CPU_*/sched_setaffinity, F_GETPIPE_SZ, copy_file_range, memrchr, fallocate,
+// fputs_unlocked...) — the exact failure this file hit when the
+// substrate include sat above this block.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
@@ -64,6 +73,21 @@
 #include <dlfcn.h>      // dlopen/dlsym for -C plugin loading
 #include <spawn.h>
 #include <sys/wait.h>
+
+// forkrun_substrate.h — Stage 1 state-ownership boundary (v1.3 §2.1).
+// Included AFTER the FTMs and system headers (project-header rule): the
+// header is FTM-independent and self-contained, so it compiles from any
+// position — but keeping it here preserves the canonical order above.
+// PACK_KEY / FR_MINOR_BITS / ENGINE_KNOWN_FLAGS stay in one place with the
+// fr_config_t/fr_state_t contract they also constrain.
+#include "forkrun_substrate.h"
+
+// The FROZEN plugin-ABI header (v2, frozen at v3.5.0) — single source for
+// struct forkrun_ctx, the use_ctx encoding (FORKRUN_CTX_ENABLE /
+// VERSION_MASK / FLAG_RAW), and the strong substrate<->ABI packing asserts.
+// Quoted include resolves relative to THIS file's directory, so it works
+// in-repo (product + canary), in CI (full checkout), and from any cwd.
+#include "ring_loadables/forkrun_plugin.h"
 
 // ==============================================================================
 // AVX2 FAST DELIMITER SCANNER
@@ -260,6 +284,46 @@ static inline char *try_simd_scan(char *p, char *safe_end, uint64_t target,
   return NULL;
 }
 
+/* TLS-cached SIMD capability probe: the dispatch predicate of try_simd_scan
+ * above, factored out WITHOUT touching try_simd_scan (whose NULL-means-
+ * unsupported-or-not-found contract its callers depend on). */
+static inline bool fr_simd_available(void) {
+#if defined(__x86_64__) || defined(__i386__)
+  static __thread int avx2_supported = -1;
+  if (__builtin_expect(avx2_supported == -1, 0)) {
+    __builtin_cpu_init();
+    avx2_supported = __builtin_cpu_supports("avx2") &&
+                     __builtin_cpu_supports("popcnt");
+  }
+  return avx2_supported;
+#elif defined(__aarch64__)
+  return true;
+#else
+  return false;
+#endif
+}
+
+/* -L path only: pointer past the Nth delimiter in [p, end), or NULL if
+ * fewer than N exist. Scalar fallback reproduces the current -L semantics
+ * exactly on non-SIMD arches — zero behavior change where the test matrix
+ * cannot reach. try_simd_scan's contract is untouched. */
+static inline char *scan_nth_delim(char *p, char *end, uint64_t n, char delim) {
+  char *hit = try_simd_scan(p, end, n, delim);
+  if (hit)
+    return hit;
+  if (!fr_simd_available()) { /* NULL = unsupported, not not-found */
+    while (n > 0 && p < end) {
+      char *nl = memchr(p, delim, (size_t)(end - p));
+      if (!nl)
+        return NULL;
+      p = nl + 1;
+      n--;
+    }
+    return (n == 0) ? p : NULL;
+  }
+  return NULL; /* SIMD live: genuinely fewer than n */
+}
+
 // Architecture-dispatched delimiter popcount. O(N) over the buffer, no
 // per-delimiter position extraction. Used exclusively by the pre-flight scan.
 static inline uint64_t
@@ -363,13 +427,12 @@ fast_count_delim(const char *p, const char *end, char delim) {
 
 #define MAX_BATCH_LINES  281474976710656ULL
 #define FLAG_MAJOR_EOF (1U << 31)
-#define MINOR_BITS 22
-#define MINOR_MASK ((1ULL << MINOR_BITS) - 1ULL)
-#define MAJOR_MASK ((1ULL << (64 - MINOR_BITS)) - 1ULL)
-#define PACK_KEY(maj, min) ((((uint64_t)(maj) & MAJOR_MASK) << MINOR_BITS) | ((uint64_t)(min) & MINOR_MASK))
+/* Packing constants (FR_MINOR_BITS/FR_MINOR_MASK/FR_MAJOR_MASK/FR_PACK_KEY),
+ * the use_ctx encoding (FORKRUN_CTX_*), and struct forkrun_ctx all come
+ * from the substrate + frozen plugin headers — single source, no local
+ * aliases. ENGINE_KNOWN_FLAGS is engine-side only (the plugin header
+ * explicitly does not define it) and lives here. */
 
-#define FORKRUN_CTX_ENABLE          2u
-#define FORKRUN_CTX_VERSION_MASK    0xFFu
 /* v3.5.0: no behavior flags implemented -> ENGINE_KNOWN_FLAGS is empty */
 #define ENGINE_KNOWN_FLAGS          0u
 
@@ -384,7 +447,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.5.0"
+#define FORKRUN_RING_VERSION "v3.5.1"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -916,7 +979,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats",                  \
     "Print NUMA telemetry")                                                    \
   X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")            \
-  X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr>", "Poll FDs") \
+  X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr> [timer] [trap_ack] [indexer_arr]", "Poll FDs") \
   X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
   X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
   X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow") \
@@ -1249,6 +1312,22 @@ static int *evfd_indexer_arr = NULL;
 static int *evfd_meta_arr = NULL;
 static int *fd_escrow_r = NULL;
 static int *fd_escrow_w = NULL;
+// Preconditions gate (v1.3 §2.0): kernel-observable indexer death detection.
+// The MECHANISM is bash-owned (frun.bash creates one pipe per node via
+// ring_pipe into the fd_indexer_death_r/w arrays): the indexer child
+// inherits the write end, the parent closes its write copy at spawn, and
+// ring_poll's optional 6th argument (the fd_indexer_death_r array name)
+// turns in-kernel write-end teardown on indexer SIGKILL/OOM into POLLHUP
+// -> INDEXER_DEATH -> ring_abort. Traps/`|| ring_abort` in the spawning
+// subshell structurally cannot be the mechanism: a SIGKILLed indexer runs
+// no exit code at all.
+// The engine deliberately does NOT create or hold these pipes: the
+// orchestrator owns their lifecycle (this is exactly the §2.1 taxonomy —
+// pipe topology is frontend orchestration, the poll/abort path is
+// mechanism). A C-side twin previously lived here and was removed as dead
+// infrastructure: never polled, held open tree-wide, could never fire
+// POLLHUP, and looked load-bearing to future readers — the worst kind of
+// dead code (v1.3 preconditions prune).
 
 static int evfd_data = -1;
 static int evfd_ingest_data = -1;
@@ -2432,6 +2511,9 @@ static int ring_init_main(int argc, char **argv) {
       fd_escrow_r[n] = -1;
       fd_escrow_w[n] = -1;
     }
+
+    // (Indexer death pipes are bash-owned — see the fd_escrow declaration
+    // comment above. The engine creates no pipe here.)
   }
 
   evfd_ingest_data = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
@@ -2656,8 +2738,8 @@ static int ring_numa_ingest_main(int argc, char **argv) {
     }
   }
   uint64_t min_batch_sz = (state[0].mode_byte && state[0].cfg_batch_start > 0) ? state[0].cfg_batch_start : 1;
-  if (chunk_size > (MINOR_MASK * min_batch_sz)) {
-    chunk_size = MINOR_MASK * min_batch_sz;
+  if (chunk_size > (FR_MINOR_MASK * min_batch_sz)) {
+    chunk_size = FR_MINOR_MASK * min_batch_sz;
   }
 
   // --- OOM Protection Initialization ---
@@ -3775,6 +3857,38 @@ uint64_t chunk_bounds[16] = {0};
   // -----------------------------------------------------------------
 
   if (is_resume) {
+      // SEQLOCK READ PROTOCOL — the LOAD-BEARING half of the fence PAIR
+      // (writer side: TRACK_COMPLETED_BATCH in ring_order; reader side: here
+      // and ring_dump_resume).
+      //
+      //   seq1 = load_acquire(seq)     closes window (b)
+      //   RELAXED data loads           horizon / stdout_bytes / jagged / count
+      //   fence(ACQUIRE)  <- REQUIRED  closes window (c)
+      //   seq2 = load_acquire(seq)
+      //   retry while (seq1 != seq2 || seq1 & 1)
+      //
+      // Two windows exist in a seqlock reader, and they close differently:
+      //   (b) data loads hoisting ABOVE seq1 — closed by seq1's acquire, which
+      //       pins *subsequent* operations.
+      //   (c) seq2 hoisting ABOVE the data loads — NOT closed by any acquire
+      //       load: acquire semantics are one-directional (they order later
+      //       operations, never the acquire load itself). Both the compiler
+      //       (LLVM does perform this) and hardware (on aarch64 an earlier
+      //       `ldr` waiting on a cache miss can be satisfied after a later
+      //       `ldar`) may reorder it.
+      //   Without the fence, a legal execution is: seq1 = v; the data loads
+      //   observe a later, partially-visible generation; seq2 = v (satisfied
+      //   from the older coherence state); seq1 == seq2 and even -> a TORN
+      //   SNAPSHOT IS ACCEPTED. Consequence here is high: torn jagged
+      //   intervals mean wrong skip ranges, i.e. silent loss/duplication on
+      //   resume. Narrow window, high consequence.
+      // The explicit ACQUIRE fence before seq2 is what closes (c): on aarch64
+      // it emits `dmb ishld` (the kernel's smp_rmb in read_seqretry); on x86
+      // it is a compiler barrier only, which is all TSO needs.
+      // DO NOT drop the fence; do not weaken the seq loads to RELAXED.
+      // NOTE: qemu-aarch64 cannot validate this (it does not faithfully model
+      // weak reordering) — this is static-review-correct plus functional-green,
+      // not empirically proven until real ARM hardware runs it.
       uint32_t seq1, seq2;
       uint32_t cnt = 0;
       do {
@@ -3786,6 +3900,9 @@ uint64_t chunk_bounds[16] = {0};
               rs_jagged[i].s = __atomic_load_n(&g_state->resume_jagged[i].s, __ATOMIC_RELAXED);
               rs_jagged[i].e = __atomic_load_n(&g_state->resume_jagged[i].e, __ATOMIC_RELAXED);
           }
+          /* LoadLoad: pin the RELAXED data loads above this fence (window c,
+           * see the reader-pair comment above). Load-bearing — do not delete. */
+          __atomic_thread_fence(__ATOMIC_ACQUIRE);
           seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
       } while (seq1 != seq2 || (seq1 & 1));
       rs_jagged_count = cnt;
@@ -4107,8 +4224,17 @@ uint64_t chunk_bounds[16] = {0};
       }
 
       if (atomic_load_acquire(&t_state->chunk_ready_head) <= claim_idx) {
-        // We reached EOF and the claimed chunk does not exist. Safe to exit.
-        goto unified_scanner_eof;
+        /* F15: this claim over-ran the victim's published chunks. Exiting
+         * here is safe ONLY for a scanner over-claiming its OWN queue (the
+         * exit condition implies everything published there is claimed by
+         * someone). A THIEF's own queue was last seen empty and may have
+         * received chunks since (indexer lag; ingest's min-backlog routing
+         * feeds empty nodes) — exiting now orphans them. Re-check our own
+         * queue instead; termination routes through the Instant NUMA
+         * Tear-down path (global_eof && own publish-head exhausted), which
+         * converges at global EOF. The own-scanner over-claim case reaches
+         * the identical clean exit, so this change is strictly safe. */
+        continue;
       }
 
       // PHYSICS FIX: Double-entry chunk accounting.
@@ -4343,20 +4469,81 @@ uint64_t chunk_bounds[16] = {0};
               end = buf + n;
             }
 
-            char *nl = memchr(p, delim, (size_t)(end - p));
-            if (!nl) {
-              p = end;
-              continue;
+            {
+              // F28: jump straight to the need-th delimiter (SIMD
+              // skip-ahead where available) instead of one memchr per
+              // line. need is clamped by the -n budget below, so a hit
+              // completes at most one batch and crosses the limit at most
+              // exactly. No BytesMax capping: exact lines cannot be
+              // byte-capped (see the -L/-b override warning).
+              uint64_t need = L - lines_in_batch;
+              if (limit_items > 0) {
+                uint64_t spent = sealed + published + lines_in_batch;
+                uint64_t budget =
+                    (spent >= limit_items) ? 0 : (limit_items - spent);
+                if (budget == 0) {
+                  // No budget left for even one more line: seal the open
+                  // partial (if any) as the final limited batch, publish
+                  // the cutoff BEFORE the handoff, and stop. The per-line
+                  // path below can never observe this state (it breaks on
+                  // the budget_hit flush), so this arm is reachable only
+                  // defensively — and it must not emit a spurious 0-line
+                  // batch.
+                  if (lines_in_batch > 0) {
+                    uint64_t _bnd =
+                        buf_base_offset + (uint64_t)(p - buf);
+                    bool _is_last = (_bnd >= raw_end);
+                    bool _skipped = false;
+                    UNIFIED_SCANNER_FLUSH(lines_in_batch, _is_last,
+                                          meta->major_id, l_minor, _bnd,
+                                          _skipped);
+                    l_minor++;
+                    if (_is_last && !_skipped) {
+                      l_last_flushed = true;
+                      chunk_bounds[cb_head & 15] = local_scan_idx;
+                      cb_head++;
+                    }
+                    batch_start = _bnd;
+                    published += lines_in_batch;
+                    lines_in_batch = 0;
+                  }
+                  l_limit_hit = true;
+                  atomic_store_release(&g_state->limit_cutoff_major,
+                                       meta->major_id + 1);
+                  break;
+                }
+                if (need > budget)
+                  need = budget;
+              }
+              char *hit = scan_nth_delim(p, end, need, delim);
+              if (!hit) {
+                // Fewer than need delimiters in [p, end): no complete
+                // batch (and no budget crossing) can form here.
+                if (buf_base_offset + (uint64_t)(end - buf) >= raw_end) {
+                  // Buffer already covers the chunk tail: count the
+                  // stragglers once and transfer the open batch via the
+                  // handoff below.
+                  uint64_t tail =
+                      fast_count_delim(p, end, delim);
+                  counted += tail;
+                  lines_in_batch += tail;
+                  p = end;
+                  break;
+                }
+                p = end; // trigger the pread refill above
+                continue;
+              }
+              p = hit;
+              counted += need;
+              lines_in_batch += need;
             }
-            p = nl + 1;
-            lines_in_batch++;
-            counted++;
 
             // Batches complete at exactly L; the -n budget may clamp the
             // FINAL batch short. sealed+published+lines_in_batch is the
-            // cumulative total that will be sealed once this batch
-            // publishes; it steps by 1 per delimiter, so it reaches
-            // limit_items exactly (no under/over-delivery).
+            // cumulative total sealed once this batch publishes; the F28
+            // jump claims up to `need` lines at once (need <= L -
+            // lines_in_batch, budget-clamped), so it reaches limit_items
+            // exactly (no under/over-delivery).
             bool complete = (lines_in_batch >= L);
             bool budget_hit = false;
             if (limit_items > 0 &&
@@ -5941,6 +6128,16 @@ static int forkrun_emit_with_fallback(int out_fd, int src_fd, off_t off, size_t 
     }
     if (s < 0) {
       if (errno == EPIPE) return -2;
+      /* Hard failure with zero progress: robust_sendfile returns -1 only
+         when total == 0, so the full-range copy below is exact. */
+    } else if (s > 0) {
+      /* F31 (v3.5.0 review finding): partial sendfile already emitted
+         [off, off+s). Resume the fallback copy after the emitted prefix —
+         re-emitting [off, off+len) would duplicate the prefix bytes in the
+         output stream. errno is not consulted here: whatever the failing
+         call left is superseded by the copy below (EPIPE surfaces there). */
+      off += s;
+      len -= (size_t)s;
     }
     /* fall through to copy on ANY other sendfile failure (EINVAL for O_APPEND,
        partial, ENOSYS, etc.) */
@@ -6172,6 +6369,27 @@ static int ring_order_main(int argc, char **argv) {
   }
 
   // NEW: Macro to absorb a successfully written batch into the Ledger
+  // SEQLOCK PUBLISH PROTOCOL (litmus note — read before weakening orderings):
+  //   bump(seq, ACQ_REL) -> RELAXED data stores -> fence(RELEASE) ->
+  //   bump(seq, RELEASE). Readers snapshot with ACQUIRE seq1 -> RELAXED data
+  //   -> fence(ACQUIRE) -> ACQUIRE seq2 and retry while (seq1 != seq2 ||
+  //   seq1 & 1). The READER half of the pair lives in the scanner's is_resume
+  //   block and in ring_dump_resume (full two-window rationale there).
+  //   The ACQ_REL on the FIRST bump pairs with readers' ACQUIRE seq1 (no torn
+  //   read of an in-progress publish, so the retry window is correct); the
+  //   RELEASE fence before the SECOND bump is the publish-side analog of the
+  //   kernel's smp_wmb before a final increment.
+  //   HONEST SCOPE — this fence is NOT what makes readers safe. Under the C11
+  //   model it is REDUNDANT here: the RELEASE RMW immediately below already
+  //   orders the RELAXED stores above it. It is kept as belt-and-suspenders —
+  //   toolchain defense on ppc64le/riscv64 (release-RMW codegen has historical
+  //   gaps) and the kernel-analogous publish shape — at zero cost on the
+  //   orderer path. The LOAD-BEARING half of the pair is the READER's ACQUIRE
+  //   fence before seq2: an acquire load cannot order itself, so without it
+  //   seq2 may be satisfied before the data loads and a torn snapshot is
+  //   accepted (x86-TSO hides that; ARM/POWER/RISC-V do not). Fixing the
+  //   writer does NOT fix the reader.
+  //   Tracked under the preconditions gate (Python-frontend port, v1.3 §2.0).
   #define TRACK_COMPLETED_BATCH(_op) do { \
       tracker_bytes += (_op).len; \
       uint64_t _s = (_op).in_off; \
@@ -6196,6 +6414,9 @@ static int ring_order_main(int argc, char **argv) {
               __atomic_store_n(&g_state->resume_jagged[_i].s, tracker_heap[_i].s, __ATOMIC_RELAXED); \
               __atomic_store_n(&g_state->resume_jagged[_i].e, tracker_heap[_i].e, __ATOMIC_RELAXED); \
           } \
+          /* Publish-side fence: belt-and-suspenders (see the pair note above). */ \
+          /* The LOAD-BEARING half is the reader's ACQUIRE fence before seq2. */    \
+          __atomic_thread_fence(__ATOMIC_RELEASE); \
           __atomic_add_fetch(&g_state->resume_seq, 1, __ATOMIC_RELEASE); \
       } \
   } while(0)
@@ -6214,7 +6435,7 @@ static int ring_order_main(int argc, char **argv) {
     for (size_t i = 0; i < count; i++) {
       struct OrderPacket *op = &ops[i];
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
-      uint64_t op_key = numa_mode ? PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
+      uint64_t op_key = numa_mode ? FR_PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
       if (!unordered_mode) {
         heap_push(&heap, &heap_sz, &heap_cap, op_key, *op);
@@ -6279,7 +6500,7 @@ static int ring_order_main(int argc, char **argv) {
 
       if (!unordered_mode && !stdout_broken && resume_synced) {
         while (heap_sz > 0) {
-          uint64_t expected_key = numa_mode ? PACK_KEY(expected_major, expected_minor) : expected_major;
+          uint64_t expected_key = numa_mode ? FR_PACK_KEY(expected_major, expected_minor) : expected_major;
           if (heap[0].key != expected_key) {
             break;
           }
@@ -7222,7 +7443,17 @@ static int ring_escrow_put_main(int argc, char **argv) {
 static int ring_dump_resume_main(int argc, char **argv) {
     if (!g_state) return EXECUTION_FAILURE;
 
-    // NEW: Safe Seqlock read into local variables
+    // SEQLOCK READ PROTOCOL — reader side of the fence PAIR. The scanner's
+    // is_resume block carries the full two-window rationale; the writer side
+    // is TRACK_COMPLETED_BATCH in ring_order.
+    //   ACQUIRE seq1 -> RELAXED data -> fence(ACQUIRE) -> ACQUIRE seq2,
+    //   retry while odd or mismatched.
+    // The fence is REQUIRED, not decorative: acquire semantics order later
+    // operations but never the acquire load itself, so without it seq2 can be
+    // satisfied before the data loads and a torn checkpoint (wrong horizon /
+    // jagged ranges) is accepted at abort time — one generation later than the
+    // scanner's window, same silent loss/duplication class.
+    // Do NOT weaken the seq loads to RELAXED.
     uint32_t seq1, seq2;
     uint64_t snap_horizon, snap_bytes;
     uint32_t snap_count;
@@ -7237,6 +7468,9 @@ static int ring_dump_resume_main(int argc, char **argv) {
             snap_jagged[i].s = __atomic_load_n(&g_state->resume_jagged[i].s, __ATOMIC_RELAXED);
             snap_jagged[i].e = __atomic_load_n(&g_state->resume_jagged[i].e, __ATOMIC_RELAXED);
         }
+        /* LoadLoad: pin the RELAXED data loads above this fence (reader-pair
+         * window c). Load-bearing — do not delete. */
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
         seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
     } while (seq1 != seq2 || (seq1 & 1));
 
@@ -7353,7 +7587,7 @@ static int ring_abort_reason_main(int argc, char **argv) {
 
 struct PollMeta {
     arrayind_t id;
-    int type; // 0 = spawn, 1 = scanner, 2 = worker, 3 = trap_ack
+    int type; // 0 = spawn, 1 = scanner, 2 = worker, 3 = trap_ack, 4 = indexer
 };
 
 static inline uint64_t get_mono_ms(void) {
@@ -7390,6 +7624,11 @@ static int ring_poll_main(int argc, char **argv) {
 
     // Optional 5th arg: trap ack pipe
     int fd_trap_ack_r = (argc >= 6 && argv[5][0] != '\0') ? atoi(argv[5]) : -1;
+
+    // Optional 6th arg: indexer-death array name (preconditions gate, v1.3 §2.0).
+    // When omitted the reactor behaves exactly as before (bash passes its
+    // fd_indexer_death_r array; UMA/flat mode passes an empty/unset name).
+    const char *indexer_arr_name = (argc >= 7 && argv[6][0] != '\0') ? argv[6] : NULL;
 
     int max_poll = 8192;
     struct pollfd *pfds = malloc(max_poll * sizeof(struct pollfd));
@@ -7447,6 +7686,38 @@ static int ring_poll_main(int argc, char **argv) {
     // 3. Load Scanner and Worker Death Pipes
     LOAD_ARRAY(scan_arr_name, 1);
     LOAD_ARRAY(work_arr_name, 2);
+
+    // 3b. Load Indexer Death Pipes (kernel-observable liveness; POLLHUP on
+    // indexer SIGKILL/OOM). Not core_cnt: an indexer death reports via
+    // INDEXER_DEATH -> ring_abort, it never keeps a drained loop alive.
+    // (UMA/flat pipeline has no indexer_numa: array unset/empty -> no-op.)
+    // CEILING TIE (D5 / F23b): indexer entries draw on the SAME pfds/meta
+    // budget as the spawn, trap-ack, scanner and worker entries — `max_poll`
+    // (== FR_MAX_POLL_WORKERS) is ONE ceiling for all classes, and at extreme
+    // @N oversubscription exceeding it drops death-watch coverage SILENTLY
+    // (the `p_cnt >= max_poll` guard just breaks out). Any future bound
+    // consolidation must treat these as a single budget, never as independent
+    // per-class limits.
+    if (indexer_arr_name) {
+        SHELL_VAR *xiv = find_variable(indexer_arr_name);
+        if (xiv && array_p(xiv)) {
+            ARRAY *xarr = array_cell(xiv);
+            if (xarr) {
+                ARRAY_ELEMENT *xae;
+                for (xae = element_forw(xarr->head); xae != xarr->head; xae = element_forw(xae)) {
+                    if (p_cnt >= max_poll) break;
+                    char *xval = element_value(xae);
+                    if (xval && xval[0]) {
+                        pfds[p_cnt].fd = atoi(xval);
+                        pfds[p_cnt].events = POLLHUP | POLLIN | POLLERR;
+                        meta[p_cnt].id = element_index(xae);
+                        meta[p_cnt].type = 4;
+                        p_cnt++;
+                    }
+                }
+            }
+        }
+    }
 
     uint64_t g_poll_deadline_ms = 0;
     for (int w = 0; w < MAX_POLL_WORKERS; w++) {
@@ -7572,8 +7843,11 @@ static int ring_poll_main(int argc, char **argv) {
                     return EXECUTION_SUCCESS;
                 }
             } else {
-                // --- DEATH PIPES (Scanner or Worker) ---
-                bind_variable("POLL_EVENT", meta[i].type == 1 ? "SCAN_DEATH" : "WORKER_DEATH", 0);
+                // --- DEATH PIPES (Scanner, Worker, or Indexer) ---
+                const char *ev = "WORKER_DEATH";
+                if (meta[i].type == 1) ev = "SCAN_DEATH";
+                else if (meta[i].type == 4) ev = "INDEXER_DEATH";
+                bind_variable("POLL_EVENT", ev, 0);
                 char arg_buf[32];
                 snprintf(arg_buf, sizeof(arg_buf), "%lld", (long long)meta[i].id);
                 bind_variable("POLL_ARG1", arg_buf, 0);
@@ -7700,33 +7974,30 @@ FORKRUN_LOADABLES(DEFINE_STRUCT_X)
 // ---------------------------------------------------------
 // ring_call: Zero-Tax C Plugin Callback Execution
 // ---------------------------------------------------------
+// struct forkrun_ctx is NOT defined here — it comes from the frozen
+// ring_loadables/forkrun_plugin.h (included at the top of this file).
+// Hand-maintaining a second copy of a frozen ABI is exactly the drift
+// pattern the v2 freeze and the single-source rule exist to prevent.
+// What IS enforced here: the substrate<->plugin-ABI tie (both views of
+// one coordinate system) and the frozen 128-byte layout.
 
-struct forkrun_ctx {
-    uint64_t batch_index;       // global batch sequence number
-    uint64_t batch_offset;      // byte offset in input stream
-    uint64_t batch_byte_length; // length of current batch in bytes
-    uint32_t version;           // struct version: 1 (legacy) or 2 (packed)
-    uint32_t worker_id;         // RING_WID
-    uint32_t node_id;           // NUMA node
-    uint32_t num_kills;         // retry count for this batch
-    union {
-        uint64_t numa_batch_id; // version 2: packed (42-bit major << 22 | 22-bit minor)
-        struct {
-            uint32_t numa_major; // version 1: truncated 32-bit major
-            uint32_t numa_minor; // version 1: 32-bit minor
-        };
-    };
-    int32_t  fd_in;             // input file descriptor
-    char     delimiter;         // batch delimiter
-    uint8_t  cfg_state[4];      // global configuration state
-    /* v2 extension zone (frozen layout; see forkrun_plugin.h) */
-    uint32_t batch_lines;       // records in batch; 0 = undefined (-b byte mode)
-    uint32_t struct_size;       // sizeof(struct) as built by THIS engine
-    uint32_t worker_incarn;     // respawn generation of this worker
-    uint32_t flags_granted;     // req & ENGINE_KNOWN_FLAGS; dialect >= 2 only
-    uint32_t reserved32;        // zero; alignment
-    uint64_t reserved[6];       // v3 fields land here; zero in v2
-};
+
+/* Substrate<->plugin-ABI tie (v1.3 §2.1, N1 guard): both views of one
+ * coordinate system, now provably consistent. Both headers are included
+ * unconditionally above; the guards make the tie self-documenting and the
+ * #error a tripwire against future reordering. */
+#if defined(FORKRUN_PLUGIN_H) && defined(FORKRUN_SUBSTRATE_H)
+typedef char fr_ctx_abi_minor_split_frozen[(FR_MINOR_BITS == 22) ? 1 : -1];
+typedef char fr_ctx_state_major_holds_packed_majors[
+    (sizeof(((fr_state_t *)0)->major) * 8 >= 64 - FR_MINOR_BITS) ? 1 : -1];
+typedef char fr_ctx_state_minor_holds_packed_minors[
+    (sizeof(((fr_state_t *)0)->minor) * 8 >= FR_MINOR_BITS) ? 1 : -1];
+typedef char fr_ctx_engine_known_flags_matches_v2_grant_semantics[
+    (ENGINE_KNOWN_FLAGS == 0u) ? 1 : -1];
+typedef char fr_ctx_frozen_size_128_bytes[(sizeof(struct forkrun_ctx) == 128) ? 1 : -1];
+#else
+#error "forkrun_ring.c: both forkrun_substrate.h and ring_loadables/forkrun_plugin.h must be included before the ctx tie asserts."
+#endif
 
 // Define the user's expected function signatures
 typedef int (*forkrun_cb_t)(int argc, char **argv);
@@ -7852,8 +8123,8 @@ static int ring_call_main(int argc, char **argv) {
         tls_fctx.flags_granted = (tls_use_ctx >= 2) ? tls_flags_granted : 0;
         if (tls_numa_enabled) {
             if (tls_use_ctx == 2) {
-                uint32_t actual_minor = worker_last_minor & MINOR_MASK;
-                tls_fctx.numa_batch_id = PACK_KEY(worker_last_major, actual_minor);
+                uint32_t actual_minor = worker_last_minor & FR_MINOR_MASK;
+                tls_fctx.numa_batch_id = FR_PACK_KEY(worker_last_major, actual_minor);
             } else {
                 tls_fctx.numa_major = (uint32_t)worker_last_major;
                 tls_fctx.numa_minor = worker_last_minor;
@@ -7862,7 +8133,7 @@ static int ring_call_main(int argc, char **argv) {
             if (tls_use_ctx == 2) {
                 /* C2-fix: derive UMA numa_batch_id from authoritative 64-bit claim index */
                 tls_fctx.numa_batch_id =
-                    PACK_KEY(worker_last_idx >> MINOR_BITS, worker_last_idx & MINOR_MASK);
+                    FR_PACK_KEY(worker_last_idx >> FR_MINOR_BITS, worker_last_idx & FR_MINOR_MASK);
             } else {
                 tls_fctx.numa_major = 0;
                 tls_fctx.numa_minor = worker_last_minor;
