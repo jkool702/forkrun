@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - 'forkrun_ring.c'
+      - 'forkrun_substrate.h'
+      - 'ring_loadables/forkrun_plugin.h'
       - 'META'
       - '.github/workflows/forkrun_release.yml'
   workflow_dispatch:
