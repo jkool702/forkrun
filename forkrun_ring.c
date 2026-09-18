@@ -433,8 +433,8 @@ fast_count_delim(const char *p, const char *end, char delim) {
  * aliases. ENGINE_KNOWN_FLAGS is engine-side only (the plugin header
  * explicitly does not define it) and lives here. */
 
-/* v3.5.0: no behavior flags implemented -> ENGINE_KNOWN_FLAGS is empty */
-#define ENGINE_KNOWN_FLAGS          0u
+/* v3.5.2: FLAG_RAW is live — raw window delivery for C plugins. */
+#define ENGINE_KNOWN_FLAGS          FORKRUN_CTX_FLAG_RAW
 
 #define HUGE_PAGE_SIZE (2 * 1024 * 1024)
 #define SCANNER_CHUNK_SIZE (2 * 1024 * 1024)
@@ -7993,7 +7993,7 @@ typedef char fr_ctx_state_major_holds_packed_majors[
 typedef char fr_ctx_state_minor_holds_packed_minors[
     (sizeof(((fr_state_t *)0)->minor) * 8 >= FR_MINOR_BITS) ? 1 : -1];
 typedef char fr_ctx_engine_known_flags_matches_v2_grant_semantics[
-    (ENGINE_KNOWN_FLAGS == 0u) ? 1 : -1];
+    (ENGINE_KNOWN_FLAGS == FORKRUN_CTX_FLAG_RAW) ? 1 : -1];
 typedef char fr_ctx_frozen_size_128_bytes[(sizeof(struct forkrun_ctx) == 128) ? 1 : -1];
 #else
 #error "forkrun_ring.c: both forkrun_substrate.h and ring_loadables/forkrun_plugin.h must be included before the ctx tie asserts."
@@ -8012,6 +8012,89 @@ static __thread int tls_use_ctx = 0;
 static __thread unsigned tls_flags_granted = 0;
 static __thread int tls_numa_enabled = 0;
 static __thread struct forkrun_ctx tls_fctx;
+
+/* v3.5.2 W-RAW: persistent MAP_SHARED view of the ingress memfd for raw
+ * window delivery (FLAG_RAW). One mapping per worker, lives for the
+ * worker's lifetime — never munmap'd per batch.
+ *
+ * Stability guarantee: the window [batch_offset, batch_offset +
+ * batch_byte_length) is stable during the callback because (a) ingest is
+ * append-only past the window's end, (b) tokenization never writes the
+ * shared memfd (all tokenize paths use private pread buffers), and (c)
+ * fallow punches holes only behind the acked contiguous prefix — this
+ * batch is unacked, therefore its pages are intact. This is the same
+ * guarantee the Python frontend's Batch.data relies on; the C tier
+ * proves it first. */
+static __thread void *tls_ingress_map = NULL;
+static __thread size_t tls_ingress_map_len = 0;
+static __thread int tls_ingress_fd = -1;
+
+/* Ensure tls_ingress_map covers [batch_offset, batch_offset + batch_len).
+ * First raw batch: mmap the ingress fd MAP_SHARED/PROT_READ at offset 0
+ * with length = current file size. Later batches: if the window extends
+ * past the current mapping, mremap to grow to max(need*2, file size).
+ * Returns EXECUTION_SUCCESS on success (or when batch_len == 0 and no
+ * mapping is strictly required), 254 on failure. */
+static int ring_call_ensure_ingress_map(int fd, uint64_t batch_offset,
+                                        size_t batch_len) {
+    uint64_t need;
+    if (__builtin_add_overflow(batch_offset, (uint64_t)batch_len, &need))
+        return 254;
+    if (need == 0)
+        return EXECUTION_SUCCESS;
+    if (tls_ingress_map && tls_ingress_fd == fd &&
+        (uint64_t)tls_ingress_map_len >= need)
+        return EXECUTION_SUCCESS;
+    /* fd changed (should not happen — $fd_read is stable per worker — but
+     * be safe): drop the stale mapping and start over. */
+    if (tls_ingress_map && tls_ingress_fd != fd) {
+        munmap(tls_ingress_map, tls_ingress_map_len);
+        tls_ingress_map = NULL;
+        tls_ingress_map_len = 0;
+        tls_ingress_fd = -1;
+    }
+    struct stat st;
+    size_t file_len = 0;
+    if (fstat(fd, &st) == 0 && st.st_size > 0)
+        file_len = (size_t)st.st_size;
+    size_t target;
+    if (!tls_ingress_map) {
+        /* First raw batch: map the current file size (which covers this
+         * batch — the scanner only publishes written bytes). */
+        target = file_len;
+        if ((uint64_t)target < need)
+            target = (size_t)need;
+        if (target == 0)
+            return 254;
+        void *p = mmap(NULL, target, PROT_READ, MAP_SHARED, fd, 0);
+        if (p == MAP_FAILED)
+            return 254;
+        tls_ingress_map = p;
+        tls_ingress_map_len = target;
+        tls_ingress_fd = fd;
+        return EXECUTION_SUCCESS;
+    }
+    /* Grow path: new_len = max(need*2, file size), with overflow guard. */
+    uint64_t doubled = need * 2;
+    if (doubled < need)
+        doubled = need; /* overflow: fall back to need */
+    uint64_t want = doubled;
+    if ((uint64_t)file_len > want)
+        want = (uint64_t)file_len;
+    if (want <= (uint64_t)tls_ingress_map_len)
+        want = need; /* file shrank? still must cover need */
+    if (want > (uint64_t)SIZE_MAX)
+        return 254;
+    target = (size_t)want;
+    void *p = mremap(tls_ingress_map, tls_ingress_map_len, target,
+                     MREMAP_MAYMOVE);
+    if (p == MAP_FAILED)
+        return 254;
+    tls_ingress_map = p;
+    tls_ingress_map_len = target;
+    tls_ingress_fd = fd;
+    return EXECUTION_SUCCESS;
+}
 
 // ---------------------------------------------------------
 // ring_call: Zero-Tax C Plugin Callback Execution
@@ -8044,7 +8127,17 @@ static int ring_call_main(int argc, char **argv) {
         unsigned ver = req & FORKRUN_CTX_VERSION_MASK;
         if (ver == 1 || ver == 2) {
             tls_use_ctx = (int)ver;
-            tls_flags_granted = req & ENGINE_KNOWN_FLAGS;
+            /* v3.5.2 W-RAW: raw requires v2 (v1 has no ctx window
+             * channel). Mask grants to zero for v1; delivery stays argv. */
+            if (ver >= 2) {
+                tls_flags_granted = req & ENGINE_KNOWN_FLAGS;
+            } else {
+                tls_flags_granted = 0;
+                if (req & FORKRUN_CTX_FLAG_RAW) {
+                    fprintf(stderr, "forkrun [WARN]: plugin requests FLAG_RAW under dialect v1 "
+                            "(ignored; use forkrun_use_ctx = 2 | FLAG_RAW)\n");
+                }
+            }
             tls_callback_ctx = (forkrun_cb_ctx_t)dlsym(tls_dl_handle, func_name);
             if (!tls_callback_ctx) {
                 fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
@@ -8090,19 +8183,38 @@ static int ring_call_main(int argc, char **argv) {
         tls_argv[i] = argv[6 + i];
     }
 
-    // 3. Tokenize the batch directly into tls_argv (starting at fixed_argc)
-    size_t batch_argc = 0;
-    int ret = do_tokenize(fd, length, tls_batch_offset, delim, NULL, fixed_argc, &batch_argc);
-    if (ret != EXECUTION_SUCCESS) return ret;
+    /* v3.5.2 dispatch precedence (binding for W-STDIN too):
+     *   1. FLAG_RAW granted (v2 only) -> raw window delivery (below).
+     *   2. stdin-mode signal -> stdin feed (W-STDIN, not yet implemented).
+     *   3. else -> argv tokenize (existing path).
+     * Raw overrides everything: argv tokenization, stdin delivery, the
+     * user's -s/-b flags. The plugin's ABI opt-in is authoritative over
+     * the user's CLI presentation choice. */
+    int is_raw =
+        (tls_use_ctx >= 2) && ((tls_flags_granted & FORKRUN_CTX_FLAG_RAW) != 0);
+    /* Arm 2 (W-STDIN): stdin-mode delivery for C plugins lives here.
+     * Not yet implemented — falls through to the argv tokenize path. */
 
-    // 4. Ensure capacity and terminate argv array
-    if (fixed_argc + batch_argc + 1 > tls_argv_cap) {
-        tls_argv_cap = fixed_argc + batch_argc + 1024;
-        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-        if (!new_argv) return 254;
-        tls_argv = new_argv;
+    // 3. Tokenize the batch directly into tls_argv (starting at fixed_argc),
+    //    unless RAW delivery skips tokenization entirely.
+    size_t batch_argc = 0;
+    if (is_raw) {
+        /* RAW delivery: borrowed window, zero-copy, no tokenization.
+         * Skip do_tokenize entirely. argv = fixed args only. */
+        tls_argv[fixed_argc] = NULL; /* argc = fixed_argc, argv valid but empty of batch data */
+    } else {
+        int ret = do_tokenize(fd, length, tls_batch_offset, delim, NULL, fixed_argc, &batch_argc);
+        if (ret != EXECUTION_SUCCESS) return ret;
+
+        // 4. Ensure capacity and terminate argv array
+        if (fixed_argc + batch_argc + 1 > tls_argv_cap) {
+            tls_argv_cap = fixed_argc + batch_argc + 1024;
+            char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+            if (!new_argv) return 254;
+            tls_argv = new_argv;
+        }
+        tls_argv[fixed_argc + batch_argc] = NULL;
     }
-    tls_argv[fixed_argc + batch_argc] = NULL;
 
     // 5. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
 
@@ -8121,6 +8233,32 @@ static int ring_call_main(int argc, char **argv) {
         tls_fctx.batch_byte_length = (uint64_t)length;
         tls_fctx.batch_lines = tls_batch_lines;
         tls_fctx.flags_granted = (tls_use_ctx >= 2) ? tls_flags_granted : 0;
+        if (is_raw) {
+            /* Lifetime contract: ctx->data (reserved[0]) is borrowed:
+             * valid for the duration of the callback only. The pointer's
+             * ADDRESS is not stable across calls (the engine may remap
+             * as the stream grows); only offset+length identity is stable.
+             * fd_in remains populated for plugins that prefer pread. */
+            tls_fctx.fd_in = fd;
+            if (length == 0) {
+                tls_fctx.reserved[0] = 0;
+            } else {
+                int map_ret = ring_call_ensure_ingress_map(
+                    fd, (uint64_t)tls_batch_offset, length);
+                if (map_ret != EXECUTION_SUCCESS) {
+                    sigprocmask(SIG_SETMASK, &oset, NULL);
+                    return map_ret;
+                }
+                const void *data = (const char *)tls_ingress_map +
+                                   (uint64_t)tls_batch_offset;
+                tls_fctx.reserved[0] = (uint64_t)(uintptr_t)data;
+            }
+            /* reserved[1..5] stay zero (memset at dlopen; never written). */
+        } else {
+            /* Registry rule: extension fields are populated only when
+             * the flag is granted, zero otherwise. */
+            tls_fctx.reserved[0] = 0;
+        }
         if (tls_numa_enabled) {
             if (tls_use_ctx == 2) {
                 uint32_t actual_minor = worker_last_minor & FR_MINOR_MASK;

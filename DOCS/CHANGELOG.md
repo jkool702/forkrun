@@ -1,5 +1,33 @@
 # forkrun Changelog
 
+## v3.5.2 (unreleased)
+
+- **W-RAW: C-plugin raw window delivery (`FORKRUN_CTX_FLAG_RAW` live):**
+  `ENGINE_KNOWN_FLAGS` is now `FORKRUN_CTX_FLAG_RAW` (was `0u`); the
+  `fr_ctx_engine_known_flags_matches_v2_grant_semantics` tripwire asserts
+  the new known set. `ring_call` dispatches raw-first: when the plugin's
+  `forkrun_use_ctx` grants `FLAG_RAW` (v2 only), the engine skips
+  `do_tokenize` entirely, passes only fixed args in `argv`
+  (`argc = fixed_argc`), and publishes the borrowed zero-copy window in
+  `ctx->reserved[0]` (`const void *data` over
+  `[batch_offset, batch_offset + batch_byte_length)`). The engine holds a
+  persistent per-worker `MAP_SHARED`/`PROT_READ` mmap of the ingress memfd
+  (lazy-map on first raw batch, `mremap` growth to
+  `max(need*2, file size)`, never unmapped per batch). Precedence is
+  binding: raw overrides argv tokenization, stdin delivery, and the user's
+  `-s`/`-b` flags (W-STDIN's stdin-feed arm is marked and falls through to
+  argv). Raw requires v2 — a v1 plugin requesting the flag gets the grant
+  masked to zero, argv delivery, and a dlopen-time warning. Pre-v3.5.2
+  engines grant nothing, so plugins must check
+  `ctx->flags_granted & FORKRUN_CTX_FLAG_RAW` and fall back to argv.
+  Window contract: borrowed (callback duration only), stable-during-callback
+  (append-only ingest, private `pread` tokenize buffers, fallow punches only
+  behind the acked prefix), address-not-stable across calls, `fd_in` escape
+  hatch retained. Docs: `C_PLUGIN.md` §4 (contract, negotiation pattern,
+  complete example, stability note); lock-in tests T-RAW-1..7
+  (`UNIT_TESTS/test_c_plugins_raw.sh`). No changes to `try_simd_scan`, the
+  fences, or the scanner macros.
+
 ## v3.5.1 — 2026-09-17
 
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,

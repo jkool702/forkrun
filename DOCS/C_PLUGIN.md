@@ -188,3 +188,119 @@ During the callback invocation, the byte window `[batch_offset, batch_offset + b
 Note that `mmap` offsets must be page-aligned (`sysconf(_SC_PAGESIZE)`), so consumers must map the *containing* page-aligned window of an unaligned `batch_offset` and adjust their internal pointer accordingly.
 
 *Warning:* Only map within your batch's active byte window; regions behind the fallow horizon may already be hole-punched (reading them yields zeroes).
+
+---
+
+## §4. Raw Window Delivery (`FLAG_RAW`, v3.5.2+)
+
+The third delivery mode for C plugins (`-C`). Instead of tokenized argv
+strings, the plugin receives a borrowed, zero-copy pointer to the batch's
+bytes in shared memory, plus the byte length — no tokenization, no copy.
+It is the C-tier analogue of the Python frontend's `Batch.data` contract
+(the same borrowed-window lifetime, the same stability guarantee, the same
+absolute plane coordinates).
+
+**Precedence (binding):** if the plugin declares `FLAG_RAW`, raw window
+delivery overrides everything — argv tokenization, stdin delivery, the
+user's `-s`/`-b` flags. The plugin's ABI opt-in is authoritative over the
+user's CLI presentation choice.
+
+### The contract
+
+- `ctx->reserved[0]` is `data` when `FLAG_RAW` is granted: a borrowed
+  `const void *` to `[batch_offset, batch_offset + batch_byte_length)`.
+  Zero when the flag is not granted. `reserved[1..5]` remain zero.
+- **Borrowed:** valid for the duration of the callback only. Do not store
+  the pointer across batches.
+- **Stable during the callback:** the window's bytes are immutable while
+  your function runs (see the stability note below).
+- **Address not stable across calls:** the engine may `mremap` its
+  persistent view as the stream grows, so the pointer value for two
+  batches may differ even for adjacent offsets. Only offset+length
+  identity is stable — never compare pointers across batches.
+- **`fd_in` escape hatch:** `fd_in` remains populated. Plugins that prefer
+  `pread` (or their own `mmap` with page-aligned arithmetic) can ignore
+  `data` and use `batch_offset`/`batch_byte_length`/`fd_in` directly.
+- **argv still valid:** `argc`/`argv` contain ONLY the fixed arguments
+  (`frun -C plug.so:fn --mode fast` → `argc=2`, `argv={"--mode","fast"}`).
+  No batch data is tokenized into argv in raw mode.
+- **Metadata still populated:** `batch_offset`, `batch_byte_length`,
+  `batch_lines`, and `delimiter` are valid in raw mode. `batch_lines`
+  counts delimiter-terminated records (`wc -l` semantics); `0` means
+  undefined (`-b` byte mode). Scan for `ctx->delimiter` to split records.
+- **Raw requires v2:** a v1 plugin (`forkrun_use_ctx = 1 | FLAG_RAW`) gets
+  the flag masked to zero, argv delivery, and a dlopen-time warning on
+  stderr. Use `forkrun_use_ctx = 2 | FLAG_RAW`.
+- **Old-engine compatibility:** a v2 plugin requesting `FLAG_RAW` on a
+  pre-v3.5.2 engine gets `flags_granted = 0` and argv delivery (the
+  existing negotiation contract — unknown flags are simply ungranted).
+  Always check the grant and implement the argv fallback.
+
+### The negotiation pattern
+
+```c
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>  /* write */
+#include "forkrun_plugin.h"
+
+/* Request dialect 2 + raw window delivery. */
+int forkrun_use_ctx = 2 | FORKRUN_CTX_FLAG_RAW;
+
+static const void *raw_data(const struct forkrun_ctx *ctx) {
+    return (const void *)(uintptr_t)ctx->reserved[0];
+}
+
+int my_raw_fn(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    if (ctx->version >= 2 && (ctx->flags_granted & FORKRUN_CTX_FLAG_RAW)) {
+        /* Raw path: borrowed window, zero-copy. */
+        const char *data = (const char *)raw_data(ctx);
+        size_t len = (size_t)ctx->batch_byte_length;
+        size_t off = 0;
+        while (off < len) {
+            ssize_t w = write(STDOUT_FILENO, data + off, len - off);
+            if (w < 0) return 1;
+            off += (size_t)w;
+        }
+        (void)argc; (void)argv;  /* fixed args available but unused here */
+        return 0;
+    }
+    /* Fallback path: pre-v3.5.2 engine (or flag ungranted) — argv. */
+    for (int i = 0; i < argc; i++) {
+        size_t n = strlen(argv[i]);
+        size_t off = 0;
+        while (off < n) {
+            ssize_t w = write(STDOUT_FILENO, argv[i] + off, n - off);
+            if (w < 0) return 1;
+            off += (size_t)w;
+        }
+        if (write(STDOUT_FILENO, "\n", 1) != 1) return 1;
+    }
+    return 0;
+}
+```
+
+Compile and run as usual:
+
+```bash
+gcc -O3 -shared -fPIC plugin_raw.c -o plugin_raw.so
+frun -k -C ./plugin_raw.so:my_raw_fn < massive_dataset.txt
+```
+
+(`-k` orders the per-batch windows back into input order for byte-exact
+output. Without `-k`, windows are still individually exact but may
+interleave.)
+
+### Why the window is safe (mmap-stability note)
+
+The engine holds a persistent `MAP_SHARED`/`PROT_READ` mmap of the ingress
+memfd in each worker (lazily mapped on the first raw batch, grown with
+`mremap` as the stream grows, never unmapped per batch). The borrowed
+pointer is `base + batch_offset`. The window is stable during the callback
+because (a) ingest is append-only past the window's end, (b) tokenization
+never writes the shared memfd (all tokenize paths use private `pread`
+buffers), and (c) fallow punches holes only *behind the acked contiguous
+prefix* — this batch is unacked, therefore its pages are intact. This is
+the same guarantee the Python frontend's `Batch.data` relies on; the C
+tier proves it first.
