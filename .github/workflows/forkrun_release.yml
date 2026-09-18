@@ -180,6 +180,73 @@ jobs:
           cd ../../
           rm -rf all_artifacts
 
+      - name: Verify embedded blobs match built artifacts
+        shell: bash
+        run: |
+          # W-F provenance gate: the update step above runs under `set +e`,
+          # so a silently failed update_frun_base64 would still reach the PR
+          # step with stale blobs. For every architecture with a built
+          # artifact, the payload embedded in the updated frun.bash must
+          # decode (via the repo's own decoder, checksums enforced) to bytes
+          # identical to that artifact. Mismatch ALWAYS fails. A missing
+          # artifact fails on tag refs (releases must ship every arch) and
+          # warns otherwise (riscv64 is continue-on-error).
+          #
+          # NOTE (deviation from the first sketch, which asked for a
+          # regen-and-byte-compare): the encoder gzip-compresses with an
+          # embedded mtime, so two encodings of the SAME .so never compare
+          # equal and a regen-compare false-fails on every run (demonstrated
+          # locally). Decode-and-cmp proves the same correspondence —
+          # embedded bytes == artifact bytes — deterministically.
+          set -euo pipefail
+          # Repo machinery, sourced from the UPDATED frun.bash (function defs
+          # only — never source the whole file here). Extraction runs to the
+          # first column-0 `}` after each opener (both functions end there).
+          . <( { capture=false; while IFS= read -r line; do
+            case "$line" in
+              *'_forkrun_file_to_base64() {'*|*'_forkrun_base64_to_file() {'*) capture=true;;
+            esac
+            $capture && printf '%s\n' "$line"
+            $capture && [[ "$line" == '}' ]] && capture=false
+          done; } <./frun.bash )
+          # Embedded map: eval ONLY the declare region between the
+          # _BASE64_START_ marker and the bootstrap line.
+          unset b64; declare -A b64=()
+          eval "$(awk '/_BASE64_START_/{f=1;next} /_forkrun_bootstrap_setup/{f=0} f' ./frun.bash)"
+          # NOTE: the codec functions are foreign code that is not
+          # nounset-clean, so each call runs with its native options
+          # (subshell-scoped); the comparisons below remain the hard gate —
+          # a failed decode/regeneration can never compare equal.
+          expected=(x86_64_v2 x86_64_v3 x86_64_v4 aarch64 ppc64le s390x riscv64)
+          fail=0
+          tmpd="$(mktemp -d)"
+          for key in "${expected[@]}"; do
+            artifact="ring_loadables/forkrun-libs/forkrun_ring.${key//_/-}.so"
+            if [[ ! -f "$artifact" ]]; then
+              if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+                echo "VERIFY-FAIL: missing artifact $artifact on a tag ref" >&2; fail=1
+              else
+                echo "VERIFY-WARN: missing artifact $artifact (non-tag ref; skipping)" >&2
+              fi
+              continue
+            fi
+            if [[ -z "${b64[$key]:-}" ]]; then
+              echo "VERIFY-FAIL: frun.bash carries no embedded b64[$key]" >&2; fail=1; continue
+            fi
+            rm -f "$tmpd/out.so"
+            if (set +e +u; _forkrun_base64_to_file <<<"${b64[$key]}" "$tmpd/out.so" 2>/dev/null); then
+              if cmp -s "$tmpd/out.so" "$artifact"; then
+                echo "VERIFY-OK: b64[$key] decodes to $artifact"
+              else
+                echo "VERIFY-FAIL: embedded b64[$key] decodes to bytes differing from $artifact (stale blob)" >&2; fail=1
+              fi
+            else
+              echo "VERIFY-FAIL: embedded b64[$key] failed to decode/verify" >&2; fail=1
+            fi
+          done
+          rm -rf "$tmpd"
+          exit "$fail"
+
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
