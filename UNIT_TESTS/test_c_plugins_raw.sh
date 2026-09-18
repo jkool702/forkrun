@@ -274,9 +274,8 @@ if grep -q "FLAG_RAW" err_raw_7.txt; then
     fail "unexpected FLAG_RAW warning with v2 raw plugin (T-RAW-7)"
 fi
 echo "✓ Passed: -s does not divert or break raw window delivery"
-echo "  (note: the pre-existing '-s/-b ignored in -C mode' wrapper notice may"
-echo "   still appear on stderr; it concerns the not-yet-implemented W-STDIN"
-echo "   stdin feed, not RAW. W-STDIN must keep this test green unchanged.)"
+echo "  (precedence lock-in: RAW wins over the W-STDIN stdin feed.
+   W-STDIN must keep this test green unchanged.)"
 
 echo "------------------------------------------------------"
 echo "=== All RAW Window Delivery Tests Passed (T-RAW-1..7) ==="

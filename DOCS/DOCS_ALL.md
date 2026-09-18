@@ -259,6 +259,35 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
   (`UNIT_TESTS/test_c_plugins_raw.sh`). No changes to `try_simd_scan`, the
   fences, or the scanner macros.
 
+- **W-STDIN: C-plugin stdin delivery (`-s`/`-b` with `-C`):** the bash JIT
+  exports `FORKRUN_C_STDIN=1` for `-C` + (`-s` | `-b`) — the entire
+  bash-side change, riding the existing `FORKRUN_EXTRA_VARS` cleanroom
+  transport — and `ring_call` fills the dispatch arm W-RAW established:
+  `FLAG_RAW` > stdin mode > argv tokenize. In stdin mode tokenization is
+  skipped (`argv` = fixed args only) and the batch is spliced onto the
+  plugin's fd 0 as an EOF-terminated byte stream. Tier split mirrors
+  external `-s`: fitting batches are fed synchronously (no fork); larger
+  batches fork a SIGCHLD-shielded feeder child (the `ring_exec` pattern
+  verbatim: block around fork, own `waitpid`, restore after) that splices
+  concurrently while the parent runs the callback. The child `_exit`s
+  (never returns into bash), ignores SIGPIPE, and scrubs the fork-order
+  mask-hazard fds (death-pipe write end via the `fd_worker_w` array walk,
+  `FD_TRAP_ACK_W`, `fd_fallow_w`) — targeted close, no new bash protocol,
+  no `/proc` opens. Failure semantics from process lifecycle: feeder death
+  reads as EOF (length-checking plugins fail into escrow/retry; a 0-return
+  with a dead feeder is failed by the parent rather than risk short output
+  with rc 0; partial-consumption EPIPE `_exit(0)` is never flagged);
+  worker death orphaning the child EPIPE-exits it while the death pipe
+  fires unmasked. The ctx is unchanged (offset/length/lines/delimiter/fd_in
+  populated; v2 length-bounded reads, v1 read-to-EOF); `-b` composes as a
+  byte-transparent pipe (no NUL truncation). The old "`-s`/`-b` ignored in
+  `-C` mode" warning is removed; `--help` `-C` line documents the new
+  semantics. Docs: `C_PLUGIN.md` §5 (contract, v2/v1 patterns,
+  implementation note); lock-in tests T-STDIN-1..9
+  (`UNIT_TESTS/test_c_plugins_stdin.sh`). No new loadables, no persistent
+  processes; the `/proc`-based persistent feeder stays deferred in
+  `docs_port/`.
+
 ## v3.5.1 — 2026-09-17
 
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,
@@ -912,6 +941,104 @@ prefix* — this batch is unacked, therefore its pages are intact. This is
 the same guarantee the Python frontend's `Batch.data` relies on; the C
 tier proves it first.
 
+---
+
+## §5. Stdin Delivery (`-s`/`-b` with `-C`, v3.5.2+)
+
+The second v3.5.2 delivery mode for C plugins. When the user passes `-s`
+(or `-b`, which implies stdin) with `-C`, and the plugin has NOT declared
+`FLAG_RAW`, the batch data is delivered on the plugin's stdin (fd 0) as a
+byte stream terminated by EOF. This is the C-plugin analogue of external
+`-s` mode — with the spawn amputated: no `posix_spawnp` per batch, just an
+in-process callback whose fd 0 the engine feeds before/during the call.
+
+**Precedence:** `FLAG_RAW` (checked first) > stdin mode > argv tokenize.
+A raw plugin invoked with `-s` receives the window, never a stdin feed.
+
+### The contract
+
+- Read fd 0 until EOF (v1 style), or read exactly
+  `ctx->batch_byte_length` bytes (v2 style). Both patterns below.
+- **Partial consumption is tolerated:** a plugin may read a prefix and
+  return (like `head` with external `-s`). The unconsumed remainder is
+  discarded; the next batch starts clean — no drift, no corruption.
+- **The ctx is unchanged:** `batch_offset`, `batch_byte_length`,
+  `batch_lines`, `delimiter`, and `fd_in` are populated exactly as in argv
+  mode. Stdin mode is purely a delivery convention.
+- **`-b` composes:** byte-mode chunks travel through a byte-transparent
+  pipe — no NUL truncation, no delimiter scanning. (This closes the gap
+  that made `-C` + `-b` + argv broken: argv strings cannot hold NULs.)
+- **argv still valid:** `argc`/`argv` contain ONLY the fixed arguments.
+  No batch data is tokenized into argv in stdin mode.
+
+### The v2 pattern (length-bounded read)
+
+```c
+#include <stdint.h>
+#include <unistd.h>
+#include "forkrun_plugin.h"
+
+int forkrun_use_ctx = 2;
+
+int my_stdin_fn(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    size_t want = (size_t)ctx->batch_byte_length;
+    size_t got = 0;
+    char buf[65536];
+    while (got < want) {
+        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+        if (n < 0) return 1;
+        if (n == 0) {
+            /* EOF before expected length = infrastructure failure
+             * (feeder died mid-batch). Return non-zero so the batch is
+             * retried through the existing escrow machinery. */
+            return 1;
+        }
+        /* ... process buf[0..n) ... */
+        got += (size_t)n;
+    }
+    return 0;
+}
+```
+
+### The v1 pattern (read-to-EOF loop)
+
+```c
+#include <unistd.h>
+
+int my_stdin_v1_fn(int argc, char **argv) {
+    char buf[65536];
+    for (;;) {
+        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+        if (n < 0) return 1;
+        if (n == 0) break;  /* EOF: end of this batch */
+        /* ... process buf[0..n) ... */
+    }
+    return 0;
+}
+```
+
+Run it:
+
+```bash
+frun -k -C ./plugin_stdin.so:my_stdin_fn -s < massive_dataset.txt
+frun -k -C ./plugin_stdin.so:my_stdin_fn -b 4M < binary_blob
+```
+
+### How it works (implementation note)
+
+One function, internal dispatch: the bash JIT exports `FORKRUN_C_STDIN=1`
+for `-C` + (`-s` | `-b`) — the entire bash-side change — and `ring_call`
+reads it as ambient state (`ring_call`'s CLI surface is frozen). Tier split
+mirrors external `-s`: small batches (fitting the granted pipe capacity
+minus margin) are spliced synchronously with no fork; large batches fork a
+SIGCHLD-shielded feeder child (the `ring_exec` pattern verbatim) that
+splices concurrently while the parent runs the callback, then `waitpid`.
+The child `_exit`s (never returns into bash), ignores SIGPIPE (reader
+death reads as EPIPE, not a signal), and scrubs the fork-order mask-hazard
+fds (death-pipe write end, trap-ack, fallow). All failure semantics come
+from process lifecycle: child death reads as EOF (short read → non-zero
+return → escrow/retry), worker death orphaning the child EPIPE-exits it
+while the death pipe fires unmasked.
 
 -----------------------------------------
 # DESIGN.md

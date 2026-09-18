@@ -146,7 +146,7 @@ frun() {
         for nn in "${@##\-*}"; do
             [[ ${nn} ]] && declare -F -- "$nn" &>/dev/null && ! [[ " ${FORKRUN_EXTRA_FUNCS} " == *" ${nn} "* ]] && FORKRUN_EXTRA_FUNCS+=" ${nn}"
         done
-        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} ${FORKRUN_TRUST_RESUME:+FORKRUN_TRUST_RESUME} ${FORKRUN_DEBUG:+FORKRUN_DEBUG} ${FORKRUN_TEST_FALLOW_PIDFILE:+FORKRUN_TEST_FALLOW_PIDFILE} ${FORKRUN_TEST_INDEXER_PIDFILE:+FORKRUN_TEST_INDEXER_PIDFILE} ${FORKRUN_TEST_CLEANROOM_PIDFILE:+FORKRUN_TEST_CLEANROOM_PIDFILE} "
+        FORKRUN_EXTRA_VARS+=" FORKRUN_EXTRA_VARS ${FORKRUN_EXTRA_FUNCS:+FORKRUN_EXTRA_FUNCS} ${FORKRUN_EXTRA_SETUP:+FORKRUN_EXTRA_SETUP} ${FORKRUN_RETRY_LIMIT:+FORKRUN_RETRY_LIMIT} ${FORKRUN_PREEMPT_MODE:+FORKRUN_PREEMPT_MODE} ${FORKRUN_SWEEP_ARGS:+FORKRUN_SWEEP_ARGS} ${FORKRUN_TRUST_RESUME:+FORKRUN_TRUST_RESUME} ${FORKRUN_DEBUG:+FORKRUN_DEBUG} ${FORKRUN_TEST_FALLOW_PIDFILE:+FORKRUN_TEST_FALLOW_PIDFILE} ${FORKRUN_TEST_INDEXER_PIDFILE:+FORKRUN_TEST_INDEXER_PIDFILE} ${FORKRUN_TEST_CLEANROOM_PIDFILE:+FORKRUN_TEST_CLEANROOM_PIDFILE} ${FORKRUN_C_STDIN:+FORKRUN_C_STDIN} "
 
 
         local FORKRUN_FRUN_SRC="ulimit -n $(ulimit -Hn)"$'\n'
@@ -285,7 +285,7 @@ EOF
 
 ### EXECUTION BACKENDS
   -X, --external        : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. (NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).
-  -C, --plugin <so:fn>    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. See DOCS/C_PLUGIN.md for additional info.
+  -C, --plugin <so:fn>    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. With `-C`, `-s`/`-b` select stdin delivery (the plugin reads its batch from fd 0 until EOF); a plugin declaring FLAG_RAW receives the raw window instead. See DOCS/C_PLUGIN.md for additional info.
 
 ### OUTPUT MODES
   --buffered            : (DEFAULT) Buffered / "atomic fan-in" mode. Output is stored in a memfd and printed once the whole batch finishes.
@@ -1600,8 +1600,18 @@ _forkrun_checkpoint_signal() {
                 return 1
             fi
 
-            if ${stdin_flag:-false} || ${byte_mode_flag:-false} || ${insert_args_flag:-false} || ${insert_id_flag:-false}; then
-                echo "forkrun [WARNING]: -s and -b are currently ignored in C plugin (-C) mode (stdin/stdin-chunk data delivery via forkrun_ctx is planned for v3.5.1). -i and -I insert-mode arguments are passed as fixed plugin arguments and DO work." >&2
+            # W-STDIN (v3.5.2): with -C, -s/-b select stdin delivery — the
+            # plugin reads its batch from fd 0 until EOF. The mode is ambient
+            # (FORKRUN_C_STDIN, inherited by workers); ring_call's CLI surface
+            # is unchanged. A plugin declaring FLAG_RAW still receives the raw
+            # window (RAW precedence over stdin mode). -i/-I insert-mode
+            # arguments are passed as fixed plugin arguments and DO work.
+            if ${stdin_flag:-false} || ${byte_mode_flag:-false}; then
+                export FORKRUN_C_STDIN=1
+            else
+                # Explicit reset: a previous -C -s run in this shell must not
+                # leak stdin mode into a later argv-mode -C invocation.
+                export FORKRUN_C_STDIN=0
             fi
 
             # C PLUGIN PAYLOAD (ULTRA-FASTEST PATH)

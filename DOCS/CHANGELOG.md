@@ -28,6 +28,35 @@
   (`UNIT_TESTS/test_c_plugins_raw.sh`). No changes to `try_simd_scan`, the
   fences, or the scanner macros.
 
+- **W-STDIN: C-plugin stdin delivery (`-s`/`-b` with `-C`):** the bash JIT
+  exports `FORKRUN_C_STDIN=1` for `-C` + (`-s` | `-b`) — the entire
+  bash-side change, riding the existing `FORKRUN_EXTRA_VARS` cleanroom
+  transport — and `ring_call` fills the dispatch arm W-RAW established:
+  `FLAG_RAW` > stdin mode > argv tokenize. In stdin mode tokenization is
+  skipped (`argv` = fixed args only) and the batch is spliced onto the
+  plugin's fd 0 as an EOF-terminated byte stream. Tier split mirrors
+  external `-s`: fitting batches are fed synchronously (no fork); larger
+  batches fork a SIGCHLD-shielded feeder child (the `ring_exec` pattern
+  verbatim: block around fork, own `waitpid`, restore after) that splices
+  concurrently while the parent runs the callback. The child `_exit`s
+  (never returns into bash), ignores SIGPIPE, and scrubs the fork-order
+  mask-hazard fds (death-pipe write end via the `fd_worker_w` array walk,
+  `FD_TRAP_ACK_W`, `fd_fallow_w`) — targeted close, no new bash protocol,
+  no `/proc` opens. Failure semantics from process lifecycle: feeder death
+  reads as EOF (length-checking plugins fail into escrow/retry; a 0-return
+  with a dead feeder is failed by the parent rather than risk short output
+  with rc 0; partial-consumption EPIPE `_exit(0)` is never flagged);
+  worker death orphaning the child EPIPE-exits it while the death pipe
+  fires unmasked. The ctx is unchanged (offset/length/lines/delimiter/fd_in
+  populated; v2 length-bounded reads, v1 read-to-EOF); `-b` composes as a
+  byte-transparent pipe (no NUL truncation). The old "`-s`/`-b` ignored in
+  `-C` mode" warning is removed; `--help` `-C` line documents the new
+  semantics. Docs: `C_PLUGIN.md` §5 (contract, v2/v1 patterns,
+  implementation note); lock-in tests T-STDIN-1..9
+  (`UNIT_TESTS/test_c_plugins_stdin.sh`). No new loadables, no persistent
+  processes; the `/proc`-based persistent feeder stays deferred in
+  `docs_port/`.
+
 ## v3.5.1 — 2026-09-17
 
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,

@@ -304,3 +304,102 @@ buffers), and (c) fallow punches holes only *behind the acked contiguous
 prefix* — this batch is unacked, therefore its pages are intact. This is
 the same guarantee the Python frontend's `Batch.data` relies on; the C
 tier proves it first.
+
+---
+
+## §5. Stdin Delivery (`-s`/`-b` with `-C`, v3.5.2+)
+
+The second v3.5.2 delivery mode for C plugins. When the user passes `-s`
+(or `-b`, which implies stdin) with `-C`, and the plugin has NOT declared
+`FLAG_RAW`, the batch data is delivered on the plugin's stdin (fd 0) as a
+byte stream terminated by EOF. This is the C-plugin analogue of external
+`-s` mode — with the spawn amputated: no `posix_spawnp` per batch, just an
+in-process callback whose fd 0 the engine feeds before/during the call.
+
+**Precedence:** `FLAG_RAW` (checked first) > stdin mode > argv tokenize.
+A raw plugin invoked with `-s` receives the window, never a stdin feed.
+
+### The contract
+
+- Read fd 0 until EOF (v1 style), or read exactly
+  `ctx->batch_byte_length` bytes (v2 style). Both patterns below.
+- **Partial consumption is tolerated:** a plugin may read a prefix and
+  return (like `head` with external `-s`). The unconsumed remainder is
+  discarded; the next batch starts clean — no drift, no corruption.
+- **The ctx is unchanged:** `batch_offset`, `batch_byte_length`,
+  `batch_lines`, `delimiter`, and `fd_in` are populated exactly as in argv
+  mode. Stdin mode is purely a delivery convention.
+- **`-b` composes:** byte-mode chunks travel through a byte-transparent
+  pipe — no NUL truncation, no delimiter scanning. (This closes the gap
+  that made `-C` + `-b` + argv broken: argv strings cannot hold NULs.)
+- **argv still valid:** `argc`/`argv` contain ONLY the fixed arguments.
+  No batch data is tokenized into argv in stdin mode.
+
+### The v2 pattern (length-bounded read)
+
+```c
+#include <stdint.h>
+#include <unistd.h>
+#include "forkrun_plugin.h"
+
+int forkrun_use_ctx = 2;
+
+int my_stdin_fn(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    size_t want = (size_t)ctx->batch_byte_length;
+    size_t got = 0;
+    char buf[65536];
+    while (got < want) {
+        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+        if (n < 0) return 1;
+        if (n == 0) {
+            /* EOF before expected length = infrastructure failure
+             * (feeder died mid-batch). Return non-zero so the batch is
+             * retried through the existing escrow machinery. */
+            return 1;
+        }
+        /* ... process buf[0..n) ... */
+        got += (size_t)n;
+    }
+    return 0;
+}
+```
+
+### The v1 pattern (read-to-EOF loop)
+
+```c
+#include <unistd.h>
+
+int my_stdin_v1_fn(int argc, char **argv) {
+    char buf[65536];
+    for (;;) {
+        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+        if (n < 0) return 1;
+        if (n == 0) break;  /* EOF: end of this batch */
+        /* ... process buf[0..n) ... */
+    }
+    return 0;
+}
+```
+
+Run it:
+
+```bash
+frun -k -C ./plugin_stdin.so:my_stdin_fn -s < massive_dataset.txt
+frun -k -C ./plugin_stdin.so:my_stdin_fn -b 4M < binary_blob
+```
+
+### How it works (implementation note)
+
+One function, internal dispatch: the bash JIT exports `FORKRUN_C_STDIN=1`
+for `-C` + (`-s` | `-b`) — the entire bash-side change — and `ring_call`
+reads it as ambient state (`ring_call`'s CLI surface is frozen). Tier split
+mirrors external `-s`: small batches (fitting the granted pipe capacity
+minus margin) are spliced synchronously with no fork; large batches fork a
+SIGCHLD-shielded feeder child (the `ring_exec` pattern verbatim) that
+splices concurrently while the parent runs the callback, then `waitpid`.
+The child `_exit`s (never returns into bash), ignores SIGPIPE (reader
+death reads as EPIPE, not a signal), and scrubs the fork-order mask-hazard
+fds (death-pipe write end, trap-ack, fallow). All failure semantics come
+from process lifecycle: child death reads as EOF (short read → non-zero
+return → escrow/retry), worker death orphaning the child EPIPE-exits it
+while the death pipe fires unmasked.

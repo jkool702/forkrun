@@ -8096,6 +8096,232 @@ static int ring_call_ensure_ingress_map(int fd, uint64_t batch_offset,
     return EXECUTION_SUCCESS;
 }
 
+/* Never close a keep fd while scrubbing (defensive: a variable pointing at
+ * the ingress fd or the pipe write end must not nuke the child's lifeline). */
+static void ring_call_close_scrub(int f, int keep_in, int keep_out) {
+    if (f > 2 && f != keep_in && f != keep_out)
+        close(f);
+}
+
+/* Feeder-child fd hygiene (fork-order mask-hazard class, v3.5.2 W-STDIN).
+ *
+ * Mechanism choice (documented per the work order): targeted close of the
+ * three named hazard fds — no new bash protocol beyond FORKRUN_C_STDIN, no
+ * /proc opens, no closefrom sweep. The two flat numbers come from shell
+ * variables the worker already holds (FD_TRAP_ACK_W is exported at spawn;
+ * fd_fallow_w is a worker-visible global); the worker death-pipe write end
+ * is read from the fd_worker_w array at this worker's RING_WID via the
+ * same find_variable/array_cell walk ring_poll uses for death watches.
+ * Anything unresolvable is skipped best-effort.
+ *
+ * The child keeps ONLY the ingress fd and the pipe write end (plus 0,1,2,
+ * which it never uses — it splices and _exits). Rationale for the three:
+ * an orphaned feeder outliving a violent worker death must not hold the
+ * death-pipe write end (would mask POLLHUP on fd_worker_r forever — the
+ * child blocks in splice once the pipe fills with no reader), nor the
+ * trap-ack/fallow write ends. The persistent-feeder alternative is
+ * recorded in docs_port/ as deferred; fork-per-large-batch stands until
+ * fork rate ever measurably matters. */
+static void ring_call_scrub_feeder_child(int src_fd, int pipe_w, int pipe_r) {
+    /* Reader death must surface as an EPIPE return, never as a signal. */
+    signal(SIGPIPE, SIG_IGN);
+
+    /* Its copy of the pipe read end: the parent owns the reader side. */
+    ring_call_close_scrub(pipe_r, src_fd, pipe_w);
+
+    /* Flat hazard fds (worker-visible shell variables). */
+    const char *s_trap = get_string_value("FD_TRAP_ACK_W");
+    if (s_trap && s_trap[0])
+        ring_call_close_scrub(atoi(s_trap), src_fd, pipe_w);
+    const char *s_fallow = get_string_value("fd_fallow_w");
+    if (s_fallow && s_fallow[0])
+        ring_call_close_scrub(atoi(s_fallow), src_fd, pipe_w);
+
+    /* Worker death-pipe write end: fd_worker_w[$RING_WID]. */
+    const char *s_wid = get_string_value("RING_WID");
+    if (s_wid && s_wid[0]) {
+        SHELL_VAR *wv = find_variable("fd_worker_w");
+        if (wv && array_p(wv)) {
+            ARRAY *arr = array_cell(wv);
+            if (arr) {
+                int want = atoi(s_wid);
+                ARRAY_ELEMENT *ae;
+                for (ae = element_forw(arr->head); ae != arr->head;
+                     ae = element_forw(ae)) {
+                    if (element_index(ae) == want) {
+                        char *val = element_value(ae);
+                        if (val && val[0])
+                            ring_call_close_scrub(atoi(val), src_fd, pipe_w);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* stdin tier setup for C plugins (v3.5.2 W-STDIN). Creates the feed pipe
+ * (1MB request, actual granted capacity probed — same pattern as ring_pipe),
+ * delivers the batch, and redirects fd 0 onto the pipe read end.
+ *
+ * Tier split (mirrors external -s): batches fitting the pipe (length + 4K
+ * margin within granted capacity) are spliced synchronously with no fork;
+ * larger batches fork a SIGCHLD-shielded feeder child that splices
+ * concurrently while the parent runs the callback.
+ *
+ * Runs under the caller's SIGCHLD shield (the ring_exec pattern: block
+ * around fork, own waitpid in teardown, restore after). On success,
+ * publishes *saved_stdin (>= 0) and *feeder (-1 sync tier, child pid fork
+ * tier) for ring_call_stdin_teardown. On failure, cleans up fully (pipe
+ * ends closed, fd 0 restored if it was redirected) and returns 254. */
+static int ring_call_stdin_setup(int fd, size_t length, int *saved_stdin,
+                                 pid_t *feeder) {
+    int pfd[2];
+#if defined(O_CLOEXEC)
+    if (pipe2(pfd, O_CLOEXEC) != 0)
+        return 254;
+#else
+    if (pipe(pfd) != 0)
+        return 254;
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+#endif
+
+    /* Maximize the pipe buffer, then read back what the kernel granted. */
+    fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
+    int pipe_cap = 65536;
+    int granted = fcntl(pfd[1], F_GETPIPE_SZ);
+    if (granted > 0)
+        pipe_cap = granted;
+
+    int small = (length == 0) ||
+                ((uint64_t)length + 4096 <= (uint64_t)pipe_cap);
+
+    if (small) {
+        /* Synchronous feed: the whole batch fits with no reader present,
+         * so splice cannot block and EPIPE is impossible (the read end is
+         * held open here). No fork, no signals involved. */
+        size_t written = 0;
+        off_t offset = tls_batch_offset;
+        while (written < length) {
+            ssize_t s =
+                splice(fd, &offset, pfd[1], NULL, length - written, 0);
+            if (s < 0) {
+                if (errno == EINTR)
+                    continue;
+                close(pfd[0]);
+                close(pfd[1]);
+                return 254;
+            }
+            if (s == 0) {
+                /* Explicit-offset splice past memfd EOF: the claim names
+                 * bytes that were never written — infrastructure fault. */
+                close(pfd[0]);
+                close(pfd[1]);
+                return 254;
+            }
+            written += (size_t)s;
+        }
+        close(pfd[1]); /* EOF is now pending in the pipe. */
+    } else {
+        /* Forked concurrent feed (large batch): the child splices while
+         * the parent runs the callback. Forked under the caller's SIGCHLD
+         * shield so bash's reaper cannot steal the child (ring_exec rule:
+         * never invent a new pattern; never kill on ECHILD — a shielded,
+         * unreaped pid cannot be recycled). */
+        pid_t pid = fork();
+        if (pid < 0) {
+            close(pfd[0]);
+            close(pfd[1]);
+            return 254;
+        }
+        if (pid == 0) {
+            /* Child: feed the pipe, then _exit — never return into bash. */
+            close(pfd[0]);
+            ring_call_scrub_feeder_child(fd, pfd[1], pfd[0]);
+            off_t offset = tls_batch_offset;
+            size_t left = length;
+            while (left > 0) {
+                ssize_t s = splice(fd, &offset, pfd[1], NULL, left, 0);
+                if (s < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    if (errno == EPIPE)
+                        _exit(0); /* reader done (partial consumption). */
+                    _exit(1);
+                }
+                if (s == 0)
+                    _exit(2);
+                left -= (size_t)s;
+            }
+            close(pfd[1]);
+            _exit(0); /* all bytes fed — EOF now pending for the reader. */
+        }
+        /* Parent: */
+        close(pfd[1]);
+        *feeder = pid;
+    }
+
+    /* Redirect stdin onto the pipe read end (both tiers). */
+    int saved = dup(0);
+    if (saved < 0) {
+        if (!small) {
+            /* Callback can never run: drop the read end so the blocked
+             * child EPIPE-exits, reap it (kill is safe — the shielded,
+             * unreaped pid is necessarily still ours), and fail. */
+            close(pfd[0]);
+            kill(*feeder, SIGKILL);
+            int st;
+            while (waitpid(*feeder, &st, 0) == -1 && errno == EINTR)
+                ;
+            *feeder = -1;
+        } else {
+            close(pfd[0]);
+        }
+        return 254;
+    }
+    if (dup2(pfd[0], 0) < 0) {
+        close(pfd[0]);
+        if (!small) {
+            kill(*feeder, SIGKILL);
+            int st;
+            while (waitpid(*feeder, &st, 0) == -1 && errno == EINTR)
+                ;
+            *feeder = -1;
+        }
+        close(saved);
+        return 254;
+    }
+    close(pfd[0]);
+    *saved_stdin = saved;
+    if (small)
+        *feeder = -1;
+    return EXECUTION_SUCCESS;
+}
+
+/* stdin tier teardown (v3.5.2 W-STDIN). Restores fd 0, then reaps the feeder
+ * (bounded: a short-reading callback already EPIPE-exited the child via the
+ * closed read end; a draining callback finds it exited after feeding all).
+ * Returns 1 when the feeder failed (non-zero exit, signal death, or lost),
+ * 0 otherwise. A lost (ECHILD) child is failure, never silent success. */
+static int ring_call_stdin_teardown(int saved_stdin, pid_t feeder) {
+    if (saved_stdin >= 0) {
+        dup2(saved_stdin, 0);
+        close(saved_stdin);
+    }
+    if (feeder <= 0)
+        return 0;
+    int status = 0;
+    while (waitpid(feeder, &status, 0) == -1) {
+        if (errno == EINTR)
+            continue;
+        return 1;
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 0;
+    return 1;
+}
+
 // ---------------------------------------------------------
 // ring_call: Zero-Tax C Plugin Callback Execution
 // ---------------------------------------------------------
@@ -8183,25 +8409,36 @@ static int ring_call_main(int argc, char **argv) {
         tls_argv[i] = argv[6 + i];
     }
 
-    /* v3.5.2 dispatch precedence (binding for W-STDIN too):
+    /* v3.5.2 dispatch precedence (RAW > stdin > argv, binding for W-STDIN):
      *   1. FLAG_RAW granted (v2 only) -> raw window delivery (below).
-     *   2. stdin-mode signal -> stdin feed (W-STDIN, not yet implemented).
+     *   2. stdin-mode signal (FORKRUN_C_STDIN=1, no RAW grant) -> stdin feed.
      *   3. else -> argv tokenize (existing path).
      * Raw overrides everything: argv tokenization, stdin delivery, the
      * user's -s/-b flags. The plugin's ABI opt-in is authoritative over
      * the user's CLI presentation choice. */
     int is_raw =
         (tls_use_ctx >= 2) && ((tls_flags_granted & FORKRUN_CTX_FLAG_RAW) != 0);
-    /* Arm 2 (W-STDIN): stdin-mode delivery for C plugins lives here.
-     * Not yet implemented — falls through to the argv tokenize path. */
+    /* Arm 2 (W-STDIN): stdin delivery. FORKRUN_C_STDIN is the ambient mode
+     * signal the bash JIT exports for -C + (-s | -b); ring_call's CLI
+     * surface is frozen, so the mode rides the environment instead. */
+    int c_stdin_mode = 0;
+    if (!is_raw) {
+        const char *s_stdin = get_string_value("FORKRUN_C_STDIN");
+        if (s_stdin && strcmp(s_stdin, "1") == 0)
+            c_stdin_mode = 1;
+    }
 
     // 3. Tokenize the batch directly into tls_argv (starting at fixed_argc),
-    //    unless RAW delivery skips tokenization entirely.
+    //    unless RAW/stdin delivery skips tokenization entirely.
     size_t batch_argc = 0;
     if (is_raw) {
         /* RAW delivery: borrowed window, zero-copy, no tokenization.
          * Skip do_tokenize entirely. argv = fixed args only. */
         tls_argv[fixed_argc] = NULL; /* argc = fixed_argc, argv valid but empty of batch data */
+    } else if (c_stdin_mode) {
+        /* STDIN delivery: the batch travels on fd 0 (EOF-terminated byte
+         * stream); argv = fixed args only, no batch data in argv. */
+        tls_argv[fixed_argc] = NULL;
     } else {
         int ret = do_tokenize(fd, length, tls_batch_offset, delim, NULL, fixed_argc, &batch_argc);
         if (ret != EXECUTION_SUCCESS) return ret;
@@ -8219,13 +8456,25 @@ static int ring_call_main(int argc, char **argv) {
     // 5. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
 
     // PHYSICS FIX: Shield the C-Plugin against Bash's SIGCHLD reaper
+    // (the ring_exec pattern, verbatim: block around fork, own waitpid,
+    // restore after — the stdin feeder fork lives under this shield too).
     sigset_t set, oset;
     sigemptyset(&set);
     sigaddset(&set, SIGCHLD);
     sigprocmask(SIG_BLOCK, &set, &oset);
 
+    /* Stdin tier setup (pipe + sync/forked feed + fd 0 redirect). The forked
+     * tier forks here, under the shield. */
+    int saved_stdin = -1;
+    pid_t feeder_pid = -1;
+    int stdin_rc = EXECUTION_SUCCESS;
+    if (c_stdin_mode)
+        stdin_rc = ring_call_stdin_setup(fd, length, &saved_stdin, &feeder_pid);
+
     int cb_ret;
-    if (tls_use_ctx) {
+    if (stdin_rc != EXECUTION_SUCCESS) {
+        cb_ret = stdin_rc;
+    } else if (tls_use_ctx) {
         tls_fctx.version = (uint32_t)tls_use_ctx;
         tls_fctx.batch_index = worker_last_idx;
         tls_fctx.batch_offset = (uint64_t)tls_batch_offset;
@@ -8280,6 +8529,23 @@ static int ring_call_main(int argc, char **argv) {
         cb_ret = tls_callback_ctx((int)(fixed_argc + batch_argc), tls_argv, &tls_fctx);
     } else {
         cb_ret = tls_callback((int)(fixed_argc + batch_argc), tls_argv);
+    }
+
+    /* Stdin tier teardown: restore fd 0, reap the feeder (bounded — a
+     * short-reading callback already EPIPE-exited it). All failure
+     * semantics come from process lifecycle: feeder death reads as EOF to
+     * the plugin, so a length-checking plugin fails the batch itself via
+     * its return code; if it returned 0 despite a dead feeder, fail here
+     * rather than risk short output with rc 0. A partial consumer (EPIPE
+     * _exit(0)) is never flagged. */
+    if (c_stdin_mode && stdin_rc == EXECUTION_SUCCESS) {
+        int feeder_bad = ring_call_stdin_teardown(saved_stdin, feeder_pid);
+        if (feeder_bad && cb_ret == 0) {
+            fprintf(stderr,
+                    "forkrun [WARN]: C stdin feeder failed mid-batch; "
+                    "failing batch for retry\n");
+            cb_ret = 1;
+        }
     }
 
     sigprocmask(SIG_SETMASK, &oset, NULL);
