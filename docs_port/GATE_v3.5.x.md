@@ -296,3 +296,54 @@ do-not-move-back comment at the old site). Verified: x86_64 Section R
 now green: basic 89/89, D 11/11, L 57/57 (LA3 in-suite), T 21/21,
 M 21/21, F 8/8, R 13/13. NUMA-topology portion still waits on the
 `numa=fake=4` reboot.
+
+## 20. Sanitizer-leg stale-engine incident (W-SLA3-D/E/F)
+
+Second member of the stale-artifact class (#533, this). LA3 failed on
+both sanitizer legs with `rc=137 live=1 sent=1 dead=1 fatal=0 gen=0
+cp=0` while mainline UMA LA3 stayed green. Census (fixed-sweep rerun)
+proved link 1: death pipe `1 W (victim) → 0 W` post-kill, SUB2 holding
+the read end, reactor in `poll_schedule_timeout`, `poll(32 fds)=Timeout`
+forever — the two indexer fds never entered the set (34 expected).
+Micro-test: mainline returns `INDEXER_DEATH`; both branch blobs hang.
+E3: shipped blobs self-report `v3.1.0_*`, `INDEXER_DEATH=0`, bare 3-arg
+`ring_poll` doc. Current bash + v3.1.0 engine: argv[6] lands in the
+void, POLLHUP pends unseen, ordered-mode wedge freezes output.
+
+Chain: C synced without its two new headers → `gcc:
+forkrun_substrate.h: No such file` inside the docker `bash -c` (no
+`set -e`) → script continues to `ls`, exits 0 → green job, empty
+artifacts → flatten moves nothing → codec re-encodes stale on-branch
+libs (1-line mtime churn, the #533 signature) → no verify step → green
+run, merged stale PR. Prior "partial bots" and same-size churns were
+the same failure. F3's real discovery: the sync checklist was
+`forkrun_ring.c`-only; the correct list is C + `forkrun_substrate.h` +
+`ring_loadables/forkrun_plugin.h` + `META` (runbook §2 corrected).
+
+Three-gate model (closing lesson): (1) build integrity — still OPEN
+(docker script needs `set -e` + per-arch non-empty check); (2) embed
+consistency — ported from mainline (decode-and-cmp, hard-fail), but it
+compares embed vs workspace libs, so silent-build-failure passes
+stale-vs-stale; (3) freshness — runbook §2 E1/E3 + `ring_version -V`
+label assertion. The incident needed all three down. Do not trust the
+ported workflow beyond gate 2 until gate 1 lands (post-release
+template work; construction-from-tag bakes in `set -e`, header path
+filter, matrix scope).
+
+Known-stale payload: ASAN `ppc64le`/`s390x`/`riscv64` remain v3.1.0,
+embedded, verify-green (TSAN rebuilt all 7). Inert for x86 legs (never
+executed); recorded, not fixed here. Follow-on decision: (a) trim
+sanitizer matrix to the x86_64 triple-build (recommended — "build what
+you run"), deleting stale arch libs + one embed cycle; or (b) diagnose
+emulated ASan failures. Fold into post-release template work; F6
+independent of it.
+
+Invalidation + counterfactual (§8.3, free): prior sanitizer greens
+certified a v3.5.0-era engine (same bash/tests, engine v3.5.0, all
+green save LA3) — both legs invalid in both directions and must
+fully re-run. The re-run is therefore a clean A/B: any new red
+localizes to v3.5.1 engine deltas or the instrumentation itself; the
+v3.5.0 control exists for comparison. Fix verified pre-leg: E1 empty,
+E3 `INDEXER_DEATH=1` + `v3.5.1_*` both legs, E2 micro-test green both,
+LA3 standalone `rc=1 fatal=1 gen=1 cp=1` (551-byte checkpoint) — the
+first end-to-end indexer-death execution under ASan.

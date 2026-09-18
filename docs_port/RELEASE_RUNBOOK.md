@@ -50,9 +50,22 @@ reproduces, it gets a Known Issues line, not a fix (frozen code).
 
 For each of `TESTING/TSAN` and `TESTING/ASAN+UBSAN`:
 
-1. Checkout the testing branch, copy the final (frozen) `forkrun_ring.c`
-   in, push, merge the CI PR, pull.
-2. Apply the documented gotchas before running:
+1. Sync the frozen product inputs, push, merge the CI PR, pull.
+   Sync list (F3 correction, W-SLA3-F): `forkrun_ring.c` **plus its new
+   dependencies** `forkrun_substrate.h` + `ring_loadables/forkrun_plugin.h`
+   **plus `META`**. Copying the C without its headers reproduces this
+   incident exactly (`gcc: forkrun_substrate.h: No such file`, green job,
+   empty artifacts, stale re-embed — see GATE §20).
+2. Verify **before running anything** (post-pull E1/E3):
+   - E1: `diff` of the three synced files against frozen mainline is empty.
+   - E3: `strings ring_loadables/forkrun-libs/forkrun_ring.x86-64-v4.so`
+     shows `INDEXER_DEATH` count ≥1 and the instrumented `v3.5.1_*` label.
+   - Engine-label assertion (trustworthy post-META-sync):
+     `LD_PRELOAD=<runtime> bash -c 'source ./frun.bash && ring_version -a'`
+     must print the instrumented v3.5.1 label; capture it in the leg's
+     env header alongside `frun -V` (the suite pin reads the bash echo
+     only — #533/#537 + W-SLA3-F prove an engine behind it sails through).
+3. Apply the documented gotchas before running:
    - Remove `-c` from the cleanroom `exec` in `frun.bash`
      (`exec -c "${BASH:-bash}" ...` → `exec "${BASH:-bash}" ...`;
      otherwise sanitizer env vars are silently cleared).
@@ -67,6 +80,20 @@ process only; forkrun's coordination is cross-process on shared
 `MAP_ANONYMOUS`. Sanitizers validate intra-process threading and memory
 hygiene; the cross-process ordering protocol is guaranteed by
 INVARIANTS.md and exercised by the stress matrix.
+
+Provenance note (W-SLA3-F, second member of the stale-artifact class
+after #533): the sanitizer workflows now carry mainline's
+decode-and-cmp embed gate, but trust it only for consistency, not
+freshness — when the build silently fails both sides are the same stale
+files and VERIFY-OK passes (live instance: ASAN ppc64le/s390x/riscv64
+remain v3.1.0-stale, embedded, verify-green). The three gates are:
+(1) build integrity — still open (docker `bash -c` has no `set -e`);
+(2) embed consistency — ported; (3) freshness — this section's E1/E3 +
+label assertion. Post-release template work (construction-from-tag
+bakes all three in): `set -e` + per-arch non-empty artifact check,
+workflow path filter including the two headers, sanitizer matrix scope
+decision (recommendation: trim to the x86_64 triple-build — "build what
+you run"; TSAN builds 7 while ASAN silently builds 4 today).
 
 ## 3. aarch64 QEMU leg
 
