@@ -1819,6 +1819,11 @@ _forkrun_checkpoint_signal() {
 (
   LC_ALL=C
   set +m
+  # W-STAGE1 config-injection point: these exports are the bash-frontend
+  # transport into the worker-local fr_config_t, snapshotted once by
+  # ring_worker inc (RING_WID/RING_NODE_ID/RING_WINCARN + RETRY_LIMIT /
+  # FD_ORDER_PIPE / DEBUG via the environment). The Python frontend will
+  # fill the same struct directly — no env required.
   export RING_NODE_ID="$2"
   export RING_WID="$3"
   export FD_TRAP_ACK_W="$4"

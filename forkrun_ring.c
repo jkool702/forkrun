@@ -1286,6 +1286,67 @@ static __thread uint32_t worker_last_minor = 0;
 static __thread uint32_t worker_last_num_kills = 0;
 static __thread bool tl_drain_escrow = true;
 
+// ------------------------------------------------------------------
+// W-STAGE1: worker-local engine config (v1.3 §2.1 fr_config_t).
+//
+// The bash frontend injects configuration by exporting shell variables
+// before forking workers (spawn_worker in frun.bash); fr_config_fill_from_env()
+// snapshots them here ONCE at worker start (ring_worker inc, plus a lazy
+// backstop in ring_claim's node init). All worker-side reads below consume
+// this struct — never get_string_value per call.
+//
+// NO config sync verb exists: the worker's copy is fixed for its life.
+// The Python frontend (Stage 4+) will fill the same struct directly via
+// ctypes and fork inheriting it as plain memory — no bash env required.
+// Plain (non-TLS) static: workers are forked processes, so copy-on-write
+// already isolates them (T-CONFIG-4 locks this in).
+// ------------------------------------------------------------------
+static fr_config_t g_fr_config = {
+    .ring_wid = 0, .ring_node_id = -1, .ring_wincarn = 0,
+    .fd_order_pipe = -1, .retry_limit = 3, .debug = 0,
+    .trap_ack_grace_ms = FR_TRAP_ACK_GRACE_MS_DEFAULT,
+    .respawn_cap = -1, .spawn_ceiling = -1,
+};
+static bool g_fr_config_filled = false;
+
+// Snapshot the bash-surface transport into g_fr_config. Idempotent: the
+// worker's environment is fixed for its lifetime, so re-reading yields the
+// same values. Each fallback mirrors the pre-struct call site exactly
+// (atoi-on-empty included), so the move is behavior-preserving by
+// construction. ring_init's own FORKRUN_DEBUG parse (parent side) stays
+// untouched; this only gives the WORKER its struct-carried copy.
+static void fr_config_fill_from_env(void) {
+    const char *s;
+    if ((s = get_string_value("RING_WID")))
+        g_fr_config.ring_wid = atoi(s);
+    else
+        g_fr_config.ring_wid = 0; /* ring_call's old `? atoi : 0` */
+    if ((s = get_string_value("RING_NODE_ID")))
+        g_fr_config.ring_node_id = atoi(s);
+    else
+        g_fr_config.ring_node_id = -1; /* unset -> auto-detect, as before */
+    if ((s = get_string_value("RING_WINCARN")))
+        g_fr_config.ring_wincarn = (int)strtoul(s, NULL, 10);
+    else
+        g_fr_config.ring_wincarn = 0;
+    if ((s = get_string_value("FORKRUN_RETRY_LIMIT")))
+        g_fr_config.retry_limit = atoi(s);
+    else
+        g_fr_config.retry_limit = 3;
+    if ((s = get_string_value("FD_ORDER_PIPE")))
+        g_fr_config.fd_order_pipe = atoi(s);
+    else
+        g_fr_config.fd_order_pipe = -1;
+    if ((s = get_string_value("FORKRUN_DEBUG")))
+        g_fr_config.debug = (strcmp(s, "1") == 0 || strcmp(s, "true") == 0);
+    else
+        g_fr_config.debug = 0;
+    g_debug = g_fr_config.debug; /* same value the fork inherited; now struct-sourced */
+    /* trap_ack_grace_ms / respawn_cap / spawn_ceiling keep their header
+     * defaults: protocol constant + safety-limit defaults, no env source. */
+    g_fr_config_filled = true;
+}
+
 #define MAX_POLL_WORKERS 8192
 static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
 
@@ -1294,12 +1355,25 @@ static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
 // WorkerBatchState: Pure value struct returned by do_lockfree_claim.
 // Contains everything ring_claim_main needs to bind Bash variables,
 // without any side-effects during the claim itself.
+//
+// W-STAGE1: field names match fr_state_t (forkrun_substrate.h) exactly
+// for the shared coordinate identity (batch_idx/major/minor/slots/
+// num_kills/poisoned) — the claim out-param IS the future Python claim
+// contract ("state travels with the claim", no fr_get_state() ever).
+// The extra payload-window fields (lines/offset/length) have no
+// fr_state_t counterpart by design: fr_state_t carries coordination
+// identity only, while the byte window travels as Batch.data (MAP_SHARED
+// view). A whole-struct sizeof assert would therefore be WRONG here;
+// per-field width asserts live with the substrate tie asserts below.
+// poisoned is DECIDED in ring_claim_main (needs the retry limit), not
+// in do_lockfree_claim (pure, limit-unaware): the pure helper zeroes it.
 // ------------------------------------------------------------------
 struct WorkerBatchState {
-    uint64_t idx;
-    uint64_t cnt;
+    uint64_t batch_idx;
+    uint32_t slots;      /* always 1 (single-slot invariant) */
     uint32_t lines;
     uint32_t num_kills;
+    uint32_t poisoned;   /* 1 once kill count reaches the retry limit */
     uint64_t offset;
     uint64_t length;
     uint64_t major;
@@ -5731,10 +5805,11 @@ dlc_evaluate_claim:
 
   __atomic_fetch_add(&local_state->total_lines_consumed, 1, __ATOMIC_SEQ_CST);
 
-  out->idx       = my_read_idx;
-  out->cnt       = 1;
+  out->batch_idx = my_read_idx;
+  out->slots     = 1;
   out->lines     = local_state->lines_ring[my_read_idx & RING_MASK];
   out->num_kills = current_kills;
+  out->poisoned  = 0; /* decided by the caller (needs the retry limit) */
   out->offset    = start;
   out->length    = end - start;
 
@@ -5772,9 +5847,14 @@ static int ring_claim_main(int argc, char **argv) {
   }
 
   if (my_numa_node == -1) {
-    const char *s_node = get_string_value("RING_NODE_ID");
-    if (s_node) {
-      my_numa_node = atoi(s_node);
+    /* W-STAGE1: node identity comes from the worker-local config filled at
+     * ring_worker inc (lazy backstop here covers hand-rolled callers that
+     * claim without inc; the JIT always incs first). Unset (-1) keeps the
+     * historical auto-detect fallback. */
+    if (!g_fr_config_filled)
+        fr_config_fill_from_env();
+    if (g_fr_config.ring_node_id >= 0) {
+        my_numa_node = g_fr_config.ring_node_id;
     } else {
       int phys = auto_detect_numa_node();
       my_numa_node = 0;
@@ -5826,8 +5906,8 @@ static int ring_claim_main(int argc, char **argv) {
   if (rc != 0) return rc;
 
   // --- Publish metadata to TLS globals ---
-  worker_last_idx       = batch.idx;
-  worker_last_cnt       = batch.cnt;
+  worker_last_idx       = batch.batch_idx;
+  worker_last_cnt       = batch.slots;
   worker_last_num_kills = batch.num_kills;
   worker_last_major     = batch.major;
   worker_last_minor     = batch.minor;
@@ -5846,16 +5926,18 @@ static int ring_claim_main(int argc, char **argv) {
     snprintf(buf, sizeof(buf), "%u", batch.num_kills);
     bind_variable("RING_NUM_KILLS", buf, 0);
 
-    u64toa(batch.idx, buf);
+    u64toa(batch.batch_idx, buf);
     bind_variable("RING_BATCH_IDX", buf, 0);
 
-    int limit = 3; // Default to 3 retries
-    const char *s_lim = get_string_value("FORKRUN_RETRY_LIMIT");
-    if (s_lim) limit = atoi(s_lim);
+    /* W-STAGE1: poison threshold from the worker-local config (filled once
+     * at ring_worker inc). Previously a per-claim get_string_value; the
+     * value is identical — the transport moved, the behavior did not. */
+    int limit = g_fr_config.retry_limit;
 
     // limit < 0  → infinite retries (never poison)
     // limit >= 0 → poison when kill count reaches the limit
     if (limit >= 0 && batch.num_kills >= (uint32_t)limit) {
+      batch.poisoned = 1;
       bind_variable("RING_POISONED", "1", 0);
 
       // CRITICAL FIX: Increment the global counter exactly ONCE upon crossing the threshold
@@ -5999,8 +6081,11 @@ static int ring_ack_main(int argc, char **argv) {
     }
     if (ack_cached_mode == 1) {
       if (ack_cached_order_pipe < 0) {
-        const char *s_order_pipe = get_string_value("FD_ORDER_PIPE");
-        if (s_order_pipe) ack_cached_order_pipe = atoi(s_order_pipe);
+        /* W-STAGE1: ordered-mode transport fd from the worker-local config
+         * (FD_ORDER_PIPE snapshotted at ring_worker inc). Same -1-means-
+         * unset error path as the old first-call env read. */
+        if (g_fr_config.fd_order_pipe >= 0)
+            ack_cached_order_pipe = g_fr_config.fd_order_pipe;
       }
       if (ack_cached_order_pipe < 0) {
         builtin_error("forkrun: FD_ORDER_PIPE unset during ordered ack");
@@ -6662,27 +6747,50 @@ static int ring_worker_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
   if (my_numa_node == -1) {
-    const char *s_node = get_string_value("RING_NODE_ID");
-    if (s_node)
-      my_numa_node = atoi(s_node);
+    /* W-STAGE1: same struct source as ring_claim's node init. The fill
+     * itself happens in the inc branch below, so the FIRST call takes the
+     * struct only if already filled (re-inc after a prior fill); otherwise
+     * the historical env-then-autodetect path runs and the inc fill
+     * snapshots the same values immediately after. Steady state (every
+     * claim/ack/call after inc) reads the struct exclusively. */
+    if (g_fr_config_filled && g_fr_config.ring_node_id >= 0)
+      my_numa_node = g_fr_config.ring_node_id;
     else {
-      int phys = auto_detect_numa_node();
-      my_numa_node = 0;
-      if (g_logical_to_phys_map) {
-        for (uint32_t i = 0; i < global_num_nodes; i++) {
-          if (g_logical_to_phys_map[i] == (uint32_t)phys) {
-            my_numa_node = i;
-            break;
+      const char *s_node = get_string_value("RING_NODE_ID");
+      if (s_node)
+        my_numa_node = atoi(s_node);
+      else {
+        int phys = auto_detect_numa_node();
+        my_numa_node = 0;
+        if (g_logical_to_phys_map) {
+          for (uint32_t i = 0; i < global_num_nodes; i++) {
+            if (g_logical_to_phys_map[i] == (uint32_t)phys) {
+              my_numa_node = i;
+              break;
+            }
           }
         }
       }
+      if (my_numa_node >= (int)global_num_nodes)
+        my_numa_node = 0;
     }
-    if (my_numa_node >= (int)global_num_nodes)
-      my_numa_node = 0;
   }
   int node = my_numa_node;
 
   if (!strcmp(argv[1], "inc")) {
+    /* W-STAGE1: THE fill point. The bash JIT exported RING_WID /
+     * RING_NODE_ID / RING_WINCARN / FORKRUN_RETRY_LIMIT / FD_ORDER_PIPE /
+     * FORKRUN_DEBUG before forking this worker; snapshot them into the
+     * worker-local fr_config_t here. Every worker-side read below (claim
+     * node init + poison limit, ack order pipe, call ctx identity) consumes
+     * the struct from this point on. */
+    fr_config_fill_from_env();
+    /* Re-resolve the node from the just-filled struct so inc's own pinning
+     * and active_workers accounting use the same source as later claims
+     * (identical values — the struct snapshotted the env above). */
+    if (g_fr_config.ring_node_id >= 0 &&
+        g_fr_config.ring_node_id < (int)global_num_nodes)
+      my_numa_node = node = g_fr_config.ring_node_id;
     // CHANGED: Trigger pinning for explicit map even if nodes == 1
     if ((global_num_nodes > 1 || g_explicit_pinning) && g_logical_to_phys_map) {
       if (pin_to_numa_node(g_logical_to_phys_map[node]) != 0 && g_debug) {
@@ -7995,6 +8103,25 @@ typedef char fr_ctx_state_minor_holds_packed_minors[
 typedef char fr_ctx_engine_known_flags_matches_v2_grant_semantics[
     (ENGINE_KNOWN_FLAGS == FORKRUN_CTX_FLAG_RAW) ? 1 : -1];
 typedef char fr_ctx_frozen_size_128_bytes[(sizeof(struct forkrun_ctx) == 128) ? 1 : -1];
+/* W-STAGE1: the worker's claim out-param is the fr_state_t contract.
+ * Per-FIELD width asserts (not whole-struct sizeof): WorkerBatchState
+ * also carries the payload window (lines/offset/length), which fr_state_t
+ * deliberately excludes (identity vs. Batch.data), so the structs can
+ * never be the same size. What must never drift is the shared identity:
+ * same names, same widths — the tripwire fires if either side grows a
+ * field without the other. */
+typedef char fr_state_wbs_batch_idx_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->batch_idx) == sizeof(((fr_state_t *)0)->batch_idx)) ? 1 : -1];
+typedef char fr_state_wbs_major_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->major) == sizeof(((fr_state_t *)0)->major)) ? 1 : -1];
+typedef char fr_state_wbs_minor_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->minor) == sizeof(((fr_state_t *)0)->minor)) ? 1 : -1];
+typedef char fr_state_wbs_slots_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->slots) == sizeof(((fr_state_t *)0)->slots)) ? 1 : -1];
+typedef char fr_state_wbs_num_kills_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->num_kills) == sizeof(((fr_state_t *)0)->num_kills)) ? 1 : -1];
+typedef char fr_state_wbs_poisoned_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->poisoned) == sizeof(((fr_state_t *)0)->poisoned)) ? 1 : -1];
 #else
 #error "forkrun_ring.c: both forkrun_substrate.h and ring_loadables/forkrun_plugin.h must be included before the ctx tie asserts."
 #endif
@@ -8129,7 +8256,11 @@ static void ring_call_scrub_feeder_child(int src_fd, int pipe_w, int pipe_r) {
     /* Its copy of the pipe read end: the parent owns the reader side. */
     ring_call_close_scrub(pipe_r, src_fd, pipe_w);
 
-    /* Flat hazard fds (worker-visible shell variables). */
+    /* Flat hazard fds (worker-visible shell variables).
+     * W-STAGE1: deliberately NOT fr_config_t — frontend plumbing read in
+     * the W-STDIN fork path (mode signaling / fd hygiene), not engine
+     * configuration. The §2.1 taxonomy (mode signaling ≠ config) keeps
+     * these as env reads; Python will signal its own way at Stage 4+. */
     const char *s_trap = get_string_value("FD_TRAP_ACK_W");
     if (s_trap && s_trap[0])
         ring_call_close_scrub(atoi(s_trap), src_fd, pipe_w);
@@ -8137,7 +8268,11 @@ static void ring_call_scrub_feeder_child(int src_fd, int pipe_w, int pipe_r) {
     if (s_fallow && s_fallow[0])
         ring_call_close_scrub(atoi(s_fallow), src_fd, pipe_w);
 
-    /* Worker death-pipe write end: fd_worker_w[$RING_WID]. */
+    /* Worker death-pipe write end: fd_worker_w[$RING_WID].
+     * W-STAGE1: reads the bash-surface RING_WID (not g_fr_config.ring_wid)
+     * on purpose — this scrub walks the frontend's own array topology, so
+     * it speaks the frontend's coordinates directly. Same value either way;
+     * the env read documents that this is frontend plumbing, not config. */
     const char *s_wid = get_string_value("RING_WID");
     if (s_wid && s_wid[0]) {
         SHELL_VAR *wv = find_variable("fd_worker_w");
@@ -8374,10 +8509,12 @@ static int ring_call_main(int argc, char **argv) {
             memset(&tls_fctx, 0, sizeof(tls_fctx));
             tls_fctx.version = ver;
             tls_fctx.struct_size = (uint32_t)sizeof(struct forkrun_ctx);
-            const char *wid_str = get_string_value("RING_WID");
-                        tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
-            const char *winc_str = get_string_value("RING_WINCARN");
-            tls_fctx.worker_incarn = winc_str ? (uint32_t)strtoul(winc_str, NULL, 10) : 0;
+            /* W-STAGE1: worker identity from the worker-local config filled
+             * at ring_worker inc (not per-call env conversion). Same values
+             * the old get_string_value reads produced; unset keeps the old
+             * 0 default via the fill's own fallback. */
+            tls_fctx.worker_id = g_fr_config.ring_wid;
+            tls_fctx.worker_incarn = (uint32_t)g_fr_config.ring_wincarn;
             tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
             tls_fctx.fd_in = fd;
             tls_fctx.delimiter = delim;
@@ -8420,7 +8557,11 @@ static int ring_call_main(int argc, char **argv) {
         (tls_use_ctx >= 2) && ((tls_flags_granted & FORKRUN_CTX_FLAG_RAW) != 0);
     /* Arm 2 (W-STDIN): stdin delivery. FORKRUN_C_STDIN is the ambient mode
      * signal the bash JIT exports for -C + (-s | -b); ring_call's CLI
-     * surface is frozen, so the mode rides the environment instead. */
+     * surface is frozen, so the mode rides the environment instead.
+     * W-STAGE1: deliberately NOT fr_config_t — a per-invocation mode
+     * signal from the frontend, not worker configuration (boundary
+     * taxonomy: mode signaling ≠ config). Python sets its own equivalent
+     * at Stage 4+; the env read stays. */
     int c_stdin_mode = 0;
     if (!is_raw) {
         const char *s_stdin = get_string_value("FORKRUN_C_STDIN");
