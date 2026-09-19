@@ -1,0 +1,45 @@
+name: python-v0
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "python/**"
+      - "forkrun_ring.c"
+      - "forkrun_substrate.h"
+      - "substratestubs.c"
+      - "ring_loadables/forkrun_plugin.h"
+      - "Makefile.substrate"
+      - ".github/workflows/python-check.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "python/**"
+      - "forkrun_ring.c"
+      - "forkrun_substrate.h"
+      - "substratestubs.c"
+      - "ring_loadables/forkrun_plugin.h"
+      - "Makefile.substrate"
+      - ".github/workflows/python-check.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-v0:
+    # W-PY1 Stage 4 Phase 1: build the Python-facing substrate and run the
+    # v0 engine tests. Fedora for everything (bash-devel exists there;
+    # ubuntu runners carry no bash headers package) — same rule as the
+    # canary step in forkrun_release.yml. Build artifacts are gitignored,
+    # so the workspace stays PR-clean.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build Python substrate + run v0 tests
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            fedora:latest \
+            bash -c 'dnf install -y bash-devel gcc make file python3 && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'

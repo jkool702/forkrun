@@ -336,6 +336,87 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
   four orders of magnitude under the ~10-100ms per-batch budget — Stage 3
   thunk motivation must come from argv parse costs, not call overhead.
 
+- **W-PY1: first working Python frontend (Stage 4 Phase 1 v0, no engine
+  changes):** `forkrun.run/map/stream` execute over the C substrate via
+  ctypes with no bash in the path. New files only:
+  `python/forkrun/_shim.c` (textually includes `forkrun_ring.c` — same TU,
+  so statics/TLS are visible — adding non-static `fr_py_*` entry points:
+  version/init/destroy/ingest-done/scan/worker-init/claim/ack/escrow/
+  abort/poisoned-count; the claim wrapper republishes TLS and decides
+  poison exactly like `ring_claim_main`, minus bash binding),
+  `python/forkrun/_bindings.py` (loader + `FrPyBatch`), `run.py` (parent:
+  init/spill-source-to-memfd/ingest-done/scan/fork/wait),
+  `_worker.py` (forked claim/Batch/payload/invalidate/ack loop, `os._exit`
+  only, escrow retry / skip / fail-fast), `batch.py` lifetime + lazy
+  absolute offsets, `tests/test_v0.py` (15 engine tests). Parent scans
+  synchronously before forking (ingest_complete is the scanner's EOF gate —
+  set it before scan, not after); workers mmap the memfd whole for
+  zero-copy `Batch.data`; `ack(-1,-1)` is a no-op disarm; zero-length EOF
+  sentinel slots are skipped like bash (`REPLY != 0`); same-process escrow
+  retry preserves bash `-E` counting without a respawn manager. v0 is
+  single-node UMA with materialized (bounded) input; spawn/plugin modes,
+  multi-node, ordered emitter, resume are staged `NotImplementedError`s.
+  Build: `make -f Makefile.substrate python-substrate`
+  (`python/forkrun/libforkrun_python.so`, gitignored); CI:
+  `.github/workflows/python-check.yml` (fedora + bash-devel, like the
+  canary). `Makefile.substrate check` still runs canary + `python/tests`.
+
+- **W-PY2: Python v0 refinements (Python-only, C frozen):** four supervisor
+  findings closed. F-PY1 (flush-before-ack): every worker ack funnels
+  through `_ack()` (thread-guard + stdout/stderr flush + ack), so
+  payload `print()` output survives `os._exit()`; lock-in
+  `test_flush_before_ack` (fd-redirected capture). F-PY3 (offset scan):
+  `_scan_offsets` uses `find()`-based C-speed search instead of the
+  per-byte loop — 24x on a 1MB batch (84ms → 4ms, i9-7940X); lock-in
+  `test_offset_scan_performance` (<100ms + absolute-coordinate checks).
+  F-PY2 (single-threaded contract): documented in the worker docstring +
+  `threading.active_count()` warning at ack (checked, not prevented);
+  lock-in `test_thread_warning_and_quiet`. API polish:
+  `forkrun.__version__ = "0.2.0"`, `forkrun.__engine_version__`
+  (ring_version at import, `"unknown"` when unbuilt), README upgrade path
+  (emitter/ordered/NUMA/resume). 6 new tests (flush, perf, thread
+  warn+quiet, single-line, lines=500 granularity regression, version):
+  36 green. F-PY4 (harness error-class overlap) accepted as-is.
+
+- **W-PY3: result-crossing emitter (§3.9b v0.5, Python-only, C frozen):**
+  per-worker output memfds carrying keyed records
+  (`batch_idx`/`length` u64 LE + payload bytes) via copy-on-return; the
+  parent preads them after waitpid and reassembles over `batch_index`
+  (`map(order="index")` sorts; the C orderer is skipped by design). Two
+  work-order corrections: output memfds are parent-created PRE-FORK (a
+  post-fork child fd is invisible to the parent — the order's worker-side
+  creation is unimplementable), and `map()` keeps memfd collection (the
+  order's sink-append sketch reintroduces the fork-closure bug: worker-side
+  appends never reach the parent list). No new C functions were needed —
+  Python writes inherited memfds natively, so the order's `fr_py_output_*`
+  API dissolved into ~40 lines of Python. Files are gone (tmpfs memfds,
+  tmp-file fallback where unavailable); no Python pipe/queue carries
+  payload bytes (purity test extended). 7 new tests (basic, ordered keys,
+  None-return, RSS-output-sized boundedness, emitter-vs-sink parity,
+  record framing, 4x large output): 43 green. v0.5 drains post-completion
+  (bounded by OUTPUT size); true PIPE streaming is v1.
+
+- **W-PY4: fault suites + robustness characterization (Python-only, C
+  frozen):** L-series (`tests/test_fault.py`): segfault kills the worker
+  without a deposit — survivors drain the rest, parent raises
+  `RuntimeError`, no zombies; mixed-fault survivor output is an exact
+  input prefix; `MemoryError`/`ValueError` ride the escrow path (poison
+  summary on stderr); in-payload `KeyboardInterrupt` retries (once-flag,
+  byte-exact). G/Q-series (`tests/test_concurrent.py`): sequential and
+  thread-concurrent runs correct via a process-wide `_RUN_LOCK` (engine
+  globals are process-wide; parent threads serialize, worker payloads stay
+  single-threaded); fd counts stable over 10 runs. Numpy Layer 3
+  (`tests/test_numpy_ub.py`): Layer 1 raises; cross-batch live export
+  reads intact in v0 (mmap held, no fallow) — recorded as measurement,
+  warning text updated, never a contract. RSS (`tests/test_rss.py`,
+  subprocess-per-size peaks): parent flat across 4x stream with no output,
+  output-sized under `map`. Daemon (`tests/test_daemon.py`):
+  double-forked self-terminating daemon survives without blocking
+  `waitpid`; inherits the full fd set in v0 (recorded baseline, no
+  scrubbing yet). Harness self-test (`tests/test_harness.py`): framing
+  codec incl. truncated-tail drops, fd-count helper. 21 new tests:
+  64 green.
+
 ## v3.5.1 — 2026-09-17
 
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,

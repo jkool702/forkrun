@@ -8,6 +8,7 @@
 #   make -f Makefile.substrate canary   # link check only
 #   make -f Makefile.substrate check    # canary + Stage-0 python tests
 #   make -f Makefile.substrate canary CC=aarch64-linux-gnu-gcc OUT=libforkrun.aarch64.so
+#   make -f Makefile.substrate python-substrate   # libforkrun_python.so for ctypes
 #
 # FALSE-GREEN GUARD: make tracks timestamps, not command lines, so switching CC
 # between invocations used to leave the previous arch's objects AND output in
@@ -28,9 +29,17 @@ ALLOWED_DEPS = -ldl -lrt
 
 CANARY_STUBS = substratestubs.o
 
+# W-PY1 Python frontend substrate (Stage 4 Phase 1): python/forkrun/_shim.c
+# textually includes forkrun_ring.c (same TU, so the engine's statics and
+# TLS are visible) and ADDS non-static fr_py_* entry points for ctypes.
+# forkrun_ring.c itself is unmodified. Same flags/hygiene as the canary:
+# no -D_GNU_SOURCE on the CLI (the TU sets its own FTMs first).
+PY_OUT ?= python/forkrun/libforkrun_python.so
+PY_SHIM_OBJ = forkrun_python_shim.o
+
 all: canary
 
-.PHONY: all canary check clean FORCE
+.PHONY: all canary check clean python-substrate FORCE
 
 # Rewritten only when the compiler identity/options actually change, so its
 # mtime bumps exactly when dependent objects must rebuild.
@@ -52,6 +61,20 @@ forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h $(CCSTAMP)
 $(OUT): forkrun_ring_canary.o $(CANARY_STUBS)
 	$(CC) -shared -o $@ forkrun_ring_canary.o $(CANARY_STUBS) \
 		-Wl,--no-undefined $(ALLOWED_DEPS)
+
+forkrun_python_shim.o: python/forkrun/_shim.c forkrun_ring.c forkrun_substrate.h ring_loadables/forkrun_plugin.h $(CCSTAMP)
+	# NOTE: same FTM hygiene as the canary — no -D_GNU_SOURCE on the CLI.
+	# _shim.c's first directive includes forkrun_ring.c, so the engine's
+	# FTM block still precedes the first libc include in this TU.
+	$(CC) $(CFLAGS) -DSHELL -DHAVE_CONFIG_H $(INCLUDES) -c python/forkrun/_shim.c -o $@
+
+$(PY_OUT): $(PY_SHIM_OBJ) $(CANARY_STUBS)
+	$(CC) -shared -o $@ $(PY_SHIM_OBJ) $(CANARY_STUBS) \
+		-Wl,--no-undefined $(ALLOWED_DEPS)
+
+python-substrate: $(PY_OUT)
+	@file $(PY_OUT) | sed 's/^/python substrate artifact: /'
+	@echo "python-substrate OK: $(PY_OUT)"
 
 canary: $(OUT)
 	@file $(OUT) | sed 's/^/canary artifact: /'
@@ -79,4 +102,4 @@ check: canary
 	python3 -m unittest discover -s python/tests
 
 clean:
-	rm -f *.o *.so $(CCSTAMP)
+	rm -f *.o *.so $(CCSTAMP) $(PY_SHIM_OBJ) $(PY_OUT)

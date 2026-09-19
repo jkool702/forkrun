@@ -1,4 +1,10 @@
-"""Stage 0 API-surface tests (validation only — engine lands in Stage 4)."""
+"""Stage 0 API-surface tests (validation only — engine lands in Stage 4).
+
+Validation-shape tests assert against _validate_config directly (engine-free:
+they pass with or without libforkrun_python.so). Rejection tests go through
+forkrun.run (validation raises before any engine contact). Engine behavior
+lives in test_v0.py.
+"""
 
 import os
 import sys
@@ -9,6 +15,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import forkrun  # noqa: E402
 from forkrun._batch import Batch  # noqa: E402
+
+_DEFAULTS = dict(mode="python", sink=None, order="none", lines=None,
+                 bytes_=None, workers=None, nodes="auto", on_error="retry")
 
 
 class TestSourceValidation(unittest.TestCase):
@@ -21,19 +30,21 @@ class TestSourceValidation(unittest.TestCase):
             forkrun.run("pkg.mod:func", source=(x for x in range(3)))
 
     def test_path_accepted_shape(self):
-        with self.assertRaises(NotImplementedError):
-            forkrun.run("pkg.mod:func", source="/tmp/in.txt")
+        cfg = forkrun._validate_config("pkg.mod:func", "/tmp/in.txt",
+                                       **_DEFAULTS)
+        self.assertEqual(cfg.source, "/tmp/in.txt")
 
     def test_fd_accepted_shape(self):
-        with self.assertRaises(NotImplementedError):
-            forkrun.run("pkg.mod:func", source=0)
+        cfg = forkrun._validate_config("pkg.mod:func", 0, **_DEFAULTS)
+        self.assertEqual(cfg.source, 0)
 
     def test_pipe_accepted_shape(self):
         r, w = os.pipe()
         try:
             with os.fdopen(r, "rb") as reader:
-                with self.assertRaises(NotImplementedError):
-                    forkrun.run("pkg.mod:func", source=reader)
+                cfg = forkrun._validate_config("pkg.mod:func", reader,
+                                               **_DEFAULTS)
+                self.assertIs(cfg.source, reader)
         finally:
             os.close(w)
 
@@ -71,10 +82,23 @@ class TestOptionValidation(unittest.TestCase):
             forkrun.run("p:m", source="f", sink="not-callable")
 
     def test_wrappers_delegate(self):
-        with self.assertRaises(NotImplementedError):
-            forkrun.map("p:m", source="f")
-        with self.assertRaises(NotImplementedError):
-            forkrun.stream("p:m", source="f")
+        # Delegation proven engine-free: invalid options raise through the
+        # wrappers' shared validation path (map/stream validate like run).
+        with self.assertRaises(ValueError):
+            forkrun.map("p:m", source="f", mode="bogus")
+        with self.assertRaises(ValueError):
+            forkrun.stream("p:m", source="f", order="sorted")
+
+    def test_v0_mode_gate(self):
+        # v0 implements mode="python" only; spawn/plugin stage before any
+        # engine contact (needs only a real-enough source path).
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt") as fh:
+            fh.write("a\n")
+            fh.flush()
+            with self.assertRaises(NotImplementedError):
+                forkrun.run("p:m", source=fh.name, mode="spawn")
+            with self.assertRaises(NotImplementedError):
+                forkrun.run("p:m", source=fh.name, mode="plugin")
 
 
 class TestBatchLifetime(unittest.TestCase):

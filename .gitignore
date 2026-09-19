@@ -24,6 +24,10 @@ __pycache__/
 /forkrun_ring_canary.o
 /substratestubs.o
 
+# Python frontend substrate (make -f Makefile.substrate python-substrate)
+python/forkrun/libforkrun_python.so
+/forkrun_python_shim.o
+
 # C-plugin test suite: test_c_plugins*.sh COMPILE these at test time
 # (gcc ... -o test_basic.so), COPY the header from ring_loadables/, and
 # GENERATE the inputs from seq/find. Deliberately NOT a blanket "*.so" or

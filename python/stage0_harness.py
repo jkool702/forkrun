@@ -92,9 +92,12 @@ def check_surface() -> list[str]:
             pass
         try:
             forkrun.run("pkg.mod:func", source="in.txt")
-            errors.append("pre-engine run() did NOT raise NotImplementedError")
+            errors.append("run() with valid args returned unexpectedly")
         except NotImplementedError:
-            pass
+            pass  # no engine built: validation passed, binding deferred
+        except (FileNotFoundError, OSError, RuntimeError):
+            pass  # engine built (W-PY1): validation passed, engine tried
+            # ("in.txt" is missing / the dummy payload unimportable)
     except Exception as exc:  # noqa: BLE001
         errors.append(f"surface import/validation failed: {exc}")
     finally:

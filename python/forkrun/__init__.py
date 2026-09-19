@@ -1,4 +1,4 @@
-"""forkrun Python frontend package (Stage 0 stub).
+"""forkrun Python frontend package (Stage 4 Phase 1 — W-PY1 v0).
 
 Naming note: this is a namespaced API, so `forkrun.map` deliberately shadows
 the builtin `map` *inside this namespace only* (`forkrun.map(...)`, never a
@@ -12,35 +12,26 @@ from forkrun._api import RunConfig  # noqa: F401
 # Private in _api (not part of the v0 surface); re-exported here only so the
 # Stage 0 harness and tests can assert validation without reaching into _api.
 from forkrun._api import _validate as _validate_config  # noqa: F401
+from forkrun._batch import Batch  # noqa: F401
+from forkrun.run import map, run, stream  # noqa: F401
+
+__version__ = "0.2.0"
 
 
-def run(payload, source, *, mode="python", sink=None, order="none",
-        lines=None, bytes=None, workers=None, nodes="auto",
-        on_error="retry"):
-    """v1.3 §3.0 v0 public API — signature frozen for Stage 0 measurement.
+def _query_engine_version() -> str:
+    """Read ring_version() from the built substrate (W-PY2 API polish)."""
+    from forkrun._bindings import find_substrate, load  # noqa: PLC0415
 
-    Stage 0 stub: validates arguments, then raises NotImplementedError.
-    Stage 4 wires the substrate.
-
-    NOTE: the `bytes=` keyword deliberately shadows the builtin `bytes` inside
-    this function only. It is inherited from the frozen §3.0 API sketch (the
-    -l / -b analogues) and kept for plan fidelity; use `builtins.bytes` if this
-    body ever needs the builtin.
-    """
-    _validate_config(payload, source, mode=mode, sink=sink, order=order,
-                     lines=lines, bytes_=bytes, workers=workers, nodes=nodes,
-                     on_error=on_error)
-    raise NotImplementedError("forkrun.run() engine binding lands in Stage 4")
+    lib = load(find_substrate())
+    ver = lib.fr_py_version()
+    return ver.decode("utf-8") if isinstance(ver, bytes) else str(ver)
 
 
-def map(func, source, **kwargs):
-    """Thin convenience wrapper over run()."""
-    return run(func, source, **kwargs)
+try:
+    __engine_version__ = _query_engine_version()
+except Exception:  # noqa: BLE001
+    # Validation-only environments (no built .so): import must never fail.
+    __engine_version__ = "unknown"
 
-
-def stream(func, source, **kwargs):
-    """Thin convenience wrapper over run()."""
-    return run(func, source, **kwargs)
-
-
-__all__ = ["run", "map", "stream", "RunConfig"]
+__all__ = ["run", "map", "stream", "Batch", "RunConfig",
+           "__version__", "__engine_version__"]
