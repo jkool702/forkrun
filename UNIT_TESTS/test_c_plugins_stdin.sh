@@ -7,6 +7,9 @@
 # legs use -k. NOTE on CLI grammar: frun flag parsing stops at the first
 # positional, so -s/-k/-b/-E/-j precede `-C so:fn --fixed args` (same rule
 # as the D1 fixed-args test in test_c_plugins_rigorous.sh).
+# Invocation: standalone script (bash UNIT_TESTS/test_c_plugins_stdin.sh),
+# NOT sourced into the comprehensive suite — direct frun calls are safe
+# here (the test_c_plugins_rigorous.sh precedent).
 # =============================================================================
 
 set -o pipefail
@@ -38,7 +41,10 @@ fail() {
 # ====================== Compile stdin plugins ======================
 echo "Compiling stdin plugins..."
 
-# T-STDIN-1: v1 read-to-EOF (2-arg signature, no ctx at all).
+# T-STDIN-1: read-to-EOF in v1 style (forkrun_use_ctx unset — 2-arg
+# callback form with no ctx at all; stdin delivery applies to ctx-less
+# plugins too. Distinct from forkrun_use_ctx = 1, which gets the 3-arg
+# form with a v1-flavor ctx this plugin would simply ignore.)
 cat > plugin_stdin_v1.c << 'EOF'
 #include <unistd.h>
 #include <sys/types.h>
@@ -433,4 +439,4 @@ echo "------------------------------------------------------"
 echo "=== All Stdin Delivery Tests Passed (T-STDIN-1..9) ==="
 rm -f out_stdin_*.txt out_stdin_*.dat err_stdin_*.txt input_stdin_*.txt \
     input_stdin_*.dat victim_batch3.pid .forkrun_resume \
-    plugin_stdin_*.c plugin_stdin_*.so
+    plugin_stdin_*.so

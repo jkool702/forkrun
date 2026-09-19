@@ -4,6 +4,9 @@
 # W-RAW: FLAG_RAW grants a borrowed zero-copy window in ctx->reserved[0].
 # Plugins are compiled at test time against ring_loadables/forkrun_plugin.h.
 # Requires an engine with FLAG_RAW live (v3.5.2+). Byte-exactness uses -k.
+# Invocation: standalone script (bash UNIT_TESTS/test_c_plugins_raw.sh),
+# NOT sourced into the comprehensive suite — direct frun calls are safe
+# here (the test_c_plugins_rigorous.sh precedent).
 # =============================================================================
 
 set -o pipefail

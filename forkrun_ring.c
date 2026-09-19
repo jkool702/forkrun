@@ -8236,8 +8236,8 @@ static int ring_call_stdin_setup(int fd, size_t length, int *saved_stdin,
             return 254;
         }
         if (pid == 0) {
-            /* Child: feed the pipe, then _exit — never return into bash. */
-            close(pfd[0]);
+            /* Child: feed the pipe, then _exit — never return into bash.
+             * pfd[0] is closed by the scrub below (pipe_r). */
             ring_call_scrub_feeder_child(fd, pfd[1], pfd[0]);
             off_t offset = tls_batch_offset;
             size_t left = length;
