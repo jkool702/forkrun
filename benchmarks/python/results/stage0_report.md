@@ -18,6 +18,8 @@ This harness is the project's evidence layer for the Python frontend (localizati
 
 - Fault isolation: segfaulting item (Pool, futures), segfaulting batch (forkrun -E), segfaulting chunk (parallel); per-config tables in stage0_fault_isolation.md.
 
+- FFI boundary: ctypes null-call floor, claim-shaped / claim-ptr calls, 1MiB MAP_SHARED memoryview window, Python 8-arg fixed cost; full numbers in results/ffi_spike.json (probe micro-library — zero engine involvement).
+
 ## Per-niche localization
 
 - JSONL (6 rows): argv-vs-raw delta isolates the tokenize/copy cost; bash+python isolates per-batch interpreter cost.
@@ -29,6 +31,8 @@ This harness is the project's evidence layer for the Python frontend (localizati
 
 - Streaming: frun RSS 1241.5→1244.0 MB across 2 input sizes (delta 2.5 MB) — flat: bounded.
   Throughput parity (~1.17 GB/s both configs, both sizes) is a generator ceiling, not an engine comparison: the single-process Python feeder saturates first. The valid streaming findings are boundedness (flat RSS) and byte accountability, not relative throughput.
+
+- FFI boundary (1 row): worst-case claim-shaped 1.717us (claim-ptr 0.483us, null floor 0.179us) vs the ~10-100ms per-batch budget — the call overhead is four orders of magnitude under budget. Any Stage 3 thunk-flip motivation must come from argv parse/tokenize costs, not from call overhead.
 
 ## UNMEASURED and why
 

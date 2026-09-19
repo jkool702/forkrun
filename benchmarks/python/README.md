@@ -26,6 +26,10 @@ bash benchmarks/python/run_stage0.sh
   single JSON summary line (`bench_common.py` contract). The torch leg
   emits UNMEASURED when torch/tensorflow are absent.
 - `forkrun/` — C plugins compiled at harness time (substrate-ceiling legs).
+- `ffi_spike.py` — Stage 2 ctypes spike: FFI boundary cost (null floor,
+  claim-shaped/claim-ptr calls, MAP_SHARED memoryview window, Python fixed
+  cost) against a purpose-built probe micro-library; writes
+  `results/ffi_spike.json` and appends the `ffi-boundary` table row.
 - `rental/run_rental.sh` — portable rental-day runner (documented, not yet
   executed).
 - `inputs/` (gitignored, regenerable), `work/` (gitignored scratch),

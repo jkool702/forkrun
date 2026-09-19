@@ -325,6 +325,18 @@
    "fault_outcome": "parallel rc=0; output 195000/200000 lines; failed chunk dropped, rest completed",
    "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
    "notes": "chunk-granularity fault"
+  },
+  {
+   "niche": "ffi-boundary",
+   "incumbent": "ctypes-null-floor",
+   "incumbent_result_s": 0.0,
+   "incumbent_rss_mb": 0.0,
+   "forkrun_result_s": 0.0,
+   "forkrun_rss_mb": 0.0,
+   "ratio": "",
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "FFI boundary cost per claim: 1.717 us (claim-ptr 0.483 us) \u2014 measured against the ctypes null-call floor 0.179 us; memoryview 1MiB window 0.207 us; Python 8-arg fixed cost 0.050 us. Context: the crossover data shows dispatch cost stops mattering above ~100us/record; the frontend per-batch budget is ~10-100ms (1000-line batches). Full numbers: results/ffi_spike.json. Zero engine involvement (probe micro-library, not forkrun_ring)."
   }
  ],
  "faults": [

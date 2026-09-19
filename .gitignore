@@ -48,3 +48,7 @@ benchmarks/python/*.log
 # Stage 0 operational noise (run timeline + failure marker, not evidence)
 benchmarks/python/results/progress.log
 benchmarks/python/results/stage0_error.txt
+
+# Editor session/swap files (never commit; W-V352-COMPLETE guardrail)
+*.swp
+*.kate-swp

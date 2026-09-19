@@ -104,3 +104,11 @@ what will run.
    regenerate-from-source.** The input memfd may have holes beyond the checkpoint
    horizon; resume re-ingests the original stream, so this is invisible. Any
    future feature that reuses a crashed run's memfd must re-derive this proof.
+5. **Pre-consent process termination.** The sandbox extraction executes
+   before the ownership/permission gate (F29-B's ordering: prompts preview
+   extracted values, which requires extraction first). A hostile checkpoint
+   can terminate the calling shell before the consent prompt fires. This is
+   within the documented same-UID tampering boundary (residual #1) — an
+   attacker with same-UID file-write can already do strictly worse. The
+   sandbox contains the code's *effects* (dead PATH, restricted shell,
+   re-render); it does not contain process-signal effects.

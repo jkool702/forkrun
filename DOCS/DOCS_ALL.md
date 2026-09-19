@@ -288,6 +288,54 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
   processes; the `/proc`-based persistent feeder stays deferred in
   `docs_port/`.
 
+- **W-STAGE1: the substrate's config boundary goes load-bearing:**
+  `fr_config_t` (declared in v3.5.1) is now consumed: `ring_worker inc`
+  snapshots the bash-surface transport (`RING_WID`, `RING_NODE_ID`,
+  `RING_WINCARN`, `FORKRUN_RETRY_LIMIT`, `FD_ORDER_PIPE`, `FORKRUN_DEBUG`)
+  into a worker-local struct once per worker — no config-sync verb; the
+  Python frontend will fill the same struct via ctypes and fork-inherit it
+  as plain memory. Consumers: claim node init + poison threshold (the
+  per-claim env read leaves the hot retry path), ack order-pipe, call ctx
+  identity; `FORKRUN_C_STDIN` and the feeder-scrub reads stay env (mode
+  signaling, not config — taxonomy comments). `WorkerBatchState` fields
+  renamed to the `fr_state_t` identity
+  (`batch_idx`/`slots`/`num_kills`/`poisoned`, decided at the poison
+  branch) with per-field width tripwires beside the substrate asserts
+  (whole-struct sizeof is wrong by design: the claim struct also carries
+  the payload window). One bash comment (config-injection point, both
+  twins). Lock-in T-CONFIG-1..4
+  (`UNIT_TESTS/test_c_plugins_config.sh`); basic 91/91, all C-plugin
+  suites, T-RAW, T-STDIN green with zero behavior change.
+
+- **P1 residual #5 (docs only):** pre-consent process termination named in
+  `SECURITY.md` (+ twin): sandbox extraction precedes the ownership gate
+  (F29-B ordering — prompts preview extracted values), so a hostile
+  checkpoint can terminate the calling shell before the consent prompt
+  fires. Within the documented same-UID tampering boundary (residual #1);
+  the sandbox contains the code's effects, not process-signal effects.
+  Accepted; no code change (the ordering is load-bearing).
+
+- **Stage 3.0 IDL scaffolding (annotation-only, zero runtime code):**
+  `tools/idl_schema.py` (single source: 41/41 loadables, all `ARGC_ARGV`;
+  field lists with direction/optionality/PTR+LEN for the migration-order
+  four: claim, ack, call, poll), `tools/gen_idl.py` emitting
+  `forkrun_callschema.h` (convention companion table + field hooks) plus a
+  generated ctypes mirror and usage table; `tools/test_idl.py` (10 tests:
+  standalone/order-independent compile, name coverage, byte-exact
+  usage/doc equality against the frozen engine table, `--check`
+  freshness, ctypes self-consistency); `.github/workflows/idl-check.yml`
+  runs both. No `fr_call_t`, no thunk flips (Stage 3 per-function
+  commits in v3.5.3+), no usage-string changes.
+
+- **Stage 2 ctypes spike (measurement, zero engine code):**
+  `benchmarks/python/ffi_spike.py` against a probe micro-library (not the
+  engine): null-call floor 0.179us, claim-shaped 1.717us, claim-ptr
+  0.483us, 1MiB MAP_SHARED memoryview 0.207us, Python 8-arg fixed cost
+  0.050us (i9-7940X, best-of-7). New `ffi-boundary` row in the Stage 0
+  table (+ `results/ffi_spike.json`, report narrative): call overhead is
+  four orders of magnitude under the ~10-100ms per-batch budget — Stage 3
+  thunk motivation must come from argv parse costs, not call overhead.
+
 ## v3.5.1 — 2026-09-17
 
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,
@@ -2827,6 +2875,14 @@ what will run.
    regenerate-from-source.** The input memfd may have holes beyond the checkpoint
    horizon; resume re-ingests the original stream, so this is invisible. Any
    future feature that reuses a crashed run's memfd must re-derive this proof.
+5. **Pre-consent process termination.** The sandbox extraction executes
+   before the ownership/permission gate (F29-B's ordering: prompts preview
+   extracted values, which requires extraction first). A hostile checkpoint
+   can terminate the calling shell before the consent prompt fires. This is
+   within the documented same-UID tampering boundary (residual #1) — an
+   attacker with same-UID file-write can already do strictly worse. The
+   sandbox contains the code's *effects* (dead PATH, restricted shell,
+   re-render); it does not contain process-signal effects.
 
 
 -----------------------------------------
