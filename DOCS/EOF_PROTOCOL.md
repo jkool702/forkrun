@@ -1,0 +1,211 @@
+### `EOF_PROTOCOL.md`
+
+# FORKRUN EOF PROTOCOL
+
+This document defines the formal protocol by which forkrun detects end-of-input and guarantees clean termination without lost wakeups, premature exits, or deadlocks. This protocol is a first-principles design, not derived from existing systems.
+
+> **Scope:** This protocol governs the Scanner→Worker boundary (`ring_claim`, `core_scanner_loop`). The Ingest→Scanner boundary uses a simplified 2-condition variant of the same rules.
+
+---
+
+## §1. The Three Conditions for EOF
+
+EOF is determined by **three conditions simultaneously being true**, checked in the following **strict order**:
+
+| # | Condition | Meaning |
+|---|---|---|
+| **C1** | Parent/supplier has declared EOF | The local work supplier has permanently finished. There will **never** be more local work arriving. |
+| **C2** | No local work remains | The local ring is fully drained (`read_idx >= write_idx`). |
+| **C3** | No non-local work remains | When applicable: no work available in the escrow pipe, and no chunks available to steal from other nodes. |
+
+### Ordering Rules
+
+- **C1 must be true before C2 matters.** If the supplier hasn't declared EOF, an empty ring simply means "wait for more data."
+- **C1 and C2 must both be true before C3 matters.** If local work exists, the worker must consume it before checking non-local sources.
+- **All three conditions must be re-verified in order.** If any condition fails during the sequential check, the worker must loop back and re-check from C1.
+
+### Implementation
+
+In the code, this manifests as:
+
+```c
+// C1: Has the supplier declared EOF permanently?
+if (atomic_load_acquire(&local_state->scanner_finished)) {
+
+    // C2: Re-verify local work is empty AFTER observing Supplier EOF
+    if (atomic_load_acquire(&local_state->read_idx) <
+        atomic_load_acquire(&local_state->write_idx)) {
+        continue;  // Local work exists → loop back to C1
+    }
+
+    // C3: Re-verify non-local work (Escrow) is empty AFTER C1 & C2
+    if (fd_escrow_r && fd_escrow_r[my_numa_node] >= 0) {
+        struct pollfd pfd = {.fd = fd_escrow_r[my_numa_node], .events = POLLIN};
+        if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+            continue;  // Escrow work exists → loop back to C1
+        }
+    }
+
+    // All 3 conditions met in order. Terminate.
+    return 2;
+}
+```
+
+**Reference:** `ring_claim_main()` in `forkrun_ring.c`.
+
+> **Note on §1 C3 implementation:** the snippet above shows the *logical* condition for escrow emptiness (is escrow empty?). Since v3.4 the hot-path implementation does not poll the escrow pipe here; it uses a per-node `escrow_pending` flag with TATAS re-arm and continuous drain (see §4). The poll-based check remains the correct logical definition of C3, but the fast-path check is the flag load described in §4.
+
+---
+
+## §2. The EOF eventfd
+
+Each NUMA node (or the single UMA node) has a dedicated EOF eventfd (`evfd_eof_arr[node]`). This eventfd has special semantics that differ from the data eventfds.
+
+### Rules
+
+1. **Write-once.** The EOF evfd is written exactly once per node, immediately before the scanner exits. Once non-zero, it stays non-zero forever.
+
+2. **Never consumed.** The EOF evfd is **polled but never read** (`sys_read` is never called on it). This ensures that once it becomes non-zero, every subsequent `poll()` call that includes it will return immediately with `POLLIN`.
+
+3. **Written only after finalization.** The EOF evfd is written **only after** the scanner has:
+   - Published all final work to the ring (`write_idx` updated with release semantics)
+   - Set `scanner_finished = 1` (with release semantics)
+
+   This guarantees that any worker woken by the EOF evfd will observe the fully published final state.
+
+### Purpose
+
+The EOF evfd exists solely to **break blocking polls**. Without it, a worker blocked in `poll(-1)` waiting for data would never wake up after the scanner finishes, because the data evfd might not fire again. The EOF evfd guarantees that all polls return instantly once there will never be more data.
+
+### Implementation
+
+**NUMA path:**
+```c
+atomic_store_release(&local_state->write_idx, local_scan_idx);   // 1. publish final work
+atomic_store_release(&local_state->scanner_finished, 1);          // 2. declare EOF
+uint64_t blast = 999999;
+sys_write(evfd_eof_arr[my_node_id], &blast, 8);                   // 3. wake all polls
+```
+
+**UMA path:**
+```c
+atomic_store_release(&local_state->write_idx, local_scan_idx);   // 1. publish final work
+atomic_store_release(&local_state->scanner_finished, 1);          // 2. declare EOF
+uint64_t blast = 999999;
+sys_write(evfd_eof_arr[0], &blast, 8);                            // 3. wake all polls
+```
+
+**Reference:** `core_scanner_loop()` finalization in `forkrun_ring.c`.
+
+---
+
+## §3. Simultaneous Polling Rules
+
+When a worker or scanner blocks in `poll()` waiting for events, it must follow strict rules about **which eventfds are polled simultaneously** and **in what order events are processed**.
+
+### Rule 3.1: Co-polling Requirements
+
+Any poll that waits for a **lower-priority** event **must simultaneously poll all higher-priority events** until those higher-priority conditions are confirmed met.
+
+| Poll waiting for... | Must also poll... | Rationale |
+|---|---|---|
+| Local data | EOF evfd | Must detect EOF to avoid infinite wait when no more data will arrive. |
+| Non-local data (escrow) | Local data evfd **and** EOF evfd | Must detect local work (higher priority) and EOF. Local work must be consumed before non-local work. |
+
+Once a higher-priority condition is confirmed (e.g., `scanner_finished` is true), the lower-priority poll no longer needs to actively wait for it — the EOF evfd ensures any subsequent poll returns instantly.
+
+### Rule 3.2: Event Processing Priority
+
+When a simultaneous poll returns with multiple events ready, they **must be processed in the following strict order**:
+
+| Priority | Event | Action |
+|---|---|---|
+| **1 (highest)** | Local work evfd is non-zero | Consume (read) the evfd and loop back to claim local work. |
+| **2** | Non-local work evfd is non-zero (when applicable) | Consume it and loop back to claim non-local work. |
+| **3 (lowest)** | EOF evfd is non-zero | Exit **only** when the EOF evfd is non-zero **and** all work evfds are zero. |
+
+This priority ordering prevents a race where a worker sees EOF and exits while there is still unconsumed work signaled by a data evfd that fired simultaneously.
+
+### Rule 3.3: Optional Co-polling
+
+When polling for **local** data, it is acceptable (but not required) to **also** poll for non-local data. If both return non-zero simultaneously, the standard priority rules from §3.2 apply: **local data is consumed first**.
+
+This is in contrast to polling for **non-local** data, where simultaneously polling for local data is **mandatory** (Rule 3.1).
+
+---
+
+## §4. Escrow Priority Inversion (v3.4+)
+
+### Mechanism (v3.4+): Continuous Drain + Re-arm Flag
+
+1. **Deposit signal.** `ring_escrow_put` writes the packet to the per-node escrow pipe and sets the per-node `escrow_pending` flag (release store).
+2. **Re-arm (test-and-test-and-set).** On every claim iteration each worker performs one acquire load of `escrow_pending` (cache-resident; reads 0 for the whole run in the no-failure case). The first worker to see it non-zero atomically exchanges it to 0 and sets its thread-local `tl_drain_escrow` flag. The TATAS form prevents RMW cache-line ping-pong when several workers observe the flag simultaneously.
+3. **Continuous drain.** While `tl_drain_escrow` is set, the worker checks escrow *before* the ring on every claim, draining until EAGAIN, then snaps back to ring-first priority. Inversion is continuous for the recovery episode, not one-shot.
+
+Crash validation is unchanged: reclaimed packets route through `evaluate_claim`, never bypassing `write_idx` validation.
+
+**Reference:** `ring_claim_main()` in `forkrun_ring.c`.
+
+---
+
+## §5. Scanner-Side EOF (Ingest → Scanner)
+
+The Scanner uses a simplified 2-condition variant of this protocol to detect when the Ingest stage has finished writing data to the memfd.
+
+| # | Condition | Mechanism |
+|---|---|---|
+| **C1** | Ingest has declared EOF | `ingest_complete` flag set via `atomic_store_release`, or `evfd_ingest_eof` fires |
+| **C2** | No unscanned data remains | `pread()` returns 0 bytes (or ≤ previously available bytes) with `ingest_complete` true |
+
+The scanner's wait poll simultaneously polls both the data evfd and the EOF evfd (2-way), with the data evfd taking priority:
+
+```c
+struct pollfd pfds[2] = {{.fd = evfd_ingest_data, .events = POLLIN},
+                         {.fd = evfd_ingest_eof, .events = POLLIN}};
+poll(pfds, 2, poll_timeout);
+
+bool data_fired = (pfds[0].revents & POLLIN) != 0;
+bool eof_fired = (pfds[1].revents & POLLIN) != 0;
+
+if (data_fired) {
+    uint64_t v;
+    sys_read(evfd_ingest_data, &v, 8);     // Priority 1: consume data signal
+}
+else if (eof_fired) {
+    atomic_store_release(&local_state->ingest_complete, 1);  // Priority 2: note EOF
+}
+```
+
+When `ingest_complete` is observed, the scanner forces one final `pread()` to drain any data written between the last read and the EOF signal (`force_refill = true; continue;`). This prevents the last-byte-lost race.
+
+**Reference:** `core_scanner_loop()` in `forkrun_ring.c`.
+
+---
+
+## §6. Audit Checklist
+
+Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner_loop()`, or the eventfd infrastructure.
+
+- [ ] **Every blocking `poll()` that waits for data also polls the EOF evfd.** A poll that only waits for data without also watching for EOF will deadlock if the scanner finishes while the worker is blocked.
+
+- [ ] **Every blocking `poll()` that waits for non-local work also polls the local data evfd.** Local work takes priority over non-local work. Failing to co-poll means the worker could process escrow while local ring data goes stale.
+
+- [ ] **Event processing follows the strict priority cascade: local → non-local → EOF.** Reordering this cascade can cause premature exit (if EOF is checked before data) or head-of-line blocking (if escrow is checked before local).
+
+- [ ] **The EOF evfd is never `sys_read()`.** Reading an eventfd resets its counter to zero. If any code reads the EOF evfd, subsequent polls on it will no longer return POLLIN, causing other workers to hang.
+
+- [ ] **The EOF evfd is written only after `scanner_finished` is set with release semantics.** If the evfd fires before `scanner_finished` is visible, workers could observe the evfd, check `scanner_finished`, see it as false, and re-enter a blocking poll that never wakes.
+
+- [ ] **The 3-condition EOF check re-verifies from C1 on any failure.** If a modification adds a `break` instead of `continue` when C2 or C3 fails, the worker could miss work that arrived between checks.
+
+- [ ] **Escrow drain must terminate on EAGAIN (never spin on an empty pipe); the per-node re-arm flag must be consumed by exactly one atomic exchange per deposit episode.** Continuous drain inversion is thread-local and must not affect global priority when idle; the `tl_drain_escrow` flag must be cleared only after EAGAIN, and `escrow_pending` must be TATAS-consumed.
+
+---
+
+## §7. Relationship to Other Documents
+
+| Document | Relationship |
+|---|---|
+| [INVARIANTS.md](INVARIANTS.md) | This protocol relies on Invariants §1 (monotonic indices), §2 (publish-before-claim), and §5 (escrow never required for progress). |
+| [DESIGN.md](DESIGN.md) | The 4-stage pipeline (Ingest → Index → Scan → Claim) provides the architectural context for where these EOF conditions are checked. |
+| [PHYSICS.md](PHYSICS.md) | The adaptive flow controller interacts with EOF via the stall/starve meters, but does not affect the correctness of EOF detection. |

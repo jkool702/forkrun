@@ -3,6 +3,10 @@
         (
 
             {
+
+                # enable THP
+                cat /sys/kernel/mm/transparent_hugepage/shmem_enabled | grep -F '[always]' >/dev/null || { echo 'enabling THP' >&2; echo always | sudo tee /sys/kernel/mm/transparent_hugepage/shmem_enabled; }
+
                 # source frun
                 shopt -s globstar
                 shopt -s extglob
@@ -11,7 +15,7 @@
                 #. "${frun_path%%$'\n'*}"
 
                 # setup test files
-                fLines=1000000
+                fLines=100000000
                 [[ -f ./f1 ]] || yes $'\n' | head -n $fLines >f1
                 [[ -f ./f2 ]] || seq $fLines >f2
                 [[ -f ./f3 ]] || find /usr /etc /opt /var /home -type f >f3

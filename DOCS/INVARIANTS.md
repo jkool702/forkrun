@@ -1,6 +1,6 @@
 ### `INVARIANTS.md`
 
-# FORKRUN INVARIANTS (v9.8.0-NUMA Golden Master)
+# FORKRUN INVARIANTS
 
 These are the rules that **must never be broken**. If they hold, the system is correct regardless of batching heuristics, NUMA count, or workload shape.
 
@@ -14,7 +14,7 @@ Each ring slot is claimed exactly once, by at most one worker.
 **Enforced by**  
 `read_idx` advanced **only** via atomic `fetch_add`. No CAS retry loops on the fast path. No decrement or rollback logic anywhere.
 
-**v9 NUMA note**  
+**NUMA note**  
 Each `SharedState` (one per node) maintains its own `read_idx` / `write_idx`.
 
 **Audit Rule**  
@@ -41,66 +41,53 @@ Scanner writes ring slot data **before** advancing `write_idx`. `write_idx` publ
 A batch is claimed whole or not at all.
 
 **Enforced by**  
-Workers claim ranges, never individual slots. Overshoot handled *after* claim, not during.
+Workers claim exactly 1 slot (1 batch) at a time. Atomicity is enforced upstream by the Scanner, which pre-calculates and bounds the line/byte offsets for the batch within that single slot before publishing.
 
 **Audit Rule**  
 ❌ Never introduce logic that conditionally claims per-slot or splits batch claim across multiple atomics.
 
 ---
 
-## 4. Signed Batch Size Protocol
+## 4. Single-Slot Claim Invariant
 
-**Meaning of Sign**  
-* `batch_size < 0` → **Provisional policy** (scanner may still change its mind)  
-* `batch_size > 0` → **Finalized contract** (matches stream reality)
+**Invariant**  
+Workers always claim exactly 1 ring slot via a single `atomic_fetch_add`. The Scanner is solely responsible for determining the batch size (`L`) and publishing the byte/line boundaries for that batch into the slot before advancing `write_idx`.
 
-**Scanner Responsibilities**  
-* May update batch size at any time.  
-* Must **always** publish negative values (`-abs(N)`).  
-* Must never publish a positive batch size.
+**Enforced by**  
+The worker fast path is unconditional:
+```c
+my_read_idx = __atomic_fetch_add(&local_state->read_idx, 1, __ATOMIC_SEQ_CST);
+claim_count = 1;
+```
+No CAS retry loops. No sign-bit checks. No speculative multi-slot arithmetic. The Scanner changes the *contents* of slots (larger or smaller batches); workers never see the policy, only the slot.
 
-**Worker Responsibilities**  
-* Observe the published (negative) batch size.  
-* May finalize **only** when stream count equals `abs(published_batch_size)`.  
-* Must use **CAS** to flip `-N → +N`.  
-* If CAS fails (scanner changed policy), re-evaluate under new policy.
+**The Fallback Guarantee**  
+Even when the Pre-Flight Popcount is interrupted by an early worker spawn — causing the Scanner to fall back to the Phase 1 Geometric Ramp-Up — the worker hot-path is identical. The Scanner publishes larger batches into single slots. Workers remain completely oblivious.
 
-**Forbidden Transitions**  
-* Scanner publishing positive batch size  
-* Worker changing magnitude  
-* Any positive → negative transition  
-* Non-CAS sign flip
-
-**Correctness Guarantee**  
-Batch size reflects scanner intent until finalized. Finalization occurs exactly once. Scanner policy changes cannot resurrect stale batch sizes.
+**Audit Rule**  
+❌ Never introduce logic where a worker claims more than 1 slot in a single atomic operation.  
+❌ Never introduce CAS retry loops on `read_idx`.  
+❌ Never route workers through different code paths based on a sign bit or advisory batch-size value.
 
 ---
 
-## 5. Tail-Aware Batch Size Rules
+## 5. Tail-Aware Drain Rules
 
 **Definition**  
-The tail ramp-down begins at `tail_idx`. Remaining data may not satisfy the current batch size.
+The tail begins when the scanner approaches EOF. Remaining data may not cleanly fill the current batch size `L`.
 
 **Scanner Responsibilities**  
-* Must not publish batch sizes that correspond to tail batches.  
-* Once `tail_idx` is established, scanner must not modify batch size.
+When the tail is reached, the scanner publishes the final partial batch as a normal single-slot claim bounded by the EOF/chunk boundaries and sets `FLAG_MAJOR_EOF` in `minor_ring` (NUMA mode) or relies on `scanner_finished` / `write_idx` reaching EOF (UMA mode). The scanner stops changing batch-size policy once the tail begins.
 
 **Worker Responsibilities at Tail**  
-When `read_idx ≥ tail_idx` and `batch_size < 0`:  
-1. Finalize immediately (`-N → +N` via CAS).  
-2. Bypass all slow paths (no waiting, no escrow).  
-3. Process exactly one claim using stride metadata.
-
-**Why This Rule Exists**  
-Guarantees exactly one claim per tail batch, no policy leakage, no duplicate claims.
-
-**Forbidden**  
-* Scanner publishing after entering tail  
-* Workers applying ramp-down logic based on batch size  
-* Slow path in tail
+Workers do nothing differently. They claim exactly 1 slot. Because the scanner has already bounded the slot to the exact remaining bytes/lines, the worker processes it and moves on. There is no overshoot to correct at the tail boundary — a single-slot claim never reaches past what the scanner has published.
 
 **Key Insight**  
-Batch size is a *policy*, not a property of the tail. Once the tail begins, policy ends and structure takes over.
+Batch size is a *policy*, not a property of the tail. Once the tail begins, policy ends and structure takes over. The single-slot claim invariant (§4) eliminates the tail-overshoot problem entirely.
+
+**Audit Rule**  
+❌ Never introduce logic that forces workers to finalize or roll back a multi-slot claim at the tail.  
+❌ Scanner must not publish batch-size changes after entering the tail.
 
 ---
 
@@ -110,7 +97,7 @@ Batch size is a *policy*, not a property of the tail. Once the tail begins, poli
 Escrow is advisory and never required for forward progress.
 
 **Enforced by**  
-Escrow stealing is optional. Original worker may always reclaim remainder. Escrow full → self-complete.
+Escrow is strictly a fault-tolerance channel for crashed workers. Because workers claim exactly 1 slot, there are no partial remainders to subdivide or reclaim. Escrow stealing is optional but critical for recovery.
 
 **Audit Rule**  
 ✅ It must always be possible to ignore escrow entirely and still complete all work.
@@ -156,13 +143,26 @@ Per-batch logical index + reorder buffer + emit only contiguous prefix.
 
 ---
 
-## 10. NUMA-Specific Invariants (v9.8+)
+## 10. NUMA-Specific Invariants
 
 * Data is born-local to its target node (`set_mempolicy` at ingest).  
 * Scanner pinned to its node.  
 * Per-node escrow pipes.  
 * Major/minor ordering keys for correct global reorder.  
 * Claim-pipe back-pressure prevents unbounded growth.
+
+---
+
+## 11. Gate Publication & Producer Wakeup Invariant
+
+**Invariant**
+Any process publishing gate-resolving state (`actual_end`, `cum_lines`, `write_idx`) must execute a `SEQ_CST` memory barrier and issue `sys_write` to the corresponding metadata/data eventfd whenever waiters are present (`meta_waiters > 0` or `active_waiters > 0`).
+
+**Enforced by**
+All publication sites in `forkrun_ring.c` issue release stores followed by an explicit `__atomic_thread_fence(__ATOMIC_SEQ_CST)` before checking waiter counters and waking sleeping threads.
+
+**Audit Rule**
+❌ Never remove or conditionally optimize away eventfd wakeups on gate-resolving state publications.
 
 ---
 
@@ -206,17 +206,90 @@ When sustained stall+starve causes a batch-size reduction, the meters are zeroed
 
 ---
 
-## 13. Checklist Summary
+## 13. No Sole-Path Data Movement
 
-If all sections above remain true, **v9.8.0-NUMA is correct** — regardless of:
-* batching heuristics
+**Invariant**
+Every byte-mover (`sendfile`, `copy_file_range`, `splice`, `write`) must have a fallback
+path that is exercised by the test matrix, not merely present in the code.
+
+**Enforced by**
+The orderer's emit path falls back from `sendfile` to `read`/`write` on *any* failure
+(`O_APPEND` → `EINVAL`, partial sends, environment-specific `EINVAL`). `ring_copy`'s
+cascade (`copy_file_range` → `sendfile` → `read`/`write`) is the canonical form. `FORKRUN_DISABLE_MEMPOLY`
+is the pattern for per-mover forced-fallback test hooks.
+
+**Origin**
+`sendfile` + `O_APPEND` returned `EINVAL`; the failure was classified as "downstream
+closed" → clean exit 0 → every `frun ... >> log` silently produced zero output.
+The fallback existed elsewhere in the codebase for years but was never exercised.
+
+**Audit Rule**
+❌ Any `sendfile`/`splice`/`copy_file_range` call site whose failure mode
+terminates the operation rather than degrading. A zero-copy path that cannot fail
+on *some* supported kernel/filesystem/fd-configuration does not exist. An
+unexercised fallback is a comment, not a fallback.
+
+**Companion rule — failures must be loud before they can be silent.** `EPIPE` means
+"downstream closed" (the only clean-exit condition); everything else is an internal
+fault (checkpoint + non-zero exit). Any error path that can produce a successful-
+looking exit from a failed operation is a taxonomy bug independent of the operation.
+
+---
+
+## 14. Gates Inspect Text, Never Live State
+
+**Invariant**
+A security gate must make its decision from *serialized text*, never from state
+derived from executing the text it is gating. The layer-3 resume gate previews
+content built from raw strings; function definitions cross only after the gate's
+decision. (The frame-split emission exists to make this true: variables and
+function text are separate token-bounded frames.)
+
+**Origin**
+The pre-split design eval'd functions before the gate ran, so the gate's own
+`printf -v` preview could execute the very functions it was asking the user about.
+
+**Audit Rule**
+❌ Any gate whose preview/decision commands can be shadowed by content the gate
+has already imported into scope. If the gate needs functions to make its decision,
+the design is wrong — the decision must be derivable from text.
+
+---
+
+## 15. Sanitize by Construction, Not by Clearing
+
+**Invariant**
+A hostile environment must be *constructed* (execve-time `env -i` + explicit
+values), never assumed to result from clearing or assigning. Shell-level
+assignment can be vetoed (restricted mode: `PATH` is readonly); environment
+clearing can be defeated by the target's re-seeding defaults (unset `PATH` →
+bash's compiled-in default). The construction layer is below the shell's opinion.
+
+**Origin**
+Three successive "sanitizations," each falsified by a twenty-second probe:
+`PATH=''` prefix (cleared by `exec -c`), unset `PATH` (bash re-seeds defaults),
+in-sandbox `PATH=/nonexistent` (readonly under `--restricted`). The fourth —
+`env -i` at exec time — holds because it operates where the shell cannot veto it.
+
+**Audit Rule**
+❌ Any security property that depends on a variable surviving an `exec -c`, or
+on "unset" meaning "unsearchable." Verify each sanitization mechanism empirically,
+per mechanism, with a probe — and make the adversarial tests (T1b/T1d/T1f) the
+permanent runtime tripwire.
+
+---
+
+## 16. Checklist Summary
+
+If sections §1–16 above remain true, **forkrun is correct** — regardless of:
+* batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement
 * worker churn
 * input arrival rate (trickle or burst)
 
 **Mental model reminder**  
-Progress is irreversible. Locality is structural. Contention was designed away.
+Progress is irreversible. Locality is structural. Contention was designed away. Workers always claim exactly one slot. Gates read text. Data movers degrade. Environments are built, not cleared.
 
 ---
 

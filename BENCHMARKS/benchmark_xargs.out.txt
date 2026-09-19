@@ -1,0 +1,411 @@
+
+(1): time { xargs -P $(nproc) -d $'\n' true <f1 >/dev/null; }
+real	0m12.681s
+user	0m2.175s
+sys	0m10.651s
+
+CPU UTILIZATION: 1.011 / 28
+
+-----------------------------------------
+
+(2): time { xargs -P $(nproc) -d $'\n' true <f1 | wc -l; }
+0
+real	0m12.741s
+user	0m2.209s
+sys	0m10.668s
+
+CPU UTILIZATION: 1.010 / 28
+
+-----------------------------------------
+
+(3): time { cat f1 | xargs -P $(nproc) -d $'\n' true >/dev/null; }
+real	0m12.660s
+user	0m2.306s
+sys	0m10.609s
+
+CPU UTILIZATION: 1.020 / 28
+
+-----------------------------------------
+
+(4): time { cat f1 | xargs -P $(nproc) -d $'\n' true | wc -l; }
+0
+real	0m12.922s
+user	0m2.265s
+sys	0m10.852s
+
+CPU UTILIZATION: 1.015 / 28
+
+-----------------------------------------
+
+(5): time { xargs -P $(nproc) -d $'\n' echo <f1 >/dev/null; }
+real	0m12.727s
+user	0m2.759s
+sys	0m10.666s
+
+CPU UTILIZATION: 1.054 / 28
+
+-----------------------------------------
+
+(6): time { xargs -P $(nproc) -d $'\n' echo <f1 | wc -l; }
+763
+real	0m12.367s
+user	0m2.678s
+sys	0m10.585s
+
+CPU UTILIZATION: 1.072 / 28
+
+-----------------------------------------
+
+(7): time { cat f1 | xargs -P $(nproc) -d $'\n' echo >/dev/null; }
+real	0m12.429s
+user	0m2.674s
+sys	0m10.545s
+
+CPU UTILIZATION: 1.063 / 28
+
+-----------------------------------------
+
+(8): time { cat f1 | xargs -P $(nproc) -d $'\n' echo | wc -l; }
+763
+real	0m12.488s
+user	0m2.745s
+sys	0m10.773s
+
+CPU UTILIZATION: 1.082 / 28
+
+-----------------------------------------
+
+(9): time { xargs -P $(nproc) -d $'\n' printf %s\n <f1 >/dev/null; }
+real	0m12.250s
+user	0m11.726s
+sys	0m10.336s
+
+CPU UTILIZATION: 1.800 / 28
+
+-----------------------------------------
+
+(10): time { xargs -P $(nproc) -d $'\n' printf %s\n <f1 | wc -l; }
+100000000
+real	0m12.434s
+user	0m11.934s
+sys	0m10.573s
+
+CPU UTILIZATION: 1.810 / 28
+
+-----------------------------------------
+
+(11): time { cat f1 | xargs -P $(nproc) -d $'\n' printf %s\n >/dev/null; }
+real	0m12.515s
+user	0m11.824s
+sys	0m10.636s
+
+CPU UTILIZATION: 1.794 / 28
+
+-----------------------------------------
+
+(12): time { cat f1 | xargs -P $(nproc) -d $'\n' printf %s\n | wc -l; }
+100000000
+real	0m12.413s
+user	0m11.943s
+sys	0m10.774s
+
+CPU UTILIZATION: 1.830 / 28
+
+-----------------------------------------
+
+(13): time { xargs -P $(nproc) -d $'\n' true <f2 >/dev/null; }
+real	0m17.775s
+user	0m4.514s
+sys	0m14.870s
+
+CPU UTILIZATION: 1.090 / 28
+
+-----------------------------------------
+
+(14): time { xargs -P $(nproc) -d $'\n' true <f2 | wc -l; }
+0
+real	0m17.950s
+user	0m4.625s
+sys	0m14.964s
+
+CPU UTILIZATION: 1.091 / 28
+
+-----------------------------------------
+
+(15): time { cat f2 | xargs -P $(nproc) -d $'\n' true >/dev/null; }
+real	0m17.865s
+user	0m4.613s
+sys	0m15.429s
+
+CPU UTILIZATION: 1.121 / 28
+
+-----------------------------------------
+
+(16): time { cat f2 | xargs -P $(nproc) -d $'\n' true | wc -l; }
+0
+real	0m17.971s
+user	0m4.569s
+sys	0m15.568s
+
+CPU UTILIZATION: 1.120 / 28
+
+-----------------------------------------
+
+(17): time { xargs -P $(nproc) -d $'\n' echo <f2 >/dev/null; }
+real	0m17.799s
+user	0m5.794s
+sys	0m15.043s
+
+CPU UTILIZATION: 1.170 / 28
+
+-----------------------------------------
+
+(18): time { xargs -P $(nproc) -d $'\n' echo <f2 | wc -l; }
+6782
+real	0m17.695s
+user	0m5.953s
+sys	0m15.557s
+
+CPU UTILIZATION: 1.215 / 28
+
+-----------------------------------------
+
+(19): time { cat f2 | xargs -P $(nproc) -d $'\n' echo >/dev/null; }
+real	0m17.633s
+user	0m5.746s
+sys	0m15.439s
+
+CPU UTILIZATION: 1.201 / 28
+
+-----------------------------------------
+
+(20): time { cat f2 | xargs -P $(nproc) -d $'\n' echo | wc -l; }
+6782
+real	0m17.468s
+user	0m5.752s
+sys	0m16.067s
+
+CPU UTILIZATION: 1.249 / 28
+
+-----------------------------------------
+
+(21): time { xargs -P $(nproc) -d $'\n' printf %s\n <f2 >/dev/null; }
+real	0m17.283s
+user	0m16.550s
+sys	0m14.605s
+
+CPU UTILIZATION: 1.802 / 28
+
+-----------------------------------------
+
+(22): time { xargs -P $(nproc) -d $'\n' printf %s\n <f2 | wc -l; }
+100000000
+real	0m16.922s
+user	0m16.586s
+sys	0m14.768s
+
+CPU UTILIZATION: 1.852 / 28
+
+-----------------------------------------
+
+(23): time { cat f2 | xargs -P $(nproc) -d $'\n' printf %s\n >/dev/null; }
+real	0m17.045s
+user	0m16.415s
+sys	0m14.782s
+
+CPU UTILIZATION: 1.830 / 28
+
+-----------------------------------------
+
+(24): time { cat f2 | xargs -P $(nproc) -d $'\n' printf %s\n | wc -l; }
+100000000
+real	0m16.836s
+user	0m16.482s
+sys	0m15.273s
+
+CPU UTILIZATION: 1.886 / 28
+
+-----------------------------------------
+
+(25): time { xargs -P $(nproc) -d $'\n' true <f3 >/dev/null; }
+real	0m1.241s
+user	0m0.868s
+sys	0m0.683s
+
+CPU UTILIZATION: 1.249 / 28
+
+-----------------------------------------
+
+(26): time { xargs -P $(nproc) -d $'\n' true <f3 | wc -l; }
+0
+real	0m1.234s
+user	0m0.864s
+sys	0m0.674s
+
+CPU UTILIZATION: 1.246 / 28
+
+-----------------------------------------
+
+(27): time { cat f3 | xargs -P $(nproc) -d $'\n' true >/dev/null; }
+real	0m1.221s
+user	0m0.866s
+sys	0m0.744s
+
+CPU UTILIZATION: 1.318 / 28
+
+-----------------------------------------
+
+(28): time { cat f3 | xargs -P $(nproc) -d $'\n' true | wc -l; }
+0
+real	0m1.204s
+user	0m0.836s
+sys	0m0.747s
+
+CPU UTILIZATION: 1.314 / 28
+
+-----------------------------------------
+
+(29): time { xargs -P $(nproc) -d $'\n' echo <f3 >/dev/null; }
+real	0m1.212s
+user	0m0.869s
+sys	0m0.756s
+
+CPU UTILIZATION: 1.340 / 28
+
+-----------------------------------------
+
+(30): time { xargs -P $(nproc) -d $'\n' echo <f3 | wc -l; }
+1262
+real	0m1.193s
+user	0m0.903s
+sys	0m0.793s
+
+CPU UTILIZATION: 1.421 / 28
+
+-----------------------------------------
+
+(31): time { cat f3 | xargs -P $(nproc) -d $'\n' echo >/dev/null; }
+real	0m1.231s
+user	0m0.872s
+sys	0m0.858s
+
+CPU UTILIZATION: 1.405 / 28
+
+-----------------------------------------
+
+(32): time { cat f3 | xargs -P $(nproc) -d $'\n' echo | wc -l; }
+1262
+real	0m1.198s
+user	0m0.861s
+sys	0m0.915s
+
+CPU UTILIZATION: 1.482 / 28
+
+-----------------------------------------
+
+(33): time { xargs -P $(nproc) -d $'\n' printf %s\n <f3 >/dev/null; }
+real	0m1.174s
+user	0m0.987s
+sys	0m0.837s
+
+CPU UTILIZATION: 1.553 / 28
+
+-----------------------------------------
+
+(34): time { xargs -P $(nproc) -d $'\n' printf %s\n <f3 | wc -l; }
+2086857
+real	0m1.195s
+user	0m1.029s
+sys	0m0.947s
+
+CPU UTILIZATION: 1.653 / 28
+
+-----------------------------------------
+
+(35): time { cat f3 | xargs -P $(nproc) -d $'\n' printf %s\n >/dev/null; }
+real	0m1.265s
+user	0m1.117s
+sys	0m0.890s
+
+CPU UTILIZATION: 1.586 / 28
+
+-----------------------------------------
+
+(36): time { cat f3 | xargs -P $(nproc) -d $'\n' printf %s\n | wc -l; }
+2086857
+real	0m1.189s
+user	0m1.057s
+sys	0m0.987s
+
+CPU UTILIZATION: 1.719 / 28
+
+-----------------------------------------
+
+
+-----------------------------
+INPUT DATA STATS
+
+
+
+NAME: f1
+SIZE: 100000000 bytes
+LINE COUNT: 100000000 lines
+
+
+NAME: f2
+SIZE: 888888898 bytes
+LINE COUNT: 100000000 lines
+
+
+NAME: f3
+SIZE: 165342098 bytes
+LINE COUNT: 2086857 lines
+
+
+-----------------------------
+UNSUPPORTED TESTS
+
+Note 1: xargs doesn't support fine grained control over the dynamic batch sizing - its only options are "a static batch size" or "its single builtin method for dynamically changing it".
+Note 2: xargs ONLY supports unbuffered/unordered (-u) mode, so the default buffered output with atomic fan-in is skipped.
+
+The following frun configurations are unsupported by xargs and were skipped:
+ - -b4096 -s :
+ - -b4096 -s cat
+ - -b4096 -s tee
+ - -b 524288 :
+ - -b 524288 cat
+ - -b 524288 tee
+ - : (default buffered atomic fan-in)
+ - echo (default buffered atomic fan-in)
+ - -k :
+ - -k echo
+ - -k -l 1:0 :
+ - -k -l 1:0 echo
+ - -k -l 1:0 printf %s\n
+ - -k printf %s\n
+ - -l 1:0 :
+ - -l 1:0 echo
+ - -l 1:0 printf %s\n
+ - printf %s\n (default buffered atomic fan-in)
+ - -s :
+ - -s cat
+ - -s tee
+ - -U :
+ - -U echo
+ - -u -l 1:0 :
+ - -U -l 1:0 :
+ - -u -l 1:0 echo
+ - -U -l 1:0 echo
+ - -u -l 1:0 printf %s\n
+ - -U -l 1:0 printf %s\n
+ - -U printf %s\n
+
+total sys = 319864 ms
+
+total user = 185966 ms
+
+total real = 375426 ms
+
+
+OVERALL CPU UTILIZATION: 1.347 / 28
+

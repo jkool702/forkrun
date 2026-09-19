@@ -1,0 +1,16 @@
+{
+ "null_call_us": 0.179,
+ "claim_shaped_us": 1.717,
+ "claim_ptr_us": 0.483,
+ "memoryview_window_us": 0.207,
+ "python_fixed_us": 0.05,
+ "n_calls": 200000,
+ "n_views": 20000,
+ "repeats": 7,
+ "window_bytes": 1048576,
+ "map_bytes": 67108864,
+ "gcc": "gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2)",
+ "python": "3.14.7",
+ "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+ "probe": "benchmarks/python/work/ffi_probe.so (regenerable scratch)"
+}
