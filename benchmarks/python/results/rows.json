@@ -1,0 +1,403 @@
+{
+ "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+ "engine_provenance": "07cba9d W-NIT1: W-RAW/W-STDIN review cleanup 3e41052 W-STDIN: C-plugin stdin delivery (C-side fork in ring_call) fd893a0 W-RAW: C-plugin raw window delivery (FLAG_RAW live)",
+ "rows": [
+  {
+   "niche": "jsonl-ingest",
+   "incumbent": "mp-pool",
+   "incumbent_result_s": 1.936,
+   "incumbent_rss_mb": 258.2,
+   "forkrun_result_s": 0.265,
+   "forkrun_rss_mb": 2.7,
+   "ratio": 7.3,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "forkrun via C-argv; substrate via C plugin / bash \u2014 Python frontend pending"
+  },
+  {
+   "niche": "jsonl-ingest",
+   "incumbent": "mp-pool",
+   "incumbent_result_s": 1.936,
+   "incumbent_rss_mb": 258.2,
+   "forkrun_result_s": 0.917,
+   "forkrun_rss_mb": 438.9,
+   "ratio": 2.11,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "forkrun via bash-python; substrate via C plugin / bash \u2014 Python frontend pending"
+  },
+  {
+   "niche": "jsonl-ingest",
+   "incumbent": "mp-pool",
+   "incumbent_result_s": 1.936,
+   "incumbent_rss_mb": 258.2,
+   "forkrun_result_s": 0.214,
+   "forkrun_rss_mb": 2.8,
+   "ratio": 9.03,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "forkrun via C-raw; substrate via C plugin / bash \u2014 Python frontend pending"
+  },
+  {
+   "niche": "jsonl-ingest",
+   "incumbent": "futures",
+   "incumbent_result_s": 2.268,
+   "incumbent_rss_mb": 277.9,
+   "forkrun_result_s": 0.265,
+   "forkrun_rss_mb": 2.7,
+   "ratio": 8.56,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "forkrun via C-argv; substrate via C plugin / bash \u2014 Python frontend pending"
+  },
+  {
+   "niche": "jsonl-ingest",
+   "incumbent": "futures",
+   "incumbent_result_s": 2.268,
+   "incumbent_rss_mb": 277.9,
+   "forkrun_result_s": 0.917,
+   "forkrun_rss_mb": 438.9,
+   "ratio": 2.47,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "forkrun via bash-python; substrate via C plugin / bash \u2014 Python frontend pending"
+  },
+  {
+   "niche": "jsonl-ingest",
+   "incumbent": "futures",
+   "incumbent_result_s": 2.268,
+   "incumbent_rss_mb": 277.9,
+   "forkrun_result_s": 0.214,
+   "forkrun_rss_mb": 2.8,
+   "ratio": 10.58,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "forkrun via C-raw; substrate via C plugin / bash \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "mp-pool-k100",
+   "incumbent_result_s": 13.727,
+   "incumbent_rss_mb": 2159.7,
+   "forkrun_result_s": 0.923,
+   "forkrun_rss_mb": 180.1,
+   "ratio": 14.88,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=1 items=10000000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "futures-k100",
+   "incumbent_result_s": 21.767,
+   "incumbent_rss_mb": 2368.8,
+   "forkrun_result_s": 0.923,
+   "forkrun_rss_mb": 180.1,
+   "ratio": 23.59,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=1 items=10000000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "mp-pool-k100",
+   "incumbent_result_s": 3.995,
+   "incumbent_rss_mb": 564.9,
+   "forkrun_result_s": 1.217,
+   "forkrun_rss_mb": 152.7,
+   "ratio": 3.28,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=10 items=2500000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "futures-k100",
+   "incumbent_result_s": 5.779,
+   "incumbent_rss_mb": 602.8,
+   "forkrun_result_s": 1.217,
+   "forkrun_rss_mb": 152.7,
+   "ratio": 4.75,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=10 items=2500000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "mp-pool-k1",
+   "incumbent_result_s": 8.479,
+   "incumbent_rss_mb": 71.2,
+   "forkrun_result_s": 2.769,
+   "forkrun_rss_mb": 93.3,
+   "ratio": 3.06,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=100 items=250000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "mp-pool-k100",
+   "incumbent_result_s": 2.037,
+   "incumbent_rss_mb": 71.3,
+   "forkrun_result_s": 2.769,
+   "forkrun_rss_mb": 93.3,
+   "ratio": 0.74,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=100 items=250000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "mp-pool-k1000",
+   "incumbent_result_s": 2.112,
+   "incumbent_rss_mb": 69.8,
+   "forkrun_result_s": 2.769,
+   "forkrun_rss_mb": 93.3,
+   "ratio": 0.76,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=100 items=250000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "futures-k100",
+   "incumbent_result_s": 2.204,
+   "incumbent_rss_mb": 76.9,
+   "forkrun_result_s": 2.769,
+   "forkrun_rss_mb": 93.3,
+   "ratio": 0.8,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=100 items=250000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "mp-pool-k100",
+   "incumbent_result_s": 2.016,
+   "incumbent_rss_mb": 23.1,
+   "forkrun_result_s": 2.618,
+   "forkrun_rss_mb": 88.2,
+   "ratio": 0.77,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=1000 items=25000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "futures-k100",
+   "incumbent_result_s": 1.912,
+   "incumbent_rss_mb": 24.9,
+   "forkrun_result_s": 2.618,
+   "forkrun_rss_mb": 88.2,
+   "ratio": 0.73,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=1000 items=25000; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "mp-pool-k100",
+   "incumbent_result_s": 2.081,
+   "incumbent_rss_mb": 19.5,
+   "forkrun_result_s": 9.538,
+   "forkrun_rss_mb": 45.5,
+   "ratio": 0.22,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=10000 items=2500; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "per-record-transform",
+   "incumbent": "futures-k100",
+   "incumbent_result_s": 1.978,
+   "incumbent_rss_mb": 20.1,
+   "forkrun_result_s": 9.538,
+   "forkrun_rss_mb": 45.5,
+   "ratio": 0.21,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "cost_us=10000 items=2500; forkrun -l 1000 C plugin \u2014 Python frontend pending"
+  },
+  {
+   "niche": "tb-streaming",
+   "incumbent": "gnu-parallel",
+   "incumbent_result_s": 54.919,
+   "incumbent_rss_mb": 389.6,
+   "forkrun_result_s": 56.367,
+   "forkrun_rss_mb": 1244.0,
+   "ratio": 0.97,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "input 65GB pipe; frun via C stdin-drain, parallel via --pipe wc -c \u2014 Python frontend pending"
+  },
+  {
+   "niche": "tb-streaming",
+   "incumbent": "gnu-parallel",
+   "incumbent_result_s": 112.735,
+   "incumbent_rss_mb": 320.1,
+   "forkrun_result_s": 111.768,
+   "forkrun_rss_mb": 1241.5,
+   "ratio": 1.01,
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "input 130GB pipe; frun via C stdin-drain, parallel via --pipe wc -c \u2014 Python frontend pending"
+  },
+  {
+   "niche": "tb-streaming",
+   "incumbent": "split-plus-parallel",
+   "incumbent_result_s": 4.825,
+   "incumbent_rss_mb": 14.1,
+   "forkrun_result_s": 0.0,
+   "forkrun_rss_mb": 0.0,
+   "ratio": "",
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "incumbent-only context leg, 11GB via disk chunks (tmpfs headroom); no frun pairing at this size"
+  },
+  {
+   "niche": "tb-streaming",
+   "incumbent": "split-plus-parallel",
+   "incumbent_result_s": 9.134,
+   "incumbent_rss_mb": 14.1,
+   "forkrun_result_s": 0.0,
+   "forkrun_rss_mb": 0.0,
+   "ratio": "",
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "incumbent-only context leg, 21GB via disk chunks (tmpfs headroom); no frun pairing at this size"
+  },
+  {
+   "niche": "tokenize-to-tensor",
+   "incumbent": "torch-dataloader",
+   "incumbent_result_s": 0.0,
+   "incumbent_rss_mb": 0.0,
+   "forkrun_result_s": 0.265,
+   "forkrun_rss_mb": 2.8,
+   "ratio": "",
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "incumbent neither torch nor tensorflow importable on this machine; forkrun raw-window int32 sum (400000000B); numpy frombuffer+sum alone 0.246s \u2014 substrate ceiling, Python frontend pending"
+  },
+  {
+   "niche": "fault-isolation",
+   "incumbent": "multiprocessing.Pool",
+   "incumbent_result_s": 150.2,
+   "incumbent_rss_mb": 0.0,
+   "forkrun_result_s": 0.0,
+   "forkrun_rss_mb": 0.0,
+   "ratio": "",
+   "fault_outcome": "map_async hung > 150.0s (dead worker chunk never resolves); pool terminated",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "item-granularity fault; compare vs forkrun batch-granularity"
+  },
+  {
+   "niche": "fault-isolation",
+   "incumbent": "ProcessPoolExecutor",
+   "incumbent_result_s": 0.6,
+   "incumbent_rss_mb": 0.0,
+   "forkrun_result_s": 0.0,
+   "forkrun_rss_mb": 0.0,
+   "ratio": "",
+   "fault_outcome": "BrokenProcessPool: A process in the process pool was terminated abruptly while the future was running or pending.; executor shut down, unusable after (fresh exe",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "item-granularity fault; compare vs forkrun batch-granularity"
+  },
+  {
+   "niche": "fault-isolation",
+   "incumbent": "forkrun-C-segv-plugin",
+   "incumbent_result_s": 3.2,
+   "incumbent_rss_mb": 0.0,
+   "forkrun_result_s": 0.0,
+   "forkrun_rss_mb": 0.0,
+   "ratio": "",
+   "fault_outcome": "rc=2; FAULT-INJECT seen x3; 'poison' mentions x0; output 7000/200000 lines",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "batch-granularity fault; compare vs item-granularity incumbents"
+  },
+  {
+   "niche": "fault-isolation",
+   "incumbent": "gnu-parallel-segv-job",
+   "incumbent_result_s": 0.4,
+   "incumbent_rss_mb": 0.0,
+   "forkrun_result_s": 0.0,
+   "forkrun_rss_mb": 0.0,
+   "ratio": "",
+   "fault_outcome": "parallel rc=0; output 195000/200000 lines; failed chunk dropped, rest completed",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "chunk-granularity fault"
+  },
+  {
+   "niche": "ffi-boundary",
+   "incumbent": "ctypes-null-floor",
+   "incumbent_result_s": 0.0,
+   "incumbent_rss_mb": 0.0,
+   "forkrun_result_s": 0.0,
+   "forkrun_rss_mb": 0.0,
+   "ratio": "",
+   "fault_outcome": "",
+   "hardware": "Intel(R) Core(TM) i9-7940X CPU @ 3.10GHz | 28t | 125GB single-socket | localhost.localdomain | 2026-09-18",
+   "notes": "FFI boundary cost per claim: 1.717 us (claim-ptr 0.483 us) \u2014 measured against the ctypes null-call floor 0.179 us; memoryview 1MiB window 0.207 us; Python 8-arg fixed cost 0.050 us. Context: the crossover data shows dispatch cost stops mattering above ~100us/record; the frontend per-batch budget is ~10-100ms (1000-line batches). Full numbers: results/ffi_spike.json. Zero engine involvement (probe micro-library, not forkrun_ring)."
+  }
+ ],
+ "faults": [
+  {
+   "config": "multiprocessing.Pool",
+   "granularity": "item",
+   "mark": 100000,
+   "elapsed_s": 150.2,
+   "outcome": {
+    "survived": false,
+    "completed": 0,
+    "total": 200000,
+    "action": "map_async hung > 150.0s (dead worker chunk never resolves); pool terminated",
+    "pool_usable_after": false,
+    "pool_usable_after_note": "fresh Pool required; faulted pool was terminated, not reused"
+   },
+   "notes": "item-granularity fault; compare vs forkrun batch-granularity"
+  },
+  {
+   "config": "ProcessPoolExecutor",
+   "granularity": "item",
+   "mark": 100000,
+   "elapsed_s": 0.6,
+   "outcome": {
+    "survived": false,
+    "completed": 100000,
+    "total": 200000,
+    "action": "BrokenProcessPool: A process in the process pool was terminated abruptly while the future was running or pending.; executor shut down, unusable after (fresh executor required)",
+    "pool_usable_after": false
+   },
+   "notes": "item-granularity fault; compare vs forkrun batch-granularity"
+  },
+  {
+   "config": "forkrun-C-segv-plugin",
+   "granularity": "batch (mark 7)",
+   "elapsed_s": 3.2,
+   "rc": 2,
+   "outcome": {
+    "survived": false,
+    "completed": 7000,
+    "total": 200000,
+    "action": "rc=2; FAULT-INJECT seen x3; 'poison' mentions x0; output 7000/200000 lines",
+    "pool_usable_after": true,
+    "pool_usable_after_note": "no pool object to poison; the aborted run resumes via its checkpoint (--resume)"
+   },
+   "notes": "batch-granularity fault; compare vs item-granularity incumbents"
+  },
+  {
+   "config": "gnu-parallel-segv-job",
+   "granularity": "chunk (5000 lines)",
+   "elapsed_s": 0.4,
+   "rc": 0,
+   "outcome": {
+    "survived": true,
+    "completed": 195000,
+    "total": 200000,
+    "action": "parallel rc=0; output 195000/200000 lines; failed chunk dropped, rest completed",
+    "pool_usable_after": true,
+    "pool_usable_after_note": "parallel is a new process per run"
+   },
+   "notes": "chunk-granularity fault"
+  }
+ ]
+}

@@ -1,6 +1,6 @@
 ### `DESIGN.md`
 
-# forkrun Ring Architecture – Design Overview (v9.8.0-NUMA Golden Master)
+# forkrun Ring Architecture – Design Overview
 
 ## 1. Purpose
 
@@ -21,6 +21,8 @@ The guiding philosophy is:
 
 ## 2. High-Level Model
 
+**Process model:** although docs speak of ingest/scanner/orderer/fallow "threads" (and the C code uses TLS for per-worker state), each role is at runtime a *forked process* sharing one `MAP_SHARED` anonymous mapping. There are no user threads in the pipeline; the atomics on the shared mapping are inter-process operations, and all TLS state is per-process.
+
 forkrun consists of four cooperating roles (three in legacy flat mode, four when NUMA is active):
 
 1. **NUMA Ingest** – Zero-copy splice from stdin into the shared memfd, routing data to the correct socket via `set_mempolicy`.
@@ -33,6 +35,11 @@ All coordination is done through shared memory, atomic operations, and kernel pr
 When `--nodes=1` (or auto-detected as single node) the system falls back to the classic flat pipeline while preserving every invariant.
 
 ---
+
+
+### No-load / bring-up time
+
+Full NUMA pipeline bring-up — including `memfd` creation, per-node ring setup, `madvise(MADV_HUGEPAGE)`, pinning, and clean-room exec environment extraction — completes in ~30 ms on the reference 14-core machine. This is not just overhead; it is the basis of trickle-friendliness: sub-second jobs (<100 ms) correctly show lower core utilization because the engine declines to over-spawn for work that will finish during fork latency. For ≥1B-line sustained workloads the fixed cost is negligible.
 
 ## 3. The Ring Buffer
 
@@ -53,15 +60,14 @@ This allows:
 
 ### 3.2 Ring Entry Encoding
 
-Each ring slot (`offset_ring`) is an **unsigned** 64-bit value:
+Each ring slot is described by up to four parallel arrays:
 
-* **Low 63 bits**: byte offset in the backing file
-* **High bit (bit 63, `FLAG_PARTIAL_BATCH = 1ULL << 63`)**:
-
-  * 0 → complete batch
-  * 1 → partial batch (scanner hit EOF or boundary)
-
-This encoding avoids extra metadata, keeps entries atomic, and supports offsets up to 2⁶³ bytes. The high bit is a flag, not an arithmetic sign — readers must mask it before using the offset as an address (`offset & ~FLAG_PARTIAL_BATCH`).
+* `offset_ring` (64-bit): Start byte offset of the batch in the backing memfd.
+* `end_ring` (64-bit): End byte offset of the batch. The worker's data range is `[offset_ring[slot], end_ring[slot])`. No line count is stored; the byte range is sufficient.
+* `major_ring` (32-bit, NUMA only): The NUMA chunk sequence number this batch belongs to, used by `ring_order` to merge per-node streams into global output order.
+* `minor_ring` (32-bit, NUMA only): The batch's sequence number within its chunk.
+  * **Bit 31 (`FLAG_MAJOR_EOF = 1U << 31`)**: Set on the *last* batch of a NUMA chunk, signaling the ordering subsystem to advance to the next major sequence. Clear on all other batches.
+  * **Bits 30–0**: The minor (within-chunk) batch index.
 
 ### 3.3 Atomic Invariants
 
@@ -77,22 +83,34 @@ Memory ordering:
 
 In NUMA mode each socket has its own independent `SharedState` ring; the invariants hold per node.
 
+## 3.4 Ring-full semantics (never-wraps design)
+
+The ring is sized to *never wrap* in normal operation, which eliminates ABA and overwrite hazards.
+
+- **UMA mode:** the ring is shielded by `W_max * 64` slots with a floor of 1024 slots. The scanner is throttled by `active_workers` and the fallow horizon — it never publishes beyond `read_idx + shield`.
+- **NUMA mode:** per-node ring size is `RING_SIZE/2` usable, with the same fallow-horizon shield.
+- **Fallow-horizon shield:** the scanner may not advance `write_idx` beyond the minimum active worker offset plus shield; `fallocate(PUNCH_HOLE)` reclaims physical pages behind the horizon without moving the logical offsets.
+
+If a ring were to fill (pathological oversubscription or stalled orderer), workers block on `evfd_data` rather than overwriting — correctness is preserved, throughput degrades gracefully. This invariant is structural: no slot is ever reused before all workers have passed it.
+
+
 ---
 
 ## 4. Claiming Work
 
 ### 4.1 Fast Path Claim
 
-The fast path is intentionally simple:
+The fast path is intentionally simple (two amortized RMWs per batch):
 
 1. Load `write_idx`
-2. Atomically increment `read_idx` by batch size
-3. Compute offsets from ring
-4. Execute batch
+2. Atomically increment `read_idx` by exactly **1** (claim)
+3. Atomically add to `total_lines_consumed` (accounting — same cache line, sharded per NUMA node)
+4. Compute offsets from the single claimed ring slot
+5. Execute batch
 
-No polling, no blocking, no branching beyond bounds checks.
+No locks, no CAS retry loops. Amortized contention is still negligible — both RMWs are per-NUMA sharded and the second is often on a hot cache line.
 
-If sufficient data exists, the worker never sleeps.
+No polling, no blocking, no branching beyond bounds checks. The scanner has already pre-calculated the byte/line boundaries for this slot. If sufficient data exists, the worker never sleeps.
 
 ### 4.2 Waiting (Case 1)
 
@@ -106,29 +124,26 @@ Wakeups are advisory; spurious wakeups are harmless.
 
 ---
 
-## 5. Overshoot and Partial Batches
+## 5. Transaction Recovery and Fault Tolerance
 
-### 5.1 The Overshoot Problem
+### 5.1 The Single-Slot Claim Invariant
 
-A worker may claim more data than currently exists, especially when batch sizes are large or input slows abruptly.
+*Note: In versions prior to v3.3.0, workers could speculatively over-claim multiple batches and divide them. This complex overshoot mechanism was permanently excised in favor of the Single-Slot Claim Invariant (see INVARIANTS.md).*
 
-Rather than force all workers to stall, forkrun allows:
+A worker always claims exactly 1 slot (1 batch) per atomic operation. Because the scanner completely pre-calculates boundaries, there is no longer a concept of partial remainders or subdivision.
 
-* Executing the *available* portion immediately
-* Deferring the remainder
+### 5.2 The Escrow Recovery Queue
 
-### 5.2 Escrow Mechanism
-
-To handle deferred remainders, forkrun introduces **escrow**:
+To handle fault-resilience, forkrun repurposes the **escrow** pipe:
 
 * A non-blocking anonymous pipe (per-node in NUMA mode)
-* Entries contain: starting offset + remaining line count
+* Entries contain: the ring slot index of the aborted batch, its slot count (always 1 under the single-slot invariant), and the batch's `num_kills` counter (24-byte packet).
 
-When a worker overshoots:
+If a worker process crashes, is killed by OOM, or explicitly fails, its active transaction is rolled back:
 
-1. It executes the partial batch
-2. Publishes the remainder to escrow
-3. Signals availability via `evfd_data`
+1. It is caught by the parent or trap handler
+2. The exact single-slot bounds are published to escrow
+3. Availability is signaled via `evfd_data`
 
 ### 5.3 Escrow Stealing
 
@@ -136,16 +151,9 @@ Idle workers:
 
 * Check escrow before touching the ring
 * If work exists, steal it
-* Consume *at most* one batch
-* Re-publish any leftover
+* Consume the recovered batch exactly as normal
 
-This ensures:
-
-* Only one owner per remainder
-* No duplication
-* Bounded contention
-
-If escrow is full, the worker simply completes the batch itself. Correctness always wins over optimization.
+This ensures fault tolerance without requiring complex rollback tracking in the core scanner logic.
 
 ---
 
@@ -157,12 +165,12 @@ There are multiple eventfds:
 
 * Data availability (per-node)
 * Worker spawning
-* Overshoot notifications
+* Escrow recovery notifications
 * EOF signaling
 
 Properties:
 
-* Semaphore mode prevents counter overflow
+* Semaphore mode makes each wakeup a consumable unit (a read decrements by 1), so one blast wakes exactly N waiters.
 * Spurious wakeups are allowed
 * Missed wakeups are impossible due to monotonic indices
 
@@ -170,22 +178,21 @@ This keeps the design robust and simple.
 
 ---
 
-## 7. Scanner Control Logic (Three-Phase Model)
+## 7. Scanner Control Logic (Two-Phase Model with Geometric Fallback)
 
-The scanner operates in a three-phase control loop (restored and formalized in v6.63 and still present in v9.8):
+The scanner operates in two primary phases, with a geometric fallback if the preferred pre-flight path is interrupted.
 
-### Phase 0: Warmup (Fairness & Producer Startup)
+### Phase 0: Pre-Flight Popcount (Latency Hiding)
 
-* Batch size `L = 1`
-* Exactly ~N batches are emitted (N ≈ number of workers)
-* Intent: Ensure every worker receives work early. Prevent large initial batches from being monopolized by the first worker.
+During the Bash orchestrator's fork latency window — while workers are being spawned — the scanner uses a SIMD `fast_count_delim` (AVX2/NEON) pass to count the total lines already present in the backing file. If it reaches `Wmax * Lmax` lines (or EOF arrives first), it computes the globally optimal initial batch size `L = total_lines / W` and jumps directly to Phase 2 (PID steady-state).
 
-### Phase 1: Geometric Ramp-Up (Fast Discovery)
+This converts orchestrator latency from dead time into useful calibration work. When workers begin claiming, the batch size is already at its optimal value.
 
-* Batch size doubles geometrically (`L *= 2`)
-* Each size is held for a fixed number of batches
-* Ramp halts immediately on input stall
-* O(log L) convergence, no oscillation, scanner-only logic
+### Phase 1: Geometric Fallback (Interrupted Pre-Flight)
+
+If a worker spawns before the pre-flight scan reaches `Wmax * Lmax` lines, the scanner hot-swaps its simulated batch size `sim_L` into the live state and resumes doubling (`L *= 2`) to quickly converge on the optimal size. This achieves O(log L) convergence and halts immediately on input stall.
+
+**Workers are completely oblivious to this phase.** The scanner changes the contents of ring slots (larger batches per slot); workers always claim exactly 1 slot regardless.
 
 ### Phase 2: PID-like Steady State (Adaptive Equilibrium)
 
@@ -197,12 +204,7 @@ Scanner periodically measures:
 
 Batch size is adjusted conservatively toward a target. Adjustments are slow to avoid oscillation.
 
-**Signed batch size protocol** (see INVARIANTS.md for full formal rules):
-* Scanner always publishes negative values (`-abs(N)`)
-* Only workers may flip to positive via CAS (finalization)
-* In full NUMA mode the protocol is simplified but the negative-advisory rule remains
-
-**Tail ramp-down** is a distinct phase: once `tail_idx` is published the scanner stops changing batch size and all remaining batches become self-describing (sign bit + stride metadata).
+**Tail handling**: once EOF is imminent, the scanner stops changing batch size and publishes final partial batches as normal single-slot entries bounded by chunk/EOF boundaries. Workers drain the tail identically to normal operation — no special-case logic required.
 
 ### Phase 2b: Early Partial Flush (Low-Latency Trickle Mode)
 
@@ -225,7 +227,7 @@ Both meters use the same EWMA kernel (`meter = (meter + xLim) >> 1` to grow, `me
 
 ---
 
-## 8. NUMA Topology Pipeline (v9.8+)
+## 8. NUMA Topology Pipeline
 
 When multiple NUMA nodes are present:
 
@@ -255,6 +257,7 @@ A background GC process:
 * Punches holes behind it using `fallocate(PUNCH_HOLE)`
 
 This:
+
 * Preserves offsets
 * Avoids fragmentation
 * Requires no coordination with workers
@@ -270,8 +273,21 @@ The reorder path is the only place that may block.
 
 ---
 
-## 11. Design Summary & Mental Model
+## 11. Cross-File Contracts (Seams Most at Risk from Refactor)
 
+These invariants span C and the Bash wrapper; both sides must maintain them:
+
+1. **(H1) Poison Flag Lifecycle:** C writes `RING_NUM_KILLS`, `RING_POISONED`, `RING_BATCH_IDX` *only* when `num_kills > 0`. The Bash wrapper must reset these after every `ring_ack`.
+2. **(M1) Zero-Length Sentinel Batches:** Zero-length sentinel batches (EOF markers, `FLAG_MAJOR_EOF` with 0 bytes) must be **acked but not executed** (`[[ "$REPLY" != "0" ]]`).
+3. **(FRUN_CLAIM_BYTES) Escrow Gating:** The EXIT trap's escrow deposit is gated by `FRUN_CLAIM_BYTES > 0` (or `worker_last_cnt > 0`) to prevent duplicate deposits.
+4. **(H2) `actual_end` Publisher Truth Table:**
+   - Normal mode: Indexer searches and publishes.
+   - Byte mode (`-b`): Indexer skips search, publishes raw chunk end.
+   - Exact lines (`-L`): Indexer skips both; Scanner owns and publishes in the handoff chain.
+5. **(H3) Closed Hydraulic Loop:** The worker→orderer ack pipe is sized to 4 KiB (1 page) to enforce direct output backpressure through the ring buffer.
+6. **(Producer Wakeup Invariant):** Scanners and indexers must unconditionally issue `sys_write(evfd_meta)` upon publishing gate-resolving state (`actual_end`, `cum_lines`) whenever waiters are present.
+
+## 12. Design Summary & Mental Model
 Key properties of the architecture:
 
 * Lock-free fast path
@@ -283,7 +299,7 @@ Key properties of the architecture:
 
 **Mental model** (from PHYSICS.md):
 
-> A speculative, cooperative work-stealing engine where correctness is enforced by monotonic progress, not locks — and where data is physically born on the correct socket.
+> A speculative, cooperative work-stealing engine where correctness is enforced by monotonic progress, not locks — where the optimal batch size is computed during fork latency by a SIMD pre-flight scan — and where data is physically born on the correct socket.
 
 Once that model clicks, the rest of the design follows naturally.
 

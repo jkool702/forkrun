@@ -1,0 +1,166 @@
+{
+  "ring_abort": {
+    "usage": "ring_abort",
+    "doc": "Trigger global emergency abort"
+  },
+  "ring_abort_reason": {
+    "usage": "ring_abort_reason [VAR]",
+    "doc": "Query abort reason (0=unset 1=sigpipe 2=fault)"
+  },
+  "ring_ack": {
+    "usage": "ring_ack <FD> <FD_OUT>",
+    "doc": "Ack batch"
+  },
+  "ring_ack_init": {
+    "usage": "ring_ack_init <fd>",
+    "doc": "Sync output offset"
+  },
+  "ring_call": {
+    "usage": "ring_call <fd> <len> <delim> <so> <fn>",
+    "doc": "Zero-Tax C Plugin Execution"
+  },
+  "ring_claim": {
+    "usage": "ring_claim [VAR]",
+    "doc": "Claim batch"
+  },
+  "ring_cleanup_waiter": {
+    "usage": "ring_cleanup_waiter",
+    "doc": "Cleanup waiter"
+  },
+  "ring_copy": {
+    "usage": "ring_copy <OUT> <IN>",
+    "doc": "Zero-copy ingest"
+  },
+  "ring_destroy": {
+    "usage": "ring_destroy",
+    "doc": "Destroy ring"
+  },
+  "ring_dump_resume": {
+    "usage": "ring_dump_resume [bytes]",
+    "doc": "Dump checkpoint state"
+  },
+  "ring_escrow_put": {
+    "usage": "ring_escrow_put <node> <idx> <cnt> <kills>",
+    "doc": "Deposit to escrow"
+  },
+  "ring_exec": {
+    "usage": "ring_exec <fd> <len> <delim> <cmd> [args...]",
+    "doc": "Ultra-fast execution of external binaries"
+  },
+  "ring_exec_splice": {
+    "usage": "ring_exec_splice <fd> <len> <cmd> [args...]",
+    "doc": "Spawn binary and splice to its stdin"
+  },
+  "ring_fallow": {
+    "usage": "ring_fallow <PIPE> <FILE> [dry]",
+    "doc": "Logical fallow"
+  },
+  "ring_fallow_phys": {
+    "usage": "ring_fallow_phys",
+    "doc": "Physical fallow"
+  },
+  "ring_fcntl": {
+    "usage": "ring_fcntl <FD> <cmd>",
+    "doc": "File control"
+  },
+  "ring_fetcher": {
+    "usage": "ring_fetcher",
+    "doc": "NUMA Fetcher"
+  },
+  "ring_indexer": {
+    "usage": "ring_indexer",
+    "doc": "NUMA Indexer"
+  },
+  "ring_indexer_numa": {
+    "usage": "ring_indexer_numa <memfd> <node_id>",
+    "doc": "Run NUMA chunk indexer"
+  },
+  "ring_ingest": {
+    "usage": "ring_ingest",
+    "doc": "Signal ingest"
+  },
+  "ring_init": {
+    "usage": "ring_init [FLAGS]",
+    "doc": "Initialize ring with config"
+  },
+  "ring_is_spawnable": {
+    "usage": "ring_is_spawnable <file>",
+    "doc": "Check if file is binary or has shebang"
+  },
+  "ring_list": {
+    "usage": "ring_list [VAR]",
+    "doc": "List loadables"
+  },
+  "ring_lseek": {
+    "usage": "ring_lseek <FD> <OFF> [WHENCE] [VAR]",
+    "doc": "Seek fd"
+  },
+  "ring_map": {
+    "usage": "ring_map <fd> <len> <array> [delim]",
+    "doc": "Fast user-space mapfile"
+  },
+  "ring_memfd_create": {
+    "usage": "ring_memfd_create <VAR>",
+    "doc": "Create memfd"
+  },
+  "ring_numa_ingest": {
+    "usage": "ring_numa_ingest <infd> <outfd> <nodes> [ordered]",
+    "doc": "Run NUMA topological ingest"
+  },
+  "ring_numa_scanner": {
+    "usage": "ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>",
+    "doc": "Run unified NUMA scanner"
+  },
+  "ring_numa_stats": {
+    "usage": "ring_numa_stats",
+    "doc": "Print NUMA telemetry"
+  },
+  "ring_order": {
+    "usage": "ring_order <FD> <PFX|memfd> [unordered]",
+    "doc": "Reorder output"
+  },
+  "ring_pipe": {
+    "usage": "ring_pipe <ARR|RD> [WR]",
+    "doc": "Create pipe"
+  },
+  "ring_poll": {
+    "usage": "ring_poll <spawn_fd> <scan_arr> <work_arr> [timer] [trap_ack] [indexer_arr]",
+    "doc": "Poll FDs"
+  },
+  "ring_revert_output": {
+    "usage": "ring_revert_output <fd>",
+    "doc": "Revert partial output"
+  },
+  "ring_scanner": {
+    "usage": "ring_scanner <fd> [spawn_fd]",
+    "doc": "Run unified legacy scanner"
+  },
+  "ring_seal": {
+    "usage": "ring_seal <FD>",
+    "doc": "Seal memfd"
+  },
+  "ring_set_resume": {
+    "usage": "ring_set_resume <horizon> [jagged...]",
+    "doc": "Set checkpoint state"
+  },
+  "ring_signal": {
+    "usage": "ring_signal <FD>",
+    "doc": "Signal eventfd"
+  },
+  "ring_splice": {
+    "usage": "ring_splice <IN> <OUT> <OFF> <LEN> [close]",
+    "doc": "Splice data"
+  },
+  "ring_tui": {
+    "usage": "ring_tui [expected_bytes] [order_mode]",
+    "doc": "Real-Time Telemetry Dashboard"
+  },
+  "ring_version": {
+    "usage": "ring_version [-t|-o|-m|-g|-f|-a]",
+    "doc": "Show build metadata"
+  },
+  "ring_worker": {
+    "usage": "ring_worker [inc|dec]",
+    "doc": "Worker control"
+  }
+}

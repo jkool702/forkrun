@@ -6,3 +6,49 @@ BENCHMARKS/f4
 BENCHMARKS/f3
 BENCHMARKS/f2
 BENCHMARKS/f1
+
+# ---------------------------------------------------------------
+# Build artifacts (never commit; every one is rebuilt by a test/CI
+# path, so a committed copy is a stale copy that lies about what was
+# validated).
+# ---------------------------------------------------------------
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Substrate canary (make -f Makefile.substrate canary)
+/.canary-cc
+/libforkrun.so
+/libforkrun.*.so
+/forkrun_ring_canary.o
+/substratestubs.o
+
+# C-plugin test suite: test_c_plugins*.sh COMPILE these at test time
+# (gcc ... -o test_basic.so), COPY the header from ring_loadables/, and
+# GENERATE the inputs from seq/find. Deliberately NOT a blanket "*.so" or
+# "forkrun_plugin.h":
+#   ring_loadables/forkrun-libs/*.so are CI-built per-arch blobs that
+#   must stay tracked, and ring_loadables/forkrun_plugin.h is the frozen
+#   ABI single source. A blanket rule would silently drop a newly added
+#   arch's blob from a CI PR.
+UNIT_TESTS/c_plugin_test/*.so
+UNIT_TESTS/c_plugin_test/forkrun_plugin.h
+UNIT_TESTS/c_plugin_test/input_*.txt
+UNIT_TESTS/c_plugin_test/*.tmp
+
+# Resume ledgers/checkpoints are per-run runtime state, not repo content
+.forkrun_resume
+
+# Stage 0 evidence harness scratch (regenerable; only results/ is committed)
+benchmarks/python/inputs/
+benchmarks/python/work/
+benchmarks/python/logs/
+benchmarks/python/*.log
+# Stage 0 operational noise (run timeline + failure marker, not evidence)
+benchmarks/python/results/progress.log
+benchmarks/python/results/stage0_error.txt
+
+# Editor session/swap files (never commit; W-V352-COMPLETE guardrail)
+*.swp
+*.kate-swp

@@ -63,7 +63,14 @@ struct forkrun_ctx {
     uint32_t flags_granted;     /*  72 : req & ENGINE_KNOWN_FLAGS; dialect
                                           >= 2 only; else 0                */
     uint32_t reserved32;        /*  76 : zero; alignment                   */
-    uint64_t reserved[6];       /*  80 : v3 fields land here; zero in v2   */
+    /*  80 : v3 fields land here; zero in v2, except:
+     *        reserved[0] is `data` when FLAG_RAW is granted: a borrowed
+     *        `const void *` to the batch's bytes in shared memory
+     *        ([batch_offset, batch_offset + batch_byte_length)), valid
+     *        for the duration of the callback only. Zero when FLAG_RAW
+     *        is not granted. reserved[1..5] remain zero.
+     *        Layout unchanged: this is documentation, not an ABI change. */
+    uint64_t reserved[6];
 };                              /* total: 128 bytes = one engine CACHE_LINE */
 
 #endif /* FORKRUN_PLUGIN_H */

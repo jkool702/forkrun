@@ -1,0 +1,82 @@
+# Stage 1 canary build (v1.3 §2.1): link-checks the substrate boundary.
+# libforkrun.so must carry ZERO bash linkage — enforced by
+# -Wl,--no-undefined plus an explicit allowed-dependency set.
+# The canary compiles the engine TU against stub bash symbols and fails
+# the build if any new bash-internal reference is introduced.
+#
+# Usage:
+#   make -f Makefile.substrate canary   # link check only
+#   make -f Makefile.substrate check    # canary + Stage-0 python tests
+#   make -f Makefile.substrate canary CC=aarch64-linux-gnu-gcc OUT=libforkrun.aarch64.so
+#
+# FALSE-GREEN GUARD: make tracks timestamps, not command lines, so switching CC
+# between invocations used to leave the previous arch's objects AND output in
+# place while this target (whose recipe is only an echo) still printed
+# "canary OK" — reporting success for a stale artifact of the wrong arch. Two
+# defenses: the CCSTAMP prerequisite forces a full rebuild whenever the
+# compiler identity changes, and the arch check below refuses to report OK
+# when the artifact's ELF machine doesn't match the requested compiler.
+CC      ?= gcc
+CFLAGS  ?= -O1 -fPIC -Wall -Wextra
+INCLUDES = -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins
+
+OUT     ?= libforkrun.so
+CCSTAMP  = .canary-cc
+
+# Allowed shared deps for the standalone substrate (explicit set).
+ALLOWED_DEPS = -ldl -lrt
+
+CANARY_STUBS = substratestubs.o
+
+all: canary
+
+.PHONY: all canary check clean FORCE
+
+# Rewritten only when the compiler identity/options actually change, so its
+# mtime bumps exactly when dependent objects must rebuild.
+$(CCSTAMP): FORCE
+	@printf '%s\n' '$(CC) :: $(CFLAGS)' | cmp -s - $@ || \
+		printf '%s\n' '$(CC) :: $(CFLAGS)' > $@
+
+FORCE:
+
+substratestubs.o: substratestubs.c forkrun_substrate.h $(CCSTAMP)
+	$(CC) $(CFLAGS) -c substratestubs.c -o $@
+
+forkrun_ring_canary.o: forkrun_ring.c forkrun_substrate.h $(CCSTAMP)
+	# NOTE: no -D_GNU_SOURCE here — the TU must set its own FTMs (before any
+	# libc include). A CLI define would mask exactly the include-order bug
+	# class the canary exists to catch.
+	$(CC) $(CFLAGS) -DSHELL -DHAVE_CONFIG_H $(INCLUDES) -c forkrun_ring.c -o $@
+
+$(OUT): forkrun_ring_canary.o $(CANARY_STUBS)
+	$(CC) -shared -o $@ forkrun_ring_canary.o $(CANARY_STUBS) \
+		-Wl,--no-undefined $(ALLOWED_DEPS)
+
+canary: $(OUT)
+	@file $(OUT) | sed 's/^/canary artifact: /'
+	# ARCH ASSERTION uses the compiler's own TARGET TRIPLE, not its NAME:
+	# pattern-matching on $(CC) false-REDs on a native aarch64 host running
+	# plain `gcc` (the old *gcc* arm grepped for x86-64 and failed a correct
+	# artifact). `$(CC) -dumpmachine` is the correct identity source.
+	# Arches with no mapping below (ppc64le / s390x / riscv64) get the link
+	# check only: on those the canary's job is -Wl,--no-undefined, not an
+	# ELF-machine assertion.
+	@trip="$$($(CC) -dumpmachine 2>/dev/null)"; \
+	case "$$trip" in \
+	  *aarch64*) want=aarch64 ;; \
+	  *x86_64*)  want=x86-64 ;; \
+	  *)         want="" ;; \
+	esac; \
+	echo "canary compiler: $(CC) -> $${trip:-unknown} (expecting ELF machine: $${want:-<link-check only>})"; \
+	if [ -n "$$want" ] && ! file $(OUT) | grep -q "$$want"; then \
+	  echo "canary FAIL: $(CC) targets '$$trip' but $(OUT) is not '$$want' (stale/wrong-arch artifact)" >&2; \
+	  exit 1; \
+	fi
+	@echo "canary OK: $(OUT) links with no undefined symbols"
+
+check: canary
+	python3 -m unittest discover -s python/tests
+
+clean:
+	rm -f *.o *.so $(CCSTAMP)
