@@ -974,6 +974,46 @@ int fr_py_fallow_loop(int pipe_r, int memfd) {
     return ring_fallow_main(3, argv);
 }
 
+/* W-PY16: count of published DATA batches (for worker fork timing).
+ *
+ * The scanner's pre-flight BAILS when a worker is already waiting
+ * (active_waiters > 0 → CASE B → phase 1), and entering phase 1 with
+ * already-complete input publishes nothing (workers then see instant
+ * EOF: silent data loss). So the parent must not fork workers during
+ * pre-flight. Pre-flight completion is unobservable directly, but
+ * publishing only happens in the main loop (post-pre-flight) — hence
+ * this query: cumulative DATA batches published (a batch counts when
+ * lines>0, or byte-length>0 for byte-mode's 0-means-undefined).
+ * The zero-length EOF sentinel never counts. A high-water mark makes
+ * repeated polls amortized O(total), and it self-resets when write_idx
+ * wraps below it (new run in this process).
+ *
+ * Python must read this ONLY through here (never raw MAP_SHARED
+ * coordination words — the fences live in C).
+ */
+static uint64_t fr_py_data_hwm = 0;
+
+uint64_t fr_py_data_ready(void) {
+    uint64_t found = 0;
+    uint64_t w;
+
+    if (!state)
+        return 0;
+    w = __atomic_load_n(&state[0].write_idx, __ATOMIC_ACQUIRE);
+    if (w < fr_py_data_hwm)
+        fr_py_data_hwm = 0; /* new run: scanner reset the indices */
+    while (fr_py_data_hwm < w) {
+        uint64_t slot = fr_py_data_hwm & RING_MASK;
+        uint32_t lines = state[0].lines_ring[slot];
+        uint64_t off = state[0].offset_ring[slot];
+        uint64_t end = state[0].end_ring[slot];
+        if (lines > 0 || end > off)
+            found++;
+        fr_py_data_hwm++;
+    }
+    return found;
+}
+
 /* =====================================================================
  * W-PY14: C-level output emit (fr_py_emit).
  *
@@ -1067,4 +1107,303 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
         sleft -= (size_t)n;
     }
     return 0;
+}
+
+/* Flush C stdio before ack/deposit points in the splice loop (it has
+ * no Python streams of its own; fflush(NULL) also protects buffered
+ * output from any plugin sharing the worker). */
+static void _flush_for_splice(void) {
+    fflush(NULL);
+}
+
+/* =====================================================================
+ * W-PY18: C splice worker loop — bash -b/-s parity (no payload case).
+ *
+ * Runs the WHOLE worker loop in C: claim → move bytes ingress→output
+ * → signal → ack, until EOF. Zero Python objects, zero ctypes calls,
+ * zero Python function calls per batch. The "payload" is kernel data
+ * movement (passthrough), which is what makes this mode fast.
+ *
+ * Built ONLY on tested primitives (deviations from the W-PY18 sketch,
+ * whose do_ack_current_batch/do_ack_with_fallow don't exist):
+ * - fr_py_claim (TLS publishing, poison detection + counting),
+ * - fr_py_ack (fallow/disarm) and fr_py_escrow_deposit (retry).
+ * Error semantics mirror _worker.py: poisoned → warn + ack + skip;
+ * output failure → escrow (kills+1, retry) like a payload error;
+ * signal EPIPE → fatal (infrastructure); claim abort → fatal.
+ * on_error policies are NOT consulted (retry-always, documented).
+ *
+ * Body movement is sendfile(out, ingress, &off, len) — kernel-level,
+ * file→file, no pipe staging (the sketch's splice(2) needs an
+ * intermediate pipe per batch; sendfile doesn't). Falls back to
+ * fr_py_emit_record's pread/write copy when sendfile is unavailable.
+ * Framing is identical to the v0 emitter ([idx][len][bytes]) so the
+ * parent parses untouched. Every byte appended is final (W-PY13
+ * append-once rule for the concurrent streaming reader): on ANY
+ * output failure the partial record is truncated before escrow.
+ *
+ * Returns 0 drained-to-EOF, 1 claim failure/abort, 2 signal failure.
+ * The Python child maps nonzero → worker exit 1 → parent RuntimeError.
+ * ===================================================================== */
+int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
+                             int signal_fd, int fallow_fd) {
+    fr_py_batch_t claimed;
+    int rc;
+
+    if (ingress_fd < 0 || out_fd < 0)
+        return 1;
+    while (1) {
+        off_t end = (off_t)-1;
+        off_t woff;
+        uint64_t left;
+
+        rc = fr_py_claim(&claimed);
+        if (rc == 2)
+            return 0; /* EOF: drained */
+        if (rc != 0)
+            return 1; /* abort/failure */
+
+        if (claimed.poisoned) {
+            fprintf(stderr,
+                    "forkrun [WARN]: Skipping poisoned batch %llu "
+                    "(killed %u times).\n",
+                    (unsigned long long)claimed.batch_idx,
+                    claimed.num_kills);
+            if (fr_py_ack(fallow_fd, -1) != 0)
+                return 1;
+            continue;
+        }
+
+        if (claimed.length == 0) {
+            /* EOF sentinel slot: ack but never emit (bash REPLY rule). */
+            if (fr_py_ack(fallow_fd, -1) != 0)
+                return 1;
+            continue;
+        }
+
+        /* Frame + move the body: header first (true length up front
+         * — parseable at every prefix), then sendfile streaming at
+         * the end, then signal ("record bytes are visible"), then
+         * ack (releases the batch). */
+        {
+            struct fr_py_record_hdr hdr;
+            hdr.batch_idx = claimed.batch_idx;
+            hdr.len = claimed.length;
+            end = lseek(out_fd, 0, SEEK_END);
+            if (end == (off_t)-1)
+                goto payload_error;
+            if (fr_py_write_all(out_fd, &hdr, sizeof(hdr)) != 0)
+                goto payload_error;
+            woff = (off_t)claimed.offset;
+            left = claimed.length;
+            while (left > 0) {
+                size_t want =
+                    left > (1 << 20) ? (1 << 20) : (size_t)left;
+                ssize_t n = sendfile(out_fd, ingress_fd, &woff, want);
+                if (n < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    /* sendfile unavailable for this pair — rewind
+                     * past the header and use the whole-record copy
+                     * helper instead. */
+                    if (ftruncate(out_fd, end) != 0)
+                        goto payload_error;
+                    if (fr_py_emit_record(out_fd, claimed.batch_idx,
+                                          ingress_fd, claimed.offset,
+                                          claimed.length) != 0)
+                        goto payload_error;
+                    break;
+                }
+                if (n == 0)
+                    goto payload_error; /* short: retry, don't emit */
+                left -= (uint64_t)n;
+            }
+        }
+
+        if (signal_fd >= 0) {
+            uint64_t sig[2];
+            const char *sp;
+            size_t sleft;
+            sig[0] = (uint64_t)wid;
+            sig[1] = claimed.batch_idx;
+            sp = (const char *)sig;
+            sleft = sizeof(sig);
+            while (sleft > 0) {
+                ssize_t n = write(signal_fd, sp, sleft);
+                if (n < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    return 2; /* EPIPE: parent gone — fatal */
+                }
+                if (n == 0)
+                    return 2;
+                sp += n;
+                sleft -= (size_t)n;
+            }
+        }
+
+        if (fr_py_ack(fallow_fd, -1) != 0)
+            return 1;
+        continue;
+
+    payload_error:
+        /* Output failure rides escrow like a payload error (bash -E):
+         * truncate any partial record (append-once rule), no ack (the
+         * deposit arms the retry), same-process retry on re-claim. */
+        if (end != (off_t)-1)
+            (void)ftruncate(out_fd, end);
+        _flush_for_splice();
+        fr_py_escrow_deposit(claimed.num_kills + 1);
+        continue;
+    }
+}
+
+/* =====================================================================
+ * W-PY18 addendum: zero-copy ingest + raw window.
+ *
+ * fr_py_copy_range: single-shot kernel copy src[src_off, +len) to
+ *   dst[dst_off, +len) — copy_file_range, then sendfile, else -1 so
+ *   the caller falls back to a pread/pwrite loop. EXPLICIT offsets
+ *   both sides (never touches fd positions: the W-PY16 lesson — the
+ *   scanner seeds its base from the shared SEEK_CUR). Returns bytes
+ *   copied (>0, possibly short), 0 for len==0 / EOF at src_off, -1
+ *   on any failure (caller retries via userspace copy). Same
+ *   method order as the engine's ingest probe (copy_file_range →
+ *   sendfile → read/write), minus its bounce buffer (the Python
+ *   fallback owns its chunk).
+ *
+ * fr_py_get_raw_window: borrowed pointer into the ingress memfd for
+ *   [offset, offset+length) via the engine's TLS-cached MAP_SHARED
+ *   mapping (the same ring_call FLAG_RAW mechanism the v1 plugin
+ *   path uses internally — this only EXPOSES the pointer to Python).
+ *   NULL on failure. Lifetime: valid until the worker's next remap
+ *   (streaming growth) or exit; unacked windows are never punched,
+ *   and hole reads zero-fill regardless. Materialized workers map
+ *   once, so the window is stable for the run there.
+ * ===================================================================== */
+int64_t fr_py_copy_range(int src_fd, uint64_t src_off, int dst_fd,
+                         uint64_t dst_off, uint64_t length) {
+    loff_t in_off;
+    loff_t out_off;
+    size_t want;
+    ssize_t n;
+
+    if (src_fd < 0 || dst_fd < 0)
+        return -1;
+    if (length == 0)
+        return 0;
+    want = (size_t)(length > (1 << 20) ? (1 << 20) : length);
+    in_off = (loff_t)src_off;
+    out_off = (loff_t)dst_off;
+    n = copy_file_range(src_fd, &in_off, dst_fd, &out_off, want, 0);
+    if (n > 0)
+        return (int64_t)n;
+    if (n == 0)
+        return 0; /* EOF at src_off */
+    if (errno != EINTR) {
+        /* Unsupported pair (EXDEV/EINVAL/ENOSYS/EPERM...) or hard
+         * error: one sendfile attempt, then punt to userspace. */
+        in_off = (loff_t)src_off;
+        n = sendfile(dst_fd, src_fd, &in_off, want);
+        if (n > 0)
+            return (int64_t)n;
+        if (n == 0)
+            return 0;
+        return -1;
+    }
+    return -1; /* EINTR with zero progress: caller retries/loops */
+}
+
+void *fr_py_get_raw_window(int fd, uint64_t offset, uint64_t length) {
+    if (fd < 0 || length == 0)
+        return NULL;
+    if (ring_call_ensure_ingress_map(fd, offset, (size_t)length) != 0)
+        return NULL;
+    if (tls_ingress_map == NULL)
+        return NULL;
+    return (char *)tls_ingress_map + offset;
+}
+
+/* =====================================================================
+ * W-PY19: reactor orchestration support — orderer, order-pipe setup,
+ * and spawn-aware scan. Engine frozen: these only CALL existing
+ * engine entry points (ring_order_main, core_scanner_loop) or fill
+ * g_fr_config, exactly like the existing fr_py_* wrappers above.
+ * ===================================================================== */
+
+/* Set the worker-local order-pipe fd for ordered acks (W-PY19).
+ *
+ * fr_py_worker_init hardcodes fd_order_pipe=-1 (unordered default).
+ * The reactor's C-orderer path sets it post-fork, pre-claim: the
+ * worker's first fr_py_ack(target_fd) then emits an OrderPacket to
+ * this pipe (the engine's ack_cached_order_pipe picks it up from
+ * g_fr_config on first use — TLS cache starts -1 in the forked
+ * child, so setting the config before the first ack is sufficient).
+ * Returns 0 ok, 1 when no substrate state exists. */
+int fr_py_set_order_pipe(int fd) {
+    if (!state || !g_state)
+        return 1;
+    g_fr_config.fd_order_pipe = fd;
+    return 0;
+}
+
+/* Spawn-aware scan (W-PY19 dynamic scaling).
+ *
+ * Same as fr_py_scan but forwards the scanner's spawn requests
+ * ("count\n" UMA / "node:count\n" NUMA, one per line) to spawn_w:
+ * the reactor's spawn pipe. Pass -1 to disarm (plain fr_py_scan
+ * behavior). Returns the engine rc. Runs in a forked scanner child
+ * (blocking), never in the reactor parent thread. */
+int fr_py_scan_with_spawn(int fd, int spawn_w) {
+    return core_scanner_loop(fd, 0, spawn_w, 1, false);
+}
+
+/* C-level orderer (W-PY19, bash ring_order subshell equivalent).
+ *
+ * Runs the engine's ring_order_main in the CALLING process — fork an
+ * orderer child first, then call this there and os._exit(rc):
+ *   reads OrderPackets from order_pipe_r until EOF (every worker
+ *   write end + the parent's copy closed), reorders via min-heap,
+ *   emits ordered bytes to stdout (dup2'd to output_fd when it
+ *   differs from 1), then returns the engine rc (0 clean).
+ *
+ * Transport contract (bash memfd mode): workers append keyed records
+ * ([batch_idx u64][len u64][bytes], the v0.5 emitter framing) to
+ * their own parent-created output memfds and ack with
+ * fr_py_ack(fallow_w, out_fd) so each ack's OrderPacket names the
+ * record's (fd, off, len); the orderer emits records in batch_idx
+ * order, so the parent parses its stdout exactly like today — only
+ * the ORDERING moved from Python reassembly into C. unordered != 0
+ * selects pass-through mode; numa is accepted and forwarded but v0
+ * runs UMA (0). output_fd < 0 leaves stdout untouched.
+ * Returns the engine rc (0 clean, 1 failure/abort). */
+int fr_py_orderer(int order_pipe_r, int output_fd,
+                  int unordered_mode, int numa_mode) {
+    char a0[] = "ring_order";
+    char a1[32];
+    char a2[] = "memfd";
+    char a3[] = "unordered";
+    char a4[] = "numa";
+    char *argv[6];
+    int argc = 0;
+
+    if (order_pipe_r < 0)
+        return 1;
+    argv[argc++] = a0;
+    snprintf(a1, sizeof(a1), "%d", order_pipe_r);
+    argv[argc++] = a1;
+    argv[argc++] = a2;
+    if (unordered_mode)
+        argv[argc++] = a3;
+    if (numa_mode)
+        argv[argc++] = a4;
+    argv[argc] = NULL;
+
+    if (output_fd >= 0 && output_fd != 1) {
+        if (dup2(output_fd, 1) < 0)
+            return 1;
+        if (output_fd != 1)
+            close(output_fd);
+    }
+    return ring_order_main(argc, argv);
 }

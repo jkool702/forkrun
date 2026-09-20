@@ -79,7 +79,7 @@ def _cloexec_all() -> None:
         pass
 
 
-def _ack(lib, fallow_fd=-1) -> int:
+def _ack(lib, fallow_fd=-1, target_fd=-1) -> int:
     """Thread-guard + flush + ack. The single ack funnel: every ack site
     warns on contract violation and flushes before acking.
 
@@ -87,6 +87,8 @@ def _ack(lib, fallow_fd=-1) -> int:
     inherited). >= 0 publishes the acked IndexPacket to the fallow
     reaper (hole-punch behind the contiguous prefix → bounded ingress);
     -1 is the materialized-path disarm (no reaper exists).
+    target_fd: W-PY19 C-orderer target (>= 0 emits an OrderPacket for
+    the bytes appended since the last ack; -1 disarms, the v0 default).
     """
     if threading.active_count() > 1:
         try:
@@ -99,7 +101,7 @@ def _ack(lib, fallow_fd=-1) -> int:
         except Exception:
             pass
     _flush()
-    return lib.fr_py_ack(fallow_fd, -1)
+    return lib.fr_py_ack(fallow_fd, target_fd)
 
 
 def _write_all(fd, buf) -> None:
@@ -189,15 +191,53 @@ def worker_main(wid, payload_spec, sink_spec, memfd_fd, file_size,
         os._exit(code)
 
 
+def _trap_ack_notify(trap_ack_w, msg) -> None:
+    """Best-effort write of one trap-ACK line (W-PY19).
+
+    trap_ack_w is the reactor pipe write end (or None/-1 to disarm).
+    Never raises: the parent may be gone (abandoned run) and the
+    worker must not turn a dead pipe into a second failure.
+    """
+    if trap_ack_w is None or trap_ack_w < 0:
+        return
+    try:
+        if isinstance(msg, str):
+            msg = msg.encode()
+        view = memoryview(msg)
+        while view:
+            n = os.write(trap_ack_w, view)
+            view = view[n:]
+    except OSError:
+        pass
+    except Exception:
+        pass
+
+
 def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
-         signal_w, on_error, fallow_fd=None):
+         signal_w, on_error, fallow_fd=None, trap_ack_w=None,
+         order_target=-1, wincarn=0, node=0):
     lib = get()
     payload_fn = _resolve_payload(payload_spec)
     sink_fn = _resolve_payload(sink_spec) if sink_spec is not None else None
     fallow_w = fallow_fd if fallow_fd is not None else -1
+    trap_w = trap_ack_w if trap_ack_w is not None else -1
+    # W-PY19 C-orderer target: ack(target) emits an OrderPacket for the
+    # bytes appended since the last ack. Armed only when the caller set
+    # the order pipe AND an output memfd exists to name in the packet.
+    # order_target carries the ORDER PIPE fd here (or -1); the ack
+    # target is out_fd whenever ordered. See worker_main_with_death_pipe.
+    order_pipe = order_target if (order_target is not None and
+                                  order_target >= 0 and
+                                  out_fd is not None) else -1
+    order_tgt = out_fd if order_pipe >= 0 else -1
 
-    if lib.fr_py_worker_init(wid, 0, 0, 3, 0) != 0:
+    if lib.fr_py_worker_init(wid, node, wincarn, 3, 0) != 0:
         return 1
+    if order_pipe >= 0:
+        try:
+            lib.fr_py_set_order_pipe(order_pipe)
+        except Exception:
+            pass
 
     # W-PY13 v1 fast-path detection (once per worker). The factories tag
     # their closures (spawn: _forkrun_spawn_argv, plugin: _forkrun_plugin);
@@ -243,7 +283,7 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 _write_all(signal_w, _SIG.pack(wid, bidx))
             except OSError:
                 return False  # parent gone (abandoned stream)
-        return _ack(lib, fallow_w) == 0
+        return _ack(lib, fallow_w, order_tgt) == 0
 
     streaming = file_size is not None and file_size < 0
     mm = None
@@ -271,9 +311,21 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
         nonlocal mm, view, mapped
         if need <= mapped:
             return True
+        # CPython refuses mmap() past EOF (ValueError), unlike raw
+        # mmap(2) — so growth clamps to the current file size. need is
+        # always <= fstat size (the scanner publishes only written
+        # bytes); otherwise fail loud, never silently short.
+        try:
+            cur = os.fstat(memfd_fd).st_size
+        except OSError:
+            return False
         size = mapped * 2 if mapped else (1 << 20)
         while size < need:
             size *= 2
+        if size > cur:
+            size = cur
+        if size < need:
+            return False
         try:
             if mm is not None:
                 try:
@@ -311,7 +363,12 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     os.write(2, msg.encode())
                 except OSError:
                     pass
-                if _ack(lib, fallow_w) != 0:
+                # W-PY19: poison notification to the reactor (bash
+                # "P:idx:kills" on the trap-ACK pipe). Best effort.
+                _trap_ack_notify(
+                    trap_w, "P:%d:%d\n" % (claimed.batch_idx,
+                                           claimed.num_kills))
+                if _ack(lib, fallow_w, order_tgt) != 0:
                     return 1
                 continue
 
@@ -319,7 +376,7 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 # EOF sentinel slot (scanner publishes lines=0/len=0 past
                 # the last byte). Bash parity: `if REPLY != 0` skips the
                 # payload but still acks. Never delivered to Python.
-                if _ack(lib, fallow_w) != 0:
+                if _ack(lib, fallow_w, order_tgt) != 0:
                     return 1
                 continue
 
@@ -377,7 +434,7 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                             _pfunc, rc, claimed.batch_idx))
                 # --- failure path (bash -E analogue, shared with v0) ---
                 if on_error == "skip":
-                    if _ack(lib, fallow_w) != 0:
+                    if _ack(lib, fallow_w, order_tgt) != 0:
                         return 1
                     continue
                 if on_error == "fail-fast":
@@ -395,7 +452,7 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 # loop above already EOFs. This branch is unreachable but
                 # kept explicit so a 0-byte file cannot spin.
                 batch.invalidate()
-                if _ack(lib, fallow_w) != 0:
+                if _ack(lib, fallow_w, order_tgt) != 0:
                     return 1
                 continue
 
@@ -459,7 +516,7 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         error = OSError(
                             "forkrun: output write failed on batch %d"
                             % batch.batch_index)
-                    elif _ack(lib, fallow_w) != 0:
+                    elif _ack(lib, fallow_w, order_tgt) != 0:
                         return 1
                     else:
                         continue
@@ -475,7 +532,7 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
 
             # --- failure path (bash -E analogue) ---
             if on_error == "skip":
-                if _ack(lib, fallow_w) != 0:
+                if _ack(lib, fallow_w, order_tgt) != 0:
                     return 1
                 continue
             if on_error == "fail-fast":
@@ -496,3 +553,80 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 pass
         # NOTE: the shared mmap stays open until _exit (pages must remain
         # valid for any in-flight exported views; Layer 3 UB otherwise).
+
+
+def worker_main_with_death_pipe(wid, node, payload_spec, sink_spec,
+                                memfd_fd, file_size, out_fd, signal_w,
+                                death_r, death_w, trap_ack_w, on_error,
+                                fallow_fd=None, order_w=None,
+                                wincarn=0):
+    """Reactor-managed worker entry point (W-PY19). Never returns.
+
+    Same claim/payload/ack loop as worker_main (via _run), plus the
+    bash EXIT-trap equivalent:
+
+    death_r/death_w: this worker's death pipe. The parent holds
+      death_r and polls it; the child closes death_r immediately and
+      holds death_w until exit — the kernel then closes it, which the
+      parent observes as readable EOF (POLLHUP equivalent). death_r
+      None (or < 0) disarms; death_w None disarms the close.
+    trap_ack_w: reactor trap-ACK pipe write end (or None/-1 to
+      disarm). Non-zero exit writes one "wid\\n" line (graceful
+      failure confirmation); poisoned batches already notified inline
+      as "P:idx:kills" by _run. Best effort, never raises.
+    order_w: C-orderer pipe write end (or None/-1 to disarm). When
+      armed (and out_fd present), acks carry the output memfd as the
+      OrderPacket target so the C orderer emits in batch_idx order.
+    node/wincarn: worker identity for fr_py_worker_init (respawn
+      lineage: the reactor increments wincarn per generation).
+
+    No signal handlers are installed here: KeyboardInterrupt inside
+    the payload stays a payload error (retry path), matching
+    worker_main. Global abort arrives via the engine fire alarm.
+    """
+    code = 1
+    try:
+        # The parent's read end must not stay open in the child, or
+        # the parent's EOF detection never fires.
+        if death_r is not None and death_r >= 0:
+            try:
+                os.close(death_r)
+            except OSError:
+                pass
+        order_pipe = (order_w if order_w is not None and order_w >= 0
+                      else -1)
+        code = _run(wid, payload_spec, sink_spec, memfd_fd, file_size,
+                    out_fd, signal_w, on_error, fallow_fd,
+                    trap_ack_w=trap_ack_w, order_target=order_pipe,
+                    wincarn=wincarn, node=node)
+    except BaseException:
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        code = 1
+    finally:
+        if code != 0:
+            # EXIT-trap equivalent, graceful-failure branch:
+            # 1. best-effort escrow of any in-flight batch (the
+            #    failure paths in _run already deposited with exact
+            #    kills; this covers only unexpected crashes, where 1
+            #    is the safe-direction estimate — an underestimate
+            #    merely retries, never poisons early).
+            try:
+                get().fr_py_escrow_deposit(1)
+            except Exception:
+                pass
+            # 2. trap-ACK confirmation for the reactor's 3s grace.
+            _trap_ack_notify(trap_ack_w, "%d\n" % (wid,))
+        # 3. death-pipe close → parent observes worker exit.
+        if death_w is not None and death_w >= 0:
+            try:
+                os.close(death_w)
+            except OSError:
+                pass
+        os._exit(code)

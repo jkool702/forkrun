@@ -30,9 +30,12 @@ except ImportError as exc:
     sys.exit(2)
 
 import bench_baselines  # noqa: E402
+import bench_batch_size  # noqa: E402
 import bench_fault  # noqa: E402
 import bench_memory  # noqa: E402
 import bench_niches  # noqa: E402
+import bench_splice  # noqa: E402
+import bench_streaming_ingest  # noqa: E402
 import bench_throughput  # noqa: E402
 
 BENCHMARKS = {
@@ -47,6 +50,19 @@ BENCHMARKS = {
     "plugin_v1": bench_throughput.bench_plugin_v1,
     "streaming_overhead": bench_throughput.bench_streaming_overhead,
     "stream_slow_consumer": bench_throughput.bench_stream_slow_consumer,
+    "ingest_compare": bench_streaming_ingest.bench_streaming_vs_materialized,
+    "ingest_pipe": bench_streaming_ingest.bench_streaming_pipe,
+    "splice_vs_python": bench_splice.bench_splice_vs_python,
+    "splice_stream": bench_splice.bench_splice_stream,
+    "noop_batch_sweep": bench_batch_size.bench_noop_batch_sweep,
+    "bytes_mode": bench_batch_size.bench_bytes_mode,
+    "upper_batch_sweep": bench_batch_size.bench_upper_batch_sweep,
+    "sum_batch_sweep": bench_batch_size.bench_sum_batch_sweep,
+    "jsonl_batch_sweep": bench_batch_size.bench_jsonl_batch_sweep,
+    "stream_batch_sweep": bench_batch_size.bench_stream_batch_sweep,
+    "single_worker_isolation": bench_batch_size.bench_single_worker_isolation,
+    "batch_memory": bench_batch_size.bench_batch_memory,
+    "per_batch_cost": bench_batch_size.bench_per_batch_cost,
     "ordered_vs_unordered": bench_throughput.bench_ordered_vs_unordered,
     "batch_size_effect": bench_throughput.bench_batch_size_effect,
     "rss_no_output": bench_memory.bench_rss_no_output,

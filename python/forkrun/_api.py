@@ -16,12 +16,12 @@ from typing import Any, Callable, Literal, Optional, Union
 import io
 import os
 
-Mode = Literal["python", "spawn", "plugin"]
+Mode = Literal["python", "spawn", "plugin", "splice"]
 Order = Literal["none", "index"]
 OnError = Literal["retry", "fail-fast", "skip"]
 Nodes = Union[int, Literal["auto"]]
 
-_VALID_MODES = ("python", "spawn", "plugin")
+_VALID_MODES = ("python", "spawn", "plugin", "splice")
 _VALID_ORDERS = ("none", "index")
 _VALID_ON_ERROR = ("retry", "fail-fast", "skip")
 
@@ -104,7 +104,23 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
         raise TypeError(f"sink must be None or callable on_batch(batch_meta, result), got {type(sink).__name__}")
     if streaming is not None and not isinstance(streaming, bool):
         raise TypeError(f"streaming must be None, True, or False, got {streaming!r}")
-    if payload is None:
+    if mode == "splice":
+        # Passthrough has no payload hook: payload must be absent (an
+        # ignored payload would silently drop user code — reject the
+        # contradiction instead), no sink (nothing calls it), and byte
+        # batching only (lines= are boundaries the loop never detects).
+        if payload is not None:
+            raise ValueError(
+                "mode='splice' takes no payload (passthrough) — got %r; "
+                "pass payload=None" % (payload,))
+        if sink is not None:
+            raise ValueError(
+                "mode='splice' takes no sink (no per-batch Python hook)")
+        if lines is not None:
+            raise ValueError(
+                "mode='splice' requires bytes=N (byte batches), not "
+                "lines=N (line boundaries are never detected)")
+    elif payload is None:
         raise ValueError("payload is required: 'pkg.mod:func' | callable | 'plugin.so:fn'")
     _reject_iterable_source(source)
     return RunConfig(payload=payload, source=source, mode=mode, sink=sink,

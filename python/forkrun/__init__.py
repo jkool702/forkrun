@@ -24,7 +24,7 @@ from forkrun._api import _validate as _validate_config  # noqa: F401
 from forkrun._batch import Batch  # noqa: F401
 from forkrun.run import map, run, stream  # noqa: F401
 
-__version__ = "0.5.1"
+__version__ = "0.10.0"
 
 
 def _query_engine_version() -> str:

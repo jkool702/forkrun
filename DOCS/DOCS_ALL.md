@@ -231,6 +231,146 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## v3.5.11 (unreleased)
+
+### Python frontend: reactor orchestration (W-PY19)
+
+- **New opt-in `orchestrator=True`** on `run`/`map`/`stream`
+  (default `None` = current fork-and-wait behavior, unchanged):
+  workers are supervised by a Python reactor (`_reactor.py`) with
+  per-worker death pipes (kernel-observable exit, SIGKILL-safe),
+  bounded respawn (default cap 3 per slot — crash loops terminate),
+  trap-ACK confirmation over a dedicated pipe (3s protocol grace —
+  graceful-failure ACKs pair over a signed deaths-minus-ACKs
+  balance, so pipelined death/ACK orderings never orphan a grace
+  into a false catastrophic), poison `P:idx:kills` notifications,
+  and the C orderer for `order="index"`.
+- **New shim entry points** (shim only, engine frozen):
+  `fr_py_set_order_pipe` (worker-local order-pipe fd for ordered
+  acks), `fr_py_scan_with_spawn` (scanner spawn-request pipe),
+  `fr_py_orderer` (runs the engine's `ring_order_main` in a forked
+  child over the workers' own output memfds — the keyed-record
+  framing is unchanged, only the ordering moves from Python
+  reassembly into C).
+- **Semantics**: healthy-path results are byte-identical to
+  `orchestrator=False` (map/run/stream × none/index, splice,
+  streaming ingest). A segfaulted worker is respawned and the
+  pipeline completes minus the crashed batch (best-effort: a death
+  that runs no code leaves no escrow deposit — documented, never
+  silent; a stderr recovery note names the wid). Unconfirmed death
+  raises `RuntimeError` after the grace; cap-reached deaths raise
+  `RuntimeError` immediately. Ingest fork timing stays
+  publish-gated (pre-flight bail avoidance); scanner spawn requests
+  are mechanism-tested while auto-fork stays disarmed.
+- Python `0.9.0` → `0.10.0`. 241 tests green (215 + 26
+  `test_reactor.py`); engine frozen (zero `forkrun_ring.c`
+  changes).
+
+## v3.5.10 (unreleased)
+
+### Python frontend: zero-copy ingest + raw window (W-PY18 addendum)
+
+- **`fr_py_copy_range`** (shim only): single-shot kernel copy with
+  explicit offsets (copy_file_range → sendfile → -1). Drives
+  `_spill_to_memfd`; exotic pairs fall back to the original
+  sequential loop byte-exact (pipes verified). Measured 130MB spill:
+  29ms kernel (4.5 GB/s) vs 33ms userspace — ~20% faster spill, ~3%
+  end to end. Never touches fd positions (W-PY16 SEEK_CUR lesson).
+- **`fr_py_get_raw_window`**: borrowed MAP_SHARED pointer into the
+  ingress memfd (the engine's TLS-cached mapping — the FLAG_RAW
+  mechanism v1 plugins already use internally). Readback-exact,
+  NULL on bad input; documented lifetime (until remap/exit).
+- Splice-loop Part 3 (`fr_py_splice_batch` standalone): not added —
+  the loop covers it via sendfile + emit_record fallback (no orphan
+  API without a caller).
+- Python `0.8.0` → `0.9.0`. 215 tests green (206 + 9
+  `test_zero_copy.py`); engine frozen (zero `forkrun_ring.c`
+  changes).
+
+## v3.5.9 (unreleased)
+
+### Python frontend: splice passthrough mode (W-PY18)
+
+- **New `mode="splice"`** (payload None, `bytes=N` default 512KB):
+  workers run `fr_py_worker_splice_loop` (shim only — claim →
+  sendfile → signal → ack, zero Python per batch; framing identical
+  so the parent parses untouched). Works over map/stream ×
+  materialized/streaming-ingest (bash -s shape: pipe in, live out).
+  Strict validation (non-None payload, `lines=`, `run()`, `sink`
+  all rejected — an ignored payload would drop user code).
+- **Measured, not 2B**: byte+Python 214M vs lines 161M at 10M lines
+  (+33%); splice ≈ Python passthrough (56–61M medium, 84M stream —
+  both parent-bound: spill/scan/Python-parse). Ceiling analysis:
+  sendfile ~4GB/s + parent parse ~3GB/s cap this box at ~230M for
+  map(); 2B needs ~26GB/s end to end. Full numbers + model:
+  `python/benchmarks/results/splice_study.md`.
+- Deviations from sketches: reused `fr_py_claim/ack/escrow/emit`
+  (the sketched do_ack_* don't exist); `sendfile` not `splice(2)`
+  (no staging pipe; emit_record fallback); payload-accept-anything
+  rejected as a footgun.
+- Python `0.7.0` → `0.8.0`. 206 tests green (192 + 14
+  `test_splice_mode.py`); engine frozen (zero `forkrun_ring.c`
+  changes).
+
+## v3.5.8 (unreleased)
+
+### Python frontend: batch-size amortization study (W-PY17)
+
+- **The amortization hypothesis is mostly wrong** (measured, not
+  hoped): per-batch cost is ~10ns/line at EVERY size (it scales with
+  bytes — no fixed overhead exists to amortize). Forced large batches
+  peak at ~96M lines/s (8 workers) / 116M (1 worker) for no-op, not
+  the hypothesized 1-2B. New `bench_batch_size.py` (8 sweep entries
+  in run_all.py + standalone) with exact batch counts (b'' probes,
+  never n/lines estimates).
+- **Sweet spot lines=1k–10k** (adaptive already chooses inside it):
+  lines=100 loses ~40%, lines=50k+ loses ~35% (starvation: 20 batches
+  ÷ 8 workers). Upper/sum gain +4–9% at 10k; JSONL regresses −26%
+  at 10k (payload-bound — tune the payload). Streaming +13% at 10k.
+  Single worker beats eight for no-op (116M vs 96M — claim contention
+  binds, not dispatch). Engine byte-clamps 100k-line requests (21
+  batches, not 10). Memory flat 76–80MB across the 100× range.
+- Full tables + guidance:
+  `python/benchmarks/results/batch_size_study.md`; README documents
+  the `lines=` knob and the new `streaming=` parameter.
+- Benchmarks + docs only (zero library/engine changes).
+  Python `0.6.0` → `0.7.0`. 192 tests green; engine frozen.
+
+## v3.5.7 (unreleased)
+
+### Python frontend: streaming ingest + fd scrubbing (W-PY16 + addendum)
+
+- **Streaming ingest** (`streaming=None/True/False`; fifo/socket
+  auto-stream): parent spills in 1MB chunks while a forked scanner
+  publishes concurrently and a forked reaper (`fr_py_fallow_loop` →
+  the engine's own `ring_fallow_main`, zero engine changes) punches
+  holes behind the contiguous acked prefix. Workers fork on first
+  DATA publish (new `fr_py_data_ready` query) — never during
+  pre-flight — and grow their MAP_SHARED view geometrically
+  (zero-copy kept); acks carry the fallow write end. Stall timeout
+  (2s) forks workers for slow-source pipelining; empty input skips
+  workers; scanner/reaper deaths abort loudly (never silent loss).
+- **Measured: 1GB via pipe with 0.2MB parent RSS growth**
+  (requirement was <200MB); byte-exact vs materialized across
+  python/spawn/plugin modes × map/run/stream; bytes-mode wide lines
+  exact. Medium-scale throughput is ~2-3× more CPU than materialized
+  (bimodal; under investigation as perf follow-up — capability, not
+  speed, is this order's deliverable).
+- **FD scrubbing** (`_fd_scrub.py`, all forks): children keep engine
+  fds (escrow/eventfds — closing them breaks retry and spins claims)
+  + job fds + 0/1/2. forkrun now runs inside event-loop hosts
+  (opencode/Jupyter/asyncio): covered by subprocess event-loop tests.
+- **Two engine findings documented in code**: (1) the scanner seeds
+  its base with `lseek(SEEK_CUR)` on a fork-shared offset — the spill
+  uses `pwrite` so the base stays 0; (2) pre-flight bails on waiting
+  workers into a phase-1 that publishes nothing for completed input.
+- Deliberate non-additions: no `fr_py_ingest_begin/chunk/end` (per-
+  chunk scan calls would reset publish state); no signal-carried
+  length; GIL already released by CDLL.
+- Python `0.5.1` → `0.6.0`. 192 tests green (175 + 10
+  `test_streaming_ingest.py` + 7 `test_fd_scrub.py`); engine frozen
+  (zero `forkrun_ring.c` changes).
+
 ## v3.5.6 (unreleased)
 
 ### Python frontend: pipe capacity optimization (W-PY15)

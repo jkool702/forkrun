@@ -58,6 +58,7 @@ class TestV1Detection(unittest.TestCase):
         self.assertTrue(caps["exec"], "fr_py_exec_spawn missing from .so")
         self.assertTrue(caps["plugin"], "fr_py_plugin_call missing from .so")
         self.assertTrue(caps["emit"], "fr_py_emit missing from .so")
+        self.assertTrue(caps["splice"], "fr_py_worker_splice_loop missing")
 
     def test_v1_symbols_exported(self):
         lib = get()
@@ -70,7 +71,7 @@ class TestV1Detection(unittest.TestCase):
         try:
             caps = v1_available()
             self.assertEqual(caps, {"exec": False, "plugin": False,
-                                    "emit": False})
+                                    "emit": False, "splice": False})
         finally:
             if old is None:
                 del os.environ["FORKRUN_NO_V1"]

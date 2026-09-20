@@ -8,6 +8,11 @@ ring_*_main helpers stay static and are NOT bound here).
 Guardrails: fork before threads (load in the parent before forking workers
 is fine — the .so carries no thread state; payload native imports happen
 post-fork in the worker). No pickle, no bash, no argv vectors anywhere.
+
+GIL note (W-PY16 addendum): ctypes.CDLL releases the GIL during calls
+(unlike PyDLL), so a blocking fr_py_* call never starves other Python
+threads — but the design avoids the question anyway (scanner and reaper
+run as separate processes, never as threads around a blocking call).
 """
 
 from __future__ import annotations
@@ -104,6 +109,55 @@ def _setup_signatures(lib) -> None:
         lib.fr_py_fallow_loop.restype = ctypes.c_int
     except AttributeError:
         pass
+    try:
+        # W-PY18: C splice worker loop (claim→sendfile→signal→ack).
+        lib.fr_py_worker_splice_loop.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int]
+        lib.fr_py_worker_splice_loop.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY18 addendum: kernel copy src[src_off,+len)→dst[dst_off)
+        # (copy_file_range, then sendfile; -1 = use userspace loop).
+        lib.fr_py_copy_range.argtypes = [
+            ctypes.c_int, ctypes.c_uint64, ctypes.c_int,
+            ctypes.c_uint64, ctypes.c_uint64]
+        lib.fr_py_copy_range.restype = ctypes.c_int64
+    except AttributeError:
+        pass
+    try:
+        # W-PY18 addendum: borrowed MAP_SHARED window pointer.
+        lib.fr_py_get_raw_window.argtypes = [
+            ctypes.c_int, ctypes.c_uint64, ctypes.c_uint64]
+        lib.fr_py_get_raw_window.restype = ctypes.c_void_p
+    except AttributeError:
+        pass
+    try:
+        # W-PY16: published-DATA-batch count (worker fork timing).
+        lib.fr_py_data_ready.argtypes = []
+        lib.fr_py_data_ready.restype = ctypes.c_uint64
+    except AttributeError:
+        pass
+    try:
+        # W-PY19: worker-local order-pipe fd for ordered acks.
+        lib.fr_py_set_order_pipe.argtypes = [ctypes.c_int]
+        lib.fr_py_set_order_pipe.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY19: spawn-aware scan (scanner → reactor spawn pipe).
+        lib.fr_py_scan_with_spawn.argtypes = [ctypes.c_int, ctypes.c_int]
+        lib.fr_py_scan_with_spawn.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY19: C-level orderer (ring_order_main in a forked child).
+        lib.fr_py_orderer.argtypes = [ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_int, ctypes.c_int]
+        lib.fr_py_orderer.restype = ctypes.c_int
+    except AttributeError:
+        pass
 
 
 def load(path: str | None = None):
@@ -172,7 +226,12 @@ def v1_available(lib=None) -> dict:
     if lib is None:
         lib = get()
     if os.environ.get("FORKRUN_NO_V1"):
-        return {"exec": False, "plugin": False, "emit": False}
+        return {"exec": False, "plugin": False, "emit": False,
+                "splice": False}
     return {"exec": hasattr(lib, "fr_py_exec_spawn"),
             "plugin": hasattr(lib, "fr_py_plugin_call"),
-            "emit": hasattr(lib, "fr_py_emit")}
+            "emit": hasattr(lib, "fr_py_emit"),
+            "splice": hasattr(lib, "fr_py_worker_splice_loop"),
+            "orderer": hasattr(lib, "fr_py_orderer"),
+            "order_pipe": hasattr(lib, "fr_py_set_order_pipe"),
+            "scan_spawn": hasattr(lib, "fr_py_scan_with_spawn")}

@@ -1,9 +1,9 @@
-# forkrun Python frontend — v0.5.1 (W-PY15)
+# forkrun Python frontend — v0.10.0 (W-PY19 reactor)
 
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
-`forkrun.__version__` is `"0.5.1"`; `forkrun.__engine_version__` reports the
+`forkrun.__version__` is `"0.10.0"`; `forkrun.__engine_version__` reports the
 substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build
@@ -60,6 +60,11 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
   `None` in byte mode. `offsets` are lazy absolute plane coordinates.
 - `on_error`: `"retry"` (escrow retry then poison-skip, bash `-E` analogue),
   `"skip"`, `"fail-fast"` (global abort, workers exit non-zero).
+- `lines` / `bytes` (mutually exclusive): batching controls. Default
+  adaptive already batches in the sweet spot (~4k lines); see below.
+- `streaming`: `None` (default; fifo/socket sources stream, files
+  materialize), `True` (bounded-ingress streaming ingest, TB-scale),
+  `False` (force materialized).
 - Modes `spawn`/`plugin`, multi-node, ordered emitter pipe, resume: not in
   v0 (`NotImplementedError`).
 - Workers are single-threaded by contract: payloads must not spawn threads
@@ -121,6 +126,36 @@ forkrun.map("gzip -c", "logs.txt", mode="spawn")
 forkrun.map(["sed", "s/old/new/"], "data.txt", mode="spawn")
 ```
 
+- `mode="splice"` (W-PY18): kernel passthrough, zero Python per batch.
+  Payload must be `None`; byte batching only (`bytes=N`, default
+  512KB — `lines=` rejected, boundaries never detected); `run()`
+  rejected (passthrough produces output — use `map()`/`stream()`).
+  Workers run `fr_py_worker_splice_loop` (claim → sendfile → signal →
+  ack; output failure rides escrow-retry, signal failure is fatal).
+  Measured ≈ Python passthrough (both parent-bound: spill/scan/parse;
+  the 2B target needs ~26GB/s end to end — beyond this box's
+  tmpfs+Python shape). Full analysis:
+  `python/benchmarks/results/splice_study.md`.
+
+```python
+forkrun.map(None, "input.bin", mode="splice", bytes=512*1024)
+for chunk in forkrun.stream(None, "input.bin", mode="splice"):
+    process(chunk)  # raw byte-windows as they arrive
+```
+
+- **Zero-copy ingest (W-PY18 addendum):** `_spill_to_memfd` copies
+  via `fr_py_copy_range` (copy_file_range, then sendfile, explicit
+  offsets both sides — never touches fd positions) with a silent
+  pread/pwrite fallback for exotic pairs (pipes that reject kernel
+  copy take the original sequential loop verbatim). Measured ~20%
+  faster spill (4.5 vs 3.7 GB/s); end-to-end effect is small (spill
+  is ~1/5 of map time).
+- **`fr_py_get_raw_window`:** borrowed MAP_SHARED pointer into the
+  ingress memfd (the engine's TLS-cached mapping — the same mechanism
+  FLAG_RAW delivery uses internally). For future C consumers;
+  materialized workers map once (stable), streaming workers may remap
+  on growth.
+
 ## CUDA Policy (v0, W-PY5)
 
 Python workers are **CPU-only by default**. forkrun refuses to fork if a
@@ -141,7 +176,7 @@ live CUDA context exists in the parent (fork would corrupt driver state).
 - **Faults:** Python exceptions → escrow retry → poison-skip, pipeline
   continues. True process death (segfault) kills the worker without a
   deposit: survivors drain the rest, the parent raises `RuntimeError`
-  (no reactor/respawn in v0), no zombies. `KeyboardInterrupt` inside a
+  (without the reactor), no zombies. `KeyboardInterrupt` inside a
   payload is a payload error (retry path), not a global abort.
 - **Reuse:** sequential and thread-concurrent `run()` calls in one process
   are correct (a process-wide lock serializes engine access; fd counts
@@ -189,6 +224,36 @@ live CUDA context exists in the parent (fork would corrupt driver state).
   skipped signals since W-PY7, so the only real saving is one syscall
   per batch. Kept as permanent infra (fewer syscalls, exact v0
   semantics incl. `None`-vs-`b""`).
+- **Streaming ingest (W-PY16):** `streaming=True` (or auto for
+  fifo/socket sources) spills the source in 1MB chunks while a forked
+  scanner publishes concurrently and a forked reaper
+  (`fr_py_fallow_loop` → the engine's own `ring_fallow_main`) punches
+  holes behind the contiguous acked prefix. Workers fork on first DATA
+  publish (never during pre-flight) and grow their MAP_SHARED view as
+  claims advance (zero-copy kept); acks carry the fallow write end.
+  Measured: 1GB via pipe with 0.2MB parent RSS growth (fallow-bounded);
+  byte-exact vs materialized across python/spawn/plugin × map/stream.
+  Slower per-byte than materialized at medium scale (~2-3× CPU, bimodal
+  — under investigation; the TB-scale value is capability, not speed).
+  Every forked child scrubs host fds (`_fd_scrub`, engine fds kept), so
+  forkrun runs inside event-loop hosts (opencode/Jupyter/asyncio).
+- **Batch sizes (W-PY17):** per-batch cost is ~10ns/line at every size
+  (it scales with bytes — there is no fixed overhead to amortize), so
+  forced large batches peak at ~96M lines/s (8 workers) / 116M
+  (1 worker), not 1B+. Sweet spot is lines=1k–10k (adaptive already
+  chooses inside it): lines=100 loses ~40%, lines=50k+ loses ~35%
+  (starvation: 20 batches ÷ 8 workers). JSONL regresses at 10k
+  (payload-bound — tune the payload, not `lines`). Memory flat across
+  the 100× range. Full tables:
+   `python/benchmarks/results/batch_size_study.md`.
+- **Reactor orchestration (W-PY19, opt-in):** `orchestrator=True`
+  supervises workers with per-worker death pipes (kernel-observable
+  exit), bounded respawn (cap 3/slot), trap-ACK confirmation (3s
+  grace), and the C orderer for `order="index"`. A segfaulted
+  worker is respawned and the pipeline completes minus the crashed
+  batch (best-effort, with a stderr recovery note); unconfirmed
+  death raises `RuntimeError` after the grace. Healthy-path results
+  are byte-identical to the default path.
 
 ## Layout
 
@@ -197,11 +262,16 @@ live CUDA context exists in the parent (fork would corrupt driver state).
 - `forkrun/_batch.py` — `Batch` (§3.5) with claim→invalidate→ack lifetime.
 - `forkrun/_bindings.py` — ctypes loader + `FrPyBatch` + `fr_py_*` signatures.
 - `forkrun/_shim.c` — Python-facing C entry points (new file; engine frozen).
+- `forkrun/_fd_scrub.py` — post-fork fd hygiene (keep engine + job fds).
+- `forkrun/_pipes.py` — pipe capacity utilities (1MB signal/spawn pipes).
+- `forkrun/_reactor.py` — reactor supervision (death pipes, respawn,
+  trap-ACK, C-orderer spawn, scanner death-pipe helpers).
 - `forkrun/run.py` — parent orchestration (init/spill/scan/fork/wait).
 - `forkrun/_worker.py` — forked claim/payload/ack loop (`os._exit` only).
 - `stage0_harness.py` — table schema + surface check.
 - `tests/test_api_surface.py` — engine-free validation tests.
 - `tests/test_v0.py` — v0 engine tests (need the built `.so`).
+- `tests/test_reactor.py` — reactor tests (need the built `.so`).
 
 ## Key contracts (v1.3)
 
