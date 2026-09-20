@@ -39,3 +39,16 @@ UNIT_TESTS/c_plugin_test/*.tmp
 
 # Resume ledgers/checkpoints are per-run runtime state, not repo content
 .forkrun_resume
+
+# Stage 0 evidence harness scratch (regenerable; only results/ is committed)
+benchmarks/python/inputs/
+benchmarks/python/work/
+benchmarks/python/logs/
+benchmarks/python/*.log
+# Stage 0 operational noise (run timeline + failure marker, not evidence)
+benchmarks/python/results/progress.log
+benchmarks/python/results/stage0_error.txt
+
+# Editor session/swap files (never commit; W-V352-COMPLETE guardrail)
+*.swp
+*.kate-swp

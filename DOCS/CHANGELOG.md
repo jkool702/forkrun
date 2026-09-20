@@ -1,5 +1,110 @@
 # forkrun Changelog
 
+## v3.5.2 (unreleased)
+
+- **W-RAW: C-plugin raw window delivery (`FORKRUN_CTX_FLAG_RAW` live):**
+  `ENGINE_KNOWN_FLAGS` is now `FORKRUN_CTX_FLAG_RAW` (was `0u`); the
+  `fr_ctx_engine_known_flags_matches_v2_grant_semantics` tripwire asserts
+  the new known set. `ring_call` dispatches raw-first: when the plugin's
+  `forkrun_use_ctx` grants `FLAG_RAW` (v2 only), the engine skips
+  `do_tokenize` entirely, passes only fixed args in `argv`
+  (`argc = fixed_argc`), and publishes the borrowed zero-copy window in
+  `ctx->reserved[0]` (`const void *data` over
+  `[batch_offset, batch_offset + batch_byte_length)`). The engine holds a
+  persistent per-worker `MAP_SHARED`/`PROT_READ` mmap of the ingress memfd
+  (lazy-map on first raw batch, `mremap` growth to
+  `max(need*2, file size)`, never unmapped per batch). Precedence is
+  binding: raw overrides argv tokenization, stdin delivery, and the user's
+  `-s`/`-b` flags (W-STDIN's stdin-feed arm is marked and falls through to
+  argv). Raw requires v2 — a v1 plugin requesting the flag gets the grant
+  masked to zero, argv delivery, and a dlopen-time warning. Pre-v3.5.2
+  engines grant nothing, so plugins must check
+  `ctx->flags_granted & FORKRUN_CTX_FLAG_RAW` and fall back to argv.
+  Window contract: borrowed (callback duration only), stable-during-callback
+  (append-only ingest, private `pread` tokenize buffers, fallow punches only
+  behind the acked prefix), address-not-stable across calls, `fd_in` escape
+  hatch retained. Docs: `C_PLUGIN.md` §4 (contract, negotiation pattern,
+  complete example, stability note); lock-in tests T-RAW-1..7
+  (`UNIT_TESTS/test_c_plugins_raw.sh`). No changes to `try_simd_scan`, the
+  fences, or the scanner macros.
+
+- **W-STDIN: C-plugin stdin delivery (`-s`/`-b` with `-C`):** the bash JIT
+  exports `FORKRUN_C_STDIN=1` for `-C` + (`-s` | `-b`) — the entire
+  bash-side change, riding the existing `FORKRUN_EXTRA_VARS` cleanroom
+  transport — and `ring_call` fills the dispatch arm W-RAW established:
+  `FLAG_RAW` > stdin mode > argv tokenize. In stdin mode tokenization is
+  skipped (`argv` = fixed args only) and the batch is spliced onto the
+  plugin's fd 0 as an EOF-terminated byte stream. Tier split mirrors
+  external `-s`: fitting batches are fed synchronously (no fork); larger
+  batches fork a SIGCHLD-shielded feeder child (the `ring_exec` pattern
+  verbatim: block around fork, own `waitpid`, restore after) that splices
+  concurrently while the parent runs the callback. The child `_exit`s
+  (never returns into bash), ignores SIGPIPE, and scrubs the fork-order
+  mask-hazard fds (death-pipe write end via the `fd_worker_w` array walk,
+  `FD_TRAP_ACK_W`, `fd_fallow_w`) — targeted close, no new bash protocol,
+  no `/proc` opens. Failure semantics from process lifecycle: feeder death
+  reads as EOF (length-checking plugins fail into escrow/retry; a 0-return
+  with a dead feeder is failed by the parent rather than risk short output
+  with rc 0; partial-consumption EPIPE `_exit(0)` is never flagged);
+  worker death orphaning the child EPIPE-exits it while the death pipe
+  fires unmasked. The ctx is unchanged (offset/length/lines/delimiter/fd_in
+  populated; v2 length-bounded reads, v1 read-to-EOF); `-b` composes as a
+  byte-transparent pipe (no NUL truncation). The old "`-s`/`-b` ignored in
+  `-C` mode" warning is removed; `--help` `-C` line documents the new
+  semantics. Docs: `C_PLUGIN.md` §5 (contract, v2/v1 patterns,
+  implementation note); lock-in tests T-STDIN-1..9
+  (`UNIT_TESTS/test_c_plugins_stdin.sh`). No new loadables, no persistent
+  processes; the `/proc`-based persistent feeder stays deferred in
+  `docs_port/`.
+
+- **W-STAGE1: the substrate's config boundary goes load-bearing:**
+  `fr_config_t` (declared in v3.5.1) is now consumed: `ring_worker inc`
+  snapshots the bash-surface transport (`RING_WID`, `RING_NODE_ID`,
+  `RING_WINCARN`, `FORKRUN_RETRY_LIMIT`, `FD_ORDER_PIPE`, `FORKRUN_DEBUG`)
+  into a worker-local struct once per worker — no config-sync verb; the
+  Python frontend will fill the same struct via ctypes and fork-inherit it
+  as plain memory. Consumers: claim node init + poison threshold (the
+  per-claim env read leaves the hot retry path), ack order-pipe, call ctx
+  identity; `FORKRUN_C_STDIN` and the feeder-scrub reads stay env (mode
+  signaling, not config — taxonomy comments). `WorkerBatchState` fields
+  renamed to the `fr_state_t` identity
+  (`batch_idx`/`slots`/`num_kills`/`poisoned`, decided at the poison
+  branch) with per-field width tripwires beside the substrate asserts
+  (whole-struct sizeof is wrong by design: the claim struct also carries
+  the payload window). One bash comment (config-injection point, both
+  twins). Lock-in T-CONFIG-1..4
+  (`UNIT_TESTS/test_c_plugins_config.sh`); basic 91/91, all C-plugin
+  suites, T-RAW, T-STDIN green with zero behavior change.
+
+- **P1 residual #5 (docs only):** pre-consent process termination named in
+  `SECURITY.md` (+ twin): sandbox extraction precedes the ownership gate
+  (F29-B ordering — prompts preview extracted values), so a hostile
+  checkpoint can terminate the calling shell before the consent prompt
+  fires. Within the documented same-UID tampering boundary (residual #1);
+  the sandbox contains the code's effects, not process-signal effects.
+  Accepted; no code change (the ordering is load-bearing).
+
+- **Stage 3.0 IDL scaffolding (annotation-only, zero runtime code):**
+  `tools/idl_schema.py` (single source: 41/41 loadables, all `ARGC_ARGV`;
+  field lists with direction/optionality/PTR+LEN for the migration-order
+  four: claim, ack, call, poll), `tools/gen_idl.py` emitting
+  `forkrun_callschema.h` (convention companion table + field hooks) plus a
+  generated ctypes mirror and usage table; `tools/test_idl.py` (10 tests:
+  standalone/order-independent compile, name coverage, byte-exact
+  usage/doc equality against the frozen engine table, `--check`
+  freshness, ctypes self-consistency); `.github/workflows/idl-check.yml`
+  runs both. No `fr_call_t`, no thunk flips (Stage 3 per-function
+  commits in v3.5.3+), no usage-string changes.
+
+- **Stage 2 ctypes spike (measurement, zero engine code):**
+  `benchmarks/python/ffi_spike.py` against a probe micro-library (not the
+  engine): null-call floor 0.179us, claim-shaped 1.717us, claim-ptr
+  0.483us, 1MiB MAP_SHARED memoryview 0.207us, Python 8-arg fixed cost
+  0.050us (i9-7940X, best-of-7). New `ffi-boundary` row in the Stage 0
+  table (+ `results/ffi_spike.json`, report narrative): call overhead is
+  four orders of magnitude under the ~10-100ms per-batch budget — Stage 3
+  thunk motivation must come from argv parse costs, not call overhead.
+
 ## v3.5.1 — 2026-09-17
 
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,

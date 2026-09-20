@@ -231,6 +231,111 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## v3.5.2 (unreleased)
+
+- **W-RAW: C-plugin raw window delivery (`FORKRUN_CTX_FLAG_RAW` live):**
+  `ENGINE_KNOWN_FLAGS` is now `FORKRUN_CTX_FLAG_RAW` (was `0u`); the
+  `fr_ctx_engine_known_flags_matches_v2_grant_semantics` tripwire asserts
+  the new known set. `ring_call` dispatches raw-first: when the plugin's
+  `forkrun_use_ctx` grants `FLAG_RAW` (v2 only), the engine skips
+  `do_tokenize` entirely, passes only fixed args in `argv`
+  (`argc = fixed_argc`), and publishes the borrowed zero-copy window in
+  `ctx->reserved[0]` (`const void *data` over
+  `[batch_offset, batch_offset + batch_byte_length)`). The engine holds a
+  persistent per-worker `MAP_SHARED`/`PROT_READ` mmap of the ingress memfd
+  (lazy-map on first raw batch, `mremap` growth to
+  `max(need*2, file size)`, never unmapped per batch). Precedence is
+  binding: raw overrides argv tokenization, stdin delivery, and the user's
+  `-s`/`-b` flags (W-STDIN's stdin-feed arm is marked and falls through to
+  argv). Raw requires v2 — a v1 plugin requesting the flag gets the grant
+  masked to zero, argv delivery, and a dlopen-time warning. Pre-v3.5.2
+  engines grant nothing, so plugins must check
+  `ctx->flags_granted & FORKRUN_CTX_FLAG_RAW` and fall back to argv.
+  Window contract: borrowed (callback duration only), stable-during-callback
+  (append-only ingest, private `pread` tokenize buffers, fallow punches only
+  behind the acked prefix), address-not-stable across calls, `fd_in` escape
+  hatch retained. Docs: `C_PLUGIN.md` §4 (contract, negotiation pattern,
+  complete example, stability note); lock-in tests T-RAW-1..7
+  (`UNIT_TESTS/test_c_plugins_raw.sh`). No changes to `try_simd_scan`, the
+  fences, or the scanner macros.
+
+- **W-STDIN: C-plugin stdin delivery (`-s`/`-b` with `-C`):** the bash JIT
+  exports `FORKRUN_C_STDIN=1` for `-C` + (`-s` | `-b`) — the entire
+  bash-side change, riding the existing `FORKRUN_EXTRA_VARS` cleanroom
+  transport — and `ring_call` fills the dispatch arm W-RAW established:
+  `FLAG_RAW` > stdin mode > argv tokenize. In stdin mode tokenization is
+  skipped (`argv` = fixed args only) and the batch is spliced onto the
+  plugin's fd 0 as an EOF-terminated byte stream. Tier split mirrors
+  external `-s`: fitting batches are fed synchronously (no fork); larger
+  batches fork a SIGCHLD-shielded feeder child (the `ring_exec` pattern
+  verbatim: block around fork, own `waitpid`, restore after) that splices
+  concurrently while the parent runs the callback. The child `_exit`s
+  (never returns into bash), ignores SIGPIPE, and scrubs the fork-order
+  mask-hazard fds (death-pipe write end via the `fd_worker_w` array walk,
+  `FD_TRAP_ACK_W`, `fd_fallow_w`) — targeted close, no new bash protocol,
+  no `/proc` opens. Failure semantics from process lifecycle: feeder death
+  reads as EOF (length-checking plugins fail into escrow/retry; a 0-return
+  with a dead feeder is failed by the parent rather than risk short output
+  with rc 0; partial-consumption EPIPE `_exit(0)` is never flagged);
+  worker death orphaning the child EPIPE-exits it while the death pipe
+  fires unmasked. The ctx is unchanged (offset/length/lines/delimiter/fd_in
+  populated; v2 length-bounded reads, v1 read-to-EOF); `-b` composes as a
+  byte-transparent pipe (no NUL truncation). The old "`-s`/`-b` ignored in
+  `-C` mode" warning is removed; `--help` `-C` line documents the new
+  semantics. Docs: `C_PLUGIN.md` §5 (contract, v2/v1 patterns,
+  implementation note); lock-in tests T-STDIN-1..9
+  (`UNIT_TESTS/test_c_plugins_stdin.sh`). No new loadables, no persistent
+  processes; the `/proc`-based persistent feeder stays deferred in
+  `docs_port/`.
+
+- **W-STAGE1: the substrate's config boundary goes load-bearing:**
+  `fr_config_t` (declared in v3.5.1) is now consumed: `ring_worker inc`
+  snapshots the bash-surface transport (`RING_WID`, `RING_NODE_ID`,
+  `RING_WINCARN`, `FORKRUN_RETRY_LIMIT`, `FD_ORDER_PIPE`, `FORKRUN_DEBUG`)
+  into a worker-local struct once per worker — no config-sync verb; the
+  Python frontend will fill the same struct via ctypes and fork-inherit it
+  as plain memory. Consumers: claim node init + poison threshold (the
+  per-claim env read leaves the hot retry path), ack order-pipe, call ctx
+  identity; `FORKRUN_C_STDIN` and the feeder-scrub reads stay env (mode
+  signaling, not config — taxonomy comments). `WorkerBatchState` fields
+  renamed to the `fr_state_t` identity
+  (`batch_idx`/`slots`/`num_kills`/`poisoned`, decided at the poison
+  branch) with per-field width tripwires beside the substrate asserts
+  (whole-struct sizeof is wrong by design: the claim struct also carries
+  the payload window). One bash comment (config-injection point, both
+  twins). Lock-in T-CONFIG-1..4
+  (`UNIT_TESTS/test_c_plugins_config.sh`); basic 91/91, all C-plugin
+  suites, T-RAW, T-STDIN green with zero behavior change.
+
+- **P1 residual #5 (docs only):** pre-consent process termination named in
+  `SECURITY.md` (+ twin): sandbox extraction precedes the ownership gate
+  (F29-B ordering — prompts preview extracted values), so a hostile
+  checkpoint can terminate the calling shell before the consent prompt
+  fires. Within the documented same-UID tampering boundary (residual #1);
+  the sandbox contains the code's effects, not process-signal effects.
+  Accepted; no code change (the ordering is load-bearing).
+
+- **Stage 3.0 IDL scaffolding (annotation-only, zero runtime code):**
+  `tools/idl_schema.py` (single source: 41/41 loadables, all `ARGC_ARGV`;
+  field lists with direction/optionality/PTR+LEN for the migration-order
+  four: claim, ack, call, poll), `tools/gen_idl.py` emitting
+  `forkrun_callschema.h` (convention companion table + field hooks) plus a
+  generated ctypes mirror and usage table; `tools/test_idl.py` (10 tests:
+  standalone/order-independent compile, name coverage, byte-exact
+  usage/doc equality against the frozen engine table, `--check`
+  freshness, ctypes self-consistency); `.github/workflows/idl-check.yml`
+  runs both. No `fr_call_t`, no thunk flips (Stage 3 per-function
+  commits in v3.5.3+), no usage-string changes.
+
+- **Stage 2 ctypes spike (measurement, zero engine code):**
+  `benchmarks/python/ffi_spike.py` against a probe micro-library (not the
+  engine): null-call floor 0.179us, claim-shaped 1.717us, claim-ptr
+  0.483us, 1MiB MAP_SHARED memoryview 0.207us, Python 8-arg fixed cost
+  0.050us (i9-7940X, best-of-7). New `ffi-boundary` row in the Stage 0
+  table (+ `results/ffi_spike.json`, report narrative): call overhead is
+  four orders of magnitude under the ~10-100ms per-batch budget — Stage 3
+  thunk motivation must come from argv parse costs, not call overhead.
+
 ## v3.5.1 — 2026-09-17
 
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,
@@ -767,6 +872,221 @@ During the callback invocation, the byte window `[batch_offset, batch_offset + b
 Note that `mmap` offsets must be page-aligned (`sysconf(_SC_PAGESIZE)`), so consumers must map the *containing* page-aligned window of an unaligned `batch_offset` and adjust their internal pointer accordingly.
 
 *Warning:* Only map within your batch's active byte window; regions behind the fallow horizon may already be hole-punched (reading them yields zeroes).
+
+---
+
+## §4. Raw Window Delivery (`FLAG_RAW`, v3.5.2+)
+
+The third delivery mode for C plugins (`-C`). Instead of tokenized argv
+strings, the plugin receives a borrowed, zero-copy pointer to the batch's
+bytes in shared memory, plus the byte length — no tokenization, no copy.
+It is the C-tier analogue of the Python frontend's `Batch.data` contract
+(the same borrowed-window lifetime, the same stability guarantee, the same
+absolute plane coordinates).
+
+**Precedence (binding):** if the plugin declares `FLAG_RAW`, raw window
+delivery overrides everything — argv tokenization, stdin delivery, the
+user's `-s`/`-b` flags. The plugin's ABI opt-in is authoritative over the
+user's CLI presentation choice.
+
+### The contract
+
+- `ctx->reserved[0]` is `data` when `FLAG_RAW` is granted: a borrowed
+  `const void *` to `[batch_offset, batch_offset + batch_byte_length)`.
+  Zero when the flag is not granted. `reserved[1..5]` remain zero.
+- **Borrowed:** valid for the duration of the callback only. Do not store
+  the pointer across batches.
+- **Stable during the callback:** the window's bytes are immutable while
+  your function runs (see the stability note below).
+- **Address not stable across calls:** the engine may `mremap` its
+  persistent view as the stream grows, so the pointer value for two
+  batches may differ even for adjacent offsets. Only offset+length
+  identity is stable — never compare pointers across batches.
+- **`fd_in` escape hatch:** `fd_in` remains populated. Plugins that prefer
+  `pread` (or their own `mmap` with page-aligned arithmetic) can ignore
+  `data` and use `batch_offset`/`batch_byte_length`/`fd_in` directly.
+- **argv still valid:** `argc`/`argv` contain ONLY the fixed arguments
+  (`frun -C plug.so:fn --mode fast` → `argc=2`, `argv={"--mode","fast"}`).
+  No batch data is tokenized into argv in raw mode.
+- **Metadata still populated:** `batch_offset`, `batch_byte_length`,
+  `batch_lines`, and `delimiter` are valid in raw mode. `batch_lines`
+  counts delimiter-terminated records (`wc -l` semantics); `0` means
+  undefined (`-b` byte mode). Scan for `ctx->delimiter` to split records.
+- **Raw requires v2:** a v1 plugin (`forkrun_use_ctx = 1 | FLAG_RAW`) gets
+  the flag masked to zero, argv delivery, and a dlopen-time warning on
+  stderr. Use `forkrun_use_ctx = 2 | FLAG_RAW`.
+- **Old-engine compatibility:** a v2 plugin requesting `FLAG_RAW` on a
+  pre-v3.5.2 engine gets `flags_granted = 0` and argv delivery (the
+  existing negotiation contract — unknown flags are simply ungranted).
+  Always check the grant and implement the argv fallback.
+
+### The negotiation pattern
+
+```c
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>  /* write */
+#include "forkrun_plugin.h"
+
+/* Request dialect 2 + raw window delivery. */
+int forkrun_use_ctx = 2 | FORKRUN_CTX_FLAG_RAW;
+
+static const void *raw_data(const struct forkrun_ctx *ctx) {
+    return (const void *)(uintptr_t)ctx->reserved[0];
+}
+
+int my_raw_fn(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    if (ctx->version >= 2 && (ctx->flags_granted & FORKRUN_CTX_FLAG_RAW)) {
+        /* Raw path: borrowed window, zero-copy. */
+        const char *data = (const char *)raw_data(ctx);
+        size_t len = (size_t)ctx->batch_byte_length;
+        size_t off = 0;
+        while (off < len) {
+            ssize_t w = write(STDOUT_FILENO, data + off, len - off);
+            if (w < 0) return 1;
+            off += (size_t)w;
+        }
+        (void)argc; (void)argv;  /* fixed args available but unused here */
+        return 0;
+    }
+    /* Fallback path: pre-v3.5.2 engine (or flag ungranted) — argv. */
+    for (int i = 0; i < argc; i++) {
+        size_t n = strlen(argv[i]);
+        size_t off = 0;
+        while (off < n) {
+            ssize_t w = write(STDOUT_FILENO, argv[i] + off, n - off);
+            if (w < 0) return 1;
+            off += (size_t)w;
+        }
+        if (write(STDOUT_FILENO, "\n", 1) != 1) return 1;
+    }
+    return 0;
+}
+```
+
+Compile and run as usual:
+
+```bash
+gcc -O3 -shared -fPIC plugin_raw.c -o plugin_raw.so
+frun -k -C ./plugin_raw.so:my_raw_fn < massive_dataset.txt
+```
+
+(`-k` orders the per-batch windows back into input order for byte-exact
+output. Without `-k`, windows are still individually exact but may
+interleave.)
+
+### Why the window is safe (mmap-stability note)
+
+The engine holds a persistent `MAP_SHARED`/`PROT_READ` mmap of the ingress
+memfd in each worker (lazily mapped on the first raw batch, grown with
+`mremap` as the stream grows, never unmapped per batch). The borrowed
+pointer is `base + batch_offset`. The window is stable during the callback
+because (a) ingest is append-only past the window's end, (b) tokenization
+never writes the shared memfd (all tokenize paths use private `pread`
+buffers), and (c) fallow punches holes only *behind the acked contiguous
+prefix* — this batch is unacked, therefore its pages are intact. This is
+the same guarantee the Python frontend's `Batch.data` relies on; the C
+tier proves it first.
+
+---
+
+## §5. Stdin Delivery (`-s`/`-b` with `-C`, v3.5.2+)
+
+The second v3.5.2 delivery mode for C plugins. When the user passes `-s`
+(or `-b`, which implies stdin) with `-C`, and the plugin has NOT declared
+`FLAG_RAW`, the batch data is delivered on the plugin's stdin (fd 0) as a
+byte stream terminated by EOF. This is the C-plugin analogue of external
+`-s` mode — with the spawn amputated: no `posix_spawnp` per batch, just an
+in-process callback whose fd 0 the engine feeds before/during the call.
+
+**Precedence:** `FLAG_RAW` (checked first) > stdin mode > argv tokenize.
+A raw plugin invoked with `-s` receives the window, never a stdin feed.
+
+### The contract
+
+- Read fd 0 until EOF (v1 style), or read exactly
+  `ctx->batch_byte_length` bytes (v2 style). Both patterns below.
+- **Partial consumption is tolerated:** a plugin may read a prefix and
+  return (like `head` with external `-s`). The unconsumed remainder is
+  discarded; the next batch starts clean — no drift, no corruption.
+- **The ctx is unchanged:** `batch_offset`, `batch_byte_length`,
+  `batch_lines`, `delimiter`, and `fd_in` are populated exactly as in argv
+  mode. Stdin mode is purely a delivery convention.
+- **`-b` composes:** byte-mode chunks travel through a byte-transparent
+  pipe — no NUL truncation, no delimiter scanning. (This closes the gap
+  that made `-C` + `-b` + argv broken: argv strings cannot hold NULs.)
+- **argv still valid:** `argc`/`argv` contain ONLY the fixed arguments.
+  No batch data is tokenized into argv in stdin mode.
+
+### The v2 pattern (length-bounded read)
+
+```c
+#include <stdint.h>
+#include <unistd.h>
+#include "forkrun_plugin.h"
+
+int forkrun_use_ctx = 2;
+
+int my_stdin_fn(int argc, char **argv, const struct forkrun_ctx *ctx) {
+    size_t want = (size_t)ctx->batch_byte_length;
+    size_t got = 0;
+    char buf[65536];
+    while (got < want) {
+        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+        if (n < 0) return 1;
+        if (n == 0) {
+            /* EOF before expected length = infrastructure failure
+             * (feeder died mid-batch). Return non-zero so the batch is
+             * retried through the existing escrow machinery. */
+            return 1;
+        }
+        /* ... process buf[0..n) ... */
+        got += (size_t)n;
+    }
+    return 0;
+}
+```
+
+### The v1 pattern (read-to-EOF loop)
+
+```c
+#include <unistd.h>
+
+int my_stdin_v1_fn(int argc, char **argv) {
+    char buf[65536];
+    for (;;) {
+        ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+        if (n < 0) return 1;
+        if (n == 0) break;  /* EOF: end of this batch */
+        /* ... process buf[0..n) ... */
+    }
+    return 0;
+}
+```
+
+Run it:
+
+```bash
+frun -k -C ./plugin_stdin.so:my_stdin_fn -s < massive_dataset.txt
+frun -k -C ./plugin_stdin.so:my_stdin_fn -b 4M < binary_blob
+```
+
+### How it works (implementation note)
+
+One function, internal dispatch: the bash JIT exports `FORKRUN_C_STDIN=1`
+for `-C` + (`-s` | `-b`) — the entire bash-side change — and `ring_call`
+reads it as ambient state (`ring_call`'s CLI surface is frozen). Tier split
+mirrors external `-s`: small batches (fitting the granted pipe capacity
+minus margin) are spliced synchronously with no fork; large batches fork a
+SIGCHLD-shielded feeder child (the `ring_exec` pattern verbatim) that
+splices concurrently while the parent runs the callback, then `waitpid`.
+The child `_exit`s (never returns into bash), ignores SIGPIPE (reader
+death reads as EPIPE, not a signal), and scrubs the fork-order mask-hazard
+fds (death-pipe write end, trap-ack, fallow). All failure semantics come
+from process lifecycle: child death reads as EOF (short read → non-zero
+return → escrow/retry), worker death orphaning the child EPIPE-exits it
+while the death pipe fires unmasked.
 
 -----------------------------------------
 # DESIGN.md
@@ -2555,6 +2875,14 @@ what will run.
    regenerate-from-source.** The input memfd may have holes beyond the checkpoint
    horizon; resume re-ingests the original stream, so this is invisible. Any
    future feature that reuses a crashed run's memfd must re-derive this proof.
+5. **Pre-consent process termination.** The sandbox extraction executes
+   before the ownership/permission gate (F29-B's ordering: prompts preview
+   extracted values, which requires extraction first). A hostile checkpoint
+   can terminate the calling shell before the consent prompt fires. This is
+   within the documented same-UID tampering boundary (residual #1) — an
+   attacker with same-UID file-write can already do strictly worse. The
+   sandbox contains the code's *effects* (dead PATH, restricted shell,
+   re-render); it does not contain process-signal effects.
 
 
 -----------------------------------------

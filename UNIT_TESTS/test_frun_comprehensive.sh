@@ -58,8 +58,8 @@ fi
 
 # Version Pin & Run Stamp at top of comprehensive suite:
 FRUN_VER="$(bash -c "source '$FRUN_SOURCE' && frun -V" 2>/dev/null || echo 'unknown')"
-if [[ "$FRUN_VER" != "forkrun v3.5.1" ]]; then
-    echo "FATAL: Comprehensive suite requires 'forkrun v3.5.1', got '$FRUN_VER'" >&2
+if [[ "$FRUN_VER" != "forkrun v3.5.2" ]]; then
+    echo "FATAL: Comprehensive suite requires 'forkrun v3.5.2', got '$FRUN_VER'" >&2
     exit 1
 fi
 echo "==================================================================" >&2
@@ -1795,10 +1795,17 @@ if in_section L; then
     _MD="$TEST_DIR/indexer_clean_abort"; mkdir -p "$_MD"
     # @2 = forced-count syntax: guarantees the NUMA indexer path runs even
     # on single-socket hosts (plain --nodes=2 degrades to UMA there).
-    _la4_out="$(timeout -s KILL 60 bash -c "set -o pipefail; source '$FRUN_SOURCE';
-        seq 100000 | frun --nodes=@2 -k printf '%s\n' | head -n 5" 2>"$_MD/err.txt")"
-    _la4_rc=$?
-    if (( _la4_rc == 0 )) && [[ "$(wc -l <<<"$_la4_out")" -eq 5 ]] \
+    # LA4 asserts frun's OWN exit code, not the pipeline's. Under pipefail
+    # the pipeline rc is the rightmost non-zero exit -- usually seq's 141
+    # (SIGPIPE), which races with frun's ingest drain rate and varies with
+    # host load (pre-existing/environmental; v3.5.1 behaves identically on
+    # a loaded host). frun's exit is captured via PIPESTATUS inside the
+    # pipeline shell; a missing rc file (e.g. timeout) fails the test.
+    _la4_out="$(timeout -s KILL 60 bash -c "source '$FRUN_SOURCE';
+        seq 100000 | frun --nodes=@2 -k printf '%s\n' | head -n 5
+        printf '%s' \"\${PIPESTATUS[1]}\" >'$_MD/frun.rc'" 2>"$_MD/err.txt")"
+    _la4_rc="$(cat "$_MD/frun.rc" 2>/dev/null || echo TIMEOUT)"
+    if [[ "$_la4_rc" == 0 ]] && [[ "$(wc -l <<<"$_la4_out")" -eq 5 ]] \
         && ! grep -q "Indexer .* died unexpectedly" "$_MD/err.txt"; then
         TEST_RESULTS["LA4: Clean abort emits no spurious indexer FATAL"]="PASS"
         _print_result PASS "LA4: Clean abort emits no spurious indexer FATAL"

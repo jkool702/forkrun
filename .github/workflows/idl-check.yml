@@ -1,0 +1,33 @@
+name: idl-check
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "forkrun_ring.c"
+      - "forkrun_callschema.h"
+      - "tools/**"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "forkrun_ring.c"
+      - "forkrun_callschema.h"
+      - "tools/**"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  idl-check:
+    # Stage 3.0 scaffolding (v1.3 plan section 2.2): the generator's
+    # committed artifacts must match its output, and the schema must cover
+    # every FORKRUN_LOADABLES entry with byte-exact usage/doc strings.
+    # Annotation-only in v3.5.2 — no engine behavior is involved.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Generator freshness (committed == generated)
+        run: python3 tools/gen_idl.py --check
+      - name: Schema tests (compile, coverage, usage equality, ctypes)
+        run: python3 tools/test_idl.py -v

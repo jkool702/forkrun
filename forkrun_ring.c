@@ -433,8 +433,8 @@ fast_count_delim(const char *p, const char *end, char delim) {
  * aliases. ENGINE_KNOWN_FLAGS is engine-side only (the plugin header
  * explicitly does not define it) and lives here. */
 
-/* v3.5.0: no behavior flags implemented -> ENGINE_KNOWN_FLAGS is empty */
-#define ENGINE_KNOWN_FLAGS          0u
+/* v3.5.2: FLAG_RAW is live — raw window delivery for C plugins. */
+#define ENGINE_KNOWN_FLAGS          FORKRUN_CTX_FLAG_RAW
 
 #define HUGE_PAGE_SIZE (2 * 1024 * 1024)
 #define SCANNER_CHUNK_SIZE (2 * 1024 * 1024)
@@ -447,7 +447,7 @@ fast_count_delim(const char *p, const char *end, char delim) {
 #define DAMPING_OFFSET 6
 
 #ifndef FORKRUN_RING_VERSION
-#define FORKRUN_RING_VERSION "v3.5.1"
+#define FORKRUN_RING_VERSION "v3.5.2"
 #endif
 
 #define atomic_load_acquire(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
@@ -1286,6 +1286,67 @@ static __thread uint32_t worker_last_minor = 0;
 static __thread uint32_t worker_last_num_kills = 0;
 static __thread bool tl_drain_escrow = true;
 
+// ------------------------------------------------------------------
+// W-STAGE1: worker-local engine config (v1.3 §2.1 fr_config_t).
+//
+// The bash frontend injects configuration by exporting shell variables
+// before forking workers (spawn_worker in frun.bash); fr_config_fill_from_env()
+// snapshots them here ONCE at worker start (ring_worker inc, plus a lazy
+// backstop in ring_claim's node init). All worker-side reads below consume
+// this struct — never get_string_value per call.
+//
+// NO config sync verb exists: the worker's copy is fixed for its life.
+// The Python frontend (Stage 4+) will fill the same struct directly via
+// ctypes and fork inheriting it as plain memory — no bash env required.
+// Plain (non-TLS) static: workers are forked processes, so copy-on-write
+// already isolates them (T-CONFIG-4 locks this in).
+// ------------------------------------------------------------------
+static fr_config_t g_fr_config = {
+    .ring_wid = 0, .ring_node_id = -1, .ring_wincarn = 0,
+    .fd_order_pipe = -1, .retry_limit = 3, .debug = 0,
+    .trap_ack_grace_ms = FR_TRAP_ACK_GRACE_MS_DEFAULT,
+    .respawn_cap = -1, .spawn_ceiling = -1,
+};
+static bool g_fr_config_filled = false;
+
+// Snapshot the bash-surface transport into g_fr_config. Idempotent: the
+// worker's environment is fixed for its lifetime, so re-reading yields the
+// same values. Each fallback mirrors the pre-struct call site exactly
+// (atoi-on-empty included), so the move is behavior-preserving by
+// construction. ring_init's own FORKRUN_DEBUG parse (parent side) stays
+// untouched; this only gives the WORKER its struct-carried copy.
+static void fr_config_fill_from_env(void) {
+    const char *s;
+    if ((s = get_string_value("RING_WID")))
+        g_fr_config.ring_wid = atoi(s);
+    else
+        g_fr_config.ring_wid = 0; /* ring_call's old `? atoi : 0` */
+    if ((s = get_string_value("RING_NODE_ID")))
+        g_fr_config.ring_node_id = atoi(s);
+    else
+        g_fr_config.ring_node_id = -1; /* unset -> auto-detect, as before */
+    if ((s = get_string_value("RING_WINCARN")))
+        g_fr_config.ring_wincarn = (int)strtoul(s, NULL, 10);
+    else
+        g_fr_config.ring_wincarn = 0;
+    if ((s = get_string_value("FORKRUN_RETRY_LIMIT")))
+        g_fr_config.retry_limit = atoi(s);
+    else
+        g_fr_config.retry_limit = 3;
+    if ((s = get_string_value("FD_ORDER_PIPE")))
+        g_fr_config.fd_order_pipe = atoi(s);
+    else
+        g_fr_config.fd_order_pipe = -1;
+    if ((s = get_string_value("FORKRUN_DEBUG")))
+        g_fr_config.debug = (strcmp(s, "1") == 0 || strcmp(s, "true") == 0);
+    else
+        g_fr_config.debug = 0;
+    g_debug = g_fr_config.debug; /* same value the fork inherited; now struct-sourced */
+    /* trap_ack_grace_ms / respawn_cap / spawn_ceiling keep their header
+     * defaults: protocol constant + safety-limit defaults, no env source. */
+    g_fr_config_filled = true;
+}
+
 #define MAX_POLL_WORKERS 8192
 static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
 
@@ -1294,12 +1355,25 @@ static uint64_t g_worker_deadlines[MAX_POLL_WORKERS] = {0};
 // WorkerBatchState: Pure value struct returned by do_lockfree_claim.
 // Contains everything ring_claim_main needs to bind Bash variables,
 // without any side-effects during the claim itself.
+//
+// W-STAGE1: field names match fr_state_t (forkrun_substrate.h) exactly
+// for the shared coordinate identity (batch_idx/major/minor/slots/
+// num_kills/poisoned) — the claim out-param IS the future Python claim
+// contract ("state travels with the claim", no fr_get_state() ever).
+// The extra payload-window fields (lines/offset/length) have no
+// fr_state_t counterpart by design: fr_state_t carries coordination
+// identity only, while the byte window travels as Batch.data (MAP_SHARED
+// view). A whole-struct sizeof assert would therefore be WRONG here;
+// per-field width asserts live with the substrate tie asserts below.
+// poisoned is DECIDED in ring_claim_main (needs the retry limit), not
+// in do_lockfree_claim (pure, limit-unaware): the pure helper zeroes it.
 // ------------------------------------------------------------------
 struct WorkerBatchState {
-    uint64_t idx;
-    uint64_t cnt;
+    uint64_t batch_idx;
+    uint32_t slots;      /* always 1 (single-slot invariant) */
     uint32_t lines;
     uint32_t num_kills;
+    uint32_t poisoned;   /* 1 once kill count reaches the retry limit */
     uint64_t offset;
     uint64_t length;
     uint64_t major;
@@ -5731,10 +5805,11 @@ dlc_evaluate_claim:
 
   __atomic_fetch_add(&local_state->total_lines_consumed, 1, __ATOMIC_SEQ_CST);
 
-  out->idx       = my_read_idx;
-  out->cnt       = 1;
+  out->batch_idx = my_read_idx;
+  out->slots     = 1;
   out->lines     = local_state->lines_ring[my_read_idx & RING_MASK];
   out->num_kills = current_kills;
+  out->poisoned  = 0; /* decided by the caller (needs the retry limit) */
   out->offset    = start;
   out->length    = end - start;
 
@@ -5772,9 +5847,14 @@ static int ring_claim_main(int argc, char **argv) {
   }
 
   if (my_numa_node == -1) {
-    const char *s_node = get_string_value("RING_NODE_ID");
-    if (s_node) {
-      my_numa_node = atoi(s_node);
+    /* W-STAGE1: node identity comes from the worker-local config filled at
+     * ring_worker inc (lazy backstop here covers hand-rolled callers that
+     * claim without inc; the JIT always incs first). Unset (-1) keeps the
+     * historical auto-detect fallback. */
+    if (!g_fr_config_filled)
+        fr_config_fill_from_env();
+    if (g_fr_config.ring_node_id >= 0) {
+        my_numa_node = g_fr_config.ring_node_id;
     } else {
       int phys = auto_detect_numa_node();
       my_numa_node = 0;
@@ -5826,8 +5906,8 @@ static int ring_claim_main(int argc, char **argv) {
   if (rc != 0) return rc;
 
   // --- Publish metadata to TLS globals ---
-  worker_last_idx       = batch.idx;
-  worker_last_cnt       = batch.cnt;
+  worker_last_idx       = batch.batch_idx;
+  worker_last_cnt       = batch.slots;
   worker_last_num_kills = batch.num_kills;
   worker_last_major     = batch.major;
   worker_last_minor     = batch.minor;
@@ -5846,16 +5926,18 @@ static int ring_claim_main(int argc, char **argv) {
     snprintf(buf, sizeof(buf), "%u", batch.num_kills);
     bind_variable("RING_NUM_KILLS", buf, 0);
 
-    u64toa(batch.idx, buf);
+    u64toa(batch.batch_idx, buf);
     bind_variable("RING_BATCH_IDX", buf, 0);
 
-    int limit = 3; // Default to 3 retries
-    const char *s_lim = get_string_value("FORKRUN_RETRY_LIMIT");
-    if (s_lim) limit = atoi(s_lim);
+    /* W-STAGE1: poison threshold from the worker-local config (filled once
+     * at ring_worker inc). Previously a per-claim get_string_value; the
+     * value is identical — the transport moved, the behavior did not. */
+    int limit = g_fr_config.retry_limit;
 
     // limit < 0  → infinite retries (never poison)
     // limit >= 0 → poison when kill count reaches the limit
     if (limit >= 0 && batch.num_kills >= (uint32_t)limit) {
+      batch.poisoned = 1;
       bind_variable("RING_POISONED", "1", 0);
 
       // CRITICAL FIX: Increment the global counter exactly ONCE upon crossing the threshold
@@ -5999,8 +6081,11 @@ static int ring_ack_main(int argc, char **argv) {
     }
     if (ack_cached_mode == 1) {
       if (ack_cached_order_pipe < 0) {
-        const char *s_order_pipe = get_string_value("FD_ORDER_PIPE");
-        if (s_order_pipe) ack_cached_order_pipe = atoi(s_order_pipe);
+        /* W-STAGE1: ordered-mode transport fd from the worker-local config
+         * (FD_ORDER_PIPE snapshotted at ring_worker inc). Same -1-means-
+         * unset error path as the old first-call env read. */
+        if (g_fr_config.fd_order_pipe >= 0)
+            ack_cached_order_pipe = g_fr_config.fd_order_pipe;
       }
       if (ack_cached_order_pipe < 0) {
         builtin_error("forkrun: FD_ORDER_PIPE unset during ordered ack");
@@ -6662,27 +6747,50 @@ static int ring_worker_main(int argc, char **argv) {
   if (argc < 2)
     return EXECUTION_FAILURE;
   if (my_numa_node == -1) {
-    const char *s_node = get_string_value("RING_NODE_ID");
-    if (s_node)
-      my_numa_node = atoi(s_node);
+    /* W-STAGE1: same struct source as ring_claim's node init. The fill
+     * itself happens in the inc branch below, so the FIRST call takes the
+     * struct only if already filled (re-inc after a prior fill); otherwise
+     * the historical env-then-autodetect path runs and the inc fill
+     * snapshots the same values immediately after. Steady state (every
+     * claim/ack/call after inc) reads the struct exclusively. */
+    if (g_fr_config_filled && g_fr_config.ring_node_id >= 0)
+      my_numa_node = g_fr_config.ring_node_id;
     else {
-      int phys = auto_detect_numa_node();
-      my_numa_node = 0;
-      if (g_logical_to_phys_map) {
-        for (uint32_t i = 0; i < global_num_nodes; i++) {
-          if (g_logical_to_phys_map[i] == (uint32_t)phys) {
-            my_numa_node = i;
-            break;
+      const char *s_node = get_string_value("RING_NODE_ID");
+      if (s_node)
+        my_numa_node = atoi(s_node);
+      else {
+        int phys = auto_detect_numa_node();
+        my_numa_node = 0;
+        if (g_logical_to_phys_map) {
+          for (uint32_t i = 0; i < global_num_nodes; i++) {
+            if (g_logical_to_phys_map[i] == (uint32_t)phys) {
+              my_numa_node = i;
+              break;
+            }
           }
         }
       }
+      if (my_numa_node >= (int)global_num_nodes)
+        my_numa_node = 0;
     }
-    if (my_numa_node >= (int)global_num_nodes)
-      my_numa_node = 0;
   }
   int node = my_numa_node;
 
   if (!strcmp(argv[1], "inc")) {
+    /* W-STAGE1: THE fill point. The bash JIT exported RING_WID /
+     * RING_NODE_ID / RING_WINCARN / FORKRUN_RETRY_LIMIT / FD_ORDER_PIPE /
+     * FORKRUN_DEBUG before forking this worker; snapshot them into the
+     * worker-local fr_config_t here. Every worker-side read below (claim
+     * node init + poison limit, ack order pipe, call ctx identity) consumes
+     * the struct from this point on. */
+    fr_config_fill_from_env();
+    /* Re-resolve the node from the just-filled struct so inc's own pinning
+     * and active_workers accounting use the same source as later claims
+     * (identical values — the struct snapshotted the env above). */
+    if (g_fr_config.ring_node_id >= 0 &&
+        g_fr_config.ring_node_id < (int)global_num_nodes)
+      my_numa_node = node = g_fr_config.ring_node_id;
     // CHANGED: Trigger pinning for explicit map even if nodes == 1
     if ((global_num_nodes > 1 || g_explicit_pinning) && g_logical_to_phys_map) {
       if (pin_to_numa_node(g_logical_to_phys_map[node]) != 0 && g_debug) {
@@ -7993,8 +8101,27 @@ typedef char fr_ctx_state_major_holds_packed_majors[
 typedef char fr_ctx_state_minor_holds_packed_minors[
     (sizeof(((fr_state_t *)0)->minor) * 8 >= FR_MINOR_BITS) ? 1 : -1];
 typedef char fr_ctx_engine_known_flags_matches_v2_grant_semantics[
-    (ENGINE_KNOWN_FLAGS == 0u) ? 1 : -1];
+    (ENGINE_KNOWN_FLAGS == FORKRUN_CTX_FLAG_RAW) ? 1 : -1];
 typedef char fr_ctx_frozen_size_128_bytes[(sizeof(struct forkrun_ctx) == 128) ? 1 : -1];
+/* W-STAGE1: the worker's claim out-param is the fr_state_t contract.
+ * Per-FIELD width asserts (not whole-struct sizeof): WorkerBatchState
+ * also carries the payload window (lines/offset/length), which fr_state_t
+ * deliberately excludes (identity vs. Batch.data), so the structs can
+ * never be the same size. What must never drift is the shared identity:
+ * same names, same widths — the tripwire fires if either side grows a
+ * field without the other. */
+typedef char fr_state_wbs_batch_idx_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->batch_idx) == sizeof(((fr_state_t *)0)->batch_idx)) ? 1 : -1];
+typedef char fr_state_wbs_major_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->major) == sizeof(((fr_state_t *)0)->major)) ? 1 : -1];
+typedef char fr_state_wbs_minor_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->minor) == sizeof(((fr_state_t *)0)->minor)) ? 1 : -1];
+typedef char fr_state_wbs_slots_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->slots) == sizeof(((fr_state_t *)0)->slots)) ? 1 : -1];
+typedef char fr_state_wbs_num_kills_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->num_kills) == sizeof(((fr_state_t *)0)->num_kills)) ? 1 : -1];
+typedef char fr_state_wbs_poisoned_aligned[
+    (sizeof(((struct WorkerBatchState *)0)->poisoned) == sizeof(((fr_state_t *)0)->poisoned)) ? 1 : -1];
 #else
 #error "forkrun_ring.c: both forkrun_substrate.h and ring_loadables/forkrun_plugin.h must be included before the ctx tie asserts."
 #endif
@@ -8012,6 +8139,323 @@ static __thread int tls_use_ctx = 0;
 static __thread unsigned tls_flags_granted = 0;
 static __thread int tls_numa_enabled = 0;
 static __thread struct forkrun_ctx tls_fctx;
+
+/* v3.5.2 W-RAW: persistent MAP_SHARED view of the ingress memfd for raw
+ * window delivery (FLAG_RAW). One mapping per worker, lives for the
+ * worker's lifetime — never munmap'd per batch.
+ *
+ * Stability guarantee: the window [batch_offset, batch_offset +
+ * batch_byte_length) is stable during the callback because (a) ingest is
+ * append-only past the window's end, (b) tokenization never writes the
+ * shared memfd (all tokenize paths use private pread buffers), and (c)
+ * fallow punches holes only behind the acked contiguous prefix — this
+ * batch is unacked, therefore its pages are intact. This is the same
+ * guarantee the Python frontend's Batch.data relies on; the C tier
+ * proves it first. */
+static __thread void *tls_ingress_map = NULL;
+static __thread size_t tls_ingress_map_len = 0;
+static __thread int tls_ingress_fd = -1;
+
+/* Ensure tls_ingress_map covers [batch_offset, batch_offset + batch_len).
+ * First raw batch: mmap the ingress fd MAP_SHARED/PROT_READ at offset 0
+ * with length = current file size. Later batches: if the window extends
+ * past the current mapping, mremap to grow to max(need*2, file size).
+ * Returns EXECUTION_SUCCESS on success (or when batch_len == 0 and no
+ * mapping is strictly required), 254 on failure. */
+static int ring_call_ensure_ingress_map(int fd, uint64_t batch_offset,
+                                        size_t batch_len) {
+    uint64_t need;
+    if (__builtin_add_overflow(batch_offset, (uint64_t)batch_len, &need))
+        return 254;
+    if (need == 0)
+        return EXECUTION_SUCCESS;
+    if (tls_ingress_map && tls_ingress_fd == fd &&
+        (uint64_t)tls_ingress_map_len >= need)
+        return EXECUTION_SUCCESS;
+    /* fd changed (should not happen — $fd_read is stable per worker — but
+     * be safe): drop the stale mapping and start over. */
+    if (tls_ingress_map && tls_ingress_fd != fd) {
+        munmap(tls_ingress_map, tls_ingress_map_len);
+        tls_ingress_map = NULL;
+        tls_ingress_map_len = 0;
+        tls_ingress_fd = -1;
+    }
+    struct stat st;
+    size_t file_len = 0;
+    if (fstat(fd, &st) == 0 && st.st_size > 0)
+        file_len = (size_t)st.st_size;
+    size_t target;
+    if (!tls_ingress_map) {
+        /* First raw batch: map the current file size (which covers this
+         * batch — the scanner only publishes written bytes). */
+        target = file_len;
+        if ((uint64_t)target < need)
+            target = (size_t)need;
+        if (target == 0)
+            return 254;
+        void *p = mmap(NULL, target, PROT_READ, MAP_SHARED, fd, 0);
+        if (p == MAP_FAILED)
+            return 254;
+        tls_ingress_map = p;
+        tls_ingress_map_len = target;
+        tls_ingress_fd = fd;
+        return EXECUTION_SUCCESS;
+    }
+    /* Grow path: new_len = max(need*2, file size), with overflow guard. */
+    uint64_t doubled = need * 2;
+    if (doubled < need)
+        doubled = need; /* overflow: fall back to need */
+    uint64_t want = doubled;
+    if ((uint64_t)file_len > want)
+        want = (uint64_t)file_len;
+    if (want <= (uint64_t)tls_ingress_map_len)
+        want = need; /* file shrank? still must cover need */
+    if (want > (uint64_t)SIZE_MAX)
+        return 254;
+    target = (size_t)want;
+    void *p = mremap(tls_ingress_map, tls_ingress_map_len, target,
+                     MREMAP_MAYMOVE);
+    if (p == MAP_FAILED)
+        return 254;
+    tls_ingress_map = p;
+    tls_ingress_map_len = target;
+    tls_ingress_fd = fd;
+    return EXECUTION_SUCCESS;
+}
+
+/* Never close a keep fd while scrubbing (defensive: a variable pointing at
+ * the ingress fd or the pipe write end must not nuke the child's lifeline). */
+static void ring_call_close_scrub(int f, int keep_in, int keep_out) {
+    if (f > 2 && f != keep_in && f != keep_out)
+        close(f);
+}
+
+/* Feeder-child fd hygiene (fork-order mask-hazard class, v3.5.2 W-STDIN).
+ *
+ * Mechanism choice (documented per the work order): targeted close of the
+ * three named hazard fds — no new bash protocol beyond FORKRUN_C_STDIN, no
+ * /proc opens, no closefrom sweep. The two flat numbers come from shell
+ * variables the worker already holds (FD_TRAP_ACK_W is exported at spawn;
+ * fd_fallow_w is a worker-visible global); the worker death-pipe write end
+ * is read from the fd_worker_w array at this worker's RING_WID via the
+ * same find_variable/array_cell walk ring_poll uses for death watches.
+ * Anything unresolvable is skipped best-effort.
+ *
+ * The child keeps ONLY the ingress fd and the pipe write end (plus 0,1,2,
+ * which it never uses — it splices and _exits). Rationale for the three:
+ * an orphaned feeder outliving a violent worker death must not hold the
+ * death-pipe write end (would mask POLLHUP on fd_worker_r forever — the
+ * child blocks in splice once the pipe fills with no reader), nor the
+ * trap-ack/fallow write ends. The persistent-feeder alternative is
+ * recorded in docs_port/ as deferred; fork-per-large-batch stands until
+ * fork rate ever measurably matters. */
+static void ring_call_scrub_feeder_child(int src_fd, int pipe_w, int pipe_r) {
+    /* Reader death must surface as an EPIPE return, never as a signal. */
+    signal(SIGPIPE, SIG_IGN);
+
+    /* Its copy of the pipe read end: the parent owns the reader side. */
+    ring_call_close_scrub(pipe_r, src_fd, pipe_w);
+
+    /* Flat hazard fds (worker-visible shell variables).
+     * W-STAGE1: deliberately NOT fr_config_t — frontend plumbing read in
+     * the W-STDIN fork path (mode signaling / fd hygiene), not engine
+     * configuration. The §2.1 taxonomy (mode signaling ≠ config) keeps
+     * these as env reads; Python will signal its own way at Stage 4+. */
+    const char *s_trap = get_string_value("FD_TRAP_ACK_W");
+    if (s_trap && s_trap[0])
+        ring_call_close_scrub(atoi(s_trap), src_fd, pipe_w);
+    const char *s_fallow = get_string_value("fd_fallow_w");
+    if (s_fallow && s_fallow[0])
+        ring_call_close_scrub(atoi(s_fallow), src_fd, pipe_w);
+
+    /* Worker death-pipe write end: fd_worker_w[$RING_WID].
+     * W-STAGE1: reads the bash-surface RING_WID (not g_fr_config.ring_wid)
+     * on purpose — this scrub walks the frontend's own array topology, so
+     * it speaks the frontend's coordinates directly. Same value either way;
+     * the env read documents that this is frontend plumbing, not config. */
+    const char *s_wid = get_string_value("RING_WID");
+    if (s_wid && s_wid[0]) {
+        SHELL_VAR *wv = find_variable("fd_worker_w");
+        if (wv && array_p(wv)) {
+            ARRAY *arr = array_cell(wv);
+            if (arr) {
+                int want = atoi(s_wid);
+                ARRAY_ELEMENT *ae;
+                for (ae = element_forw(arr->head); ae != arr->head;
+                     ae = element_forw(ae)) {
+                    if (element_index(ae) == want) {
+                        char *val = element_value(ae);
+                        if (val && val[0])
+                            ring_call_close_scrub(atoi(val), src_fd, pipe_w);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* stdin tier setup for C plugins (v3.5.2 W-STDIN). Creates the feed pipe
+ * (1MB request, actual granted capacity probed — same pattern as ring_pipe),
+ * delivers the batch, and redirects fd 0 onto the pipe read end.
+ *
+ * Tier split (mirrors external -s): batches fitting the pipe (length + 4K
+ * margin within granted capacity) are spliced synchronously with no fork;
+ * larger batches fork a SIGCHLD-shielded feeder child that splices
+ * concurrently while the parent runs the callback.
+ *
+ * Runs under the caller's SIGCHLD shield (the ring_exec pattern: block
+ * around fork, own waitpid in teardown, restore after). On success,
+ * publishes *saved_stdin (>= 0) and *feeder (-1 sync tier, child pid fork
+ * tier) for ring_call_stdin_teardown. On failure, cleans up fully (pipe
+ * ends closed, fd 0 restored if it was redirected) and returns 254. */
+static int ring_call_stdin_setup(int fd, size_t length, int *saved_stdin,
+                                 pid_t *feeder) {
+    int pfd[2];
+#if defined(O_CLOEXEC)
+    if (pipe2(pfd, O_CLOEXEC) != 0)
+        return 254;
+#else
+    if (pipe(pfd) != 0)
+        return 254;
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+#endif
+
+    /* Maximize the pipe buffer, then read back what the kernel granted. */
+    fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
+    int pipe_cap = 65536;
+    int granted = fcntl(pfd[1], F_GETPIPE_SZ);
+    if (granted > 0)
+        pipe_cap = granted;
+
+    int small = (length == 0) ||
+                ((uint64_t)length + 4096 <= (uint64_t)pipe_cap);
+
+    if (small) {
+        /* Synchronous feed: the whole batch fits with no reader present,
+         * so splice cannot block and EPIPE is impossible (the read end is
+         * held open here). No fork, no signals involved. */
+        size_t written = 0;
+        off_t offset = tls_batch_offset;
+        while (written < length) {
+            ssize_t s =
+                splice(fd, &offset, pfd[1], NULL, length - written, 0);
+            if (s < 0) {
+                if (errno == EINTR)
+                    continue;
+                close(pfd[0]);
+                close(pfd[1]);
+                return 254;
+            }
+            if (s == 0) {
+                /* Explicit-offset splice past memfd EOF: the claim names
+                 * bytes that were never written — infrastructure fault. */
+                close(pfd[0]);
+                close(pfd[1]);
+                return 254;
+            }
+            written += (size_t)s;
+        }
+        close(pfd[1]); /* EOF is now pending in the pipe. */
+    } else {
+        /* Forked concurrent feed (large batch): the child splices while
+         * the parent runs the callback. Forked under the caller's SIGCHLD
+         * shield so bash's reaper cannot steal the child (ring_exec rule:
+         * never invent a new pattern; never kill on ECHILD — a shielded,
+         * unreaped pid cannot be recycled). */
+        pid_t pid = fork();
+        if (pid < 0) {
+            close(pfd[0]);
+            close(pfd[1]);
+            return 254;
+        }
+        if (pid == 0) {
+            /* Child: feed the pipe, then _exit — never return into bash.
+             * pfd[0] is closed by the scrub below (pipe_r). */
+            ring_call_scrub_feeder_child(fd, pfd[1], pfd[0]);
+            off_t offset = tls_batch_offset;
+            size_t left = length;
+            while (left > 0) {
+                ssize_t s = splice(fd, &offset, pfd[1], NULL, left, 0);
+                if (s < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    if (errno == EPIPE)
+                        _exit(0); /* reader done (partial consumption). */
+                    _exit(1);
+                }
+                if (s == 0)
+                    _exit(2);
+                left -= (size_t)s;
+            }
+            close(pfd[1]);
+            _exit(0); /* all bytes fed — EOF now pending for the reader. */
+        }
+        /* Parent: */
+        close(pfd[1]);
+        *feeder = pid;
+    }
+
+    /* Redirect stdin onto the pipe read end (both tiers). */
+    int saved = dup(0);
+    if (saved < 0) {
+        if (!small) {
+            /* Callback can never run: drop the read end so the blocked
+             * child EPIPE-exits, reap it (kill is safe — the shielded,
+             * unreaped pid is necessarily still ours), and fail. */
+            close(pfd[0]);
+            kill(*feeder, SIGKILL);
+            int st;
+            while (waitpid(*feeder, &st, 0) == -1 && errno == EINTR)
+                ;
+            *feeder = -1;
+        } else {
+            close(pfd[0]);
+        }
+        return 254;
+    }
+    if (dup2(pfd[0], 0) < 0) {
+        close(pfd[0]);
+        if (!small) {
+            kill(*feeder, SIGKILL);
+            int st;
+            while (waitpid(*feeder, &st, 0) == -1 && errno == EINTR)
+                ;
+            *feeder = -1;
+        }
+        close(saved);
+        return 254;
+    }
+    close(pfd[0]);
+    *saved_stdin = saved;
+    if (small)
+        *feeder = -1;
+    return EXECUTION_SUCCESS;
+}
+
+/* stdin tier teardown (v3.5.2 W-STDIN). Restores fd 0, then reaps the feeder
+ * (bounded: a short-reading callback already EPIPE-exited the child via the
+ * closed read end; a draining callback finds it exited after feeding all).
+ * Returns 1 when the feeder failed (non-zero exit, signal death, or lost),
+ * 0 otherwise. A lost (ECHILD) child is failure, never silent success. */
+static int ring_call_stdin_teardown(int saved_stdin, pid_t feeder) {
+    if (saved_stdin >= 0) {
+        dup2(saved_stdin, 0);
+        close(saved_stdin);
+    }
+    if (feeder <= 0)
+        return 0;
+    int status = 0;
+    while (waitpid(feeder, &status, 0) == -1) {
+        if (errno == EINTR)
+            continue;
+        return 1;
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 0;
+    return 1;
+}
 
 // ---------------------------------------------------------
 // ring_call: Zero-Tax C Plugin Callback Execution
@@ -8044,7 +8488,17 @@ static int ring_call_main(int argc, char **argv) {
         unsigned ver = req & FORKRUN_CTX_VERSION_MASK;
         if (ver == 1 || ver == 2) {
             tls_use_ctx = (int)ver;
-            tls_flags_granted = req & ENGINE_KNOWN_FLAGS;
+            /* v3.5.2 W-RAW: raw requires v2 (v1 has no ctx window
+             * channel). Mask grants to zero for v1; delivery stays argv. */
+            if (ver >= 2) {
+                tls_flags_granted = req & ENGINE_KNOWN_FLAGS;
+            } else {
+                tls_flags_granted = 0;
+                if (req & FORKRUN_CTX_FLAG_RAW) {
+                    fprintf(stderr, "forkrun [WARN]: plugin requests FLAG_RAW under dialect v1 "
+                            "(ignored; use forkrun_use_ctx = 2 | FLAG_RAW)\n");
+                }
+            }
             tls_callback_ctx = (forkrun_cb_ctx_t)dlsym(tls_dl_handle, func_name);
             if (!tls_callback_ctx) {
                 fprintf(stderr, "forkrun [ERROR]: dlsym failed: %s\n", dlerror());
@@ -8055,10 +8509,12 @@ static int ring_call_main(int argc, char **argv) {
             memset(&tls_fctx, 0, sizeof(tls_fctx));
             tls_fctx.version = ver;
             tls_fctx.struct_size = (uint32_t)sizeof(struct forkrun_ctx);
-            const char *wid_str = get_string_value("RING_WID");
-                        tls_fctx.worker_id = wid_str ? atoi(wid_str) : 0;
-            const char *winc_str = get_string_value("RING_WINCARN");
-            tls_fctx.worker_incarn = winc_str ? (uint32_t)strtoul(winc_str, NULL, 10) : 0;
+            /* W-STAGE1: worker identity from the worker-local config filled
+             * at ring_worker inc (not per-call env conversion). Same values
+             * the old get_string_value reads produced; unset keeps the old
+             * 0 default via the fill's own fallback. */
+            tls_fctx.worker_id = g_fr_config.ring_wid;
+            tls_fctx.worker_incarn = (uint32_t)g_fr_config.ring_wincarn;
             tls_fctx.node_id = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
             tls_fctx.fd_in = fd;
             tls_fctx.delimiter = delim;
@@ -8090,30 +8546,76 @@ static int ring_call_main(int argc, char **argv) {
         tls_argv[i] = argv[6 + i];
     }
 
-    // 3. Tokenize the batch directly into tls_argv (starting at fixed_argc)
-    size_t batch_argc = 0;
-    int ret = do_tokenize(fd, length, tls_batch_offset, delim, NULL, fixed_argc, &batch_argc);
-    if (ret != EXECUTION_SUCCESS) return ret;
-
-    // 4. Ensure capacity and terminate argv array
-    if (fixed_argc + batch_argc + 1 > tls_argv_cap) {
-        tls_argv_cap = fixed_argc + batch_argc + 1024;
-        char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
-        if (!new_argv) return 254;
-        tls_argv = new_argv;
+    /* v3.5.2 dispatch precedence (RAW > stdin > argv, binding for W-STDIN):
+     *   1. FLAG_RAW granted (v2 only) -> raw window delivery (below).
+     *   2. stdin-mode signal (FORKRUN_C_STDIN=1, no RAW grant) -> stdin feed.
+     *   3. else -> argv tokenize (existing path).
+     * Raw overrides everything: argv tokenization, stdin delivery, the
+     * user's -s/-b flags. The plugin's ABI opt-in is authoritative over
+     * the user's CLI presentation choice. */
+    int is_raw =
+        (tls_use_ctx >= 2) && ((tls_flags_granted & FORKRUN_CTX_FLAG_RAW) != 0);
+    /* Arm 2 (W-STDIN): stdin delivery. FORKRUN_C_STDIN is the ambient mode
+     * signal the bash JIT exports for -C + (-s | -b); ring_call's CLI
+     * surface is frozen, so the mode rides the environment instead.
+     * W-STAGE1: deliberately NOT fr_config_t — a per-invocation mode
+     * signal from the frontend, not worker configuration (boundary
+     * taxonomy: mode signaling ≠ config). Python sets its own equivalent
+     * at Stage 4+; the env read stays. */
+    int c_stdin_mode = 0;
+    if (!is_raw) {
+        const char *s_stdin = get_string_value("FORKRUN_C_STDIN");
+        if (s_stdin && strcmp(s_stdin, "1") == 0)
+            c_stdin_mode = 1;
     }
-    tls_argv[fixed_argc + batch_argc] = NULL;
+
+    // 3. Tokenize the batch directly into tls_argv (starting at fixed_argc),
+    //    unless RAW/stdin delivery skips tokenization entirely.
+    size_t batch_argc = 0;
+    if (is_raw) {
+        /* RAW delivery: borrowed window, zero-copy, no tokenization.
+         * Skip do_tokenize entirely. argv = fixed args only. */
+        tls_argv[fixed_argc] = NULL; /* argc = fixed_argc, argv valid but empty of batch data */
+    } else if (c_stdin_mode) {
+        /* STDIN delivery: the batch travels on fd 0 (EOF-terminated byte
+         * stream); argv = fixed args only, no batch data in argv. */
+        tls_argv[fixed_argc] = NULL;
+    } else {
+        int ret = do_tokenize(fd, length, tls_batch_offset, delim, NULL, fixed_argc, &batch_argc);
+        if (ret != EXECUTION_SUCCESS) return ret;
+
+        // 4. Ensure capacity and terminate argv array
+        if (fixed_argc + batch_argc + 1 > tls_argv_cap) {
+            tls_argv_cap = fixed_argc + batch_argc + 1024;
+            char **new_argv = realloc(tls_argv, tls_argv_cap * sizeof(char *));
+            if (!new_argv) return 254;
+            tls_argv = new_argv;
+        }
+        tls_argv[fixed_argc + batch_argc] = NULL;
+    }
 
     // 5. THE ZERO-TAX UTOPIA: Execute the user's C code natively!
 
     // PHYSICS FIX: Shield the C-Plugin against Bash's SIGCHLD reaper
+    // (the ring_exec pattern, verbatim: block around fork, own waitpid,
+    // restore after — the stdin feeder fork lives under this shield too).
     sigset_t set, oset;
     sigemptyset(&set);
     sigaddset(&set, SIGCHLD);
     sigprocmask(SIG_BLOCK, &set, &oset);
 
+    /* Stdin tier setup (pipe + sync/forked feed + fd 0 redirect). The forked
+     * tier forks here, under the shield. */
+    int saved_stdin = -1;
+    pid_t feeder_pid = -1;
+    int stdin_rc = EXECUTION_SUCCESS;
+    if (c_stdin_mode)
+        stdin_rc = ring_call_stdin_setup(fd, length, &saved_stdin, &feeder_pid);
+
     int cb_ret;
-    if (tls_use_ctx) {
+    if (stdin_rc != EXECUTION_SUCCESS) {
+        cb_ret = stdin_rc;
+    } else if (tls_use_ctx) {
         tls_fctx.version = (uint32_t)tls_use_ctx;
         tls_fctx.batch_index = worker_last_idx;
         tls_fctx.batch_offset = (uint64_t)tls_batch_offset;
@@ -8121,6 +8623,32 @@ static int ring_call_main(int argc, char **argv) {
         tls_fctx.batch_byte_length = (uint64_t)length;
         tls_fctx.batch_lines = tls_batch_lines;
         tls_fctx.flags_granted = (tls_use_ctx >= 2) ? tls_flags_granted : 0;
+        if (is_raw) {
+            /* Lifetime contract: ctx->data (reserved[0]) is borrowed:
+             * valid for the duration of the callback only. The pointer's
+             * ADDRESS is not stable across calls (the engine may remap
+             * as the stream grows); only offset+length identity is stable.
+             * fd_in remains populated for plugins that prefer pread. */
+            tls_fctx.fd_in = fd;
+            if (length == 0) {
+                tls_fctx.reserved[0] = 0;
+            } else {
+                int map_ret = ring_call_ensure_ingress_map(
+                    fd, (uint64_t)tls_batch_offset, length);
+                if (map_ret != EXECUTION_SUCCESS) {
+                    sigprocmask(SIG_SETMASK, &oset, NULL);
+                    return map_ret;
+                }
+                const void *data = (const char *)tls_ingress_map +
+                                   (uint64_t)tls_batch_offset;
+                tls_fctx.reserved[0] = (uint64_t)(uintptr_t)data;
+            }
+            /* reserved[1..5] stay zero (memset at dlopen; never written). */
+        } else {
+            /* Registry rule: extension fields are populated only when
+             * the flag is granted, zero otherwise. */
+            tls_fctx.reserved[0] = 0;
+        }
         if (tls_numa_enabled) {
             if (tls_use_ctx == 2) {
                 uint32_t actual_minor = worker_last_minor & FR_MINOR_MASK;
@@ -8142,6 +8670,23 @@ static int ring_call_main(int argc, char **argv) {
         cb_ret = tls_callback_ctx((int)(fixed_argc + batch_argc), tls_argv, &tls_fctx);
     } else {
         cb_ret = tls_callback((int)(fixed_argc + batch_argc), tls_argv);
+    }
+
+    /* Stdin tier teardown: restore fd 0, reap the feeder (bounded — a
+     * short-reading callback already EPIPE-exited it). All failure
+     * semantics come from process lifecycle: feeder death reads as EOF to
+     * the plugin, so a length-checking plugin fails the batch itself via
+     * its return code; if it returned 0 despite a dead feeder, fail here
+     * rather than risk short output with rc 0. A partial consumer (EPIPE
+     * _exit(0)) is never flagged. */
+    if (c_stdin_mode && stdin_rc == EXECUTION_SUCCESS) {
+        int feeder_bad = ring_call_stdin_teardown(saved_stdin, feeder_pid);
+        if (feeder_bad && cb_ret == 0) {
+            fprintf(stderr,
+                    "forkrun [WARN]: C stdin feeder failed mid-batch; "
+                    "failing batch for retry\n");
+            cb_ret = 1;
+        }
     }
 
     sigprocmask(SIG_SETMASK, &oset, NULL);
