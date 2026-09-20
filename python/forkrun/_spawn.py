@@ -1,13 +1,24 @@
-"""Mode 2 (spawn): execute external binaries per batch (W-PY8).
+"""Mode 2 (spawn): execute external binaries per batch (W-PY8, W-PY13).
 
-v0 uses Python subprocess (correct, simple, no C changes). A v1 C-level
-fast path wrapping the engine's ring_exec machinery (posix_spawnp) is
-future work.
+Two dispatch tiers (chosen per worker in _worker.py, not here):
+- v1 (W-PY13): C-level fr_py_exec_spawn — posix_spawnp with a concurrent
+  poll pump (splice ingress memfd -> stdin, stdout pipe -> output memfd,
+  framed in C). ~10µs overhead. Active when the substrate exports the
+  symbol, a sink isn't consuming the output, and an output memfd exists.
+  The closure below is then only a marker: _worker reads
+  _forkrun_spawn_argv and never calls the function (zero-copy input —
+  batch.data is never touched).
+- v0: Python subprocess.run per batch (~350µs overhead). Fallback when
+  v1 is unavailable (pre-v1 .so, FORKRUN_NO_V1=1, run() with sink=, or
+  run() discard mode with no output memfd).
 
-Performance note: v0 spawn pays ~1-5ms per-batch Python subprocess
-overhead vs ~10us for the bash -X C path. The v0 niche is correctness
-and extensibility, not peak throughput; for peak external-binary
-throughput use the bash frontend (frun -X).
+Timeout note: v0 enforces a fixed 30s per-batch timeout below; v1 waits
+like bash -X does (no timeout — a hung command hangs the worker, whose
+nonzero/signal death then rides the normal escrow/retry path).
+
+Performance note: v1 spawn pays ~10us per-batch (posix_spawnp + splice
+pump) vs v0's ~350µs subprocess overhead — the bash -X gap is closed
+while keeping v0 as the fallback.
 
 Purity note: the run() call below transports batch bytes INTO the child
 via a stdin pipe — inherent to exec mode (the command reads stdin) and

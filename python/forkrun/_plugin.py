@@ -1,8 +1,18 @@
-"""Mode 3 (plugin): C callbacks via ctypes (W-PY9).
+"""Mode 3 (plugin): C callbacks (W-PY9, W-PY13).
 
-v0 calls plugin functions from Python through ctypes (~1-2us overhead per
-call vs ~0.1us for the bash -C direct dispatch). v1 will add C-level
-dispatch wrapping the engine's ring_call machinery.
+Two dispatch tiers (chosen per worker in _worker.py, not here):
+- v1 (W-PY13): C-level fr_py_plugin_call through the FROZEN engine ABI
+  (ring_loadables/forkrun_plugin.h, 128-byte forkrun_ctx, dialect
+  negotiated from the plugin's forkrun_use_ctx exactly like ring_call).
+  The plugin reads the input window zero-copy (RAW borrowed window in
+  reserved[0], or pread on fd_in) and writes stdout, which the shim
+  captures to a memfd and frames into the output memfd. A bash -C plugin
+  works from Python unchanged and vice versa. Active under the same
+  conditions as spawn v1 (symbol + no sink + output memfd); the closure
+  below is then only a marker carrying (path, function).
+- v0: ctypes call with explicit in/out buffers through the PYTHON-SIDE
+  convention below (72-byte fr_py_plugin_ctx — NOT the engine ABI;
+  ~1-2us overhead per call vs ~0.1us for C-level dispatch).
 
 ABI HONESTY NOTICE (load-bearing): the struct below is the v0
 PYTHON-SIDE C-callback convention — it is NOT the frozen engine plugin
@@ -95,10 +105,19 @@ def make_plugin_payload(path, function_name):
     Output buffer is allocated once per worker (lazily, post-fork) and
     reused. Input is copied once (create_string_buffer) — v0 copy cost,
     stated; zero-copy window passing is v1.
+
+    W-PY13: probes the plugin's forkrun_use_ctx at build time (parent,
+    pre-fork — dlopen without calling is fork-safe) and tags the closure
+    with _forkrun_plugin_v1. The worker takes the C-level v1 path only
+    for dialect-1/2 plugins; anything else (including the v0 72B
+    convention, which exports NO forkrun_use_ctx) stays on the v0 ctypes
+    path. This is load-bearing: a v0-72B entry point and a legacy 2-arg
+    bash entry point are indistinguishable at the symbol level, so the
+    use_ctx export is the discriminator — never guess.
     """
     # func retains its CDLL (CPython _FuncPtr holds the library), so the
     # handle stays open for the payload's lifetime via this closure.
-    _, func = load_plugin(path, function_name)
+    lib, func = load_plugin(path, function_name)
     output_buffer = None
 
     def plugin_payload(batch):
@@ -134,7 +153,23 @@ def make_plugin_payload(path, function_name):
         return bytes(output_buffer.raw[:n])
 
     plugin_payload._forkrun_plugin = (path, function_name)  # introspection
+    plugin_payload._forkrun_plugin_v1 = _negotiates_ctx(lib)
     return plugin_payload
+
+
+def _negotiates_ctx(lib) -> bool:
+    """True when the plugin opts into dialect 1/2 via forkrun_use_ctx.
+
+    Reads the exported int (when present) and masks the dialect exactly
+    like the engine does ((unsigned)v & 0xFF). Unknown dialects read as
+    False — the C side would take its legacy 2-arg arm, which must never
+    be guessed for a 72B-convention entry point.
+    """
+    try:
+        use_ctx = ctypes.c_int.in_dll(lib, "forkrun_use_ctx").value
+    except (AttributeError, ValueError):
+        return False
+    return (use_ctx & 0xFF) in (1, 2)
 
 
 __all__ = ["ForkrunCtx", "PluginError", "PLUGIN_OUTPUT_BUFFER_SIZE",

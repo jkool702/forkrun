@@ -81,11 +81,12 @@ class RunConfig:
     workers: Optional[int] = None
     nodes: Nodes = "auto"
     on_error: OnError = "retry"
+    streaming: Optional[bool] = None
 
 
 def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
               order: str, lines: Any, bytes_: Any, workers: Any,
-              nodes: Any, on_error: str) -> RunConfig:
+              nodes: Any, on_error: str, streaming: Any = None) -> RunConfig:
     if mode not in _VALID_MODES:
         raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
     if order not in _VALID_ORDERS:
@@ -101,9 +102,11 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
         raise ValueError(f'nodes must be "auto" or a positive int, got {nodes!r}')
     if sink is not None and not callable(sink):
         raise TypeError(f"sink must be None or callable on_batch(batch_meta, result), got {type(sink).__name__}")
+    if streaming is not None and not isinstance(streaming, bool):
+        raise TypeError(f"streaming must be None, True, or False, got {streaming!r}")
     if payload is None:
         raise ValueError("payload is required: 'pkg.mod:func' | callable | 'plugin.so:fn'")
     _reject_iterable_source(source)
     return RunConfig(payload=payload, source=source, mode=mode, sink=sink,
                      order=order, lines=lines, bytes=bytes_, workers=workers,
-                     nodes=nodes, on_error=on_error)
+                     nodes=nodes, on_error=on_error, streaming=streaming)

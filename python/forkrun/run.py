@@ -46,10 +46,13 @@ import sys
 from ._api import _validate
 from ._bindings import RC_OK, get, load
 from ._cuda_guard import check_cuda_hazard
+from ._pipes import make_pipe
 from ._plugin import make_plugin_payload
 from ._reassembly import ReassemblyBuffer
 from ._spawn import make_spawn_payload
 from ._worker import _HDR, worker_main
+
+import fcntl as _fcntl
 
 _CHUNK = 1 << 20
 
@@ -244,9 +247,59 @@ def _coerce_payload(payload, mode):
     return payload, mode
 
 
+def _detect_streaming(source, streaming):
+    """Resolve streaming=None to a bool (W-PY16).
+
+    Explicit True/False always wins. Auto (None): fifo/socket sources
+    stream (unbounded, can't pre-stat a size — and a slow writer must
+    not block a full spill); everything else materializes. Works for
+    paths (stat), int fds (fstat), and fileno() objects.
+    """
+    if streaming is not None:
+        return streaming
+    try:
+        import stat as _stat
+        if isinstance(source, (str, bytes, os.PathLike)):
+            st = os.stat(source)
+        elif isinstance(source, int):
+            if isinstance(source, bool) or source < 0:
+                return False
+            st = os.fstat(source)
+        elif hasattr(source, "fileno"):
+            st = os.fstat(source.fileno())
+        else:
+            return False
+        return _stat.S_ISFIFO(st.st_mode) or _stat.S_ISSOCK(st.st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def _close_all_except(keep):
+    """Close every fd >= 3 not in keep (post-fork child hygiene, W-PY16).
+
+    The fallow/scanner children must not hold the write ends whose
+    closure signals EOF (fallow_w pins the reaper; signal_w pins the
+    drain), nor src copies, nor sibling out_fds. keep is a set of ints.
+    Best-effort; never raises (runs pre-_exit in children).
+    """
+    try:
+        try:
+            fds = [int(n) for n in os.listdir("/proc/self/fd")]
+        except (OSError, ValueError):
+            fds = list(range(3, 1024))
+        for fd in fds:
+            if fd >= 3 and fd not in keep:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
 def run(payload, source, *, mode="python", sink=None, order="none",
         lines=None, bytes=None, workers=None, nodes="auto",
-        on_error="retry"):
+        on_error="retry", streaming=None):
     """Run payload over source in parallel. See module docstring for v0 scope.
 
     mode="python": payload is "pkg.mod:func" | callable (Batch -> bytes).
@@ -254,10 +307,14 @@ def run(payload, source, *, mode="python", sink=None, order="none",
       with batch bytes on stdin; stdout captured as the result.
     mode="plugin": payload is "path:function" (C .so entry point per the
       v0 Python-side convention — see _plugin.py ABI notice).
+    streaming: None (default) auto-detects (fifo/socket sources stream,
+      files materialize); True forces streaming ingest (bounded ingress
+      via the fallow reaper — TB-scale/unbounded sources); False forces
+      the materialized path.
     """
     _validate(payload, source, mode=mode, sink=sink, order=order,
               lines=lines, bytes_=bytes, workers=workers, nodes=nodes,
-              on_error=on_error)
+              on_error=on_error, streaming=streaming)
     if mode not in ("python", "spawn", "plugin"):
         raise NotImplementedError(
             "unknown mode %r" % (mode,))
@@ -265,6 +322,12 @@ def run(payload, source, *, mode="python", sink=None, order="none",
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
     payload, mode = _coerce_payload(payload, mode)
+    if _detect_streaming(source, streaming):
+        _execute_ingest(payload, source, sink=sink, lines=lines,
+                        bytes_=bytes, workers=_resolve_workers(workers),
+                        on_error=on_error, collect=False, order=order,
+                        mode=mode, nodes=nodes)
+        return None
     _execute(payload, source, sink=sink, lines=lines, bytes_=bytes,
              workers=_resolve_workers(workers), on_error=on_error,
              collect=False, order=order)
@@ -279,9 +342,17 @@ def map(payload, source, **kwargs):
     _validate(payload, source, mode=mode, sink=None,
               order=kwargs.get("order", "none"), lines=kwargs.get("lines"),
               bytes_=kwargs.get("bytes"), workers=kwargs.get("workers"),
-              nodes=nodes, on_error=kwargs.get("on_error", "retry"))
+              nodes=nodes, on_error=kwargs.get("on_error", "retry"),
+              streaming=kwargs.get("streaming"))
     payload, mode = _coerce_payload(payload, mode)
     order = kwargs.get("order", "none")
+    if _detect_streaming(source, kwargs.get("streaming")):
+        return _execute_ingest(
+            payload, source, sink=None, lines=kwargs.get("lines"),
+            bytes_=kwargs.get("bytes"),
+            workers=_resolve_workers(kwargs.get("workers")),
+            on_error=kwargs.get("on_error", "retry"),
+            collect=True, order=order, mode=mode, nodes=nodes)
     results = _execute(payload, source, sink=None,
                        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
                        workers=_resolve_workers(kwargs.get("workers")),
@@ -306,10 +377,13 @@ def stream(payload, source, **kwargs):
               lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
               workers=kwargs.get("workers"),
               nodes=kwargs.get("nodes", "auto"),
-              on_error=kwargs.get("on_error", "retry"))
+              on_error=kwargs.get("on_error", "retry"),
+              streaming=kwargs.get("streaming"))
     payload, engine_mode = _coerce_payload(payload, kwargs.get("mode",
                                                                "python"))
     kwargs = dict(kwargs, mode=engine_mode)
+    if _detect_streaming(source, kwargs.get("streaming")):
+        return _ingest_stream_gen(payload, source, **kwargs)
     return _stream_gen(payload, source, **kwargs)
 
 
@@ -361,7 +435,7 @@ def _drain_worker_memfd(fd, state) -> tuple:
 
 
 def _drain_records(lib, signal_r, out_fds, pids, statuses,
-                   order="none", stats=None):
+                   order="none", stats=None, pump=None):
     """Yield payload blobs (v1 drain loop).
 
     order="none": worker-completion order (W-PY6 behavior).
@@ -372,8 +446,14 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
       keyed transport); the signal's idx is a wakeup cross-check only.
     stats (optional dict): receives {"reassembly_max": high-water mark}
       when ordering (white-box diagnostic for the boundedness test).
+    pump (W-PY16): optional zero-arg callable run once per drain-loop
+      iteration; returns True when the ingest it services is fully done
+      (source EOF consumed AND ingest gate issued). Lets stream() over a
+      streaming source interleave spill and drain in one thread. Raising
+      inside pump propagates (caller teardown handles children).
     Terminates when every worker is reaped AND the signal pipe hits EOF
-    (all write ends closed) with no unframed signal bytes left.
+    (all write ends closed) with no unframed signal bytes left AND the
+    pump (if any) is done.
     """
     import select as _select
     import struct as _struct
@@ -385,6 +465,7 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
     alive = set(pids)
     sig_buf = b""
     sig_eof = False
+    pump_done = pump is None
     while True:
         if not sig_eof:
             try:
@@ -421,7 +502,9 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
             if wpid == pid:
                 alive.discard(pid)
                 statuses.append((pid, status))
-        if not alive and sig_eof and not sig_buf:
+        if pump is not None and not pump_done:
+            pump_done = bool(pump())
+        if not alive and sig_eof and not sig_buf and pump_done:
             break
     # Safety sweep: every record arrived with its signal before EOF, so
     # this should find nothing — but a short final write must never be
@@ -443,11 +526,18 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
 
 
 def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
-                     src_fd, must_close):
+                     src_fd, must_close, extra_pids=(), fallow_w=None):
     """Reap-all + close-all + destroy. Abandon-safe: unblocks claim-gated
     workers via the fire alarm and EPIPEs signal-blocked ones by closing
     the read end, then reaps (zombies pin pids, so no PID-reuse hazard
-    for the SIGKILL straggler pass)."""
+    for the SIGKILL straggler pass).
+
+    W-PY16: extra_pids covers the scanner + fallow children (same
+    kill-then-reap discipline — the fire alarm unblocks a scanner gated
+    on ingest, and closing fallow_w EOFs a reaper gated on acks);
+    fallow_w is closed here (idempotent: normal flow already closed it
+    before reaping the reaper).
+    """
     try:
         lib.fr_py_abort()
     except Exception:
@@ -457,7 +547,12 @@ def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
             os.close(signal_r)
         except OSError:
             pass
-    for pid in pids:
+    if fallow_w is not None:
+        try:
+            os.close(fallow_w)
+        except OSError:
+            pass
+    for pid in list(pids) + list(extra_pids):
         try:
             wpid, _ = os.waitpid(pid, os.WNOHANG)
             if wpid == 0:
@@ -467,7 +562,7 @@ def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                     pass
         except ChildProcessError:
             pass
-    for pid in pids:
+    for pid in list(pids) + list(extra_pids):
         try:
             os.waitpid(pid, 0)
         except ChildProcessError:
@@ -553,7 +648,10 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             pass
 
         out_fds, out_hold = _new_output_memfds(workers)
-        signal_r, signal_w = os.pipe()
+        # W-PY15: 1MB signal pipe (65536 outstanding 16B signals vs 4096
+        # at default) — workers run further ahead of a slow consumer.
+        # Best-effort: falls back to 64KB where F_SETPIPE_SZ is capped.
+        signal_r, signal_w, _ = make_pipe()
         for i in range(workers):
             pid = os.fork()
             if pid == 0:
@@ -621,6 +719,575 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         # setup itself raised before forking.
         _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                          src_fd, must_close)
+
+
+def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
+                           on_error, mode="python", nodes="auto",
+                           order="none", stats=None):
+    """stream() over a streaming source: a GENERATOR (W-PY16).
+
+    Same fork topology as _execute_ingest_locked (reaper + scanner +
+    workers, file_size=-1, fallow acks), but the parent interleaves the
+    spill with the live drain in one thread: each drain-loop iteration
+    runs pump(), which spill-quantum-drains the (nonblocking) source
+    until EAGAIN and issues the ingest gate at source EOF. First results
+    can arrive before the source is exhausted (slow-source pipelining).
+    Abandonment tears everything down via the finally (helpers reaped
+    through extra_pids). Mirrors _execute_streaming's guard convention.
+    """
+    if mode != "python":
+        raise NotImplementedError(
+            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+    if not (nodes == "auto" or nodes == 1):
+        raise NotImplementedError(
+            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    if order not in ("none", "index"):
+        raise ValueError(
+            "order must be 'none' or 'index', got %r" % (order,))
+    lib = load()
+    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
+        raise RuntimeError("substrate init failed")
+
+    src_fd, must_close = _open_source(source)
+    memfd = None
+    mem_hold: list = []
+    out_fds: list = []
+    out_hold: list = []
+    fallow_r = fallow_w = None
+    signal_r = None
+    signal_w = None
+    fallow_pid = scan_pid = None
+    helpers = {"scan_rc": None, "fallow_rc": None}
+    gate = {"issued": False}
+    pids: list = []
+    try:
+        memfd, mem_hold = _new_ingress_memfd()
+        try:
+            os.lseek(memfd, 0, os.SEEK_SET)
+        except OSError:
+            pass
+        out_fds, out_hold = _new_output_memfds(workers)
+        signal_r, signal_w, _ = make_pipe()
+        fallow_r, fallow_w = os.pipe()
+
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+        fallow_pid, scan_pid = _fork_ingest_helpers(
+            lib, memfd, fallow_r, fallow_w)
+        for i in range(workers):
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    os.close(signal_r)
+                except OSError:
+                    pass
+                try:
+                    if must_close:
+                        os.close(src_fd)
+                except OSError:
+                    pass
+                _close_all_except({memfd, out_fds[i], signal_w, fallow_w})
+                worker_main(i, payload, None, memfd, -1, out_fds[i],
+                            signal_w, on_error, fallow_w)
+                os._exit(127)  # unreachable; worker_main exits
+            else:
+                pids.append(pid)
+        # Parent drops its write copies: signal EOF then means every
+        # worker exited; reaper EOF means every worker exited too.
+        try:
+            os.close(signal_w)
+        except OSError:
+            pass
+        signal_w = None
+        try:
+            os.close(fallow_r)
+        except OSError:
+            pass
+        fallow_r = None
+        try:
+            os.close(fallow_w)
+        except OSError:
+            pass
+        fallow_w = None
+
+        # Nonblocking source for the interleave (dup user fds — never
+        # mutate flags on a descriptor we don't own).
+        if not must_close:
+            src_fd = os.dup(src_fd)
+            must_close = True
+        try:
+            fl = _fcntl.fcntl(src_fd, _fcntl.F_GETFL)
+            _fcntl.fcntl(src_fd, _fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        except OSError:
+            pass
+
+        def _watch_live():
+            # Same helper-liveness rule as the locked path (abort +
+            # raise on death / premature clean scanner exit).
+            for pid, name in ((scan_pid, "scanner"),
+                              (fallow_pid, "fallow")):
+                if pid is None:
+                    continue
+                try:
+                    wpid, st = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    continue
+                if wpid != pid:
+                    continue
+                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
+                if name == "scanner":
+                    helpers["scan_rc"] = st
+                    if not ok or not gate["issued"]:
+                        lib.fr_py_abort()
+                        raise RuntimeError(
+                            "forkrun: ingest scanner failed "
+                            "(status %r)" % (st,))
+                else:
+                    helpers["fallow_rc"] = st
+                    if not ok:
+                        lib.fr_py_abort()
+                        raise RuntimeError(
+                            "forkrun: ingest reaper failed "
+                            "(status %r)" % (st,))
+
+        def _pump():
+            # One spill quantum: drain the source until EAGAIN, then
+            # return False (more may come) — or True once source EOF is
+            # consumed and the ingest gate issued.
+            _watch_live()
+            if gate["issued"]:
+                return True
+            while True:
+                try:
+                    chunk = os.read(src_fd, _CHUNK)
+                except BlockingIOError:
+                    return False
+                except OSError as exc:
+                    raise RuntimeError(
+                        "failed reading source: %s" % (exc,))
+                if not chunk:
+                    if lib.fr_py_ingest_done() != RC_OK:
+                        raise RuntimeError("ingest signal failed")
+                    gate["issued"] = True
+                    return True
+                view = memoryview(chunk)
+                while view:
+                    try:
+                        n = os.write(memfd, view)
+                    except OSError as exc:
+                        raise RuntimeError(
+                            "failed writing ingress: %s" % (exc,))
+                    view = view[n:]
+            # unreachable
+
+        statuses: list = []
+        try:
+            for blob in _drain_records(lib, signal_r, out_fds, pids,
+                                       statuses, order=order, stats=stats,
+                                       pump=_pump):
+                yield blob
+        finally:
+            _teardown_stream(lib, pids, signal_r, out_fds, out_hold,
+                             memfd, src_fd, must_close,
+                             extra_pids=[p for p in (fallow_pid, scan_pid)
+                                         if p is not None])
+            memfd = None
+            signal_r = None
+            out_fds = []
+
+        failed = [s for s in statuses
+                  if not (os.WIFEXITED(s[1]) and os.WEXITSTATUS(s[1]) == 0)]
+        if failed:
+            raise RuntimeError(
+                "forkrun: %d/%d workers failed%s" % (
+                    len(failed), len(pids),
+                    " (on_error=%s)" % on_error))
+
+        if scan_pid is not None and helpers["scan_rc"] is None:
+            try:
+                _, scan_st = os.waitpid(scan_pid, 0)
+            except ChildProcessError:
+                scan_st = None
+            if scan_st is None or not (
+                    os.WIFEXITED(scan_st) and
+                    os.WEXITSTATUS(scan_st) == 0):
+                raise RuntimeError(
+                    "forkrun: ingest scanner failed (status %r)"
+                    % (scan_st,))
+        if fallow_pid is not None and helpers["fallow_rc"] is None:
+            try:
+                _, fallow_st = os.waitpid(fallow_pid, 0)
+            except ChildProcessError:
+                fallow_st = None
+            if fallow_st is not None and not (
+                    os.WIFEXITED(fallow_st) and
+                    os.WEXITSTATUS(fallow_st) == 0):
+                try:
+                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
+                             b"abnormally; ingress may not be fully "
+                             b"reclaimed.\n")
+                except OSError:
+                    pass
+
+        try:
+            npois = lib.fr_py_poisoned_count()
+        except Exception:
+            npois = 0
+        if npois:
+            try:
+                os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "
+                             "skipped (retry limit reached).\n" % npois
+                             ).encode())
+            except OSError:
+                pass
+    finally:
+        _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
+                         src_fd, must_close,
+                         extra_pids=[p for p in (fallow_pid, scan_pid)
+                                     if p is not None])
+
+
+def _ingest_stream_gen(payload, source, **kwargs):
+    # stream() over a streaming source: live drain interleaved with the
+    # spill (pump hook), same ordering contract as _stream_gen.
+    yield from _execute_ingest_stream(
+        payload, source,
+        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
+        workers=_resolve_workers(kwargs.get("workers")),
+        on_error=kwargs.get("on_error", "retry"),
+        mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
+        order=kwargs.get("order", "none"))
+
+
+def _new_ingress_memfd():
+    """Create the streaming-ingest memfd (parent writes, scanner + workers
+    read). Falls back to an anonymous temp file where memfd_create is
+    unavailable (same rationale as _spill_to_memfd). Returns (fd, hold)
+    where hold keeps a fallback file alive (empty for memfd)."""
+    try:
+        return os.memfd_create("forkrun_ingress"), []
+    except AttributeError:
+        import tempfile as _tf
+
+        tmp = _tf.TemporaryFile(prefix="forkrun_ingress_")
+        return tmp.fileno(), [tmp]
+
+
+def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
+                    on_error, collect, order, mode="python", nodes="auto"):
+    """Streaming-ingest entry for map/run (blocking, like _execute)."""
+    if mode != "python":
+        raise NotImplementedError(
+            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+    if not (nodes == "auto" or nodes == 1):
+        raise NotImplementedError(
+            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    # CUDA-fork hazard guard (W-PY5, same position as _execute).
+    hazard, message = check_cuda_hazard()
+    if hazard:
+        raise RuntimeError(message)
+    with _RUN_LOCK:
+        return _execute_ingest_locked(
+            payload, source, sink=sink, lines=lines, bytes_=bytes_,
+            workers=workers, on_error=on_error, collect=collect,
+            order=order)
+
+
+def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w):
+    """Fork the fallow reaper + scanner children (W-PY16).
+
+    Both run long-lived engine loops concurrently with the parent's
+    spill: the reaper punches holes behind the contiguous acked prefix
+    (bounded ingress), the scanner publishes batches as bytes land
+    (its pread loop waits on !ingest_complete — the bash topology).
+    Returns (fallow_pid, scan_pid). Children never return (os._exit).
+    The caller forks workers after; the parent closes its fallow copies
+    once every child exists (reaper EOF = workers' write ends only).
+    """
+    fallow_pid = os.fork()
+    if fallow_pid == 0:
+        try:
+            _close_all_except({fallow_r, memfd})
+            rc = lib.fr_py_fallow_loop(fallow_r, memfd)
+        except BaseException:
+            rc = 1
+        os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
+    scan_pid = os.fork()
+    if scan_pid == 0:
+        try:
+            _close_all_except({memfd})
+            rc = lib.fr_py_scan(memfd)
+        except BaseException:
+            rc = 1
+        os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
+    return fallow_pid, scan_pid
+
+
+def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
+                           workers, on_error, collect, order):
+    """map/run over a streaming source (W-PY16, collect/discard).
+
+    Pipeline: init → ingress memfd → output memfds → fallow pipe →
+    fork reaper + scanner → fork workers (file_size=-1, fallow_w) →
+    parent spills source in 1MB chunks (WNOHANG helper watches) →
+    ingest gate → waitpid workers → join scanner (strict) + reaper
+    (lenient) → poison summary → parse. Ingress stays bounded: the
+    reaper punches acked prefixes while the spill advances.
+    """
+    lib = load()
+    if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
+        raise RuntimeError("substrate init failed")
+
+    src_fd, must_close = _open_source(source)
+    memfd = None
+    mem_hold: list = []
+    out_fds: list = []
+    out_hold: list = []
+    fallow_r = fallow_w = None
+    fallow_pid = scan_pid = None
+    helpers = {"scan_rc": None, "fallow_rc": None}
+    gate_issued = False
+    pids: list = []
+    try:
+        memfd, mem_hold = _new_ingress_memfd()
+        try:
+            os.lseek(memfd, 0, os.SEEK_SET)
+        except OSError:
+            pass
+        if collect:
+            out_fds, out_hold = _new_output_memfds(workers)
+        fallow_r, fallow_w = os.pipe()
+
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+        fallow_pid, scan_pid = _fork_ingest_helpers(
+            lib, memfd, fallow_r, fallow_w)
+        for i in range(workers):
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    _close_all_except(
+                        {memfd, fallow_w} |
+                        ({out_fds[i]} if collect else set()))
+                except Exception:
+                    pass
+                worker_main(i, payload, sink, memfd, -1,
+                            out_fds[i] if collect else None, None,
+                            on_error, fallow_w)
+                os._exit(127)  # unreachable; worker_main exits
+            else:
+                pids.append(pid)
+        # Parent drops its fallow copies: reaper EOF then means every
+        # worker has exited (its own write end closed at _exit).
+        try:
+            os.close(fallow_r)
+        except OSError:
+            pass
+        fallow_r = None
+        try:
+            os.close(fallow_w)
+        except OSError:
+            pass
+        fallow_w = None
+
+        def _watch_helpers():
+            # Reap helper deaths mid-spill (nonblocking). Scanner death
+            # is fatal (unpublished tail would be silently lost);
+            # reaper death aborts too (acks would EPIPE and fail
+            # workers — fail fast instead of spilling pointlessly).
+            # Scanner exit 0 before the gate is equally fatal: it can
+            # only exit 0 via the EOF gate, so an early 0 means the
+            # tail it never saw is lost.
+            nonlocal gate_issued
+            for pid, name in ((scan_pid, "scanner"),
+                              (fallow_pid, "fallow")):
+                if pid is None:
+                    continue
+                try:
+                    wpid, st = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    continue
+                if wpid != pid:
+                    continue
+                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
+                if name == "scanner":
+                    helpers["scan_rc"] = st
+                    if not ok or not gate_issued:
+                        lib.fr_py_abort()
+                        raise RuntimeError(
+                            "forkrun: ingest scanner failed "
+                            "(status %r)" % (st,))
+                else:
+                    helpers["fallow_rc"] = st
+                    if not ok:
+                        lib.fr_py_abort()
+                        raise RuntimeError(
+                            "forkrun: ingest reaper failed "
+                            "(status %r)" % (st,))
+
+        try:
+            while True:
+                try:
+                    chunk = os.read(src_fd, _CHUNK)
+                except OSError as exc:
+                    raise RuntimeError(
+                        "failed reading source: %s" % (exc,))
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    try:
+                        n = os.write(memfd, view)
+                    except OSError as exc:
+                        raise RuntimeError(
+                            "failed writing ingress: %s" % (exc,))
+                    view = view[n:]
+                _watch_helpers()
+        except KeyboardInterrupt:
+            lib.fr_py_abort()
+            raise
+        if lib.fr_py_ingest_done() != RC_OK:
+            raise RuntimeError("ingest signal failed")
+        gate_issued = True
+
+        failed = []
+        try:
+            for pid in pids:
+                _, status = os.waitpid(pid, 0)
+                if not (os.WIFEXITED(status) and
+                        os.WEXITSTATUS(status) == 0):
+                    failed.append((pid, status))
+        except KeyboardInterrupt:
+            lib.fr_py_abort()
+            for pid in pids:
+                try:
+                    os.waitpid(pid, 0)
+                except Exception:
+                    pass
+            raise
+
+        if failed:
+            raise RuntimeError(
+                "forkrun: %d/%d workers failed%s" % (
+                    len(failed), len(pids),
+                    " (on_error=%s)" % on_error))
+
+        # Join the scanner (strict: unpublished tail is data loss) and
+        # the reaper (lenient warn: workers-OK implies acks landed; a
+        # late reaper death loses nothing).
+        if scan_pid is not None and helpers["scan_rc"] is None:
+            try:
+                _, scan_st = os.waitpid(scan_pid, 0)
+            except ChildProcessError:
+                scan_st = None
+            if scan_st is None or not (
+                    os.WIFEXITED(scan_st) and
+                    os.WEXITSTATUS(scan_st) == 0):
+                raise RuntimeError(
+                    "forkrun: ingest scanner failed (status %r)"
+                    % (scan_st,))
+        if fallow_pid is not None and helpers["fallow_rc"] is None:
+            try:
+                _, fallow_st = os.waitpid(fallow_pid, 0)
+            except ChildProcessError:
+                fallow_st = None
+            if fallow_st is not None and not (
+                    os.WIFEXITED(fallow_st) and
+                    os.WEXITSTATUS(fallow_st) == 0):
+                try:
+                    os.write(2, b"forkrun [WARN]: ingest reaper exited "
+                             b"abnormally; ingress may not be fully "
+                             b"reclaimed.\n")
+                except OSError:
+                    pass
+
+        try:
+            npois = lib.fr_py_poisoned_count()
+        except Exception:
+            npois = 0
+        if npois:
+            try:
+                os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "
+                             "skipped (retry limit reached).\n" % npois
+                             ).encode())
+            except OSError:
+                pass
+
+        if not collect:
+            return None
+        records = []
+        for fd in out_fds:
+            records.extend(_parse_records(_read_fd_all(fd)))
+        if order == "index":
+            records.sort(key=lambda kv: kv[0])
+        return [blob for _, blob in records]
+    finally:
+        for fd in out_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        out_hold.clear()
+        mem_hold.clear()
+        if fallow_r is not None:
+            try:
+                os.close(fallow_r)
+            except OSError:
+                pass
+        if fallow_w is not None:
+            try:
+                os.close(fallow_w)
+            except OSError:
+                pass
+        for pid in [fallow_pid, scan_pid]:
+            if pid is None:
+                continue
+            try:
+                wpid, _ = os.waitpid(pid, os.WNOHANG)
+                if wpid == 0:
+                    try:
+                        os.kill(pid, 9)
+                    except OSError:
+                        pass
+            except ChildProcessError:
+                pass
+        for pid in [fallow_pid, scan_pid]:
+            if pid is None:
+                continue
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+            except OSError:
+                pass
+        if memfd is not None:
+            try:
+                os.close(memfd)
+            except OSError:
+                pass
+        if must_close:
+            try:
+                os.close(src_fd)
+            except OSError:
+                pass
+        try:
+            lib.fr_py_destroy()
+        except Exception:
+            pass
 
 
 def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,

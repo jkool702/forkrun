@@ -31,8 +31,10 @@ import threading
 import traceback
 import warnings
 
-from ._bindings import RC_EOF, RC_FAIL, RC_OK, FrPyBatch, get
+from ._bindings import RC_EOF, RC_FAIL, RC_OK, FrPyBatch, get, v1_available
 from ._batch import Batch
+from ._plugin import PluginError
+from ._spawn import SpawnError
 
 _HDR = struct.Struct("<QQ")  # batch_idx u64, payload length u64
 # v1 streaming signal: (worker_id u64, batch_idx u64). Indices only — never
@@ -51,9 +53,41 @@ def _flush() -> None:
             pass
 
 
-def _ack(lib) -> int:
+def _cloexec_all() -> None:
+    """Mark every fd > 2 close-on-exec (W-PY13 v1 hygiene).
+
+    posix_spawn'd children must start with ONLY the dup2'd stdio (0/1):
+    inheriting the signal pipe write end, escrow/eventfds, or sibling
+    output memfds would let a daemonizing/long-lived command pin the
+    parent's EOF detection or leak engine fds. This is the v1 analogue
+    of subprocess close_fds=True (which already covers the v0 path).
+    CLOEXEC affects exec only — fork inheritance (memfds, pipes, mmaps
+    the worker itself uses) is untouched. Best-effort; never raises.
+    """
+    try:
+        try:
+            fds = [int(n) for n in os.listdir("/proc/self/fd")]
+        except (OSError, ValueError):
+            fds = list(range(3, 256))
+        for fd in fds:
+            if fd > 2:
+                try:
+                    os.set_inheritable(fd, False)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
+def _ack(lib, fallow_fd=-1) -> int:
     """Thread-guard + flush + ack. The single ack funnel: every ack site
-    warns on contract violation and flushes before acking."""
+    warns on contract violation and flushes before acking.
+
+    fallow_fd: W-PY16 streaming-ingest write end (parent-created,
+    inherited). >= 0 publishes the acked IndexPacket to the fallow
+    reaper (hole-punch behind the contiguous prefix → bounded ingress);
+    -1 is the materialized-path disarm (no reaper exists).
+    """
     if threading.active_count() > 1:
         try:
             warnings.simplefilter("always", RuntimeWarning)
@@ -65,7 +99,7 @@ def _ack(lib) -> int:
         except Exception:
             pass
     _flush()
-    return lib.fr_py_ack(-1, -1)
+    return lib.fr_py_ack(fallow_fd, -1)
 
 
 def _write_all(fd, buf) -> None:
@@ -116,7 +150,7 @@ def _coerce_result(ret):
 
 
 def worker_main(wid, payload_spec, sink_spec, memfd_fd, file_size,
-                out_fd, signal_w, on_error):
+                out_fd, signal_w, on_error, fallow_fd=None):
     """Child entry point. Never returns.
 
     out_fd: parent-created output memfd inherited across fork (W-PY3
@@ -130,11 +164,17 @@ def worker_main(wid, payload_spec, sink_spec, memfd_fd, file_size,
       only, never payload bytes. A blocked signal write IS the
       backpressure mechanism (pipe full => consumer slow); EPIPE means
       the parent abandoned the stream => fatal worker exit (reaped).
+    file_size: ingress size at fork; -1 (W-PY16) means streaming/unknown
+      — the worker grows its MAP_SHARED view as claims advance instead
+      of mapping once.
+    fallow_fd: W-PY16 reaper write end (or None to disarm). Acked
+      IndexPackets flow here; the reaper punches holes behind the
+      contiguous prefix, bounding ingress memory.
     """
     code = 1
     try:
         code = _run(wid, payload_spec, sink_spec, memfd_fd, file_size,
-                    out_fd, signal_w, on_error)
+                    out_fd, signal_w, on_error, fallow_fd)
     except BaseException:
         try:
             traceback.print_exc()
@@ -150,19 +190,109 @@ def worker_main(wid, payload_spec, sink_spec, memfd_fd, file_size,
 
 
 def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
-         signal_w, on_error):
+         signal_w, on_error, fallow_fd=None):
     lib = get()
     payload_fn = _resolve_payload(payload_spec)
     sink_fn = _resolve_payload(sink_spec) if sink_spec is not None else None
+    fallow_w = fallow_fd if fallow_fd is not None else -1
 
     if lib.fr_py_worker_init(wid, 0, 0, 3, 0) != 0:
         return 1
 
+    # W-PY13 v1 fast-path detection (once per worker). The factories tag
+    # their closures (spawn: _forkrun_spawn_argv, plugin: _forkrun_plugin);
+    # when the tag AND the C symbol are present (and a sink isn't stealing
+    # the output, and an output memfd exists to frame into), the claim loop
+    # below bypasses Python dispatch entirely: batch bytes stay in the
+    # shared memfd (zero-copy input), C frames the record, Python only
+    # signals + acks. Otherwise the v0 Batch path runs unchanged.
+    _v1 = v1_available(lib)
+    _spawn_argv = getattr(payload_fn, "_forkrun_spawn_argv", None)
+    _plugin_spec = getattr(payload_fn, "_forkrun_plugin", None)
+    use_v1_spawn = (_spawn_argv is not None and sink_fn is None and
+                    out_fd is not None and _v1["exec"])
+    # _forkrun_plugin_v1 (probed in the parent by make_plugin_payload):
+    # only dialect-1/2 plugins take the C path. A missing tag (or False)
+    # means the v0 72B convention — never guess (a 72B entry point and a
+    # legacy 2-arg entry point are symbol-indistinguishable).
+    use_v1_plugin = (not use_v1_spawn and _plugin_spec is not None and
+                     getattr(payload_fn, "_forkrun_plugin_v1", False) and
+                     sink_fn is None and out_fd is not None and
+                     _v1["plugin"])
+    argv_c = None
+    if use_v1_spawn:
+        import ctypes as _ctypes
+
+        _argv_b = [(a.encode("utf-8") if isinstance(a, str) else bytes(a))
+                   for a in list(_spawn_argv)]
+        argv_c = (_ctypes.c_char_p * (len(_argv_b) + 1))(*_argv_b, None)
+    # W-PY14: C-level output emit. Active whenever results are collected
+    # (out_fd present) and the symbol exists — orthogonal to the spawn/
+    # plugin dispatch above (those frame inside C and never reach the
+    # output block below). One ctypes call replaces header pack + two
+    # writes + signal pack/write; bytes returns pass their internal
+    # buffer pointer (zero-copy). FORKRUN_NO_V1 forces the v0 path.
+    use_emit = out_fd is not None and _v1["emit"]
+    if use_v1_spawn or use_v1_plugin:
+        _cloexec_all()
+
+    def _success(bidx):
+        """Signal (indices only) + ack. Shared by v0 and v1 paths."""
+        if out_fd is not None and signal_w is not None:
+            try:
+                _write_all(signal_w, _SIG.pack(wid, bidx))
+            except OSError:
+                return False  # parent gone (abandoned stream)
+        return _ack(lib, fallow_w) == 0
+
+    streaming = file_size is not None and file_size < 0
     mm = None
     view = None
-    if file_size > 0:
+    mapped = 0
+    if not streaming and file_size > 0:
         mm = mmap.mmap(memfd_fd, file_size, access=mmap.ACCESS_READ)
         view = memoryview(mm)
+        mapped = file_size
+
+    def _ensure_mapped(need):
+        """Grow the MAP_SHARED ingress view to cover [0, need) (W-PY16).
+
+        Streaming ingest grows the memfd after fork, so the worker maps
+        geometrically (1MB floor, doubling) instead of once. Runs
+        BETWEEN batches only: no Batch views are live here (the previous
+        batch was invalidated before ack), so replacing the mapping via
+        close + re-mmap is safe — same ordering rule the engine's
+        ring_call_ensure_ingress_map relies on. Punched (fallow)
+        prefixes are never re-read: only unacked windows are mapped
+        into Batches, and hole reads zero-fill regardless.
+        Returns True mapped, False on failure (fatal: the claim names
+        bytes the engine published, so this is unreachable in practice).
+        """
+        nonlocal mm, view, mapped
+        if need <= mapped:
+            return True
+        size = mapped * 2 if mapped else (1 << 20)
+        while size < need:
+            size *= 2
+        try:
+            if mm is not None:
+                try:
+                    view.release()
+                except (ValueError, BufferError, AttributeError):
+                    pass
+                view = None
+                mm.close()
+                mm = None
+            mm = mmap.mmap(memfd_fd, size, access=mmap.ACCESS_READ)
+            view = memoryview(mm)
+            mapped = size
+            return True
+        except (OSError, ValueError, BufferError):
+            # BufferError: the payload leaked a view past invalidate
+            # (Layer 3) and the old mapping can't close — fail loud
+            # (worker exit 1 → parent RuntimeError), never silently
+            # short. OSError/ValueError: mapping itself failed.
+            return False
 
     try:
         while True:
@@ -181,7 +311,7 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     os.write(2, msg.encode())
                 except OSError:
                     pass
-                if _ack(lib) != 0:
+                if _ack(lib, fallow_w) != 0:
                     return 1
                 continue
 
@@ -189,11 +319,74 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 # EOF sentinel slot (scanner publishes lines=0/len=0 past
                 # the last byte). Bash parity: `if REPLY != 0` skips the
                 # payload but still acks. Never delivered to Python.
-                if _ack(lib) != 0:
+                if _ack(lib, fallow_w) != 0:
                     return 1
                 continue
 
             line_count = (claimed.lines if claimed.lines > 0 else None)
+            if streaming:
+                # Unknown size at fork: grow the shared view to cover
+                # this claim (between-batch remap — no live views).
+                if not _ensure_mapped(claimed.offset + claimed.length):
+                    return 1
+            if use_v1_spawn or use_v1_plugin:
+                # v1: C-level dispatch (no Batch, no Python copy — the
+                # input window stays in the shared memfd; C already framed
+                # the record into out_fd). Flush BEFORE the call: fd 1 may
+                # be redirected by the plugin capture, so buffered Python
+                # output must land first (else it leaks into the record).
+                _flush()
+                error = None
+                if use_v1_spawn:
+                    rc = lib.fr_py_exec_spawn(
+                        argv_c, len(argv_c) - 1,
+                        claimed.offset, claimed.length,
+                        memfd_fd, out_fd, claimed.batch_idx)
+                    if rc == 0:
+                        if not _success(claimed.batch_idx):
+                            return 1
+                        continue
+                    if rc < 0:
+                        # Pipe/framing/wait failure: the worker's own
+                        # transport is broken (retry cannot fix it), and
+                        # the partial record was truncated in C — fatal
+                        # rather than a silently short stream.
+                        return 1
+                    error = SpawnError(
+                        "command %r exited with %d on batch %d" % (
+                            list(_spawn_argv), rc, claimed.batch_idx))
+                else:
+                    _ppath, _pfunc = _plugin_spec
+                    rc = lib.fr_py_plugin_call(
+                        _ppath.encode("utf-8"), _pfunc.encode("utf-8"),
+                        memfd_fd, out_fd,
+                        claimed.offset, claimed.length, claimed.batch_idx,
+                        claimed.lines, claimed.num_kills, wid, 0)
+                    if rc == 0:
+                        if not _success(claimed.batch_idx):
+                            return 1
+                        continue
+                    # Negative (dl/capture/tokenize failure) rides the
+                    # retry path too (v0 "wasteful but correct" doctrine:
+                    # bounded retries, then poison with warnings — never
+                    # a silent drop, never a whole-run abort for one
+                    # batch's failure). Only a dead signal pipe (_success
+                    # False above) is fatal infrastructure.
+                    error = PluginError(
+                        "plugin %s failed with code %d on batch %d" % (
+                            _pfunc, rc, claimed.batch_idx))
+                # --- failure path (bash -E analogue, shared with v0) ---
+                if on_error == "skip":
+                    if _ack(lib, fallow_w) != 0:
+                        return 1
+                    continue
+                if on_error == "fail-fast":
+                    _flush()
+                    lib.fr_py_abort()
+                    return 1
+                _flush()
+                lib.fr_py_escrow_deposit(claimed.num_kills + 1)
+                continue
             batch = Batch.from_window(
                 claimed.batch_idx, claimed.offset, claimed.length,
                 line_count, view if view is not None else memoryview(b""))
@@ -202,11 +395,12 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 # loop above already EOFs. This branch is unreachable but
                 # kept explicit so a 0-byte file cannot spin.
                 batch.invalidate()
-                if _ack(lib) != 0:
+                if _ack(lib, fallow_w) != 0:
                     return 1
                 continue
 
             error = None
+            emit_rc = None
             try:
                 ret = payload_fn(batch)
                 if sink_fn is not None:
@@ -219,12 +413,32 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         line_count=batch.line_count,
                         num_kills=claimed.num_kills)
                     sink_fn(meta, ret)
-                blob = _coerce_result(ret)
-                if blob is not None and out_fd is not None:
-                    _write_all(out_fd, _HDR.pack(batch.batch_index,
-                                                 len(blob)))
-                    if blob:
-                        _write_all(out_fd, blob)
+                if use_emit:
+                    # W-PY14: one C call replaces header pack + two
+                    # writes + signal pack/write. bytes pass their
+                    # internal buffer (zero-copy); anything else is
+                    # coerced once (validation + conversion preserved).
+                    # signal_w None (map/run) → -1 → signal skipped.
+                    if ret is None:
+                        data, data_len = None, 0
+                    elif isinstance(ret, bytes):
+                        data, data_len = ret, len(ret)
+                    else:
+                        blob = _coerce_result(ret)
+                        if blob is None:
+                            data, data_len = None, 0
+                        else:
+                            data, data_len = blob, len(blob)
+                    emit_rc = lib.fr_py_emit(
+                        out_fd, signal_w if signal_w is not None else -1,
+                        wid, batch.batch_index, data, data_len)
+                else:
+                    blob = _coerce_result(ret)
+                    if blob is not None and out_fd is not None:
+                        _write_all(out_fd, _HDR.pack(batch.batch_index,
+                                                     len(blob)))
+                        if blob:
+                            _write_all(out_fd, blob)
             except BaseException as exc:  # noqa: BLE001
                 error = exc
             finally:
@@ -234,24 +448,34 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     pass
 
             if error is None:
-                # v1 streaming signal (indices only) goes out AFTER the
-                # record bytes are visible and BEFORE ack: a worker blocked
-                # here holds an unacked batch, which is exactly the
-                # backpressure the hydraulic loop needs. Outside the payload
-                # try — a signal failure is infrastructure, never escrowed.
-                if out_fd is not None and signal_w is not None:
-                    try:
-                        _write_all(signal_w,
-                                   _SIG.pack(wid, batch.batch_index))
-                    except OSError:
-                        return 1  # parent gone (abandoned stream)
-                if _ack(lib) != 0:
-                    return 1
-                continue
+                if emit_rc is not None:
+                    # C emit path: output (+ signal, unless map/run)
+                    # already done. -2 (signal) is fatal infrastructure
+                    # (v0 parity); other nonzero (output) rides the
+                    # shared failure path like a Python write error.
+                    if emit_rc == -2:
+                        return 1
+                    if emit_rc != 0:
+                        error = OSError(
+                            "forkrun: output write failed on batch %d"
+                            % batch.batch_index)
+                    elif _ack(lib, fallow_w) != 0:
+                        return 1
+                    else:
+                        continue
+                else:
+                    # v1 streaming signal (indices only) goes out AFTER the
+                    # record bytes are visible and BEFORE ack: a worker blocked
+                    # here holds an unacked batch, which is exactly the
+                    # backpressure the hydraulic loop needs. Outside the payload
+                    # try — a signal failure is infrastructure, never escrowed.
+                    if not _success(batch.batch_index):
+                        return 1
+                    continue
 
             # --- failure path (bash -E analogue) ---
             if on_error == "skip":
-                if _ack(lib) != 0:
+                if _ack(lib, fallow_w) != 0:
                     return 1
                 continue
             if on_error == "fail-fast":

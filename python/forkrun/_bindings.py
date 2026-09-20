@@ -69,6 +69,41 @@ def _setup_signatures(lib) -> None:
     lib.fr_py_abort.restype = ctypes.c_int
     lib.fr_py_poisoned_count.argtypes = []
     lib.fr_py_poisoned_count.restype = ctypes.c_uint
+    # W-PY13 v1 fast paths (optional: absent on pre-v1 substrates — the
+    # worker falls back to v0 subprocess/ctypes dispatch). Guarded per
+    # symbol so a partial substrate never breaks signature setup.
+    try:
+        lib.fr_py_exec_spawn.argtypes = [
+            ctypes.POINTER(ctypes.c_char_p), ctypes.c_int,
+            ctypes.c_uint64, ctypes.c_uint64,
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint64]
+        lib.fr_py_exec_spawn.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        lib.fr_py_plugin_call.argtypes = [
+            ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_int,
+            ctypes.c_uint64, ctypes.c_uint64, ctypes.c_uint64,
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_int, ctypes.c_int]
+        lib.fr_py_plugin_call.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY14: C-level output emit (header + data via writev, signal).
+        lib.fr_py_emit.argtypes = [
+            ctypes.c_int, ctypes.c_int,
+            ctypes.c_uint64, ctypes.c_uint64,
+            ctypes.c_char_p, ctypes.c_uint64]
+        lib.fr_py_emit.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY16: fallow reaper (IndexPacket pipe → punch-hole memfd).
+        lib.fr_py_fallow_loop.argtypes = [ctypes.c_int, ctypes.c_int]
+        lib.fr_py_fallow_loop.restype = ctypes.c_int
+    except AttributeError:
+        pass
 
 
 def load(path: str | None = None):
@@ -123,4 +158,21 @@ def find_substrate() -> str:
         "'make -f Makefile.substrate python-substrate'")
 
 __all__ = ["FrPyBatch", "RC_OK", "RC_FAIL", "RC_EOF", "load", "get",
-           "find_substrate"]
+           "find_substrate", "v1_available"]
+
+
+def v1_available(lib=None) -> dict:
+    """W-PY13: which C-level fast paths the loaded substrate offers.
+
+    Returns {"exec": bool, "plugin": bool}. Missing symbols (pre-v1
+    .so) read as False — the worker then uses the v0 subprocess/ctypes
+    dispatch. Respects the FORKRUN_NO_V1 kill switch (test escape hatch
+    + operator override: forces v0 even when the symbols exist).
+    """
+    if lib is None:
+        lib = get()
+    if os.environ.get("FORKRUN_NO_V1"):
+        return {"exec": False, "plugin": False, "emit": False}
+    return {"exec": hasattr(lib, "fr_py_exec_spawn"),
+            "plugin": hasattr(lib, "fr_py_plugin_call"),
+            "emit": hasattr(lib, "fr_py_emit")}

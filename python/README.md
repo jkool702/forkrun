@@ -1,9 +1,9 @@
-# forkrun Python frontend — v0.2 (W-PY2)
+# forkrun Python frontend — v0.5.1 (W-PY15)
 
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
-`forkrun.__version__` is `"0.3.0"`; `forkrun.__engine_version__` reports the
+`forkrun.__version__` is `"0.5.1"`; `forkrun.__engine_version__` reports the
 substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build
@@ -68,12 +68,11 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
 
 ## Upgrade path (v0 → v1)
 
-- **Ordered streaming:** `stream()` yields completion order; ordered
-  streaming needs the C orderer (Stage 5 Phase 2).
-- **Ordered output:** parent-side reassembly over `batch_index` exists in
-  `map(order="index")`; the C orderer path lands with the emitter.
-- **NUMA multi-node / spawn / plugin modes:** Stage 5 (API already accepts
-  the surface; execution stages `NotImplementedError`).
+- **Ordered streaming:** `stream()` yields completion order, or
+  `batch_index` sequence with `order="index"` (parent-side reassembly;
+  landed W-PY7).
+- **Spawn/plugin v1 fast paths (W-PY13, landed):** C-level dispatch with
+  v0 fallback — see Modes. Remaining: NUMA multi-node.
 - **Resume UX, halt, TUI:** Stage 6 (demand-pulled).
 
 ## Modes
@@ -81,20 +80,37 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
 - `mode="python"` (default): payload is `"pkg.mod:func"` (imported
   post-fork in the worker) or a callable (fork-inherited, never pickled).
   Receives a `Batch`, returns `bytes`/`memoryview`/`str`/`None`.
-- `mode="spawn"` (W-PY8): payload is a COMMAND (`str` split on whitespace,
-  or `list` argv — use list form for anything quoting would be needed
-  for). Each batch is piped to the command's stdin; stdout captured as
-  the result. Non-zero exit / timeout (30s) / spawn failure →
-  `SpawnError` → escrow → retry → poison (bash `-E` semantics).
-  v0 uses Python `subprocess` (~1-5ms/batch overhead — documented; the
-  `posix_spawnp` C fast path is v1). For peak external-binary throughput
-  use the bash frontend (`frun -X`).
+  Output crosses via `fr_py_emit` (W-PY14): one C call writes the
+  header + body with `writev` (zero-copy for `bytes` returns) and the
+  signal; `None` emits no record, `b""` emits an empty one. Falls back
+  to Python writes under `FORKRUN_NO_V1=1`.
+- `mode="spawn"` (W-PY8, v1 in W-PY13): payload is a COMMAND (`str`
+  split on whitespace, or `list` argv — use list form for anything
+  quoting would be needed for). Each batch is spliced zero-copy from the
+  ingress memfd to the command's stdin; stdout captured as the result.
+  Non-zero exit / spawn failure → `SpawnError` → escrow → retry → poison
+  (bash `-E` semantics); missing command exits 127 (shell convention,
+  retryable — v0 parity). v1 dispatches in C (`fr_py_exec_spawn`:
+  `posix_spawnp` + concurrent poll pump, ~10µs overhead vs v0's ~350µs
+  `subprocess`); v0 remains as fallback (pre-v1 `.so`,
+  `FORKRUN_NO_V1=1`, `sink=` present, or discard mode). Measured
+  (i9-7940X): 2.1× at small batches (1.05M vs 0.49M lines/s,
+  `lines=100`); parity at adaptive batching (~24M both — command-bound).
+  v1 has no per-batch timeout (waits like bash `-X`; v0 keeps its 30s).
 - `mode="plugin"`: payload is `"path:function"` (C `.so` entry point).
-  v0 speaks a minimal Python-side C-callback convention (explicit
-  in/out buffers, 1MB fixed output buffer) — NOT the frozen engine ABI,
-  so v0 plugins are not interchangeable with bash `-C` plugins; v1
-  dispatches through the engine's `ring_call` and unifies the tiers.
-  Non-zero return → escrow → retry → poison, like all payload errors.
+  v1 (W-PY13) dispatches in C (`fr_py_plugin_call`) through the FROZEN
+  engine ABI (`forkrun_ctx`, 128B, dialect negotiated from the plugin's
+  `forkrun_use_ctx` exactly like `ring_call`): the plugin reads the
+  input window zero-copy (RAW borrowed window or `pread` on `fd_in`)
+  and writes stdout, which the shim stages and frames. **A bash `-C`
+  plugin works from Python unchanged and vice versa** (ABI unification).
+  v0 (72B `fr_py_plugin_ctx` ctypes convention) remains for plugins
+  WITHOUT a `forkrun_use_ctx` export — selected by parent-side probe,
+  never guessed. Measured: transform throughput ≈ v0 (0.8–1× on the
+  uppercase micro-bench — the capture staging costs what ctypes saves);
+  v1's wins are unification + zero-copy input + no per-batch input
+  allocation. Non-zero return → escrow → retry → poison, like all
+  payload errors.
 
 ```python
 forkrun.map("./myplugin.so:process", "data.txt", mode="plugin")
@@ -156,10 +172,23 @@ live CUDA context exists in the parent (fork would corrupt driver state).
   signal write holding unacked batches → claims stop (backpressure).
   `map()` stays on the v0.5 post-completion drain; `run()` (discard /
   worker-side sink) needs no drain at all.
+- **Pipe capacities (W-PY15):** the streaming signal pipe is 1MB
+  (65536 outstanding 16B signals vs 4096 at the 64KB default), and the
+  spawn stdin/stdout pipes are 1MB (batch-sized transfers without
+  intermediate blocking) — all best-effort via `F_SETPIPE_SZ` with
+  silent fallback (`forkrun/_pipes.py`). The engine ack pipe stays 4KB
+  by design (H3 backpressure invariant); escrow/death pipes untouched.
 - **Ordered streaming** (`stream(order="index")`): parent-side reassembly
   over `batch_idx` keys (bounded out-of-order buffer; poisoned-batch holes
   flush sorted at EOF — brief head-of-line blocking behind a hole is
   inherent). `order="none"` (default) yields completion order.
+- **C-level emit (W-PY14):** `fr_py_emit` replaces header pack + two
+  writes + signal pack/write with one call (`writev`, zero-copy `bytes`).
+  Measured ≈ v0 (±noise) — the remaining cost is payload-side copies
+  (`bytes(data).upper()`), not output syscalls; `map()`/`run()` already
+  skipped signals since W-PY7, so the only real saving is one syscall
+  per batch. Kept as permanent infra (fewer syscalls, exact v0
+  semantics incl. `None`-vs-`b""`).
 
 ## Layout
 

@@ -1,5 +1,67 @@
 # forkrun Changelog
 
+## v3.5.6 (unreleased)
+
+### Python frontend: pipe capacity optimization (W-PY15)
+
+- **Signal pipe 64KB → 1MB** (`forkrun/_pipes.py`, used by
+  `_execute_streaming`): 65536 outstanding 16B batch signals vs 4096 —
+  workers run further ahead of a moderately slow consumer before
+  backpressure stalls them. Best-effort `F_SETPIPE_SZ` with silent
+  fallback; fds stay non-inheritable (spawn hygiene preserved).
+- **Spawn stdin/stdout already 1MB** (set in `fr_py_exec_spawn` since
+  W-PY13) — verified by inspection, covered by a 3MB single-batch
+  pump test; no C change in this order.
+- **Untouched by design:** engine ack pipe (H3 4KB backpressure
+  invariant), escrow/death pipes, `forkrun_ring.c` (frozen).
+- Python `0.5.0` → `0.5.1`. 175 tests green (166 + 9 new
+  `test_pipes.py`); new `stream_slow_consumer` benchmark row.
+
+## v3.5.5 (unreleased)
+
+### Python frontend: C-level output emit (W-PY14)
+
+- **New `fr_py_emit`** (shim only): one C call per batch writes the
+  16-byte header + payload via `writev` (zero-copy for `bytes` returns)
+  plus the 16-byte signal; `signal_fd=-1` skips the signal (map/run),
+  `out_fd=-1` skips output (discard). Exact v0 semantics preserved
+  (`None` = no record, `b""` = empty record; output failure rides
+  escrow like a Python write error, signal failure stays fatal).
+- **Measured ≈ v0 (±noise), NOT the 63M→100M target — documented, not
+  claimed.** Upper map: 26.1M (emit) vs 23.7M (v0) adaptive; 18.6M vs
+  18.4M at lines=100 (i9-7940X). Cause: the remaining cost is
+  payload-side copies (`bytes(data).upper()`), not output syscalls, and
+  map/run already skipped signals since W-PY7 — the real saving is one
+  syscall per batch. Kept as permanent infra (fewer syscalls, exact
+  semantics); the 100M+ transform goal needs payload-side copies gone
+  (write-in-place `OutputBatch`, Stage 6+). New `emit_upper` benchmark
+  records the A/B permanently.
+- Python `0.4.0` → `0.5.0`. 166 tests green (150 + 16 new
+  `test_v1_emit.py`); engine frozen (zero `forkrun_ring.c` changes).
+
+## v3.5.4 (unreleased)
+
+### Python frontend: v1 spawn & plugin fast paths (W-PY13)
+
+- **Spawn v1** (`fr_py_exec_spawn`): C-level `posix_spawnp` + concurrent
+  poll pump — zero-copy splice ingress memfd → stdin, stdout staged to a
+  reused capture memfd then framed once. 2.1× at small batches (1.05M vs
+  0.49M lines/s, lines=100); parity at adaptive batching (~24M both —
+  command-bound). Missing command exits 127 (shell convention, retryable).
+- **Plugin v1** (`fr_py_plugin_call`): C-level dispatch through the FROZEN
+  128B `forkrun_ctx` (dialect from the plugin's `forkrun_use_ctx`, filled
+  exactly like `ring_call`) — **bash `-C` plugins run from Python
+  unchanged**. Throughput ≈ v0 on transform micro-benchmarks (0.8–1×);
+  wins are unification + zero-copy input + no per-batch input copy.
+- **Selection is automatic with v0 fallback** (symbol probe +
+  parent-side `forkrun_use_ctx` probe — the 72B v0 convention is never
+  misdispatched; `FORKRUN_NO_V1=1` forces v0). Caught in development: an
+  in-place header backfill that the concurrent streaming reader could
+  observe mid-write (whole-batch loss) — fixed by append-once framing;
+  every byte visible in an output memfd is final.
+- Python `0.3.0` → `0.4.0`. 150 tests green (129 existing + 21 new
+  `test_v1_fast.py`); engine frozen (zero `forkrun_ring.c` changes).
+
 ## v3.5.3 — 2026-09-20
 
 ### Python frontend: benchmark publication (W-PY11, W-PY12, measurement-only)
