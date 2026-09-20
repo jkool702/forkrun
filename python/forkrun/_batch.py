@@ -17,6 +17,11 @@ Layer 4 (sanctioned persistence): batch.copy() BEFORE invalidation. After
   retained Batch reference keeps only metadata (coordinates/kill count) so
   the finally path can deposit the escrow packet.
 
+CUDA: workers are CPU-only. The parent must not hold a live CUDA context
+at fork time (the spawn-time guard in _cuda_guard.py refuses with an
+actionable message). GPU work belongs in the parent or consumer, never
+in workers.
+
 Data plane: the worker mmaps the whole ingress memfd once (MAP_SHARED,
 zero-copy) and each Batch is a sliced memoryview over it. Offsets are lazy
 absolute plane coordinates (one-currency rule).

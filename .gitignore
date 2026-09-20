@@ -28,6 +28,14 @@ __pycache__/
 python/forkrun/libforkrun_python.so
 /forkrun_python_shim.o
 
+# Python packaging artifacts (pip wheel / setup.py build; never commit)
+python/forkrun.egg-info/
+python/build/
+python/dist/
+build/
+dist/
+*.egg-info/
+
 # C-plugin test suite: test_c_plugins*.sh COMPILE these at test time
 # (gcc ... -o test_basic.so), COPY the header from ring_loadables/, and
 # GENERATE the inputs from seq/find. Deliberately NOT a blanket "*.so" or
@@ -40,6 +48,9 @@ UNIT_TESTS/c_plugin_test/*.so
 UNIT_TESTS/c_plugin_test/forkrun_plugin.h
 UNIT_TESTS/c_plugin_test/input_*.txt
 UNIT_TESTS/c_plugin_test/*.tmp
+
+# Python plugin fixtures: test_plugin.py COMPILEs these at test time
+python/tests/plugins/*.so
 
 # Resume ledgers/checkpoints are per-run runtime state, not repo content
 .forkrun_resume

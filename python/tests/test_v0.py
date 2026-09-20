@@ -311,10 +311,13 @@ class TestPurity(unittest.TestCase):
         pkg = os.path.join(os.path.dirname(__file__), "..", "forkrun")
         offenders = []
         for name in ("run.py", "_worker.py", "_bindings.py", "_batch.py",
-                     "_api.py", "__init__.py"):
+                     "_api.py", "__init__.py", "_cuda_guard.py"):
             with open(os.path.join(pkg, name)) as fh:
                 src = fh.read()
-            for token in ("subprocess", "Popen", "import pickle",
+            # "subprocess." (with dot) bans direct subprocess CALLS in the
+            # transport files; the bare word still appears in prose.
+            # _spawn.py is exempt by design (sanctioned exec, own test).
+            for token in ("subprocess.", "Popen", "import pickle",
                           "from pickle", "cPickle", "os.system",
                           "frun.bash", "source ./frun",
                           "multiprocessing", "multiprocessing.Pipe",

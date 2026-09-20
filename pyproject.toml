@@ -1,0 +1,11 @@
+[build-system]
+# PEP 517: setuptools backend. The custom build_py step in setup.py
+# compiles the C substrate before packaging (see System dependencies
+# below). No network fetch beyond setuptools/wheel (both ubiquitous).
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# System dependencies (build-time only, not PyPI-installable):
+#   Fedora/RHEL: dnf install -y gcc make bash-devel python3-devel
+#   Debian/Ubuntu: bash headers are NOT packaged (no libbash-dev);
+#     use the Fedora container (same rule as Makefile.substrate canary).

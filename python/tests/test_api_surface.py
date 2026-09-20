@@ -90,14 +90,14 @@ class TestOptionValidation(unittest.TestCase):
             forkrun.stream("p:m", source="f", order="sorted")
 
     def test_v0_mode_gate(self):
-        # v0 implements mode="python" only; spawn/plugin stage before any
-        # engine contact (needs only a real-enough source path).
+        # All three modes dispatch (plugin loads eagerly and fails here
+        # on the bogus path — still before any engine contact).
+        from forkrun._plugin import PluginError  # noqa: PLC0415
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt") as fh:
             fh.write("a\n")
             fh.flush()
-            with self.assertRaises(NotImplementedError):
-                forkrun.run("p:m", source=fh.name, mode="spawn")
-            with self.assertRaises(NotImplementedError):
+            with self.assertRaises(PluginError):
                 forkrun.run("p:m", source=fh.name, mode="plugin")
 
 

@@ -17,6 +17,23 @@ The `.so` is built from `python/forkrun/_shim.c`, which textually includes
 `forkrun_ring.c` (same TU, so the engine's statics/TLS are visible) and adds
 non-static `fr_py_*` entry points. `forkrun_ring.c` itself is unmodified.
 
+## Install (W-PY10)
+
+```bash
+pip install .            # builds the substrate, installs the wheel
+```
+
+- No `src/` move: `package_dir={"": "python"}` maps `python/forkrun/`
+  to the wheel top-level; tests never ship (no `__init__.py` under
+  `python/tests/`). Version single-sources from `__version__`.
+- System build deps: `gcc make bash-devel` (Fedora; same rule as the
+  canary — Debian has no bash-headers package). `setup.py` drives
+  `Makefile.substrate` (single source of flags) with a documented
+  gcc fallback.
+- Linux-only: import raises `ImportError` off Linux (plan §4).
+- No PyPI upload in this work order — local wheel (`pip wheel .`)
+  only; reproducible-builds/signing gate the first PyPI release.
+
 ## Use
 
 ```python
@@ -29,7 +46,8 @@ forkrun.run(upper, "inputs.txt", workers=4)              # fire-and-forget
 forkrun.run(upper, "inputs.txt", sink=on_batch)          # payload-side sink
 results = forkrun.map(upper, "inputs.txt",               # batch-granular,
                       workers=4, order="index")          # ordered by batch_index
-for r in forkrun.stream(upper, "inputs.txt"): ...        # v0: over collected
+for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
+                                                         # yields while workers run
 ```
 
 - `payload`: `"pkg.mod:func"` (imported post-fork in the worker — keeps the
@@ -50,15 +68,57 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # v0: over collected
 
 ## Upgrade path (v0 → v1)
 
-- **True PIPE streaming (v1 emitter):** v0.5 drains output memfds after
-  workers complete; v1 drains while they run, closing the hydraulic
-  backpressure loop (parent reads slowly → pipe fills → acks block →
-  workers stall → ingest yields).
+- **Ordered streaming:** `stream()` yields completion order; ordered
+  streaming needs the C orderer (Stage 5 Phase 2).
 - **Ordered output:** parent-side reassembly over `batch_index` exists in
   `map(order="index")`; the C orderer path lands with the emitter.
 - **NUMA multi-node / spawn / plugin modes:** Stage 5 (API already accepts
   the surface; execution stages `NotImplementedError`).
 - **Resume UX, halt, TUI:** Stage 6 (demand-pulled).
+
+## Modes
+
+- `mode="python"` (default): payload is `"pkg.mod:func"` (imported
+  post-fork in the worker) or a callable (fork-inherited, never pickled).
+  Receives a `Batch`, returns `bytes`/`memoryview`/`str`/`None`.
+- `mode="spawn"` (W-PY8): payload is a COMMAND (`str` split on whitespace,
+  or `list` argv — use list form for anything quoting would be needed
+  for). Each batch is piped to the command's stdin; stdout captured as
+  the result. Non-zero exit / timeout (30s) / spawn failure →
+  `SpawnError` → escrow → retry → poison (bash `-E` semantics).
+  v0 uses Python `subprocess` (~1-5ms/batch overhead — documented; the
+  `posix_spawnp` C fast path is v1). For peak external-binary throughput
+  use the bash frontend (`frun -X`).
+- `mode="plugin"`: payload is `"path:function"` (C `.so` entry point).
+  v0 speaks a minimal Python-side C-callback convention (explicit
+  in/out buffers, 1MB fixed output buffer) — NOT the frozen engine ABI,
+  so v0 plugins are not interchangeable with bash `-C` plugins; v1
+  dispatches through the engine's `ring_call` and unifies the tiers.
+  Non-zero return → escrow → retry → poison, like all payload errors.
+
+```python
+forkrun.map("./myplugin.so:process", "data.txt", mode="plugin")
+```
+
+```python
+forkrun.map("gzip -c", "logs.txt", mode="spawn")
+forkrun.map(["sed", "s/old/new/"], "data.txt", mode="spawn")
+```
+
+## CUDA Policy (v0, W-PY5)
+
+Python workers are **CPU-only by default**. forkrun refuses to fork if a
+live CUDA context exists in the parent (fork would corrupt driver state).
+
+- **Importing torch is fine** — the guard (`dlopen(RTLD_NOLOAD)` +
+  `cuCtxGetCurrent`, `/proc/self/maps` fallback only when inconclusive)
+  fires on live contexts, not loaded libraries, so CUDA-virgin scripts
+  pass untaxed.
+- **Initializing CUDA before `run()` is refused** with an actionable
+  error naming the fix (spawn workers first, then init CUDA; GPU work
+  belongs in the parent/consumer).
+- Over-refusal is the safe direction; under-refusal causes UB. An
+  early-spawn escape hatch is demand-pulled Stage 6+, not a v0 feature.
 
 ## Robustness (W-PY4 characterization)
 
@@ -80,7 +140,7 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # v0: over collected
   `waitpid`, but inherit the full worker fd set in v0 (no scrubbing yet —
   recorded baseline for v1).
 
-## Result crossing (emitter, §3.9b v0.5)
+## Result crossing (emitter, §3.9b v0.5 → v1)
 
 - The parent creates one **output memfd per worker pre-fork** (a memfd
   created post-fork would exist only in the child's fd table); workers
@@ -89,9 +149,17 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # v0: over collected
 - The emitter **transports, it does not order**: `map(order="index")`
   reassembles parent-side over `batch_index` keys. No Python pipe/queue
   ever carries payload bytes; no pickle.
-- v0.5 drains after workers complete (bounded by OUTPUT size). True PIPE
-  streaming — parent drains while workers run, closing the hydraulic
-  backpressure loop — is v1.
+- **v1 streaming** (`stream()`): after each record the worker emits a
+  16-byte `(wid, batch_idx)` signal (indices only) down a pipe; the parent
+  `select()`s, `pread()`s the new bytes incrementally, and yields while
+  workers run. A slow consumer fills the pipe → workers block in the
+  signal write holding unacked batches → claims stop (backpressure).
+  `map()` stays on the v0.5 post-completion drain; `run()` (discard /
+  worker-side sink) needs no drain at all.
+- **Ordered streaming** (`stream(order="index")`): parent-side reassembly
+  over `batch_idx` keys (bounded out-of-order buffer; poisoned-batch holes
+  flush sorted at EOF — brief head-of-line blocking behind a hole is
+  inherent). `order="none"` (default) yields completion order.
 
 ## Layout
 

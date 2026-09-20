@@ -35,6 +35,9 @@ from ._bindings import RC_EOF, RC_FAIL, RC_OK, FrPyBatch, get
 from ._batch import Batch
 
 _HDR = struct.Struct("<QQ")  # batch_idx u64, payload length u64
+# v1 streaming signal: (worker_id u64, batch_idx u64). Indices only — never
+# payload bytes (<= PIPE_BUF, so one write is atomic across workers).
+_SIG = struct.Struct("<QQ")
 
 
 def _flush() -> None:
@@ -113,7 +116,7 @@ def _coerce_result(ret):
 
 
 def worker_main(wid, payload_spec, sink_spec, memfd_fd, file_size,
-                out_fd, on_error):
+                out_fd, signal_w, on_error):
     """Child entry point. Never returns.
 
     out_fd: parent-created output memfd inherited across fork (W-PY3
@@ -121,11 +124,17 @@ def worker_main(wid, payload_spec, sink_spec, memfd_fd, file_size,
       this fd — never shared between workers. Copy-on-return: payload
       bytes are copied into the memfd (stated v0 cost; write-in-place
       OutputBatch is demand-pulled Stage 6+).
+    signal_w: parent-created signal pipe write end (W-PY6 v1 streaming;
+      None for the v0.5 post-completion drain). After each record write
+      the worker emits one 16-byte (wid, batch_idx) signal — indices
+      only, never payload bytes. A blocked signal write IS the
+      backpressure mechanism (pipe full => consumer slow); EPIPE means
+      the parent abandoned the stream => fatal worker exit (reaped).
     """
     code = 1
     try:
         code = _run(wid, payload_spec, sink_spec, memfd_fd, file_size,
-                    out_fd, on_error)
+                    out_fd, signal_w, on_error)
     except BaseException:
         try:
             traceback.print_exc()
@@ -141,7 +150,7 @@ def worker_main(wid, payload_spec, sink_spec, memfd_fd, file_size,
 
 
 def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
-         on_error):
+         signal_w, on_error):
     lib = get()
     payload_fn = _resolve_payload(payload_spec)
     sink_fn = _resolve_payload(sink_spec) if sink_spec is not None else None
@@ -225,6 +234,17 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     pass
 
             if error is None:
+                # v1 streaming signal (indices only) goes out AFTER the
+                # record bytes are visible and BEFORE ack: a worker blocked
+                # here holds an unacked batch, which is exactly the
+                # backpressure the hydraulic loop needs. Outside the payload
+                # try — a signal failure is infrastructure, never escrowed.
+                if out_fd is not None and signal_w is not None:
+                    try:
+                        _write_all(signal_w,
+                                   _SIG.pack(wid, batch.batch_index))
+                    except OSError:
+                        return 1  # parent gone (abandoned stream)
                 if _ack(lib) != 0:
                     return 1
                 continue

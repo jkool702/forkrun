@@ -9,6 +9,8 @@ on:
       - "substratestubs.c"
       - "ring_loadables/forkrun_plugin.h"
       - "Makefile.substrate"
+      - "pyproject.toml"
+      - "setup.py"
       - ".github/workflows/python-check.yml"
   pull_request:
     branches: [ "main" ]
@@ -19,6 +21,8 @@ on:
       - "substratestubs.c"
       - "ring_loadables/forkrun_plugin.h"
       - "Makefile.substrate"
+      - "pyproject.toml"
+      - "setup.py"
       - ".github/workflows/python-check.yml"
 
   workflow_dispatch:
@@ -28,11 +32,12 @@ permissions:
 
 jobs:
   python-v0:
-    # W-PY1 Stage 4 Phase 1: build the Python-facing substrate and run the
-    # v0 engine tests. Fedora for everything (bash-devel exists there;
-    # ubuntu runners carry no bash headers package) — same rule as the
-    # canary step in forkrun_release.yml. Build artifacts are gitignored,
-    # so the workspace stays PR-clean.
+    # W-PY1 Stage 4 Phase 1 (+W-PY10 packaging): build the Python-facing
+    # substrate and run the full python suite (incl. the pip-install
+    # cycle test, which needs the pip toolchain). Fedora for everything
+    # (bash-devel exists there; ubuntu runners carry no bash headers
+    # package) — same rule as the canary step in forkrun_release.yml.
+    # Build artifacts are gitignored, so the workspace stays PR-clean.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -42,4 +47,4 @@ jobs:
             -v $PWD:/src \
             -w /src \
             fedora:latest \
-            bash -c 'dnf install -y bash-devel gcc make file python3 && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'
+            bash -c 'dnf install -y bash-devel gcc make file python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'

@@ -186,6 +186,99 @@
   codec incl. truncated-tail drops, fd-count helper. 21 new tests:
   64 green.
 
+- **W-PY6: true streaming emitter v1 (Stage 5 Phase 1, Python-only, C
+  frozen):** `stream()` yields WHILE workers run. After each memfd record
+  the worker emits a 16-byte `(wid, batch_idx)` signal (indices only —
+  pipe never carries payload bytes); the parent `select()`s, `pread()`s
+  new bytes incrementally (never `read`/`lseek`: the fd description is
+  shared with the writing child), and yields in completion order. Slow
+  consumer fills the pipe → workers block in the signal write holding
+  unacked batches → claims stop (backpressure); abandoning the generator
+  EPIPEs blocked writers and reaps everything (verified ECHILD, no
+  leaks). `map()` stays on the v0.5 post-completion drain, `run()`
+  needs no drain; no `streaming=` param was added (`run`'s
+  discard/worker-sink semantics have nothing to stream). 6 tests
+  (incremental first-yield, line-multiset exactness, empty, None-return,
+   50MB-output slow-consumer parent peak <60MB, streaming within 2.5x of
+   collect): 77 green.
+
+- **W-PY7: ordered streaming (Stage 5 Phase 2, Python-only, C frozen):**
+  `stream(order="index")` reassembles parent-side over the records'
+  batch_idx keys (`_reassembly.py`: add/drain/final_drain + max_size
+  diagnostic; drain loop gains order/stats, still yielding blobs).
+  Two deviations: no `advance_past_gap` — the parent has no
+  poisoned-index channel (only a scalar count), and EOF-anchored final
+  flush sorted already skips holes with zero stall risk, subsuming it;
+  and no hard `(workers×2)+1` cap — a poisoned head-of-line legitimately
+  buffers everything after it, so any cap risks data loss (max_size is
+  diagnostic, not a limit). 10 tests: buffer mechanics (ordered add,
+  hole-skip final drain, diagnostics), in-sequence/unique indices,
+  unordered regression, ordered==map byte equality, idx-gated-sleep
+  bound (max ≥3, < total), deterministic poison hole (lines=500 fixed →
+  exactly batch 50 of 100; yields all-but-50, max ≥49), empty,
+  single-batch: 87 green.
+
+- **W-PY8: Mode 2 spawn — external binaries (Stage 5 Phase 3,
+  Python-only, C frozen):** `mode="spawn"` executes a command per batch
+  (str split on whitespace, or list argv) via Python `subprocess`
+  (`_spawn.py`: batch bytes on stdin, stdout captured, 30s timeout;
+  non-zero/timeout/not-found → `SpawnError` → escrow/retry/poison).
+  Dispatch coerces eagerly in `run`/`map`/`stream` (spawn+callable raises
+  `ValueError` on call, preserving eager validation) and normalizes to
+  the engine path — claim/ack/emitter/reassembly never branch on mode.
+  Stdin-pipe input transport is inherent to exec and explicitly
+  sanctioned; the §3.9 rule governs results (unchanged memfd path).
+  v0 overhead ~1-5ms/batch documented (C `posix_spawnp` fast path is v1;
+  `frun -X` for peak). 12 tests (validation incl. `_spawn` hygiene,
+  cat/gzip/sed-list, mixed grep continuation, not-found poison,
+  stdout-only, empty, stream, ordered==map): 99 green.
+
+- **W-PY9: Mode 3 plugin — C callbacks (Stage 5 Phase 4, Python-only, C
+  frozen):** `mode="plugin"` takes `"path:function"`, dlopens pre-fork
+  and calls per batch through ctypes (`_plugin.py`: explicit in/out
+  buffers, lazily allocated 1MB output buffer reused per worker,
+  non-zero → `PluginError` → escrow/retry/poison). ABI honesty: the v0
+  struct is a deliberately separate Python-side convention
+  (`fr_py_plugin_ctx`, 72B, explicit pad) — NOT the frozen 128-byte
+  engine ABI, whose argv/stdout mechanism belongs to `ring_call`;
+  reimplementing it in Python would duplicate C-owned mechanism. Pinned
+  two-sided (C `_Static_assert`s + exact ctypes offsets, incl. the
+  `n > out_len` strictness edge). Two findings while implementing: the
+  order's sketch mismatches the frozen header field-for-field, and its
+  oversize test is unreachable — engine byte batches clamp to
+  min(L2, 1MB), so the -2 arm is defense-in-depth (boundary test locks
+  1MB-exact success instead). 14 tests (loading ×4, layout pin, basic,
+  batch_idx identity, poison, validation ×2, empty, stream, ordered==map,
+  1MB boundary): 113 green. v1 unifies via `ring_call`; zero-copy input
+  and dialect negotiation ride along.
+
+- **W-PY10: Python packaging (Python-only, no engine/library changes):**
+  `pyproject.toml` + `setup.py` (`pip install .` / `pip wheel .`), no
+  `src/` restructure (`package_dir={"": "python"}`, tests never ship),
+  version single-sourced from `__version__` (0.2.0), build_py compiles
+  the substrate via `Makefile.substrate` (single flag source; gcc
+  fallback), Linux-only fail-fast import (plan §4), no PyPI upload.
+  Two corrections: the order's `src/` move is churn without function,
+  and its `0.1.0` contradicts the shipped `0.2.0`. 5 tests (Linux
+  import, faked-platform guard refusal, setup.py--version parity,
+  in-place .so, full wheel→isolated-target→subprocess-run cycle):
+  118 green.
+
+- **W-PY5: spawn-time CUDA hazard guard (Stage 4 final item, Python-only,
+  C frozen):** `python/forkrun/_cuda_guard.py` (tri-state detection:
+  `dlopen(RTLD_NOLOAD)` + `cuCtxGetCurrent` primary — refuses only on a
+  live context so torch-importing-but-virgin scripts pass untaxed;
+  `/proc/self/maps` fallback consulted ONLY when the primary is
+  inconclusive, never overriding a definitive answer), enforced in
+  `_execute()` before engine contact or fork with an actionable refusal
+  (names the fix: spawn before CUDA init; early-spawn is Stage 6+, not
+  advertised as available). Two corrections while implementing: the
+  order's `ctypes.RTLD_NOLOAD` does not exist (it lives on `os`), and its
+  fallback reading would over-refuse virgin scripts. 7 contract tests
+  (clean import, actionable message, tri-state precedence lock-in via
+  mock, virgin-torch and live-CUDA subprocess drivers, simulated-hazard
+  run refusal, real-run integration): Stage 4 complete.
+
 ## v3.5.1 — 2026-09-17
 
 Porting-plan preconditions (v1.3 §2.0) that ship unconditionally as bugfixes,

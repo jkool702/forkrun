@@ -8,6 +8,15 @@ DataLoader idiom), which is the point of the convenience wrappers. `import
 forkrun` does not shadow anything at the call site of the importer.
 """
 
+import sys as _sys
+
+if _sys.platform != "linux":
+    raise ImportError(
+        "forkrun requires Linux (got %s). The C substrate uses "
+        "Linux-specific syscalls (memfd_create, splice, fallocate)."
+        % _sys.platform)
+del _sys
+
 from forkrun._api import RunConfig  # noqa: F401
 # Private in _api (not part of the v0 surface); re-exported here only so the
 # Stage 0 harness and tests can assert validation without reaching into _api.
