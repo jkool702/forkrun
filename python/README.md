@@ -3,7 +3,7 @@
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
-`forkrun.__version__` is `"0.2.0"`; `forkrun.__engine_version__` reports the
+`forkrun.__version__` is `"0.3.0"`; `forkrun.__engine_version__` reports the
 substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build

@@ -1,5 +1,33 @@
 # forkrun Changelog
 
+## v3.5.3 — 2026-09-20
+
+### Python frontend: benchmark publication (W-PY11, W-PY12, measurement-only)
+
+- **182M lines/s** no-op at 10M lines (bring-up amortized; 102M at 1M).
+  Claim/ack via ctypes bypasses bash variable binding.
+- **6.4× faster than serial Python** on transforms (63M vs 9.8M);
+  **21.5× over multiprocessing.Pool** at large scale (zero-copy fork
+  inheritance vs pickle/IPC).
+- **3.6M JSONL records/s**, 31M filter, 50M aggregation — production
+  data-prep rates, stable across scales.
+- **1.8× faster streaming than collection** at 10M (pipelining
+  discovered benefit; 1.4× at 1M); ordered-vs-unordered 1.34x.
+- **Flat RSS** across 8× stream growth (no output); 39–175MB observed
+  on fixed 50MB slow-consumer output (variance disclosed in
+  `python/benchmarks/results/large.md`, under investigation).
+- **14–15M lines/s spawn mode** (adaptive batching amortizes
+  subprocess); 43–54M plugin ctypes callbacks.
+- Attributable CPU% per headline row (children-CPU method — system-wide
+  /proc/stat rejected as noise on shared boxes); v0.5 reads
+  overhead-bound at 10M (parent collect serial), documented honestly.
+- New: `python/benchmarks/run_all.py` (table + CSV, --scale/--trials/
+  --filter/--list), `make bench[-small|-large|-csv]`, CPU% column,
+  `python/benchmarks/results/large.{md,csv}`, README side-by-side
+  tables + "What These Benchmarks Do NOT Measure".
+- Python `0.2.0` → `0.3.0`. 121 tests green; engine frozen (zero C
+  changes since v3.5.2). Tag message ready (owner creates the tag).
+
 ## v3.5.2 (unreleased)
 
 - **W-RAW: C-plugin raw window delivery (`FORKRUN_CTX_FLAG_RAW` live):**
@@ -251,6 +279,23 @@
   batch_idx identity, poison, validation ×2, empty, stream, ordered==map,
   1MB boundary): 113 green. v1 unifies via `ring_call`; zero-copy input
   and dialect negotiation ride along.
+
+- **W-PY11: Python benchmark suite (measurement-only, no lib/engine
+  changes):** `python/benchmarks/` (harness + throughput/memory/fault/
+  baselines/niches + `run_all.py` CLI with --scale/--trials/--filter/
+  --list/--csv) plus `make bench[-small|-large|-csv]` targets. Corrects
+  five sketch bugs (missing imports incl. a `run_all` NameError, empty
+  table crash, deprecated `mktemp`, `memoryview.split`, loop-closure
+  batch-size leak) and right-sizes the mp baseline to small scale.
+  Harness unit-tested (`tests/test_bench.py`, engine-free). First
+  numbers, medium/1M (i9-7940X 28c, median of 5): no-op 102M/s all
+  paths, upper 52M, sum 45M, plugin 43M, spawn cat/tr ~14.6M (batches
+  amortize subprocess — 100x over the sketch's guess), stream 0.70x
+  of map (faster, no collect), ordered 1.01x, 4.6x vs serial / 12.6x
+  vs Pool, JSONL 3.4M, RSS flat +0MB (1→8MB), slow-consumer 61MB peak
+  on 50MB output. Fault inversion documented: faulty runs score higher
+  lines/s because poisoned batches skip payload work. 8 harness tests:
+  126 green.
 
 - **W-PY10: Python packaging (Python-only, no engine/library changes):**
   `pyproject.toml` + `setup.py` (`pip install .` / `pip wheel .`), no

@@ -53,7 +53,7 @@ class TestPackaging(unittest.TestCase):
             capture_output=True, text=True, timeout=120, cwd=REPO_ROOT)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), forkrun.__version__)
-        self.assertEqual(forkrun.__version__, "0.2.0")
+        self.assertEqual(forkrun.__version__, "0.3.0")
 
     def test_so_present_in_place(self):
         pkg_dir = os.path.dirname(os.path.abspath(forkrun.__file__))

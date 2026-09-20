@@ -39,7 +39,7 @@ PY_SHIM_OBJ = forkrun_python_shim.o
 
 all: canary
 
-.PHONY: all canary check clean python-substrate FORCE
+.PHONY: all canary check clean python-substrate FORCE bench bench-small bench-large bench-csv
 
 # Rewritten only when the compiler identity/options actually change, so its
 # mtime bumps exactly when dependent objects must rebuild.
@@ -75,6 +75,19 @@ $(PY_OUT): $(PY_SHIM_OBJ) $(CANARY_STUBS)
 python-substrate: $(PY_OUT)
 	@file $(PY_OUT) | sed 's/^/python substrate artifact: /'
 	@echo "python-substrate OK: $(PY_OUT)"
+
+bench: python-substrate
+	python3 python/benchmarks/run_all.py --scale medium --trials 3
+
+bench-small: python-substrate
+	python3 python/benchmarks/run_all.py --scale small --trials 2
+
+bench-large: python-substrate
+	python3 python/benchmarks/run_all.py --scale large --trials 5
+
+bench-csv: python-substrate
+	python3 python/benchmarks/run_all.py --scale medium --trials 5 \
+		--csv benchmarks/python/results_pybench.csv
 
 canary: $(OUT)
 	@file $(OUT) | sed 's/^/canary artifact: /'

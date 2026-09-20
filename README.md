@@ -60,6 +60,47 @@ frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output na
 - **forkrun:** ~90% aggregate (27.1 / 28 cores in steady-state default mode = 97%; 27.6/28 = 98.6% for default-mode sustained runs at ≥1B-line scale (100M-scale measures 24.5–25.5/28 for default -X); `-U` unsafe runs hit 27.1+/28; `-b 512k` on 100 MB intentionally ~2.6/28) — *No centralized dispatcher; all cores do actual work when work exists.*
 - **GNU Parallel:** 9.6% total (2.68 / 28 cores), 6% useful work (1.68 / 28) — *1 full core used strictly for dispatching work; 1.68 cores doing actual work.*
 
+### Python Frontend (forkrun v0.3.0 — `python/`)
+
+*10M lines (large), median of 5, same i9-7940X class hardware. Method: `python/benchmarks/` (`run_all.py --scale large`). CPU% = attributable process-tree CPU (self + reaped children) over wall × cores — not system-wide. Full record: `python/benchmarks/results/large.md` + `large.csv`.*
+
+| Workload | forkrun Python | Baseline | Speedup | CPU% | Notes |
+|----------|---------------|----------|---------|------|-------|
+| Python no-op (map) | **182 M lines/s** | — | — | 6% | claim/ack via ctypes; overhead-bound at 10M, not compute-bound |
+| Python transform (upper) | **63 M lines/s** | 9.8 M/s serial | **6.4×** | 7% | `bytes(batch.data).upper()`; parent collect is the serial bottleneck |
+| Python compute (sum) | **53 M lines/s** | — | — | 21% | `sum(memoryview)` |
+| C plugin callback | **54 M lines/s** | — | — | 11% | ctypes → C function |
+| Spawn external (`cat`) | **15.1 M lines/s** | — | — | 12% | subprocess amortized by batching |
+| JSONL ingestion | **3.6 M records/s** | — | — | 27% | `json.loads` per record; highest CPU (payload-bound) |
+| Filter + transform | **31 M lines/s** | — | — | — | grep-like + upper |
+| Aggregation (sum) | **50 M lines/s** | — | — | — | int parse + sum |
+
+*Unmeasured cells show "—" (pool baselines are small-scale-only by design; per-row CPU was sampled on headline rows). No-op/upper/sum hold or improve from 1M (102→182M), i.e. fixed bring-up amortizes.*
+
+| Scenario | Input | Output | Peak RSS | Notes |
+|----------|-------|--------|----------|-------|
+| No output (discard) | 1→8MB | 0 | **+0MB** | perfectly flat, both scales |
+| map (collect-all) | 1→8MB | 1→8MB | **output-sized** | v0.5 design |
+| stream, slow consumer | 10MB | 50MB | **~40–175MB peak** | bounded by window, not stream; spread across runs under investigation (see `large.md`) |
+| stream, 5× amplification | 2MB | 10MB | **bounded** | backpressure active |
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| stream() vs map() | **1.8× faster** | drain overlaps produce (no collect); 1.4× at 1M |
+| ordered vs unordered | **1.34×** | reassembly cost grows with batch count (1.01× at 1M) |
+| First yield latency | **~7ms** | on a 0.5s job |
+
+### What These Benchmarks Do NOT Measure
+
+- **NUMA multi-node scaling** — single-node only; NUMA is Stage 5 P5.
+- **TB-scale streaming** — v0 materializes input; streaming ingest is v1.
+- **aarch64** — x86_64 only; ARM legs are run manually on hardware.
+- **GPU workloads** — workers are CPU-only by design; GPU work belongs in the parent.
+- **Sub-100k-line jobs** — fixed ~30ms bring-up dominates; use serial Python.
+- **Spawn vs bash `-X`** — Python `subprocess` (~1–5ms/batch) vs `posix_spawnp` (~10µs); bash wins for external binaries by design.
+- **Cold I/O** — inputs are page-cached/tmpfs; cold disk adds a floor both sides.
+- **Pool baselines at scale** — `multiprocessing.Pool` rows are small-scale only (per-line pickling would blow the budget proving nothing new).
+
 ---
 
 ## 🧠 How It Works: The Physics of forkrun
