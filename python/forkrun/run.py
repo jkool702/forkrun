@@ -88,6 +88,158 @@ _CHUNK = 1 << 20
 REACTOR_RESPAWN_CAP = 3
 
 
+def _require_numa_symbol():
+    """Raise a clear error when the substrate predates the NUMA stages
+    (pre-W-PY21 .so): nodes=@N has no UMA fallback (per-node rings
+    cannot be emulated by the single-ring engine)."""
+    from ._bindings import v1_available as _v1a
+
+    if not _v1a()["numa"]:
+        raise RuntimeError(
+            "nodes=@N/multi-node needs the NUMA substrate "
+            "(fr_py_init_numa et al.) — rebuild it ('make -f "
+            "Makefile.substrate python-substrate')")
+
+
+def _resolve_numa(nodes):
+    """Resolve nodes= into (numa_map_str, num_nodes, node_cpus).
+
+    Raises ValueError on malformed specs (via _numa.build_numa_map).
+    num_nodes == 1 means UMA (existing paths); > 1 means the NUMA
+    pipeline executors below.
+    """
+    from ._numa import build_numa_map
+
+    return build_numa_map(nodes)
+
+
+def _require_drain_symbol():
+    """Raise a clear error when the substrate predates the C drain
+    (pre-W-PY21-A .so): c_drain=True has no Python equivalent at
+    zero per-result cost — fall back with c_drain=False."""
+    from ._bindings import v1_available as _v1a
+
+    if not _v1a().get("drain"):
+        raise RuntimeError(
+            "c_drain=True needs fr_py_drain_loop — rebuild "
+            "the substrate ('make -f Makefile.substrate "
+            "python-substrate')")
+
+
+def _validate_c_drain(c_drain):
+    """Normalize the W-PY21-A drain flag (None → False default).
+
+    Measured (medium scale, same box, alternating medians): the C
+    drain runs 0.7-1.0x of the legacy Python drain — never faster.
+    Structural reason: the parent must parse every record either
+    way, the Python signal reads are already batched (4096/64KB
+    read), and the drain adds a full extra transit of the output
+    bytes (out memfd → results → parent vs pread direct). The
+    work order's ≥1.5x premise is therefore falsified, and the
+    default stays legacy (opt-in True) so no user regresses. The
+    drain remains available and byte-identical as substrate for a
+    future design that also moves consumption client-side.
+
+    The FORKRUN_NO_V1 escape hatch forces legacy paths (it masks
+    every fast-path symbol, drain included): under it the default
+    is likewise False. An explicit True with the hatch set still
+    raises via _require_drain_symbol (asking for the drain while
+    masking its symbol is a contradiction).
+    """
+    if c_drain is None:
+        return False
+    if isinstance(c_drain, bool):
+        return c_drain
+    raise TypeError(
+        "c_drain must be None, True, or False, got %r" % (c_drain,))
+
+
+def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
+    """Fork the C drain child (W-PY21-A data path separation).
+
+    signal_r: read end of the 16B (wid, batch_idx) signal pipe.
+      Ownership transfers to the drain: the parent MUST close its
+      copy right after this returns (drain EOF = every write end
+      closed = all workers exited + no parent spare/write copy).
+    out_fds: parent-created per-worker output memfds (drain preads
+      them; created pre-fork so both workers and drain inherit).
+    workers: worker count (wid validity bound for the drain).
+    mode "memfd": returns (pid, results_memfd) — drain appends
+      framed bytes; parent reads once at end (map/run).
+    mode "pipe": returns (pid, results_r) — 1MB results pipe the
+      parent reads incrementally (stream); a full pipe blocks the
+      drain → workers block on signal write → claims stop (the
+      hydraulic backpressure loop extended through the drain).
+      The parent's write copy is closed inside.
+
+    The drain scrubs to {signal_r, results} + out_fds (pure
+    pread/write syscalls — no engine contact, no engine fds) and
+    never returns (os._exit with the fr_py_drain_loop rc).
+    """
+    import ctypes as _ctypes
+
+    from ._bindings import get as _get
+    from ._fd_scrub import scrub_fds as _scrub
+
+    if not out_fds or workers < 1:
+        raise ValueError(
+            "c_drain needs per-worker output memfds")
+    if mode not in ("memfd", "pipe"):
+        raise ValueError("drain mode must be 'memfd' or 'pipe'")
+
+    lib = _get()
+    if mode == "memfd":
+        try:
+            results_fd = os.memfd_create("forkrun_results")
+        except AttributeError:
+            import tempfile as _tf
+            _tmp = _tf.TemporaryFile(prefix="forkrun_results_")
+            _fork_drain._tmp_hold.append(_tmp)
+            results_fd = _tmp.fileno()
+        results_r = None
+    else:
+        results_r, results_w, _ = make_pipe()
+        results_fd = results_w
+
+    arr = (_ctypes.c_int * len(out_fds))(*out_fds)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            keep = {signal_r, results_fd} | set(out_fds)
+            _scrub(keep)
+        except Exception:
+            pass
+        if mode == "pipe":
+            try:
+                os.close(results_r)
+            except OSError:
+                pass
+        try:
+            rc = lib.fr_py_drain_loop(signal_r, arr, workers,
+                                      results_fd,
+                                      1 if mode == "pipe" else 0)
+        except BaseException:
+            rc = 1
+        os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
+
+    # Parent: signal_r belongs to the drain now; pipe mode also
+    # drops the results write end (drain owns it).
+    try:
+        os.close(signal_r)
+    except OSError:
+        pass
+    if mode == "pipe":
+        try:
+            os.close(results_w)
+        except OSError:
+            pass
+        return pid, results_r
+    return pid, results_fd
+
+
+_fork_drain._tmp_hold = []
+
+
 def _validate_orchestrator(orchestrator):
     """Validate the W-PY19 orchestrator flag (None/True/False only)."""
     if orchestrator is None or isinstance(orchestrator, bool):
@@ -378,7 +530,8 @@ def _detect_streaming(source, streaming):
 
 def run(payload, source, *, mode="python", sink=None, order="none",
         lines=None, bytes=None, workers=None, nodes="auto",
-        on_error="retry", streaming=None, orchestrator=None):
+        on_error="retry", streaming=None, orchestrator=None,
+        c_drain=None):
     """Run payload over source in parallel. See module docstring for v0 scope.
 
     mode="python": payload is "pkg.mod:func" | callable (Batch -> bytes).
@@ -398,17 +551,43 @@ def run(payload, source, *, mode="python", sink=None, order="none",
       trap-ACK confirmation, C orderer for order="index"). False =
       current behavior explicitly. The reactor is additive: identical
       results, stronger fault tolerance.
+    nodes: None/"auto" (default) = detect topology (single-socket →
+      UMA, unchanged); 1 = force UMA; N = first N physical nodes;
+      "0,1" = explicit physicals; "@N" = N forced logical nodes
+      (W-PY21 NUMA pipeline with per-node rings, born-local ingest,
+      CPU pinning; testing-friendly on single-socket).
+    c_drain: None (default False, opt-in True) = forked C loop
+      moves result bytes (W-PY21-A data/control separation);
+      False = legacy parent-side drain. Byte-identical either way;
+      measured 0.7-1.0x of legacy (see _validate_c_drain).
     """
     _validate(payload, source, mode=mode, sink=sink, order=order,
               lines=lines, bytes_=bytes, workers=workers, nodes=nodes,
               on_error=on_error, streaming=streaming)
     orchestrator = _validate_orchestrator(orchestrator)
+    c_drain = _validate_c_drain(c_drain)
     if mode not in ("python", "spawn", "plugin", "splice"):
         raise NotImplementedError(
             "unknown mode %r" % (mode,))
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    numa_map_str, num_nodes, node_cpus = _resolve_numa(nodes)
+    if num_nodes > 1:
+        # NUMA pipeline (ingest owns the source — files and pipes
+        # uniformly; no materialized/streaming split here).
+        _require_numa_symbol()
+        payload, mode = _coerce_payload(payload, mode)
+        if mode == "splice":
+            raise ValueError(
+                "mode='splice' produces output records — use map() or "
+                "stream() (payload=None, bytes=N).")
+        with _RUN_LOCK:
+            _execute_numa_locked(
+                payload, source, sink=sink, lines=lines, bytes_=bytes,
+                workers=_resolve_workers(workers), on_error=on_error,
+                collect=False, order=order, mode=mode,
+                numa_map=numa_map_str, num_nodes=num_nodes,
+                node_cpus=node_cpus, c_drain=c_drain)
+        return None
+    nodes = 1
     payload, mode = _coerce_payload(payload, mode)
     if mode == "splice":
         raise ValueError(
@@ -421,23 +600,24 @@ def run(payload, source, *, mode="python", sink=None, order="none",
                     payload, source, sink=sink, lines=lines,
                     bytes_=bytes, workers=_resolve_workers(workers),
                     on_error=on_error, collect=False, order=order,
-                    mode=mode, nodes=nodes)
+                    mode=mode, nodes=nodes, c_drain=c_drain)
             return None
         _execute_ingest(payload, source, sink=sink, lines=lines,
                         bytes_=bytes, workers=_resolve_workers(workers),
                         on_error=on_error, collect=False, order=order,
-                        mode=mode, nodes=nodes)
+                        mode=mode, nodes=nodes, c_drain=c_drain)
         return None
     if orchestrator:
         with _RUN_LOCK:
             _execute_reactor_locked(
                 payload, source, sink=sink, lines=lines, bytes_=bytes,
                 workers=_resolve_workers(workers), on_error=on_error,
-                collect=False, order=order, mode=mode, nodes=nodes)
+                collect=False, order=order, mode=mode, nodes=nodes,
+                c_drain=c_drain)
         return None
     _execute(payload, source, sink=sink, lines=lines, bytes_=bytes,
              workers=_resolve_workers(workers), on_error=on_error,
-             collect=False, order=order)
+             collect=False, order=order, c_drain=c_drain)
     return None
 
 
@@ -451,6 +631,15 @@ def map(payload, source, **kwargs):
     orchestrator=True: W-PY19 reactor supervision (death pipes,
       bounded respawn, trap-ACK, C orderer for order="index").
       Default None = current fork-and-wait behavior.
+
+    nodes: None/"auto" (default) = detect; 1 = force UMA; N/"0,1"/
+      "@N" = W-PY21 NUMA pipeline (per-node rings, born-local
+      ingest, pinning; uniform over files and pipes).
+
+    c_drain: None (default False, opt-in True) = forked C loop
+      moves result bytes (W-PY21-A data/control separation);
+      False = legacy parent-side drain. Byte-identical either way;
+      measured 0.7-1.0x of legacy (see _validate_c_drain).
     """
     mode = kwargs.get("mode", "python")
     nodes = kwargs.get("nodes", "auto")
@@ -460,6 +649,28 @@ def map(payload, source, **kwargs):
               nodes=nodes, on_error=kwargs.get("on_error", "retry"),
               streaming=kwargs.get("streaming"))
     orchestrator = _validate_orchestrator(kwargs.get("orchestrator"))
+    c_drain = _validate_c_drain(kwargs.get("c_drain"))
+    numa_map_str, num_nodes, node_cpus = _resolve_numa(nodes)
+    if num_nodes > 1:
+        _require_numa_symbol()
+        payload, mode = _coerce_payload(payload, mode)
+        order = kwargs.get("order", "none")
+        if mode == "splice":
+            _require_splice_symbol()
+            b = kwargs.get("bytes") or _SPLICE_DEFAULT_BYTES
+        else:
+            b = kwargs.get("bytes")
+        with _RUN_LOCK:
+            return _execute_numa_locked(
+                payload, source, sink=None,
+                lines=kwargs.get("lines"), bytes_=b,
+                workers=_resolve_workers(kwargs.get("workers")),
+                on_error=kwargs.get("on_error", "retry"),
+                collect=True, order=order, mode=mode,
+                numa_map=numa_map_str, num_nodes=num_nodes,
+                node_cpus=node_cpus,
+                splice=(mode == "splice"), c_drain=c_drain)
+    nodes = 1
     payload, mode = _coerce_payload(payload, mode)
     order = kwargs.get("order", "none")
     if mode == "splice":
@@ -473,13 +684,13 @@ def map(payload, source, **kwargs):
                         workers=_resolve_workers(kwargs.get("workers")),
                         on_error=kwargs.get("on_error", "retry"),
                         collect=True, order=order, mode=mode,
-                        nodes=nodes, splice=True)
+                        nodes=nodes, splice=True, c_drain=c_drain)
             return _execute_ingest(
                 None, source, sink=None, lines=None, bytes_=b,
                 workers=_resolve_workers(kwargs.get("workers")),
                 on_error=kwargs.get("on_error", "retry"),
                 collect=True, order=order, mode=mode, nodes=nodes,
-                splice=True)
+                splice=True, c_drain=c_drain)
         if orchestrator:
             with _RUN_LOCK:
                 return _execute_reactor_locked(
@@ -487,13 +698,13 @@ def map(payload, source, **kwargs):
                     workers=_resolve_workers(kwargs.get("workers")),
                     on_error=kwargs.get("on_error", "retry"),
                     collect=True, order=order, mode=mode, nodes=nodes,
-                    splice=True)
+                    splice=True, c_drain=c_drain)
         return _execute(
             None, source, sink=None, lines=None, bytes_=b,
             workers=_resolve_workers(kwargs.get("workers")),
             on_error=kwargs.get("on_error", "retry"),
             collect=True, order=order, mode=mode, nodes=nodes,
-            splice=True)
+            splice=True, c_drain=c_drain)
     if _detect_streaming(source, kwargs.get("streaming")):
         if orchestrator:
             with _RUN_LOCK:
@@ -503,13 +714,15 @@ def map(payload, source, **kwargs):
                     bytes_=kwargs.get("bytes"),
                     workers=_resolve_workers(kwargs.get("workers")),
                     on_error=kwargs.get("on_error", "retry"),
-                    collect=True, order=order, mode=mode, nodes=nodes)
+                    collect=True, order=order, mode=mode, nodes=nodes,
+                    c_drain=c_drain)
         return _execute_ingest(
             payload, source, sink=None, lines=kwargs.get("lines"),
             bytes_=kwargs.get("bytes"),
             workers=_resolve_workers(kwargs.get("workers")),
             on_error=kwargs.get("on_error", "retry"),
-            collect=True, order=order, mode=mode, nodes=nodes)
+            collect=True, order=order, mode=mode, nodes=nodes,
+            c_drain=c_drain)
     if orchestrator:
         with _RUN_LOCK:
             return _execute_reactor_locked(
@@ -517,13 +730,14 @@ def map(payload, source, **kwargs):
                 lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
                 workers=_resolve_workers(kwargs.get("workers")),
                 on_error=kwargs.get("on_error", "retry"),
-                collect=True, order=order, mode=mode, nodes=nodes)
+                collect=True, order=order, mode=mode, nodes=nodes,
+                c_drain=c_drain)
     results = _execute(payload, source, sink=None,
                        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
                        workers=_resolve_workers(kwargs.get("workers")),
                        on_error=kwargs.get("on_error", "retry"),
                        collect=True, order=order,
-                       mode=mode, nodes=nodes)
+                       mode=mode, nodes=nodes, c_drain=c_drain)
     return results
 
 
@@ -540,6 +754,14 @@ def stream(payload, source, **kwargs):
     orchestrator=True: W-PY19 reactor supervision (death pipes,
       bounded respawn, trap-ACK, C orderer for order="index").
       Default None = current streaming behavior.
+
+    nodes: None/"auto" (default) = detect; 1 = force UMA; N/"0,1"/
+      "@N" = W-PY21 NUMA pipeline (uniform over files and pipes).
+
+    c_drain: None (default False, opt-in True) = forked C loop
+      moves result bytes (W-PY21-A data/control separation);
+      False = legacy parent-side drain. Byte-identical either way;
+      measured 0.7-1.0x of legacy (see _validate_c_drain).
     """
     _validate(payload, source, mode=kwargs.get("mode", "python"),
               sink=None, order=kwargs.get("order", "none"),
@@ -549,6 +771,27 @@ def stream(payload, source, **kwargs):
               on_error=kwargs.get("on_error", "retry"),
               streaming=kwargs.get("streaming"))
     orchestrator = _validate_orchestrator(kwargs.get("orchestrator"))
+    c_drain = _validate_c_drain(kwargs.get("c_drain"))
+    kwargs = dict(kwargs, c_drain=c_drain)
+    numa_map_str, num_nodes, node_cpus = _resolve_numa(
+        kwargs.get("nodes", "auto"))
+    if num_nodes > 1:
+        _require_numa_symbol()
+        payload, engine_mode = _coerce_payload(payload, kwargs.get(
+            "mode", "python"))
+        if engine_mode == "splice":
+            _require_splice_symbol()
+        return _numa_stream_gen(
+            payload, source,
+            lines=kwargs.get("lines"),
+            bytes_=(kwargs.get("bytes") or _SPLICE_DEFAULT_BYTES
+                    if engine_mode == "splice" else kwargs.get("bytes")),
+            workers=_resolve_workers(kwargs.get("workers")),
+            on_error=kwargs.get("on_error", "retry"),
+            mode=engine_mode, order=kwargs.get("order", "none"),
+            orchestrator=orchestrator, numa_map=numa_map_str,
+            num_nodes=num_nodes, node_cpus=node_cpus,
+            splice=(engine_mode == "splice"), c_drain=c_drain)
     payload, engine_mode = _coerce_payload(payload, kwargs.get("mode",
                                                                "python"))
     kwargs = dict(kwargs, mode=engine_mode)
@@ -562,26 +805,30 @@ def stream(payload, source, **kwargs):
                     workers=_resolve_workers(kwargs.get("workers")),
                     on_error=kwargs.get("on_error", "retry"),
                     nodes=kwargs.get("nodes", "auto"),
-                    order=kwargs.get("order", "none"))
+                    order=kwargs.get("order", "none"),
+                    c_drain=kwargs.get("c_drain", True))
             return _splice_ingest_stream_gen(
                 source, bytes_=b,
                 workers=_resolve_workers(kwargs.get("workers")),
                 on_error=kwargs.get("on_error", "retry"),
                 nodes=kwargs.get("nodes", "auto"),
-                order=kwargs.get("order", "none"))
+                order=kwargs.get("order", "none"),
+                c_drain=kwargs.get("c_drain", True))
         if orchestrator:
             return _splice_stream_reactor_gen(
                 source, bytes_=b,
                 workers=_resolve_workers(kwargs.get("workers")),
                 on_error=kwargs.get("on_error", "retry"),
                 nodes=kwargs.get("nodes", "auto"),
-                order=kwargs.get("order", "none"))
+                order=kwargs.get("order", "none"),
+                c_drain=kwargs.get("c_drain", True))
         return _splice_stream_gen(
             source, bytes_=b,
             workers=_resolve_workers(kwargs.get("workers")),
             on_error=kwargs.get("on_error", "retry"),
             nodes=kwargs.get("nodes", "auto"),
-            order=kwargs.get("order", "none"))
+            order=kwargs.get("order", "none"),
+            c_drain=kwargs.get("c_drain", True))
     if _detect_streaming(source, kwargs.get("streaming")):
         if orchestrator:
             return _ingest_stream_reactor_gen(payload, source, **kwargs)
@@ -610,27 +857,28 @@ def _stream_gen(payload, source, **kwargs):
         workers=_resolve_workers(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
-        order=kwargs.get("order", "none"))
+        order=kwargs.get("order", "none"),
+        c_drain=kwargs.get("c_drain", True))
 
 
 def _splice_stream_gen(source, *, bytes_, workers, on_error, nodes,
-                       order):
+                       order, c_drain=True):
     # W-PY18 stream() over the C passthrough loop (materialized
     # ingest, live results): yields raw byte-windows as they arrive.
     yield from _execute_streaming(
         None, source, lines=None, bytes_=bytes_, workers=workers,
         on_error=on_error, mode="splice", nodes=nodes, order=order,
-        splice=True)
+        splice=True, c_drain=c_drain)
 
 
 def _splice_ingest_stream_gen(source, *, bytes_, workers, on_error,
-                              nodes, order):
+                              nodes, order, c_drain=True):
     # W-PY18 stream() over passthrough + streaming ingest (unbounded
     # in, live out — the bash -s shape): spill and drain interleave.
     yield from _execute_ingest_stream(
         None, source, lines=None, bytes_=bytes_, workers=workers,
         on_error=on_error, mode="splice", nodes=nodes, order=order,
-        splice=True)
+        splice=True, c_drain=c_drain)
 
 
 def _stream_reactor_gen(payload, source, **kwargs):
@@ -644,18 +892,19 @@ def _stream_reactor_gen(payload, source, **kwargs):
         on_error=kwargs.get("on_error", "retry"),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
-        splice=kwargs.get("mode") == "splice")
+        splice=kwargs.get("mode") == "splice",
+        c_drain=kwargs.get("c_drain", True))
 
 
 def _splice_stream_reactor_gen(source, *, bytes_, workers, on_error,
-                               nodes, order):
+                               nodes, order, c_drain=True):
     # W-PY19 stream() over splice + reactor (materialized ingest,
     # live results, respawn on death). Python reassembly only (the C
     # orderer needs OrderPackets the splice loop never sends).
     yield from _execute_streaming_reactor(
         None, source, lines=None, bytes_=bytes_, workers=workers,
         on_error=on_error, mode="splice", nodes=nodes, order=order,
-        splice=True)
+        splice=True, c_drain=c_drain)
 
 
 def _ingest_stream_reactor_gen(payload, source, **kwargs):
@@ -668,16 +917,18 @@ def _ingest_stream_reactor_gen(payload, source, **kwargs):
         workers=_resolve_workers(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
-        order=kwargs.get("order", "none"))
+        order=kwargs.get("order", "none"),
+        c_drain=kwargs.get("c_drain", True))
 
 
 def _splice_ingest_stream_reactor_gen(source, *, bytes_, workers,
-                                      on_error, nodes, order):
+                                      on_error, nodes, order,
+                                      c_drain=True):
     # W-PY19 stream() over splice + streaming ingest + reactor.
     yield from _execute_ingest_stream_reactor(
         None, source, lines=None, bytes_=bytes_, workers=workers,
         on_error=on_error, mode="splice", nodes=nodes, order=order,
-        splice=True)
+        splice=True, c_drain=c_drain)
 
 
 def _drain_worker_memfd(fd, state) -> tuple:
@@ -802,8 +1053,76 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
             stats["reassembly_max"] = reassembly.max_size
 
 
+def _make_results_pump(results_r, order="none", stats=None):
+    """Build a C-drain results-pipe pump for streaming (W-PY21-A).
+
+    The drain child moves framed records verbatim into the results
+    pipe; this pump is the parent's incremental consumer. Returns
+    pump(alive), where alive is True while any producer (worker or
+    drain process) may still deliver bytes. Returns the next blob,
+    None when nothing is complete YET (not EOF — keep polling), or
+    raises StopIteration when producers are gone AND the pipe hit
+    EOF AND no buffered records remain (same EOF-anchored rule as
+    _drain_records; a truncated tail drops like _parse_records —
+    a worker that died mid-record, never user data).
+
+    order="index" reassembles completion-order records into
+    batch_idx sequence via ReassemblyBuffer (holes flush sorted at
+    EOF — same head-of-line contract as _drain_records). stats
+    receives {"reassembly_max": high-water} when ordering.
+    """
+    import select as _select
+
+    st = {"tail": b"", "eof": False, "pending": [],
+          "reassembly": (ReassemblyBuffer() if order == "index"
+                         else None)}
+
+    def _ingest(chunk):
+        records, tail = _split_records(st["tail"] + chunk)
+        st["tail"] = tail
+        if st["reassembly"] is None:
+            st["pending"].extend(blob for _, blob in records)
+        else:
+            for bidx, blob in records:
+                st["reassembly"].add(bidx, blob)
+            for _, ordered in st["reassembly"].drain():
+                st["pending"].append(ordered)
+
+    def pump(alive):
+        if not st["eof"]:
+            try:
+                ready, _, _ = _select.select([results_r], [], [], 0)
+            except (OSError, ValueError):
+                ready = []
+            if ready:
+                try:
+                    chunk = os.read(results_r, 65536)
+                except OSError:
+                    chunk = b""
+                if chunk == b"":
+                    st["eof"] = True
+                else:
+                    _ingest(chunk)
+        if st["pending"]:
+            return st["pending"].pop(0)
+        if not alive and st["eof"]:
+            if st["reassembly"] is not None:
+                for _, ordered in st["reassembly"].final_drain():
+                    st["pending"].append(ordered)
+                if stats is not None:
+                    stats["reassembly_max"] = (
+                        st["reassembly"].max_size)
+                if st["pending"]:
+                    return st["pending"].pop(0)
+            raise StopIteration
+        return None
+
+    return pump
+
+
 def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
-                     src_fd, must_close, extra_pids=(), fallow_w=None):
+                     src_fd, must_close, extra_pids=(), fallow_w=None,
+                     drain_pid=None, results_fd=None):
     """Reap-all + close-all + destroy. Abandon-safe: unblocks claim-gated
     workers via the fire alarm and EPIPEs signal-blocked ones by closing
     the read end, then reaps (zombies pin pids, so no PID-reuse hazard
@@ -814,6 +1133,10 @@ def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
     on ingest, and closing fallow_w EOFs a reaper gated on acks);
     fallow_w is closed here (idempotent: normal flow already closed it
     before reaping the reaper).
+
+    W-PY21-A: drain_pid/results_fd cover the C drain child (same
+    kill-then-reap discipline; closing the results read end EPIPEs a
+    drain blocked on a full pipe). Omitted when the Python drain ran.
     """
     try:
         lib.fr_py_abort()
@@ -829,7 +1152,13 @@ def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
             os.close(fallow_w)
         except OSError:
             pass
-    for pid in list(pids) + list(extra_pids):
+    if results_fd is not None:
+        try:
+            os.close(results_fd)
+        except OSError:
+            pass
+    for pid in list(pids) + list(extra_pids) + (
+            [drain_pid] if drain_pid is not None else []):
         try:
             wpid, _ = os.waitpid(pid, os.WNOHANG)
             if wpid == 0:
@@ -839,7 +1168,8 @@ def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                     pass
         except ChildProcessError:
             pass
-    for pid in list(pids) + list(extra_pids):
+    for pid in list(pids) + list(extra_pids) + (
+            [drain_pid] if drain_pid is not None else []):
         try:
             os.waitpid(pid, 0)
         except ChildProcessError:
@@ -921,7 +1251,8 @@ def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
 
 def _execute_streaming(payload, source, *, lines, bytes_, workers,
                        on_error, mode="python", nodes="auto",
-                       order="none", stats=None, splice=False):
+                       order="none", stats=None, splice=False,
+                       c_drain=True):
     """v1 streaming pipeline: a GENERATOR. Fork happens on first next(),
     blobs yield in worker-completion order (order="none") or batch_idx
     sequence (order="index", parent-side reassembly) while workers run.
@@ -929,6 +1260,9 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
     generator (close/GC/exception) tears down workers via the finally.
     stats (optional dict): white-box drain diagnostics (reassembly_max).
     splice (W-PY18): children run the C passthrough loop (no payload).
+    c_drain (W-PY21-A): True (opt-in) moves signal consume + memfd
+      pread into a forked C loop feeding a results pipe the parent
+      reads incrementally; False keeps the Python _drain_records path.
     """
     if mode not in ("python", "splice"):
         raise NotImplementedError(
@@ -945,6 +1279,9 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    use_drain = bool(c_drain)
+    if use_drain:
+        _require_drain_symbol()
     pre_fds = snapshot_fds()
     lib = load()
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
@@ -958,6 +1295,10 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
     out_hold: list = []
     signal_r = None
     signal_w = None
+    drain_pid = None
+    results_r = None
+    drain_status = None
+    exhausted = False
     pids: list = []
     try:
         memfd, size = _spill_to_memfd(src_fd)
@@ -1024,19 +1365,97 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         signal_w = None
 
         statuses: list = []
-        try:
-            for blob in _drain_records(lib, signal_r, out_fds, pids,
-                                       statuses, order=order, stats=stats):
-                yield blob
-        finally:
-            # Normal exhaustion falls through; abandonment (GeneratorExit)
-            # or consumer error lands here: reap, close, destroy, re-raise
-            # (a fresh raise on the abandon path would mask GeneratorExit).
-            _teardown_stream(lib, pids, signal_r, out_fds, out_hold,
-                             memfd, src_fd, must_close)
-            memfd = None
+        if use_drain:
+            # W-PY21-A: the C drain owns signal_r from here on; the
+            # parent consumes the results pipe (never signals/memfds).
+            # No threads: one single-threaded loop below interleaves
+            # results reads with WNOHANG reaps (fork-before-threads
+            # stays intact — the reactor thread sketched in early
+            # drafts would fork under a live thread on respawn).
+            drain_pid, results_r = _fork_drain(
+                signal_r, out_fds, workers, mode="pipe")
             signal_r = None
-            out_fds = []
+            pump = _make_results_pump(results_r, order=order,
+                                      stats=stats)
+            drain_alive = True
+            try:
+                alive = set(pids)
+                while True:
+                    for pid in list(alive):
+                        try:
+                            wpid, status = os.waitpid(pid, os.WNOHANG)
+                        except ChildProcessError:
+                            alive.discard(pid)
+                            continue
+                        except OSError:
+                            continue
+                        if wpid == pid:
+                            alive.discard(pid)
+                            statuses.append((pid, status))
+                    if drain_alive:
+                        try:
+                            wpid, _dst = os.waitpid(drain_pid,
+                                                    os.WNOHANG)
+                        except ChildProcessError:
+                            drain_alive = False
+                        except OSError:
+                            pass
+                        else:
+                            if wpid == drain_pid:
+                                drain_alive = False
+                                drain_status = _dst
+                    try:
+                        blob = pump(bool(alive) or drain_alive)
+                    except StopIteration:
+                        break
+                    if blob is not None:
+                        yield blob
+                # Workers are gone and the results pipe hit EOF, so
+                # the drain has exited (it terminates on signal EOF)
+                # — join it here to capture its rc. Blocking is safe:
+                # EOF implies the write end is closed.
+                if drain_alive:
+                    try:
+                        _, _dst = os.waitpid(drain_pid, 0)
+                    except ChildProcessError:
+                        pass
+                    except OSError:
+                        pass
+                    else:
+                        drain_alive = False
+                        drain_status = _dst
+                exhausted = True
+            finally:
+                # Normal exhaustion falls through; abandonment
+                # (GeneratorExit) or consumer error lands here: reap,
+                # close, destroy, re-raise (a fresh raise on the
+                # abandon path would mask GeneratorExit). The
+                # teardown EPIPEs a drain blocked on a full pipe via
+                # the results read end.
+                _teardown_stream(lib, pids, signal_r, out_fds,
+                                 out_hold, memfd, src_fd, must_close,
+                                 drain_pid=drain_pid,
+                                 results_fd=results_r)
+                memfd = None
+                signal_r = None
+                out_fds = []
+                drain_pid = None
+                results_r = None
+        else:
+            try:
+                for blob in _drain_records(lib, signal_r, out_fds, pids,
+                                           statuses, order=order,
+                                           stats=stats):
+                    yield blob
+            finally:
+                # Normal exhaustion falls through; abandonment (GeneratorExit)
+                # or consumer error lands here: reap, close, destroy, re-raise
+                # (a fresh raise on the abandon path would mask GeneratorExit).
+                _teardown_stream(lib, pids, signal_r, out_fds, out_hold,
+                                 memfd, src_fd, must_close)
+                memfd = None
+                signal_r = None
+                out_fds = []
 
         failed = [s for s in statuses
                   if not (os.WIFEXITED(s[1]) and os.WEXITSTATUS(s[1]) == 0)]
@@ -1045,6 +1464,18 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                 "forkrun: %d/%d workers failed%s" % (
                     len(failed), len(pids),
                     " (on_error=%s)" % on_error))
+
+        if use_drain and exhausted and drain_status is not None:
+            # Drain rc is secondary to worker failures (checked
+            # above); on a clean worker set a nonzero drain rc is a
+            # real infrastructure error. Abandoned runs skip this
+            # (teardown EPIPEs the drain → rc 5 by design).
+            if drain_status != 0 and not (
+                    os.WIFEXITED(drain_status) and
+                    os.WEXITSTATUS(drain_status) == 0):
+                raise RuntimeError(
+                    "forkrun: C drain failed (status %r)"
+                    % (drain_status,))
 
         try:
             npois = lib.fr_py_poisoned_count()
@@ -1067,7 +1498,8 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
 
 def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                            on_error, mode="python", nodes="auto",
-                           order="none", stats=None, splice=False):
+                           order="none", stats=None, splice=False,
+                           c_drain=True):
     """stream() over a streaming source: a GENERATOR (W-PY16).
 
     Same fork topology as _execute_ingest_locked (reaper + scanner +
@@ -1079,6 +1511,10 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
     Abandonment tears everything down via the finally (helpers reaped
     through extra_pids). Mirrors _execute_streaming's guard convention.
     splice (W-PY18): workers run the C passthrough loop.
+    c_drain (W-PY21-A): True (opt-in) moves signal consume + memfd
+      pread into a forked C loop feeding a results pipe (forked
+      lazily at first worker fork — workers fork dynamically here);
+      False keeps the Python _drain_records path.
     """
     if mode not in ("python", "splice"):
         raise NotImplementedError(
@@ -1089,6 +1525,9 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
+    use_drain = bool(c_drain)
+    if use_drain:
+        _require_drain_symbol()
     pre_fds = snapshot_fds()
     lib = load()
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
@@ -1104,6 +1543,11 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
     fallow_r = fallow_w = None
     signal_r = None
     signal_w = None
+    drain_pid = None
+    results_r = None
+    drain_status = None
+    drain_alive = True
+    exhausted = False
     fallow_pid = scan_pid = None
     helpers = {"scan_rc": None, "fallow_rc": None}
     gate = {"issued": False}
@@ -1158,6 +1602,27 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                     pass
                 fallow_w = None
 
+        drain = {"pid": None, "results_r": None, "pump": None,
+                 "status": None, "alive": True}
+
+        def _fork_drain_if_needed():
+            # W-PY21-A: lazy drain fork (workers fork dynamically
+            # here — the drain needs no earlier existence; signals
+            # queue in the pipe until it starts). Runs once, at the
+            # first worker fork. signal_r ownership transfers to
+            # the drain; empty inputs never fork workers, hence
+            # never need a drain.
+            nonlocal signal_r, drain_pid, results_r
+            if not use_drain or drain["pid"] is not None:
+                return
+            drain["pid"], drain["results_r"] = _fork_drain(
+                signal_r, out_fds, workers, mode="pipe")
+            drain["pump"] = _make_results_pump(
+                drain["results_r"], order=order, stats=stats)
+            signal_r = None
+            drain_pid = drain["pid"]
+            results_r = drain["results_r"]
+
         def _fork_workers():
             # Single fork event (also closes the parent's signal +
             # fallow write copies here: every child exists, so EOF on
@@ -1184,6 +1649,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             _drop_parent_copies()
             state["workers"] = True
             state["fork_at"] = _time.monotonic()
+            _fork_drain_if_needed()
 
         def _watch_live():            # Same helper-liveness rule as the locked path (abort +
             # raise on death / premature clean scanner exit).
@@ -1354,19 +1820,95 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             # unreachable
 
         statuses: list = []
-        try:
-            for blob in _drain_records(lib, signal_r, out_fds, pids,
-                                       statuses, order=order, stats=stats,
-                                       pump=_pump):
-                yield blob
-        finally:
-            _teardown_stream(lib, pids, signal_r, out_fds, out_hold,
-                             memfd, src_fd, must_close,
-                             extra_pids=[p for p in (fallow_pid, scan_pid)
-                                         if p is not None])
-            memfd = None
-            signal_r = None
-            out_fds = []
+        if use_drain:
+            # W-PY21-A: spill pump + results-pipe consumer, one
+            # single-threaded loop (no threads — see _execute_streaming).
+            # The drain forks lazily at first worker fork; empty
+            # inputs never need one.
+            pump_done = False
+            try:
+                alive = set()
+                while True:
+                    if not pump_done:
+                        pump_done = bool(_pump())
+                    alive.update(pids)
+                    for pid in list(alive):
+                        try:
+                            wpid, status = os.waitpid(pid, os.WNOHANG)
+                        except ChildProcessError:
+                            alive.discard(pid)
+                            continue
+                        except OSError:
+                            continue
+                        if wpid == pid:
+                            alive.discard(pid)
+                            statuses.append((pid, status))
+                    if drain["pid"] is not None:
+                        if drain["alive"]:
+                            try:
+                                wpid, _dst = os.waitpid(
+                                    drain["pid"], os.WNOHANG)
+                            except ChildProcessError:
+                                drain["alive"] = False
+                            except OSError:
+                                pass
+                            else:
+                                if wpid == drain["pid"]:
+                                    drain["alive"] = False
+                                    drain["status"] = _dst
+                        try:
+                            blob = drain["pump"](
+                                bool(alive) or drain["alive"])
+                        except StopIteration:
+                            break
+                        if blob is not None:
+                            yield blob
+                    elif pump_done:
+                        # No drain (no workers ever forked: empty
+                        # input) and the spill is done — nothing will
+                        # ever arrive.
+                        break
+                # Join the drain for its rc (EOF seen ⇒ exited).
+                if drain["pid"] is not None and drain["alive"]:
+                    try:
+                        _, _dst = os.waitpid(drain["pid"], 0)
+                    except ChildProcessError:
+                        pass
+                    except OSError:
+                        pass
+                    else:
+                        drain["alive"] = False
+                        drain["status"] = _dst
+                drain_status = drain["status"]
+                drain_alive = drain["alive"]
+                exhausted = True
+            finally:
+                _teardown_stream(lib, pids, signal_r, out_fds,
+                                 out_hold, memfd, src_fd, must_close,
+                                 extra_pids=[p for p in (fallow_pid,
+                                                         scan_pid)
+                                             if p is not None],
+                                 drain_pid=drain["pid"],
+                                 results_fd=drain["results_r"])
+                memfd = None
+                signal_r = None
+                out_fds = []
+                drain_pid = None
+                results_r = None
+        else:
+            try:
+                for blob in _drain_records(lib, signal_r, out_fds, pids,
+                                           statuses, order=order,
+                                           stats=stats, pump=_pump):
+                    yield blob
+            finally:
+                _teardown_stream(lib, pids, signal_r, out_fds, out_hold,
+                                 memfd, src_fd, must_close,
+                                 extra_pids=[p for p in (fallow_pid, scan_pid)
+                                             if p is not None])
+                memfd = None
+                signal_r = None
+                out_fds = []
 
         failed = [s for s in statuses
                   if not (os.WIFEXITED(s[1]) and os.WEXITSTATUS(s[1]) == 0)]
@@ -1375,6 +1917,16 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                 "forkrun: %d/%d workers failed%s" % (
                     len(failed), len(pids),
                     " (on_error=%s)" % on_error))
+
+        if use_drain and exhausted and drain_status is not None:
+            # Secondary to worker failures (above); abandoned runs
+            # skip this (teardown EPIPEs the drain → rc 5 by design).
+            if drain_status != 0 and not (
+                    os.WIFEXITED(drain_status) and
+                    os.WEXITSTATUS(drain_status) == 0):
+                raise RuntimeError(
+                    "forkrun: C drain failed (status %r)"
+                    % (drain_status,))
 
         # Scanner join: strict when observed, proof-based when already
         # reaped by teardown after healthy workers + complete drain
@@ -1438,7 +1990,8 @@ def _ingest_stream_gen(payload, source, **kwargs):
         workers=_resolve_workers(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
-        order=kwargs.get("order", "none"))
+        order=kwargs.get("order", "none"),
+        c_drain=kwargs.get("c_drain", True))
 
 
 def _new_ingress_memfd():
@@ -1457,7 +2010,7 @@ def _new_ingress_memfd():
 
 def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
                     on_error, collect, order, mode="python", nodes="auto",
-                    splice=False):
+                    splice=False, c_drain=True):
     """Streaming-ingest entry for map/run (blocking, like _execute)."""
     if mode not in ("python", "splice"):
         raise NotImplementedError(
@@ -1473,7 +2026,7 @@ def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
         return _execute_ingest_locked(
             payload, source, sink=sink, lines=lines, bytes_=bytes_,
             workers=workers, on_error=on_error, collect=collect,
-            order=order, splice=splice)
+            order=order, splice=splice, c_drain=c_drain)
 
 
 def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
@@ -1509,7 +2062,7 @@ def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
 
 def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                            workers, on_error, collect, order,
-                           splice=False):
+                           splice=False, c_drain=True):
     """map/run over a streaming source (W-PY16, collect/discard).
 
     Pipeline: init → ingress memfd → output memfds → fallow pipe →
@@ -1522,7 +2075,13 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
     acked prefixes while the spill advances. Slow sources (no publish
     within STALL_FORK_AFTER, gate still open) fork workers anyway for
     pipelining — the input is still arriving, the shape CASE B handles.
+    c_drain (W-PY21-A): True (opt-in) moves result byte movement
+      into a forked C loop (results memfd read once at end);
+      False keeps the parent-side memfd parse.
     """
+    use_drain = bool(c_drain) and collect
+    if use_drain:
+        _require_drain_symbol()
     pre_fds = snapshot_fds()
     lib = load()
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
@@ -1539,6 +2098,11 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
     out_fds: list = []
     out_hold: list = []
     fallow_r = fallow_w = None
+    signal_r = None
+    signal_w = None
+    drain_pid = None
+    results_fd = None
+    drain_status = None
     fallow_pid = scan_pid = None
     helpers = {"scan_rc": None, "fallow_rc": None}
     gate_issued = False
@@ -1557,6 +2121,9 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
         if collect:
             out_fds, out_hold = _new_output_memfds(workers)
         fallow_r, fallow_w = os.pipe()
+        if use_drain:
+            # Workers signal the C drain (1MB pipe, like streaming).
+            signal_r, signal_w, _ = make_pipe()
 
         try:
             sys.stdout.flush()
@@ -1595,7 +2162,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
             # (empty input: nothing to consume). Closes parent fallow
             # copies here: every child exists, so reaper EOF = workers.
             nonlocal workers_forked, stall_forked
-            nonlocal fork_at
+            nonlocal fork_at, signal_r, signal_w
+            nonlocal drain_pid, results_fd
             for i in range(workers):
                 if splice:
                     # W-PY18: C-loop passthrough (fallow acks included;
@@ -1603,18 +2171,22 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     # explicit offsets, never mmaps).
                     pids.append(_fork_splice_worker(
                         lib, i, memfd,
-                        out_fds[i] if collect else None, None, fallow_w,
+                        out_fds[i] if collect else None,
+                        signal_w if use_drain else None, fallow_w,
                         engine_fds))
                     continue
                 pid = os.fork()
                 if pid == 0:
                     try:
                         scrub_fds(engine_fds | {memfd, fallow_w} |
-                                  ({out_fds[i]} if collect else set()))
+                                  ({out_fds[i]} if collect else set()) |
+                                  ({signal_w} if use_drain and
+                                   signal_w is not None else set()))
                     except Exception:
                         pass
                     worker_main(i, payload, sink, memfd, -1,
-                                out_fds[i] if collect else None, None,
+                                out_fds[i] if collect else None,
+                                signal_w if use_drain else None,
                                 on_error, fallow_w)
                     os._exit(127)  # unreachable; worker_main exits
                 else:
@@ -1622,6 +2194,18 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
             _drop_fallow_copies()
             workers_forked = True
             fork_at = _time.monotonic()
+            if use_drain:
+                # Parent's signal write copy goes now (no respawns in
+                # this path — single fork event); the drain takes the
+                # read end. Drain EOF = all workers out.
+                try:
+                    os.close(signal_w)
+                except OSError:
+                    pass
+                signal_w = None
+                drain_pid, results_fd = _fork_drain(
+                    signal_r, out_fds, workers, mode="memfd")
+                signal_r = None
 
         def _watch_helpers():
             # Reap helper deaths (nonblocking). Scanner death is fatal
@@ -1746,7 +2330,17 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     if total_written == 0:
                         # Empty input: drop the fallow copies (reaper
                         # EOF) and skip workers — nothing to consume.
+                        # With c_drain the unused signal pipe goes too
+                        # (no workers ⇒ no drain forked).
                         _drop_fallow_copies()
+                        if use_drain:
+                            for _fd in (signal_w, signal_r):
+                                if _fd is not None:
+                                    try:
+                                        os.close(_fd)
+                                    except OSError:
+                                        pass
+                            signal_w = signal_r = None
                         break
                     raise RuntimeError(
                         "forkrun: ingest scanner published no data "
@@ -1768,6 +2362,21 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 except Exception:
                     pass
             raise
+
+        if use_drain and drain_pid is not None:
+            # Signal EOF (all workers gone) terminates the drain on
+            # its own — reap it. Worker error below wins on the
+            # failed path (results moot, child still reaped).
+            try:
+                _, _dst = os.waitpid(drain_pid, 0)
+            except ChildProcessError:
+                _dst = 0
+            drain_status = _dst
+            drain_pid = None
+            if not failed and _dst != 0 and not (
+                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
+                raise RuntimeError(
+                    "forkrun: C drain failed (status %r)" % (_dst,))
 
         if failed:
             raise RuntimeError(
@@ -1828,13 +2437,51 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
 
         if not collect:
             return None
-        records = []
-        for fd in out_fds:
-            records.extend(_parse_records(_read_fd_all(fd)))
+        if use_drain:
+            # Dynamic-fork paths (ingest/NUMA) fork no drain on
+            # empty input (no workers ever existed) — vacuously
+            # no records. Materialized paths always fork workers,
+            # so their drain always exists here.
+            records = (_parse_records(_read_fd_all(results_fd))
+                       if results_fd is not None else [])
+        else:
+            records = []
+            for fd in out_fds:
+                records.extend(_parse_records(_read_fd_all(fd)))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
     finally:
+        if drain_pid is not None:
+            # Stray drain (exception path): SIGKILL + reap.
+            try:
+                wpid, _ = os.waitpid(drain_pid, os.WNOHANG)
+                if wpid == 0:
+                    try:
+                        os.kill(drain_pid, 9)
+                    except OSError:
+                        pass
+            except ChildProcessError:
+                pass
+            except OSError:
+                pass
+            try:
+                os.waitpid(drain_pid, 0)
+            except ChildProcessError:
+                pass
+            except OSError:
+                pass
+        if results_fd is not None:
+            try:
+                os.close(results_fd)
+            except OSError:
+                pass
+        for _fd in (signal_r, signal_w):
+            if _fd is not None:
+                try:
+                    os.close(_fd)
+                except OSError:
+                    pass
         for fd in out_fds:
             try:
                 os.close(fd)
@@ -1890,7 +2537,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
 
 
 def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
-             collect, order, mode="python", nodes="auto", splice=False):
+              collect, order, mode="python", nodes="auto", splice=False,
+              c_drain=True):
     if mode not in ("python", "splice"):
         raise NotImplementedError(
             "v0 supports mode='python' only (spawn/plugin are Stage 5)")
@@ -1906,11 +2554,20 @@ def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
         return _execute_locked(payload, source, sink=sink, lines=lines,
                                bytes_=bytes_, workers=workers,
                                on_error=on_error, collect=collect,
-                               order=order, splice=splice)
+                               order=order, splice=splice,
+                               c_drain=c_drain)
 
 
 def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
-                    on_error, collect, order, splice=False):
+                    on_error, collect, order, splice=False,
+                    c_drain=True):
+    # W-PY21-A: c_drain moves result byte movement (signal consume +
+    # memfd pread) from the parent into a forked C loop. Framing and
+    # parsing are untouched: the drain copies framed records
+    # verbatim into a results memfd the parent reads once at end.
+    use_drain = bool(c_drain) and collect
+    if use_drain:
+        _require_drain_symbol()
     pre_fds = snapshot_fds()
     lib = load()
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
@@ -1921,6 +2578,10 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
 
     src_fd, must_close = _open_source(source)
     memfd = None
+    signal_r = None
+    signal_w = None
+    drain_pid = None
+    results_fd = None
     try:
         memfd, size = _spill_to_memfd(src_fd)
         try:
@@ -1948,6 +2609,10 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             # Emitter transport, created pre-fork (see _new_output_memfds).
             out_fds, out_hold = _new_output_memfds(workers)
 
+        if use_drain:
+            # Workers signal the drain (not the parent): 1MB pipe.
+            signal_r, signal_w, _ = make_pipe()
+
         pids = []
         for i in range(workers):
             if splice:
@@ -1955,7 +2620,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                 # out_fd always present here (splice requires
                 # collect; run() rejects the mode).
                 pids.append(_fork_splice_worker(
-                    lib, i, memfd, out_fds[i], None, None,
+                    lib, i, memfd, out_fds[i],
+                    signal_w if use_drain else None, None,
                     engine_fds))
                 continue
             pid = os.fork()
@@ -1971,14 +2637,30 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                     pass
                 try:
                     scrub_fds(engine_fds | {memfd} |
-                              ({out_fds[i]} if collect else set()))
+                              ({out_fds[i]} if collect else set()) |
+                              ({signal_w} if use_drain and
+                               signal_w is not None else set()))
                 except Exception:
                     pass
                 worker_main(i, payload, sink, memfd, size,
-                            out_fds[i] if collect else None, None, on_error)
+                            out_fds[i] if collect else None,
+                            signal_w if use_drain else None, on_error)
                 os._exit(127)  # unreachable; worker_main exits
             else:
                 pids.append(pid)
+
+        if use_drain:
+            # Parent never writes signals and (no respawns here)
+            # keeps no spare: close the write end now, fork the
+            # drain, drop the read end. Drain EOF = all workers out.
+            try:
+                os.close(signal_w)
+            except OSError:
+                pass
+            signal_w = None
+            drain_pid, results_fd = _fork_drain(
+                signal_r, out_fds, workers, mode="memfd")
+            signal_r = None
 
         failed = []
         try:
@@ -1996,6 +2678,22 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             raise
         finally:
             pass
+
+        if use_drain and drain_pid is not None:
+            # Workers are gone so the signal pipe hit EOF; the drain
+            # exits on its own — reap it and check its rc. (On the
+            # failed path below this still runs first: results are
+            # moot but the child must be reaped. A drain failure
+            # there is secondary — the worker error below wins.)
+            try:
+                _, _dst = os.waitpid(drain_pid, 0)
+            except ChildProcessError:
+                _dst = 0
+            drain_pid = None
+            if not failed and _dst != 0 and not (
+                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
+                raise RuntimeError(
+                    "forkrun: C drain failed (status %r)" % (_dst,))
 
         if failed:
             raise RuntimeError(
@@ -2019,13 +2717,56 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
 
         if not collect:
             return None
-        records = []
-        for fd in out_fds:
-            records.extend(_parse_records(_read_fd_all(fd)))
+        if use_drain:
+            # Dynamic-fork paths (ingest/NUMA) fork no drain on
+            # empty input (no workers ever existed) — vacuously
+            # no records. Materialized paths always fork workers,
+            # so their drain always exists here.
+            records = (_parse_records(_read_fd_all(results_fd))
+                       if results_fd is not None else [])
+        else:
+            records = []
+            for fd in out_fds:
+                records.extend(_parse_records(_read_fd_all(fd)))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
     finally:
+        if drain_pid is not None:
+            # Stray drain (exception path): SIGKILL + reap so no
+            # zombie pins the pid and no child outlives the run.
+            try:
+                wpid, _ = os.waitpid(drain_pid, os.WNOHANG)
+                if wpid == 0:
+                    try:
+                        os.kill(drain_pid, 9)
+                    except OSError:
+                        pass
+            except ChildProcessError:
+                pass
+            except OSError:
+                pass
+            try:
+                os.waitpid(drain_pid, 0)
+            except ChildProcessError:
+                pass
+            except OSError:
+                pass
+        if results_fd is not None:
+            try:
+                os.close(results_fd)
+            except OSError:
+                pass
+        if signal_r is not None:
+            try:
+                os.close(signal_r)
+            except OSError:
+                pass
+        if signal_w is not None:
+            try:
+                os.close(signal_w)
+            except OSError:
+                pass
         for fd in out_fds:
             try:
                 os.close(fd)
@@ -2099,7 +2840,8 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
                       src_fd=None, must_close=False, extra_pids=(),
                       orderer_pid=None, order_r=None, order_w=None,
                       trap_r=None, trap_w=None, coll_fd=None,
-                      coll_hold=None):
+                      coll_hold=None, drain_pid=None, results_fd=None,
+                      spare_signal_w=None):
     """Kill stray reactor children + close-all + destroy (abandon-safe).
 
     Mirrors _teardown_stream: fire alarm first (unblocks claim-gated
@@ -2107,6 +2849,11 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
     so no PID-reuse hazard), then close fds and destroy. The reactor
     already reaped supervised workers; this covers the orderer,
     scanner/fallow helpers, and any respawn racing teardown.
+
+    W-PY21-A: drain_pid/results_fd/spare_signal_w cover the C drain
+    child (kill+reap; closing the results read end EPIPEs a drain
+    blocked on a full pipe; closing the spare lets a live drain
+    observe signal EOF).
     """
     try:
         lib.fr_py_abort()
@@ -2143,7 +2890,9 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
         except OSError:
             pass
     for pid in list(extra_pids) + ([orderer_pid]
-                                   if orderer_pid is not None else []):
+                                   if orderer_pid is not None else []) + (
+                                       [drain_pid]
+                                       if drain_pid is not None else []):
         if pid is None:
             continue
         try:
@@ -2158,7 +2907,9 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
         except OSError:
             pass
     for pid in list(extra_pids) + ([orderer_pid]
-                                   if orderer_pid is not None else []):
+                                   if orderer_pid is not None else []) + (
+                                       [drain_pid]
+                                       if drain_pid is not None else []):
         if pid is None:
             continue
         try:
@@ -2176,8 +2927,8 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
         out_hold.clear()
     if mem_hold is not None:
         mem_hold.clear()
-    for fd in (signal_r, order_r, order_w, trap_r, trap_w, coll_fd,
-               memfd):
+    for fd in (signal_r, spare_signal_w, order_r, order_w, trap_r,
+               trap_w, coll_fd, results_fd, memfd):
         if fd is None or fd < 0:
             continue
         try:
@@ -2199,15 +2950,20 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
 
 def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                             workers, on_error, collect, order,
-                            mode="python", nodes="auto", splice=False):
+                            mode="python", nodes="auto", splice=False,
+                            c_drain=True):
     """Materialized map/run under reactor supervision (blocking).
 
     init → spill → sync scan → (output memfds) → (order pipe +
     orderer for collect+order=index, non-splice) → trap-ACK pipe →
     fork N workers with death pipes → reactor_loop → failure
-    accounting → parse (collection file when the C orderer ran, else
-    per-worker memfds) → teardown. Raises RuntimeError on trap-ACK
-    timeout (catastrophic) or unrecovered deaths (cap reached).
+    accounting → parse (collection file when the C orderer ran,
+    results memfd when the C drain ran, else per-worker memfds) →
+    teardown. Raises RuntimeError on trap-ACK timeout (catastrophic)
+    or unrecovered deaths (cap reached).
+    c_drain (W-PY21-A): with collect and without the C orderer,
+      workers signal a forked C drain loop instead of the parent
+      (which never preads output memfds on this path).
     """
     from ._bindings import v1_available as _v1a
     from ._reactor import (ORDER_PIPE_SIZE, ReactorState, reactor_run,
@@ -2235,6 +2991,11 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     coll_hold: list = []
     orderer_pid = None
     trap_r = trap_w = None
+    signal_r = None
+    signal_w = None
+    drain_pid = None
+    results_fd = None
+    drain_status = None
     state = None
     try:
         memfd, size = _spill_to_memfd(src_fd)
@@ -2265,6 +3026,11 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         # (pre-W-PY19 .so) falls back to Python reassembly silently.
         use_orderer = (collect and order == "index" and not splice
                        and _v1a(lib).get("orderer"))
+        # C drain for collect without the orderer (the orderer path
+        # is already C-speed end to end — no drain needed there).
+        use_drain = bool(c_drain) and collect and not use_orderer
+        if use_drain:
+            _require_drain_symbol()
         if use_orderer:
             order_r, order_w = os.pipe()
             try:
@@ -2283,6 +3049,12 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                                         engine_fds=engine_fds,
                                         out_fds=out_fds)
 
+        if use_drain:
+            # Workers signal the drain; the parent keeps the spare
+            # write end for respawns (closed when no worker is live,
+            # so the drain observes EOF).
+            signal_r, signal_w, _ = make_pipe()
+
         trap_r, trap_w = os.pipe()
 
         state = ReactorState(workers, num_nodes=1,
@@ -2290,7 +3062,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                              spawn_ceiling=workers)
         state.configure(payload_spec=payload, sink_spec=sink,
                         memfd=memfd, file_size=size,
-                        out_fds=list(out_fds), signal_w=None,
+                        out_fds=list(out_fds), signal_w=signal_w,
                         fallow_w=-1,
                         order_w=order_w if use_orderer else -1,
                         trap_ack_w=trap_w, on_error=on_error,
@@ -2300,12 +3072,47 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             if state.spawn_worker(node=0) is None:
                 break
 
+        if use_drain:
+            # signal_r belongs to the drain from here on (the parent
+            # never selects on it — control events only). The spare
+            # write end stays open for future respawns.
+            drain_pid, results_fd = _fork_drain(
+                signal_r, out_fds, workers, mode="memfd")
+            signal_r = None
+
         try:
             reactor_run(state)
         except KeyboardInterrupt:
             raise
 
         _reactor_failure_check(state, workers, on_error)
+
+        if use_drain:
+            # Every worker write end is closed (all reaped) — drop
+            # the spare so the drain observes EOF, then join it.
+            # Worker error above already raised (results moot, but
+            # the drain must still be reaped — teardown covers the
+            # raise path via drain_pid).
+            if signal_w is not None:
+                try:
+                    os.close(signal_w)
+                except OSError:
+                    pass
+                signal_w = None
+                state.ctx["signal_w"] = -1
+            if drain_pid is not None:
+                try:
+                    _, _dst = os.waitpid(drain_pid, 0)
+                except ChildProcessError:
+                    _dst = 0
+                drain_status = _dst
+                drain_pid = None
+                if _dst != 0 and not (
+                        os.WIFEXITED(_dst) and
+                        os.WEXITSTATUS(_dst) == 0):
+                    raise RuntimeError(
+                        "forkrun: C drain failed (status %r)"
+                        % (_dst,))
 
         # Orderer EOF: every worker write end is closed (all workers
         # reaped) — drop the parent's spare so the orderer finishes.
@@ -2337,9 +3144,17 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             records = _parse_records(_read_fd_all(coll_fd))
             # Already batch_idx-ordered by the C orderer; no sort.
             return [blob for _, blob in records]
-        records = []
-        for fd in out_fds:
-            records.extend(_parse_records(_read_fd_all(fd)))
+        if use_drain:
+            # Dynamic-fork paths (ingest/NUMA) fork no drain on
+            # empty input (no workers ever existed) — vacuously
+            # no records. Materialized paths always fork workers,
+            # so their drain always exists here.
+            records = (_parse_records(_read_fd_all(results_fd))
+                       if results_fd is not None else [])
+        else:
+            records = []
+            for fd in out_fds:
+                records.extend(_parse_records(_read_fd_all(fd)))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
@@ -2355,22 +3170,27 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                           src_fd=src_fd, must_close=must_close,
                           orderer_pid=orderer_pid, order_r=order_r,
                           order_w=order_w, trap_r=trap_r, trap_w=trap_w,
-                          coll_fd=coll_fd, coll_hold=coll_hold)
+                          coll_fd=coll_fd, coll_hold=coll_hold,
+                          drain_pid=drain_pid, results_fd=results_fd,
+                          spare_signal_w=signal_w)
 
 
 def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                                workers, on_error, mode="python",
                                nodes="auto", order="none", stats=None,
-                               splice=False):
+                               splice=False, c_drain=True):
     """Materialized stream() under reactor supervision (generator).
 
-    Fork happens on first next(); blobs yield live via the signal
-    pipe while the reactor supervises deaths/respawns. order=index
-    uses the C orderer (non-splice): the parent incrementally parses
-    the orderer's collection file (already ordered — no Python
-    reassembly buffer); order=none (or splice) drains per-worker
-    memfds exactly like _execute_streaming. Abandonment tears down
-    via the finally (reactor teardown kills strays).
+    Fork happens on first next(); blobs yield live while the reactor
+    supervises deaths/respawns. order=index uses the C orderer
+    (non-splice): the parent incrementally parses the orderer's
+    collection file (already ordered — no Python reassembly
+    buffer). c_drain (W-PY21-A, opt-in True, non-orderer paths):
+    a forked C loop moves signal consume + memfd pread into a
+    results pipe the parent reads incrementally (never signals/
+    memfds itself); False keeps the per-worker Python drain.
+    Abandonment tears down via the finally (reactor teardown kills
+    strays).
     """
     from ._bindings import v1_available as _v1a
     from ._reactor import (ORDER_PIPE_SIZE, ReactorState, reactor_loop,
@@ -2405,6 +3225,11 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     coll_hold: list = []
     orderer_pid = None
     trap_r = trap_w = None
+    drain_pid = None
+    results_r = None
+    drain_status = None
+    drain_alive = True
+    exhausted = False
     state = None
     try:
         memfd, size = _spill_to_memfd(src_fd)
@@ -2431,6 +3256,11 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
 
         use_orderer = (order == "index" and not splice
                        and _v1a(lib).get("orderer"))
+        # C drain for non-orderer paths (the orderer path is already
+        # C-speed end to end — the parent only preads one file there).
+        use_drain = bool(c_drain) and not use_orderer
+        if use_drain:
+            _require_drain_symbol()
         if use_orderer:
             order_r, order_w = os.pipe()
             try:
@@ -2476,6 +3306,51 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             pass
         signal_w = None
         state.ctx["signal_w"] = spare_signal_w
+
+        # W-PY21-A: with c_drain the C loop owns signal_r from here
+        # on (the parent never selects on it — control events only).
+        # The spare write end stays open for future respawns.
+        drain_st = {"alive": True, "status": None}
+        results_pump = None
+        if use_drain:
+            drain_pid, results_r = _fork_drain(
+                signal_r, out_fds, workers, mode="pipe")
+            signal_r = None
+            results_pump = _make_results_pump(
+                results_r, order=order, stats=stats)
+
+        def _close_spare():
+            # Drop the parent's spare signal write end (kept for
+            # future respawns) so signal EOF can arrive. Idempotent.
+            nonlocal spare_signal_w
+            if spare_signal_w is not None and spare_signal_w >= 0:
+                try:
+                    os.close(spare_signal_w)
+                except OSError:
+                    pass
+                spare_signal_w = None
+                state.ctx["signal_w"] = -1
+
+        def _pump_drain_c():
+            # W-PY21-A results-pipe consumer: spare management +
+            # drain reap + incremental parse. Same StopIteration
+            # contract as _pump_drain below.
+            if not any(s.alive for s in state.workers.values()):
+                _close_spare()
+            if drain_st["alive"]:
+                try:
+                    wpid, _dst = os.waitpid(drain_pid, os.WNOHANG)
+                except ChildProcessError:
+                    drain_st["alive"] = False
+                except OSError:
+                    pass
+                else:
+                    if wpid == drain_pid:
+                        drain_st["alive"] = False
+                        drain_st["status"] = _dst
+            return results_pump(
+                any(s.alive for s in state.workers.values())
+                or drain_st["alive"])
 
         # Drain state: per-worker (order=none/splice) or single
         # collection file (C orderer). Signals are wakeups only.
@@ -2620,11 +3495,35 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
 
         _pending: list = []
         try:
-            yield from reactor_loop(state, drain_gen=_pump_drain)
+            yield from reactor_loop(
+                state,
+                drain_gen=_pump_drain_c if use_drain else _pump_drain)
         finally:
             pass
 
         _reactor_failure_check(state, workers, on_error)
+
+        if use_drain:
+            # Workers are gone and the results pipe hit EOF, so the
+            # drain has exited — join it for its rc (worker error
+            # above already raised; teardown covers that path).
+            if drain_st["alive"]:
+                try:
+                    _, _dst = os.waitpid(drain_pid, 0)
+                except ChildProcessError:
+                    pass
+                except OSError:
+                    pass
+                else:
+                    drain_st["alive"] = False
+                    drain_st["status"] = _dst
+            drain_status = drain_st["status"]
+            if drain_status is not None and drain_status != 0 and not (
+                    os.WIFEXITED(drain_status) and
+                    os.WEXITSTATUS(drain_status) == 0):
+                raise RuntimeError(
+                    "forkrun: C drain failed (status %r)"
+                    % (drain_status,))
 
         if use_orderer:
             if order_w is not None:
@@ -2644,7 +3543,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                     raise RuntimeError(
                         "forkrun: C orderer failed (status %r)"
                         % (_ost,))
-        if stats is not None and reassembly is not None:
+        if stats is not None and reassembly is not None \
+                and not use_drain:
             stats["reassembly_max"] = reassembly.max_size
 
         _reactor_poison_summary(lib, state)
@@ -2660,13 +3560,15 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                           must_close=must_close,
                           orderer_pid=orderer_pid, order_r=order_r,
                           order_w=order_w, trap_r=trap_r, trap_w=trap_w,
-                          coll_fd=coll_fd, coll_hold=coll_hold)
+                          coll_fd=coll_fd, coll_hold=coll_hold,
+                          drain_pid=drain_pid, results_fd=results_r,
+                          spare_signal_w=spare_signal_w)
 
 
 def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                                    bytes_, workers, on_error, collect,
                                    order, mode="python", nodes="auto",
-                                   splice=False):
+                                   splice=False, c_drain=True):
     """map/run over a streaming source under reactor supervision.
 
     Mirrors _execute_ingest_locked (reaper + spawn-aware scanner +
@@ -2674,6 +3576,9 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     supervision instead of plain waitpid: worker deaths respawn
     (bounded), trap-ACKs confirm, the scanner has a death pipe with
     error classification, and order=index+collect uses the C orderer.
+    c_drain (W-PY21-A, opt-in True, non-orderer collect): workers
+    signal a forked C drain loop (results memfd read once at end)
+    instead of the parent parsing per-worker memfds.
     """
     from ._bindings import v1_available as _v1a
     from ._reactor import (ORDER_PIPE_SIZE, ReactorState,
@@ -2707,6 +3612,10 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     orderer_pid = None
     spawn_r = spawn_w = None
     trap_r = trap_w = None
+    signal_r = None
+    signal_w = None
+    drain_pid = None
+    results_fd = None
     fallow_pid = scan_pid = None
     scan_death_r = None
     state = None
@@ -2730,6 +3639,11 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
 
         use_orderer = (collect and order == "index" and not splice
                        and _v1a(lib).get("orderer"))
+        # C drain for collect without the orderer (orderer path is
+        # already C-speed end to end).
+        use_drain = bool(c_drain) and collect and not use_orderer
+        if use_drain:
+            _require_drain_symbol()
         if use_orderer:
             order_r, order_w = os.pipe()
             try:
@@ -2749,6 +3663,11 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                                         out_fds=out_fds)
 
         trap_r, trap_w = os.pipe()
+
+        if use_drain:
+            # Workers signal the drain; the parent keeps the spare
+            # write end for respawns (closed when no worker is live).
+            signal_r, signal_w, _ = make_pipe()
 
         try:
             sys.stdout.flush()
@@ -2788,7 +3707,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         state.configure(payload_spec=payload, sink_spec=sink,
                         memfd=memfd, file_size=-1,
                         out_fds=list(out_fds) if collect else [],
-                        signal_w=None, fallow_w=fallow_w,
+                        signal_w=signal_w if use_drain else None,
+                        fallow_w=fallow_w,
                         order_w=order_w if use_orderer else -1,
                         trap_ack_w=trap_w, on_error=on_error,
                         engine_fds=engine_fds, splice=splice)
@@ -2910,6 +3830,19 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 reactor_poll_once(state)
                 if helpers["scan_kind"] == "clean":
                     if total_written == 0:
+                        # Empty input: drop the fallow copies (reaper
+                        # EOF) and skip workers — nothing to consume.
+                        # With c_drain the unused signal pipe goes
+                        # too (no workers ⇒ no drain forked).
+                        _drop_fallow_copies()
+                        if use_drain:
+                            for _fd in (signal_w, signal_r):
+                                if _fd is not None:
+                                    try:
+                                        os.close(_fd)
+                                    except OSError:
+                                        pass
+                            signal_w = signal_r = None
                         break
                     raise RuntimeError(
                         "forkrun: ingest scanner published no data "
@@ -2920,6 +3853,14 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                         "forkrun: ingest scanner failed (status %r)"
                         % (helpers["scan_code"],))
                 _time.sleep(0.05)
+
+        if use_drain and workers_forked and drain_pid is None:
+            # Workers exist (spill/gate phases done); the drain takes
+            # signal_r from here on. Signals queued meanwhile are
+            # preserved in the pipe.
+            drain_pid, results_fd = _fork_drain(
+                signal_r, out_fds, workers, mode="memfd")
+            signal_r = None
 
         if workers_forked:
             try:
@@ -2954,6 +3895,26 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 pass
             fallow_w = None
             state.ctx["fallow_w"] = -1
+        if use_drain and drain_pid is not None:
+            # Same for the drain's signal EOF: drop the signal spare,
+            # then join the drain for its rc (worker error above
+            # already raised — teardown covers that path).
+            if signal_w is not None:
+                try:
+                    os.close(signal_w)
+                except OSError:
+                    pass
+                signal_w = None
+                state.ctx["signal_w"] = -1
+            try:
+                _, _dst = os.waitpid(drain_pid, 0)
+            except ChildProcessError:
+                _dst = 0
+            drain_pid = None
+            if _dst != 0 and not (
+                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
+                raise RuntimeError(
+                    "forkrun: C drain failed (status %r)" % (_dst,))
         if use_orderer:
             if order_w is not None:
                 try:
@@ -3013,9 +3974,17 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if use_orderer:
             records = _parse_records(_read_fd_all(coll_fd))
             return [blob for _, blob in records]
-        records = []
-        for fd in out_fds:
-            records.extend(_parse_records(_read_fd_all(fd)))
+        if use_drain:
+            # Dynamic-fork paths (ingest/NUMA) fork no drain on
+            # empty input (no workers ever existed) — vacuously
+            # no records. Materialized paths always fork workers,
+            # so their drain always exists here.
+            records = (_parse_records(_read_fd_all(results_fd))
+                       if results_fd is not None else [])
+        else:
+            records = []
+            for fd in out_fds:
+                records.extend(_parse_records(_read_fd_all(fd)))
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
@@ -3034,13 +4003,16 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                                       if p is not None],
                           orderer_pid=orderer_pid, order_r=order_r,
                           order_w=order_w, trap_r=trap_r, trap_w=trap_w,
-                          coll_fd=coll_fd, coll_hold=coll_hold)
+                          coll_fd=coll_fd, coll_hold=coll_hold,
+                          drain_pid=drain_pid, results_fd=results_fd,
+                          spare_signal_w=signal_w)
 
 
 def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                                      workers, on_error, mode="python",
                                      nodes="auto", order="none",
-                                     stats=None, splice=False):
+                                     stats=None, splice=False,
+                                     c_drain=True):
     """stream() over a streaming source under reactor supervision.
 
     Mirrors _execute_ingest_stream (spill/pump interleaved with a
@@ -3054,6 +4026,9 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     auto-forking on scanner requests would fork workers during
     pre-flight and trip the CASE-B bail (silent loss), so ingest
     forks stay publish-gated. Abandonment tears down via finally.
+    c_drain (W-PY21-A, opt-in True, non-orderer paths): a forked C
+    loop moves signal consume + memfd pread into a results pipe
+    the parent reads incrementally (never signals/memfds itself).
     """
     from ._bindings import v1_available as _v1a
     from ._reactor import (ORDER_PIPE_SIZE, ReactorState,
@@ -3092,6 +4067,9 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     coll_hold: list = []
     orderer_pid = None
     trap_r = trap_w = None
+    cdrain_pid = None
+    cresults_r = None
+    cdrain_status = None
     fallow_pid = scan_pid = None
     scan_death_r = None
     state = None
@@ -3112,6 +4090,10 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         use_orderer = (order == "index" and not splice
                        and _v1a(lib).get("orderer"))
+        # C drain for non-orderer paths (orderer path already C-speed).
+        use_drain = bool(c_drain) and not use_orderer
+        if use_drain:
+            _require_drain_symbol()
         if use_orderer:
             order_r, order_w = os.pipe()
             try:
@@ -3170,6 +4152,24 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
         state.trap_ack_r = trap_r
         spare_signal_w = os.dup(signal_w)
 
+        # W-PY21-A drain delegation state (pipe mode; forked lazily
+        # at first worker fork like the simple ingest path — the
+        # legacy `drain` dict below stays for c_drain=False).
+        cdrain = {"pid": None, "results_r": None, "pump": None,
+                  "status": None, "alive": True}
+
+        def _fork_cdrain_if_needed():
+            nonlocal signal_r, cdrain_pid, cresults_r
+            if not use_drain or cdrain["pid"] is not None:
+                return
+            cdrain["pid"], cdrain["results_r"] = _fork_drain(
+                signal_r, out_fds, workers, mode="pipe")
+            cdrain["pump"] = _make_results_pump(
+                cdrain["results_r"], order=order, stats=stats)
+            signal_r = None
+            cdrain_pid = cdrain["pid"]
+            cresults_r = cdrain["results_r"]
+
         def _drop_parent_signal():
             nonlocal signal_w, spare_signal_w
             # Workers (present + future respawns via the spare) hold
@@ -3189,6 +4189,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
             _drop_parent_signal()
             fstate["workers"] = True
             fstate["fork_at"] = _time.monotonic()
+            _fork_cdrain_if_needed()
 
         def _watch_helpers():
             # Raises on fallow death / scanner error / early clean
@@ -3368,9 +4369,51 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                                 got = True
             return got
 
+        def _pump_drain_c():
+            # W-PY21-A quantum: spill interleave (drives forks) +
+            # results-pipe consumer. Same StopIteration contract as
+            # _pump_drain below (pump done + no producers + results
+            # EOF + empty). The legacy signal/memfd machinery is
+            # entirely bypassed — the drain owns it.
+            pump_done = _spill_quantum()
+            if cdrain["pid"] is None:
+                # No workers ever forked (empty input): with the
+                # spill done nothing will ever arrive.
+                if pump_done:
+                    raise StopIteration
+                return None
+            if cdrain["alive"]:
+                try:
+                    wpid, _dst = os.waitpid(cdrain["pid"], os.WNOHANG)
+                except ChildProcessError:
+                    cdrain["alive"] = False
+                except OSError:
+                    pass
+                else:
+                    if wpid == cdrain["pid"]:
+                        cdrain["alive"] = False
+                        cdrain["status"] = _dst
+            try:
+                blob = cdrain["pump"](
+                    bool(any(s.alive for s in state.workers.values()))
+                    or cdrain["alive"])
+            except StopIteration:
+                if pump_done:
+                    raise
+                return None
+            return blob
+
         def _pump_drain():
             nonlocal spare_signal_w
-            if not any(s.alive for s in state.workers.values()):
+            # Spare-drop rule (W-PY19 erratum): only once workers
+            # have EVER forked (fstate). Rounds before the first
+            # fork have no live workers either — closing the spare
+            # then would poison ctx (future forks inherit
+            # signal_w=-1 and never signal, starving the drain AND
+            # the legacy signal parser; legacy limps home only via
+            # its end-of-stream safety sweep).
+            if fstate["workers"] and not any(
+                    s.alive for s in state.workers.values()):
                 if spare_signal_w is not None and spare_signal_w >= 0:
                     try:
                         os.close(spare_signal_w)
@@ -3378,6 +4421,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                         pass
                     spare_signal_w = None
                     state.ctx["signal_w"] = -1
+            if use_drain:
+                return _pump_drain_c()
             try:
                 pump_done = _spill_quantum()
             except StopIteration:
@@ -3454,6 +4499,27 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         _reactor_failure_check(state, workers, on_error)
 
+        if use_drain and cdrain["pid"] is not None:
+            # Results EOF ⇒ the drain exited — join it for its rc
+            # (worker error above already raised; teardown covers).
+            if cdrain["alive"]:
+                try:
+                    _, _dst = os.waitpid(cdrain["pid"], 0)
+                except ChildProcessError:
+                    pass
+                except OSError:
+                    pass
+                else:
+                    cdrain["alive"] = False
+                    cdrain["status"] = _dst
+            cdrain_status = cdrain["status"]
+            if cdrain_status is not None and cdrain_status != 0 and not (
+                    os.WIFEXITED(cdrain_status) and
+                    os.WEXITSTATUS(cdrain_status) == 0):
+                raise RuntimeError(
+                    "forkrun: C drain failed (status %r)"
+                    % (cdrain_status,))
+
         # Reaper EOF (same rule as the locked ingest path): drop the
         # parent's spare fallow write end now that no respawn can
         # reopen one, so the reaper observes EOF and exits.
@@ -3511,7 +4577,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                              b"reclaimed.\n")
                 except OSError:
                     pass
-        if stats is not None and drain["reassembly"] is not None:
+        if stats is not None and drain["reassembly"] is not None \
+                and not use_drain:
             stats["reassembly_max"] = drain["reassembly"].max_size
 
         _reactor_poison_summary(lib, state)
@@ -3529,7 +4596,1388 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                                       if p is not None],
                           orderer_pid=orderer_pid, order_r=order_r,
                           order_w=order_w, trap_r=trap_r, trap_w=trap_w,
-                          coll_fd=coll_fd, coll_hold=coll_hold)
+                          coll_fd=coll_fd, coll_hold=coll_hold,
+                          drain_pid=cdrain_pid,
+                          results_fd=cresults_r,
+                          spare_signal_w=spare_signal_w)
 
 
-__all__ = ["run", "map", "stream"]
+# =====================================================================
+# W-PY20 parameter sweeps — bash ::: / :::: / --link equivalent.
+#
+# Pure frontend feature: combinations are generated by _sweep.py and
+# each becomes ordinary batches whose .metadata carries the sweep
+# tuple. The engine never sees sweeps (same claim/ack loop, no new
+# syscalls, no new IPC).
+# =====================================================================
+
+def sweep(payload, source=None, *, args=None, args_from=None,
+          link=False, workers=None, on_error="retry", **kwargs):
+    """Parameter sweep: run payload once per argument combination.
+
+    payload: Batch -> bytes (receives .metadata with the sweep tuple;
+      mode="spawn"/"plugin" run per combination with metadata set but
+      unused by the external entry point — use mode="python" to
+      consume it). mode="splice" is rejected (no payload exists to
+      receive metadata).
+    source: optional input every combination processes (path | fd |
+      pipe/socket, same contract as map). None = standalone combos.
+    args: list of lists (one per dimension); args_from: list of file
+      paths (one dimension per file, one value per line).
+    link: False (default) = Cartesian product (bash :::); True = zip
+      dimensions pairwise with shortest-truncation warning (--link).
+    workers/on_error: as in map (workers defaults to min(8, combos)
+      standalone, cpu-count with source).
+    Additional kwargs (lines/bytes/order/mode/streaming/
+    orchestrator/nodes) forward to the underlying map call(s),
+    except standalone sweeps force lines=1 + order="index" (the
+    batch↔combination 1:1 mapping and combination-order results are
+    load-bearing — conflicting values raise ValueError rather than
+    silently scrambling).
+
+    Returns one result per combination, in combination order. Empty
+    combinations → []. Payload errors ride the usual escrow/retry/
+    poison path per batch (= per combination standalone).
+    """
+    from ._sweep import generate_combinations
+
+    if kwargs.get("sink") is not None:
+        raise ValueError(
+            "sweep() collects results — sink= is not accepted (the "
+            "payload return value is the result)")
+    if kwargs.get("mode", "python") == "splice":
+        raise ValueError(
+            "sweep() with mode='splice' is rejected: no payload "
+            "exists to receive batch.metadata (passthrough has no "
+            "per-combination hook)")
+    combos = list(generate_combinations(args=args, args_from=args_from,
+                                        link=link))
+    if not combos:
+        return []
+    if source is not None:
+        return _execute_sweep_with_source(
+            payload, source, combos, workers, on_error, **kwargs)
+    return _execute_sweep_standalone(payload, combos, workers,
+                                     on_error, **kwargs)
+
+
+def _execute_sweep_standalone(payload, combinations, workers, on_error,
+                              **kwargs):
+    """Standalone sweep: one batch per combination, no source data.
+
+    Synthetic input (one index line per combination) run with
+    lines=1 (exactly one batch per line — adaptive batching would
+    otherwise pack several combos into one batch and break the
+    index mapping) and order="index" (results in combination
+    order — completion order would scramble it). Both are forced:
+    user-supplied lines=/bytes=/order= raise instead of silently
+    violating the mapping.
+    """
+    import tempfile as _tf
+
+    if kwargs.get("lines") is not None \
+            or kwargs.get("bytes") is not None:
+        raise ValueError(
+            "standalone sweep() forces lines=1 (one batch per "
+            "combination) — lines=/bytes= would merge combinations")
+    if kwargs.get("order") is not None \
+            and kwargs.get("order") != "index":
+        raise ValueError(
+            "standalone sweep() forces order='index' (results in "
+            "combination order) — got %r" % (kwargs.get("order"),))
+    n = len(combinations)
+    with _tf.NamedTemporaryFile(mode="w", suffix=".txt",
+                                delete=False) as fh:
+        for i in range(n):
+            fh.write("%d\n" % i)
+        path = fh.name
+    try:
+        def sweep_payload(batch):
+            try:
+                combo_idx = int(bytes(batch.data).strip())
+            except ValueError:
+                raise RuntimeError(
+                    "forkrun: sweep index batch unparseable: %r"
+                    % (bytes(batch.data)[:32],))
+            batch.metadata = combinations[combo_idx]
+            return payload(batch)
+
+        return map(sweep_payload, path,
+                   workers=(workers if workers is not None
+                            else min(8, n)),
+                   on_error=on_error, lines=1, order="index",
+                   **{k: v for k, v in kwargs.items()
+                      if k not in ("lines", "bytes", "order")})
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _execute_sweep_with_source(payload, source, combinations,
+                               workers, on_error, **kwargs):
+    """Sweep over source data: each combination processes the source.
+
+    One map() per combination (≤100 expected; bounded inputs only —
+    same materialization contract as map). Path sources are reused
+    directly; fd/pipe sources are materialized to a temp file ONCE
+    (a repeated drain would observe EOF after the first combo).
+    Within each combo the order defaults to "index" for
+    determinism unless the caller sets order=.
+    """
+    import os as _os
+
+    if isinstance(source, (str, bytes, _os.PathLike)):
+        # Path sources reopen per combination — reuse directly.
+        combo_source = source
+        tmp_hold = None
+    else:
+        # fd / fileno() object: consume once into a temp file so
+        # every combination observes the full source. Rewind
+        # seekables first (the kernel spill path reads from
+        # explicit offset 0 regardless of position; pipes raise
+        # ESPIPE here and read from the current position as usual).
+        import tempfile as _tf
+        src_fd, must_close = _open_source(source)
+        try:
+            try:
+                os.lseek(src_fd, 0, os.SEEK_SET)
+            except OSError:
+                pass
+            chunks = []
+            while True:
+                try:
+                    chunk = os.read(src_fd, _CHUNK)
+                except OSError as exc:
+                    raise RuntimeError(
+                        "failed reading source: %s" % (exc,))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            blob = b"".join(chunks)
+        finally:
+            if must_close:
+                try:
+                    os.close(src_fd)
+                except OSError:
+                    pass
+        tmp = _tf.NamedTemporaryFile(mode="wb", suffix=".txt",
+                                     delete=False)
+        try:
+            tmp.write(blob)
+            tmp.close()
+            combo_source = tmp.name
+        except OSError:
+            try:
+                tmp.close()
+            except OSError:
+                pass
+            raise
+        tmp_hold = tmp.name
+
+    kwargs = dict(kwargs)
+    kwargs.setdefault("order", "index")
+    try:
+        results = []
+        for combo in combinations:
+            def combo_payload(batch, _combo=combo):
+                batch.metadata = _combo
+                return payload(batch)
+
+            results.extend(map(combo_payload, combo_source,
+                               workers=workers, on_error=on_error,
+                               **kwargs))
+        return results
+    finally:
+        if tmp_hold is not None:
+            try:
+                os.unlink(tmp_hold)
+            except OSError:
+                pass
+
+
+# =====================================================================
+# W-PY21 NUMA multi-node pipeline executors.
+#
+# Topology (engine owns the mechanism; this module only forks it):
+#   ingest (born-local MPOL_BIND distributor, owns the source fd) →
+#   N indexers (chunk boundaries, self-pinned) →
+#   N scanners (per-node rings, distance-charged stealing) →
+#   workers (per-node claims, self-pinned via fr_py_worker_init) →
+#   physical fallow (PhysPackets) + C orderer (numa=1) as needed.
+# Workers fork per-node on that node's first DATA publish (the
+# W-PY19 pre-flight rule, applied per ring), with a global stall
+# fallback for slow sources. Scanner spawn pipes stay disarmed
+# (fd -1): auto-forking on the scanner's startup burst would trip
+# the CASE-B pre-flight bail (silent loss) — publish-gating is the
+# safe rule, same rationale as W-PY19 ingest.
+# =====================================================================
+
+def _pump_debug_tick():
+    """Env-gated pump diagnostic throttle (W-PY21-A debugging).
+
+    Returns True ~once/sec when FORKRUN_DEBUG_PUMP is set, else
+    False. Zero overhead otherwise (one getenv per call — the
+    callers already do costlier work per round; never enabled in
+    tests or benchmarks).
+    """
+    import time as _t
+    now = _t.monotonic()
+    last = _pump_debug_tick._last
+    if os.environ.get("FORKRUN_DEBUG_PUMP") and now - last >= 1.0:
+        _pump_debug_tick._last = now
+        return True
+    return False
+
+
+_pump_debug_tick._last = 0.0
+
+
+def _pump_debug_log(msg):
+    try:
+        os.write(2, ("[pump %d] %s\n" % (os.getpid(), msg)).encode())
+    except OSError:
+        pass
+
+
+def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
+    """Fork fallow-phys + N indexers + N scanners + ingest (W-PY21).
+
+    All children scrub to their keep set and never return (os._exit
+    with the engine rc). Scanners run with spawn disarmed (-1).
+    Returns a dict with pids, death-pipe read ends, and the fallow
+    write-end spare. The caller owns src_fd (closes it when
+    must_close after this returns — every child already inherited
+    what it needs).
+    """
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+    fallow_r, fallow_w = os.pipe()
+    fallow_pid = os.fork()
+    if fallow_pid == 0:
+        try:
+            scrub_fds(engine_fds | {fallow_r, memfd})
+            rc = lib.fr_py_fallow_phys(fallow_r, memfd)
+        except BaseException:
+            rc = 1
+        os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
+    try:
+        os.close(fallow_r)
+    except OSError:
+        pass
+
+    indexer_pids = []
+    indexer_deaths = []
+    for node in range(num_nodes):
+        death_r, death_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(death_r)
+            except OSError:
+                pass
+            try:
+                scrub_fds(engine_fds | {memfd, death_w})
+                rc = lib.fr_py_indexer_numa(memfd, node)
+            except BaseException:
+                rc = 1
+            os._exit(rc if isinstance(rc, int) and 0 <= rc < 256
+                      else 1)
+        try:
+            os.close(death_w)
+        except OSError:
+            pass
+        indexer_pids.append(pid)
+        indexer_deaths.append(death_r)
+
+    scanner_pids = []
+    scanner_deaths = []
+    for node in range(num_nodes):
+        death_r, death_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(death_r)
+            except OSError:
+                pass
+            try:
+                scrub_fds(engine_fds | {memfd, death_w})
+                rc = lib.fr_py_numa_scanner(memfd, node, -1,
+                                            num_nodes)
+            except BaseException:
+                rc = 1
+            os._exit(rc if isinstance(rc, int) and 0 <= rc < 256
+                      else 1)
+        try:
+            os.close(death_w)
+        except OSError:
+            pass
+        scanner_pids.append(pid)
+        scanner_deaths.append(death_r)
+
+    ingest_death_r, ingest_death_w = os.pipe()
+    ingest_pid = os.fork()
+    if ingest_pid == 0:
+        try:
+            os.close(ingest_death_r)
+        except OSError:
+            pass
+        try:
+            scrub_fds(engine_fds | {src_fd, memfd, ingest_death_w})
+            rc = lib.fr_py_numa_ingest(src_fd, memfd, num_nodes)
+        except BaseException:
+            rc = 1
+        os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
+    try:
+        os.close(ingest_death_w)
+    except OSError:
+        pass
+
+    return {"fallow_pid": fallow_pid, "fallow_w": fallow_w,
+            "indexer_pids": indexer_pids,
+            "indexer_deaths": indexer_deaths,
+            "scanner_pids": scanner_pids,
+            "scanner_deaths": scanner_deaths,
+            "ingest_pid": ingest_pid,
+            "ingest_death": ingest_death_r}
+
+
+def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
+                         workers, on_error, collect, order,
+                         mode="python", numa_map="", num_nodes=2,
+                         node_cpus=None, splice=False, c_drain=True):
+    """Blocking map/run over the NUMA pipeline (W-PY21).
+
+    init_numa → empty ingress memfd → pipeline (fallow-phys,
+    indexers, scanners, ingest owning the source) → per-node
+    publish-gated worker forks → reactor_run → failure accounting
+    → orderer/parse → helper joins → teardown. Raises RuntimeError
+    on ingest/indexer/scanner failure, trap-ACK timeout, or
+    unrecovered deaths. Requires num_nodes > 1 (caller routes UMA
+    elsewhere).
+    c_drain (W-PY21-A, opt-in True, non-orderer collect): workers
+    signal a forked C drain loop (results memfd read once at end)
+    instead of the parent parsing per-worker memfds.
+    """
+    from ._bindings import v1_available as _v1a
+    from ._numa import wid_to_node
+    from ._reactor import (ORDER_PIPE_SIZE, ReactorState,
+                           check_scanner_death, reactor_poll_once,
+                           reactor_run, spawn_orderer)
+    import fcntl as _fcntl
+
+    if mode not in ("python", "splice"):
+        raise NotImplementedError(
+            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+    pre_fds = snapshot_fds()
+    lib = load()
+    if lib.fr_py_init_numa(lines or 0, bytes_ or 0, num_nodes,
+                           numa_map.encode() if numa_map else None
+                           ) != RC_OK:
+        raise RuntimeError("NUMA substrate init failed")
+    engine_fds = snapshot_fds() - pre_fds
+
+    src_fd, must_close = _open_source(source)
+    memfd = None
+    mem_hold: list = []
+    out_fds: list = []
+    out_hold: list = []
+    order_r = order_w = None
+    coll_fd = None
+    coll_hold: list = []
+    orderer_pid = None
+    trap_r = trap_w = None
+    signal_r = None
+    signal_w = None
+    drain_pid = None
+    results_fd = None
+    fallow_w = None
+    pipe = None
+    state = None
+    helpers = {"fallow_rc": None, "ingest_kind": None,
+               "ingest_code": None, "index": {}, "scan": {}}
+    forked = set()
+    t_start = _time.monotonic()
+    try:
+        memfd, mem_hold = _new_ingress_memfd()
+        try:
+            os.lseek(memfd, 0, os.SEEK_SET)
+        except OSError:
+            pass
+        if collect:
+            out_fds, out_hold = _new_output_memfds(workers)
+
+        use_orderer = (collect and order == "index" and not splice
+                       and _v1a(lib).get("orderer"))
+        # C drain for collect without the orderer (orderer path is
+        # already C-speed end to end).
+        use_drain = bool(c_drain) and collect and not use_orderer
+        if use_drain:
+            _require_drain_symbol()
+        if use_orderer:
+            order_r, order_w = os.pipe()
+            try:
+                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
+                             ORDER_PIPE_SIZE)
+            except OSError:
+                pass
+            try:
+                coll_fd = os.memfd_create("forkrun_ordered")
+            except AttributeError:
+                import tempfile as _tf
+                _tmp = _tf.TemporaryFile(prefix="forkrun_ordered_")
+                coll_hold.append(_tmp)
+                coll_fd = _tmp.fileno()
+            orderer_pid = spawn_orderer(order_r, coll_fd,
+                                        unordered=False, numa=True,
+                                        engine_fds=engine_fds,
+                                        out_fds=out_fds)
+
+        if use_drain:
+            # Workers signal the drain; the parent keeps the spare
+            # write end for respawns (closed when no worker is live).
+            signal_r, signal_w, _ = make_pipe()
+
+        trap_r, trap_w = os.pipe()
+
+        pipe = _numa_fork_pipeline(lib, memfd, src_fd, num_nodes,
+                                   engine_fds)
+        fallow_w = pipe["fallow_w"]
+        if must_close:
+            try:
+                os.close(src_fd)
+            except OSError:
+                pass
+            must_close = False
+
+        from ._numa import wid_to_node
+        # wid → node blocks (stable for the run: respawns reuse the
+        # wid, hence the same memfd and the same claim ring).
+        wid_node = wid_to_node(workers, num_nodes)
+
+        state = ReactorState(workers, num_nodes=num_nodes,
+                             respawn_cap=REACTOR_RESPAWN_CAP,
+                             spawn_ceiling=workers)
+        state.configure(payload_spec=payload, sink_spec=sink,
+                        memfd=memfd, file_size=-1,
+                        out_fds=list(out_fds) if collect else [],
+                        signal_w=signal_w if use_drain else None,
+                        fallow_w=fallow_w,
+                        order_w=order_w if use_orderer else -1,
+                        trap_ack_w=trap_w, on_error=on_error,
+                        engine_fds=engine_fds, splice=splice,
+                        node_cpus=node_cpus)
+        state.trap_ack_r = trap_r
+
+        def _ready_all():
+            try:
+                return [lib.fr_py_data_ready_node(n)
+                        for n in range(num_nodes)]
+            except Exception:
+                return [0] * num_nodes
+
+        def _poll_ingest():
+            # One nonblocking ingest-death classification. Records
+            # definitive outcomes (the pipe is consumed/closed
+            # inside); raises on error.
+            if helpers["ingest_kind"] is not None:
+                return
+            kind, code = check_scanner_death(
+                pipe["ingest_pid"], pipe["ingest_death"])
+            if kind != "running":
+                helpers["ingest_kind"] = kind
+                helpers["ingest_code"] = code
+                pipe["ingest_death"] = None
+                if kind == "error":
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: NUMA ingest failed (status %r)"
+                        % (code,))
+
+        def _watch_pipeline():
+            # Fallow death (WNOHANG) is fatal; indexer/scanner/ingest
+            # deaths classify via their death pipes. Error kinds
+            # raise at once. A clean indexer/scanner exit keys on
+            # ingest EOF POSTED (fr_py_ingest_eof_posted — the same
+            # sentinel the indexers watch), NOT on ingest process
+            # exit: the ingest routinely outlives its helpers (it
+            # flushes on chunk_done before exiting), so
+            # exit-ordering alone cannot tell normal teardown
+            # ("helper done after EOF posted, ingest still
+            # flushing") from tail loss ("helper done before EOF
+            # was even posted" — fatal).
+            try:
+                wpid, st = os.waitpid(pipe["fallow_pid"], os.WNOHANG)
+            except (ChildProcessError, OSError):
+                wpid, st = None, None
+            if wpid == pipe["fallow_pid"]:
+                helpers["fallow_rc"] = st
+                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
+                if not ok:
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: NUMA reaper failed (status %r)"
+                        % (st,))
+            _poll_ingest()
+            try:
+                eof_posted = lib.fr_py_ingest_eof_posted()
+            except Exception:
+                eof_posted = 0
+            for pids, deaths, key in (
+                    (pipe["indexer_pids"], pipe["indexer_deaths"],
+                     "index"),
+                    (pipe["scanner_pids"], pipe["scanner_deaths"],
+                     "scan")):
+                for node in range(num_nodes):
+                    if node in helpers[key]:
+                        continue
+                    kind, code = check_scanner_death(
+                        pids[node], deaths[node])
+                    if kind == "running":
+                        continue
+                    if kind == "error" or not eof_posted:
+                        helpers[key][node] = (kind, code)
+                        deaths[node] = None
+                        lib.fr_py_abort()
+                        raise RuntimeError(
+                            "forkrun: NUMA %s %d failed "
+                            "(status %r)" % (key, node, code))
+                    helpers[key][node] = (kind, code)
+                    deaths[node] = None
+
+        def _fork_node(node):
+            for wid, nd in enumerate(wid_node):
+                if nd == node:
+                    state.spawn_worker(wid=wid, node=node)
+            forked.add(node)
+
+        def _all_helpers_done():
+            return (helpers["ingest_kind"] == "clean"
+                    and len(helpers["index"]) >= num_nodes
+                    and len(helpers["scan"]) >= num_nodes)
+
+        # Fork-timing loop: per-node publish gating + global stall
+        # fallback. Ends when every node forked, or when the whole
+        # pipeline is done (ingest + all indexers + all scanners
+        # clean — then fstat below separates empty input from a
+        # publish anomaly). Fork-on-publish precedes the done-check
+        # each round so a publish coinciding with pipeline EOF still
+        # forks before the loop can exit.
+        stalled = False
+        while len(forked) < num_nodes:
+            _watch_pipeline()
+            reactor_poll_once(state)
+            for node, ready in enumerate(_ready_all()):
+                if ready > 0 and node not in forked:
+                    _fork_node(node)
+            if len(forked) >= num_nodes:
+                break
+            if _all_helpers_done():
+                break
+            if not stalled and (
+                    _time.monotonic() - t_start) >= STALL_FORK_AFTER:
+                stalled = True
+                for node in range(num_nodes):
+                    if node not in forked:
+                        _fork_node(node)
+            _time.sleep(0.05)
+
+        if not forked:
+            # Nothing published and ingest is done: empty input
+            # (fstat 0) skips workers; anything landed is a loud
+            # anomaly (never silent loss).
+            try:
+                landed = os.fstat(memfd).st_size
+            except OSError:
+                landed = 0
+            if landed != 0:
+                raise RuntimeError(
+                    "forkrun: NUMA ingest landed %d bytes with no "
+                    "published batches" % landed)
+            for _fd in (fallow_w, order_w):
+                if _fd is not None:
+                    try:
+                        os.close(_fd)
+                    except OSError:
+                        pass
+            if fallow_w is not None:
+                fallow_w = None
+                state.ctx["fallow_w"] = -1
+            if order_w is not None:
+                order_w = None
+                state.ctx["order_w"] = -1
+            if use_drain:
+                # No workers ⇒ no drain forked; drop the unused
+                # signal pipe.
+                for _fd in (signal_w, signal_r):
+                    if _fd is not None:
+                        try:
+                            os.close(_fd)
+                        except OSError:
+                            pass
+                signal_w = signal_r = None
+        else:
+            if use_drain and drain_pid is None:
+                # Workers exist; the drain takes signal_r from here
+                # on (the parent never selects on it — control only).
+                # The spare write end stays open for respawns.
+                drain_pid, results_fd = _fork_drain(
+                    signal_r, out_fds, workers, mode="memfd")
+                signal_r = None
+            try:
+                reactor_run(state, service=_watch_pipeline)
+            except KeyboardInterrupt:
+                raise
+
+        _reactor_failure_check(state, workers, on_error)
+
+        if fallow_w is not None:
+            try:
+                os.close(fallow_w)
+            except OSError:
+                pass
+            fallow_w = None
+            if state is not None:
+                state.ctx["fallow_w"] = -1
+        if use_drain and drain_pid is not None:
+            # Drop the signal spare so the drain observes EOF, then
+            # join it for its rc (worker error above already raised;
+            # teardown covers that path).
+            if signal_w is not None:
+                try:
+                    os.close(signal_w)
+                except OSError:
+                    pass
+                signal_w = None
+                state.ctx["signal_w"] = -1
+            try:
+                _, _dst = os.waitpid(drain_pid, 0)
+            except ChildProcessError:
+                _dst = 0
+            drain_pid = None
+            if _dst != 0 and not (
+                    os.WIFEXITED(_dst) and os.WEXITSTATUS(_dst) == 0):
+                raise RuntimeError(
+                    "forkrun: C drain failed (status %r)" % (_dst,))
+        if use_orderer:
+            if order_w is not None:
+                try:
+                    os.close(order_w)
+                except OSError:
+                    pass
+                order_w = None
+            if orderer_pid is not None:
+                try:
+                    _, _ost = os.waitpid(orderer_pid, 0)
+                except ChildProcessError:
+                    _ost = 0
+                if _ost != 0 and not (
+                        os.WIFEXITED(_ost) and
+                        os.WEXITSTATUS(_ost) == 0):
+                    raise RuntimeError(
+                        "forkrun: C orderer failed (status %r)"
+                        % (_ost,))
+
+        # Helper joins: ingest strict-clean; indexers/scanners
+        # strict unless already observed (proof-based leniency only
+        # when teardown already reaped them — same rule as UMA).
+        if helpers["ingest_kind"] == "error":
+            raise RuntimeError(
+                "forkrun: NUMA ingest failed (status %r)"
+                % (helpers["ingest_code"],))
+        if helpers["ingest_kind"] is None:
+            try:
+                _, _st = os.waitpid(pipe["ingest_pid"], 0)
+            except ChildProcessError:
+                _st = None
+            if _st is not None and not (
+                    os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
+                raise RuntimeError(
+                    "forkrun: NUMA ingest failed (status %r)" % (_st,))
+        for key, pids in (("index", pipe["indexer_pids"]),
+                          ("scan", pipe["scanner_pids"])):
+            for node in range(num_nodes):
+                if node in helpers[key]:
+                    kind, code = helpers[key][node]
+                    if kind == "error":
+                        raise RuntimeError(
+                            "forkrun: NUMA %s %d failed (status %r)"
+                            % (key, node, code))
+                    continue
+                try:
+                    _, _st = os.waitpid(pids[node], 0)
+                except ChildProcessError:
+                    _st = None
+                if _st is not None and not (
+                        os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
+                    raise RuntimeError(
+                        "forkrun: NUMA %s %d failed (status %r)"
+                        % (key, node, _st))
+        if helpers["fallow_rc"] is None:
+            try:
+                _, _fst = os.waitpid(pipe["fallow_pid"], 0)
+            except ChildProcessError:
+                _fst = None
+            if _fst is not None and not (
+                    os.WIFEXITED(_fst) and os.WEXITSTATUS(_fst) == 0):
+                try:
+                    os.write(2, b"forkrun [WARN]: NUMA reaper exited "
+                             b"abnormally; ingress may not be fully "
+                             b"reclaimed.\n")
+                except OSError:
+                    pass
+
+        _reactor_poison_summary(lib, state)
+
+        if not collect:
+            return None
+        if use_orderer:
+            records = _parse_records(_read_fd_all(coll_fd))
+            return [blob for _, blob in records]
+        if use_drain:
+            # Dynamic-fork paths (ingest/NUMA) fork no drain on
+            # empty input (no workers ever existed) — vacuously
+            # no records. Materialized paths always fork workers,
+            # so their drain always exists here.
+            records = (_parse_records(_read_fd_all(results_fd))
+                       if results_fd is not None else [])
+        else:
+            records = []
+            for fd in out_fds:
+                records.extend(_parse_records(_read_fd_all(fd)))
+        if order == "index":
+            records.sort(key=lambda kv: kv[0])
+        return [blob for _, blob in records]
+    except KeyboardInterrupt:
+        try:
+            lib.fr_py_abort()
+        except Exception:
+            pass
+        raise
+    finally:
+        extra = []
+        if pipe is not None:
+            extra = ([pipe["fallow_pid"], pipe["ingest_pid"]]
+                     + pipe["indexer_pids"] + pipe["scanner_pids"])
+            # Death-pipe read ends the watches already consumed
+            # (closed inside check_scanner_death); close any still
+            # open so fd counts stay stable across runs.
+            for _dr in ([pipe["ingest_death"]] + pipe["indexer_deaths"]
+                        + pipe["scanner_deaths"]):
+                if _dr is not None:
+                    try:
+                        os.close(_dr)
+                    except OSError:
+                        pass
+        _teardown_reactor(lib, state, out_fds=out_fds,
+                          out_hold=out_hold, memfd=memfd,
+                          mem_hold=mem_hold,
+                          src_fd=src_fd, must_close=must_close,
+                          extra_pids=[p for p in extra
+                                      if p is not None],
+                          orderer_pid=orderer_pid, order_r=order_r,
+                          order_w=order_w, trap_r=trap_r, trap_w=trap_w,
+                          coll_fd=coll_fd, coll_hold=coll_hold,
+                          drain_pid=drain_pid, results_fd=results_fd,
+                          spare_signal_w=signal_w)
+
+
+def _numa_stream_gen(payload, source, *, lines, bytes_, workers,
+                       on_error, mode, order, orchestrator, numa_map,
+                       num_nodes, node_cpus, splice=False, c_drain=True):
+    # stream() over the NUMA pipeline: live drain while the ingest
+    # feeds per-node rings. Always reactor-supervised (the NUMA path
+    # is new in W-PY21 — no legacy non-reactor NUMA exists to preserve).
+    _ = orchestrator  # accepted for call uniformity; NUMA implies reactor
+    yield from _execute_numa_stream(
+        payload, source, lines=lines, bytes_=bytes_, workers=workers,
+        on_error=on_error, mode=mode, order=order,
+        numa_map=numa_map, num_nodes=num_nodes, node_cpus=node_cpus,
+        splice=splice, c_drain=c_drain)
+
+
+def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
+                         on_error, mode="python", order="none",
+                         numa_map="", num_nodes=2, node_cpus=None,
+                         stats=None, splice=False, c_drain=True):
+    """stream() over the NUMA pipeline (W-PY21 generator).
+
+    Same pipeline as _execute_numa_locked, but the parent drains
+    live: signal wakeups + incremental preads (per-worker memfds, or
+    the C orderer's collection file when order=index non-splice).
+    pump_done = ingest observed done AND (workers forked OR input
+    was empty). Abandonment tears down via the finally.
+    c_drain (W-PY21-A, opt-in True, non-orderer paths): a forked C
+    loop moves signal consume + memfd pread into a results pipe
+    the parent reads incrementally (never signals/memfds itself).
+    """
+    from ._bindings import v1_available as _v1a
+    from ._numa import wid_to_node
+    from ._reactor import (ORDER_PIPE_SIZE, ReactorState,
+                           check_scanner_death, reactor_loop,
+                           spawn_orderer)
+    import fcntl as _fcntl
+    import select as _select
+
+    if mode not in ("python", "splice"):
+        raise NotImplementedError(
+            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
+    if order not in ("none", "index"):
+        raise ValueError(
+            "order must be 'none' or 'index', got %r" % (order,))
+    pre_fds = snapshot_fds()
+    lib = load()
+    if lib.fr_py_init_numa(lines or 0, bytes_ or 0, num_nodes,
+                           numa_map.encode() if numa_map else None
+                           ) != RC_OK:
+        raise RuntimeError("NUMA substrate init failed")
+    engine_fds = snapshot_fds() - pre_fds
+
+    src_fd, must_close = _open_source(source)
+    memfd = None
+    mem_hold: list = []
+    out_fds: list = []
+    out_hold: list = []
+    signal_r = None
+    signal_w = None
+    spare_signal_w = None
+    order_r = order_w = None
+    coll_fd = None
+    coll_hold: list = []
+    orderer_pid = None
+    trap_r = trap_w = None
+    drain_pid = None
+    results_r = None
+    fallow_w = None
+    pipe = None
+    state = None
+    helpers = {"fallow_rc": None, "ingest_kind": None,
+               "ingest_code": None, "index": {}, "scan": {}}
+    forked = set()
+    pump_state = {"done": False, "t_start": _time.monotonic(),
+                  "stalled": False}
+    try:
+        memfd, mem_hold = _new_ingress_memfd()
+        try:
+            os.lseek(memfd, 0, os.SEEK_SET)
+        except OSError:
+            pass
+        out_fds, out_hold = _new_output_memfds(workers)
+        signal_r, signal_w, _ = make_pipe()
+
+        use_orderer = (order == "index" and not splice
+                       and _v1a(lib).get("orderer"))
+        # C drain for non-orderer paths (orderer path already C-speed).
+        use_drain = bool(c_drain) and not use_orderer
+        if use_drain:
+            _require_drain_symbol()
+        if use_orderer:
+            order_r, order_w = os.pipe()
+            try:
+                _fcntl.fcntl(order_w, _fcntl.F_SETPIPE_SZ,
+                             ORDER_PIPE_SIZE)
+            except OSError:
+                pass
+            try:
+                coll_fd = os.memfd_create("forkrun_ordered")
+            except AttributeError:
+                import tempfile as _tf
+                _tmp = _tf.TemporaryFile(prefix="forkrun_ordered_")
+                coll_hold.append(_tmp)
+                coll_fd = _tmp.fileno()
+            orderer_pid = spawn_orderer(order_r, coll_fd,
+                                        unordered=False, numa=True,
+                                        engine_fds=engine_fds,
+                                        out_fds=out_fds)
+
+        trap_r, trap_w = os.pipe()
+
+        pipe = _numa_fork_pipeline(lib, memfd, src_fd, num_nodes,
+                                   engine_fds)
+        fallow_w = pipe["fallow_w"]
+        if must_close:
+            try:
+                os.close(src_fd)
+            except OSError:
+                pass
+            must_close = False
+
+        # wid → node blocks (stable for the run — see locked path).
+        stream_wid_node = wid_to_node(workers, num_nodes)
+
+        state = ReactorState(workers, num_nodes=num_nodes,
+                             respawn_cap=REACTOR_RESPAWN_CAP,
+                             spawn_ceiling=workers)
+        state.configure(payload_spec=payload, sink_spec=None,
+                        memfd=memfd, file_size=-1,
+                        out_fds=list(out_fds), signal_w=signal_w,
+                        fallow_w=fallow_w,
+                        order_w=order_w if use_orderer else -1,
+                        trap_ack_w=trap_w, on_error=on_error,
+                        engine_fds=engine_fds, splice=splice,
+                        node_cpus=node_cpus)
+        state.trap_ack_r = trap_r
+        spare_signal_w = os.dup(signal_w)
+
+        def _drop_parent_signal():
+            nonlocal signal_w
+            # NOTE: signal_w MUST go None here (W-PY21-A erratum):
+            # without it every _fork_node re-closes the same NUMBER,
+            # which the results pipe later recycles — killing the
+            # pump's read end and hanging with data ready but unread.
+            if signal_w is not None:
+                try:
+                    os.close(signal_w)
+                except OSError:
+                    pass
+                signal_w = None
+            state.ctx["signal_w"] = spare_signal_w
+
+        def _fork_node(node):
+            for wid, nd in enumerate(stream_wid_node):
+                if nd == node:
+                    state.spawn_worker(wid=wid, node=node)
+            _drop_parent_signal()
+            forked.add(node)
+
+        def _poll_ingest():
+            if helpers["ingest_kind"] is not None:
+                return
+            kind, code = check_scanner_death(
+                pipe["ingest_pid"], pipe["ingest_death"])
+            if kind != "running":
+                helpers["ingest_kind"] = kind
+                helpers["ingest_code"] = code
+                pipe["ingest_death"] = None
+                if kind == "error":
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: NUMA ingest failed (status %r)"
+                        % (code,))
+
+        def _watch_pipeline():
+            # Same classification contract as the locked NUMA path:
+            # clean helper exits key on ingest EOF POSTED (not on
+            # ingest process exit — the ingest flushes last).
+            try:
+                wpid, st = os.waitpid(pipe["fallow_pid"], os.WNOHANG)
+            except (ChildProcessError, OSError):
+                wpid, st = None, None
+            if wpid == pipe["fallow_pid"]:
+                helpers["fallow_rc"] = st
+                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
+                if not ok:
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: NUMA reaper failed (status %r)"
+                        % (st,))
+            _poll_ingest()
+            try:
+                eof_posted = lib.fr_py_ingest_eof_posted()
+            except Exception:
+                eof_posted = 0
+            for pids, deaths, key in (
+                    (pipe["indexer_pids"], pipe["indexer_deaths"],
+                     "index"),
+                    (pipe["scanner_pids"], pipe["scanner_deaths"],
+                     "scan")):
+                for node in range(num_nodes):
+                    if node in helpers[key]:
+                        continue
+                    kind, code = check_scanner_death(
+                        pids[node], deaths[node])
+                    if kind == "running":
+                        continue
+                    if kind == "error" or not eof_posted:
+                        helpers[key][node] = (kind, code)
+                        deaths[node] = None
+                        lib.fr_py_abort()
+                        raise RuntimeError(
+                            "forkrun: NUMA %s %d failed "
+                            "(status %r)" % (key, node, code))
+                    helpers[key][node] = (kind, code)
+                    deaths[node] = None
+
+        def _fork_timing():
+            if len(forked) >= num_nodes:
+                return
+            try:
+                ready = [lib.fr_py_data_ready_node(n)
+                         for n in range(num_nodes)]
+            except Exception:
+                ready = [0] * num_nodes
+            for node, r in enumerate(ready):
+                if r > 0 and node not in forked:
+                    _fork_node(node)
+            if len(forked) < num_nodes and not pump_state["stalled"] \
+                    and (_time.monotonic() - pump_state["t_start"]
+                         ) >= STALL_FORK_AFTER:
+                pump_state["stalled"] = True
+                for node in range(num_nodes):
+                    if node not in forked:
+                        _fork_node(node)
+
+        def _all_helpers_done():
+            # Full-pipeline quiescence (same rule as the locked NUMA
+            # path): the ingest is fast (ms on small files) while
+            # indexers/scanners are still spinning up, so ingest-clean
+            # alone must never trigger the empty/anomaly verdict —
+            # only the whole pipeline being done does.
+            return (helpers["ingest_kind"] == "clean"
+                    and len(helpers["index"]) >= num_nodes
+                    and len(helpers["scan"]) >= num_nodes)
+
+        # W-PY21-A drain delegation state (pipe mode; forked lazily
+        # once some node forked — signals queue until the drain
+        # starts; empty inputs never need one).
+        cdrain_n = {"pid": None, "results_r": None, "pump": None,
+                    "status": None, "alive": True}
+
+        def _pump_drain_c_numa():
+            # W-PY21-A quantum: results-pipe consumer. The spill
+            # side already ran above in _pump_drain. Same
+            # StopIteration contract (results exhausted AND spill
+            # pump done — else keep polling).
+            nonlocal signal_r, drain_pid, results_r
+            if forked and cdrain_n["pid"] is None:
+                cdrain_n["pid"], cdrain_n["results_r"] = _fork_drain(
+                    signal_r, out_fds, workers, mode="pipe")
+                cdrain_n["pump"] = _make_results_pump(
+                    cdrain_n["results_r"], order=order, stats=stats)
+                signal_r = None
+                drain_pid = cdrain_n["pid"]
+                results_r = cdrain_n["results_r"]
+            if cdrain_n["pid"] is None:
+                return None
+            if cdrain_n["alive"]:
+                try:
+                    wpid, _dst = os.waitpid(cdrain_n["pid"], os.WNOHANG)
+                except ChildProcessError:
+                    cdrain_n["alive"] = False
+                except OSError:
+                    pass
+                else:
+                    if wpid == cdrain_n["pid"]:
+                        cdrain_n["alive"] = False
+                        cdrain_n["status"] = _dst
+            try:
+                return cdrain_n["pump"](
+                    bool(any(s.alive for s in state.workers.values()))
+                    or cdrain_n["alive"])
+            except StopIteration:
+                if pump_state["done"]:
+                    raise
+                return None
+
+        _sig = struct.Struct("<QQ")
+        drain = {"coll_off": 0, "coll_tail": b"", "sig_buf": b"",
+                 "sig_eof": False, "pending": [],
+                 "reassembly": None}
+        if order == "index" and not use_orderer:
+            drain["reassembly"] = ReassemblyBuffer()
+        per_worker = [[0, b""] for _ in range(workers)]
+
+        def _parse_quantum():
+            got = False
+            if use_orderer:
+                try:
+                    _sz = os.fstat(coll_fd).st_size
+                except OSError:
+                    _sz = drain["coll_off"]
+                if _sz > drain["coll_off"]:
+                    try:
+                        _ch = os.pread(coll_fd, _sz - drain["coll_off"],
+                                       drain["coll_off"])
+                    except OSError:
+                        _ch = b""
+                    if _ch:
+                        drain["coll_off"] += len(_ch)
+                        recs, tail = _split_records(
+                            drain["coll_tail"] + _ch)
+                        drain["coll_tail"] = tail
+                        if recs:
+                            drain["pending"].extend(
+                                blob for _, blob in recs)
+                            got = True
+                while len(drain["sig_buf"]) >= _sig.size:
+                    drain["sig_buf"] = drain["sig_buf"][_sig.size:]
+            else:
+                while len(drain["sig_buf"]) >= _sig.size:
+                    wid, _idx = _sig.unpack_from(
+                        drain["sig_buf"][:_sig.size])
+                    drain["sig_buf"] = drain["sig_buf"][_sig.size:]
+                    if 0 <= wid:
+                        while len(per_worker) <= wid:
+                            per_worker.append([0, b""])
+                        if wid < len(out_fds):
+                            for _bidx, blob in _drain_worker_memfd(
+                                    out_fds[wid], per_worker[wid]):
+                                if drain["reassembly"] is None:
+                                    drain["pending"].append(blob)
+                                else:
+                                    drain["reassembly"].add(_bidx, blob)
+                                    for _, ordered in drain[
+                                            "reassembly"].drain():
+                                        drain["pending"].append(ordered)
+                                got = True
+            return got
+
+        def _sweep_memfds():
+            # Safety sweep before EOF (short final writes).
+            if use_orderer:
+                try:
+                    _sz = os.fstat(coll_fd).st_size
+                except OSError:
+                    _sz = drain["coll_off"]
+                if _sz > drain["coll_off"]:
+                    try:
+                        _ch = os.pread(coll_fd, _sz - drain["coll_off"],
+                                       drain["coll_off"])
+                    except OSError:
+                        _ch = b""
+                    if _ch:
+                        drain["coll_off"] += len(_ch)
+                        recs, tail = _split_records(
+                            drain["coll_tail"] + _ch)
+                        drain["coll_tail"] = tail
+                        drain["pending"].extend(
+                            blob for _, blob in recs)
+            else:
+                for _wid in range(len(per_worker)):
+                    if _wid >= len(out_fds):
+                        continue
+                    for _bidx, blob in _drain_worker_memfd(
+                            out_fds[_wid], per_worker[_wid]):
+                        if drain["reassembly"] is None:
+                            drain["pending"].append(blob)
+                        else:
+                            drain["reassembly"].add(_bidx, blob)
+                            for _, ordered in drain[
+                                    "reassembly"].drain():
+                                drain["pending"].append(ordered)
+            if drain["reassembly"] is not None:
+                for _, ordered in drain["reassembly"].final_drain():
+                    drain["pending"].append(ordered)
+
+        def _pump_drain():
+            nonlocal spare_signal_w, signal_w
+            # Spare-drop rule (W-PY19 erratum, see ingest path):
+            # only once some node forked (forked set), never on
+            # pre-first-fork rounds — closing early poisons ctx for
+            # future forks (signal_w=-1 ⇒ no signals ⇒ starvation).
+            if forked and not any(
+                    s.alive for s in state.workers.values()):
+                if spare_signal_w is not None and spare_signal_w >= 0:
+                    try:
+                        os.close(spare_signal_w)
+                    except OSError:
+                        pass
+                    spare_signal_w = None
+                    state.ctx["signal_w"] = -1
+            if _pump_debug_tick():
+                _pump_debug_log(
+                    "forked=%s live=%s ingest=%s idx=%s scan=%s "
+                    "cdrain=%s dalive=%s spare=%s ctxsig=%s sig_r=%s "
+                    "res_r=%s done=%s" % (
+                        sorted(forked),
+                        sorted(w for w, s in state.workers.items()
+                               if s.alive),
+                        helpers["ingest_kind"],
+                        {n: v[0] for n, v in helpers["index"].items()},
+                        {n: v[0] for n, v in helpers["scan"].items()},
+                        cdrain_n["pid"], cdrain_n["alive"],
+                        spare_signal_w, state.ctx.get("signal_w"),
+                        signal_r, cdrain_n["results_r"],
+                        pump_state["done"]))
+            # Spill-side quantum: helper watches + fork timing (the
+            # ingest itself is a process — nothing to pump here).
+            _watch_pipeline()
+            _fork_timing()
+            if helpers["ingest_kind"] == "clean" and not forked \
+                    and _all_helpers_done():
+                try:
+                    landed = os.fstat(memfd).st_size
+                except OSError:
+                    landed = 0
+                if landed != 0:
+                    raise RuntimeError(
+                        "forkrun: NUMA ingest landed %d bytes with no "
+                        "published batches" % landed)
+                pump_state["done"] = True
+            elif helpers["ingest_kind"] == "clean" and (
+                    forked or _all_helpers_done()):
+                pump_state["done"] = True
+            if use_drain:
+                # W-PY21-A: results-pipe consumer (the drain owns
+                # signals/memfds). Spill side already ran above.
+                return _pump_drain_c_numa()
+            if not drain["sig_eof"]:
+                try:
+                    ready, _, _ = _select.select([signal_r], [], [], 0)
+                except (OSError, ValueError):
+                    ready = []
+                if ready:
+                    try:
+                        chunk = os.read(signal_r, 65536)
+                    except OSError:
+                        chunk = b""
+                    if chunk == b"":
+                        drain["sig_eof"] = True
+                    else:
+                        drain["sig_buf"] += chunk
+            _parse_quantum()
+            if drain["pending"]:
+                return drain["pending"].pop(0)
+            if (pump_state["done"]
+                    and not any(s.alive
+                                for s in state.workers.values())
+                    and drain["sig_eof"] and not drain["sig_buf"]):
+                _sweep_memfds()
+                if drain["pending"]:
+                    return drain["pending"].pop(0)
+                raise StopIteration
+            return None
+
+        try:
+            yield from reactor_loop(state, drain_gen=_pump_drain)
+        finally:
+            pass
+
+        _reactor_failure_check(state, workers, on_error)
+
+        if use_drain and cdrain_n["pid"] is not None:
+            # Results EOF ⇒ the drain exited — join it for its rc
+            # (worker error above already raised; teardown covers).
+            if cdrain_n["alive"]:
+                try:
+                    _, _dst = os.waitpid(cdrain_n["pid"], 0)
+                except ChildProcessError:
+                    pass
+                except OSError:
+                    pass
+                else:
+                    cdrain_n["alive"] = False
+                    cdrain_n["status"] = _dst
+            if cdrain_n["status"] is not None and cdrain_n["status"] != 0 \
+                    and not (
+                        os.WIFEXITED(cdrain_n["status"]) and
+                        os.WEXITSTATUS(cdrain_n["status"]) == 0):
+                raise RuntimeError(
+                    "forkrun: C drain failed (status %r)"
+                    % (cdrain_n["status"],))
+
+        if fallow_w is not None:
+            try:
+                os.close(fallow_w)
+            except OSError:
+                pass
+            fallow_w = None
+            state.ctx["fallow_w"] = -1
+        if use_orderer:
+            if order_w is not None:
+                try:
+                    os.close(order_w)
+                except OSError:
+                    pass
+                order_w = None
+            if orderer_pid is not None:
+                try:
+                    _, _ost = os.waitpid(orderer_pid, 0)
+                except ChildProcessError:
+                    _ost = 0
+                if _ost != 0 and not (
+                        os.WIFEXITED(_ost) and
+                        os.WEXITSTATUS(_ost) == 0):
+                    raise RuntimeError(
+                        "forkrun: C orderer failed (status %r)"
+                        % (_ost,))
+        if helpers["ingest_kind"] == "error":
+            raise RuntimeError(
+                "forkrun: NUMA ingest failed (status %r)"
+                % (helpers["ingest_code"],))
+        if helpers["ingest_kind"] is None:
+            try:
+                _, _st = os.waitpid(pipe["ingest_pid"], 0)
+            except ChildProcessError:
+                _st = None
+            if _st is not None and not (
+                    os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
+                raise RuntimeError(
+                    "forkrun: NUMA ingest failed (status %r)" % (_st,))
+        for key, pids in (("index", pipe["indexer_pids"]),
+                          ("scan", pipe["scanner_pids"])):
+            for node in range(num_nodes):
+                if node in helpers[key]:
+                    kind, code = helpers[key][node]
+                    if kind == "error":
+                        raise RuntimeError(
+                            "forkrun: NUMA %s %d failed (status %r)"
+                            % (key, node, code))
+                    continue
+                try:
+                    _, _st = os.waitpid(pids[node], 0)
+                except ChildProcessError:
+                    _st = None
+                if _st is not None and not (
+                        os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
+                    raise RuntimeError(
+                        "forkrun: NUMA %s %d failed (status %r)"
+                        % (key, node, _st))
+        if helpers["fallow_rc"] is None:
+            try:
+                _, _fst = os.waitpid(pipe["fallow_pid"], 0)
+            except ChildProcessError:
+                _fst = None
+            if _fst is not None and not (
+                    os.WIFEXITED(_fst) and os.WEXITSTATUS(_fst) == 0):
+                try:
+                    os.write(2, b"forkrun [WARN]: NUMA reaper exited "
+                             b"abnormally; ingress may not be fully "
+                             b"reclaimed.\n")
+                except OSError:
+                    pass
+        if stats is not None and drain["reassembly"] is not None \
+                and not use_drain:
+            stats["reassembly_max"] = drain["reassembly"].max_size
+
+        _reactor_poison_summary(lib, state)
+    finally:
+        if spare_signal_w is not None and spare_signal_w >= 0:
+            try:
+                os.close(spare_signal_w)
+            except OSError:
+                pass
+        extra = []
+        if pipe is not None:
+            extra = ([pipe["fallow_pid"], pipe["ingest_pid"]]
+                     + pipe["indexer_pids"] + pipe["scanner_pids"])
+            for _dr in ([pipe["ingest_death"]] + pipe["indexer_deaths"]
+                        + pipe["scanner_deaths"]):
+                if _dr is not None:
+                    try:
+                        os.close(_dr)
+                    except OSError:
+                        pass
+        _teardown_reactor(lib, state, signal_r=signal_r,
+                          out_fds=out_fds, out_hold=out_hold,
+                          memfd=memfd, mem_hold=mem_hold,
+                          src_fd=src_fd, must_close=must_close,
+                          extra_pids=[p for p in extra
+                                      if p is not None],
+                          orderer_pid=orderer_pid, order_r=order_r,
+                          order_w=order_w, trap_r=trap_r, trap_w=trap_w,
+                          coll_fd=coll_fd, coll_hold=coll_hold,
+                          drain_pid=drain_pid,
+                          results_fd=results_r,
+                          spare_signal_w=spare_signal_w)
+
+
+__all__ = ["run", "map", "stream", "sweep"]

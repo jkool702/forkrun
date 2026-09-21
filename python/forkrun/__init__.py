@@ -22,9 +22,9 @@ from forkrun._api import RunConfig  # noqa: F401
 # Stage 0 harness and tests can assert validation without reaching into _api.
 from forkrun._api import _validate as _validate_config  # noqa: F401
 from forkrun._batch import Batch  # noqa: F401
-from forkrun.run import map, run, stream  # noqa: F401
+from forkrun.run import map, run, stream, sweep  # noqa: F401
 
-__version__ = "0.10.0"
+__version__ = "0.13.0"
 
 
 def _query_engine_version() -> str:
@@ -42,5 +42,5 @@ except Exception:  # noqa: BLE001
     # Validation-only environments (no built .so): import must never fail.
     __engine_version__ = "unknown"
 
-__all__ = ["run", "map", "stream", "Batch", "RunConfig",
+__all__ = ["run", "map", "stream", "sweep", "Batch", "RunConfig",
            "__version__", "__engine_version__"]

@@ -37,7 +37,8 @@ class Batch:
 
     def __init__(self, batch_index: int, byte_offset: int,
                  byte_length: int, line_count: Optional[int],
-                 data: memoryview, offsets: Optional[memoryview] = None) -> None:
+                 data: memoryview, offsets: Optional[memoryview] = None,
+                 metadata=None) -> None:
         # Metadata is plain state — it survives invalidate() so the worker's
         # finally path can escrow with live coordinates.
         self.batch_index = batch_index
@@ -46,6 +47,11 @@ class Batch:
         # 0-means-undefined is the C ABI convention; the Python wrapper
         # maps 0 -> None. One sentinel per language layer.
         self.line_count = line_count
+        # W-PY20 sweep arguments (optional tuple, one entry per sweep
+        # dimension). Plain metadata: set by the sweep wrapper before
+        # the user payload runs, retained across invalidate() like the
+        # other coordinates. None outside sweeps.
+        self.metadata = metadata
         self._data = data
         self._offsets = offsets
         self._offsets_materialized = offsets is not None
@@ -55,19 +61,22 @@ class Batch:
     @classmethod
     def from_window(cls, batch_index: int, byte_offset: int,
                     byte_length: int, line_count: Optional[int],
-                    mm: memoryview, base: int = 0) -> "Batch":
+                    mm: memoryview, base: int = 0,
+                    metadata=None) -> "Batch":
         """Build a Batch as a slice of a worker-held shared mapping.
 
         mm is the worker's whole-file MAP_SHARED view (or any buffer-like);
         base is the mapping's plane offset (v0: 0). The Batch keeps a
         reference to mm so the window cannot be torn down mid-payload, but
         does not own it — the worker owns the mapping's lifetime.
+        metadata is an optional W-PY20 sweep tuple, carried through.
         """
         start = base + byte_offset if base else byte_offset
         # Note: byte_offset is already absolute (scanner publishes absolute
         # plane coordinates with buf_base_offset 0 in v0), so base is 0.
         view = mm[start:start + byte_length]
-        obj = cls(batch_index, byte_offset, byte_length, line_count, view)
+        obj = cls(batch_index, byte_offset, byte_length, line_count, view,
+                  metadata=metadata)
         obj._mm = mm
         return obj
 

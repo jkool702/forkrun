@@ -19,7 +19,9 @@ import os
 Mode = Literal["python", "spawn", "plugin", "splice"]
 Order = Literal["none", "index"]
 OnError = Literal["retry", "fail-fast", "skip"]
-Nodes = Union[int, Literal["auto"]]
+# W-PY21: "auto"/None (detect), 1 (UMA), N (first N physicals),
+# "0,1" (explicit physicals), "@N" (forced logical nodes).
+Nodes = Union[int, str, None]
 
 _VALID_MODES = ("python", "spawn", "plugin", "splice")
 _VALID_ORDERS = ("none", "index")
@@ -98,8 +100,15 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
     for name, val in (("lines", lines), ("bytes", bytes_), ("workers", workers)):
         if val is not None and (not isinstance(val, int) or val <= 0):
             raise ValueError(f"{name} must be a positive int, got {val!r}")
-    if not (nodes == "auto" or (isinstance(nodes, int) and nodes >= 1)):
-        raise ValueError(f'nodes must be "auto" or a positive int, got {nodes!r}')
+    # W-PY21 NUMA node specs: None/"auto" (detect), 1/"1" (UMA),
+    # N (first N physicals), "0,1" (explicit), "@N" (forced logical).
+    # Full resolution lives in _numa.build_numa_map; validated here
+    # so run/map/stream all fail eagerly on bad specs.
+    try:
+        from forkrun._numa import build_numa_map as _build_map
+        _build_map(nodes)
+    except ValueError as exc:
+        raise ValueError(f"nodes: {exc}")
     if sink is not None and not callable(sink):
         raise TypeError(f"sink must be None or callable on_batch(batch_meta, result), got {type(sink).__name__}")
     if streaming is not None and not isinstance(streaming, bool):

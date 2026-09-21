@@ -27,6 +27,9 @@
  * already ran, and writev is POSIX — no feature-test dependency. */
 #include <sys/uio.h>
 
+/* Forward: publish-mark epoch reset (defined with the marks below). */
+static void fr_py_data_hwm_reset(void);
+
 /* Python-facing claim out-param. Identity fields mirror fr_state_t /
  * WorkerBatchState widths (batch_idx u64, major u64, minor/slots/num_kills/
  * poisoned u32); offset/length/lines carry the payload byte window which
@@ -53,11 +56,13 @@ const char *fr_py_version(void) {
 /* Initialize the substrate for one UMA node. lines/bytes are mutually
  * exclusive (0 = default adaptive). Returns the engine rc (0 ok, 1 fail). */
 int fr_py_init(int lines, int bytes) {
+    char a0[] = "ring_init";
     if (lines < 0 || bytes < 0)
         return 1;
     if (lines > 0 && bytes > 0)
         return 1;
-    char a0[] = "ring_init";
+    /* New epoch for the publish high-water marks (W-PY21). */
+    fr_py_data_hwm_reset();
     char a1[64];
     char *argv[3];
     int argc = 1;
@@ -131,6 +136,14 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
         my_numa_node = 0;
     if (my_numa_node >= (int)global_num_nodes)
         my_numa_node = 0;
+    /* W-PY21: worker self-pinning (mirrors ring_worker inc exactly:
+     * pin when multi-node OR explicit map, via the engine's own
+     * logical→physical map; best-effort, never fatal — UMA paths
+     * never reach here, so UMA behavior is unchanged). */
+    if ((global_num_nodes > 1 || g_explicit_pinning) &&
+        g_logical_to_phys_map)
+        pin_to_numa_node(
+            g_logical_to_phys_map[my_numa_node]);
     __atomic_fetch_add(&state[my_numa_node].active_workers, 1,
                        __ATOMIC_SEQ_CST);
     return 0;
@@ -974,6 +987,26 @@ int fr_py_fallow_loop(int pipe_r, int memfd) {
     return ring_fallow_main(3, argv);
 }
 
+/* W-PY16/W-PY21: published-DATA-batch high-water marks (worker
+ * fork timing). File-static so both init entry points can reset
+ * them: a new init is a new epoch (see fr_py_data_hwm_reset).
+ * The w<hwm self-reset at poll time stays as a second defense. */
+static uint64_t fr_py_data_hwm = 0;
+static uint64_t fr_py_data_hwm_node[512] = {0};
+
+/* The publish marks are per-RUN state. Resetting them at init —
+ * not only on the w<hwm heuristic at poll time — is load-bearing:
+ * a fast pipeline can publish its whole run before the parent's
+ * first poll, and a stale mark would then swallow every publish
+ * into its shadow (zero observed forever → workers never fork →
+ * publish anomaly). Both init entry points call this. */
+static void fr_py_data_hwm_reset(void) {
+    int i;
+    fr_py_data_hwm = 0;
+    for (i = 0; i < 512; i++)
+        fr_py_data_hwm_node[i] = 0;
+}
+
 /* W-PY16: count of published DATA batches (for worker fork timing).
  *
  * The scanner's pre-flight BAILS when a worker is already waiting
@@ -985,13 +1018,11 @@ int fr_py_fallow_loop(int pipe_r, int memfd) {
  * this query: cumulative DATA batches published (a batch counts when
  * lines>0, or byte-length>0 for byte-mode's 0-means-undefined).
  * The zero-length EOF sentinel never counts. A high-water mark makes
- * repeated polls amortized O(total), and it self-resets when write_idx
- * wraps below it (new run in this process).
+ * repeated polls amortized O(total).
  *
  * Python must read this ONLY through here (never raw MAP_SHARED
  * coordination words — the fences live in C).
  */
-static uint64_t fr_py_data_hwm = 0;
 
 uint64_t fr_py_data_ready(void) {
     uint64_t found = 0;
@@ -1406,4 +1437,331 @@ int fr_py_orderer(int order_pipe_r, int output_fd,
             close(output_fd);
     }
     return ring_order_main(argc, argv);
+}
+
+/* =====================================================================
+ * W-PY21: NUMA multi-node pipeline. Engine frozen: these only CALL
+ * existing engine entry points with argv vectors, exactly like the
+ * fr_py_* wrappers above. All run in forked children (blocking),
+ * never in the reactor parent.
+ * ===================================================================== */
+
+/* NUMA-aware init (W-PY21). Same lines/bytes contract as fr_py_init,
+ * plus the logical topology: num_nodes > 1 forwards --numa-map
+ * (comma-separated physical IDs, e.g. "0,1") to ring_init_main,
+ * which creates per-node rings, eventfds, escrow pipes and steal
+ * thresholds. num_nodes <= 1 (or empty/NULL map) behaves exactly
+ * like fr_py_init. Caps at the engine's 512 meta_ring ceiling.
+ * Returns the engine rc (0 ok, 1 fail). */
+int fr_py_init_numa(int lines, int bytes, int num_nodes,
+                    const char *numa_map) {
+    char a0[] = "ring_init";
+    char a1[64];
+    char a2[4096];
+    char *argv[4];
+    int argc = 0;
+
+    if (lines < 0 || bytes < 0)
+        return 1;
+    if (lines > 0 && bytes > 0)
+        return 1;
+    if (num_nodes < 1 || num_nodes > 512)
+        return 1;
+    /* New epoch for the publish high-water marks (W-PY21). */
+    fr_py_data_hwm_reset();
+    argv[argc++] = a0;
+    if (lines > 0) {
+        snprintf(a1, sizeof(a1), "--lines=%d", lines);
+        argv[argc++] = a1;
+    } else if (bytes > 0) {
+        snprintf(a1, sizeof(a1), "--bytes=%d", bytes);
+        argv[argc++] = a1;
+    }
+    if (num_nodes > 1 && numa_map && numa_map[0]) {
+        snprintf(a2, sizeof(a2), "--numa-map=%s", numa_map);
+        argv[argc++] = a2;
+    }
+    argv[argc] = NULL;
+    return ring_init_main(argc, argv);
+}
+
+/* NUMA ingest (W-PY21): born-local data distributor.
+ * ring_numa_ingest <infd> <outfd> <nodes>: reads the SOURCE (not a
+ * pre-spill — placement happens here, per chunk, via MPOL_BIND),
+ * writes the shared ingress memfd, publishes ChunkMeta and signals
+ * per-node indexers; EOF propagates internally via ingest_eof
+ * (no fr_py_ingest_done gate needed). The usage string's 4th
+ * [ordered] slot is vestigial (the engine never reads argv[4]).
+ * Returns the engine rc. */
+int fr_py_numa_ingest(int infd, int outfd, int num_nodes) {
+    char a0[] = "ring_numa_ingest";
+    char a1[32], a2[32], a3[32];
+    char *argv[5];
+
+    if (infd < 0 || outfd < 0 || num_nodes < 1)
+        return 1;
+    argv[0] = a0;
+    snprintf(a1, sizeof(a1), "%d", infd);
+    argv[1] = a1;
+    snprintf(a2, sizeof(a2), "%d", outfd);
+    argv[2] = a2;
+    snprintf(a3, sizeof(a3), "%d", num_nodes);
+    argv[3] = a3;
+    argv[4] = NULL;
+    return ring_numa_ingest_main(4, argv);
+}
+
+/* Per-node NUMA indexer (W-PY21): ring_indexer_numa <memfd> <node>.
+ * Self-pins to the node's physical CPUs inside the engine.
+ * Returns the engine rc. */
+int fr_py_indexer_numa(int memfd, int node_id) {
+    char a0[] = "ring_indexer_numa";
+    char a1[32], a2[32];
+    char *argv[3];
+
+    if (memfd < 0 || node_id < 0)
+        return 1;
+    argv[0] = a0;
+    snprintf(a1, sizeof(a1), "%d", memfd);
+    argv[1] = a1;
+    snprintf(a2, sizeof(a2), "%d", node_id);
+    argv[2] = a2;
+    return ring_indexer_numa_main(3, argv);
+}
+
+/* Per-node NUMA scanner (W-PY21):
+ * ring_numa_scanner <memfd> <node_id> <spawn_fd> <nodes>.
+ * Distance-charged stealing when starved; spawn_fd -1 disarms
+ * spawn requests (the Python ingest keeps publish-gated fork
+ * timing — pre-flight bail avoidance, same rule as W-PY19).
+ * Returns the engine rc. */
+int fr_py_numa_scanner(int memfd, int node_id, int fd_spawn,
+                       int num_nodes) {
+    char a0[] = "ring_numa_scanner";
+    char a1[32], a2[32], a3[32], a4[32];
+    char *argv[6];
+
+    if (memfd < 0 || node_id < 0 || num_nodes < 1)
+        return 1;
+    argv[0] = a0;
+    snprintf(a1, sizeof(a1), "%d", memfd);
+    argv[1] = a1;
+    snprintf(a2, sizeof(a2), "%d", node_id);
+    argv[2] = a2;
+    snprintf(a3, sizeof(a3), "%d", fd_spawn);
+    argv[3] = a3;
+    snprintf(a4, sizeof(a4), "%d", num_nodes);
+    argv[4] = a4;
+    argv[5] = NULL;
+    return ring_numa_scanner_main(6, argv);
+}
+
+/* Physical fallow, NUMA mode (W-PY21): ring_fallow_phys <PIPE> <FILE>.
+ * Reads PhysPackets {off, len} (NUMA ack path writes physical
+ * offsets, not IndexPackets). One process for all nodes.
+ * Returns the engine rc (0 clean at pipe EOF). */
+int fr_py_fallow_phys(int fd_in, int fd_file) {
+    char a0[] = "ring_fallow_phys";
+    char a1[32], a2[32];
+    char *argv[3];
+
+    if (fd_in < 0 || fd_file < 0)
+        return 1;
+    argv[0] = a0;
+    snprintf(a1, sizeof(a1), "%d", fd_in);
+    argv[1] = a1;
+    snprintf(a2, sizeof(a2), "%d", fd_file);
+    argv[2] = a2;
+    return ring_fallow_phys_main(3, argv);
+}
+
+/* Per-node published-DATA-batch count (W-PY21 fork timing). Same contract as fr_py_data_ready but for one NUMA node's ring:
+ * cumulative DATA batches (lines>0, or byte-length>0 for byte
+ * mode's 0-means-undefined); the zero-length EOF sentinel never
+ * counts. Python reads coordination words ONLY through here. */
+uint64_t fr_py_data_ready_node(int node) {
+    uint64_t found = 0;
+    uint64_t w;
+
+    if (!state || node < 0 || node >= 512 ||
+        node >= (int)global_num_nodes)
+        return 0;
+    w = __atomic_load_n(&state[node].write_idx, __ATOMIC_ACQUIRE);
+    if (w < fr_py_data_hwm_node[node])
+        fr_py_data_hwm_node[node] = 0; /* second defense (see above) */
+    while (fr_py_data_hwm_node[node] < w) {
+        uint64_t slot = fr_py_data_hwm_node[node] & RING_MASK;
+        uint32_t lines = state[node].lines_ring[slot];
+        uint64_t off = state[node].offset_ring[slot];
+        uint64_t end = state[node].end_ring[slot];
+        if (lines > 0 || end > off)
+            found++;
+        fr_py_data_hwm_node[node]++;
+    }
+    return found;
+}
+
+/* NUMA ingest-EOF-posted query (W-PY21 helper classification).
+ *
+ * Returns 1 once the ingest published end-of-input
+ * (g_state->ingest_eof_idx != ~0, the same sentinel the indexers
+ * themselves watch), else 0. Monotonic within a run; reset by
+ * init (see ring_init_main). Lets the parent tell "pipeline
+ * helper exited before EOF was even posted" (tail-loss anomaly —
+ * fatal) from "helper exited after EOF posted while the ingest
+ * process is still flushing" (normal teardown ordering — the
+ * ingest waits for chunk_done before exiting, so it is routinely
+ * the LAST to be reaped). Process-exit ordering alone cannot
+ * distinguish the two. Python reads this ONLY through here. */
+int fr_py_ingest_eof_posted(void) {
+    if (!g_state)
+        return 0;
+    return __atomic_load_n(&g_state->ingest_eof_idx,
+                           __ATOMIC_ACQUIRE) != ~(uint64_t)0 ? 1 : 0;
+}
+
+/* =====================================================================
+ * W-PY21-A: C drain process — data/control path separation.
+ *
+ * Runs in a forked child (never in the reactor parent). Replaces the
+ * Python parent's per-result drain work (select + signal unpack +
+ * pread + parse) with a tight C loop: blocking 16-byte signal reads
+ * ((wid, batch_idx), indices only — the W-PY6 signal contract),
+ * pread of newly arrived bytes from that worker's output memfd
+ * (pread, never read/lseek — the fd description is SHARED with the
+ * writing worker), and append of those bytes VERBATIM to the results
+ * destination. Framing is untouched (keyed [idx][len][bytes] records
+ * pass through opaquely), so the parent parses exactly as before —
+ * only the byte movement moved into C.
+ *
+ * Per-worker offsets are monotonic append cursors: a respawned wid
+ * reuses the same memfd and only appends, so generation changes
+ * need no handling. A worker that dies mid-record leaves a short
+ * tail the parent drops at parse (same rule as the Python drain).
+ *
+ * Two destinations selected by drain_mode:
+ *   0 = results memfd (map/run: parent reads once at end).
+ *   1 = pipe write end (stream: parent reads incrementally; a full
+ *       pipe blocks the drain → workers block on signal write →
+ *       claims stop — the hydraulic backpressure loop extended
+ *       through the drain).
+ *
+ * Returns 0 drained-to-EOF, 1 bad arguments/allocation failure,
+ * 2 signal-pipe read error, 3 short signal (framing), 4 results
+ * write failure, 5 EPIPE on the results pipe (parent abandoned the
+ * stream — the child exits; the parent reaps it in teardown).
+ * ===================================================================== */
+
+static ssize_t fr_py_read_full(int fd, void *buf, size_t count) {
+    char *p = (char *)buf;
+    size_t left = count;
+    while (left > 0) {
+        ssize_t n = read(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0)
+            return (ssize_t)(count - left); /* EOF: partial count */
+        p += n;
+        left -= (size_t)n;
+    }
+    return (ssize_t)count;
+}
+
+static int fr_py_write_full(int fd, const void *buf, size_t count) {
+    const char *p = (const char *)buf;
+    size_t left = count;
+    while (left > 0) {
+        ssize_t n = write(fd, p, left);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1; /* caller maps EPIPE vs other errno */
+        }
+        if (n == 0)
+            return -1;
+        p += n;
+        left -= (size_t)n;
+    }
+    return 0;
+}
+
+int fr_py_drain_loop(int signal_r, const int *out_fds, int num_workers,
+                     int results_fd, int drain_mode) {
+    uint64_t *offsets;
+    int rc = 0;
+
+    if (signal_r < 0 || !out_fds || num_workers <= 0 ||
+        num_workers > 4096 || results_fd < 0 ||
+        (drain_mode != 0 && drain_mode != 1))
+        return 1;
+    offsets = (uint64_t *)calloc((size_t)num_workers, sizeof(uint64_t));
+    if (!offsets)
+        return 1;
+
+    while (1) {
+        uint64_t sig[2];
+        ssize_t n;
+        uint64_t wid;
+        struct stat st;
+        uint64_t size, offset, remaining;
+        char buf[65536];
+
+        /* 1. Signal heartbeat (blocking): one keyed record's worth
+         * of new bytes is visible in out_fds[wid] when this returns. */
+        n = fr_py_read_full(signal_r, sig, sizeof(sig));
+        if (n == 0)
+            break; /* EOF: every write end closed — drained */
+        if (n < 0) {
+            rc = 2;
+            break;
+        }
+        if (n != (ssize_t)sizeof(sig)) {
+            rc = 3; /* short signal: never from a 16B atomic write */
+            break;
+        }
+        wid = sig[0]; /* sig[1] (batch_idx) is transport-opaque here */
+        if (wid >= (uint64_t)num_workers)
+            continue; /* defensive: our own workers never send this */
+
+        /* 2. New bytes in this worker's memfd (fstat size vs cursor). */
+        if (fstat(out_fds[wid], &st) != 0)
+            continue; /* memfd went away: nothing to move, keep going */
+        size = (uint64_t)st.st_size;
+        offset = offsets[wid];
+        if (size <= offset)
+            continue; /* duplicate/empty wakeup: next signal */
+        remaining = size - offset;
+
+        /* 3. Move them verbatim (bounded 64KB chunks — the drain's
+         * own RSS stays flat no matter how far behind it gets). */
+        while (remaining > 0) {
+            size_t want = remaining > sizeof(buf) ? sizeof(buf)
+                                                  : (size_t)remaining;
+            ssize_t r = pread(out_fds[wid], buf, want, (off_t)offset);
+            if (r < 0) {
+                if (errno == EINTR)
+                    continue;
+                break; /* transient: next signal re-drives us */
+            }
+            if (r == 0)
+                break; /* raced the writer: next signal re-drives us */
+            if (fr_py_write_full(results_fd, buf, (size_t)r) != 0) {
+                if (drain_mode == 1 && errno == EPIPE)
+                    rc = 5; /* abandoned stream: parent went away */
+                else
+                    rc = 4;
+                goto drain_done;
+            }
+            offset += (uint64_t)r;
+            remaining -= (uint64_t)r;
+        }
+        offsets[wid] = offset;
+    }
+
+drain_done:
+    free(offsets);
+    return rc;
 }

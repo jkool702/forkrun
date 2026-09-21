@@ -31,9 +31,11 @@ except ImportError as exc:
 
 import bench_baselines  # noqa: E402
 import bench_batch_size  # noqa: E402
+import bench_c_drain  # noqa: E402
 import bench_fault  # noqa: E402
 import bench_memory  # noqa: E402
 import bench_niches  # noqa: E402
+import bench_numa  # noqa: E402
 import bench_splice  # noqa: E402
 import bench_streaming_ingest  # noqa: E402
 import bench_throughput  # noqa: E402
@@ -54,6 +56,11 @@ BENCHMARKS = {
     "ingest_pipe": bench_streaming_ingest.bench_streaming_pipe,
     "splice_vs_python": bench_splice.bench_splice_vs_python,
     "splice_stream": bench_splice.bench_splice_stream,
+    "c_drain_vs_python": bench_c_drain.bench_c_drain_vs_python,
+    "c_drain_numa": bench_c_drain.bench_c_drain_numa,
+    "c_drain_stream": bench_c_drain.bench_c_drain_streaming,
+    "numa_scaling": bench_numa.bench_numa_scaling,
+    "numa_stream": bench_numa.bench_numa_stream,
     "noop_batch_sweep": bench_batch_size.bench_noop_batch_sweep,
     "bytes_mode": bench_batch_size.bench_bytes_mode,
     "upper_batch_sweep": bench_batch_size.bench_upper_batch_sweep,

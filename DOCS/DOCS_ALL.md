@@ -231,6 +231,110 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 # forkrun Changelog
 
+## v3.5.14 (unreleased)
+
+### Python frontend: C drain process, opt-in (W-PY21-A)
+
+- **New `fr_py_drain_loop`** (shim only): a forked child moves
+  signal consume + output-memfd pread into a results destination
+  (memfd for map/run, 1MB pipe for stream with hydraulic
+  backpressure preserved). Framing untouched — the parent parses
+  exactly as before.
+- **New opt-in `c_drain=False` default** on run/map/stream (all 10
+  collect/stream executors: UMA materialized + ingest ×
+  simple/reactor, NUMA blocking + streaming). Single-threaded
+  pumps throughout (no threads — fork-before-threads intact);
+  the reactor is unchanged (drain_gen abstraction already
+  separates data from control).
+- **Measured verdict (honest): 0.7-1.0x — the speedup premise is
+  falsified, so the default stays legacy.** Medium scale,
+  alternating medians: map 35.7M vs 53.2M legacy (0.7x), stream
+  59.6M vs 67.8M (0.9x), NUMA @2 same ratio. Structural reason:
+  the parent must parse every record either way, Python signal
+  reads are already batched (4096/64KB), and the drain adds a
+  full extra transit of the output bytes. The ≥1.5x checklist
+  item FAILS by measurement; kept as byte-identical opt-in
+  substrate for a future design that also moves consumption.
+- **Drive-by fixes**: spare-signal-close now fires only after a
+  worker has EVER forked (pre-first-fork close poisoned ctx with
+  signal_w=-1 and starved all consumers — the legacy ingest
+  paths only survived via their end-of-stream safety sweep);
+  missing `signal_w=None` in the NUMA stream drop closed a
+  recycled fd number (the results read end) and hung with data
+  ready but unread; empty-input drain parse guarded.
+- Python `0.12.0` → `0.13.0`. 324 tests green (295 + 29
+  `test_c_drain.py`); engine frozen (zero `forkrun_ring.c`
+  changes).
+
+## v3.5.13 (unreleased)
+
+### Python frontend: NUMA multi-node (W-PY21)
+
+- **New `nodes=` topologies** (`_numa.py`): `None`/`"auto"`
+  (detect — single-socket stays UMA, unchanged), `1` (force UMA),
+  `N` (first N physicals), `"0,1"` (explicit physicals), `"@N"`
+  (N forced logical nodes cycling physicals — fake multi-node for
+  testing, like bash). Unknown specs raise `ValueError` eagerly.
+- **New NUMA pipeline executors** (blocking + streaming): the
+  born-local ingest owns the source fd (files and pipes uniformly
+  — no pre-spill), per-node indexers/scanners run with death
+  pipes, the physical fallow reclaims via `PhysPackets`, and
+  workers fork per-node on that node's first DATA publish (the
+  W-PY19 pre-flight rule per ring) with a global stall fallback.
+  Scanner spawn pipes stay disarmed — auto-forking on the startup
+  burst would trip the CASE-B pre-flight bail (silent loss).
+- **New shim entry points** (shim only, engine frozen):
+  `fr_py_init_numa` (`--numa-map`), `fr_py_numa_ingest`,
+  `fr_py_indexer_numa`, `fr_py_numa_scanner`, `fr_py_fallow_phys`,
+  `fr_py_data_ready_node`. Workers self-pin via the engine map in
+  `fr_py_worker_init` (mirrors `ring_worker inc`); Python
+  pre-pinning in the reactor spawn path is best-effort backup.
+  `order="index"` reuses `fr_py_orderer` with `numa=1` (no new
+  orderer needed — the packed major/minor key was already there).
+- **Hardened publish accounting**: the DATA high-water marks reset
+  at init (new epoch) instead of only on the `w<hwm` heuristic —
+  a fast pipeline finishing before the parent's first poll used to
+  hide every publish in the stale mark's shadow (zero observed →
+  spurious publish anomaly on in-process re-runs). Same latent
+  race closed on the UMA mark.
+- **Semantics**: per-node rings batch independently, so parity is
+  over byte content (ordered mode reconstructs the input
+  byte-exact via the C orderer), never batch counts. Fault
+  tolerance, trap-ACK, respawn cap, and poison reporting ride the
+  W-PY19 reactor unchanged (now NUMA-aware per slot lineage).
+- Python `0.11.0` → `0.12.0`. 295 tests green (263 + 32
+  `test_numa.py`); engine frozen (zero `forkrun_ring.c`
+  changes).
+
+## v3.5.12 (unreleased)
+
+### Python frontend: parameter sweeps (W-PY20)
+
+- **New `forkrun.sweep()`** (bash `:::` / `::::` / `--link`
+  equivalent): `args=[[...], ...]` dimensions generate Cartesian
+  products, `link=True` zips pairwise (shortest-truncation with
+  `UserWarning`), `args_from=[files]` loads one dimension per file
+  (one value per line, blanks skipped). Each combination becomes
+  ordinary batches whose `.metadata` carries the sweep tuple;
+  results return in combination order.
+- **New `Batch.metadata`** (additive, default `None`): sweep tuple
+  set by the wrapper before the user payload runs, retained across
+  `invalidate()` like the other coordinates. No existing API
+  changes; the claim/ack loop is untouched.
+- **Execution**: standalone sweeps run one synthetic-input pipeline
+  with forced `lines=1` (exactly one batch per combination —
+  adaptive batching would merge combos) and `order="index"`
+  (combination order — completion order would scramble it);
+  conflicting `lines=`/`bytes=`/`order=`/`sink=` raise instead of
+  silently violating the mapping. With-source sweeps run one
+  `map()` per combination (path sources reused; fd/pipe sources
+  materialized once — a repeated drain would see EOF). Payload
+  errors ride escrow/retry/poison per combination; `mode="splice"`
+  rejected (no payload exists to receive metadata).
+- Python `0.10.0` → `0.11.0`. 263 tests green (241 + 22
+  `test_sweep.py`); engine frozen (zero `forkrun_ring.c`
+  changes).
+
 ## v3.5.11 (unreleased)
 
 ### Python frontend: reactor orchestration (W-PY19)

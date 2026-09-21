@@ -158,6 +158,57 @@ def _setup_signatures(lib) -> None:
         lib.fr_py_orderer.restype = ctypes.c_int
     except AttributeError:
         pass
+    try:
+        # W-PY21: NUMA-aware init (--numa-map topology).
+        lib.fr_py_init_numa.argtypes = [ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_char_p]
+        lib.fr_py_init_numa.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY21: NUMA pipeline stages (ingest/indexer/scanner/fallow).
+        lib.fr_py_numa_ingest.argtypes = [ctypes.c_int, ctypes.c_int,
+                                          ctypes.c_int]
+        lib.fr_py_numa_ingest.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        lib.fr_py_indexer_numa.argtypes = [ctypes.c_int, ctypes.c_int]
+        lib.fr_py_indexer_numa.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        lib.fr_py_numa_scanner.argtypes = [ctypes.c_int, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_int]
+        lib.fr_py_numa_scanner.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        lib.fr_py_fallow_phys.argtypes = [ctypes.c_int, ctypes.c_int]
+        lib.fr_py_fallow_phys.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY21: per-node published-DATA-batch count.
+        lib.fr_py_data_ready_node.argtypes = [ctypes.c_int]
+        lib.fr_py_data_ready_node.restype = ctypes.c_uint64
+    except AttributeError:
+        pass
+    try:
+        # W-PY21: NUMA ingest-EOF-posted query (helper classification).
+        lib.fr_py_ingest_eof_posted.argtypes = []
+        lib.fr_py_ingest_eof_posted.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY21-A: C drain process (data/control path separation).
+        lib.fr_py_drain_loop.argtypes = [ctypes.c_int,
+                                         ctypes.POINTER(ctypes.c_int),
+                                         ctypes.c_int, ctypes.c_int,
+                                         ctypes.c_int]
+        lib.fr_py_drain_loop.restype = ctypes.c_int
+    except AttributeError:
+        pass
 
 
 def load(path: str | None = None):
@@ -234,4 +285,10 @@ def v1_available(lib=None) -> dict:
             "splice": hasattr(lib, "fr_py_worker_splice_loop"),
             "orderer": hasattr(lib, "fr_py_orderer"),
             "order_pipe": hasattr(lib, "fr_py_set_order_pipe"),
-            "scan_spawn": hasattr(lib, "fr_py_scan_with_spawn")}
+            "scan_spawn": hasattr(lib, "fr_py_scan_with_spawn"),
+            "numa": all(hasattr(lib, s) for s in (
+                "fr_py_init_numa", "fr_py_numa_ingest",
+                "fr_py_indexer_numa", "fr_py_numa_scanner",
+                "fr_py_fallow_phys", "fr_py_data_ready_node",
+                "fr_py_ingest_eof_posted")),
+            "drain": hasattr(lib, "fr_py_drain_loop")}

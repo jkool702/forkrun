@@ -41,6 +41,9 @@ from collections import defaultdict
 # FR_TRAP_ACK_GRACE_MS_DEFAULT in forkrun_substrate.h.
 TRAP_ACK_GRACE_S = 3.0
 
+# Per-round drain burst cap (see reactor_loop §4).
+DRAIN_BURST = 64
+
 # Order-pipe capacity (bash H3 invariant: 1 page for backpressure).
 ORDER_PIPE_SIZE = 4096
 
@@ -127,7 +130,7 @@ class ReactorState:
     def configure(self, *, payload_spec, sink_spec, memfd, file_size,
                   out_fds, signal_w, fallow_w=-1, order_w=-1,
                   trap_ack_w=-1, on_error="retry", engine_fds=frozenset(),
-                  splice=False):
+                  splice=False, node_cpus=None):
         """Capture the fork context respawns need (parent-side)."""
         self.ctx = {
             "payload_spec": payload_spec,
@@ -142,6 +145,8 @@ class ReactorState:
             "on_error": on_error,
             "engine_fds": set(engine_fds),
             "splice": bool(splice),
+            "node_cpus": (list(node_cpus) if node_cpus is not None
+                          else None),
         }
         if trap_ack_w is not None and trap_ack_w >= 0:
             self.trap_ack_w = trap_ack_w
@@ -197,6 +202,17 @@ class ReactorState:
                 if out_fds and 0 <= wid < len(out_fds):
                     keep.add(out_fds[wid])
                 scrub_fds(keep)
+            except Exception:
+                pass
+            # W-PY21: best-effort pre-pinning to the worker's node
+            # (fr_py_worker_init re-pins authoritatively via the
+            # engine's logical→physical map right after; this only
+            # narrows the pre-init window. Never fatal).
+            try:
+                _ncpus = ctx.get("node_cpus")
+                if _ncpus and 0 <= node < len(_ncpus):
+                    from ._numa import pin_to_node as _pin
+                    _pin(_ncpus[node])
             except Exception:
                 pass
             try:
@@ -381,6 +397,14 @@ def _splice_child_main(ctx, wid, node, incarn, death_w):
     from ._bindings import get as _get
     lib = _get()
     trap_w = ctx.get("trap_ack_w", -1)
+    # W-PY21: best-effort pre-pinning (see spawn_worker).
+    try:
+        _ncpus = ctx.get("node_cpus")
+        if _ncpus and 0 <= node < len(_ncpus):
+            from ._numa import pin_to_node as _pin
+            _pin(_ncpus[node])
+    except Exception:
+        pass
     try:
         if lib.fr_py_worker_init(wid, node, incarn, 3, 0) != 0:
             return 1
@@ -492,7 +516,7 @@ def handle_spawn_bytes(state, data):
                 break
 
 
-def reactor_loop(state, drain_gen=None, poll_timeout=0.1):
+def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
     """Supervise workers to completion (bash ring_poll equivalent).
 
     Death pipes + spawn pipe + trap-ACK pipe are select()ed each
@@ -503,13 +527,17 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1):
     polling), or raising StopIteration when the stream is exhausted:
     while any worker is alive the loop pumps it and YIELDS each blob
     (streaming mode); when drain_gen is None the loop only
-    supervises (map/run mode).
+    supervises (map/run mode). service (optional) is a zero-arg
+    callable run once per round after event handling (NUMA helper
+    watches — pipeline deaths raise promptly instead of waiting
+    for worker completion).
 
     Yields result blobs (streaming) and returns
     {"statuses": [(pid, status)], "poisoned": [...]}.
     Raises RuntimeError on trap-ACK timeout. Never returns while a
     worker is alive.
     """
+    drained_last = False
 
     def _drain_pipe_nonblock(fd, buf_attr):
         try:
@@ -542,8 +570,14 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1):
 
         if watch:
             try:
-                readable, _, _ = _select.select(watch, [], [],
-                                                poll_timeout)
+                # Adaptive idle: a round that drained results
+                # re-polls immediately (tight drain loop under load)
+                # instead of sleeping a full quantum with data
+                # waiting — otherwise throughput caps at ~10
+                # blobs/s (one yield per 100ms idle select).
+                readable, _, _ = _select.select(
+                    watch, [], [],
+                    0.0 if drained_last else poll_timeout)
             except (OSError, ValueError):
                 readable = []
             for fd in readable:
@@ -595,19 +629,33 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1):
         #    classifies + respawns inline).
         state.reap_clean_exits()
 
+        # 3b. Owner service hook (NUMA pipeline watches). Raises
+        #    propagate (helper death aborts the supervised run).
+        if service is not None:
+            service()
+
         # 4. Streaming drain pump (None = nothing complete YET,
         #    keep polling; StopIteration = stream exhausted for good).
+        #    Bounded burst per round (DRAIN_BURST): one blob per
+        #    round starves throughput (see above); an unbounded
+        #    burst would starve death handling under a flooding
+        #    stream. 64 bounds detection latency while draining
+        #    any realistic backlog per round.
         if drain_gen is not None:
-            try:
-                blob = drain_gen()
-            except StopIteration:
-                drain_gen = None
-            else:
-                if blob is not None:
-                    yield blob
-                # After yielding (or an empty quantum), re-check
-                # timeouts promptly rather than sleeping a full
-                # quantum with a dead grace.
+            drained_last = False
+            for _ in range(DRAIN_BURST):
+                try:
+                    blob = drain_gen()
+                except StopIteration:
+                    drain_gen = None
+                    break
+                if blob is None:
+                    break
+                drained_last = True
+                yield blob
+            if drained_last:
+                # Re-check timeouts promptly after a burst rather
+                # than sleeping a full quantum with a dead grace.
                 state.check_trap_timeouts()
 
         # 5. Termination: no live worker AND (no drain pending or the
@@ -651,10 +699,10 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1):
             "poisoned": list(state.poisoned_batches)}
 
 
-def reactor_run(state, poll_timeout=0.1):
+def reactor_run(state, poll_timeout=0.1, service=None):
     """Blocking supervision (map/run): exhaust reactor_loop, return its
     result dict. Raises RuntimeError on trap-ACK timeout."""
-    gen = reactor_loop(state, None, poll_timeout)
+    gen = reactor_loop(state, None, poll_timeout, service)
     try:
         while True:
             next(gen)
@@ -863,4 +911,4 @@ __all__ = ["WorkerSlot", "ReactorState", "reactor_loop", "reactor_run",
            "handle_trap_ack_bytes", "handle_spawn_bytes",
            "report_poisoned", "spawn_orderer",
            "fork_scanner_with_death_pipe", "check_scanner_death",
-           "TRAP_ACK_GRACE_S", "ORDER_PIPE_SIZE"]
+           "TRAP_ACK_GRACE_S", "ORDER_PIPE_SIZE", "DRAIN_BURST"]

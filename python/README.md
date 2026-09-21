@@ -1,9 +1,9 @@
-# forkrun Python frontend — v0.10.0 (W-PY19 reactor)
+# forkrun Python frontend — v0.13.0 (W-PY21-A C drain, opt-in)
 
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
-`forkrun.__version__` is `"0.10.0"`; `forkrun.__engine_version__` reports the
+`forkrun.__version__` is `"0.13.0"`; `forkrun.__engine_version__` reports the
 substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build
@@ -254,6 +254,29 @@ live CUDA context exists in the parent (fork would corrupt driver state).
   batch (best-effort, with a stderr recovery note); unconfirmed
   death raises `RuntimeError` after the grace. Healthy-path results
   are byte-identical to the default path.
+- **Parameter sweeps (W-PY20):** `forkrun.sweep(payload,
+  args=[["a", "b"], ["x", "y"]])` runs the payload once per
+  combination (Cartesian; `link=True` zips, `args_from=[files]`
+  loads dimensions from files). Each batch's `.metadata` carries
+  the sweep tuple; results return in combination order. With
+  `source=`, every combination processes the full source.
+- **NUMA multi-node (W-PY21):** `nodes="@N"` (or real topologies
+  via `nodes="auto"`/N/`"0,1"`) runs the born-local pipeline
+  (per-node indexers/scanners, MPOL_BIND ingest, physical fallow,
+  CPU pinning, C orderer with the packed major/minor key).
+  Per-node rings batch independently, so parity with UMA is over
+  byte content (ordered mode reconstructs the input byte-exact),
+  never batch counts. `nodes=1` forces the unchanged UMA path.
+- **C drain (W-PY21-A, opt-in `c_drain=True`, default False):** a
+  forked C loop (`fr_py_drain_loop`) moves signal consume + memfd
+  pread into a results memfd (map/run) or 1MB pipe (stream,
+  backpressure preserved). Framing/parsing untouched —
+  byte-identical to the legacy drain. **Measured 0.7-1.0x of
+  legacy, so it stays opt-in:** the parent must parse every
+  record either way, Python signal reads are already batched,
+  and the drain adds a full extra transit of the output bytes.
+  No threads anywhere (fork-before-threads intact); the reactor
+  is unchanged.
 
 ## Layout
 
@@ -266,12 +289,18 @@ live CUDA context exists in the parent (fork would corrupt driver state).
 - `forkrun/_pipes.py` — pipe capacity utilities (1MB signal/spawn pipes).
 - `forkrun/_reactor.py` — reactor supervision (death pipes, respawn,
   trap-ACK, C-orderer spawn, scanner death-pipe helpers).
+- `forkrun/_sweep.py` — sweep combination generator (Cartesian/zip,
+  args/args_from).
+- `forkrun/_numa.py` — NUMA topology, pinning, worker distribution.
 - `forkrun/run.py` — parent orchestration (init/spill/scan/fork/wait).
 - `forkrun/_worker.py` — forked claim/payload/ack loop (`os._exit` only).
 - `stage0_harness.py` — table schema + surface check.
 - `tests/test_api_surface.py` — engine-free validation tests.
 - `tests/test_v0.py` — v0 engine tests (need the built `.so`).
 - `tests/test_reactor.py` — reactor tests (need the built `.so`).
+- `tests/test_sweep.py` — sweep tests (need the built `.so`).
+- `tests/test_numa.py` — NUMA tests (need the built `.so`).
+- `tests/test_c_drain.py` — C drain tests (need the built `.so`).
 
 ## Key contracts (v1.3)
 
