@@ -73,7 +73,8 @@ class TestV1Detection(unittest.TestCase):
             self.assertEqual(caps, {"exec": False, "plugin": False,
                                     "emit": False, "splice": False,
                                     "ack_direct": False, "complete": False,
-                                    "spill": False, "parse": False})
+                                    "spill": False, "parse": False,
+                                    "resume": False})
         finally:
             if old is None:
                 del os.environ["FORKRUN_NO_V1"]

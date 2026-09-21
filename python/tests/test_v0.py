@@ -462,7 +462,7 @@ class TestWPY2(unittest.TestCase):
             os.unlink(path)
 
     def test_version(self):
-        self.assertEqual(forkrun.__version__, "0.14.0")
+        self.assertEqual(forkrun.__version__, "0.16.0")
         self.assertIn("Batch", forkrun.__all__)
         self.assertEqual(forkrun.__engine_version__, "v3.5.2")
 

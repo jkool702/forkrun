@@ -1,9 +1,9 @@
-# forkrun Python frontend — v0.14.0 (W-PY21-B datapath consolidation)
+# forkrun Python frontend — v0.16.0 (W-PY23 release prep)
 
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
-`forkrun.__version__` is `"0.14.0"`; `forkrun.__engine_version__` reports the
+`forkrun.__version__` is `"0.16.0"`; `forkrun.__engine_version__` reports the
 substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build
@@ -278,6 +278,29 @@ live CUDA context exists in the parent (fork would corrupt driver state).
   and the drain adds a full extra transit of the output bytes.
   No threads anywhere (fork-before-threads intact); the reactor
   is unchanged.
+- **Resume/checkpoint (W-PY22, C-orderer paths only):**
+  `map()`/`stream()` with `orchestrator=True, order="index"`
+  accept `resume=<ckpt>` (resume FROM) and
+  `checkpoint_file=<path>` (publish TO on abort). Anything else
+  (`run()`, unordered, non-reactor, splice, multi-node NUMA)
+  raises `RuntimeError` — a checkpoint without a tracker would be
+  silent loss, so it is refused instead. Checkpoints are BYTE
+  coordinates (`FORKRUN_RESUME_HORIZON=<offset>`,
+  `FORKRUN_RESUME_JAGGED=("s:e" ...)`), parsed strictly
+  (fail-closed) and published atomically (tmp → fsync → chmod
+  600 → rename). On abort the parent quiesces (bounded reap),
+  drains the C orderer, snapshots the engine ledger
+  (`fr_py_resume_snapshot`, same seqlock reader as
+  `ring_dump_resume`), and publishes — before teardown destroys
+  the engine. `map()` additionally preserves the aborted run's
+  committed output in a `<ckpt>.coll` sidecar and prepends it on
+  a successful resume (abort+resume is byte-identical to an
+  uninterrupted run); `stream()` has no sidecar (the consumer
+  owns everything yielded live).
+  **Engine commit is exactly-once; Python consumption is not:**
+  a crash between engine commit and Python observation means the
+  checkpoint skips bytes the caller never saw — persist consumed
+  results yourself for end-to-end exactly-once.
 
 ## Layout
 

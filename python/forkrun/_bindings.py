@@ -63,6 +63,17 @@ class RecordDescriptor(ctypes.Structure):
     ]
 
 
+class FrPyInterval(ctypes.Structure):
+    """W-PY22: resume interval (mirrors FrPyInterval in _shim.c,
+    layout-identical to the engine's IntervalNode {s, e}).
+    """
+
+    _fields_ = [
+        ("start", ctypes.c_uint64),
+        ("end", ctypes.c_uint64),
+    ]
+
+
 def _setup_signatures(lib) -> None:
     lib.fr_py_version.argtypes = []
     lib.fr_py_version.restype = ctypes.c_char_p
@@ -255,6 +266,31 @@ def _setup_signatures(lib) -> None:
         lib.fr_py_parse_descriptors.restype = ctypes.c_int64
     except AttributeError:
         pass
+    try:
+        # W-PY22: structured resume snapshot (out-params, no stdout).
+        lib.fr_py_resume_snapshot.argtypes = [
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(FrPyInterval),
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_uint32]
+        lib.fr_py_resume_snapshot.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY22: set resume state (typed params, no argv).
+        lib.fr_py_set_resume_state.argtypes = [
+            ctypes.c_uint64, ctypes.c_uint64,
+            ctypes.POINTER(FrPyInterval), ctypes.c_uint32]
+        lib.fr_py_set_resume_state.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY22: resume-mode query.
+        lib.fr_py_is_resume_mode.argtypes = []
+        lib.fr_py_is_resume_mode.restype = ctypes.c_int
+    except AttributeError:
+        pass
 
 
 def load(path: str | None = None):
@@ -308,7 +344,8 @@ def find_substrate() -> str:
         "libforkrun_python.so not found — run "
         "'make -f Makefile.substrate python-substrate'")
 
-__all__ = ["FrPyBatch", "RecordDescriptor", "RC_OK", "RC_FAIL", "RC_EOF",
+__all__ = ["FrPyBatch", "RecordDescriptor", "FrPyInterval",
+           "RC_OK", "RC_FAIL", "RC_EOF",
            "load", "get", "find_substrate", "v1_available"]
 
 
@@ -325,7 +362,7 @@ def v1_available(lib=None) -> dict:
     if os.environ.get("FORKRUN_NO_V1"):
         return {"exec": False, "plugin": False, "emit": False,
                 "splice": False, "ack_direct": False, "complete": False,
-                "spill": False, "parse": False}
+                "spill": False, "parse": False, "resume": False}
     has = hasattr
     return {"exec": has(lib, "fr_py_exec_spawn"),
             "plugin": has(lib, "fr_py_plugin_call"),
@@ -343,4 +380,7 @@ def v1_available(lib=None) -> dict:
             "ack_direct": has(lib, "fr_py_ack_direct"),
             "complete": has(lib, "fr_py_complete"),
             "spill": has(lib, "fr_py_spill_sequential"),
-            "parse": has(lib, "fr_py_parse_descriptors")}
+            "parse": has(lib, "fr_py_parse_descriptors"),
+            "resume": all(has(lib, s) for s in (
+                "fr_py_resume_snapshot", "fr_py_set_resume_state",
+                "fr_py_is_resume_mode"))}

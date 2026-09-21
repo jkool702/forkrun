@@ -50,6 +50,8 @@ from ._fd_scrub import scrub_fds, snapshot_fds
 from ._pipes import make_pipe
 from ._plugin import make_plugin_payload
 from ._reassembly import ReassemblyBuffer
+from ._resume import (checkpoint_on_abort, consume_sidecar,
+                      require_resume_path, resume_begin)
 from ._spawn import make_spawn_payload
 from ._worker import _HDR, worker_main
 
@@ -606,7 +608,7 @@ def _detect_streaming(source, streaming):
 def run(payload, source, *, mode="python", sink=None, order="none",
         lines=None, bytes=None, workers=None, nodes="auto",
         on_error="retry", streaming=None, orchestrator=None,
-        c_drain=None):
+        c_drain=None, resume=None, checkpoint_file=None):
     """Run payload over source in parallel. See module docstring for v0 scope.
 
     mode="python": payload is "pkg.mod:func" | callable (Batch -> bytes).
@@ -635,10 +637,20 @@ def run(payload, source, *, mode="python", sink=None, order="none",
       moves result bytes (W-PY21-A data/control separation);
       False = legacy parent-side drain. Byte-identical either way;
       measured 0.7-1.0x of legacy (see _validate_c_drain).
+    resume/checkpoint_file: W-PY22 — NOT supported by run() (no
+      C orderer on any run path); passing either raises
+      RuntimeError. Use map()/stream() with orchestrator=True,
+      order="index".
     """
     _validate(payload, source, mode=mode, sink=sink, order=order,
               lines=lines, bytes_=bytes, workers=workers, nodes=nodes,
-              on_error=on_error, streaming=streaming)
+              on_error=on_error, streaming=streaming,
+              resume=resume, checkpoint_file=checkpoint_file)
+    if resume is not None or checkpoint_file is not None:
+        raise RuntimeError(
+            "run(): resume=/checkpoint_file= require a C-orderer-backed "
+            "path (map()/stream() with orchestrator=True, "
+            "order='index'); run() has no C orderer")
     orchestrator = _validate_orchestrator(orchestrator)
     c_drain = _validate_c_drain(c_drain)
     if mode not in ("python", "spawn", "plugin", "splice"):
@@ -715,6 +727,14 @@ def map(payload, source, **kwargs):
       moves result bytes (W-PY21-A data/control separation);
       False = legacy parent-side drain. Byte-identical either way;
       measured 0.7-1.0x of legacy (see _validate_c_drain).
+
+    resume: None (default) or checkpoint path to resume FROM
+      (W-PY22, byte coordinates). checkpoint_file: None (default)
+      or path to publish a checkpoint TO on abort. Both require
+      orchestrator=True, order="index", UMA single-node, non-splice
+      (C-orderer path); anything else raises RuntimeError loudly.
+      Engine commit is exactly-once; Python consumption is not
+      (persist consumed results yourself for end-to-end exactly-once).
     """
     mode = kwargs.get("mode", "python")
     nodes = kwargs.get("nodes", "auto")
@@ -722,10 +742,20 @@ def map(payload, source, **kwargs):
               order=kwargs.get("order", "none"), lines=kwargs.get("lines"),
               bytes_=kwargs.get("bytes"), workers=kwargs.get("workers"),
               nodes=nodes, on_error=kwargs.get("on_error", "retry"),
-              streaming=kwargs.get("streaming"))
+              streaming=kwargs.get("streaming"),
+              resume=kwargs.get("resume"),
+              checkpoint_file=kwargs.get("checkpoint_file"))
     orchestrator = _validate_orchestrator(kwargs.get("orchestrator"))
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
     numa_map_str, num_nodes, node_cpus = _resolve_numa(nodes)
+    if kwargs.get("resume") is not None or \
+            kwargs.get("checkpoint_file") is not None:
+        # W-PY22: capability gate (NUMA/splice/non-reactor never see
+        # resume params — they are rejected here, loudly). Shape and
+        # file-existence errors from _validate above take precedence.
+        require_resume_path("map()", order=kwargs.get("order", "none"),
+             orchestrator=orchestrator, mode=mode, collect=True,
+             splice=False, num_nodes=num_nodes)
     if num_nodes > 1:
         _require_numa_symbol()
         payload, mode = _coerce_payload(payload, mode)
@@ -790,7 +820,9 @@ def map(payload, source, **kwargs):
                     workers=_resolve_workers(kwargs.get("workers")),
                     on_error=kwargs.get("on_error", "retry"),
                     collect=True, order=order, mode=mode, nodes=nodes,
-                    c_drain=c_drain)
+                    c_drain=c_drain,
+                    resume=kwargs.get("resume"),
+                    checkpoint_file=kwargs.get("checkpoint_file"))
         return _execute_ingest(
             payload, source, sink=None, lines=kwargs.get("lines"),
             bytes_=kwargs.get("bytes"),
@@ -806,7 +838,9 @@ def map(payload, source, **kwargs):
                 workers=_resolve_workers(kwargs.get("workers")),
                 on_error=kwargs.get("on_error", "retry"),
                 collect=True, order=order, mode=mode, nodes=nodes,
-                c_drain=c_drain)
+                c_drain=c_drain,
+                resume=kwargs.get("resume"),
+                checkpoint_file=kwargs.get("checkpoint_file"))
     results = _execute(payload, source, sink=None,
                        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
                        workers=_resolve_workers(kwargs.get("workers")),
@@ -837,6 +871,12 @@ def stream(payload, source, **kwargs):
       moves result bytes (W-PY21-A data/control separation);
       False = legacy parent-side drain. Byte-identical either way;
       measured 0.7-1.0x of legacy (see _validate_c_drain).
+
+    resume/checkpoint_file: W-PY22, same contract as map() (C-orderer
+      paths only: orchestrator=True, order="index", UMA, non-splice).
+      For stream() there is no output sidecar: the consumer owns
+      everything yielded live, and the checkpoint covers the engine
+      frontier beyond it.
     """
     _validate(payload, source, mode=kwargs.get("mode", "python"),
               sink=None, order=kwargs.get("order", "none"),
@@ -844,12 +884,22 @@ def stream(payload, source, **kwargs):
               workers=kwargs.get("workers"),
               nodes=kwargs.get("nodes", "auto"),
               on_error=kwargs.get("on_error", "retry"),
-              streaming=kwargs.get("streaming"))
+              streaming=kwargs.get("streaming"),
+              resume=kwargs.get("resume"),
+              checkpoint_file=kwargs.get("checkpoint_file"))
     orchestrator = _validate_orchestrator(kwargs.get("orchestrator"))
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
     kwargs = dict(kwargs, c_drain=c_drain)
     numa_map_str, num_nodes, node_cpus = _resolve_numa(
         kwargs.get("nodes", "auto"))
+    if kwargs.get("resume") is not None or \
+            kwargs.get("checkpoint_file") is not None:
+        # W-PY22: gate BEFORE dispatch (NUMA/splice/non-reactor never
+        # see resume params — they are rejected here, loudly).
+        require_resume_path("stream()", order=kwargs.get("order", "none"),
+             orchestrator=orchestrator,
+             mode=kwargs.get("mode", "python"),
+             collect=True, splice=False, num_nodes=num_nodes)
     if num_nodes > 1:
         _require_numa_symbol()
         payload, engine_mode = _coerce_payload(payload, kwargs.get(
@@ -968,7 +1018,9 @@ def _stream_reactor_gen(payload, source, **kwargs):
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
         splice=kwargs.get("mode") == "splice",
-        c_drain=kwargs.get("c_drain", True))
+        c_drain=kwargs.get("c_drain", True),
+        resume=kwargs.get("resume"),
+        checkpoint_file=kwargs.get("checkpoint_file"))
 
 
 def _splice_stream_reactor_gen(source, *, bytes_, workers, on_error,
@@ -993,7 +1045,9 @@ def _ingest_stream_reactor_gen(payload, source, **kwargs):
         on_error=kwargs.get("on_error", "retry"),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
-        c_drain=kwargs.get("c_drain", True))
+        c_drain=kwargs.get("c_drain", True),
+        resume=kwargs.get("resume"),
+        checkpoint_file=kwargs.get("checkpoint_file"))
 
 
 def _splice_ingest_stream_reactor_gen(source, *, bytes_, workers,
@@ -3026,7 +3080,8 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
 def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                             workers, on_error, collect, order,
                             mode="python", nodes="auto", splice=False,
-                            c_drain=True):
+                            c_drain=True, resume=None,
+                            checkpoint_file=None):
     """Materialized map/run under reactor supervision (blocking).
 
     init → spill → sync scan → (output memfds) → (order pipe +
@@ -3056,6 +3111,13 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
         raise RuntimeError("substrate init failed")
     engine_fds = snapshot_fds() - pre_fds
+    # W-PY22 resume: parse + gate + engine state AFTER init (which
+    # zeroes the ledger) and BEFORE any fork. Raises before any
+    # child exists. engine_live gates the abort choreography below.
+    resume_state = resume_begin(lib, resume, order=order,
+                                 orchestrator=True, mode=mode,
+                                 collect=collect, splice=splice)
+    engine_live = True
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -3072,6 +3134,9 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     results_fd = None
     drain_status = None
     state = None
+    # W-PY22: pre-try defaults so the abort handler below never
+    # NameErrors on early failures (spill/scan, before assignment).
+    use_orderer = False
     try:
         memfd, size = _spill_to_memfd(src_fd)
         try:
@@ -3217,6 +3282,12 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             return None
         if use_orderer:
             records = _parse_records(_read_fd_all(coll_fd))
+            # Already batch_idx-ordered by the C orderer; prepend any
+            # sidecar output from previously aborted run(s), then sort
+            # (committed ranges are jagged — the union of two ordered
+            # lists is not ordered). Consumes (deletes) the sidecar.
+            if resume is not None:
+                records = consume_sidecar(resume, records)
             # Already batch_idx-ordered by the C orderer; no sort.
             return [blob for _, blob in records]
         if use_drain:
@@ -3233,9 +3304,19 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
-    except KeyboardInterrupt:
+    except BaseException:
+        # W-PY22 abort choreography (quiesce -> reap -> snapshot ->
+        # publish) BEFORE the finally-teardown destroys the engine.
+        # Re-raises with the original type (KeyboardInterrupt stays
+        # KeyboardInterrupt). Skips silently unless armed with
+        # resume=/checkpoint_file= on a live C-orderer path.
         try:
-            lib.fr_py_abort()
+            checkpoint_on_abort(lib, state=state, orderer_pid=orderer_pid,
+                        order_w=order_w, coll_fd=coll_fd,
+                        use_orderer=use_orderer, collect=collect,
+                        resume_src=resume,
+                        checkpoint_file=checkpoint_file,
+                        engine_live=engine_live)
         except Exception:
             pass
         raise
@@ -3253,7 +3334,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
 def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                                workers, on_error, mode="python",
                                nodes="auto", order="none", stats=None,
-                               splice=False, c_drain=True):
+                               splice=False, c_drain=True, resume=None,
+                               checkpoint_file=None):
     """Materialized stream() under reactor supervision (generator).
 
     Fork happens on first next(); blobs yield live while the reactor
@@ -3287,6 +3369,16 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
         raise RuntimeError("substrate init failed")
     engine_fds = snapshot_fds() - pre_fds
+    # W-PY22 resume: parse + gate + engine state AFTER init (which
+    # zeroes the ledger) and BEFORE any fork. engine_live gates the
+    # abort choreography below.
+    resume_state = resume_begin(lib, resume, order=order,
+                                 orchestrator=True, mode=mode,
+                                 collect=True, splice=splice)
+    engine_live = True
+    # W-PY22: pre-try default so the abort handler never NameErrors
+    # on early failures (spill/scan, before assignment below).
+    use_orderer = False
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -3569,12 +3661,32 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             return None
 
         _pending: list = []
+        _stream_ok = False
         try:
-            yield from reactor_loop(
-                state,
-                drain_gen=_pump_drain_c if use_drain else _pump_drain)
-        finally:
-            pass
+            try:
+                yield from reactor_loop(
+                    state,
+                    drain_gen=_pump_drain_c if use_drain else _pump_drain)
+            finally:
+                pass
+        except BaseException:
+            # W-PY22 abort choreography on abnormal generator exit
+            # (consumer abandon/GeneratorExit, worker-crash
+            # propagation, KeyboardInterrupt): quiesce -> reap ->
+            # snapshot -> publish, then re-raise. No yields here
+            # (GeneratorExit forbids them). Stream has no output
+            # sidecar — the consumer owns everything yielded live.
+            if not _stream_ok:
+                try:
+                    checkpoint_on_abort(lib, state=state,
+                             orderer_pid=orderer_pid, order_w=order_w,
+                             coll_fd=None, use_orderer=use_orderer,
+                             collect=False, resume_src=resume,
+                             checkpoint_file=checkpoint_file,
+                             engine_live=engine_live)
+                except Exception:
+                    pass
+            raise
 
         _reactor_failure_check(state, workers, on_error)
 
@@ -3623,6 +3735,9 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             stats["reassembly_max"] = reassembly.max_size
 
         _reactor_poison_summary(lib, state)
+        # W-PY22: normal exhaustion — generator completed; the
+        # abort handler above must not fire on the way out.
+        _stream_ok = True
     finally:
         if spare_signal_w is not None and spare_signal_w >= 0:
             try:
@@ -3643,7 +3758,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
 def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                                    bytes_, workers, on_error, collect,
                                    order, mode="python", nodes="auto",
-                                   splice=False, c_drain=True):
+                                   splice=False, c_drain=True, resume=None,
+                                   checkpoint_file=None):
     """map/run over a streaming source under reactor supervision.
 
     Mirrors _execute_ingest_locked (reaper + spawn-aware scanner +
@@ -3674,6 +3790,16 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
         raise RuntimeError("substrate init failed")
     engine_fds = snapshot_fds() - pre_fds
+    # W-PY22 resume: parse + gate + engine state AFTER init (which
+    # zeroes the ledger) and BEFORE any fork. engine_live gates the
+    # abort choreography below.
+    resume_state = resume_begin(lib, resume, order=order,
+                                 orchestrator=True, mode=mode,
+                                 collect=collect, splice=splice)
+    engine_live = True
+    # W-PY22: pre-try default so the abort handler never NameErrors
+    # on early failures (before assignment below).
+    use_orderer = False
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -4048,6 +4174,11 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             return None
         if use_orderer:
             records = _parse_records(_read_fd_all(coll_fd))
+            # Already batch_idx-ordered by the C orderer; prepend any
+            # sidecar output from previously aborted run(s), then sort
+            # (committed ranges are jagged). Consumes the sidecar.
+            if resume is not None:
+                records = consume_sidecar(resume, records)
             return [blob for _, blob in records]
         if use_drain:
             # Dynamic-fork paths (ingest/NUMA) fork no drain on
@@ -4063,9 +4194,19 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
-    except KeyboardInterrupt:
+    except BaseException:
+        # W-PY22 abort choreography (quiesce -> reap -> snapshot ->
+        # publish) BEFORE the finally-teardown destroys the engine
+        # (including the fallow/scanner helpers). Re-raises with the
+        # original type. Skips silently unless armed with
+        # resume=/checkpoint_file= on a live C-orderer path.
         try:
-            lib.fr_py_abort()
+            checkpoint_on_abort(lib, state=state, orderer_pid=orderer_pid,
+                        order_w=order_w, coll_fd=coll_fd,
+                        use_orderer=use_orderer, collect=collect,
+                        resume_src=resume,
+                        checkpoint_file=checkpoint_file,
+                        engine_live=engine_live)
         except Exception:
             pass
         raise
@@ -4087,7 +4228,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                                      workers, on_error, mode="python",
                                      nodes="auto", order="none",
                                      stats=None, splice=False,
-                                     c_drain=True):
+                                     c_drain=True, resume=None,
+                                     checkpoint_file=None):
     """stream() over a streaming source under reactor supervision.
 
     Mirrors _execute_ingest_stream (spill/pump interleaved with a
@@ -4127,6 +4269,16 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
         raise RuntimeError("substrate init failed")
     engine_fds = snapshot_fds() - pre_fds
+    # W-PY22 resume: parse + gate + engine state AFTER init (which
+    # zeroes the ledger) and BEFORE any fork. engine_live gates the
+    # abort choreography below.
+    resume_state = resume_begin(lib, resume, order=order,
+                                 orchestrator=True, mode=mode,
+                                 collect=True, splice=splice)
+    engine_live = True
+    # W-PY22: pre-try default so the abort handler never NameErrors
+    # on early failures (before assignment below).
+    use_orderer = False
 
     src_fd, must_close = _open_source(source)
     memfd = None
@@ -4569,6 +4721,24 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         try:
             yield from reactor_loop(state, drain_gen=_pump_drain)
+        except BaseException:
+            # W-PY22 abort choreography on abnormal generator exit
+            # (consumer abandon/GeneratorExit, worker-crash
+            # propagation, KeyboardInterrupt): quiesce -> reap ->
+            # snapshot -> publish, then re-raise. No yields here.
+            # Stream has no output sidecar — the consumer owns
+            # everything yielded live.
+            try:
+                checkpoint_on_abort(lib, state=state,
+                                    orderer_pid=orderer_pid,
+                                    order_w=order_w,
+                                    coll_fd=None, use_orderer=use_orderer,
+                                    collect=False, resume_src=resume,
+                                    checkpoint_file=checkpoint_file,
+                                    engine_live=engine_live)
+            except Exception:
+                pass
+            raise
         finally:
             pass
 

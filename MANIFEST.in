@@ -1,0 +1,26 @@
+# MANIFEST.in — sdist contents for forkrun (W-PY23).
+#
+# The wheel carries a prebuilt .so, but the sdist must let anyone
+# rebuild it: setup.py's build_py step runs Makefile.substrate, which
+# needs the engine TU, the shim, the stubs, the plugin ABI header,
+# and the makefile itself (all paths relative to the sdist root,
+# mirroring the repo layout).
+
+# C sources needed for building the substrate
+include forkrun_ring.c
+include forkrun_substrate.h
+include substratestubs.c
+include Makefile.substrate
+include ring_loadables/forkrun_plugin.h
+
+# Python package (modules + shim source)
+recursive-include python/forkrun *.py *.c
+
+# Documentation and license (PyPI page + legal)
+include python/README.md
+include LICENSE
+
+# Build metadata
+include pyproject.toml
+include setup.py
+include MANIFEST.in

@@ -2073,3 +2073,157 @@ int64_t fr_py_parse_descriptors(const char *input, uint64_t input_len,
     }
     return (int64_t)count;
 }
+
+/* =====================================================================
+ * W-PY22: engine-committed output recovery — structured resume
+ * snapshot without stdout redirection. Engine frozen: these only ADD
+ * new fr_py_* entry points that read/write the existing resume
+ * ledger (g_state resume_* fields, written by TRACK_COMPLETED_BATCH
+ * in ring_order_main, read by the scanner's is_resume block and
+ * ring_dump_resume_main). All coordinates are BYTES on the Universal
+ * Coordinate Plane (horizon = contiguous committed input offset;
+ * jagged = out-of-order committed intervals beyond it) — never
+ * batch numbers.
+ * ===================================================================== */
+
+/* Caller-provided interval (layout-identical to the engine's struct
+ * IntervalNode {uint64_t s; uint64_t e;} — 16 bytes, same order;
+ * ctypes binds positionally, so field order is load-bearing). */
+struct FrPyInterval {
+    uint64_t start;
+    uint64_t end;
+};
+
+/* Snapshot the engine's resume ledger via out-parameters.
+ *
+ * Takes the same seqlock-protected snapshot ring_dump_resume_main
+ * takes internally. The reader protocol is copied EXACTLY:
+ *   ACQUIRE seq1 -> RELAXED data -> fence(ACQUIRE) -> ACQUIRE seq2,
+ *   retry while odd or mismatched.
+ * The ACQUIRE fence before seq2 is LOAD-BEARING (closes window c:
+ * without it seq2 may be satisfied before the data loads and a torn
+ * snapshot is accepted — x86-TSO hides this; ARM does not). Do NOT
+ * simplify or weaken any of these orderings.
+ *
+ * Caller provides the jagged array (avoids malloc ownership across
+ * the ctypes boundary); max_jagged == 0 is a count query (no array
+ * needed, *count_out receives the true ledger count). Otherwise
+ * *count_out receives the actual interval count clamped to
+ * max_jagged (caller grows the array and retries when clamped).
+ * The horizon-0 fallow fallback mirrors ring_dump_resume_main
+ * (bash-checkpoint interchangeability).
+ *
+ * Returns 0 ok, -1 engine not initialized, -2 bad out-pointers.
+ */
+int fr_py_resume_snapshot(uint64_t *horizon, uint64_t *stdout_bytes,
+                          struct FrPyInterval *jagged,
+                          uint32_t *count_out, uint32_t max_jagged) {
+    uint32_t seq1, seq2;
+    uint64_t snap_horizon, snap_bytes;
+    uint32_t snap_count, n, i;
+    struct IntervalNode snap_jagged[1024];
+
+    if (!g_state)
+        return -1;
+    if (!horizon || !stdout_bytes || !count_out)
+        return -2;
+    if (max_jagged > 0 && !jagged)
+        return -2;
+
+    do {
+        seq1 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+        snap_horizon = __atomic_load_n(&g_state->resume_horizon,
+                                       __ATOMIC_RELAXED);
+        snap_bytes = __atomic_load_n(&g_state->resume_stdout_bytes,
+                                     __ATOMIC_RELAXED);
+        snap_count = __atomic_load_n(&g_state->resume_jagged_count,
+                                     __ATOMIC_RELAXED);
+        if (snap_count > 1024)
+            snap_count = 1024;
+        for (i = 0; i < snap_count; i++) {
+            snap_jagged[i].s = __atomic_load_n(
+                &g_state->resume_jagged[i].s, __ATOMIC_RELAXED);
+            snap_jagged[i].e = __atomic_load_n(
+                &g_state->resume_jagged[i].e, __ATOMIC_RELAXED);
+        }
+        /* LoadLoad: pin the RELAXED data loads above this fence
+         * (reader-pair window c). Load-bearing — do not delete. */
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        seq2 = __atomic_load_n(&g_state->resume_seq, __ATOMIC_ACQUIRE);
+    } while (seq1 != seq2 || (seq1 & 1));
+
+    if (snap_horizon == 0) {
+        /* ring_dump_resume_main fallback for -u mode: the fallow
+         * reaper's contiguous prefix when the orderer ledger has
+         * nothing (a C-orderer path never lands here with real
+         * progress, but bash-format checkpoints must round-trip). */
+        uint64_t fh = __atomic_load_n(&g_state->fallow_horizon_bytes,
+                                      __ATOMIC_RELAXED);
+        if (fh > 0)
+            snap_horizon = fh;
+    }
+
+    *horizon = snap_horizon;
+    *stdout_bytes = snap_bytes;
+    if (max_jagged == 0) {
+        /* Count query (no array): report the true ledger count so
+         * the caller can size one exact array. */
+        *count_out = snap_count;
+        return 0;
+    }
+    n = (snap_count < max_jagged) ? snap_count : max_jagged;
+    for (i = 0; i < n; i++) {
+        jagged[i].start = snap_jagged[i].s;
+        jagged[i].end = snap_jagged[i].e;
+    }
+    *count_out = n;
+    return 0;
+}
+
+/* Set resume state for a new run (call after fr_py_init, before the
+ * scan/worker forks). The scanner suppresses already-committed byte
+ * intervals; the C orderer bootstraps its tracker from this state
+ * (multi-resume is cumulative, not delta). Plain stores + qsort —
+ * identical to ring_set_resume_main minus the argv parsing (same
+ * e > s filter, same cmp_interval order).
+ *
+ * Returns 0 ok, -1 engine not initialized, -2 count > 1024.
+ */
+int fr_py_set_resume_state(uint64_t horizon, uint64_t stdout_bytes,
+                           const struct FrPyInterval *jagged,
+                           uint32_t jagged_count) {
+    uint32_t n = 0;
+    uint32_t i;
+
+    if (!g_state)
+        return -1;
+    if (jagged_count > 1024)
+        return -2;
+    if (jagged_count > 0 && !jagged)
+        return -2;
+
+    g_state->is_resume_mode = 1;
+    g_state->resume_horizon = horizon;
+    g_state->resume_stdout_bytes = stdout_bytes;
+    for (i = 0; i < jagged_count; i++) {
+        /* e > s filter (ring_set_resume_main parity — degenerate
+         * intervals never enter the ledger). */
+        if (jagged[i].end > jagged[i].start) {
+            g_state->resume_jagged[n].s = jagged[i].start;
+            g_state->resume_jagged[n].e = jagged[i].end;
+            n++;
+        }
+    }
+    g_state->resume_jagged_count = n;
+    /* Scanner expects sorted (ring_set_resume_main parity). */
+    qsort(g_state->resume_jagged, n, sizeof(struct IntervalNode),
+          cmp_interval);
+    return 0;
+}
+
+/* Resume-mode query (1 active, 0 otherwise, incl. no engine). */
+int fr_py_is_resume_mode(void) {
+    if (!g_state)
+        return 0;
+    return g_state->is_resume_mode ? 1 : 0;
+}

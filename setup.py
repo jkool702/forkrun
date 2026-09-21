@@ -14,6 +14,7 @@ setuptools copy it as package_data. No PyPI upload happens here.
 """
 
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -24,6 +25,33 @@ from setuptools.command.build_py import build_py
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PKG_DIR = os.path.join(REPO_ROOT, "python", "forkrun")
 SO_NAME = "libforkrun_python.so"
+
+
+def get_platform_tag():
+    """W-PY23: correct platform tag for the wheel (fail-fast off-Linux).
+
+    The wheel carries a compiled .so (ctypes-loaded, so any Python 3
+    works — only the platform matters). A py3-none-any tag would let
+    pip install it on ARM/macOS where the .so cannot load; the
+    platform tag makes that a clean refusal instead.
+    """
+    system = platform.system()
+    if system != "Linux":
+        raise RuntimeError(
+            "forkrun requires Linux (got %s). The C substrate uses "
+            "Linux-specific syscalls (memfd_create, splice, "
+            "fallocate)." % system)
+    machine = platform.machine()
+    if machine == "x86_64":
+        return "linux_x86_64"
+    if machine == "aarch64":
+        return "linux_aarch64"
+    raise RuntimeError(
+        "unsupported architecture %r (supported: x86_64, aarch64)"
+        % machine)
+
+
+PLATFORM_TAG = get_platform_tag()
 
 
 def read_version():
@@ -59,12 +87,17 @@ class BuildSubstratePy(build_py):
                     % exc) from exc
         else:
             # Fallback mirror of the Makefile recipe (kept in sync by
-            # inspection; prefer make whenever available).
+            # inspection; prefer make whenever available). Mirrors the
+            # W-PY23 reproducibility flags too (prefix map, pinned
+            # __DATE__/__TIME__, no build-id).
             self.announce("make not found; using fallback gcc invocation")
             if shutil.which("gcc") is None:
                 raise RuntimeError(
                     "need gcc (or make) to build the C substrate")
             cc = ["gcc", "-O1", "-fPIC", "-Wall", "-Wextra",
+                  "-ffile-prefix-map=" + REPO_ROOT + "=.",
+                  "-Wno-builtin-macro-redefined",
+                  '-D__DATE__="Sep  1 2026"', '-D__TIME__="00:00:00"',
                   "-DSHELL", "-DHAVE_CONFIG_H",
                   "-I/usr/include/bash",
                   "-I/usr/include/bash/include",
@@ -79,36 +112,65 @@ class BuildSubstratePy(build_py):
                 check=True, cwd=REPO_ROOT)
             subprocess.run(
                 ["gcc", "-shared", "-o", so_path, obj, stub,
-                 "-Wl,--no-undefined", "-ldl", "-lrt"],
+                 "-Wl,--no-undefined", "-Wl,--build-id=none",
+                 "-ldl", "-lrt"],
                 check=True, cwd=REPO_ROOT)
         if not os.path.exists(so_path):
             raise RuntimeError("substrate build produced no %s" % SO_NAME)
 
 
+def read_readme():
+    with open(os.path.join(REPO_ROOT, "python", "README.md")) as fh:
+        return fh.read()
+
+
 setup(
     name="forkrun",
     version=read_version(),
-    description="NUMA-aware contention-free streaming parallelization",
-    long_description=(
-        "forkrun is a self-tuning parallelizer: fault-tolerant,"
-        " zero-copy streaming over a coordinate plane, with Python"
-        " (this package), spawn, and C-plugin frontends. Linux-only."
-    ),
+    description="NUMA-aware contention-free streaming parallelization for Python",
+    long_description=read_readme(),
+    long_description_content_type="text/markdown",
     license="MIT",
     author="forkrun contributors",
+    author_email="",  # Set by the maintainer before `twine upload`.
     url="https://github.com/jkool702/forkrun",
+    project_urls={
+        "Source": "https://github.com/jkool702/forkrun",
+        "Documentation": "https://github.com/jkool702/forkrun/tree/main/DOCS",
+        "Bug Tracker": "https://github.com/jkool702/forkrun/issues",
+        "Benchmarks": "https://github.com/jkool702/forkrun/tree/main/python/benchmarks",
+    },
+    keywords=[
+        "parallel", "parallelization", "streaming", "NUMA",
+        "high-performance", "data-processing", "fork",
+        "multiprocessing", "concurrent", "pipeline",
+    ],
     package_dir={"": "python"},
     packages=["forkrun"],
     package_data={"forkrun": [SO_NAME]},
     cmdclass={"build_py": BuildSubstratePy},
+    # The wheel carries a compiled .so: tag it for this platform so
+    # pip refuses it elsewhere (never py3-none-any).
+    options={"bdist_wheel": {"plat_name": PLATFORM_TAG}},
     python_requires=">=3.8",
+    install_requires=[],
     classifiers=[
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
+        "Intended Audience :: Science/Research",
+        "Intended Audience :: System Administrators",
         "License :: OSI Approved :: MIT License",
         "Operating System :: POSIX :: Linux",
         "Programming Language :: C",
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Topic :: System :: Distributed Computing",
+        "Topic :: System :: Parallel Processing",
+        "Topic :: Scientific/Engineering",
+        "Topic :: Utilities",
     ],
 )

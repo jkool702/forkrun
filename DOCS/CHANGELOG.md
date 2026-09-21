@@ -1,5 +1,35 @@
 # forkrun Changelog
 
+## v3.6.0 (unreleased)
+
+### Python frontend: PyPI release prep (W-PY23)
+
+- **Reproducible substrate builds**: same source + same compiler
+  is now byte-identical (`make -f Makefile.substrate
+  reproducibility-check`). The frozen engine embeds `__DATE__` /
+  `__TIME__` (version output) and `__FILE__` paths, so the build
+  pins them via flags only — `-ffile-prefix-map`, predefined
+  `__DATE__`/`__TIME__` overrides, `--build-id=none` — with zero
+  source changes. Verified: consecutive builds share a sha256.
+- **Correct platform wheel**: `py3-none-linux_x86_64` (or
+  `linux_aarch64`) instead of `py3-none-any` — the wheel carries
+  a compiled `.so`, and pip now refuses it off-platform instead
+  of installing something that cannot load. Non-Linux and
+  unknown-arch builds fail fast with a clear error.
+- **Complete PyPI metadata**: long_description from
+  `python/README.md`, Beta status, full classifier set, project
+  URLs, keywords, `Requires-Python >= 3.8`, zero runtime deps.
+- **sdist support** (`MANIFEST.in`): engine TU, shim, stubs,
+  plugin ABI header, and makefile ship in the tarball; `pip
+  install forkrun-0.16.0.tar.gz` rebuilds the substrate from
+  source and runs byte-identical.
+- **Release gate**: `python/release_check.py` verifies version
+  coherence, the full suite, canary, IDL schemas, reproducibility,
+  wheel tag + metadata, sdist contents, doc twins, a clean tree,
+  and the frozen engine — all-pass is required before tagging.
+- Python `0.15.0` → `0.16.0`. Engine frozen (zero
+  `forkrun_ring.c` changes).
+
 ## v3.5.14 (unreleased)
 
 ### Python frontend: C drain process, opt-in (W-PY21-A)
@@ -86,6 +116,50 @@
   nil; flagged for follow-up. Ordered mode already shows +4.5%.
 - Python `0.13.0` → `0.14.0`. 344 tests green (324 + 20
   `test_complete.py`); engine frozen (zero `forkrun_ring.c`
+  changes).
+
+### Python frontend: resume/checkpoint on C-orderer paths (W-PY22)
+
+- **New shim entry points** (shim only, engine frozen):
+  `fr_py_resume_snapshot` (the exact seqlock reader from
+  `ring_dump_resume_main` — ACQUIRE seq1, RELAXED data,
+  load-bearing ACQUIRE fence, ACQUIRE seq2 — via out-params, no
+  stdout redirection, plus the fallow-horizon fallback for
+  bash-checkpoint interchange), `fr_py_set_resume_state`
+  (typed params, plain stores + `qsort(cmp_interval)` — identical
+  to `ring_set_resume_main` minus argv), `fr_py_is_resume_mode`.
+- **New `_checkpoint.py` codec**: strict fail-closed parser
+  (exactly 3 keys in order, decimal uint64, ≤1024 intervals,
+  start < end, no extra content), bash-canonical serializer
+  (sort + collapse), atomic publication (tmp → fsync → chmod
+  600 → rename, previous preserved on failure).
+- **New `_resume.py` orchestration**: path gating (resume ONLY
+  where a live C orderer exists — map()/stream() with
+  `orchestrator=True, order="index"`, UMA, non-splice; `run()`,
+  unordered, non-reactor, splice, multi-node NUMA all raise
+  `RuntimeError` instead of writing useless checkpoints),
+  post-init `resume_begin` (parse + safety + engine state,
+  pre-fork), abort choreography (abort → bounded worker reap →
+  order_w close → bounded orderer reap → seqlock snapshot →
+  atomic sidecar + checkpoint publish → teardown destroys),
+  and the `<ckpt>.coll` output sidecar (aborted runs' committed
+  output preserved cumulatively; a successful resumed map()
+  prepends it — concatenation, never index re-sort, because
+  batch indices restart every run — and consumes it).
+- **Semantic contract** (documented in README + tests): ENGINE
+  COMMIT is exactly-once (quiesced ledger, cumulative across
+  multi-resume via the orderer's bootstrap); PYTHON CONSUMPTION
+  is not (crash between commit and observation skips bytes the
+  caller never saw — stream consumers persist yields
+  themselves). All coordinates are bytes, never batch numbers.
+- **Measured**: abort→checkpoint→resume is byte-identical to an
+  uninterrupted 20k-line run; committed byte ranges are never
+  re-executed (output-derived coverage proof); multi-resume
+  frontiers mount (39424 → 101376 in testing); SIGINT and
+  fail-fast aborts both checkpoint; no checkpoint on success,
+  on zero progress, or on unsupported paths.
+- Python `0.14.0` → `0.15.0`. 383 tests green (344 + 39
+  `test_resume.py`); engine frozen (zero `forkrun_ring.c`
   changes).
 
 ## v3.5.13 (unreleased)

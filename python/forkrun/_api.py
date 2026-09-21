@@ -84,11 +84,39 @@ class RunConfig:
     nodes: Nodes = "auto"
     on_error: OnError = "retry"
     streaming: Optional[bool] = None
+    # W-PY22 resume: checkpoint file to resume FROM (byte coordinates)
+    # and/or checkpoint file to publish TO on abort. Path gating
+    # (C-orderer executors only) happens in run.py — here only the
+    # shape is validated (str/PathLike or None; resume must exist).
+    resume: Optional[Any] = None
+    checkpoint_file: Optional[Any] = None
+
+
+def _validate_resume_path(name: str, value: Any, must_exist: bool) -> Any:
+    """Validate a resume/checkpoint file path (W-PY22).
+
+    Returns the path as str. must_exist (resume=) raises
+    FileNotFoundError eagerly; checkpoint_file= may not exist yet
+    (created atomically on abort).
+    """
+    if isinstance(value, os.PathLike):
+        value = os.fspath(value)
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{name} must be a file path (str), got "
+            f"{type(value).__name__}")
+    if not value:
+        raise ValueError(f"{name} must be a non-empty path")
+    if must_exist and not os.path.exists(value):
+        raise FileNotFoundError(
+            f"checkpoint file not found: {value!r}")
+    return value
 
 
 def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
               order: str, lines: Any, bytes_: Any, workers: Any,
-              nodes: Any, on_error: str, streaming: Any = None) -> RunConfig:
+              nodes: Any, on_error: str, streaming: Any = None,
+              resume: Any = None, checkpoint_file: Any = None) -> RunConfig:
     if mode not in _VALID_MODES:
         raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
     if order not in _VALID_ORDERS:
@@ -132,6 +160,12 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
     elif payload is None:
         raise ValueError("payload is required: 'pkg.mod:func' | callable | 'plugin.so:fn'")
     _reject_iterable_source(source)
+    resume_path = (None if resume is None
+                   else _validate_resume_path("resume", resume, True))
+    checkpoint_path = (None if checkpoint_file is None
+                       else _validate_resume_path(
+                           "checkpoint_file", checkpoint_file, False))
     return RunConfig(payload=payload, source=source, mode=mode, sink=sink,
                      order=order, lines=lines, bytes=bytes_, workers=workers,
-                     nodes=nodes, on_error=on_error, streaming=streaming)
+                     nodes=nodes, on_error=on_error, streaming=streaming,
+                     resume=resume_path, checkpoint_file=checkpoint_path)
