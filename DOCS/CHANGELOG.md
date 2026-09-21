@@ -30,6 +30,49 @@
 - Python `0.15.0` → `0.16.0`. Engine frozen (zero
   `forkrun_ring.c` changes).
 
+### Benchmarks: real-world ML pipeline vs best-of-the-best (W-PY24)
+
+- **New `python/benchmarks/` files** (benchmarks only — no
+  library changes): `ml_data_gen.py` (seeded synthetic
+  recommendation-event JSONL, light/medium/heavy),
+  `ml_payload.py` (identical transformation for every UDF
+  system), `ml_native.py` (Polars/DuckDB native expressions),
+  `bench_ml_pipeline.py` (worker sweep 1–28, validation,
+  crash-once fault injection, graceful degradation).
+- **Measured (50k records/variant, best of sweep, honest)**:
+  native-expressible work goes to Polars (2.4M/s, 4.4× best
+  UDF) — but DuckDB (186k) loses to forkrun-UDF (308k), so
+  native ≠ automatically faster. Arbitrary-Python UDFs go to
+  ProcessPoolExecutor (1037k/577k/85k), Pool second, forkrun at
+  60–75% (590k/308k/67k); heavy/compute-bound compresses the
+  field as predicted. Ray (22–43k) and HF Datasets (30–75k)
+  trail at this scale.
+- **forkrun C plugin tier (new):** the same medium/heavy/light
+  workloads as hand-rolled C callbacks through the frozen ABI
+  (dialect-2 + FLAG_RAW borrowed window, stdout capture):
+  light 1124k (beats Executor outright), medium 493k (85% of
+  Executor, beats Pool), heavy 215k (2.5× the best Python
+  system — the C tokenizer demolishes the Python one). Polars
+  still leads expressible work 5× (the "faster than Polars"
+  hope is falsified). Plugin outputs validated by JSON-value
+  equality vs the Python path on clean AND 5%-malformed data
+  (light byte-identical; floats epsilon-compared; heavy `fh`
+  excluded — SipHash-vs-FNV by design; `round-half-even`
+  reproduced exactly, including a double-rounding fix).
+- **Fault injection, corrected:** crash-once SIGSEGV at idx 5 +
+  transients, every fault proven fired (an earlier revision used
+  random indices that sometimes never executed — a vacuous
+  pass). forkrun survives with output truncated at the lost
+  batch (4887 records; signal death skips escrow and the C
+  orderer stalls at the head hole — exit 0, clean prefix, no
+  hang); the C plugin shows identical hole semantics; Ray
+  survives complete (task retry); Pool hangs and dies
+  (TimeoutError). Parent-side replay of death-hole batches is
+  flagged follow-up work, not implemented here.
+- Full tables, methodology, and caveats:
+  `python/benchmarks/results/ml_pipeline_study.md` (+ CSV).
+  No version bump (benchmarks only).
+
 ## v3.5.14 (unreleased)
 
 ### Python frontend: C drain process, opt-in (W-PY21-A)

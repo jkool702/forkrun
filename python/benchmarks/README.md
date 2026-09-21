@@ -36,6 +36,26 @@ make -f Makefile.substrate bench                               # medium, 3 trial
 - `bench_niches.py` — Stage 0 workloads: JSONL ingestion, filter+
   transform, aggregation. (`batch.data` is a memoryview — payloads copy
   to bytes first; the copy is part of the measured path.)
+- `ml_data_gen.py` / `ml_payload.py` / `ml_native.py` /
+  `bench_ml_pipeline.py` — W-PY24 real-world ML pipeline benchmark:
+  synthetic recommendation-event JSONL (light/medium/heavy) with the
+  IDENTICAL Python transformation across forkrun, Ray Data, HF
+  Datasets, Pool, Executor, and serial, plus native Polars/DuckDB
+  expressions and crash-once fault injection. Needs
+  `pip install ray polars duckdb datasets` (each skips cleanly if
+  absent). Run:
+  `python3 python/benchmarks/bench_ml_pipeline.py --records 50000
+  --trials 3` (~30 min full matrix). Full write-up with verdicts:
+  `results/ml_pipeline_study.md`.
+- `plugins/ml_plugin_{light,medium,heavy}.c` — W-PY24 C plugins for
+  the same ML workloads through the frozen ABI (dialect-2 +
+  FLAG_RAW borrowed window, stdout capture): `gcc -O3 -shared
+  -fPIC -march=native -I ring_loadables -o ml_plugin_X.so
+  ml_plugin_X.c -lm`, then
+  `forkrun.map("ml_plugin_X.so:ml_process_X", path, mode="plugin")`.
+  Validated by JSON-value equality vs the Python path (light is
+  byte-identical). `ml_plugin_fault.c` is the crash-once fault
+  injector (FR_FAULT_MARKER/FR_FAULT_IDX env).
 
 ## Reading the table
 
