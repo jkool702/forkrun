@@ -49,6 +49,20 @@ class FrPyBatch(ctypes.Structure):
     ]
 
 
+class RecordDescriptor(ctypes.Structure):
+    """W-PY21-B: output descriptor (mirrors fr_py_record_desc).
+
+    C parses the [batch_idx u64][len u64][bytes] framing and fills
+    these; Python slices result objects from the known boundaries.
+    """
+
+    _fields_ = [
+        ("batch_idx", ctypes.c_uint64),
+        ("offset", ctypes.c_uint64),
+        ("length", ctypes.c_uint64),
+    ]
+
+
 def _setup_signatures(lib) -> None:
     lib.fr_py_version.argtypes = []
     lib.fr_py_version.restype = ctypes.c_char_p
@@ -209,6 +223,38 @@ def _setup_signatures(lib) -> None:
         lib.fr_py_drain_loop.restype = ctypes.c_int
     except AttributeError:
         pass
+    try:
+        # W-PY21-B: direct ack (no argv/snprintf/atoi round-trip).
+        lib.fr_py_ack_direct.argtypes = [ctypes.c_int, ctypes.c_int]
+        lib.fr_py_ack_direct.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY21-B: batch commit (fr_py_emit + fr_py_ack_direct).
+        # Returns 0 ok, -1 output failure, -2 signal failure,
+        # -3 ack failure. data=None passes NULL (no output).
+        lib.fr_py_complete.argtypes = [
+            ctypes.c_int, ctypes.c_uint64, ctypes.c_uint64,
+            ctypes.c_int, ctypes.c_int,
+            ctypes.c_char_p, ctypes.c_uint64]
+        lib.fr_py_complete.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY21-B: C sequential spill (pipes/sockets fallback).
+        lib.fr_py_spill_sequential.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint64]
+        lib.fr_py_spill_sequential.restype = ctypes.c_int64
+    except AttributeError:
+        pass
+    try:
+        # W-PY21-B: C descriptor parsing (map() collect path).
+        lib.fr_py_parse_descriptors.argtypes = [
+            ctypes.c_char_p, ctypes.c_uint64,
+            ctypes.POINTER(RecordDescriptor), ctypes.c_uint64]
+        lib.fr_py_parse_descriptors.restype = ctypes.c_int64
+    except AttributeError:
+        pass
 
 
 def load(path: str | None = None):
@@ -262,8 +308,8 @@ def find_substrate() -> str:
         "libforkrun_python.so not found — run "
         "'make -f Makefile.substrate python-substrate'")
 
-__all__ = ["FrPyBatch", "RC_OK", "RC_FAIL", "RC_EOF", "load", "get",
-           "find_substrate", "v1_available"]
+__all__ = ["FrPyBatch", "RecordDescriptor", "RC_OK", "RC_FAIL", "RC_EOF",
+           "load", "get", "find_substrate", "v1_available"]
 
 
 def v1_available(lib=None) -> dict:
@@ -278,11 +324,13 @@ def v1_available(lib=None) -> dict:
         lib = get()
     if os.environ.get("FORKRUN_NO_V1"):
         return {"exec": False, "plugin": False, "emit": False,
-                "splice": False}
-    return {"exec": hasattr(lib, "fr_py_exec_spawn"),
-            "plugin": hasattr(lib, "fr_py_plugin_call"),
-            "emit": hasattr(lib, "fr_py_emit"),
-            "splice": hasattr(lib, "fr_py_worker_splice_loop"),
+                "splice": False, "ack_direct": False, "complete": False,
+                "spill": False, "parse": False}
+    has = hasattr
+    return {"exec": has(lib, "fr_py_exec_spawn"),
+            "plugin": has(lib, "fr_py_plugin_call"),
+            "emit": has(lib, "fr_py_emit"),
+            "splice": has(lib, "fr_py_worker_splice_loop"),
             "orderer": hasattr(lib, "fr_py_orderer"),
             "order_pipe": hasattr(lib, "fr_py_set_order_pipe"),
             "scan_spawn": hasattr(lib, "fr_py_scan_with_spawn"),
@@ -291,4 +339,8 @@ def v1_available(lib=None) -> dict:
                 "fr_py_indexer_numa", "fr_py_numa_scanner",
                 "fr_py_fallow_phys", "fr_py_data_ready_node",
                 "fr_py_ingest_eof_posted")),
-            "drain": hasattr(lib, "fr_py_drain_loop")}
+            "drain": hasattr(lib, "fr_py_drain_loop"),
+            "ack_direct": has(lib, "fr_py_ack_direct"),
+            "complete": has(lib, "fr_py_complete"),
+            "spill": has(lib, "fr_py_spill_sequential"),
+            "parse": has(lib, "fr_py_parse_descriptors")}

@@ -1,9 +1,9 @@
-# forkrun Python frontend — v0.13.0 (W-PY21-A C drain, opt-in)
+# forkrun Python frontend — v0.14.0 (W-PY21-B datapath consolidation)
 
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
-`forkrun.__version__` is `"0.13.0"`; `forkrun.__engine_version__` reports the
+`forkrun.__version__` is `"0.14.0"`; `forkrun.__engine_version__` reports the
 substrate build (e.g. `"v3.5.2"`, `"unknown"` when the `.so` isn't built).
 
 ## Build
@@ -68,7 +68,8 @@ for r in forkrun.stream(upper, "inputs.txt"): ...        # TRUE v1 streaming:
 - Modes `spawn`/`plugin`, multi-node, ordered emitter pipe, resume: not in
   v0 (`NotImplementedError`).
 - Workers are single-threaded by contract: payloads must not spawn threads
-  (a `RuntimeWarning` fires at ack if they do); return bytes and
+  (documented, not policed at runtime since W-PY21-B — a thread that
+  outlives its batch is UB-by-contract); return bytes and
   parallelize in the parent instead.
 
 ## Upgrade path (v0 → v1)

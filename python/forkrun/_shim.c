@@ -1765,3 +1765,311 @@ drain_done:
     free(offsets);
     return rc;
 }
+
+/* =====================================================================
+ * W-PY21-B: frontend datapath consolidation — batch commit primitive,
+ * C-level sequential spill, and C-level descriptor parsing. Engine
+ * frozen: these only ADD new fr_py_* entry points. fr_py_ack_core is
+ * a verbatim port of ring_ack_main's body with direct int parameters
+ * (no argc/argv, no snprintf, no atoi); behavior is identical,
+ * including the worker_last_cnt == 0 bash-env fallback branch.
+ * fr_py_complete composes fr_py_emit + fr_py_ack_direct (no logic
+ * duplicated). fr_py_spill_sequential covers the non-seekable
+ * sources copy_file_range cannot. fr_py_parse_descriptors produces
+ * a descriptor table (Python still materializes result objects).
+ * ===================================================================== */
+
+/* Shared ack core: fallow packet + order packet + worker_last_cnt
+ * reset, with SIGPIPE shielding. Returns EXECUTION_SUCCESS (0) or
+ * EXECUTION_FAILURE (1) — same codes as ring_ack_main. */
+static int fr_py_ack_core(int fallow_fd, int target_fd) {
+    struct sigaction sa_ign, sa_old;
+    struct OrderPacket op = {0};
+    struct SharedState *local_state;
+    uint64_t my_idx;
+
+    if (!state || !g_state)
+        return EXECUTION_FAILURE;
+    sa_ign.sa_handler = SIG_IGN;
+    sigemptyset(&sa_ign.sa_mask);
+    sa_ign.sa_flags = 0;
+    sigaction(SIGPIPE, &sa_ign, &sa_old);
+
+    local_state = (my_numa_node != -1 &&
+                   my_numa_node < (int)global_num_nodes)
+                      ? &state[my_numa_node]
+                      : &state[0];
+
+    if (worker_last_cnt > 0) {
+        my_idx = worker_last_idx;
+        if (local_state && local_state->numa_enabled) {
+            op.major_idx = worker_last_major;
+            op.minor_idx = worker_last_minor;
+            op.cnt = worker_last_cnt;
+        } else {
+            op.major_idx = worker_last_idx;
+            op.minor_idx = 0;
+            op.cnt = worker_last_cnt;
+        }
+    } else {
+        const char *s_slots = get_string_value("RING_BATCH_SLOTS");
+        const char *s_batch_idx = get_string_value("RING_BATCH_IDX");
+        if (!s_slots || !s_batch_idx) {
+            sigaction(SIGPIPE, &sa_old, NULL);
+            return EXECUTION_FAILURE;
+        }
+        op.cnt = (uint32_t)atoi(s_slots);
+        if (local_state && local_state->numa_enabled) {
+            const char *s_maj = get_string_value("RING_MAJOR");
+            const char *s_min = get_string_value("RING_MINOR");
+            if (!s_maj || !s_min) {
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+            op.major_idx = (uint64_t)strtoull(s_maj, NULL, 10);
+            op.minor_idx = (uint32_t)atoi(s_min);
+            my_idx = (uint64_t)atoll(s_batch_idx);
+        } else {
+            op.major_idx = (uint64_t)strtoull(s_batch_idx, NULL, 10);
+            op.minor_idx = 0;
+            my_idx = op.major_idx;
+        }
+    }
+
+    if (fallow_fd > 0) {
+        if (local_state && local_state->numa_enabled) {
+            uint64_t start =
+                local_state->offset_ring[my_idx & RING_MASK];
+            uint64_t end =
+                local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
+            struct PhysPacket pp = {.off = start, .len = end - start};
+            if (robust_pipe_write(fallow_fd, &pp, sizeof(pp)) < 0) {
+                pull_fire_alarm_reason(2);
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+        } else {
+            struct IndexPacket ip = {.idx = op.major_idx, .cnt = op.cnt};
+            if (robust_pipe_write(fallow_fd, &ip, sizeof(ip)) < 0) {
+                pull_fire_alarm_reason(2);
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+        }
+    }
+
+    {
+        uint64_t in_start = local_state->offset_ring[my_idx & RING_MASK];
+        uint64_t in_end =
+            local_state->end_ring[(my_idx + op.cnt - 1) & RING_MASK];
+        op.in_off = in_start;
+        op.in_len = in_end - in_start;
+    }
+
+    if (target_fd > 0) {
+        if (target_fd != ack_cached_target_fd) {
+            ack_cached_target_fd = target_fd;
+            struct stat st;
+            ack_cached_mode =
+                (fstat(target_fd, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
+        }
+        if (ack_cached_mode == 1) {
+            if (ack_cached_order_pipe < 0) {
+                if (g_fr_config.fd_order_pipe >= 0)
+                    ack_cached_order_pipe = g_fr_config.fd_order_pipe;
+            }
+            if (ack_cached_order_pipe < 0) {
+                builtin_error(
+                    "forkrun: FD_ORDER_PIPE unset during ordered ack");
+                pull_fire_alarm_reason(2);
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+            if (ack_cached_order_pipe >= 0) {
+                int fd_pipe = ack_cached_order_pipe;
+                off_t curr = lseek(target_fd, 0, SEEK_CUR);
+                if (curr == (off_t)-1) {
+                    sigaction(SIGPIPE, &sa_old, NULL);
+                    return EXECUTION_FAILURE;
+                }
+                op.fd = target_fd;
+                op.off = (uint64_t)last_ack_offset;
+                op.len = (uint64_t)(curr - last_ack_offset);
+                if (robust_pipe_write(fd_pipe, &op, sizeof(op)) < 0) {
+                    pull_fire_alarm_reason(2);
+                    sigaction(SIGPIPE, &sa_old, NULL);
+                    return EXECUTION_FAILURE;
+                }
+                last_ack_offset = curr;
+            }
+        } else {
+            if (robust_pipe_write(target_fd, &op, sizeof(op)) < 0) {
+                pull_fire_alarm_reason(2);
+                sigaction(SIGPIPE, &sa_old, NULL);
+                return EXECUTION_FAILURE;
+            }
+        }
+    }
+
+    worker_last_cnt = 0;
+    sigaction(SIGPIPE, &sa_old, NULL);
+    return EXECUTION_SUCCESS;
+}
+
+/* W-PY21-B.a: direct ack — identical to fr_py_ack (ring_ack_main)
+ * minus the snprintf/argv/atoi round-trip. Saves ~150ns per batch
+ * (measured, no-state short-circuit). */
+int fr_py_ack_direct(int fallow_fd, int target_fd) {
+    return fr_py_ack_core(fallow_fd, target_fd);
+}
+
+/* W-PY21-B.b: batch commit primitive — a thin composition of two
+ * already-tested primitives (NOT a duplication of their logic):
+ *   fr_py_emit (output writev + 16B signal) + fr_py_ack_direct
+ *   (fallow packet + order packet + worker_last_cnt reset).
+ *
+ * Ordering invariants (identical to the old emit-then-ack path):
+ *   1. output (header + data) to out_fd      [fr_py_emit]
+ *   2. signal (wid + batch_idx) to signal_fd [fr_py_emit]
+ *   3. fallow packet + 4. order packet + 5. worker_last_cnt reset
+ *      [fr_py_ack_direct]
+ *
+ * The ack TARGET is derived exactly like the worker's old order_tgt:
+ * target = out_fd when ordered (g_fr_config.fd_order_pipe >= 0, set
+ * at worker init via fr_py_set_order_pipe), else -1 (disarm). There
+ * is deliberately NO order-fd parameter — the order pipe lives in
+ * the worker config, and the output memfd names the OrderPacket's
+ * (fd, off, len), same as fr_py_ack(fallow_w, out_fd) always did.
+ *
+ * Output semantics are fr_py_emit's exactly (data == NULL or
+ * out_fd < 0 means no output). The caller flushes Python-level
+ * buffered streams BEFORE this call (flush-before-ack invariant);
+ * C stdio is covered by fr_py_emit's path (fflush at the call
+ * sites that redirect fd 1).
+ *
+ * Returns fr_py_emit's code (0 ok, -1 output failure, -2 signal
+ * failure: EPIPE = parent abandoned the stream -> fatal, v0
+ * parity) or -3 on ack failure. On output/signal failure the ack
+ * is skipped (failure rides escrow, never ack — v0 parity).
+ */
+int fr_py_complete(int signal_fd, uint64_t wid, uint64_t batch_idx,
+                   int fallow_fd, int out_fd,
+                   const char *data, uint64_t data_len) {
+    int rc;
+    int target;
+
+    rc = fr_py_emit(out_fd, signal_fd, wid, batch_idx, data, data_len);
+    if (rc != 0)
+        return rc;
+    target = (g_fr_config.fd_order_pipe >= 0 && out_fd >= 0) ? out_fd : -1;
+    if (fr_py_ack_direct(fallow_fd, target) != EXECUTION_SUCCESS)
+        return -3;
+    return 0;
+}
+
+/* W-PY21-B.d: C sequential copy for non-seekable sources.
+ *
+ * For pipes and sockets copy_file_range may not work (the existing
+ * fr_py_copy_range covers seekable sources and the parent tries it
+ * first). This is the fallback: C read -> C write instead of
+ * Python os.read -> Python os.write per chunk. Bytes are identical;
+ * only the per-chunk interpreter overhead moves into C.
+ * max_bytes == 0 means no limit. Returns bytes copied, or -1
+ * (errno preserved) on read/write failure. */
+int64_t fr_py_spill_sequential(int src_fd, int dst_fd,
+                               uint64_t max_bytes) {
+    char buf[65536];
+    uint64_t total = 0;
+
+    if (src_fd < 0 || dst_fd < 0)
+        return -1;
+    while (max_bytes == 0 || total < max_bytes) {
+        size_t to_read = sizeof(buf);
+        ssize_t r;
+
+        if (max_bytes != 0 && max_bytes - total < to_read)
+            to_read = (size_t)(max_bytes - total);
+        r = read(src_fd, buf, to_read);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (r == 0)
+            break; /* EOF */
+        {
+            size_t written = 0;
+            while (written < (size_t)r) {
+                ssize_t w = write(dst_fd, buf + written,
+                                  (size_t)r - written);
+                if (w < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        struct pollfd pfd;
+                        pfd.fd = dst_fd;
+                        pfd.events = POLLOUT;
+                        poll(&pfd, 1, -1);
+                        continue;
+                    }
+                    return -1;
+                }
+                written += (size_t)w;
+            }
+        }
+        total += (uint64_t)r;
+    }
+    return (int64_t)total;
+}
+
+/* W-PY21-B.e: C-level record parsing -> descriptor table.
+ *
+ * Input framing (v0 emitter, shared with run.py:_HDR "<QQ"):
+ *   [batch_idx u64 LE][len u64 LE][len data bytes] x N.
+ * A short header or short body ends the parse (a worker that died
+ * mid-record leaves a truncated tail — dropped by the caller, the
+ * same rule as _parse_records).
+ *
+ * This produces a descriptor table, NOT Python objects: C parses
+ * the framing (unpack + bounds checks + offset arithmetic per
+ * record), and the Python parent materializes result objects by
+ * slicing input[off:off+len] from the known boundaries. The input
+ * buffer is NOT copied — descriptors reference into it.
+ *
+ * Returns the number of descriptors written, or -1 on bad
+ * arguments. Stops at max_descriptors (the caller grows the array
+ * and retries — records are >= 16 bytes, so len/16 always bounds
+ * the count and the retry terminates).
+ */
+struct fr_py_record_desc {
+    uint64_t batch_idx;
+    uint64_t offset; /* byte offset of the data in the input buffer */
+    uint64_t length; /* length of the data */
+};
+
+int64_t fr_py_parse_descriptors(const char *input, uint64_t input_len,
+                                struct fr_py_record_desc *descriptors,
+                                uint64_t max_descriptors) {
+    uint64_t off = 0;
+    uint64_t count = 0;
+
+    if (!input && input_len > 0)
+        return -1;
+    if (!descriptors && max_descriptors > 0)
+        return -1;
+    while (off + 16 <= input_len && count < max_descriptors) {
+        uint64_t batch_idx, data_len;
+
+        memcpy(&batch_idx, input + off, 8);
+        memcpy(&data_len, input + off + 8, 8);
+        off += 16;
+        if (off + data_len > input_len)
+            break; /* truncated record — stop here */
+        descriptors[count].batch_idx = batch_idx;
+        descriptors[count].offset = off;
+        descriptors[count].length = data_len;
+        count++;
+        off += data_len;
+    }
+    return (int64_t)count;
+}

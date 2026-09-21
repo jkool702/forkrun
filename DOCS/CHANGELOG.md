@@ -35,6 +35,59 @@
   `test_c_drain.py`); engine frozen (zero `forkrun_ring.c`
   changes).
 
+### Python frontend: datapath consolidation (W-PY21-B)
+
+- **New `fr_py_ack_direct`** (shim only): verbatim port of
+  `ring_ack_main` minus the snprintf/argv/atoi round-trip
+  (measured ~150ns/batch saved). All ack sites prefer it, else
+  the legacy `fr_py_ack`.
+- **New `fr_py_complete`** (shim only): thin composition
+  `fr_py_emit` + `fr_py_ack_direct` — no duplicated writev, no
+  order-fd parameter (the ack target derives from
+  `fd_order_pipe` exactly like the worker's old `order_tgt`).
+  One C call per batch replaces emit + thread-check + flush +
+  flush + argv-ack, preserving output → signal → fallow →
+  order → ack. Return codes 0/-1/-2/-3 (ok/output/signal/ack).
+- **Worker hot path**: `threading.active_count()` DELETED
+  (addendum Option A — documented contract, not policed; a
+  startup check would observe nothing). `_flush()` kept before
+  complete (flush-before-ack stays load-bearing for payload
+  `print()`). bytes/None fast path (no extra coerce call);
+  the commit FuncPtr binds once per worker.
+- **New `fr_py_spill_sequential`** (shim only): C read/write
+  loop for pipes/sockets (where `copy_file_range` cannot go),
+  wired as the `_spill_to_memfd` fallback after the existing
+  kernel path (unchanged). Measured 123MB file: 27.7ms vs
+  30.5ms for the Python pread/pwrite loop (1.10x).
+- **New `fr_py_parse_descriptors`** (shim only): C parses the
+  `[idx][len][bytes]` framing into a descriptor table
+  (batch_idx, offset, length); Python still slices result
+  objects. Measured 0.65x via ctypes (per-element struct
+  attribute access costs more than `struct.unpack_from`) — so
+  it is OPT-IN only (`FORKRUN_C_PARSE=1`), kept as tested
+  substrate for a future C-extension module that builds the
+  result list in C.
+- **Measured verdict (honest): the ≥10% checklist item PASSES
+  against the true baseline, with two falsified premises.**
+  Batch-bound no-op (1M lines, `lines=20`, 8 workers, medians):
+  42ms vs 49ms true-original (argv-ack + thread check) =
+  +14-17%. Realistic adaptive workloads: neutral (±2%, inside
+  run variance). The "~4µs per-batch Python overhead" premise
+  was overstated — the measured addressable total is ~1µs
+  (flush ~250ns + argv ~150ns + crossing ~300ns + wrappers).
+  Per-phase (same box): spill ~28ms/123MB, parse ~33ms/48MB
+  framed blob (Python loop), worker commit ~2.5µs of ~4.6µs
+  per batch. Known residual, documented: vs the `FORKRUN_NO_V1`
+  hybrid split path (which already banks `ack_direct` + the
+  deleted thread check), `fr_py_complete` measures ~80ns/batch
+  slower in batch-bound micro-runs — 10 experiments (strace
+  identical counts, perf inconclusive, order-bias excluded)
+  could not isolate it below the noise floor; realistic impact
+  nil; flagged for follow-up. Ordered mode already shows +4.5%.
+- Python `0.13.0` → `0.14.0`. 344 tests green (324 + 20
+  `test_complete.py`); engine frozen (zero `forkrun_ring.c`
+  changes).
+
 ## v3.5.13 (unreleased)
 
 ### Python frontend: NUMA multi-node (W-PY21)

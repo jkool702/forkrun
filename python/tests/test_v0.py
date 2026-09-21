@@ -380,6 +380,11 @@ class TestWPY2(unittest.TestCase):
                 os.unlink(cap)
 
     def test_thread_warning_and_quiet(self):
+        # W-PY21-B (addendum Option A): the per-batch thread-count check
+        # is DELETED — the single-threaded contract is documented, not
+        # policed. A payload that spawns threads runs UNWARNED (its
+        # leaked views are UB-by-contract, same as Layer 3 numpy UB)
+        # and still produces correct results.
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
             path = fh.name
@@ -401,13 +406,15 @@ class TestWPY2(unittest.TestCase):
             saved = self._redirect_fd(2, cap)
             try:
                 sys.stderr.flush()
-                forkrun.map(thready, path, workers=1)
+                res = forkrun.map(thready, path, workers=1)
                 sys.stderr.flush()
             finally:
                 os.dup2(saved, 2)
                 os.close(saved)
             with open(cap, "rb") as fh:
-                self.assertIn(b"single-threaded", fh.read())
+                self.assertNotIn(b"single-threaded", fh.read())
+            with open(path, "rb") as fh:
+                self.assertEqual(b"".join(res), fh.read())
 
             def clean(batch):
                 return bytes(batch.data)
@@ -455,7 +462,7 @@ class TestWPY2(unittest.TestCase):
             os.unlink(path)
 
     def test_version(self):
-        self.assertEqual(forkrun.__version__, "0.13.0")
+        self.assertEqual(forkrun.__version__, "0.14.0")
         self.assertIn("Batch", forkrun.__all__)
         self.assertEqual(forkrun.__engine_version__, "v3.5.2")
 

@@ -319,9 +319,22 @@ def _spill_to_memfd(src_fd) -> tuple[int, int]:
                 return memfd, size
             size += n
     if size == 0:
-        # Nothing moved (unsupported pair or no kernel path): the
-        # ORIGINAL sequential loop verbatim — pipes/sockets can only
-        # be read sequentially (pread would ESPIPE).
+        # Nothing moved (unsupported pair or no kernel path): pipes and
+        # sockets can only be read sequentially (pread would ESPIPE).
+        # W-PY21-B: C sequential copy first (fr_py_spill_sequential —
+        # no Python per chunk); on any failure the ORIGINAL Python loop
+        # below runs verbatim (odd fds still surface RuntimeError there;
+        # a partial C copy is safe — both loops append at the live
+        # offsets, so the fallback resumes, never duplicates).
+        spill_seq = (getattr(lib, "fr_py_spill_sequential", None)
+                     if lib is not None else None)
+        if spill_seq is not None:
+            try:
+                n_seq = spill_seq(src_fd, memfd, 0)
+            except Exception:
+                n_seq = -1
+            if n_seq is not None and int(n_seq) >= 0:
+                return memfd, int(n_seq)
         while True:
             try:
                 chunk = os.read(src_fd, _CHUNK)
@@ -441,13 +454,75 @@ def _split_records(blob: bytes) -> tuple:
     return records, blob[off:]
 
 
+def _parse_records_c(blob: bytes) -> list | None:
+    """W-PY21-B: C descriptor parse + Python slicing from known bounds.
+
+    fr_py_parse_descriptors does the framing loop in C (no per-record
+    struct.unpack/bounds-check/offset arithmetic in Python); result
+    bytes objects are still sliced here — C cannot make Python
+    objects. Truncated tails drop exactly like _split_records.
+    Returns None when the fast path is unavailable or fails (the
+    caller falls back to _split_records — never raises).
+    """
+    if not blob:
+        return []
+    try:
+        from ._bindings import RecordDescriptor as _RD
+        from ._bindings import get as _get
+
+        fn = getattr(_get(), "fr_py_parse_descriptors", None)
+        if fn is None:
+            return None
+    except Exception:
+        return None
+    import ctypes as _ct
+
+    n = len(blob)
+    bound = n // 16  # records are >= 16 bytes: always terminates
+    if bound == 0:
+        return []
+    # Bound transient memory (24MB/round); grow-and-retry only when
+    # the array filled exactly (cnt == cap < bound may be truncation
+    # of the descriptor output, not of the input).
+    cap = bound if bound < (1 << 20) else (1 << 20)
+    try:
+        while True:
+            arr = (_RD * cap)()
+            cnt = fn(blob, n, arr, cap)
+            if cnt is None or int(cnt) < 0:
+                return None
+            cnt = int(cnt)
+            if cnt < cap or cap >= bound:
+                return [(int(arr[i].batch_idx),
+                         bytes(blob[arr[i].offset:
+                                    arr[i].offset + arr[i].length]))
+                        for i in range(cnt)]
+            cap = bound if bound < cap * 2 else cap * 2
+    except Exception:
+        return None
+
+
 def _parse_records(blob: bytes) -> list:
     """Parse the v0 emitter record stream: [batch_idx u64][len u64][bytes]*.
 
     Returns [(batch_idx, payload_bytes)]. Truncated tails (worker died
     mid-record) are dropped — waitpid failure already raises before this
     runs, so a short tail means an internal inconsistency, not user data.
+
+    W-PY21-B: tries the C descriptor fast path first (identical
+    results), falling back to the Python loop verbatim.
+
+    The C path is opt-in (FORKRUN_C_PARSE=1): measured 0.65x of the
+    Python loop through ctypes — per-element struct attribute access
+    costs more than struct.unpack_from, so the framing win never
+    reaches the caller. The symbol stays as tested substrate for a
+    future C-extension module (which would build the result list in
+    C instead of returning descriptors through ctypes).
     """
+    if os.environ.get("FORKRUN_C_PARSE") == "1":
+        fast = _parse_records_c(blob)
+        if fast is not None:
+            return fast
     records, _tail = _split_records(blob)
     return records
 

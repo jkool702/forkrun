@@ -17,8 +17,10 @@ The payload runs single-threaded. Spawning threads inside the payload is
 unsupported: a thread holding a Batch memoryview past invalidation makes
 that view's lifetime unenforceable (Layer 3 UB-by-contract — the worker
 os._exit()s without joining anything). If a batch needs inner parallelism,
-return its bytes and parallelize in the parent. A payload that violates
-the contract gets a RuntimeWarning at ack time (checked, not prevented).
+return its bytes and parallelize in the parent. The contract is documented,
+not policed at runtime (W-PY21-B deleted the per-batch thread check —
+a startup check would observe nothing, and payload-created threads are
+the caller's UB, same as Layer 3 numpy UB).
 """
 
 from __future__ import annotations
@@ -27,9 +29,7 @@ import mmap
 import os
 import struct
 import sys
-import threading
 import traceback
-import warnings
 
 from ._bindings import RC_EOF, RC_FAIL, RC_OK, FrPyBatch, get, v1_available
 from ._batch import Batch
@@ -80,8 +80,15 @@ def _cloexec_all() -> None:
 
 
 def _ack(lib, fallow_fd=-1, target_fd=-1) -> int:
-    """Thread-guard + flush + ack. The single ack funnel: every ack site
-    warns on contract violation and flushes before acking.
+    """Flush + ack. The single ack funnel for the pre-W-PY21-B paths.
+
+    W-PY21-B: the per-batch thread-count check is DELETED
+    (addendum Option A — the single-threaded contract is documented,
+    not policed; a startup check would observe nothing since workers
+    are born single-threaded, and payload-created threads are the
+    user's UB). _flush() stays: payload print() output would be lost
+    to os._exit() without it. Prefers fr_py_ack_direct (no argv)
+    when the substrate offers it, else the legacy fr_py_ack.
 
     fallow_fd: W-PY16 streaming-ingest write end (parent-created,
     inherited). >= 0 publishes the acked IndexPacket to the fallow
@@ -90,17 +97,13 @@ def _ack(lib, fallow_fd=-1, target_fd=-1) -> int:
     target_fd: W-PY19 C-orderer target (>= 0 emits an OrderPacket for
     the bytes appended since the last ack; -1 disarms, the v0 default).
     """
-    if threading.active_count() > 1:
+    _flush()
+    ack_direct = getattr(lib, "fr_py_ack_direct", None)
+    if ack_direct is not None:
         try:
-            warnings.simplefilter("always", RuntimeWarning)
-            warnings.warn(
-                "Payload spawned threads — the v0 single-threaded contract "
-                "is violated. Memoryview references held by threads past "
-                "invalidation are UB-by-contract.",
-                RuntimeWarning, stacklevel=2)
+            return ack_direct(fallow_fd, target_fd)
         except Exception:
             pass
-    _flush()
     return lib.fr_py_ack(fallow_fd, target_fd)
 
 
@@ -238,7 +241,6 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
             lib.fr_py_set_order_pipe(order_pipe)
         except Exception:
             pass
-
     # W-PY13 v1 fast-path detection (once per worker). The factories tag
     # their closures (spawn: _forkrun_spawn_argv, plugin: _forkrun_plugin);
     # when the tag AND the C symbol are present (and a sink isn't stealing
@@ -275,6 +277,46 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
     use_emit = out_fd is not None and _v1["emit"]
     if use_v1_spawn or use_v1_plugin:
         _cloexec_all()
+
+    # W-PY21-B: batch commit primitive (fr_py_complete = emit + signal
+    # + fallow + order + ack in one C call). Active whenever the
+    # substrate offers it; FORKRUN_NO_V1 forces the legacy split path
+    # below. _success/_ack stay for the fallback and the ack-only
+    # paths (skip/deposit carry no output and never signal).
+    use_complete = bool(_v1.get("complete", False))
+    _sig_w = signal_w if signal_w is not None else -1
+    _out = out_fd if out_fd is not None else -1
+    # Bind once: CDLL attribute access must not sit in the per-batch
+    # path (a fresh FuncPtr per lookup).
+    _complete_fn = lib.fr_py_complete if use_complete else None
+
+    def _commit(bidx, blob):
+        """Output + signal + ack (v0 success path). Flushes first
+        (flush-before-ack invariant — payload print() would be lost
+        to os._exit() otherwise). Returns 0 ok, -1 output failure
+        (rides escrow like a Python write error), -2 signal failure
+        (fatal infrastructure), -3 ack failure (fatal, v0 parity)."""
+        _flush()
+        return _complete_fn(
+            _sig_w, wid, bidx, fallow_w, _out,
+            blob, len(blob) if blob is not None else 0)
+
+    def _commit_recorded(bidx):
+        """Signal + ack, no output (v1 spawn/plugin success: C already
+        framed the record into out_fd). Any nonzero rc is fatal
+        (v0 parity with _success False)."""
+        _flush()
+        return _complete_fn(
+            _sig_w, wid, bidx, fallow_w, _out, None, 0)
+
+    def _commit_silent(bidx):
+        """Ack only (poison/sentinel: no record emitted, hence no
+        signal — v0 parity). _out is still passed so ordered mode
+        emits the empty OrderPacket the C orderer expects (same as
+        the old ack(fallow_w, order_tgt)). Returns 0 ok, else fatal.
+        """
+        return _complete_fn(-1, wid, bidx, fallow_w, _out,
+                            None, 0)
 
     def _success(bidx):
         """Signal (indices only) + ack. Shared by v0 and v1 paths."""
@@ -368,7 +410,10 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 _trap_ack_notify(
                     trap_w, "P:%d:%d\n" % (claimed.batch_idx,
                                            claimed.num_kills))
-                if _ack(lib, fallow_w, order_tgt) != 0:
+                if use_complete:
+                    if _commit_silent(claimed.batch_idx) != 0:
+                        return 1
+                elif _ack(lib, fallow_w, order_tgt) != 0:
                     return 1
                 continue
 
@@ -376,7 +421,10 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 # EOF sentinel slot (scanner publishes lines=0/len=0 past
                 # the last byte). Bash parity: `if REPLY != 0` skips the
                 # payload but still acks. Never delivered to Python.
-                if _ack(lib, fallow_w, order_tgt) != 0:
+                if use_complete:
+                    if _commit_silent(claimed.batch_idx) != 0:
+                        return 1
+                elif _ack(lib, fallow_w, order_tgt) != 0:
                     return 1
                 continue
 
@@ -400,7 +448,10 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         claimed.offset, claimed.length,
                         memfd_fd, out_fd, claimed.batch_idx)
                     if rc == 0:
-                        if not _success(claimed.batch_idx):
+                        if use_complete:
+                            if _commit_recorded(claimed.batch_idx) != 0:
+                                return 1
+                        elif not _success(claimed.batch_idx):
                             return 1
                         continue
                     if rc < 0:
@@ -420,7 +471,10 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         claimed.offset, claimed.length, claimed.batch_idx,
                         claimed.lines, claimed.num_kills, wid, 0)
                     if rc == 0:
-                        if not _success(claimed.batch_idx):
+                        if use_complete:
+                            if _commit_recorded(claimed.batch_idx) != 0:
+                                return 1
+                        elif not _success(claimed.batch_idx):
                             return 1
                         continue
                     # Negative (dl/capture/tokenize failure) rides the
@@ -452,12 +506,16 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 # loop above already EOFs. This branch is unreachable but
                 # kept explicit so a 0-byte file cannot spin.
                 batch.invalidate()
-                if _ack(lib, fallow_w, order_tgt) != 0:
+                if use_complete:
+                    if _commit_silent(batch.batch_index) != 0:
+                        return 1
+                elif _ack(lib, fallow_w, order_tgt) != 0:
                     return 1
                 continue
 
             error = None
             emit_rc = None
+            blob = None
             try:
                 ret = payload_fn(batch)
                 if sink_fn is not None:
@@ -470,7 +528,17 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                         line_count=batch.line_count,
                         num_kills=claimed.num_kills)
                     sink_fn(meta, ret)
-                if use_emit:
+                if use_complete:
+                    # W-PY21-B: fast-type fast path (None/bytes pass
+                    # straight through — no extra call); anything else
+                    # coerces once with validation preserved. The
+                    # single C call below does output + signal + ack.
+                    # Flush happens inside _commit.
+                    if ret is None or isinstance(ret, bytes):
+                        blob = ret
+                    else:
+                        blob = _coerce_result(ret)
+                elif use_emit:
                     # W-PY14: one C call replaces header pack + two
                     # writes + signal pack/write. bytes pass their
                     # internal buffer (zero-copy); anything else is
@@ -505,7 +573,21 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     pass
 
             if error is None:
-                if emit_rc is not None:
+                if use_complete:
+                    # W-PY21-B: ONE C CALL — output + signal + fallow
+                    # + order + ack (flush-before-complete inside).
+                    # -2/-3 are fatal infrastructure (v0 parity with
+                    # _success False); -1 rides the escrow failure
+                    # path like a Python write error.
+                    comp_rc = _commit(batch.batch_index, blob)
+                    if comp_rc == 0:
+                        continue
+                    if comp_rc == -2 or comp_rc == -3:
+                        return 1
+                    error = OSError(
+                        "forkrun: output write failed on batch %d"
+                        % batch.batch_index)
+                elif emit_rc is not None:
                     # C emit path: output (+ signal, unless map/run)
                     # already done. -2 (signal) is fatal infrastructure
                     # (v0 parity); other nonzero (output) rides the
