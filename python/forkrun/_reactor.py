@@ -128,10 +128,15 @@ class ReactorState:
         self.ctx = {}
 
     def configure(self, *, payload_spec, sink_spec, memfd, file_size,
-                  out_fds, signal_w, fallow_w=-1, order_w=-1,
-                  trap_ack_w=-1, on_error="retry", engine_fds=frozenset(),
-                  splice=False, node_cpus=None):
-        """Capture the fork context respawns need (parent-side)."""
+                   out_fds, signal_w, fallow_w=-1, order_w=-1,
+                   trap_ack_w=-1, on_error="retry", engine_fds=frozenset(),
+                   splice=False, node_cpus=None, plugin_loop=None):
+        """Capture the fork context respawns need (parent-side).
+
+        plugin_loop (W-PY26): None (Python worker) or a (path, func)
+        frozen-ABI pair — workers then run fr_py_worker_plugin_loop
+        (zero Python per batch) instead of worker_main.
+        """
         self.ctx = {
             "payload_spec": payload_spec,
             "sink_spec": sink_spec,
@@ -145,6 +150,7 @@ class ReactorState:
             "on_error": on_error,
             "engine_fds": set(engine_fds),
             "splice": bool(splice),
+            "plugin_loop": plugin_loop,
             "node_cpus": (list(node_cpus) if node_cpus is not None
                           else None),
         }
@@ -218,6 +224,9 @@ class ReactorState:
             try:
                 if ctx.get("splice"):
                     rc = _splice_child_main(
+                        ctx, wid, node, incarn, death_w)
+                elif ctx.get("plugin_loop"):
+                    rc = _c_plugin_child_main(
                         ctx, wid, node, incarn, death_w)
                 else:
                     from ._worker import worker_main_with_death_pipe
@@ -423,6 +432,67 @@ def _splice_child_main(ctx, wid, node, incarn, death_w):
         fal = fal_w if fal_w is not None and fal_w >= 0 else -1
         rc = lib.fr_py_worker_splice_loop(
             wid, ctx["memfd"], out_fd, sig, fal)
+    except BaseException:
+        rc = 1
+    if rc != 0:
+        try:
+            lib.fr_py_escrow_deposit(1)
+        except Exception:
+            pass
+        if trap_w is not None and trap_w >= 0:
+            try:
+                os.write(trap_w, ("%d\n" % (wid,)).encode())
+            except OSError:
+                pass
+    try:
+        os.close(death_w)
+    except OSError:
+        pass
+    return 0 if rc == 0 else 1
+
+
+def _c_plugin_child_main(ctx, wid, node, incarn, death_w):
+    """C-loop plugin worker with death-pipe + trap-ACK (W-PY26).
+
+    Runs in the forked child. Returns the exit code for os._exit.
+    Mirrors _splice_child_main: C loop owns claim→plugin→signal→ack;
+    nonzero exit escrows in-flight work (safe-direction estimate)
+    and trap-ACKs the wid for the reactor's grace.
+    """
+    from ._bindings import get as _get
+    from ._worker import _ON_ERROR_CODES
+    lib = _get()
+    trap_w = ctx.get("trap_ack_w", -1)
+    try:
+        _ncpus = ctx.get("node_cpus")
+        if _ncpus and 0 <= node < len(_ncpus):
+            from ._numa import pin_to_node as _pin
+            _pin(_ncpus[node])
+    except Exception:
+        pass
+    try:
+        spec = ctx.get("plugin_loop")
+        path, func = (spec if isinstance(spec, (tuple, list)) and
+                      len(spec) == 2 else (None, None))
+        if not path or not func:
+            return 1
+        out_fds = ctx.get("out_fds") or []
+        out_fd = (out_fds[wid] if out_fds and 0 <= wid < len(out_fds)
+                  else -1)
+        sig_w = ctx.get("signal_w", -1)
+        sig = sig_w if sig_w is not None and sig_w >= 0 else -1
+        fal_w = ctx.get("fallow_w", -1)
+        fal = fal_w if fal_w is not None and fal_w >= 0 else -1
+        ord_w = ctx.get("order_w", -1)
+        ord_fd = ord_w if ord_w is not None and ord_w >= 0 else -1
+        trap = trap_w if trap_w is not None and trap_w >= 0 else -1
+        on_error = ctx.get("on_error", "retry")
+        rc = lib.fr_py_worker_plugin_loop(
+            wid,
+            path.encode("utf-8") if isinstance(path, str) else path,
+            func.encode("utf-8") if isinstance(func, str) else func,
+            ctx["memfd"], out_fd, sig, fal, ord_fd, trap, incarn, 3,
+            _ON_ERROR_CODES.get(on_error, 0))
     except BaseException:
         rc = 1
     if rc != 0:

@@ -2,6 +2,36 @@
 
 ## v3.6.0 (unreleased)
 
+### Python frontend: C plugin worker loop, opt-in (W-PY26)
+
+- **New `fr_py_worker_plugin_loop`** (`_shim.c` additions only,
+  engine frozen): the plugin analogue of the W-PY18 splice loop —
+  claim → plugin → signal → ack entirely in C, zero Python per
+  batch. Built only on tested primitives (`fr_py_claim`,
+  `fr_py_plugin_invoke` extracted byte-identical from
+  `fr_py_plugin_call`, `fr_py_complete`, escrow/abort); poison,
+  zero-length sentinel, retry/skip/fail-fast, trap-ACK, and order
+  targets all mirror `_worker.py`.
+- **Opt-in `c_worker_loop=True`** on `map()` (default False):
+  mode="plugin", dialect-1/2 frozen ABI, UMA, materialized input.
+  Anything else (splice/stream/NUMA/run/streaming/v0-72B) raises
+  loudly — never silently falls back. 13 new tests in
+  `python/tests/test_scaling.py`; full suite 409 green.
+- **Diagnostics first** (`python/benchmarks/bench_scaling.py`,
+  new): exp1 (no-output), exp2 (none-vs-index), exp3 (existing C
+  orderer), exp4 (Python loop vs C loop), exp5 (perf-stat
+  commands).
+- **Honest result — hypothesis falsified as stated:** on this box
+  (14c/28t) with ML-light, Python-loop and C-loop curves are
+  equivalent at every worker count. Short runs (100k records,
+  ~24ms) showed a 14w→28w dip in BOTH loops — a startup artifact
+  (fork/spawn dominating wall time), not a scaling cliff. Long
+  runs (1M records, ~106MB) scale monotonically to 28w in both
+  loops (py: 870→1596→2850→4520→5719→6085k/s; c-loop within
+  noise at every count). The C loop wins ~4-7% at high batch
+  rates (lines=100) but does not change the scaling shape. The
+  worker lifecycle is not the bottleneck.
+
 ### Python frontend: PyPI release prep (W-PY23)
 
 - **Reproducible substrate builds**: same source + same compiler

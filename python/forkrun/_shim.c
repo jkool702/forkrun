@@ -788,12 +788,15 @@ static int fr_py_plugin_ensure(const char *path, const char *func_name) {
  * larger than any pipe), and frames it into out_fd tagged with batch_idx.
  * Input is zero-copy: RAW plugins read the borrowed window
  * (reserved[0]); all plugins can pread fd_in at batch_offset.
+ *
+ * W-PY26: the body lives in fr_py_plugin_invoke (static, no dlopen)
+ * so the C worker loop reuses it per batch without duplicating the
+ * ctx/capture/emit logic. fr_py_plugin_call is ensure + invoke.
  */
-int fr_py_plugin_call(const char *path, const char *func_name,
-                      int ingress_fd, int out_fd, uint64_t batch_off,
-                      uint64_t batch_len, uint64_t batch_idx,
-                      uint32_t line_count, uint32_t num_kills, int wid,
-                      int wincarn) {
+static int fr_py_plugin_invoke(int ingress_fd, int out_fd,
+                               uint64_t batch_off, uint64_t batch_len,
+                               uint64_t batch_idx, uint32_t line_count,
+                               uint32_t num_kills, int wid, int wincarn) {
     int rc;
     int is_raw;
     struct forkrun_ctx ctx;
@@ -804,10 +807,9 @@ int fr_py_plugin_call(const char *path, const char *func_name,
     struct stat st;
     uint64_t cap_len = 0;
 
-    if (!path || !func_name || ingress_fd < 0 || out_fd < 0)
+    if (ingress_fd < 0 || out_fd < 0)
         return -1;
-    rc = fr_py_plugin_ensure(path, func_name);
-    if (rc != 0)
+    if (!fr_py_plugin_handle)
         return -2;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -928,6 +930,23 @@ int fr_py_plugin_call(const char *path, const char *func_name,
         int truncated = cb_ret & 0xFF;
         return (truncated == 0) ? 1 : truncated;
     }
+}
+
+int fr_py_plugin_call(const char *path, const char *func_name,
+                      int ingress_fd, int out_fd, uint64_t batch_off,
+                      uint64_t batch_len, uint64_t batch_idx,
+                      uint32_t line_count, uint32_t num_kills, int wid,
+                      int wincarn) {
+    int rc;
+
+    if (!path || !func_name || ingress_fd < 0 || out_fd < 0)
+        return -1;
+    rc = fr_py_plugin_ensure(path, func_name);
+    if (rc != 0)
+        return -2;
+    return fr_py_plugin_invoke(ingress_fd, out_fd, batch_off, batch_len,
+                               batch_idx, line_count, num_kills,
+                               wid, wincarn);
 }
 
 /* =====================================================================
@@ -2226,4 +2245,154 @@ int fr_py_is_resume_mode(void) {
     if (!g_state)
         return 0;
     return g_state->is_resume_mode ? 1 : 0;
+}
+
+/* =====================================================================
+ * W-PY26: C worker loop for plugin mode — zero Python per batch.
+ *
+ * The plugin equivalent of fr_py_worker_splice_loop: owns the ENTIRE
+ * batch lifecycle in C (claim → plugin → signal → ack). No ctypes,
+ * no GIL, no Python objects per batch. Matches bash's architecture
+ * (C worker, C callback, C loop).
+ *
+ * Built ONLY on tested primitives (same doctrine as the splice
+ * loop — deviations from the W-PY26 sketch, whose fixed_argv /
+ * raw-funcptr / hand-rolled mmap bypass the frozen ABI):
+ * - fr_py_claim (TLS publishing, poison detection + counting),
+ * - fr_py_plugin_invoke (the exact ctx/capture/emit body
+ *   fr_py_plugin_call uses — tokenized argv via do_tokenize, RAW
+ *   window via ring_call_ensure_ingress_map, stdout capture into
+ *   the reused memfd, framing via fr_py_emit_record),
+ * - fr_py_complete (signal + fallow + order + ack in one call),
+ * - fr_py_escrow_deposit (retry), fr_py_abort (fail-fast).
+ *
+ * Sketch deviations (deliberate, frozen-ABI-driven):
+ * - (path, func_name) strings, NOT a raw function pointer: the
+ *   child dlopens itself post-fork via fr_py_plugin_ensure (same
+ *   fork-safety rule as _plugin.load_plugin — dlopen without
+ *   calling is fork-safe; a parent-handle pointer would dangle on
+ *   dlclose and entangle refcounts across fork).
+ * - No fixed_argv: argv comes from do_tokenize inside the invoke
+ *   helper, exactly like ring_call_main (fixed args would bypass
+ *   batch delivery for non-RAW plugins).
+ * - No hand-rolled ingress mmap: the invoke helper uses the
+ *   engine's TLS-cached mapping (RAW) / pread fallback (fd_in).
+ * - on_error is honored (0 retry / 1 skip / 2 fail-fast), mirroring
+ *   _worker.py; the splice loop's retry-always rule does NOT apply
+ *   here because plugin failures are payload errors.
+ *
+ * Params:
+ *   wid/ingress_fd/out_fd/signal_fd/fallow_fd as in the splice loop.
+ *   order_fd: order-pipe write end (-1 disarms; when >= 0 acks
+ *     target out_fd so the C orderer gets contiguous packets).
+ *   trap_ack_fd: poison "P:idx:kills" lines (-1 disarms).
+ *   wincarn: respawn generation for fr_py_worker_init lineage.
+ *   retry_limit: poison threshold (mirrors engine default 3).
+ *   on_error: 0 retry (escrow) / 1 skip (ack) / 2 fail-fast (abort).
+ *
+ * Returns 0 drained-to-EOF, 1 claim/ack failure or fail-fast abort,
+ * 2 signal failure (EPIPE = parent gone — fatal, v0 parity). The
+ * Python child maps nonzero → worker exit 1 → parent RuntimeError.
+ * Poisoned batches warn + notify + ack-silent (never escrowed);
+ * zero-length sentinels ack-silent (M1 invariant, never executed).
+ * ===================================================================== */
+int fr_py_worker_plugin_loop(int wid, const char *path,
+                             const char *func_name, int ingress_fd,
+                             int out_fd, int signal_fd, int fallow_fd,
+                             int order_fd, int trap_ack_fd, int wincarn,
+                             int retry_limit, int on_error) {
+    fr_py_batch_t claimed;
+    int rc;
+
+    if (!path || !func_name || ingress_fd < 0 || out_fd < 0)
+        return 1;
+    if (on_error < 0 || on_error > 2)
+        return 1;
+    if (fr_py_worker_init(wid, 0, wincarn, retry_limit, 0) != 0)
+        return 1;
+    if (order_fd >= 0)
+        g_fr_config.fd_order_pipe = order_fd;
+    if (fr_py_plugin_ensure(path, func_name) != 0)
+        return 1;
+
+    while (1) {
+        rc = fr_py_claim(&claimed);
+        if (rc == 2)
+            return 0; /* EOF: drained */
+        if (rc != 0)
+            return 1; /* abort/failure */
+
+        if (claimed.poisoned) {
+            char pbuf[64];
+            int plen;
+            fprintf(stderr,
+                    "forkrun [WARN]: Skipping poisoned batch %llu "
+                    "(killed %u times).\n",
+                    (unsigned long long)claimed.batch_idx,
+                    claimed.num_kills);
+            if (trap_ack_fd >= 0) {
+                plen = snprintf(pbuf, sizeof(pbuf), "P:%llu:%u\n",
+                                (unsigned long long)claimed.batch_idx,
+                                claimed.num_kills);
+                if (plen > 0)
+                    (void)robust_pipe_write(trap_ack_fd, pbuf,
+                                            (size_t)plen);
+            }
+            /* Ack-silent (no signal — v0 parity) but ordered: the
+             * C orderer still expects its contiguous packet. */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        if (claimed.length == 0) {
+            /* EOF sentinel slot: ack but never emit (bash REPLY rule). */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+
+        rc = fr_py_plugin_invoke(ingress_fd, out_fd, claimed.offset,
+                                 claimed.length, claimed.batch_idx,
+                                 claimed.lines, claimed.num_kills,
+                                 wid, wincarn);
+        if (rc == 0) {
+            /* Success: record already framed by the invoke — signal
+             * + fallow + order + ack in one call (no output: data
+             * NULL skips the writev, signal still honored). */
+            rc = fr_py_complete(signal_fd, (uint64_t)wid,
+                                claimed.batch_idx, fallow_fd, out_fd,
+                                NULL, 0);
+            if (rc == 0)
+                continue;
+            if (rc == -2)
+                return 2; /* signal EPIPE: parent gone — fatal */
+            return 1; /* -1 output (unreachable: no output) / -3 ack */
+        }
+
+        /* --- failure path (bash -E analogue, _worker.py parity) --- */
+        if (on_error == 1) {
+            /* skip: ack-silent like poison (no signal — nothing emitted). */
+            rc = fr_py_complete(-1, (uint64_t)wid, claimed.batch_idx,
+                                fallow_fd, out_fd, NULL, 0);
+            if (rc != 0)
+                return 1;
+            continue;
+        }
+        if (on_error == 2) {
+            fflush(NULL);
+            fr_py_abort();
+            return 1;
+        }
+        /* Default retry: escrow with kills+1, no ack (the next claim
+         * overwrites the armed TLS). Same-process retry on re-claim;
+         * poison threshold converts loops into skips above. */
+        fflush(NULL);
+        fr_py_escrow_deposit(claimed.num_kills + 1);
+        continue;
+    }
 }

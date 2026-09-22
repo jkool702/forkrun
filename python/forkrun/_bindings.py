@@ -143,6 +143,17 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # W-PY26: C plugin worker loop (claim→plugin→signal→ack).
+        # on_error: 0 retry / 1 skip / 2 fail-fast.
+        lib.fr_py_worker_plugin_loop.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        lib.fr_py_worker_plugin_loop.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
         # W-PY18 addendum: kernel copy src[src_off,+len)→dst[dst_off)
         # (copy_file_range, then sendfile; -1 = use userspace loop).
         lib.fr_py_copy_range.argtypes = [
@@ -362,7 +373,8 @@ def v1_available(lib=None) -> dict:
     if os.environ.get("FORKRUN_NO_V1"):
         return {"exec": False, "plugin": False, "emit": False,
                 "splice": False, "ack_direct": False, "complete": False,
-                "spill": False, "parse": False, "resume": False}
+                "spill": False, "parse": False, "resume": False,
+                "plugin_loop": False}
     has = hasattr
     return {"exec": has(lib, "fr_py_exec_spawn"),
             "plugin": has(lib, "fr_py_plugin_call"),
@@ -376,6 +388,7 @@ def v1_available(lib=None) -> dict:
                 "fr_py_indexer_numa", "fr_py_numa_scanner",
                 "fr_py_fallow_phys", "fr_py_data_ready_node",
                 "fr_py_ingest_eof_posted")),
+            "plugin_loop": has(lib, "fr_py_worker_plugin_loop"),
             "drain": hasattr(lib, "fr_py_drain_loop"),
             "ack_direct": has(lib, "fr_py_ack_direct"),
             "complete": has(lib, "fr_py_complete"),

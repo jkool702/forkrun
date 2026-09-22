@@ -637,6 +637,80 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
         # valid for any in-flight exported views; Layer 3 UB otherwise).
 
 
+_ON_ERROR_CODES = {"retry": 0, "skip": 1, "fail-fast": 2}
+
+
+def _c_plugin_spec(payload_fn):
+    """Extract the (path, func) frozen-ABI plugin spec from a coerced
+    plugin payload closure (W-PY26).
+
+    Returns (path, func) when the closure carries a dialect-1/2
+    _forkrun_plugin marker (C-loop eligible), else None. v0 72B
+    conventions (no forkrun_use_ctx) are NOT eligible — the C loop
+    speaks only the frozen engine ABI.
+    """
+    spec = getattr(payload_fn, "_forkrun_plugin", None)
+    if not spec:
+        return None
+    if not getattr(payload_fn, "_forkrun_plugin_v1", False):
+        return None
+    if not isinstance(spec, (tuple, list)) or len(spec) != 2:
+        return None
+    path, func = spec
+    if not isinstance(path, str) or not path:
+        return None
+    if not isinstance(func, str) or not func:
+        return None
+    return (path, func)
+
+
+def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
+                           out_fd, signal_w, fallow_w, engine_fds,
+                           on_error="retry"):
+    """Fork one C-loop plugin worker (W-PY26 mode="plugin" fast path).
+
+    The child scrubs to engine + job fds, then runs
+    fr_py_worker_plugin_loop to EOF: claim → plugin → signal → ack
+    with zero Python per batch. Returns the child pid in the parent;
+    the child never returns (os._exit with the loop rc mapped to
+    0/1 — the parent's failed-check treats nonzero as failure).
+    signal_w/fallow_w may be None (→ -1 disarm, map/materialized).
+    out_fd must be a parent-created output memfd (never None: the
+    C loop always frames records for the parent to parse).
+    on_error rides the same codes as the Python worker (retry/skip/
+    fail-fast); v0 72B plugins must never reach here (gate on
+    _c_plugin_spec first).
+    """
+    pid = os.fork()
+    if pid == 0:
+        try:
+            keep = set(engine_fds) | {memfd_fd, out_fd}
+            if signal_w is not None:
+                keep.add(signal_w)
+            if fallow_w is not None and fallow_w >= 0:
+                keep.add(fallow_w)
+            from ._fd_scrub import scrub_fds
+            scrub_fds(keep)
+        except Exception:
+            pass
+        try:
+            rc = lib.fr_py_worker_plugin_loop(
+                wid,
+                plugin_path.encode("utf-8")
+                if isinstance(plugin_path, str) else plugin_path,
+                plugin_func.encode("utf-8")
+                if isinstance(plugin_func, str) else plugin_func,
+                memfd_fd, out_fd,
+                signal_w if signal_w is not None else -1,
+                fallow_w if fallow_w is not None else -1,
+                -1, -1, 0, 3,
+                _ON_ERROR_CODES.get(on_error, 0))
+        except BaseException:
+            rc = 1
+        os._exit(0 if rc == 0 else 1)
+    return pid
+
+
 def worker_main_with_death_pipe(wid, node, payload_spec, sink_spec,
                                 memfd_fd, file_size, out_fd, signal_w,
                                 death_r, death_w, trap_ack_w, on_error,
