@@ -56,6 +56,17 @@ make -f Makefile.substrate bench                               # medium, 3 trial
   Validated by JSON-value equality vs the Python path (light is
   byte-identical). `ml_plugin_fault.c` is the crash-once fault
   injector (FR_FAULT_MARKER/FR_FAULT_IDX env).
+- `tokenize_data_gen.py` / `tokenize_payload.py` /
+  `plugins/tokenize_plugin.c` / `bench_tokenize.py` — W-PY25 LLM
+  tokenization benchmark: synthetic corpus (50–500 words/doc) +
+  30k shared vocabulary, identical tokenizer rules in Python and
+  C (suffix table/order, UNK, quality filters), 8-system matrix
+  (serial/Pool/Executor/HF/Ray/forkrun-Python/forkrun-C/Polars
+  map_batches). Run:
+  `python3 python/benchmarks/bench_tokenize.py --docs 20000
+  --trials 3` (~15 min). Write-up with verdicts:
+  `results/tokenize_study.md` (+ `--min-words/--max-words` for
+  the big-doc crossover).
 
 ## Reading the table
 

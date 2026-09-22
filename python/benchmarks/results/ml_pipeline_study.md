@@ -14,8 +14,8 @@ No single winner — the workload decides, exactly as designed:
 
 - **Natively-expressible work belongs to native engines — sometimes.**
   Polars does 2.4M records/s on the medium workload (4.4× the best
-  Python-UDF system). But DuckDB does 186k — SLOWER than forkrun's
-  308k UDF path. Native ≠ automatically faster; engine overhead
+  Python-UDF system). But DuckDB does 189k — SLOWER than forkrun's
+  293k UDF path. Native ≠ automatically faster; engine overhead
   (here: JSON shredding) can dominate.
 - **forkrun's C plugin is a tier of its own.** Same logical
   workload, hand-rolled C field extraction through the frozen ABI
@@ -27,7 +27,7 @@ No single winner — the workload decides, exactly as designed:
   margin.** ProcessPoolExecutor wins light (1037k) and medium
   (577k); `multiprocessing.Pool` is second; forkrun Python runs at
   60–75% of the executor. The heavy variant compresses the field
-  (85k vs 82k vs 67k) — payload-bound, as predicted.
+  (84k vs 84k vs 68k) — payload-bound, as predicted.
 - **Fault isolation: Ray recovers completely, forkrun survives
   truncated, Pool dies.** Crash-once SIGSEGV + transients, all
   faults proven fired: Ray survives with full output (transparent
@@ -45,23 +45,23 @@ expression language (medium only).
 
 | System               | Light    | Medium   | Heavy    | Medium native |
 |----------------------|----------|----------|----------|---------------|
-| Serial Python        | 144k     | 66k      | 6.8k     | —             |
-| mp.Pool (best)       | 910k     | 477k     | 82k      | —             |
-| ProcessPoolExecutor  | 1037k    | 577k     | 85k      | —             |
-| HF Datasets num_proc | 75k      | 60k      | 30k      | —             |
-| forkrun map (Python) | 590k     | 308k     | 67k      | —             |
-| forkrun map (C plugin)| 1124k   | 493k     | 215k     | —             |
-| Ray Data             | 43k      | 39k      | 22k      | —             |
-| Polars native        | —        | —        | —        | 2400k         |
-| DuckDB native        | —        | —        | —        | 186k          |
+| Serial Python        | 147k     | 63k      | 6.4k     | —             |
+| mp.Pool (best)       | 856k     | 457k     | 84k      | —             |
+| ProcessPoolExecutor  | 1023k    | 551k     | 84k      | —             |
+| HF Datasets num_proc | 81k      | 62k      | 33k      | —             |
+| forkrun map (Python) | 580k     | 293k     | 68k      | —             |
+| forkrun map (C plugin)| 1047k   | 481k     | 216k     | —             |
+| Ray Data             | 43k      | 38k      | 17k      | —             |
+| Polars native        | —        | —        | —        | 2200k         |
+| DuckDB native        | —        | —        | —        | 189k          |
 
 (units: records/s; best of worker sweep 1,2,4,8,14,28.)
 
-Per-worker shape (medium): forkrun Python scales 58k(1w) →
-308k(14w) → 203k(28w, oversubscribed); Pool/Executor scale
+Per-worker shape (medium): forkrun Python scales 62k(1w) →
+293k(14w) → 199k(28w, oversubscribed); Pool/Executor scale
 similarly and peak at 14–28w. The C plugin tracks ~1.6× higher
-(160k → 493k at 8w) but fades faster past peak (382k at 14w,
-232k at 28w — smaller per-batch work units contend sooner).
+(157k → 481k at 8w) but fades faster past peak (367k at 14w,
+189k at 28w — smaller per-batch work units contend sooner).
 Plugin wins light outright and leads heavy 2.5×. All systems
 agree on output counts (validated 49974/50000 medium, 49979/50000
 heavy — quality filter + clean data; fault data validated
@@ -97,7 +97,7 @@ follow-up work, not implemented here.
 
 ## Follow-up measurements (same box, isolated)
 
-- forkrun medium 14w in isolation: ~500k (vs 308k in-matrix).
+- forkrun medium 14w in isolation: ~500k (vs 293k in-matrix).
   The matrix runs systems back-to-back per round (pool, executor,
   HF, forkrun — forkrun last), so in-matrix numbers carry
   accumulated thermal/cache state; relative order is the robust

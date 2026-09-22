@@ -41,7 +41,7 @@
   crash-once fault injection, graceful degradation).
 - **Measured (50k records/variant, best of sweep, honest)**:
   native-expressible work goes to Polars (2.4M/s, 4.4× best
-  UDF) — but DuckDB (186k) loses to forkrun-UDF (308k), so
+  UDF) — but DuckDB (189k) loses to forkrun-UDF (293k), so
   native ≠ automatically faster. Arbitrary-Python UDFs go to
   ProcessPoolExecutor (1037k/577k/85k), Pool second, forkrun at
   60–75% (590k/308k/67k); heavy/compute-bound compresses the
@@ -51,9 +51,9 @@
   workloads as hand-rolled C callbacks through the frozen ABI
   (dialect-2 + FLAG_RAW borrowed window, stdout capture):
   light 1124k (beats Executor outright), medium 493k (85% of
-  Executor, beats Pool), heavy 215k (2.5× the best Python
+  Executor, beats Pool), heavy 216k (2.6× the best Python
   system — the C tokenizer demolishes the Python one). Polars
-  still leads expressible work 5× (the "faster than Polars"
+  still leads expressible work ~4.6× (the "faster than Polars"
   hope is falsified). Plugin outputs validated by JSON-value
   equality vs the Python path on clean AND 5%-malformed data
   (light byte-identical; floats epsilon-compared; heavy `fh`
@@ -71,6 +71,35 @@
   flagged follow-up work, not implemented here.
 - Full tables, methodology, and caveats:
   `python/benchmarks/results/ml_pipeline_study.md` (+ CSV).
+  No version bump (benchmarks only).
+
+### Benchmarks: LLM tokenization, the niche measured (W-PY25)
+
+- **New `python/benchmarks/` files** (benchmarks only — no
+  library changes): `tokenize_data_gen.py` (seeded corpus +
+  shared 30k vocabulary sidecar), `tokenize_payload.py`
+  (identical tokenizer in Python), `plugins/tokenize_plugin.c`
+  (same algorithm in C through the frozen ABI: dialect-2 +
+  FLAG_RAW window, vocab hash table, stdout capture),
+  `bench_tokenize.py` (8-system matrix: serial/Pool/Executor/
+  HF/Ray/forkrun-Python/forkrun-C/Polars-map_batches).
+- **Measured (20k docs, best of sweep, honest)**: forkrun C
+  127k docs/s edges Executor 118k (1.1×); Pool 110k,
+  forkrun-Python 78k, HF 32k, Polars-UDF 15k ≈ serial 12k, Ray
+  13k. Big docs (662 tok/doc): C 58k vs Executor 39k (1.5×),
+  forkrun-Python passes Pool on zero-copy transport. The
+  predicted 10× did NOT materialize — per-document fixed costs
+  (JSON parse, framing, transport) dilute the ~10× per-token
+  compute edge (Amdahl's floor); the C advantage grows with the
+  compute fraction. Polars cannot express tokenization natively
+  (map_batches runs serially — verified against
+  POLARS_MAX_THREADS=1).
+- **Validation**: plugin outputs exactly equal Python outputs
+  (parsed-JSON equality, clean + malformed corpora; diversity
+  round-half-even reproduced including a double-rounding fix;
+  suffix-continue semantics matched).
+- Full tables, methodology, caveats:
+  `python/benchmarks/results/tokenize_study.md` (+ CSV).
   No version bump (benchmarks only).
 
 ## v3.5.14 (unreleased)
