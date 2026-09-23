@@ -1999,6 +1999,81 @@ FUNCEOF
 fi
 
 # ============================================================================
+# M1a: Operator SIGINT aborts with checkpoint + exit 130
+# ============================================================================
+# W-PY28 sequel to M1: worker SIGKILLs recover (no checkpoint), but an
+# operator SIGINT must still ring_abort and publish a resume file for
+# the later M-series tests to analyze. SIGINT must run frun in the
+# FOREGROUND: without job control bash ignores SIGINT in backgrounded
+# pipelines, so the backgrounded HUP-flow shape cannot deliver it — a
+# killer subshell signals the cleanroom pid instead while frun runs
+# foreground and records its exit code.
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M1a"; mkdir -p "$_MD"
+    seq 20000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+sig_func() {
+    for a in "$@"; do
+            for ((j=0;j<2000;j++)); do :; done  # stretch runtime for size-gated signal
+            printf '%s\n' "$a"
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; (for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=9000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -INT \$(cat .hup_ready)) & cat input.txt | FORKRUN_EXTRA_FUNCS='sig_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -l 1 sig_func > output1.txt 2>err1.txt; echo \$? > .exitcode" \
+        > /dev/null 2>&1
+
+    _M1ACODE=$(cat "$_MD/.exitcode" 2>/dev/null || echo "")
+    if [[ -f "$_MD/.forkrun_resume" ]] && [[ "$_M1ACODE" == "130" ]]; then
+        TEST_RESULTS["M1a: Operator SIGINT aborts with checkpoint (exit 130)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "M1a: Operator SIGINT aborts with checkpoint (exit 130)"
+    else
+        TEST_RESULTS["M1a: Operator SIGINT aborts with checkpoint (exit 130)"]="FAIL"
+        TEST_ERRORS["M1a: Operator SIGINT aborts with checkpoint (exit 130)"]="checkpoint=$([[ -f "$_MD/.forkrun_resume" ]] && echo yes || echo no) exit=$_M1ACODE (want 130)"
+        ((FAILED_TESTS++)); _print_result FAIL "M1a: Operator SIGINT aborts with checkpoint (exit 130)" "checkpoint/exit mismatch"
+    fi
+fi
+
+# ============================================================================
+# M1b: SLURM-style SIGUSR1 (preemption) aborts with checkpoint + exit 138
+# ============================================================================
+# FORKRUN_PREEMPT_MODE=1 force-enables the USR1 trap outside SLURM (per
+# frun.bash docs: testing hook for non-SLURM environments). Unlike
+# SIGINT, SIGUSR1 is deliverable to backgrounded pipelines, so the
+# standard HUP-flow shape works unchanged.
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/resume_M1b"; mkdir -p "$_MD"
+    seq 20000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+sig_func() {
+    for a in "$@"; do
+            for ((j=0;j<2000;j++)); do :; done  # stretch runtime for size-gated signal
+            printf '%s\n' "$a"
+    done
+}
+FUNCEOF
+
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='sig_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' FORKRUN_PREEMPT_MODE=1 frun -k -l 1 sig_func > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=9000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -USR1 \$(cat .hup_ready); wait \$_hup_pid; echo \$? > .exitcode; true" \
+        > /dev/null 2>&1
+
+    _M1BCODE=$(cat "$_MD/.exitcode" 2>/dev/null || echo "")
+    if [[ -f "$_MD/.forkrun_resume" ]] && [[ "$_M1BCODE" == "138" ]]; then
+        TEST_RESULTS["M1b: SLURM SIGUSR1 (preempt) aborts with checkpoint (exit 138)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "M1b: SLURM SIGUSR1 (preempt) aborts with checkpoint (exit 138)"
+    else
+        TEST_RESULTS["M1b: SLURM SIGUSR1 (preempt) aborts with checkpoint (exit 138)"]="FAIL"
+        TEST_ERRORS["M1b: SLURM SIGUSR1 (preempt) aborts with checkpoint (exit 138)"]="checkpoint=$([[ -f "$_MD/.forkrun_resume" ]] && echo yes || echo no) exit=$_M1BCODE (want 138)"
+        ((FAILED_TESTS++)); _print_result FAIL "M1b: SLURM SIGUSR1 (preempt) aborts with checkpoint (exit 138)" "checkpoint/exit mismatch"
+    fi
+    # Later M-series content tests (M2/M3) analyze M1a's checkpoint.
+    _MD="$TEST_DIR/resume_M1a"
+fi
+
+# ============================================================================
 # M2: Checkpoint contains FORKRUN_RESUME_HORIZON or equivalent resume state
 # ============================================================================
 if in_section M; then
@@ -2017,7 +2092,7 @@ if in_section M; then
         fi
     else
         TEST_RESULTS["M2: Checkpoint contains resume horizon state"]="SKIP"; ((SKIPPED_TESTS++))
-        _print_result SKIP "M2: Checkpoint contains resume horizon state" "no checkpoint from M1"
+        _print_result SKIP "M2: Checkpoint contains resume horizon state" "no checkpoint from M1a"
     fi
 fi
 
@@ -2037,7 +2112,7 @@ if in_section M; then
         fi
     else
         TEST_RESULTS["M3: Checkpoint contains FORKRUN_ORIG_ARGS"]="SKIP"; ((SKIPPED_TESTS++))
-        _print_result SKIP "M3: Checkpoint contains FORKRUN_ORIG_ARGS" "no checkpoint from M1"
+        _print_result SKIP "M3: Checkpoint contains FORKRUN_ORIG_ARGS" "no checkpoint from M1a"
     fi
 fi
 
@@ -2642,22 +2717,19 @@ fi
 if in_section M; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/resume_M16"; mkdir -p "$_MD"
-    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 20000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
 
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_func() {
     for a in "$@"; do
-        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -l 1 crash_func > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=9000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     _MBYTES=$(grep -oP 'truncate your output file to exactly \K[0-9]+' "$_MD/err1.txt" 2>/dev/null || echo "")
 

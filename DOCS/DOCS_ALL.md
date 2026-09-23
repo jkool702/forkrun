@@ -262,16 +262,21 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
   longer exist: 17 bash resume tests now manufacture checkpoints
   via operator HUP (size-gated, self-synchronizing) instead of
   `kill -9`, and 1 Python test was rewritten (SIGKILL →
-  respawn-cap, no grace wait). Documented residuals: ~ns
-  claim-without-publish race, ACK-clear race double-emit window,
-  pipe outputs at-least-once, first-batch bash revert hole.
+  respawn-cap, no grace wait). New M1a/M1b prove operator signals
+  still abort + checkpoint (SIGINT → exit 130 foreground-only:
+  bash ignores SIGINT in backgrounded pipelines without job
+  control; SIGUSR1 → exit 138 under FORKRUN_PREEMPT_MODE=1), and
+  M2/M3 analyze M1a's file instead of skipping. Documented
+  residuals: ~ns claim-without-publish race, ACK-clear race
+  double-emit window, pipe outputs at-least-once, first-batch bash
+  revert hole.
 - **Latent bugs fixed as drive-bys:** respawned ordered workers
   re-emit the whole file (missing ack-offset sync — new
   `fr_py_ack_init`, called on all worker entries); `UINT64_MAX`
   disarms output rollback (0 is a legitimate position).
 - Full suites: Python 418 green, bash test_frun.sh 89/89,
-  comprehensive 257 green + 3 intent-skips (M2/M3/M16 need M1's
-  old checkpoint contract), C plugins green.
+  comprehensive 260 green + 0 skips (M2/M3/M16 consume M1a's
+  checkpoint), C plugins green.
 
 ### Python frontend: C plugin worker loop, opt-in (W-PY26)
 
