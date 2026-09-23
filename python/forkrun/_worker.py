@@ -224,10 +224,27 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
     sink_fn = _resolve_payload(sink_spec) if sink_spec is not None else None
     fallow_w = fallow_fd if fallow_fd is not None else -1
     trap_w = trap_ack_w if trap_ack_w is not None else -1
+    # W-PY19 C-orderer target: ack(target) emits an OrderPacket for the
+    # bytes appended since the last ack. Armed only when the caller set
+    # the order pipe AND an output memfd exists to name in the packet.
+    # order_target carries the ORDER PIPE fd here (or -1); the ack
+    # target is out_fd whenever ordered. See worker_main_with_death_pipe.
+    order_pipe = order_target if (order_target is not None and
+                                  order_target >= 0 and
+                                  out_fd is not None) else -1
+    order_tgt = out_fd if order_pipe >= 0 else -1
+
+    # W-PY29: init FIRST — fr_py_worker_init resets fr_py_txn_out_fd
+    # (calling _set_out before it silently disarms transaction
+    # publication; that was Bug 1 — output_start stuck at init).
+    if lib.fr_py_worker_init(wid, node, wincarn, 3, 0) != 0:
+        return 1
     # W-PY28: name the output fd for transaction publication and sync
     # the ack offset (respawned generations append to a reused fd).
     # One call per worker (never per batch). Best-effort on old
     # substrates (missing symbols → txn records simply stay dark).
+    # W-PY29: fr_py_ack_init also initializes the output cursor (one
+    # lseek per worker); per-batch publication is syscall-free.
     _set_out = getattr(lib, "fr_py_set_output_fd", None)
     if _set_out is not None:
         try:
@@ -240,18 +257,6 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
             _ack_init(out_fd)
         except Exception:
             pass
-    # W-PY19 C-orderer target: ack(target) emits an OrderPacket for the
-    # bytes appended since the last ack. Armed only when the caller set
-    # the order pipe AND an output memfd exists to name in the packet.
-    # order_target carries the ORDER PIPE fd here (or -1); the ack
-    # target is out_fd whenever ordered. See worker_main_with_death_pipe.
-    order_pipe = order_target if (order_target is not None and
-                                  order_target >= 0 and
-                                  out_fd is not None) else -1
-    order_tgt = out_fd if order_pipe >= 0 else -1
-
-    if lib.fr_py_worker_init(wid, node, wincarn, 3, 0) != 0:
-        return 1
     if order_pipe >= 0:
         try:
             lib.fr_py_set_order_pipe(order_pipe)
@@ -305,6 +310,10 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
     # Bind once: CDLL attribute access must not sit in the per-batch
     # path (a fresh FuncPtr per lookup).
     _complete_fn = lib.fr_py_complete if use_complete else None
+    # W-PY29: cursor advance for the v0 direct-write path below
+    # (bypasses fr_py_emit). Bound once, best-effort (old substrates
+    # lack it — the ordered ack sync still heals the cursor there).
+    _advanced_fn = getattr(lib, "fr_py_output_advanced", None)
 
     def _commit(bidx, blob):
         """Output + signal + ack (v0 success path). Flushes first
@@ -580,6 +589,14 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                                                      len(blob)))
                         if blob:
                             _write_all(out_fd, blob)
+                        # W-PY29: complete record durable — advance the
+                        # rollback frontier (best-effort; emit/ordered
+                        # paths advance in C anyway).
+                        if _advanced_fn is not None:
+                            try:
+                                _advanced_fn(16 + len(blob))
+                            except Exception:
+                                pass
             except BaseException as exc:  # noqa: BLE001
                 error = exc
             finally:

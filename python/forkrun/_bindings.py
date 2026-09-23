@@ -321,6 +321,12 @@ def _setup_signatures(lib) -> None:
         lib.fr_py_recover_worker.restype = ctypes.c_int
     except AttributeError:
         pass
+    try:
+        # W-PY29: manual output-cursor advance (v0 direct-write path).
+        lib.fr_py_output_advanced.argtypes = [ctypes.c_uint64]
+        lib.fr_py_output_advanced.restype = ctypes.c_int
+    except AttributeError:
+        pass
 
 
 def load(path: str | None = None):

@@ -21,24 +21,66 @@ This guarantees absolute, immediate failure detection without requiring the orch
 
 ---
 
-## §2. Transient Failure: Graceful Recovery & Self-Healing
+## §2. Transient Failure: Parent-Side Transaction Recovery (W-PY29)
 
-When a worker dies gracefully (e.g., a command returns a non-zero exit code while `-E` is active), the worker's `EXIT` trap executes a multi-step rollback and recovery protocol.
+Every batch runs inside a per-worker transaction record (`WorkerTxn`,
+one 128B cache line per worker in MAP_SHARED `GlobalState`). The
+worker publishes at claim and clears at ack; the PARENT recovers on
+any death. The worker's EXIT trap is cleanup-only (it must never
+escrow — that would double-deposit).
 
-### 2.1 Output Reversion (Transaction Rollback)
-To preserve Exactly-Once semantics, any partial data the failing worker wrote to its output buffer must be erased before the batch is retried. 
-The worker calls `ring_revert_output`, which uses `ftruncate` and `lseek` to roll the worker's output `memfd` back to the exact byte offset recorded prior to the batch starting. 
+### 2.1 The 4-State Machine
 
-### 2.2 The Escrow Deposit
-The worker calls `ring_escrow_put`, dropping the metadata for the failed batch (byte offset, number of lines) into the lock-free Escrow side-channel. Crucially, it increments the `num_kills` counter for this specific batch.
+```
+                    claim
+IDLE ─────────────→ CLAIMING ────── claim failed (EOF/abort) ─────→ IDLE
+                       │                      (only legal backward edge)
+                       │ successful publication (release store, LAST)
+                       ▼
+                    CLAIMED
+                       │
+                       │ begin ack side effects
+                       ▼
+                 COMMITTING
+                       │
+                       │ all ack side effects complete
+                       ▼
+                     IDLE
+```
 
-### 2.3 The `TRAP_ACK` Handshake
-The dying worker sends its `wID` down the `TRAP_ACK` pipe to the parent orchestrator, signaling: *"I have safely rolled back my state and secured the data."* The worker then exits.
+Happy-path cost is four cache-local release stores (~2ns total). No
+CAS, no fences beyond the publish/clear release-acquire pair, no
+syscalls on the claim path.
 
-### 2.4 The Orchestrator Respawn
-The `ring_poll` reactor observes the `WORKER_DEATH` event. Because the exit was non-zero, it instantly spawns a replacement worker on the same NUMA node to maintain pipeline capacity. Due to the **Escrow Priority Inversion** rule, the first thing the new (or any idle) worker does is check the Escrow pipe, claim the abandoned batch, and execute it. 
+### 2.2 Output Rollback Without lseek
 
-If the failure was transient, the replacement worker succeeds, and the pipeline continues with zero data loss and zero sequence corruption.
+Each worker holds a TLS `worker_output_end` cursor: the byte position
+right after the most recently completed batch. It is initialized once
+per worker (fresh or respawned) from the output fd's live position
+(the only cursor `lseek`), snapshotted as `output_start` at claim,
+and advanced only after a COMPLETE emit succeeds — never during
+partial emission. Recovery truncates regular files to `output_start`
+(`ftruncate` + `lseek`); pipes are at-least-once (guarded by
+`S_ISREG`, never grown).
+
+### 2.3 The Escrow Deposit (Parent-Side)
+
+Recovery deposits the orphan batch metadata into the lock-free Escrow
+side-channel with `num_kills + 1`, routed to the dead worker's NUMA
+node (locality survives death). The first idle worker re-claims it
+(Escrow Priority Inversion); the poison threshold converts loops
+into skips (§3). Both reactors call recovery for EVERY death,
+including exit 0 — the C state machine classifies:
+
+| State + death | Decision |
+|---|---|
+| `IDLE` + exit 0, or error at EOF | NORMAL_EXIT (free slot) |
+| `IDLE` + error mid-stream | NO_BATCH (respawn, nothing lost) |
+| `CLAIMING` + any death | RACE → abort/resume (ticket unattributable) |
+| `CLAIMED`, already committed | ALREADY_DONE (clear, respawn/free) |
+| `CLAIMED`, orphan, error exit | RECOVERED (revert + escrow + respawn) |
+| `CLAIMED`, orphan, exit 0 | FATAL (worker bug — abort) |
+| `COMMITTING` + any death | RACE → abort/resume (commit ambiguous) |
 
 ---
 
@@ -53,13 +95,19 @@ If a specific batch of data is fundamentally malformed, it will persistently kil
 
 ---
 
-## §4. Catastrophic Failure: The Seqlock Ledger & Checkpoints
+## §4. Catastrophic Failure: Conservative Abort + Seqlock Ledger
 
-If a worker suffers a catastrophic death (e.g., `SIGKILL`), it cannot execute its `EXIT` trap. It cannot revert its output, and it cannot deposit the batch into Escrow.
+A `CLAIMING` or `COMMITTING` death (§2.3, RACE) cannot be recovered
+locally: the ticket is unattributable (claim race) or the commit is
+ambiguous (ack race — re-execution could double-emit). The reactor
+aborts the run and the Seqlock ledger below carries the resume.
 
-### 4.1 The 3-Second Grace Period
-When the `ring_poll` reactor catches a `WORKER_DEATH` event, it increments a `trap_ack_pending` counter for that `wID`. If a corresponding `TRAP_ACK` arrives, the counter decrements to 0. 
-If the counter is > 0, an asynchronous 3,000-millisecond countdown begins. If the timer expires and the counter is still > 0, the orchestrator declares a **Catastrophic Failure** and triggers a global `ring_abort`. 
+### 4.1 No Grace Period
+
+There is no trap-ACK wait and no timeout: recovery runs
+synchronously in the death handler (revert + escrow deposit are a few
+microseconds), so every death is classified the moment the death pipe
+fires. `TRAP_ACK` carries poison-skip notices only.
 
 ### 4.2 The Seqlock Ledger
 The `ring_order` thread acts as a deterministic observer. As batches successfully complete, `ring_order` merges them. Because batches finish out of order, the leading edge of completed work is "jagged." 
@@ -93,7 +141,11 @@ The engine guarantees **Bounded At-Least-Once Execution** by default.
 *Preconditions:* output must go to a seekable file (truncation is impossible on pipes/terminals — those downgrade to at-least-once); the user must truncate to the byte count in the crash message before resuming; and the orchestrator must survive long enough to write the checkpoint (SIGKILL to `frun` itself yields no checkpoint — SIGTERM/SIGINT/SIGHUP and SLURM USR1 with `FORKRUN_PREEMPT_MODE` are trapped and checkpointed).
 
 * **Ordered (`-k`) & Buffered (`--buffered`) Modes: EXACTLY-ONCE DELIVERY.**
-  Because partial output is physically reverted (`ftruncate`) inside the per-worker `memfd` upon a graceful crash, and because catastrophic crashes trigger a mathematically absolute byte-coordinate resumption, surviving data is guaranteed to be committed to the final output stream exactly once. 
+  Because partial output is physically reverted (`ftruncate` to the
+  transaction cursor) by parent-side recovery on any crash, and
+  because ambiguous-window crashes abort into a mathematically
+  absolute byte-coordinate resumption, surviving data is guaranteed
+  to be committed to the final output stream exactly once. 
 * **Realtime (`-u`) Mode: AT-LEAST-ONCE DELIVERY (NOT RECOMMENDED).**
   Workers write directly to `stdout`, so `forkrun` cannot recall bytes on a crash (resuming produces duplicates). Furthermore, realtime mode risks severely scrambled output (byte interleaving) and kernel lock contention. Use `--buffered` or `-k` instead.
 

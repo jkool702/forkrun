@@ -1277,6 +1277,18 @@ static inline uint64_t fast_log2(uint64_t v) {
 static __thread int my_numa_node = -1;
 static __thread bool is_waiting_on_ring = false;
 static __thread off_t last_ack_offset = 0;
+/* W-PY29: TLS output position cursor (rollback frontier).
+ *
+ * Invariant: worker_output_end is the output-stream byte position
+ * immediately following the most recently completed batch whose
+ * output was fully emitted. worker_txn_publish snapshots it as
+ * txn.output_start (no lseek on the claim path). It advances ONLY
+ * after a COMPLETE emit succeeds (fr_py_emit, emit_record call
+ * sites, ordered-ack sync) — never during partial emission, so a
+ * death mid-emit still rolls back to the pre-batch frontier.
+ * Initialized once per worker (fresh or respawned) by
+ * worker_txn_init_output_cursor (the ONLY cursor lseek). */
+static __thread off_t worker_output_end = 0;
 static __thread int ack_cached_target_fd = -1;
 static __thread int ack_cached_order_pipe = -1;
 static __thread int ack_cached_mode = 0;
@@ -1470,15 +1482,23 @@ struct OrderPacket {
 // with headroom (frontends cap far below: Python 64, bash -j flags);
 // out-of-range wids fail safe (publish/clear no-op, recover FATAL).
 #define MAX_TXN_WORKERS 1024
-#define TXN_IDLE    0
-#define TXN_CLAIMED 1
+/* W-PY29: universal 4-state transaction machine.
+ * IDLE → CLAIMING → CLAIMED → COMMITTING → IDLE.
+ * The only early edge is CLAIMING → IDLE (claim returned EOF/abort,
+ * no batch acquired). CLAIMING/COMMITTING deaths are ambiguous →
+ * parent aborts/resumes (conservative). No CAS: plain release
+ * stores with defensive checks. */
+#define TXN_IDLE      0
+#define TXN_CLAIMING  1  /* Claim in progress — ticket unattributable */
+#define TXN_CLAIMED   2  /* Batch fully published — safe to recover */
+#define TXN_COMMITTING 3 /* Ack side effects in progress — ambiguous */
 
 struct WorkerTxn {
   // NOTE: field order is load-bearing for the 128B size below — all
   // u32s are grouped before the u64s so no implicit alignment padding
   // appears (the static assert underneath pins the total; if you add
   // a field, resize _pad to compensate).
-  volatile uint32_t state;  // TXN_IDLE or TXN_CLAIMED (release/acquire)
+  volatile uint32_t state;  /* TXN_IDLE/CLAIMING/CLAIMED/COMMITTING (release/acquire) */
   uint32_t num_kills;       // kill count at claim time
   uint32_t slots;           // claimed slot count (single-slot invariant: 1)
   uint32_t incarnation;     // worker generation (stale-record detection)
@@ -5891,32 +5911,57 @@ dlc_evaluate_claim:
 // This function is now a thin wrapper: do_lockfree_claim handles all ring
 // physics, and this function handles NUMA init, the SIGPIPE shield, and all
 // Bash variable bindings.
-/* W-PY28: Publish transaction record — called at claim time.
+/* W-PY29: Initialize output cursor at worker startup.
+ * Called ONCE per worker (fresh or respawned) via ring_ack_init /
+ * fr_py_ack_init (both already lseek). This is the ONLY place lseek
+ * is called for the output cursor — per-batch publication reads the
+ * cached value (syscall-free). fd < 0 or lseek failure (pipe) leaves
+ * the cursor at 0; recovery's S_ISREG guard (not the cursor) is what
+ * excludes pipes from truncation. */
+static inline int worker_txn_init_output_cursor(int fd) {
+    if (fd < 0) {
+        worker_output_end = 0;
+        return 0;
+    }
+    {
+        off_t pos = lseek(fd, 0, SEEK_CUR);
+        if (pos == (off_t)-1) {
+            worker_output_end = 0;
+            return -1;
+        }
+        worker_output_end = pos;
+    }
+    return 0;
+}
+
+/* W-PY29: IDLE → CLAIMING (before do_lockfree_claim).
+ *
+ * Marks the claim-without-publish window: a death here leaves a
+ * ticket nobody can attribute, so recovery aborts/resumes rather
+ * than guessing. Cost: 1 release store. */
+static inline void worker_txn_begin_claim(int wid) {
+    if (!g_state || wid < 0 || wid >= MAX_TXN_WORKERS) return;
+    __atomic_store_n(&g_state->worker_txn[wid].state, TXN_CLAIMING,
+                     __ATOMIC_RELEASE);
+}
+
+/* W-PY29: Publish transaction record — called at claim time.
  *
  * Writes the batch identity fields (relaxed) then state=TXN_CLAIMED
  * (release, written LAST so the parent's acquire read sees every
  * field). Cost: a few relaxed stores + 1 release store (~1ns
  * non-contended; the record is the worker's private cache line).
  *
- * output_fd: the worker's exclusive output memfd (or -1/unknown).
- * output_start records its pre-batch end position via lseek (the
- * file offset only moves forward on append-only worker fds, so the
- * position at claim time is exactly where a rollback must cut).
- * No fd (or lseek failure on a pipe) publishes UINT64_MAX = "no
- * rollback possible" (pipes are at-least-once on recovery).
- *
- * First-claim note: ack_cached_target_fd is -1 before the first ack,
- * so output_start publishes UINT64_MAX on the very first claim (no
- * revert for first-batch orphans on the bash path). Bounded impact:
- * ordered mode is immune (packets name exact offsets; orphaned
- * bytes are never referenced); unordered collection may drop
- * records around the hole — within the project's established
- * "truncation at hole" fault doctrine. The Python frontend names
- * its fd explicitly (fr_py_set_output_fd) and closes even this.
- */
+ * output_start snapshots the TLS worker_output_end cursor (the
+ * pre-batch end position — the file offset only moves forward on
+ * append-only worker fds, so the cursor at claim time is exactly
+ * where a rollback must cut). NO lseek here (W-PY29 invariant 10):
+ * the cursor was initialized once at worker startup and advanced
+ * after every complete emit. NOTE 0 is a LEGITIMATE position
+ * (first batch on a fresh memfd rolls back to 0) — recovery's
+ * S_ISREG/size guards (not the value) decide truncatability. */
 static inline void worker_txn_publish(int wid,
-                                      const struct WorkerBatchState *batch,
-                                      int output_fd) {
+                                      const struct WorkerBatchState *batch) {
     struct WorkerTxn *txn;
 
     if (!g_state || !batch || wid < 0 || wid >= MAX_TXN_WORKERS) return;
@@ -5930,31 +5975,63 @@ static inline void worker_txn_publish(int wid,
     txn->node = (uint32_t)(my_numa_node >= 0 ? my_numa_node : 0);
     txn->major = batch->major;
     txn->minor = batch->minor;
-    /* UINT64_MAX = "no rollback possible" (no fd, or lseek failed on
-     * a pipe). NOTE 0 is a LEGITIMATE position (first batch on a
-     * fresh memfd rolls back to 0) — it must NOT be treated as
-     * disarmed, or first-batch orphans would leave partial output. */
-    if (output_fd >= 0) {
-        off_t pos = lseek(output_fd, 0, SEEK_CUR);
-        txn->output_start =
-            (pos != (off_t)-1) ? (uint64_t)pos : (uint64_t)UINT64_MAX;
-    } else {
-        txn->output_start = (uint64_t)UINT64_MAX;
-    }
+    txn->output_start = (uint64_t)worker_output_end;
 
     /* Publish LAST (release — makes all fields visible to the parent). */
     __atomic_store_n(&txn->state, TXN_CLAIMED, __ATOMIC_RELEASE);
 }
 
-/* W-PY28: Clear transaction record — called at ack time.
+/* W-PY29: CLAIMING → IDLE (claim failed — EOF, abort, no batch).
+ * The only legal backward edge: no batch was acquired, so there is
+ * nothing to recover. Cost: 1 release store. */
+static inline void worker_txn_abort_claim(int wid) {
+    if (!g_state || wid < 0 || wid >= MAX_TXN_WORKERS) return;
+    __atomic_store_n(&g_state->worker_txn[wid].state, TXN_IDLE,
+                     __ATOMIC_RELEASE);
+}
+
+/* W-PY29: CLAIMED → COMMITTING (before fallow/order writes).
  *
- * Cost: 1 release store. Runs after the ack's pipe writes complete,
- * so a parent that observes TXN_IDLE knows the batch fully committed.
- */
+ * Marks the ack-complete/clear-store window: the order packet may
+ * already be downstream while the clear store hasn't landed, so a
+ * death here is ambiguous → recovery aborts/resumes (conservative,
+ * never double-emits by re-executing a possibly-committed batch).
+ *
+ * Defensive invariant check — NOT a CAS, just a guard: catches
+ * accidental future acks with no active transaction (double ack,
+ * ack without claim) by refusing to move a non-CLAIMED record. */
+static inline void worker_txn_begin_commit(int wid) {
+    uint32_t cur;
+
+    if (!g_state || wid < 0 || wid >= MAX_TXN_WORKERS) return;
+    cur = __atomic_load_n(&g_state->worker_txn[wid].state,
+                          __ATOMIC_RELAXED);
+    if (cur != TXN_CLAIMED) return; /* No active transaction — hold. */
+    __atomic_store_n(&g_state->worker_txn[wid].state, TXN_COMMITTING,
+                     __ATOMIC_RELEASE);
+}
+
+/* W-PY29: COMMITTING → IDLE (after successful ack).
+ *
+ * Runs after every ack side effect (fallow/order packets) is on its
+ * pipe, so a parent that observes TXN_IDLE knows the batch fully
+ * committed. Cost: 1 release store. */
 static inline void worker_txn_clear(int wid) {
     if (!g_state || wid < 0 || wid >= MAX_TXN_WORKERS) return;
     __atomic_store_n(&g_state->worker_txn[wid].state, TXN_IDLE,
                      __ATOMIC_RELEASE);
+}
+
+/* W-PY29: Advance the output cursor after a COMPLETE emit.
+ *
+ * bytes_written is the TOTAL emit size (framing + payload). Call
+ * only after the complete record is durable — never during partial
+ * emission (a mid-emit death must still roll back to the pre-batch
+ * frontier). Cost: one TLS add. */
+static inline void worker_txn_advance_output(int wid,
+                                             uint64_t bytes_written) {
+    (void)wid; /* Cursor is worker-local TLS; wid documents ownership. */
+    worker_output_end += (off_t)bytes_written;
 }
 
 static int ring_claim_main(int argc, char **argv) {
@@ -6021,8 +6098,15 @@ static int ring_claim_main(int argc, char **argv) {
   // -------------------------------------------
 
   struct WorkerBatchState batch;
+  /* W-PY29: IDLE → CLAIMING before the ticket is issued (do_lockfree_claim
+   * is untouched — the hook only brackets it). */
+  worker_txn_begin_claim(g_fr_config.ring_wid);
   int rc = do_lockfree_claim(&batch, true);
-  if (rc != 0) return rc;
+  if (rc != 0) {
+      /* EOF/abort: no batch acquired — CLAIMING → IDLE (only backward). */
+      worker_txn_abort_claim(g_fr_config.ring_wid);
+      return rc;
+  }
 
   // --- Publish metadata to TLS globals ---
   worker_last_idx       = batch.batch_idx;
@@ -6033,14 +6117,13 @@ static int ring_claim_main(int argc, char **argv) {
   tls_batch_lines       = batch.lines;
   tls_batch_offset      = (off_t)batch.offset;
 
-  /* --- W-PY28: Publish transaction record (universal Tier-1/2/3
-   * recovery). FIRST thing after the claim lands — every instruction
-   * before this publish widens the claim-without-publish race (death
-   * in that window leaves a ticket nobody can attribute). The output
-   * fd is the last ack's target (same exclusive per-worker memfd all
-   * run; -1 on the first claim publishes output_start=0, exactly
-   * right for a fresh file). --- */
-  worker_txn_publish(g_fr_config.ring_wid, &batch, ack_cached_target_fd);
+  /* --- W-PY29: CLAIMING → CLAIMED (universal Tier-1/2/3
+   * recovery). FIRST thing after the claim lands + TLS publication —
+   * every instruction before this publish widens the
+   * claim-without-publish race (death in that window reads
+   * TXN_CLAIMING → abort/resume). Syscall-free: output_start
+   * snapshots the TLS cursor. --- */
+  worker_txn_publish(g_fr_config.ring_wid, &batch);
 
   // --- Bind the byte-length to the target Bash variable ---
   char buf[64];
@@ -6174,6 +6257,13 @@ static int ring_ack_main(int argc, char **argv) {
     }
   }
 
+  /* W-PY29: CLAIMED → COMMITTING before any ack side effect
+   * (fallow/order packets) goes out — a death from here to the clear
+   * below reads TXN_COMMITTING → abort/resume (never re-execute a
+   * possibly-committed batch). Defensive: no-ops when no transaction
+   * is active. do_lockfree_claim and the packet logic are untouched. */
+  worker_txn_begin_commit(g_fr_config.ring_wid);
+
   if (fd_fallow > 0) {
     if (local_state && local_state->numa_enabled) {
       uint64_t start =
@@ -6237,6 +6327,11 @@ static int ring_ack_main(int argc, char **argv) {
             return EXECUTION_FAILURE;
         }
         last_ack_offset = curr;
+        /* W-PY29: the worker exclusively appends, so the post-batch
+         * end position is also the next batch's rollback frontier.
+         * Zero new syscalls (reuses curr). Covers ALL bash payload
+         * output (which bypasses the C emit paths). */
+        worker_output_end = curr;
       }
     } else {
       if (robust_pipe_write(fd_target, &op, sizeof(op)) < 0) {
@@ -6249,8 +6344,8 @@ static int ring_ack_main(int argc, char **argv) {
 
   worker_last_cnt = 0;
 
-  /* --- W-PY28: Clear transaction record (pairs with the claim-time
-   * publish above). Runs after every ack side effect (fallow/order
+  /* --- W-PY29: COMMITTING → IDLE (pairs with the begin_commit
+   * above). Runs after every ack side effect (fallow/order
    * packets) is on its pipe, so TXN_IDLE means fully committed. --- */
   worker_txn_clear(g_fr_config.ring_wid);
 
@@ -6259,7 +6354,7 @@ static int ring_ack_main(int argc, char **argv) {
 }
 
 /* =====================================================================
- * W-PY28: Universal worker recovery (Tier-1/2/3 in one parent-side path).
+ * W-PY29: Universal worker recovery (Tier-1/2/3 in one parent-side path).
  *
  * When ANY worker dies for ANY reason (Python exception, graceful
  * exit, SIGSEGV, SIGKILL, OOM), the parent calls this with the dead
@@ -6268,11 +6363,17 @@ static int ring_ack_main(int argc, char **argv) {
  * the old EXIT trap did worker-side: roll back partial output,
  * increment num_kills, deposit into escrow.
  *
+ * Both reactors (bash WORKER_DEATH, Python _classify) call this for
+ * EVERY death INCLUDING exit 0 — this function is the sole
+ * classification authority.
+ *
  * Classification over (WorkerTxn.state, exit_code, batch_is_acked):
  *   IDLE + exit 0                  → 2 NORMAL_EXIT (EOF, free slot)
  *   IDLE + exit != 0 + EOF         → 2 NORMAL_EXIT (teardown err, free)
  *   IDLE + exit != 0 + mid-stream  → 1 NO_BATCH (respawn; nothing lost —
  *                                    no batch was in flight)
+ *   CLAIMING + any death           → 4 RACE (claim-without-publish:
+ *                                    ticket unattributable → abort/resume)
  *   CLAIMED + slot recycled        → 3 ALREADY_DONE (clear; the ring
  *                                    advanced ≥RING_SIZE past the ticket,
  *                                    so the batch committed long ago —
@@ -6286,6 +6387,11 @@ static int ring_ack_main(int argc, char **argv) {
  *   CLAIMED + not ACKed + exit 0   → 5 FATAL (worker bug: correct
  *                                    workers only exit 0 at EOF with
  *                                    TXN_IDLE — defensive abort)
+ *   COMMITTING + any death         → 4 RACE (ack side effects in
+ *                                    progress: the order packet may be
+ *                                    downstream while the clear never
+ *                                    landed — re-execution could double-
+ *                                    emit, so abort/resume instead)
  *
  * "Batch ACKed" is decided WITHOUT the resume_horizon unit trap: the
  * horizon is in BYTES while tickets are batch indices. The check is
@@ -6302,12 +6408,11 @@ static int ring_ack_main(int argc, char **argv) {
  * escrowed retries are work no ticket covers — freeing the last slot
  * with escrow pending would orphan them into a hang.
  *
- * Known residuals (documented, not silent): a death inside the ~ns
- * claim-without-publish window (ticket issued, txn still IDLE) reads
- * as NO_BATCH — the ticket has no attribution anywhere (same window
- * exists in the pre-txn design, where it ended in abort). A death in
- * the ~ns ack-complete/clear-store window with an unemitted order
- * packet can double-emit one record downstream (at-least-once).
+ * Residuals (documented, not silent): CLAIMING/COMMITTING deaths abort
+ * the run by design (conservative over at-least-once). A death in the
+ * ~ns ack-complete/clear-store window with an unemitted order packet
+ * can double-emit one record downstream ONLY if it were re-executed —
+ * COMMITTING routes exactly there to abort instead.
  * ===================================================================== */
 static int ring_recover_worker_core(int wid, int incarnation,
                                     int output_fd, int exit_code) {
@@ -6349,7 +6454,26 @@ static int ring_recover_worker_core(int wid, int incarnation,
         return 1;  /* NO_BATCH — mid-stream, respawn. */
     }
 
-    /* ─── Case 2: CLAIMED ──────────────────────────────────────── */
+    /* ─── Case 2: CLAIMING ─────────────────────────────────── */
+    if (txn_state == TXN_CLAIMING) {
+        /* Claim-without-publish race: the ticket may or may not have
+         * been issued, and no identity is published anywhere. Any
+         * re-execution could duplicate; any no-op could lose. The
+         * conservative direction is abort/resume (checkpoint from the
+         * orderer ledger, which only contains committed work). */
+        return 4;
+    }
+
+    /* ─── Case 3: COMMITTING ───────────────────────────────── */
+    if (txn_state == TXN_COMMITTING) {
+        /* Ack side effects were in flight: fallow/order packets may
+         * already be downstream while the clear store never landed.
+         * Re-execution could double-emit one record; the conservative
+         * direction is abort/resume. */
+        return 4;
+    }
+
+    /* ─── Case 4: CLAIMED ──────────────────────────────────────── */
     if (txn_state != TXN_CLAIMED) {
         /* Torn state value (single-bit flip class) — fail closed. */
         return 5;
@@ -7851,6 +7975,11 @@ static int ring_ack_init_main(int argc, char **argv) {
     if (fd >= 0) {
         last_ack_offset = lseek(fd, 0, SEEK_CUR);
     }
+    /* W-PY29: one cursor lseek per worker startup (fresh or respawned).
+     * Respawned generations append to a reused fd, so the cursor must
+     * start at the live end — exactly what this existing sync point
+     * already observes. */
+    worker_txn_init_output_cursor(fd);
     return EXECUTION_SUCCESS;
 }
 

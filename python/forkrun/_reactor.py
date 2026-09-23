@@ -312,44 +312,80 @@ class ReactorState:
         else:
             exit_code = 1  # signaled — a crash by definition
 
-        if exit_code == 0:
-            # A clean exit from a generation carrying an inherited
-            # unacked death means the respawn drained to EOF: the
-            # engine published everything consumable and this worker
-            # consumed to the end, so the pipeline is whole — heal
-            # the pending grace instead of orphaning it into a false
-            # catastrophic at termination.
-            if slot.trap_ack_pending > 0:
-                slot.trap_ack_pending = 0
-                self.trap_ack_deadlines.pop(wid, None)
-                self.recovered.append(wid)
-            elif slot.trap_ack_pending < 0:
-                # Defensive: transient credit should always have been
-                # consumed by the death that preceded this clean exit
-                # (respawn is synchronous with death observation).
-                # Normalize rather than carry a stale balance.
-                slot.trap_ack_pending = 0
-                self.trap_ack_deadlines.pop(wid, None)
-            self.wid_free.add(wid)
-            del self.workers[wid]
-            return ("clean", None)
-
-        # Non-zero death: authoritative parent-side recovery.
-        #
-        # W-PY28: the dead worker's WorkerTxn record (published at
-        # claim, cleared at ack) is read via fr_py_recover_worker —
-        # one path for payload errors, SIGSEGV, SIGKILL, and OOM.
-        # Recovery runs SYNCHRONOUSLY here (revert + escrow deposit),
-        # so no trap-ACK grace is armed: there is nothing left to
-        # wait for. The bounded-respawn tail below is unchanged
-        # (respawn on the same node; the cap still bounds crash
-        # loops into n_unrecovered → "respawn cap reached").
+        # W-PY29: universal parent-side recovery for ALL deaths,
+        # INCLUDING exit 0. The C state machine
+        # (ring_recover_worker_core) is the sole classification
+        # authority: IDLE + exit 0 → NORMAL_EXIT (free, same outcome
+        # as the old fast path); CLAIMED + exit 0 → FATAL (worker
+        # bug — a correct worker only exits 0 at EOF with TXN_IDLE).
         #
         # Pre-W-PY28 substrates lack the symbol: fall back to the
-        # trap-ACK grace path verbatim (mixed-version safety).
+        # legacy behavior verbatim (exit-0 fast path + trap-ACK grace
+        # for non-zero; mixed-version safety).
         from ._bindings import get as _get
         _recover = getattr(_get(), "fr_py_recover_worker", None)
-        if _recover is None:
+        if _recover is not None:
+            _out_fds = (self.ctx.get("out_fds") or [])
+            _out_fd = (_out_fds[wid]
+                       if 0 <= wid < len(_out_fds) else -1)
+            if _out_fd is None or _out_fd < 0:
+                _out_fd = -1
+            try:
+                _rrc = _recover(wid, slot.incarn, _out_fd, exit_code)
+            except Exception:
+                _rrc = 5
+            if _rrc == 2:
+                # NORMAL_EXIT: the dead generation held no unacked
+                # work (EOF drain or between-batch death at rest).
+                # A clean exit from a generation carrying an inherited
+                # unacked death means the respawn drained to EOF: the
+                # engine published everything consumable and this worker
+                # consumed to the end, so the pipeline is whole — heal
+                # the pending grace instead of orphaning it into a false
+                # catastrophic at termination.
+                if slot.trap_ack_pending > 0:
+                    slot.trap_ack_pending = 0
+                    self.trap_ack_deadlines.pop(wid, None)
+                    self.recovered.append(wid)
+                elif slot.trap_ack_pending < 0:
+                    # Defensive: transient credit should always have been
+                    # consumed by the death that preceded this clean exit
+                    # (respawn is synchronous with death observation).
+                    # Normalize rather than carry a stale balance.
+                    slot.trap_ack_pending = 0
+                    self.trap_ack_deadlines.pop(wid, None)
+                self.wid_free.add(wid)
+                del self.workers[wid]
+                return ("clean", None)
+            if _rrc == 4:
+                raise RuntimeError(
+                    "forkrun: Worker %d died in the claim-without-"
+                    "publish race; batch unattributable. Aborting."
+                    % (wid,))
+            if _rrc == 5:
+                raise RuntimeError(
+                    "forkrun: Worker %d recovery failed "
+                    "(orphan revert/escrow). Aborting." % (wid,))
+            # rc 0 (RECOVERED) / 1 (NO_BATCH) / 3 (ALREADY_DONE):
+            # the death is accounted for — proceed to the respawn tail
+            # like a confirmed death. (rc 2 with a non-zero exit still
+            # frees: the EOF teardown error holds no work.)
+            # Only genuine orphan recoveries join the healed list.
+            if _rrc == 0:
+                self.recovered.append(wid)
+        else:
+            if exit_code == 0:
+                if slot.trap_ack_pending > 0:
+                    slot.trap_ack_pending = 0
+                    self.trap_ack_deadlines.pop(wid, None)
+                    self.recovered.append(wid)
+                elif slot.trap_ack_pending < 0:
+                    slot.trap_ack_pending = 0
+                    self.trap_ack_deadlines.pop(wid, None)
+                self.wid_free.add(wid)
+                del self.workers[wid]
+                return ("clean", None)
+
             # Legacy path: trap-ACK bookkeeping (bash pending logic).
             # Deaths and ACKs pipeline in EITHER order (an ACK can sit
             # in the pipe before the death-pipe EOF is selected), so
@@ -361,33 +397,6 @@ class ReactorState:
                     wid not in self.trap_ack_deadlines:
                 self.trap_ack_deadlines[wid] = (
                     _time.monotonic() + self.trap_ack_grace)
-        else:
-            _out_fds = (self.ctx.get("out_fds") or [])
-            _out_fd = (_out_fds[wid]
-                       if 0 <= wid < len(_out_fds) else -1)
-            if _out_fd is None or _out_fd < 0:
-                _out_fd = -1
-            try:
-                _rrc = _recover(wid, slot.incarn, _out_fd, exit_code)
-            except Exception:
-                _rrc = 5
-            if _rrc == 4:
-                raise RuntimeError(
-                    "forkrun: Worker %d died in the claim-without-"
-                    "publish race; batch unattributable. Aborting."
-                    % (wid,))
-            if _rrc == 5:
-                raise RuntimeError(
-                    "forkrun: Worker %d recovery failed "
-                    "(orphan revert/escrow). Aborting." % (wid,))
-            # rc 0 (RECOVERED) / 1 (NO_BATCH) / 2 (NORMAL_EXIT at EOF)
-            # / 3 (ALREADY_DONE): the death is accounted for — proceed
-            # to the respawn tail like a confirmed death. (rc 2 with a
-            # non-zero exit still respawns: the fresh generation exits
-            # at EOF by itself. Same outcome, zero special cases.)
-            # Only genuine orphan recoveries join the healed list.
-            if _rrc == 0:
-                self.recovered.append(wid)
 
         # Bounded respawn (bash: respawn on the same node).
         cap = self.respawn_cap

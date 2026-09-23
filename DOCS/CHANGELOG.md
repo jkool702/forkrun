@@ -2,6 +2,46 @@
 
 ## v3.6.0 (unreleased)
 
+### WorkerTxn hardening: 4-state machine + output cursor (W-PY29)
+
+- **4-state transaction machine** (`IDLE → CLAIMING → CLAIMED →
+  COMMITTING → IDLE`, engine `WorkerTxn.state` renumbered
+  0/1/2/3): `TXN_CLAIMING` brackets `do_lockfree_claim` (death in
+  the claim-without-publish window → RACE/abort instead of a silent
+  lost ticket); `TXN_COMMITTING` brackets the ack side effects
+  (death in the ack→clear window → RACE/abort instead of a
+  re-execution double-emit). Both hooks exist on BOTH entry paths
+  (`ring_claim_main` + `fr_py_claim`, `ring_ack_main` +
+  `fr_py_ack_core`); `do_lockfree_claim` untouched, no CAS anywhere
+  (plain release stores + a defensive state check in
+  `begin_commit`). Only legal backward edge: `CLAIMING → IDLE` on
+  failed/EOF claim.
+- **Per-batch `lseek` removed from publication**: new TLS
+  `worker_output_end` cursor (rollback frontier), initialized once
+  per worker via `worker_txn_init_output_cursor` (shared with the
+  existing ack-offset sync lseek — zero new syscalls), snapshotted
+  at claim, advanced only after COMPLETE emits (`fr_py_emit`,
+  spawn/plugin emit-record sites, splice loop, ordered-ack sync,
+  new `fr_py_output_advanced` for the Python v0 direct-write path).
+  Four state stores (~2ns) replace a ~250ns syscall; 5M benchmarks
+  must show no statistically significant regression.
+- **Python worker FD ordering fixed** (`_worker.py`: `init →
+  set_output_fd → ack_init`; the old order reset the txn fd to -1
+  and silently disarmed rollback). Both reactors now call recovery
+  for ALL deaths including exit 0 (the C machine classifies;
+  `CLAIMED + exit 0` stays FATAL/worker-bug).
+- **12 adversarial tests** (`python/tests/test_recovery_adversarial.py`):
+  forced claim/commit-window deaths (env-injected SIGKILL, unit +
+  orchestrator-abort), ordered/unordered SIGKILL rollback, exact
+  output_start across simulated respawn, publish→payload boundary,
+  2/3/back-to-back deaths, no-lseek-in-claim white-box lock-in.
+- Full suites: Python 430 green (418 + 12), bash unaffected
+  (reactor verified by syntax + existing resume coverage).
+- Documented deviation from the work-order sketch: recovery keeps
+  the existing `S_ISREG` + `size >= start` truncation guards (the
+  sketch's `output_start > 0` snippet would have skipped legitimate
+  first-batch rollbacks to 0).
+
 ### Universal WorkerTxn recovery: engine-wide, all failure types (W-PY28)
 
 - **First engine unfreeze since v3.5.2** (additive + 2 one-line

@@ -54,12 +54,11 @@ const char *fr_py_version(void) {
 }
 
 /* W-PY28: worker-local output fd for transaction publication.
- * fr_py_claim publishes output_start = SEEK_CUR of this fd at claim
- * time (append-only per-worker memfd → pre-batch end position). Set
- * once per worker via fr_py_set_output_fd (Python _run) or directly
- * (C loops, same TU); -1 disarms (output_start publishes 0 = no
- * rollback). Reset by fr_py_worker_init (fresh generation). Declared
- * here (before first use in fr_py_worker_init) because C demands it. */
+ * W-PY29: publication now snapshots the TLS worker_output_end cursor
+ * (initialized by fr_py_ack_init), so this naming is vestigial — kept
+ * for API compatibility (workers still set it; nothing reads it).
+ * Declared here (before first use in fr_py_worker_init) because C
+ * demands it. */
 static __thread int fr_py_txn_out_fd = -1;
 
 /* Set the worker-local output fd for W-PY28 transaction records.
@@ -75,13 +74,26 @@ int fr_py_set_output_fd(int fd) {
  * a respawned ordered worker's first packet would cover the whole
  * file (TLS starts 0), duplicating everything downstream. Fresh
  * workers are a no-op (fresh memfd offset is already 0). Assigns
- * only on lseek success (a pipe fd must never install -1). */
+ * only on lseek success (a pipe fd must never install -1).
+ * W-PY29: also initializes the output cursor (one lseek per worker,
+ * shared with the offset sync above — no extra syscall). */
 int fr_py_ack_init(int fd) {
     if (fd >= 0) {
         off_t pos = lseek(fd, 0, SEEK_CUR);
         if (pos != (off_t)-1)
             last_ack_offset = pos;
     }
+    worker_txn_init_output_cursor(fd);
+    return 0;
+}
+
+/* W-PY29: manual output-cursor advance for emit paths that bypass
+ * fr_py_emit (Python v0 direct-write path in _worker.py). The caller
+ * passes the TOTAL record bytes just made durable (framing +
+ * payload); the cursor moves only on complete emits. Best-effort,
+ * never fails (returns 0 always so workers never branch on it). */
+int fr_py_output_advanced(uint64_t nbytes) {
+    worker_output_end += (off_t)nbytes;
     return 0;
 }
 
@@ -201,9 +213,25 @@ int fr_py_claim(fr_py_batch_t *out) {
         if (my_numa_node >= (int)global_num_nodes)
             my_numa_node = 0;
     }
+    /* W-PY29: IDLE → CLAIMING before the ticket is issued
+     * (do_lockfree_claim is untouched — the hook only brackets it). */
+    worker_txn_begin_claim(g_fr_config.ring_wid);
+    /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_CLAIM=1 makes
+     * the worker SIGKILL itself inside the claim-without-publish
+     * window (deterministic race injection). Inert unless the env var
+     * is set. Deliberately uncached: the value is read fresh so
+     * forked children observe the post-fork environment (a cached
+     * "unset" inherited across fork would disarm the hook) and
+     * set/del cycles across tests behave. Cost is one getenv per
+     * claim (~tens of ns, invisible next to batch work). */
+    if (getenv("FORKRUN_TEST_DIE_AT_CLAIM") != NULL)
+        raise(SIGKILL);
     rc = do_lockfree_claim(&batch, true);
-    if (rc != 0)
+    if (rc != 0) {
+        /* EOF/abort: no batch acquired — CLAIMING → IDLE. */
+        worker_txn_abort_claim(g_fr_config.ring_wid);
         return rc;
+    }
 
     worker_last_idx = batch.batch_idx;
     worker_last_cnt = batch.slots;
@@ -271,14 +299,14 @@ int fr_py_claim(fr_py_batch_t *out) {
         out->major = batch.major;
         out->minor = batch.minor;
     }
-    /* W-PY28: publish the transaction record first-thing after the
-     * claim lands (same placement rule as ring_claim_main — every
-     * instruction before the publish widens the claim-without-publish
-     * race). Python workers bypass ring_claim_main, so the shim
-     * publishes here; the poison accounting above is part of the
-     * claim (not "before" it) — the record carries the final
-     * num_kills the parent must increment from. */
-    worker_txn_publish(g_fr_config.ring_wid, &batch, fr_py_txn_out_fd);
+    /* W-PY29: CLAIMING → CLAIMED first-thing after the claim lands
+     * (same placement rule as ring_claim_main — every instruction
+     * before the publish widens the claim-without-publish race).
+     * Python workers bypass ring_claim_main, so the shim publishes
+     * here; the poison accounting above is part of the claim (not
+     * "before" it) — the record carries the final num_kills the
+     * parent must increment from. Syscall-free (TLS cursor). */
+    worker_txn_publish(g_fr_config.ring_wid, &batch);
     return 0;
 }
 
@@ -741,6 +769,9 @@ int fr_py_exec_spawn(char **argv, int argc, uint64_t in_off, uint64_t in_len,
              * empty output is no record, not an empty record). */
             if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0)
                 erc = -3;
+            else if (cap_len > 0)
+                /* W-PY29: complete record durable — advance frontier. */
+                worker_txn_advance_output(-1, 16 + cap_len);
             return erc;
         }
         return code; /* retryable command failure */
@@ -965,6 +996,8 @@ static int fr_py_plugin_invoke(int ingress_fd, int out_fd,
         if (fr_py_emit_record(out_fd, batch_idx, cap_fd, 0, cap_len) != 0) {
             return -1;
         }
+        /* W-PY29: complete record durable — advance frontier. */
+        worker_txn_advance_output(wid, 16 + cap_len);
     }
 
     /* ring_call truncation rule: nonzero → &0xFF, never silent 0. */
@@ -1180,6 +1213,10 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
                 }
             }
         }
+        /* W-PY29: the COMPLETE record (16B framing + payload) is
+         * durable — advance the rollback frontier. Partial writes
+         * return -1 above before reaching here. */
+        worker_txn_advance_output((int)wid, 16 + data_len);
     }
 
     if (signal_fd < 0)
@@ -1316,6 +1353,10 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
                     goto payload_error; /* short: retry, don't emit */
                 left -= (uint64_t)n;
             }
+            /* W-PY29: header + full body durable (both the sendfile
+             * and the emit_record-fallback sub-paths converge here on
+             * success) — advance the rollback frontier once. */
+            worker_txn_advance_output(wid, 16 + claimed.length);
         }
 
         if (signal_fd >= 0) {
@@ -1857,6 +1898,16 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
 
     if (!state || !g_state)
         return EXECUTION_FAILURE;
+    /* W-PY29: CLAIMED → COMMITTING before any ack side effect
+     * (fallow/order packets) goes out — pairs with worker_txn_clear
+     * below. Defensive: no-ops when no transaction is active. */
+    worker_txn_begin_commit(g_fr_config.ring_wid);
+    /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_COMMIT=1 makes
+     * the worker SIGKILL itself inside the ack→clear window
+     * (deterministic race injection). Inert unless set; read fresh
+     * per ack (see DIE_AT_CLAIM note on fork inheritance). */
+    if (getenv("FORKRUN_TEST_DIE_AT_COMMIT") != NULL)
+        raise(SIGKILL);
     sa_ign.sa_handler = SIG_IGN;
     sigemptyset(&sa_ign.sa_mask);
     sa_ign.sa_flags = 0;
@@ -1968,6 +2019,10 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
                     return EXECUTION_FAILURE;
                 }
                 last_ack_offset = curr;
+                /* W-PY29: reuse curr for the rollback frontier (zero
+                 * new syscalls). Self-healing: corrects any drift
+                 * between emit-time advances and the live end. */
+                worker_output_end = curr;
             }
         } else {
             if (robust_pipe_write(target_fd, &op, sizeof(op)) < 0) {
@@ -1980,9 +2035,9 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
 
     worker_last_cnt = 0;
 
-    /* W-PY28: clear the transaction record (pairs with the claim-time
-     * publish in fr_py_claim above). Runs after every ack side effect
-     * is on its pipe, so TXN_IDLE means fully committed. */
+    /* W-PY29: COMMITTING → IDLE (pairs with the begin_commit above).
+     * Runs after every ack side effect is on its pipe, so TXN_IDLE
+     * means fully committed. */
     worker_txn_clear(g_fr_config.ring_wid);
 
     sigaction(SIGPIPE, &sa_old, NULL);

@@ -233,6 +233,27 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### WorkerTxn hardening: 4-state machine + output cursor (W-PY29)
+
+- **4-state transaction machine** (`IDLE → CLAIMING → CLAIMED →
+  COMMITTING → IDLE`, `WorkerTxn.state` 0/1/2/3): `TXN_CLAIMING`
+  brackets `do_lockfree_claim` (claim-window death → RACE/abort);
+  `TXN_COMMITTING` brackets ack side effects (ack-window death →
+  RACE/abort, never a re-execution double-emit). Both hooks on BOTH
+  entry paths; `do_lockfree_claim` untouched, no CAS (release stores
+  + defensive check in `begin_commit`). Only backward edge:
+  `CLAIMING → IDLE` on failed/EOF claim.
+- **Per-batch `lseek` removed**: TLS `worker_output_end` cursor
+  (init once per worker, snapshot at claim, advance only after
+  COMPLETE emits via `fr_py_emit`, spawn/plugin sites, splice loop,
+  ordered-ack sync, `fr_py_output_advanced` for the v0 path). Four
+  stores (~2ns) replace a ~250ns syscall.
+- **Python FD ordering fixed** (init → set_output_fd → ack_init);
+  both reactors recover ALL deaths incl. exit 0 (C classifies).
+- **12 adversarial tests** (`test_recovery_adversarial.py`); full
+  suite 430 green. Recovery keeps `S_ISREG` + `size >= start`
+  guards (first-batch rollback to 0 intact).
+
 ### Universal WorkerTxn recovery: engine-wide, all failure types (W-PY28)
 
 - **First engine unfreeze since v3.5.2** (additive + 2 one-line
