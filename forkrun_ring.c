@@ -62,6 +62,7 @@
 #include <string.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -6034,6 +6035,93 @@ static inline void worker_txn_advance_output(int wid,
     worker_output_end += (off_t)bytes_written;
 }
 
+/* W-PY30: Final-attempt coredump policy.
+ *
+ * Coredumps are OFF by default on all workers (soft RLIMIT_CORE 0,
+ * set at worker startup). They are enabled for exactly one batch
+ * execution: the final allowed attempt of an escrowed batch — the
+ * attempt whose failure poisons the batch. Forensics are therefore
+ * captured exactly once per ultimately-poisoned batch that dies, and
+ * never for any batch the auto-retry saves.
+ *
+ * Engine mapping of the retry counter: the escrow deposit already
+ * incremented num_kills (deposit passes kills+1), so on an escrow
+ * read with num_kills=k, this attempt's failure deposits k+1 and the
+ * next read poisons iff k+1 >= limit. The final attempt is the
+ * running attempt with k+1 == limit (k < limit, else it would have
+ * been poison-skipped without running). limit<0 (infinite retries)
+ * has no final attempt — never armed.
+ *
+ * Lifecycle: armed at claim (both claim wrappers, only when the
+ * batch will actually run); disarmed at ack entry and at worker-side
+ * escrow deposit (soft-fail continuation). A death during the armed
+ * window dumps via normal OS crash handling; success/skip paths
+ * disarm, so the enabled limit never leaks into later batches.
+ * Only plain setrlimit on self — no new state, no IPC. Fresh and
+ * poison-skip claims cost one branch (no syscall); only the final
+ * attempt pays two syscalls (get+setrlimit) per claim. */
+static __thread int txn_coredump_armed = 0;
+
+/* Per-worker coredump defaults. Call ONCE at worker startup (fresh
+ * or respawned), from both worker inits (ring_worker inc,
+ * fr_py_worker_init — every worker path funnels through one).
+ * Preserves the inherited HARD limit (raising hard needs privilege;
+ * inherited hard is typically INFINITY — it is kept, never lowered,
+ * so the arm below can always raise soft back up to it) and forces
+ * soft to 0. Also pins coredump_filter to anon-private + ELF
+ * headers + hugetlb-private (0x31): drops file-backed and
+ * anon-shared arenas — the multi-GB ingress memfds — so a dump
+ * that does fire stays small and fast. Best-effort throughout;
+ * never fails startup. */
+static inline void worker_coredump_startup(void) {
+    struct rlimit rl;
+    FILE *f;
+
+    if (getrlimit(RLIMIT_CORE, &rl) == 0) {
+        rl.rlim_cur = 0;
+        setrlimit(RLIMIT_CORE, &rl);
+    }
+    txn_coredump_armed = 0;
+    f = fopen("/proc/self/coredump_filter", "w");
+    if (f) {
+        /* NOTE: decimal on write, hex on read — 49 == 0x31. */
+        fputs("49", f);
+        fclose(f);
+    }
+}
+
+/* Arm coredumps iff this claim is the final allowed attempt.
+ * num_kills/poisoned come from the just-completed claim decision;
+ * retry_limit is the worker-local config. */
+static inline void worker_coredump_arm_if_final(uint32_t num_kills,
+                                                uint32_t poisoned,
+                                                int retry_limit) {
+    struct rlimit rl;
+    uint32_t threshold;
+
+    if (poisoned || num_kills == 0 || retry_limit < 0) return;
+    threshold = (retry_limit > 0) ? (uint32_t)retry_limit : 1;
+    if (num_kills + 1 < threshold) return; /* not the final attempt */
+    /* Final attempt: its failure poisons. Raise soft to hard —
+     * always permitted (never exceeds the preserved hard limit). */
+    if (getrlimit(RLIMIT_CORE, &rl) != 0) return;
+    rl.rlim_cur = rl.rlim_max;
+    if (setrlimit(RLIMIT_CORE, &rl) != 0) return;
+    txn_coredump_armed = 1;
+}
+
+/* Disarm coredumps (batch execution over). No-op unless armed, so
+ * the common path costs one TLS branch and no syscall. */
+static inline void worker_coredump_disarm(void) {
+    struct rlimit rl;
+
+    if (!txn_coredump_armed) return;
+    txn_coredump_armed = 0;
+    if (getrlimit(RLIMIT_CORE, &rl) != 0) return;
+    rl.rlim_cur = 0;
+    setrlimit(RLIMIT_CORE, &rl);
+}
+
 static int ring_claim_main(int argc, char **argv) {
   if (!state || !g_state) return EXECUTION_FAILURE;
   const char *v_target = "REPLY";
@@ -6193,6 +6281,12 @@ static int ring_claim_main(int argc, char **argv) {
     }
   }
 
+  /* W-PY30: arm coredumps iff this is the final allowed attempt (an
+   * escrowed batch whose failure poisons). Fresh batches and
+   * poison-skips return inside (one branch, no syscall). */
+  worker_coredump_arm_if_final(batch.num_kills, batch.poisoned,
+                               g_fr_config.retry_limit);
+
   return 0;
 }
 
@@ -6256,6 +6350,11 @@ static int ring_ack_main(int argc, char **argv) {
       my_idx = op.major_idx;
     }
   }
+
+  /* W-PY30: batch execution is over — disarm a final-attempt
+   * coredump before any ack side effect (no-op unless armed: one TLS
+   * branch, no syscall on the common path). */
+  worker_coredump_disarm();
 
   /* W-PY29: CLAIMED → COMMITTING before any ack side effect
    * (fallow/order packets) goes out — a death from here to the clear
@@ -7265,6 +7364,9 @@ static int ring_worker_main(int argc, char **argv) {
       }
     }
     __atomic_fetch_add(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);
+    /* W-PY30: per-worker coredump defaults (dumps off; generous hard
+     * preserved for final-attempt arming; small-dump filter). */
+    worker_coredump_startup();
   } else if (!strcmp(argv[1], "dec")) {
     cleanup_waiter_state();
     __atomic_fetch_sub(&state[node].active_workers, 1, __ATOMIC_SEQ_CST);

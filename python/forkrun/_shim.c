@@ -177,6 +177,9 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
      * (fork inherits the value; the worker re-arms it explicitly via
      * fr_py_set_output_fd or the C loops below). */
     fr_py_txn_out_fd = -1;
+    /* W-PY30: per-worker coredump defaults (dumps off; generous hard
+     * preserved for final-attempt arming; small-dump filter). */
+    worker_coredump_startup();
 
     if (g_fr_config.ring_node_id >= 0)
         my_numa_node = g_fr_config.ring_node_id;
@@ -298,6 +301,11 @@ int fr_py_claim(fr_py_batch_t *out) {
         out->length = batch.length;
         out->major = batch.major;
         out->minor = batch.minor;
+        /* W-PY30: arm coredumps iff this is the final allowed attempt
+         * (same condition as ring_claim_main — poisoned/fresh/limit<0
+         * return inside with no syscall). */
+        worker_coredump_arm_if_final(batch.num_kills, poisoned,
+                                     g_fr_config.retry_limit);
     }
     /* W-PY29: CLAIMING → CLAIMED first-thing after the claim lands
      * (same placement rule as ring_claim_main — every instruction
@@ -334,6 +342,10 @@ int fr_py_escrow_deposit(unsigned int kills) {
     int node;
     struct EscrowPacket ep;
 
+    /* W-PY30: this batch's execution is over (soft failure → retry
+     * via escrow) — disarm a final-attempt coredump so it cannot leak
+     * into the worker's subsequent batches. No-op unless armed. */
+    worker_coredump_disarm();
     if (worker_last_cnt == 0)
         return 0;
     node = my_numa_node;
@@ -1898,6 +1910,9 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
 
     if (!state || !g_state)
         return EXECUTION_FAILURE;
+    /* W-PY30: batch execution is over — disarm a final-attempt
+     * coredump (no-op unless armed). */
+    worker_coredump_disarm();
     /* W-PY29: CLAIMED → COMMITTING before any ack side effect
      * (fallow/order packets) goes out — pairs with worker_txn_clear
      * below. Defensive: no-ops when no transaction is active. */

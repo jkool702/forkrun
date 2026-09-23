@@ -233,6 +233,15 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### Final-attempt coredump policy (W-PY30)
+
+- **Coredumps off by default** (soft `RLIMIT_CORE` 0 at worker
+  startup, hard preserved); **armed only for the final allowed
+  escrow attempt** (`num_kills + 1 == retry_limit`, both claim
+  wrappers); disarm at ack entries + worker-side escrow deposit.
+  `coredump_filter` pinned to `0x31` (drops multi-GB shared
+  arenas). 7 new tests; Python 437 + bash 89/262 green.
+
 ### WorkerTxn hardening: 4-state machine + output cursor (W-PY29)
 
 - **4-state transaction machine** (`IDLE → CLAIMING → CLAIMED →

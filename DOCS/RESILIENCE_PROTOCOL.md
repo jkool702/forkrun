@@ -93,6 +93,23 @@ If a specific batch of data is fundamentally malformed, it will persistently kil
 3. **The Safe Skip:** The worker skips processing the batch entirely. It acknowledges (`ring_ack`) the batch to ensure global pipeline ordering continues, prints a warning to `stderr`, and alerts the orchestrator.
 4. **The Global State:** The orchestrator records the poisoned batch index and alters the final pipeline exit code to `3` to explicitly notify the user of partial data loss. 
 
+### 3.1 Final-Attempt Coredumps (W-PY30)
+
+Coredumps are disabled by default on every worker (soft
+`RLIMIT_CORE` 0 at startup; the generous hard limit is preserved so
+re-enabling needs no privilege). They are armed for exactly one
+batch execution: the final allowed escrow attempt — the running
+attempt with `num_kills + 1 == RETRY_LIMIT`, whose failure poisons
+the batch. Success, poison-skip, and soft-fail (escrow deposit)
+paths disarm, so the enabled limit never leaks into later batches.
+A death in the armed window produces exactly one core per poisoned
+batch; batches the auto-retry saves never dump. `coredump_filter`
+is pinned to `0x31` (anonymous-private + ELF headers + hugetlb-private) so the dump
+excludes the multi-GB shared ingress arenas. Accepted cost: the
+dump delays death-pipe visibility on final-attempt crashes — but
+that batch is being poisoned regardless, so the latency never
+delays a save. 
+
 ---
 
 ## §4. Catastrophic Failure: Conservative Abort + Seqlock Ledger

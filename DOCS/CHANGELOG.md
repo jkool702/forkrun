@@ -2,6 +2,35 @@
 
 ## v3.6.0 (unreleased)
 
+### Final-attempt coredump policy (W-PY30)
+
+- **Coredumps off by default on all workers** (soft `RLIMIT_CORE` 0
+  at worker startup via both inits — `ring_worker inc` and
+  `fr_py_worker_init`; inherited hard limit preserved, never
+  lowered, so re-enabling later needs no privilege).
+- **Armed for exactly one batch execution**: the final allowed
+  escrow attempt (running with `num_kills + 1 == retry_limit` and
+  not poison-skipped). Hooks in both claim wrappers; disarm at both
+  ack entries and at worker-side escrow deposit (soft-fail
+  continuation), so the enabled limit never leaks into later
+  batches. A death in the armed window dumps via normal OS handling;
+  the next generation reads `kills == limit` and poisons (existing
+  logic). `limit < 0` (infinite retries) never arms. Fresh and
+  poison-skip claims cost one branch, no syscall.
+- **`coredump_filter` pinned to `0x31`** (anon-private + ELF headers
+  + hugetlb-private)
+  at worker startup: drops file-backed and anon-shared arenas — the
+  multi-GB ingress memfds that cost systemd-coredump ~10s per SEGV
+  — so a dump that fires stays small and fast.
+- **Accepted side effect (documented):** `do_coredump` delays death
+  becoming visible on the death pipe, so recovery-detection latency
+  is higher specifically on final-attempt crashes. Acceptable: the
+  batch is being poisoned regardless — the latency delays only the
+  already-final outcome, never a save.
+- 7 new tests (`python/tests/test_recovery_coredump.py`); full
+  suites: Python 437 green, bash 89 + 262 green (engine blobs
+  re-embedded for x86-64 v2/v3/v4).
+
 ### WorkerTxn hardening: 4-state machine + output cursor (W-PY29)
 
 - **4-state transaction machine** (`IDLE → CLAIMING → CLAIMED →

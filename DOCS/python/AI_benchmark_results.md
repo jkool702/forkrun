@@ -35,6 +35,68 @@
 FORKRUN C PLUGIN WINS ALL FOUR UDF WORKLOADS OUTRIGHT.
 NO SCALING DEFECTS. NO CLIFFS. NO DIPS.
 
+┌────────────────────────────────────────────────────────────────────┐
+│  FAULT INJECTION (W-PY29): medium 5M, lines=100, order=index,      │
+│  Python payload, median of 2 (+warmup). Core dumps disabled        │
+│  (RLIMIT_CORE=0 — systemd-coredump spends ~10s per SEGV writing    │
+│  multi-GB memfd mappings; environmental, not forkrun).             │
+├──────────────┬──────────┬──────────┬──────────┬────────┬───────────┤
+│ Mode         │ 8w rec/s │ 14w rec/s│ 28w rec/s│ Deaths │ Output    │
+│              │          │          │          │(8/14/28│           │
+├──────────────┼──────────┼──────────┼──────────┼────────┼───────────┤
+│ clean        │  414k    │  604k    │  606k    │  0     │ exact     │
+│ burst SIGKILL│  404k    │  558k    │  482k    │ 8/14/28│ exact     │
+│ sustained    │  411k    │  582k    │  556k    │ 4/8/15 │ exact     │
+│ segv-once    │  403k    │  594k    │  571k    │ 1 each │ exact     │
+│ poison       │  408k    │  603k    │  585k    │  0     │ exact-1   │
+└──────────────┴──────────┴──────────┴──────────┴────────┴───────────┘
+
+W-PY29 fault reading:
+- Every fault mode is byte-exact vs clean (all 50k batches). The old
+  "dead batch LOST, output truncated at hole" semantics are gone:
+  parent-side WorkerTxn recovery (revert + escrow kills+1 + respawn)
+  re-executes the orphan exactly once.
+- Poison (batch 25000 fails every attempt): killed 3 times, then
+  poison-skipped — zero worker deaths, pipeline completes with
+  exactly that batch absent (`exact-1`), at ~clean throughput (3
+  wasted payload executions are invisible at 50k batches).
+- Recovery tax is single-digit % for realistic death counts: burst
+  of W simultaneous SIGKILLs costs 2-8% at 8/14w; a lone SIGSEGV
+  costs ~0-3% (noise floor ~±5% at 2 trials). 28-worker burst of 28
+  simultaneous deaths (respawn storm) costs ~20% — still exact.
+- Sustained ~1 death per 350k records costs ~40ms/death (fork +
+  re-claim + rework + re-ack), ~8% at 28w.
+- Respawn cap (3/slot) bounds genuine crash loops into a loud abort;
+  all schedules above stay far below it by construction.
+
+┌────────────────────────────────────────────────────────────────────┐
+│  FAULT x4 SCALE (W-PY29 follow-up): same kill counts, 20M records  │
+│  (200k batches), 28 workers. Question: is recovery cost a fixed   │
+│  per-death price (relative drop shrinks 4x) or scale-proportional? │
+├──────────────┬──────────┬──────────┬────────┬────────┬─────────────┤
+│ Mode         │ 5M rec/s │ 20M rec/s│ 5M +s  │ 20M +s │ Deaths      │
+├──────────────┼──────────┼──────────┼────────┼────────┼─────────────┤
+│ clean        │  606k    │  653k    │   —    │   —    │  0          │
+│ burst SIGKILL│  482k    │  574k    │ +2.2s  │ +4.2s  │ 28 (head)   │
+│ burst-tail   │   —      │  570k    │   —    │ +4.5s  │ 28 (tail)   │
+│ sustained    │  556k    │  592k    │ +0.6s  │ +2.0s  │ 15          │
+│ segv-head/tail│ 571k    │  633k    │ +0.6s  │ +1.0s  │ 1           │
+└──────────────┴──────────┴──────────┴────────┴────────┴─────────────┘
+(death counts identical across scales by construction; all exact.)
+
+Answer: NEITHER pure model holds — the 1/4-relative-drop hypothesis
+is falsified for burst (relative drop shrank only ~40%, 20.6%→12.1%),
+but so is a purely proportional model (absolute drops shrank ~35%:
+124k→79k). The data fits a two-component cost per death: a FIXED
+term (~50-80ms: death-pipe detection, revert, escrow, fork, rework)
+plus a DATA-SCALE term (~10-14ms/GB). Head-vs-tail bursts are
+identical, so it is NOT orderer hole-backlog — the leading suspect
+for the scale term is process teardown/fork page-table work on the
+parent's full input+output mappings (~2x input bytes mapped), which
+grows linearly with data size and is paid per respawn. Follow-up:
+verify via fork-latency microbenchmark; reduce by shrinking parent
+mappings (e.g., fallow-punch output memfds harder) if it matters.
+
 W-PY29 note: forkrun rows re-measured post-hardening (median of 3,
 order=index, workers 8/14/28 on the same 28c box class; per-worker
 table below). Non-forkrun rows unchanged (W-PY29 touches only the
