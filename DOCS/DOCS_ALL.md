@@ -233,6 +233,46 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### Universal WorkerTxn recovery: engine-wide, all failure types (W-PY28)
+
+- **First engine unfreeze since v3.5.2** (additive + 2 one-line
+  hooks): per-worker transaction records (`WorkerTxn`, 128B each,
+  1024 slots in MAP_SHARED `GlobalState`) published at claim
+  (release) and cleared at ack (release). Happy-path cost is two
+  cache-local stores (~1ns, invisible).
+- **New `ring_recover_worker` core + loadable** (bash) and
+  `fr_py_recover_worker` (Python shim, typed, no argv): one
+  parent-side path for Python exceptions, graceful exits, SIGSEGV,
+  SIGKILL, and OOM — revert partial output (regular files only),
+  escrow with kills+1, respawn. Returns 0..5
+  (RECOVERED/NO_BATCH/NORMAL_EXIT/ALREADY_DONE/RACE/FATAL).
+- **Bash:** EXIT trap is cleanup-only (no more double-escrow);
+  WORKER_DEATH recovers via the record (no trap-ACK wait, no 3s
+  grace); trap-ACK pipe kept for poison notices only. SIGKILLed
+  workers now recover (poison cascade) instead of aborting.
+- **Python:** reactor deaths recover via the record (grace
+  machinery retained as fallback for pre-W-PY28 substrates);
+  worker-side escrow kept for live-worker errors (a death per
+  retry would trip the respawn cap on deterministic failures —
+  indistinguishable from crash loops parent-side). Crash-once
+  SIGKILL now completes byte-exact (new regression test).
+- **Honest result — hypothesis falsified as stated:** the work
+  order's "3-second timeout followed by abort and checkpoint" is
+  gone for worker deaths, so crash-manufactured checkpoints no
+  longer exist: 17 bash resume tests now manufacture checkpoints
+  via operator HUP (size-gated, self-synchronizing) instead of
+  `kill -9`, and 1 Python test was rewritten (SIGKILL →
+  respawn-cap, no grace wait). Documented residuals: ~ns
+  claim-without-publish race, ACK-clear race double-emit window,
+  pipe outputs at-least-once, first-batch bash revert hole.
+- **Latent bugs fixed as drive-bys:** respawned ordered workers
+  re-emit the whole file (missing ack-offset sync — new
+  `fr_py_ack_init`, called on all worker entries); `UINT64_MAX`
+  disarms output rollback (0 is a legitimate position).
+- Full suites: Python 418 green, bash test_frun.sh 89/89,
+  comprehensive 257 green + 3 intent-skips (M2/M3/M16 need M1's
+  old checkpoint contract), C plugins green.
+
 ### Python frontend: C plugin worker loop, opt-in (W-PY26)
 
 - **New `fr_py_worker_plugin_loop`** (`_shim.c` additions only,

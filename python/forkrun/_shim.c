@@ -53,6 +53,38 @@ const char *fr_py_version(void) {
     return FORKRUN_RING_VERSION;
 }
 
+/* W-PY28: worker-local output fd for transaction publication.
+ * fr_py_claim publishes output_start = SEEK_CUR of this fd at claim
+ * time (append-only per-worker memfd → pre-batch end position). Set
+ * once per worker via fr_py_set_output_fd (Python _run) or directly
+ * (C loops, same TU); -1 disarms (output_start publishes 0 = no
+ * rollback). Reset by fr_py_worker_init (fresh generation). Declared
+ * here (before first use in fr_py_worker_init) because C demands it. */
+static __thread int fr_py_txn_out_fd = -1;
+
+/* Set the worker-local output fd for W-PY28 transaction records.
+ * Call once post-fork, post-init (idempotent; -1 disarms). */
+int fr_py_set_output_fd(int fd) {
+    fr_py_txn_out_fd = fd;
+    return 0;
+}
+
+/* W-PY28: sync the ack offset for a (possibly respawned) worker.
+ * ring_ack_init_main's shim twin: last_ack_offset = SEEK_CUR so the
+ * next OrderPacket spans only this generation's appends. Without it
+ * a respawned ordered worker's first packet would cover the whole
+ * file (TLS starts 0), duplicating everything downstream. Fresh
+ * workers are a no-op (fresh memfd offset is already 0). Assigns
+ * only on lseek success (a pipe fd must never install -1). */
+int fr_py_ack_init(int fd) {
+    if (fd >= 0) {
+        off_t pos = lseek(fd, 0, SEEK_CUR);
+        if (pos != (off_t)-1)
+            last_ack_offset = pos;
+    }
+    return 0;
+}
+
 /* Initialize the substrate for one UMA node. lines/bytes are mutually
  * exclusive (0 = default adaptive). Returns the engine rc (0 ok, 1 fail). */
 int fr_py_init(int lines, int bytes) {
@@ -129,6 +161,10 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
     g_fr_config.spawn_ceiling = -1;
     g_fr_config_filled = true;
     g_debug = g_fr_config.debug;
+    /* W-PY28: fresh generation — drop any inherited output-fd naming
+     * (fork inherits the value; the worker re-arms it explicitly via
+     * fr_py_set_output_fd or the C loops below). */
+    fr_py_txn_out_fd = -1;
 
     if (g_fr_config.ring_node_id >= 0)
         my_numa_node = g_fr_config.ring_node_id;
@@ -235,6 +271,14 @@ int fr_py_claim(fr_py_batch_t *out) {
         out->major = batch.major;
         out->minor = batch.minor;
     }
+    /* W-PY28: publish the transaction record first-thing after the
+     * claim lands (same placement rule as ring_claim_main — every
+     * instruction before the publish widens the claim-without-publish
+     * race). Python workers bypass ring_claim_main, so the shim
+     * publishes here; the poison accounting above is part of the
+     * claim (not "before" it) — the record carries the final
+     * num_kills the parent must increment from. */
+    worker_txn_publish(g_fr_config.ring_wid, &batch, fr_py_txn_out_fd);
     return 0;
 }
 
@@ -1202,6 +1246,10 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
 
     if (ingress_fd < 0 || out_fd < 0)
         return 1;
+    /* W-PY28: name the output fd for transaction publication + sync
+     * the ack offset (respawned generations append to a reused fd). */
+    fr_py_txn_out_fd = out_fd;
+    fr_py_ack_init(out_fd);
     while (1) {
         off_t end = (off_t)-1;
         off_t woff;
@@ -1931,6 +1979,12 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
     }
 
     worker_last_cnt = 0;
+
+    /* W-PY28: clear the transaction record (pairs with the claim-time
+     * publish in fr_py_claim above). Runs after every ack side effect
+     * is on its pipe, so TXN_IDLE means fully committed. */
+    worker_txn_clear(g_fr_config.ring_wid);
+
     sigaction(SIGPIPE, &sa_old, NULL);
     return EXECUTION_SUCCESS;
 }
@@ -2248,6 +2302,21 @@ int fr_py_is_resume_mode(void) {
 }
 
 /* =====================================================================
+ * W-PY28: parent-side universal recovery — typed wrapper over the
+ * engine core (no argv marshalling). The reactor calls this when ANY
+ * worker dies for ANY reason; return codes are the core's 0..5
+ * (RECOVERED / NO_BATCH / NORMAL_EXIT / ALREADY_DONE / RACE /
+ * FATAL). The core is static to the shared TU, so this thin
+ * non-static wrapper is what ctypes binds. Direct call, zero
+ * marshalling overhead.
+ * ===================================================================== */
+int fr_py_recover_worker(int wid, int incarnation, int output_fd,
+                         int exit_code) {
+    return ring_recover_worker_core(wid, incarnation, output_fd,
+                                    exit_code);
+}
+
+/* =====================================================================
  * W-PY26: C worker loop for plugin mode — zero Python per batch.
  *
  * The plugin equivalent of fr_py_worker_splice_loop: owns the ENTIRE
@@ -2312,6 +2381,10 @@ int fr_py_worker_plugin_loop(int wid, const char *path,
         return 1;
     if (order_fd >= 0)
         g_fr_config.fd_order_pipe = order_fd;
+    /* W-PY28: name the output fd for transaction publication + sync
+     * the ack offset (respawned generations append to a reused fd). */
+    fr_py_txn_out_fd = out_fd;
+    fr_py_ack_init(out_fd);
     if (fr_py_plugin_ensure(path, func_name) != 0)
         return 1;
 

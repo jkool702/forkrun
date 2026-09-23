@@ -302,6 +302,25 @@ def _setup_signatures(lib) -> None:
         lib.fr_py_is_resume_mode.restype = ctypes.c_int
     except AttributeError:
         pass
+    try:
+        # W-PY28: worker-local output fd for txn publication.
+        lib.fr_py_set_output_fd.argtypes = [ctypes.c_int]
+        lib.fr_py_set_output_fd.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY28: ack-offset sync for (re)spawned workers.
+        lib.fr_py_ack_init.argtypes = [ctypes.c_int]
+        lib.fr_py_ack_init.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
+        # W-PY28: parent-side universal recovery (0..5 decision).
+        lib.fr_py_recover_worker.argtypes = [ctypes.c_int, ctypes.c_int,
+                                             ctypes.c_int, ctypes.c_int]
+        lib.fr_py_recover_worker.restype = ctypes.c_int
+    except AttributeError:
+        pass
 
 
 def load(path: str | None = None):

@@ -201,6 +201,50 @@ class TestWorkerRespawn(unittest.TestCase):
             import shutil as _shutil
             _shutil.rmtree(plugin_dir, ignore_errors=True)
 
+    def test_sigkill_once_full_recovery(self):
+        """W-PY28 Tier-3: crash-once SIGKILL mid-run → parent-side
+        WorkerTxn recovery (revert + escrow + respawn) → pipeline
+        completes with byte-exact full results (zero loss).
+
+        Pre-W-PY28 this ended in the 3s trap-ACK timeout → abort.
+        The orphaned batch re-executes exactly once on the respawned
+        worker (crash marker consumed), so unlike the poison-skip
+        cases above, NOTHING is lost here.
+        """
+        path = _make_input(2000)
+        plugin_dir = tempfile.mkdtemp(prefix="w28killonce_")
+        mod_path = os.path.join(plugin_dir, "w28killonce_mod.py")
+        marker = os.path.join(plugin_dir, "crashed")
+        try:
+            with open(mod_path, "w") as fh:
+                fh.write(
+                    "import os, signal\n"
+                    "MARKER = %r\n"
+                    "def payload(batch):\n"
+                    "    if (batch.batch_index == 0\n"
+                    "            and not os.path.exists(MARKER)):\n"
+                    "        open(MARKER, 'w').write('x')\n"
+                    "        os.kill(os.getpid(), signal.SIGKILL)\n"
+                    "    return bytes(batch.data).upper()\n" % marker)
+            sys.path.insert(0, plugin_dir)
+            try:
+                t0 = time.monotonic()
+                res = forkrun.map("w28killonce_mod:payload", path,
+                                  workers=2, orchestrator=True,
+                                  order="index")
+                dt = time.monotonic() - t0
+            finally:
+                sys.path.remove(plugin_dir)
+            healthy = forkrun.map(_up, path, workers=2, order="index")
+            # Full recovery: every batch lands, order preserved.
+            self.assertEqual(res, healthy)
+            # No grace waits: one death + respawn, seconds not minutes.
+            self.assertLess(dt, 60)
+        finally:
+            os.unlink(path)
+            import shutil as _shutil
+            _shutil.rmtree(plugin_dir, ignore_errors=True)
+
     def test_always_sigkill_bounded(self):
         """Worker SIGKILLed on every batch: bounded, then raise."""
         path = _make_input(500)
@@ -229,9 +273,15 @@ class TestWorkerRespawn(unittest.TestCase):
             import shutil as _shutil
             _shutil.rmtree(plugin_dir, ignore_errors=True)
 
-    def test_trap_ack_timeout(self):
-        """SIGKILL (no trap can fire) → ~3s grace → RuntimeError."""
-        from forkrun._reactor import TRAP_ACK_GRACE_S
+    def test_sigkill_recovers_then_caps(self):
+        """W-PY28: SIGKILL (no trap can fire) → parent-side WorkerTxn
+        recovery (revert + escrow + respawn, no 3s grace) → the
+        kill-every-batch loop still terminates via the respawn cap.
+
+        Replaces test_trap_ack_timeout: the trap-ACK grace period no
+        longer exists, so there is no "trap-ACK" error and no lower
+        time bound — recovery is synchronous per death.
+        """
         path = _make_input(300)
         plugin_dir = tempfile.mkdtemp(prefix="w19tack_")
         mod_path = os.path.join(plugin_dir, "w19tack_mod.py")
@@ -244,13 +294,15 @@ class TestWorkerRespawn(unittest.TestCase):
             sys.path.insert(0, plugin_dir)
             try:
                 t0 = time.monotonic()
-                with self.assertRaisesRegex(RuntimeError, "trap-ACK"):
+                with self.assertRaisesRegex(RuntimeError,
+                                            "respawn cap reached"):
                     forkrun.map("w19tack_mod:payload", path,
                                 workers=1, orchestrator=True)
                 dt = time.monotonic() - t0
             finally:
                 sys.path.remove(plugin_dir)
-            self.assertGreaterEqual(dt, TRAP_ACK_GRACE_S * 0.8)
+            # No grace waits: deaths recover synchronously, so the
+            # cap trips in seconds, never minutes.
             self.assertLess(dt, 60)
         finally:
             os.unlink(path)

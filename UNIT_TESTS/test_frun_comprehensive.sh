@@ -1957,7 +1957,15 @@ print_section M "Checkpoint & Resume"
 _M_FUNCS="$TEST_DIR/resume_funcs.sh"
 
 # ============================================================================
-# M1: Checkpoint file created on worker SIGKILL (-k, ordered)
+# M1: Worker SIGKILL (-k, ordered) → autonomous recovery (W-PY28).
+# The old contract (SIGKILL → abort + checkpoint) is replaced: the
+# parent reads the dead worker's WorkerTxn record and recovers the
+# orphan batch (revert + escrow + respawn), so no checkpoint is ever
+# needed. The adversarial crash payload (kills batch 50 while no
+# checkpoint exists) terminates via the poison doctrine: batch 50 is
+# skipped after 3 kills, everything else lands. Assert: exit path is
+# clean, output is complete-minus-one, and NO checkpoint file exists
+# (recovery supersedes checkpointing for worker deaths).
 # ============================================================================
 if in_section M; then
     ((TOTAL_TESTS++))
@@ -1977,15 +1985,16 @@ crash_func() {
 FUNCEOF
 
     bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
-        > /dev/null 2>"$_MD/err1.txt"
+        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
 
-    if [[ -f "$_MD/.forkrun_resume" ]]; then
-        TEST_RESULTS["M1: Checkpoint file created on worker SIGKILL (-k)"]="PASS"; ((PASSED_TESTS++))
-        _print_result PASS "M1: Checkpoint file created on worker SIGKILL (-k)"
+    _M1L=$(wc -l < "$_MD/output1.txt" | tr -d ' ')
+    if [[ ! -f "$_MD/.forkrun_resume" ]] && (( _M1L == 999 )); then
+        TEST_RESULTS["M1: Worker SIGKILL (-k) recovers without checkpoint"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "M1: Worker SIGKILL (-k) recovers without checkpoint"
     else
-        TEST_RESULTS["M1: Checkpoint file created on worker SIGKILL (-k)"]="FAIL"
-        TEST_ERRORS["M1: Checkpoint file created on worker SIGKILL (-k)"]="no checkpoint file"
-        ((FAILED_TESTS++)); _print_result FAIL "M1: Checkpoint file created on worker SIGKILL (-k)" "no checkpoint file"
+        TEST_RESULTS["M1: Worker SIGKILL (-k) recovers without checkpoint"]="FAIL"
+        TEST_ERRORS["M1: Worker SIGKILL (-k) recovers without checkpoint"]="lines=$_M1L (want 999), checkpoint=$([[ -f "$_MD/.forkrun_resume" ]] && echo yes || echo no)"
+        ((FAILED_TESTS++)); _print_result FAIL "M1: Worker SIGKILL (-k) recovers without checkpoint" "lines=$_M1L"
     fi
 fi
 
@@ -2043,18 +2052,18 @@ if in_section M; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_func() {
     for a in "$@"; do
-        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    # Run 1: crash
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    # Run 1: HUP-checkpoint (W-PY28: worker crashes now recover
+    # instead of aborting, so the checkpoint comes from an operator
+    # HUP gated on output size (fires at ~10% committed: always
+    # mid-drain, self-synchronizing on any runner speed).
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -l 1 crash_func > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M4: Resume produces complete output (-k)"]="FAIL"
@@ -2111,17 +2120,14 @@ if in_section M; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_func() {
     for a in "$@"; do
-        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -l 1 crash_func" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 1 crash_func > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
         if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M5: Resume with buffered mode"]="FAIL"
@@ -2164,17 +2170,14 @@ if in_section M; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_func() {
     for a in "$@"; do
-        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -u -l 1 crash_func" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -u -l 1 crash_func > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M6: Resume with realtime mode (-u)"]="FAIL"
@@ -2205,24 +2208,21 @@ fi
 if in_section M; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/resume_M7"; mkdir -p "$_MD"
-    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 100000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
 
     # -s mode: data comes via stdin, not cmdline args. Function reads stdin.
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_stdin() {
     local line
     while IFS= read -r line; do
-        if [[ "$line" == "50" ]] && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$line"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_stdin' frun -k -s crash_stdin" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_stdin' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -s crash_stdin > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M7: Resume with stdin mode (-s)"]="FAIL"
@@ -2242,9 +2242,9 @@ FUNCEOF
 
         _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
         _MDUP=$(sort "$_MD/combined.txt" | uniq -d | wc -l | tr -d ' ')
-        _MMISS=$(comm -23 <(seq 1000 | sort) <(sort "$_MD/combined.txt") | wc -l | tr -d ' ')
+        _MMISS=$(comm -23 <(seq 100000 | sort) <(sort "$_MD/combined.txt") | wc -l | tr -d ' ')
 
-        if (( _ML == 1000 && _MDUP == 0 && _MMISS == 0 )); then
+        if (( _ML == 100000 && _MDUP == 0 && _MMISS == 0 )); then
             TEST_RESULTS["M7: Resume with stdin mode (-s)"]="PASS"; ((PASSED_TESTS++))
             _print_result PASS "M7: Resume with stdin mode (-s)"
         else
@@ -2261,24 +2261,26 @@ fi
 if in_section M; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/resume_M8"; mkdir -p "$_MD"
-    seq 1000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 100000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
     _MEXP=$(wc -c < "$_MD/input.txt" | tr -d ' ')
 
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_cat() {
     local line
     while IFS= read -r line; do
-        if [[ "$line" == "50" ]] && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<50;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$line"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_cat' frun -k -b 4096 -s crash_cat" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    # W-PY28 note: single-batch run (-b 1MB covers the whole input),
+    # so ordered output appears all-at-once at completion — a size
+    # gate can never fire mid-run. Time-based HUP instead: the batch
+    # takes ~8s (busy-50 payload), HUP at readiness+3s always lands
+    # mid-batch on any runner speed.
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_cat' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -b 1048576 -s crash_cat > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; sleep 3; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M8: Resume with byte mode (-b)"]="FAIL"
@@ -2291,15 +2293,15 @@ FUNCEOF
             mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
         fi
 
-        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_cat' frun -k -b 4096 -s --resume '.forkrun_resume' crash_cat" \
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_cat' frun -k -b 1048576 -s --resume '.forkrun_resume' crash_cat" \
             > "$_MD/output2.txt" 2>"$_MD/err2.txt"
 
         cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
 
         _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
-        _MMISS=$(comm -23 <(seq 1000 | sort) <(sort "$_MD/combined.txt") | wc -l | tr -d ' ')
+        _MMISS=$(comm -23 <(seq 100000 | sort) <(sort "$_MD/combined.txt") | wc -l | tr -d ' ')
 
-        if (( _ML == 1000 && _MMISS == 0 )); then
+        if (( _ML == 100000 && _MMISS == 0 )); then
             TEST_RESULTS["M8: Resume with byte mode (-b)"]="PASS"; ((PASSED_TESTS++))
             _print_result PASS "M8: Resume with byte mode (-b)"
         else
@@ -2321,17 +2323,14 @@ if in_section M; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 label_func() {
     for a in "$@"; do
-        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "${MY_LABEL}:${a}"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; MY_LABEL='VAR_OK'; cat input.txt | FORKRUN_EXTRA_FUNCS='label_func' FORKRUN_EXTRA_VARS='MY_LABEL' frun -k -l 1 label_func" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; MY_LABEL='VAR_OK'; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='label_func' FORKRUN_EXTRA_VARS='MY_LABEL' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -l 1 label_func > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M9: Resume preserves FORKRUN_EXTRA_VARS"]="FAIL"
@@ -2382,17 +2381,14 @@ if in_section M; then
 helper_fn() { printf 'H:%s\n' "$1"; }
 main_fn() {
     for a in "$@"; do
-        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             helper_fn "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='helper_fn main_fn' frun -k -l 1 main_fn" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='helper_fn main_fn' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -l 1 main_fn > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M10: Resume preserves FORKRUN_EXTRA_FUNCS"]="FAIL"
@@ -2449,17 +2445,14 @@ if in_section M; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_func() {
     for a in "$@"; do
-        if (( a == 50 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k --nodes=2 -l 1 crash_func" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k --nodes=2 -l 1 crash_func > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M12: Resume with NUMA (--nodes=2)"]="FAIL"
@@ -2498,22 +2491,19 @@ fi
 if in_section M; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/resume_M13"; mkdir -p "$_MD"
-    seq 500 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 20000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
 
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_func() {
     for a in "$@"; do
-        if (( a == 30 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -l 1 crash_func > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M13: Ordered output correct after resume (-k)"]="FAIL"
@@ -2532,12 +2522,12 @@ FUNCEOF
         cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
 
         # Verify exact sequence matches input
-        if diff -q <(seq 500) "$_MD/combined.txt" &>/dev/null; then
+        if diff -q <(seq 20000) "$_MD/combined.txt" &>/dev/null; then
             TEST_RESULTS["M13: Ordered output correct after resume (-k)"]="PASS"; ((PASSED_TESTS++))
             _print_result PASS "M13: Ordered output correct after resume (-k)"
         else
             _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
-            _MFIRST=$(diff <(seq 500) "$_MD/combined.txt" | head -5)
+            _MFIRST=$(diff <(seq 20000) "$_MD/combined.txt" | head -5)
             TEST_RESULTS["M13: Ordered output correct after resume (-k)"]="FAIL"
             TEST_ERRORS["M13: Ordered output correct after resume (-k)"]="$_ML lines. Diff: $_MFIRST"
             ((FAILED_TESTS++)); _print_result FAIL "M13: Ordered output correct after resume (-k)" "$_ML lines, sequence mismatch"
@@ -2556,17 +2546,14 @@ if in_section M; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_func() {
     for a in "$@"; do
-        if (( a == 200 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' frun -k -l 1 crash_func" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -l 1 crash_func > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=1000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M14: No duplicates after resume (exactly-once)"]="FAIL"
@@ -2605,22 +2592,19 @@ fi
 if in_section M; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/resume_M15"; mkdir -p "$_MD"
-    seq 500 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 100000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
 
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 wrap_func() {
     for a in "$@"; do
-        if (( a == 30 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '[%s]\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='wrap_func' frun -k -l 1 -i wrap_func {}" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='wrap_func' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -l 1 -i wrap_func {} > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["M15: Resume with -i insert mode"]="FAIL"
@@ -2641,7 +2625,7 @@ FUNCEOF
         _ML=$(wc -l < "$_MD/combined.txt" | tr -d ' ')
         _MWRAP=$(grep -c '^\[[0-9]*\]$' "$_MD/combined.txt" 2>/dev/null || echo 0)
 
-        if (( _ML == 500 && _MWRAP == 500 )); then
+        if (( _ML == 100000 && _MWRAP == 100000 )); then
             TEST_RESULTS["M15: Resume with -i insert mode"]="PASS"; ((PASSED_TESTS++))
             _print_result PASS "M15: Resume with -i insert mode"
         else
@@ -4386,7 +4370,8 @@ fi
 print_section T2 "v3.4.4 Hardening Regressions (W1, M2, W2, resume)"
 
 # --- T7a: ordered resume, NON-reproducible boundaries (-l 1000 → -l 777) ---
-# THE original W1 gate. Run-1 crashes mid-stream with fixed -l 1000; run-2
+# THE original W1 gate. Run-1 checkpoints mid-stream (W-PY28: via operator
+# HUP, since crashes recover instead of aborting) with fixed -l 1000; run-2
 # resumes with a DIFFERENT fixed -l so its batch boundaries provably cannot
 # align with run-1's at the horizon. Pre-fix, the orderer never synced
 # (silent empty output). Post-fix, output must be byte-exact vs. reference.
@@ -4398,11 +4383,8 @@ if in_section T2; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_mid() {
     for a in "$@"; do
-        if (( a == 20000 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
@@ -4411,9 +4393,11 @@ FUNCEOF
     bash -c "cd '$_MD'; source '$FRUN_SOURCE'; cat input.txt | frun -k -l 1000 printf '%s\n'" \
         > "$_MD/reference.txt" 2>/dev/null
 
-    # Run 1: crash at line 20000 (mid-stream, well past any startup transient)
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_mid' frun -k -l 1000 crash_mid" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    # Run 1: HUP-checkpoint gated on output size (W-PY28: crashes
+    # recover instead of aborting, so the checkpoint comes from an
+    # operator HUP at ~10% committed — always mid-drain).
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_mid' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -l 1000 crash_mid > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=10000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["T7a: ordered resume, non-reproducible boundaries (-l 1000→777)"]="FAIL"
@@ -4456,17 +4440,14 @@ if in_section T2; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_mid() {
     for a in "$@"; do
-        if (( a == 20000 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_mid' frun -l 1000 crash_mid" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_mid' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 1000 crash_mid > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=10000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["T7b: buffered resume, non-reproducible boundaries (-l 1000→777)"]="FAIL"
@@ -4509,17 +4490,14 @@ if in_section T2; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_mid() {
     for a in "$@"; do
-        if (( a == 20000 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
+            for ((j=0;j<2000;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_mid' frun -k --nodes=2 -l 1000 crash_mid" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_mid' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k --nodes=2 -l 1000 crash_mid > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=10000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["T7c: ordered NUMA resume, non-reproducible boundaries"]="FAIL"
@@ -4562,11 +4540,7 @@ if in_section T2; then
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_mid() {
     for a in "$@"; do
-        if (( a == 1000000 )) && ! [[ -f ./.forkrun_resume ]]; then
-            kill -9 $BASHPID
-        else
             printf '%s\n' "$a"
-        fi
     done
 }
 FUNCEOF
@@ -4574,8 +4548,8 @@ FUNCEOF
     bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_mid' frun -k crash_mid" \
         > "$_MD/output1.txt" 2>"$_MD/err1.txt" 2>/dev/null
     # (typo-guard: rerun cleanly)
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_mid' frun -k crash_mid" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_mid' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k crash_mid > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=130000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["T7d: ordered resume, adaptive boundaries (2M lines)"]="FAIL"
@@ -4796,28 +4770,38 @@ FUNCEOF
     fi
 fi
 
-# --- T12 (v2): jagged-straddle resume — buffered mode + batch-membership crash ---
+# --- T12 (v2): jagged-straddle resume — buffered mode + batch-membership stall ---
 # BUFFERED mode (not -k): the tracker records every COMPLETED batch, so the
 # checkpoint has real jagged intervals (in ordered mode, un-emitted completed
-# batches are untracked — see note). Crash on the batch CONTAINING line 505
-# (batch 6); batches 7-20 complete during the 3s grace and become the jagged
-# edge. Resume with -l 37: run-2 batches straddle those intervals.
+# batches are untracked — see note). HUP lands mid-drain (size-gated);
+# batches completing out of order around the frontier become the jagged
+# edge (W-PY28: crashes recover instead of aborting, so the checkpoint
+# comes from an operator HUP, not a kill).
+# Resume with -l 37: run-2 batches straddle those intervals.
 if in_section T2; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/T12"; mkdir -p "$_MD"
-    seq 2000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
+    seq 20000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume"
 
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
 crash_batch6() {
-    if [[ " $* " == *" 505 "* ]] && ! [[ -f ./.forkrun_resume ]]; then
+    # W-PY28: per-line burn (busy first: each cascade re-execution also
+    # burns, delaying poison-fill well past the HUP below), then a
+    # crash-once kill for the batch holding line 19500 (~97.5%): the
+    # kill opens a genuine hole with completed batches beyond it, and
+    # the HUP lands ~0.2s later — long before the ~3s poison cascade
+    # could fill it. That hole + backlog is the jagged edge. On resume
+    # (checkpoint exists) the batch runs normally to completion.
+    for a in "$@"; do for ((j=0;j<2000;j++)); do :; done; done
+    if [[ " $* " == *" 19500 "* ]] && ! [[ -f ./.forkrun_resume ]]; then
         kill -9 $BASHPID
     fi
     printf '%s\n' "$@"
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' frun -l 100 crash_batch6" \
-        > "$_MD/output1.txt" 2>"$_MD/err1.txt"
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 100 crash_batch6 > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+        > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
         TEST_RESULTS["T12: jagged-straddle resume (buffered, differing -l)"]="FAIL"
@@ -4837,9 +4821,9 @@ FUNCEOF
         cat "$_MD/output1.txt" "$_MD/output2.txt" | sort > "$_MD/combined_s.txt"
         _MUNIQ=$(sort -u "$_MD/combined_s.txt" | wc -l | tr -d ' ')
         _MDUP=$(uniq -d < "$_MD/combined_s.txt" | wc -l | tr -d ' ')
-        _MMISS=$(comm -23 <(seq 2000 | sort) "$_MD/combined_s.txt" | wc -l | tr -d ' ')
+        _MMISS=$(comm -23 <(seq 20000 | sort) "$_MD/combined_s.txt" | wc -l | tr -d ' ')
 
-        if (( _MUNIQ == 2000 && _MDUP == 0 && _MMISS == 0 && _TJAG >= 1 )); then
+        if (( _MUNIQ == 20000 && _MDUP == 0 && _MMISS == 0 && _TJAG >= 1 )); then
             TEST_RESULTS["T12: jagged-straddle resume (buffered, differing -l)"]="PASS"; ((PASSED_TESTS++))
             _print_result PASS "T12: jagged-straddle resume (buffered, differing -l)" "(jagged intervals present: ${_TJAG})"
         else

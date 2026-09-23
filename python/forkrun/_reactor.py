@@ -334,33 +334,74 @@ class ReactorState:
             del self.workers[wid]
             return ("clean", None)
 
-        # Non-zero death: trap-ACK bookkeeping (bash pending logic).
-        # Deaths and ACKs pipeline in EITHER order (an ACK can sit in
-        # the pipe before the death-pipe EOF is selected), so this is
-        # a SIGNED counter, not a flag: each death +1, each ACK -1,
-        # and the grace lives only while the balance is positive. A
-        # death/death/ack/ack sequence balances (1,2 → 1,0); an
-        # ack-before-death leaves transient credit (-1) that the
-        # death consumes back to 0 instead of orphaning a grace into
-        # a false catastrophic.
-        slot.trap_ack_pending += 1
-        if slot.trap_ack_pending > 0 and \
-                wid not in self.trap_ack_deadlines:
-            self.trap_ack_deadlines[wid] = (
-                _time.monotonic() + self.trap_ack_grace)
+        # Non-zero death: authoritative parent-side recovery.
+        #
+        # W-PY28: the dead worker's WorkerTxn record (published at
+        # claim, cleared at ack) is read via fr_py_recover_worker —
+        # one path for payload errors, SIGSEGV, SIGKILL, and OOM.
+        # Recovery runs SYNCHRONOUSLY here (revert + escrow deposit),
+        # so no trap-ACK grace is armed: there is nothing left to
+        # wait for. The bounded-respawn tail below is unchanged
+        # (respawn on the same node; the cap still bounds crash
+        # loops into n_unrecovered → "respawn cap reached").
+        #
+        # Pre-W-PY28 substrates lack the symbol: fall back to the
+        # trap-ACK grace path verbatim (mixed-version safety).
+        from ._bindings import get as _get
+        _recover = getattr(_get(), "fr_py_recover_worker", None)
+        if _recover is None:
+            # Legacy path: trap-ACK bookkeeping (bash pending logic).
+            # Deaths and ACKs pipeline in EITHER order (an ACK can sit
+            # in the pipe before the death-pipe EOF is selected), so
+            # this is a SIGNED counter, not a flag: each death +1,
+            # each ACK -1, and the grace lives only while the balance
+            # is positive.
+            slot.trap_ack_pending += 1
+            if slot.trap_ack_pending > 0 and \
+                    wid not in self.trap_ack_deadlines:
+                self.trap_ack_deadlines[wid] = (
+                    _time.monotonic() + self.trap_ack_grace)
+        else:
+            _out_fds = (self.ctx.get("out_fds") or [])
+            _out_fd = (_out_fds[wid]
+                       if 0 <= wid < len(_out_fds) else -1)
+            if _out_fd is None or _out_fd < 0:
+                _out_fd = -1
+            try:
+                _rrc = _recover(wid, slot.incarn, _out_fd, exit_code)
+            except Exception:
+                _rrc = 5
+            if _rrc == 4:
+                raise RuntimeError(
+                    "forkrun: Worker %d died in the claim-without-"
+                    "publish race; batch unattributable. Aborting."
+                    % (wid,))
+            if _rrc == 5:
+                raise RuntimeError(
+                    "forkrun: Worker %d recovery failed "
+                    "(orphan revert/escrow). Aborting." % (wid,))
+            # rc 0 (RECOVERED) / 1 (NO_BATCH) / 2 (NORMAL_EXIT at EOF)
+            # / 3 (ALREADY_DONE): the death is accounted for — proceed
+            # to the respawn tail like a confirmed death. (rc 2 with a
+            # non-zero exit still respawns: the fresh generation exits
+            # at EOF by itself. Same outcome, zero special cases.)
+            # Only genuine orphan recoveries join the healed list.
+            if _rrc == 0:
+                self.recovered.append(wid)
 
         # Bounded respawn (bash: respawn on the same node).
         cap = self.respawn_cap
         if cap is not None and cap >= 0 and slot.incarn >= cap:
             self.n_unrecovered += 1
-            return ("pending", None)  # cap reached: wait grace, no respawn
+            return ("pending", None)  # cap reached: no respawn
         new_slot = self.spawn_worker(wid=wid, node=slot.node)
         if new_slot is None:
             self.n_unrecovered += 1
             return ("pending", None)
         self.n_respawns += 1
         # The new generation inherits the pending ACK wait: the ACK
-        # names the wid, not the generation.
+        # names the wid, not the generation. (Always 0 on the W-PY28
+        # path — no grace is ever armed there.)
         new_slot.trap_ack_pending = slot.trap_ack_pending
         return ("respawned", new_slot)
 

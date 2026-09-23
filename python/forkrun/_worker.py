@@ -224,6 +224,22 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
     sink_fn = _resolve_payload(sink_spec) if sink_spec is not None else None
     fallow_w = fallow_fd if fallow_fd is not None else -1
     trap_w = trap_ack_w if trap_ack_w is not None else -1
+    # W-PY28: name the output fd for transaction publication and sync
+    # the ack offset (respawned generations append to a reused fd).
+    # One call per worker (never per batch). Best-effort on old
+    # substrates (missing symbols → txn records simply stay dark).
+    _set_out = getattr(lib, "fr_py_set_output_fd", None)
+    if _set_out is not None:
+        try:
+            _set_out(out_fd if out_fd is not None else -1)
+        except Exception:
+            pass
+    _ack_init = getattr(lib, "fr_py_ack_init", None)
+    if _ack_init is not None and out_fd is not None:
+        try:
+            _ack_init(out_fd)
+        except Exception:
+            pass
     # W-PY19 C-orderer target: ack(target) emits an OrderPacket for the
     # bytes appended since the last ack. Armed only when the caller set
     # the order pipe AND an output memfd exists to name in the packet.
@@ -624,6 +640,14 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
             # Default "retry": escrow with kills+1, no ack (the next claim
             # overwrites the TLS the deposit left armed), same-process retry
             # when this worker re-claims the deposited batch.
+            # W-PY28 note: this worker-side escrow is KEPT for live-
+            # worker (soft) errors — it preserves the retry-then-poison
+            # doctrine without consuming respawn budget (a death per
+            # retry would trip the respawn cap on deterministic
+            # failures, which are indistinguishable from crash loops
+            # parent-side). Parent-side recovery (fr_py_recover_worker)
+            # covers exactly the deaths that run no code here
+            # (SIGSEGV/SIGKILL/OOM), where this deposit never happens.
             _flush()
             lib.fr_py_escrow_deposit(claimed.num_kills + 1)
             continue
@@ -727,9 +751,12 @@ def worker_main_with_death_pipe(wid, node, payload_spec, sink_spec,
       parent observes as readable EOF (POLLHUP equivalent). death_r
       None (or < 0) disarms; death_w None disarms the close.
     trap_ack_w: reactor trap-ACK pipe write end (or None/-1 to
-      disarm). Non-zero exit writes one "wid\\n" line (graceful
-      failure confirmation); poisoned batches already notified inline
-      as "P:idx:kills" by _run. Best effort, never raises.
+      disarm). Non-zero exit writes one "wid\\n" line (kept as a
+      confirmatory wire diagnostic); poisoned batches already
+      notified inline as "P:idx:kills" by _run. Best effort, never
+      raises. (W-PY28: the grace protocol is gone — recovery is
+      parent-side via WorkerTxn — but the pipe still carries poison
+      notices the parent reports.)
     order_w: C-orderer pipe write end (or None/-1 to disarm). When
       armed (and out_fd present), acks carry the output memfd as the
       OrderPacket target so the C orderer emits in batch_idx order.
@@ -739,6 +766,11 @@ def worker_main_with_death_pipe(wid, node, payload_spec, sink_spec,
     No signal handlers are installed here: KeyboardInterrupt inside
     the payload stays a payload error (retry path), matching
     worker_main. Global abort arrives via the engine fire alarm.
+
+    W-PY28: _run names the output fd (fr_py_set_output_fd) and syncs
+    the ack offset, so the parent's fr_py_recover_worker can revert
+    partial output when THIS worker dies running no code. Live-worker
+    errors keep the in-worker escrow path (see _run).
     """
     code = 1
     try:
