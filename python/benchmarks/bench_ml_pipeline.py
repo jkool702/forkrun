@@ -250,6 +250,56 @@ def build_ml_plugin(variant, workdir):
     return so_path
 
 
+def build_yyjson_plugin(workdir):
+    """Compile the yyjson medium plugin (W-PY31).
+
+    Same flags as build_ml_plugin, plus yyjson.c (vendored, zero
+    deps). Only the medium variant has a yyjson implementation —
+    returns None for anything else (caller skips quietly).
+    """
+    import shutil as _shutil
+    if _shutil.which("gcc") is None:
+        raise RuntimeError("need gcc to build the yyjson plugin")
+    repo_root = os.path.dirname(os.path.dirname(HERE))
+    src = os.path.join(HERE, "plugins", "ml_plugin_yyjson.c")
+    yjsrc = os.path.join(HERE, "plugins", "yyjson.c")
+    if not os.path.exists(src) or not os.path.exists(yjsrc):
+        raise RuntimeError("missing yyjson plugin sources")
+    so_path = os.path.join(workdir, "ml_plugin_yyjson.so")
+    cmd = ["gcc", "-O3", "-shared", "-fPIC", "-march=native",
+           "-I", os.path.join(repo_root, "ring_loadables"),
+           "-o", so_path, src, yjsrc, "-lm"]
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          timeout=300)
+    if proc.returncode != 0:
+        raise RuntimeError("yyjson plugin build failed:\n%s"
+                           % proc.stderr[-2000:])
+    return so_path
+
+
+def bench_forkrun_yyjson(ctx, path, n_records, input_bytes, variant,
+                         workers, trials, plugin_so):
+    """forkrun mode="plugin" with yyjson SIMD parsing (W-PY31).
+
+    Byte-identical output to bench_forkrun_plugin (locked in by
+    python/tests/test_yyjson_plugin.py); the only difference is the
+    JSON parse core. Counts validated here.
+    """
+    import forkrun
+    payload = "%s:ml_process_medium_yyjson" % plugin_so
+
+    def run():
+        return forkrun.map(payload, path, mode="plugin",
+                           workers=workers, order="index")
+
+    t, _ = time_it(run, trials=trials, warmup=1)
+    n_out = count_results(run())
+    ctx.record("forkrun-yyjson-%s-%dw" % (variant, workers), "plugin",
+               "c-callback-yyjson", n_records / t, rss_mb(),
+               "out=%d/%d records, frozen ABI" % (n_out, n_records))
+    return n_records / t
+
+
 def bench_forkrun_plugin(ctx, path, n_records, input_bytes, variant,
                          workers, trials, plugin_so):
     """forkrun mode="plugin": same logical workload, C callback.
@@ -715,6 +765,15 @@ def main(argv=None):
                         print("plugin build skipped (%s): %s"
                               % (variant, str(exc)[:150]), flush=True)
 
+                # yyjson medium plugin (W-PY31; medium only).
+                yyjson_so = None
+                if found["forkrun"] and variant == "medium":
+                    try:
+                        yyjson_so = build_yyjson_plugin(tmpdir)
+                    except Exception as exc:  # noqa: BLE001
+                        print("yyjson build skipped (%s): %s"
+                              % (variant, str(exc)[:150]), flush=True)
+
                 if found["serial"]:
                     r = bench_serial(ctx, path, args.records,
                                      input_bytes, variant, args.trials)
@@ -754,6 +813,18 @@ def main(argv=None):
                                 note_best("forkrun-plugin", variant, r)
                             except Exception as exc:  # noqa: BLE001
                                 print("forkrun-plugin failed (%s, w=%d): %s"
+                                      % (variant, workers,
+                                         str(exc)[:150]),
+                                      flush=True)
+                        if yyjson_so is not None:
+                            try:
+                                r = bench_forkrun_yyjson(
+                                    ctx, path, args.records, input_bytes,
+                                    variant, workers, args.trials,
+                                    yyjson_so)
+                                note_best("forkrun-yyjson", variant, r)
+                            except Exception as exc:  # noqa: BLE001
+                                print("forkrun-yyjson failed (%s, w=%d): %s"
                                       % (variant, workers,
                                          str(exc)[:150]),
                                       flush=True)

@@ -120,3 +120,60 @@ Per-worker tokenize (500k docs, 282.2 avg tok/doc):
 | Mode            │ 8w docs/s │ 14w docs/s │ 28w docs/s │ 28w tok/s │
 │ forkrun Python  │   85,742  │   135,524  │   146,025  │   41.2M   │
 │ forkrun C       │  212,805  │   304,696  │   346,055  │   97.7M   │
+
+┌────────────────────────────────────────────────────────────────────┐
+│  MEDIUM + yyjson (W-PY31): 5M records, order=index                  │
+├──────────────┬──────────┬──────────┬──────────┬─────────────────────┤
+│ Plugin       │ 8w       │ 14w      │ 28w      │ Batch-size sweep 28w│
+├──────────────┼──────────┼──────────┼──────────┼─────────────────────┤
+│ scalar C     │ 1,117k   │ 1,533k   │ 1,664k   │ l100: 1002k         │
+│ yyjson C     │ 1,473k   │ 1,891k   │ 1,875k   │ l100: 1067k         │
+│ delta        │ +32%     │ +23%     │ +13%     │ l1000: 1643k/1990k  │
+│              │          │          │          │ l5000: 1644k/1960k  │
+└──────────────┴──────────┴──────────┴──────────┴─────────────────────┘
+
+Reading: yyjson wins everywhere parsing matters (+20% at lines≥1000),
+but both plateau at ~2M/s — at lines=100 (50k batches) the two are
+within 7%, i.e. the ceiling is framework per-batch cost, not JSON
+parsing. The 3,500k target (and Polars' 2,936k) is falsified as
+stated for a parser-only swap; closing it needs framework
+batch-throughput work (future, engine stays frozen). Output is
+byte-identical (7-test lock-in); keep yyjson as the medium default.
+
+┌────────────────────────────────────────────────────────────────────┐
+│  MEDIUM + single-pass (W-PY32): 5M records, order=index            │
+├──────────────┬──────────┬──────────┬──────────┬─────────────────────┤
+│ Plugin       │ 8w       │ 14w      │ 28w      │ vs obj-get          │
+├──────────────┼──────────┼──────────┼──────────┼─────────────────────┤
+│ scalar C     │ 1,117k   │ 1,533k   │ 1,664k   │ —                   │
+│ yyjson obj   │ 1,473k   │ 1,891k   │ 1,875k   │ —                   │
+│ yyjson spass │ 1,602k   │ 2,023k   │ 2,077k   │ +9% / +7% / +11%    │
+└──────────────┴──────────┴──────────┴──────────┴─────────────────────┘
+
+Reading: single-pass + exact fast formatter buy a real +7-11% (and
++25-43% over scalar), but the ~2M/s plateau does not move — the work
+order's bottleneck table (extraction 55% of a 7.4µs record) is
+incompatible with the measured batch-size response, where per-record
+cost balloons from ~14µs (lines=1000) to ~28µs (lines=100) for BOTH
+implementations. Parser work is now diminishing returns; the
+remaining ceiling is framework per-batch cost. The 2.6x/4.9M
+projection is falsified. Keep single-pass as the medium default
+(free, byte-exact, 3-test lock-in).
+
+┌────────────────────────────────────────────────────────────────────┐
+│  SPAWN C-loop vs Python loop (W-PY33): 1M medium, `tr a-z A-Z`      │
+├──────────────┬──────────┬──────────┬──────────┬─────────────────────┤
+│ Loop         │ 8w       │ 14w      │ 28w      │ lines=100           │
+├──────────────┼──────────┼──────────┼──────────┼─────────────────────┤
+│ Python loop  │ 1,629k   │ 1,792k   │ 1,358k   │ 656k / 783k         │
+│ C loop       │ 1,679k   │ 1,800k   │ 1,324k   │ 682k / 790k         │
+└──────────────┴──────────┴──────────┴──────────┴─────────────────────┘
+
+Reading: parity (±4%) at every worker count and batch size. The
+Python loop's v1 fast path (fr_py_exec_spawn + fr_py_complete, 2
+ctypes calls) had already removed per-batch Python cost; both paths
+pay identical `tr` execution (~300µs+/batch), so the projected
+350µs-per-batch saving never existed. The C loop's value is
+architectural (one engine-owned claim→spawn→signal→ack path under
+WorkerTxn recovery), not throughput. 256KB batches complete
+identically — no deadlock, as the capture-memfd design guarantees.

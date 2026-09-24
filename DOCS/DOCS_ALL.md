@@ -233,6 +233,34 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### C worker loop for spawn mode (W-PY33)
+
+- New `fr_py_worker_spawn_loop` (claim→spawn→signal→ack in C, built
+  only on tested primitives; capture-then-frame, never
+  direct-to-memfd). Part A verified with strace (zero worker
+  preads — no change needed).
+- Opt-in `c_spawn_loop=True` on `map()` (mode="spawn", UMA,
+  materialized). Parity with Python loop (±4%); 2-3x premise
+  falsified (`tr` execution dominates both). 13 new tests; suite
+  460 green.
+
+### Single-pass extraction + exact fast formatter (W-PY32)
+
+- One foreach pass (~15 comparisons) + snprintf-free `fmt_r4`
+  (3.6M-value sweep: zero mismatches) in `ml_plugin_yyjson.c`.
+- Measured +7-11% over obj-get (5M: 2077k vs 1875k at 28w);
+  ~2M/s plateau is framework per-batch cost — 2.6x projection
+  falsified. 3-test lock-in; Python 447 green.
+
+### yyjson-accelerated C plugin, medium workload (W-PY31)
+
+- Vendored yyjson (as-is) + new `ml_plugin_yyjson.c` (frozen ABI,
+  no-INSITU, byte-identical output locked in by 7 tests).
+- Measured: +13-32% medium (5M: 1875k vs 1664k at 28w); plateau at
+  ~2M/s is framework per-batch cost, not parsing — the 3,500k goal
+  is falsified as stated (needs framework work, future). Keep as
+  the medium default: free +20%, zero risk. Python 444 green.
+
 ### Final-attempt coredump policy (W-PY30)
 
 - **Coredumps off by default** (soft `RLIMIT_CORE` 0 at worker

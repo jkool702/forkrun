@@ -752,6 +752,71 @@ def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
     return pid
 
 
+def _c_spawn_spec(payload_fn):
+    """Extract the argv list from a coerced spawn payload closure.
+
+    make_spawn_payload tags its wrapper with _forkrun_spawn_argv
+    (list of str command + args). Returns the list when present and
+    well-formed, else None. The C loop replays exactly this argv per
+    batch (no shell, no re-splitting).
+    """
+    argv = getattr(payload_fn, "_forkrun_spawn_argv", None)
+    if not argv:
+        return None
+    if not isinstance(argv, (tuple, list)) or len(argv) == 0:
+        return None
+    if not all(isinstance(a, (str, bytes, bytearray)) for a in argv):
+        return None
+    return list(argv)
+
+
+def _fork_c_spawn_worker(lib, wid, spawn_argv, memfd_fd,
+                         out_fd, signal_w, fallow_w, engine_fds,
+                         on_error="retry"):
+    """Fork one C-loop spawn worker (W-PY33 mode="spawn" fast path).
+
+    The child scrubs to engine + job fds, then runs
+    fr_py_worker_spawn_loop to EOF: claim → posix_spawnp → signal →
+    ack with zero Python per batch. Returns the child pid in the
+    parent; the child never returns (os._exit with the loop rc mapped
+    to 0/1 — the parent's failed-check treats nonzero as failure).
+    signal_w/fallow_w may be None (→ -1 disarm, map/materialized).
+    out_fd must be a parent-created output memfd (never None: the
+    C loop always frames records for the parent to parse).
+    on_error rides the same codes as the Python worker (retry/skip/
+    fail-fast). Gate on _c_spawn_spec first (never guess argv).
+    """
+    import ctypes as _ctypes
+
+    _argv_b = [(a.encode("utf-8") if isinstance(a, str) else bytes(a))
+               for a in spawn_argv]
+    argv_c = (_ctypes.c_char_p * (len(_argv_b) + 1))(*_argv_b, None)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            keep = set(engine_fds) | {memfd_fd, out_fd}
+            if signal_w is not None:
+                keep.add(signal_w)
+            if fallow_w is not None and fallow_w >= 0:
+                keep.add(fallow_w)
+            from ._fd_scrub import scrub_fds
+            scrub_fds(keep)
+        except Exception:
+            pass
+        try:
+            rc = lib.fr_py_worker_spawn_loop(
+                wid, argv_c, len(_argv_b),
+                memfd_fd, out_fd,
+                signal_w if signal_w is not None else -1,
+                fallow_w if fallow_w is not None else -1,
+                -1, -1, 0, 3,
+                _ON_ERROR_CODES.get(on_error, 0))
+        except BaseException:
+            rc = 1
+        os._exit(0 if rc == 0 else 1)
+    return pid
+
+
 def worker_main_with_death_pipe(wid, node, payload_spec, sink_spec,
                                 memfd_fd, file_size, out_fd, signal_w,
                                 death_r, death_w, trap_ack_w, on_error,

@@ -2,6 +2,115 @@
 
 ## v3.6.0 (unreleased)
 
+### C worker loop for spawn mode (W-PY33)
+
+- **New `fr_py_worker_spawn_loop`** (`_shim.c` additions only,
+  engine frozen): claim → posix_spawnp → signal → ack entirely in
+  C, zero Python per batch — the spawn analogue of the W-PY26 plugin
+  loop, built only on tested primitives (`fr_py_claim`,
+  `fr_py_exec_spawn`, `fr_py_complete`, escrow/abort). Deliberate
+  deviations from the sketched design, all frozen-ABI-driven:
+  output is capture-then-framed (direct-to-memfd would emit
+  unparseable bytes — the record length is unknowable until the
+  child exits); claims go through `fr_py_claim` (W-PY29 TXN hooks +
+  poison counting, no raw `do_lockfree_claim`, no static buffer);
+  order target derived (unordered disarms like the Python loop);
+  poison warn + trap-notify, `on_error` retry/skip/fail-fast, and
+  wincarn lineage all mirror `_worker.py`; argv marshalled as a
+  fork-inherited NUL pack (no shell re-splitting).
+- **Part A (zero-copy plugin data): verified, no change needed.**
+  The sketch assumed a malloc+pread hot path; strace shows plugin
+  workers already make zero preads (RAW borrowed window serves all
+  batch reads — the 6 observed preads are parent-side ingest
+  spill). `reserved[0]` semantics (batch slice start) confirmed by
+  the byte-identity suites.
+- **Opt-in `c_spawn_loop=True`** on `map()` (default False):
+  mode="spawn", UMA, materialized input. Anything else raises loudly
+  — never silently falls back. Reactor (`spawn_loop` ctx +
+  `_c_spawn_child_main` with death pipes/respawn) and plain
+  fork-and-wait (`_fork_c_spawn_worker`) paths both covered.
+- **Honest result — throughput premise falsified:** C loop runs at
+  parity with the Python loop (±4%: 1M medium `tr`, default
+  batching 1629k-vs-1679k at 8w; lines=100 682k-vs-656k). The
+  Python loop's v1 fast path had already removed per-batch Python
+  cost; both paths pay the same `tr` execution (~300µs+/batch), so
+  there was no 350µs to save and no 2-3x to gain. Value is
+  architectural uniformity (one engine-owned recovery path), not
+  speed. 13 new tests in `python/tests/test_spawn_loop.py`
+  (byte-identity, 256KB-batch no-deadlock, poison/skip/fail-fast,
+  worker-SIGKILL recovery); full suite 460 green.
+
+### Single-pass extraction + exact fast formatter (W-PY32)
+
+(Note: the originating order numbered itself W-PY31, which is taken
+by the yyjson plugin above — filed here as W-PY32. Implemented with
+four corrections: emit matches the real trimmed `fmt_r4` semantics,
+not always-4-digits `%.4f` (which would have broken byte-identity);
+duplicate `case 11:` fixed; strings type-checked with first-wins
+seen bits; Part 3 rejected — the RAW window was already zero-copy
+and a static buffer would cap batch size.)
+
+- **`MlFields` single-pass extractor** in `ml_plugin_yyjson.c` (new
+  code, scalar file untouched, engine untouched): one
+  `yyjson_obj_foreach` pass per record (~15 comparisons) replacing
+  10+ `obj_get` linear scans; length + first-char prefilter with
+  full `memcmp` confirmation (user/item_context and price_cents/
+  num_reviews collisions handled); first occurrence wins via seen
+  bits (scalar parity on duplicates); strict
+  SINT/UINT-with-strtoll-clamp ints; verbatim `scroll_depth`/
+  `rating` still via whole-line raw spans (no float round-trips).
+- **Snprintf-free `fmt_r4` with byte-identical output** (verified by
+  a 3.6M-value differential sweep vs the `snprintf` version — zero
+  mismatches, incl. negatives, zero, halfway cases, ts_n/log ranges
+  and fuzz; `snprintf` fallback retained for inf/nan/huge).
+- **Caught by the battery:** `"days_since_signup"` is 17 chars, not
+  16 (sketch error) — `dss` silently read 0 until the differential
+  caught it. Also fixed: `yyjson_get_int` 32-bit trap (prior step).
+- **Honest result — 2.6x projection falsified:** single-pass gains
+  +7-11% over obj-get yyjson (5M medium: 8w 1602k vs 1473k, 14w
+  2023k vs 1891k, 28w 2077k vs 1875k; +25-43% over scalar), but the
+  ~2M/s plateau stands — the order's bottleneck table (extraction
+  55% of record time) contradicts the measured batch-size response
+  (lines=100: both ~1M/s; lines≥1000: both plateau). Remaining
+  ceiling is framework per-batch cost; parser work is now
+  diminishing returns. Keep as the medium default (free, exact).
+- Correctness: `python/tests/test_single_pass.py` (3 tests,
+  record-set comparison — batch blobs shift with adaptive
+  batching); full suite Python 447 green.
+
+### yyjson-accelerated C plugin, medium workload (W-PY31)
+
+- **Vendored yyjson** (`python/benchmarks/plugins/yyjson.{h,c}`,
+  as-is, zero deps, compiles warning-free) — the fastest C JSON
+  library instead of a hand-rolled SIMD parser.
+- **New `ml_plugin_yyjson.c`** (new file; scalar file untouched,
+  engine untouched): same frozen-ABI entry, same RAW-window input,
+  same stdout framing, same validation semantics and exact output
+  format — only the field-lookup core uses yyjson (NO INSITU: the
+  shared memfd stays immutable; per-record stack pool + heap
+  fallback so no input size is refused). Verbatim float slices
+  (`scroll_depth`, `rating`) use raw spans, never float round-trips.
+- **Byte-identity locked in** (`python/tests/test_yyjson_plugin.py`,
+  7 tests): generator clean + 5%/50% malformed mixes, 30-line edge
+  battery, quality-filter and nesting spot-checks, plus two
+  generator-impossible residuals pinned explicitly (backslash
+  escapes: raw vs unescaped; trailing garbage: scalar accepts,
+  yyjson rejects). Also caught and fixed a real bug the battery
+  exposed (`yyjson_is_int` covers uint64 and `yyjson_get_int` is
+  32-bit — the 64-bit path needs `is_sint`/`get_sint`).
+- **Honest result — target falsified as stated:** yyjson wins
+  +13-32% on medium (5M: 8w 1473k vs 1117k, 14w 1891k vs 1533k,
+  28w 1875k vs 1664k; +~20% at batch sizes where parsing matters),
+  but plateaus at ~2M/s alongside scalar — the ceiling is framework
+  per-batch cost, not parse speed (lines=100: both ~1M/s; lines≥1000:
+  both plateau). The 3,500k goal (and Polars' 2,936k) is unreachable
+  by parser swap alone; it needs framework batch-throughput work,
+  which is future work (engine stays frozen). Keep the yyjson plugin
+  as the medium default: free +20% at zero risk.
+- Benchmark harness: `bench_forkrun_yyjson` in
+  `bench_ml_pipeline.py` (medium only), `note_best` tracked.
+- Full suites: Python 444 green (437 + 7).
+
 ### Final-attempt coredump policy (W-PY30)
 
 - **Coredumps off by default on all workers** (soft `RLIMIT_CORE` 0

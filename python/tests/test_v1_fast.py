@@ -75,7 +75,8 @@ class TestV1Detection(unittest.TestCase):
                                     "ack_direct": False, "complete": False,
                                     "spill": False, "parse": False,
                                     "resume": False,
-                                    "plugin_loop": False})
+                                    "plugin_loop": False,
+                                    "spawn_loop": False})
         finally:
             if old is None:
                 del os.environ["FORKRUN_NO_V1"]

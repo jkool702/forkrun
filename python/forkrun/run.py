@@ -53,7 +53,8 @@ from ._reassembly import ReassemblyBuffer
 from ._resume import (checkpoint_on_abort, consume_sidecar,
                       require_resume_path, resume_begin)
 from ._spawn import make_spawn_payload
-from ._worker import _HDR, _c_plugin_spec, _fork_c_plugin_worker, worker_main
+from ._worker import _HDR, _c_plugin_spec, _c_spawn_spec, \
+    _fork_c_plugin_worker, _fork_c_spawn_worker, worker_main
 
 import fcntl as _fcntl
 import time as _time
@@ -302,6 +303,59 @@ def _resolve_c_plugin_loop(c_worker_loop, raw_mode, num_nodes):
             "c_worker_loop=True is UMA-only in W-PY26 (multi-node is "
             "future work) — use c_worker_loop=False")
     _require_plugin_loop_symbol()
+    return True
+
+
+def _validate_c_spawn_loop(c_spawn_loop):
+    """Normalize the W-PY33 C spawn-loop flag (None → False default).
+
+    The C loop (fr_py_worker_spawn_loop) owns claim→spawn→signal→ack
+    in C with zero Python per batch — the spawn analogue of the
+    W-PY26 plugin loop. Opt-in (default False): the Python worker
+    loop stays the default so no user changes behavior without
+    asking.
+    """
+    if c_spawn_loop is None:
+        return False
+    if isinstance(c_spawn_loop, bool):
+        return c_spawn_loop
+    raise TypeError(
+        "c_spawn_loop must be None, True, or False, got %r"
+        % (c_spawn_loop,))
+
+
+def _require_spawn_loop_symbol():
+    """Raise a clear error when the substrate predates the C spawn loop
+    (pre-W-PY33 .so): c_spawn_loop=True has no Python equivalent at
+    zero per-batch cost — fall back with c_spawn_loop=False."""
+    from ._bindings import v1_available as _v1a
+
+    if not _v1a().get("spawn_loop"):
+        raise RuntimeError(
+            "c_spawn_loop=True needs fr_py_worker_spawn_loop — rebuild "
+            "the substrate ('make -f Makefile.substrate "
+            "python-substrate')")
+
+
+def _resolve_c_spawn_loop(c_spawn_loop, raw_mode, num_nodes):
+    """Gate the W-PY33 C spawn loop to its supported envelope.
+
+    Supported: map(), mode="spawn", UMA single-node, materialized
+    input. Anything else raises loudly (never silently falls back —
+    a user asking for the C loop must know when they are not getting
+    it). Splice/streaming/NUMA/run/stream executors are future work.
+    """
+    if not c_spawn_loop:
+        return False
+    if raw_mode != "spawn":
+        raise ValueError(
+            "c_spawn_loop=True needs mode='spawn' (the C loop replays "
+            "a spawn argv per batch), got mode=%r" % (raw_mode,))
+    if num_nodes != 1:
+        raise RuntimeError(
+            "c_spawn_loop=True is UMA-only in W-PY33 (multi-node is "
+            "future work) — use c_spawn_loop=False")
+    _require_spawn_loop_symbol()
     return True
 
 
@@ -813,6 +867,12 @@ def map(payload, source, **kwargs):
     c_worker_loop = _resolve_c_plugin_loop(
         _validate_c_worker_loop(kwargs.get("c_worker_loop")),
         mode, num_nodes)
+    # W-PY33: gate the C spawn loop to its envelope (mode/spawn +
+    # UMA + symbol). Argv extraction happens after _coerce_payload
+    # per branch below (the spawn-ness rides the wrapper's tag).
+    c_spawn_loop = _resolve_c_spawn_loop(
+        _validate_c_spawn_loop(kwargs.get("c_spawn_loop")),
+        mode, num_nodes)
     if kwargs.get("resume") is not None or \
             kwargs.get("checkpoint_file") is not None:
         # W-PY22: capability gate (NUMA/splice/non-reactor never see
@@ -881,6 +941,11 @@ def map(payload, source, **kwargs):
                 "c_worker_loop=True is materialized-only in W-PY26 "
                 "(streaming ingest is future work) — use "
                 "c_worker_loop=False")
+        if c_spawn_loop:
+            raise RuntimeError(
+                "c_spawn_loop=True is materialized-only in W-PY33 "
+                "(streaming ingest is future work) — use "
+                "c_spawn_loop=False")
         if orchestrator:
             with _RUN_LOCK:
                 return _execute_ingest_reactor_locked(
@@ -911,6 +976,16 @@ def map(payload, source, **kwargs):
                 "c_worker_loop=True needs a dialect-1/2 frozen-ABI "
                 "plugin (forkrun_use_ctx opting into 1 or 2) — this "
                 "payload negotiates no ctx; use c_worker_loop=False")
+    spawn_argv = None
+    if c_spawn_loop:
+        # Coerced spawn payloads carry the argv list on the wrapper
+        # (make_spawn_payload tags _forkrun_spawn_argv); the C loop
+        # replays exactly this argv per batch (no shell).
+        spawn_argv = _c_spawn_spec(payload)
+        if spawn_argv is None:
+            raise RuntimeError(
+                "c_spawn_loop=True needs a spawn argv payload "
+                "(mode='spawn') — use c_spawn_loop=False")
     if orchestrator:
         with _RUN_LOCK:
             return _execute_reactor_locked(
@@ -923,7 +998,9 @@ def map(payload, source, **kwargs):
                 resume=kwargs.get("resume"),
                 checkpoint_file=kwargs.get("checkpoint_file"),
                 c_worker_loop=c_worker_loop,
-                plugin_spec=plugin_spec)
+                plugin_spec=plugin_spec,
+                c_spawn_loop=c_spawn_loop,
+                spawn_argv=spawn_argv)
     results = _execute(payload, source, sink=None,
                        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
                        workers=_resolve_workers(kwargs.get("workers")),
@@ -931,7 +1008,9 @@ def map(payload, source, **kwargs):
                        collect=True, order=order,
                        mode=mode, nodes=nodes, c_drain=c_drain,
                        c_worker_loop=c_worker_loop,
-                       plugin_spec=plugin_spec)
+                       plugin_spec=plugin_spec,
+                       c_spawn_loop=c_spawn_loop,
+                       spawn_argv=spawn_argv)
     return results
 
 
@@ -977,6 +1056,10 @@ def stream(payload, source, **kwargs):
     if _validate_c_worker_loop(kwargs.get("c_worker_loop")):
         raise RuntimeError(
             "stream(): c_worker_loop=True is map()-only in W-PY26 "
+            "(streaming executors are future work)")
+    if _validate_c_spawn_loop(kwargs.get("c_spawn_loop")):
+        raise RuntimeError(
+            "stream(): c_spawn_loop=True is map()-only in W-PY33 "
             "(streaming executors are future work)")
     kwargs = dict(kwargs, c_drain=c_drain)
     numa_map_str, num_nodes, node_cpus = _resolve_numa(
@@ -2755,8 +2838,9 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
 
 
 def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
-              collect, order, mode="python", nodes="auto", splice=False,
-              c_drain=True, c_worker_loop=False, plugin_spec=None):
+               collect, order, mode="python", nodes="auto", splice=False,
+               c_drain=True, c_worker_loop=False, plugin_spec=None,
+               c_spawn_loop=False, spawn_argv=None):
     if mode not in ("python", "splice"):
         raise NotImplementedError(
             "v0 supports mode='python' only (spawn/plugin are Stage 5)")
@@ -2775,12 +2859,15 @@ def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
                                order=order, splice=splice,
                                c_drain=c_drain,
                                c_worker_loop=c_worker_loop,
-                               plugin_spec=plugin_spec)
+                               plugin_spec=plugin_spec,
+                               c_spawn_loop=c_spawn_loop,
+                               spawn_argv=spawn_argv)
 
 
 def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                     on_error, collect, order, splice=False,
-                    c_drain=True, c_worker_loop=False, plugin_spec=None):
+                    c_drain=True, c_worker_loop=False, plugin_spec=None,
+                    c_spawn_loop=False, spawn_argv=None):
     # W-PY21-A: c_drain moves result byte movement (signal consume +
     # memfd pread) from the parent into a forked C loop. Framing and
     # parsing are untouched: the drain copies framed records
@@ -2794,6 +2881,12 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                 "c_worker_loop=True needs collection with a "
                 "dialect-1/2 plugin spec")
         _require_plugin_loop_symbol()
+    if c_spawn_loop:
+        if not collect or spawn_argv is None:
+            raise RuntimeError(
+                "c_spawn_loop=True needs collection with a "
+                "spawn argv payload")
+        _require_spawn_loop_symbol()
     pre_fds = snapshot_fds()
     lib = load()
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
@@ -2856,6 +2949,16 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                 # collect is always true here (map-only flag).
                 pids.append(_fork_c_plugin_worker(
                     lib, i, plugin_spec[0], plugin_spec[1],
+                    memfd, out_fds[i],
+                    signal_w if use_drain else None, None,
+                    engine_fds, on_error))
+                continue
+            if c_spawn_loop:
+                # W-PY33: C-loop spawn worker (zero Python per
+                # batch). spawn_argv was tag-gated in map(); collect
+                # is always true here (map-only flag).
+                pids.append(_fork_c_spawn_worker(
+                    lib, i, spawn_argv,
                     memfd, out_fds[i],
                     signal_w if use_drain else None, None,
                     engine_fds, on_error))
@@ -3189,7 +3292,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                             mode="python", nodes="auto", splice=False,
                             c_drain=True, resume=None,
                             checkpoint_file=None, c_worker_loop=False,
-                            plugin_spec=None):
+                            plugin_spec=None, c_spawn_loop=False,
+                            spawn_argv=None):
     """Materialized map/run under reactor supervision (blocking).
 
     init → spill → sync scan → (output memfds) → (order pipe +
@@ -3227,6 +3331,18 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                 "c_worker_loop=True takes no sink (no per-batch "
                 "Python hook in the C loop)")
         _require_plugin_loop_symbol()
+    if c_spawn_loop:
+        # W-PY33: reactor + C spawn loop needs collection, a spawn
+        # argv payload, and no sink (the C loop has no sink hook).
+        if not collect or spawn_argv is None:
+            raise RuntimeError(
+                "c_spawn_loop=True needs collection with a "
+                "spawn argv payload")
+        if sink is not None:
+            raise RuntimeError(
+                "c_spawn_loop=True takes no sink (no per-batch "
+                "Python hook in the C loop)")
+        _require_spawn_loop_symbol()
     pre_fds = snapshot_fds()
     lib = load()
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
@@ -3329,7 +3445,9 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                         trap_ack_w=trap_w, on_error=on_error,
                         engine_fds=engine_fds, splice=splice,
                         plugin_loop=(tuple(plugin_spec)
-                                     if c_worker_loop else None))
+                                     if c_worker_loop else None),
+                        spawn_loop=(tuple(spawn_argv)
+                                    if c_spawn_loop else None))
         state.trap_ack_r = trap_r
         for _ in range(workers):
             if state.spawn_worker(node=0) is None:
