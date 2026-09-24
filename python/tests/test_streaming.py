@@ -51,7 +51,7 @@ class TestStreaming(unittest.TestCase):
 
             t0 = time.perf_counter()
             stamps = []
-            for _blob in forkrun.stream(slow, path, workers=2, lines=20):
+            for _blob in forkrun.stream(slow, path, workers=2, lines=20, nodes=1):
                 stamps.append(time.perf_counter() - t0)
             total = time.perf_counter() - t0
             self.assertGreater(len(stamps), 50)
@@ -68,7 +68,7 @@ class TestStreaming(unittest.TestCase):
             path = fh.name
         try:
             write_lines(path, 5000)
-            out = list(forkrun.stream(_identity, path, workers=4))
+            out = list(forkrun.stream(_identity, path, workers=4, nodes=1))
             with open(path, "rb") as fh:
                 raw = fh.read()
             self.assertEqual(sorted(b"".join(out).splitlines()),
@@ -83,7 +83,7 @@ class TestStreaming(unittest.TestCase):
             path = fh.name
         try:
             self.assertEqual(list(forkrun.stream(_identity, path,
-                                                 workers=2)), [])
+                                                 workers=2, nodes=1)), [])
             assert_no_zombies(self)
         finally:
             os.unlink(path)
@@ -97,7 +97,7 @@ class TestStreaming(unittest.TestCase):
             path = fh.name
         try:
             write_lines(path, 500)
-            self.assertEqual(list(forkrun.stream(drop, path, workers=2)),
+            self.assertEqual(list(forkrun.stream(drop, path, workers=2, nodes=1)),
                              [])
             assert_no_zombies(self)
         finally:
@@ -121,7 +121,7 @@ class TestStreaming(unittest.TestCase):
 
             before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             n = 0
-            for blob in forkrun.stream(amplify, path, workers=4):
+            for blob in forkrun.stream(amplify, path, workers=4, nodes=1):
                 n += 1
                 time.sleep(0.001)
                 if n == 1:
@@ -145,10 +145,10 @@ class TestStreaming(unittest.TestCase):
             write_lines(path, 20000)
             t0 = time.perf_counter()
             out_stream = list(forkrun.stream(_identity, path, workers=4,
-                                             order="none"))
+                                             order="none", nodes=1))
             t_stream = time.perf_counter() - t0
             t0 = time.perf_counter()
-            out_map = forkrun.map(_identity, path, workers=4)
+            out_map = forkrun.map(_identity, path, workers=4, nodes=1)
             t_map = time.perf_counter() - t0
             self.assertEqual(sorted(b"".join(out_stream).splitlines()),
                              sorted(b"".join(out_map).splitlines()))

@@ -177,3 +177,65 @@ pay identical `tr` execution (~300µs+/batch), so the projected
 architectural (one engine-owned claim→spawn→signal→ack path under
 WorkerTxn recovery), not throughput. 256KB batches complete
 identically — no deadlock, as the capture-memfd design guarantees.
+
+┌────────────────────────────────────────────────────────────────────┐
+│  NUMA fake-4 STEADY STATE (W-PY35): 5M records, 28 workers,        │
+│  order=index, same-boot UMA baseline, numa=fake=4 boot             │
+├──────────────┬──────────┬──────────┬──────────┬────────────────────┤
+│ forkrun C    │ UMA 1    │ @2       │ @4(auto) │ NUMA/UMA           │
+├──────────────┼──────────┼──────────┼──────────┼────────────────────┤
+│ light 508MB  │ 5.8M     │ 5.4M     │ 5.6M     │ 0.93-0.97          │
+│ medium 2.2GB │ 1.7M     │ 1.9M     │ 2.1M     │ 1.12-1.24          │
+│ heavy 6.4GB  │ 552k     │ 709k     │ 710k     │ 1.28-1.29          │
+├──────────────┼──────────┼──────────┼──────────┼────────────────────┤
+│ Python light │ 1.6M     │ —        │ 1.6M     │ 1.00               │
+│ Python med   │ 655k     │ —        │ 712k     │ 1.09               │
+│ Python heavy │ 88k      │ —        │ 90k      │ 1.02               │
+├──────────────┼──────────┼──────────┼──────────┼────────────────────┤
+│ tok C 500k   │ 317k d/s │ —        │ 342k     │ 1.08 (2.2× Exec)   │
+│ tok Py 500k  │ 140k d/s │ —        │ 148k     │ ~1.04              │
+│ spawn py 1M  │ 1.6M     │ —        │ 1.2M     │ 0.75               │
+│ spawn C 1M   │ 1.6M     │ —        │ gate     │ UMA-only by design │
+└──────────────┴──────────┴──────────┴──────────┴────────────────────┘
+Competitors same boot 28w: light Ex 1.7M / Pool 1.5M; medium Ex
+755k / Pool 757k; heavy Ex 93k / Pool 92k; tokenize Ex 158k /
+Pool 157k. forkrun C NUMA advantage: 3.3× / 2.8× / 7.6× /
+2.2× (tok). Sweep 1M medium monotonic both topologies (C:
+361k→1.7M UMA, auto matches from 4w; Python plateaus 14→28w
+both). Stream+@2 slow-consumer: 1M/1M lines, +0MB RSS.
+
+Reading: no NUMA software tax at steady state on fake hardware
+(W-PY36 corrected the first hypothesis offered here: the win is
+pipeline overlap — UMA serializes ~0.9s spill+scan while NUMA
+overlaps ingest/index/scan with compute — not contention
+relief; per-instruction efficiency is worse on NUMA
+everywhere). Only spawn regresses
+(0.75×, spawn-cost dominated). Output record-multisets proven
+exactly equal UMA vs NUMA at 5M (light 5.0M/5.0M, medium
+4997892/4997892 = Pool/Executor counts); naive line counts
+read low on NUMA because blobs don't newline-terminate
+(junction artifact, <0.1% — the runner's 99% threshold
+separates it from genuine 25%+ topology shortfall). Full
+tables: `python/benchmarks/results/numa_5m_study.md`. Runner:
+`python/benchmarks/bench_numa_5m.py`.
+
+┌────────────────────────────────────────────────────────────────────┐
+│  NUMA fake-4 at 20M (W-PY35 follow-up): same harness, 28 workers   │
+├──────────────┬──────────┬──────────┬─────────┬─────────────────────┤
+│ forkrun      │ UMA 1    │ @4(auto) │ ratio   │ vs 5M ratio         │
+├──────────────┼──────────┼──────────┼─────────┼─────────────────────┤
+│ light C      │ 4.6M     │ 5.5M     │ 1.20×   │ was 0.97×           │
+│ medium C     │ 1.4M     │ 1.8M     │ 1.29×   │ was 1.24×           │
+│ heavy C      │ 545k     │ 730k     │ 1.34×   │ was 1.29×           │
+│ light Py     │ 1.5M     │ 1.6M     │ 1.07×   │ was 1.00×           │
+│ medium Py    │ 595k     │ 701k     │ 1.18×   │ was 1.09×           │
+│ heavy Py     │ 87k      │ 90k      │ 1.03×   │ was 1.02×           │
+└──────────────┴──────────┴──────────┴─────────┴─────────────────────┘
+Reading: scales as hoped — ratios hold or strengthen at 4× data.
+Absolutes drift ~15-20% on both topologies over the long matrix
+while NUMA holds (light 5.6M→5.5M vs UMA 5.8M→4.6M): the longer
+the run, the more UMA's serialized spill+scan costs it (W-PY36:
+the win is pipeline overlap, not contention relief — NUMA is
+worse on every micro metric and wins via more aggregate
+parallelism). CSV:
+`python/benchmarks/results/numa_20m.csv`, inputs at `/tmp/numa20m`.

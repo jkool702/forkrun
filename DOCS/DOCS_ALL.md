@@ -3622,6 +3622,81 @@ Because resume files dictate commands and environment restoration, `forkrun` enf
 
 See [`SECURITY.md`](SECURITY.md) for the complete security specification.
 
+## §7. Verified Envelopes: Streaming + NUMA Tier-3 Recovery (W-PY34)
+
+§2–§4 describe the mechanism. This section records where recovery
+is *verified by test* (not just designed), and the topology
+preconditions the verification rests on. Verification order: no
+engine or recovery-code changes were needed — the WorkerTxn
+architecture covered streaming and multi-node NUMA as designed.
+
+### 7.1 Streaming recovery (UMA) — `python/tests/test_streaming_recovery.py`
+
+Worker death DURING an active `stream()` drain recovers exactly
+like death during `map()`: the reactor's death-pipe handler calls
+`fr_py_recover_worker()` synchronously inside `reactor_loop`
+(between drain bursts — `DRAIN_BURST` bounds detection latency),
+the orphan batch is reverted + escrowed, the respawned generation
+re-processes it, and the drain loop yields it. The other workers
+never pause. Verified (all with `orchestrator=True`, `nodes=1`):
+
+- SIGSEGV / SIGKILL mid-stream, `order="none"` and
+  `order="index"`: stream continues, output complete, recovered
+  batch exactly once (Counter equality, plus a blob-uniqueness
+  gate against double-emit).
+- Two simultaneous deaths at different batches: both recovered.
+- Ordered streaming: the reassembly buffer holds the gap; the
+  late batch lands in its correct position (byte-exact
+  reconstruction).
+- Slow consumer + crash: recovery completes with bounded parent
+  memory (streaming holds only the in-flight window).
+
+### 7.2 NUMA recovery (`nodes="@2"`) — `python/tests/test_numa_recovery.py`
+
+Cross-node recovery works because every routing decision keys off
+the dead worker's node (`txn->node`), never the parent's:
+
+- Crash under `@2`: parent on node 0 reads `WorkerTxn[wid]` from
+  MAP_SHARED `GlobalState`, deposits to `fd_escrow_w[1]`, respawns
+  pinned to node 1 (`fr_py_worker_init(wid, node, ...)`); the new
+  generation claims from node 1's escrow. Output byte-exact vs a
+  healthy `@2` run (SIGSEGV and SIGKILL, map and stream).
+- Respawn node stability is structural: `wid_to_node` assigns
+  contiguous per-node blocks once per run, so a respawned wid
+  reuses its node's memfd, ring, and escrow pipe (locked in by
+  unit test).
+- Combined streaming + NUMA + crash (both orders): stream
+  continues, complete output, exact order for `order="index"`.
+
+### 7.3 Topology preconditions (read before operating NUMA)
+
+1. **Workers must cover every node** (`workers >= nodes`).
+   Rings are born-local and workers claim locally only (stealing
+   is scanner-side); a node with no worker never has its ring
+   claimed, and its share of the input is silently lost. The
+   reactor does not (and cannot cheaply) rebalance this — size
+   the pool to the topology.
+2. **`nodes="auto"` follows the boot topology.** Booted with
+   `numa=fake=N`, auto resolves to N nodes and every call takes
+   the NUMA pipeline. Single-node-authored tests and scripts
+   (workers < N, UMA batching assumptions) must pass `nodes=1`
+   explicitly under fake NUMA. This is an operating fact, not a
+   recovery bug: the W-PY34 suites pin `nodes=1` (streaming) and
+   `nodes="@2"` (NUMA) for exactly this reason.
+3. **NUMA batch granularity varies run to run** (per-node rings
+   batch independently, and a crash shifts timing). Correctness
+   comparisons across NUMA runs must be over line multisets or
+   joined bytes — never over blob identity. (UMA batching is
+   deterministic: single ring, pre-fork scan.)
+
+### 7.4 Explicitly NOT covered
+
+- Recovery in `mode="spawn"` / `mode="plugin"` streaming
+  executors (same WorkerTxn mechanism, no Tier-3 tests written).
+- Realtime (`-u`) delivery (at-least-once by physics, §5.2).
+- Scheduling work onto unworked nodes (see 7.3.1 — documented
+  constraint, not a tested path).
+
 
 -----------------------------------------
 # SECURITY.md

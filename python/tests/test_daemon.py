@@ -76,7 +76,7 @@ class TestPayloadForksDaemon(unittest.TestCase):
                     os.waitpid(pid, 0)  # reap the middle process only
                 return data
 
-            out = forkrun.map(forking, path, workers=1, order="index")
+            out = forkrun.map(forking, path, workers=1, order="index", nodes=1)
             # The run is unaffected by the daemon fork.
             self.assertEqual(b"".join(out), raw)
             # The daemon lived past the batch and past the run (3 beats).

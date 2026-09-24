@@ -413,7 +413,10 @@ def v1_available(lib=None) -> dict:
         return {"exec": False, "plugin": False, "emit": False,
                 "splice": False, "ack_direct": False, "complete": False,
                 "spill": False, "parse": False, "resume": False,
-                "plugin_loop": False, "spawn_loop": False}
+                "plugin_loop": False, "spawn_loop": False,
+                "orderer": False, "order_pipe": False,
+                "scan_spawn": False, "numa": False,
+                "drain": False}
     has = hasattr
     return {"exec": has(lib, "fr_py_exec_spawn"),
             "plugin": has(lib, "fr_py_plugin_call"),

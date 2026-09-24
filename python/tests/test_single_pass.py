@@ -97,7 +97,7 @@ class TestSinglePassCorrectness(unittest.TestCase):
         out = {}
         for tag, spec in specs.items():
             res = forkrun.map(spec, path, mode="plugin",
-                              workers=workers, order="index")
+                              workers=workers, order="index", nodes=1)
             out[tag] = _records(res)
         return out
 

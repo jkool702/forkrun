@@ -117,7 +117,7 @@ class TestSweepExecution(unittest.TestCase):
         res = forkrun.sweep(
             lambda b: ("%s-%s" % (b.metadata[0],
                                   b.metadata[1])).encode(),
-            args=[["a", "b"], ["x", "y"]])
+            args=[["a", "b"], ["x", "y"]], nodes=1)
         self.assertEqual(len(res), 4)
         self.assertIn(b"a-x", res)
         self.assertIn(b"b-y", res)
@@ -125,7 +125,7 @@ class TestSweepExecution(unittest.TestCase):
     def test_sweep_combination_order(self):
         # Standalone results arrive in combination order.
         res = forkrun.sweep(lambda b: str(b.metadata).encode(),
-                            args=[["a", "b"], ["x", "y"]])
+                            args=[["a", "b"], ["x", "y"]], nodes=1)
         self.assertEqual(
             res, [b"('a', 'x')", b"('a', 'y')",
                   b"('b', 'x')", b"('b', 'y')"])
@@ -141,10 +141,10 @@ class TestSweepExecution(unittest.TestCase):
                     b.metadata[0],
                     bytes(b.data).decode().strip().splitlines()[0]
                 )).encode(),
-                source=path, args=[["p1", "p2"]])
+                source=path, args=[["p1", "p2"]], nodes=1)
             # Each of the 2 combos processes the whole source.
             self.assertEqual(len(res), 2 * len(
-                forkrun.map(lambda b: bytes(b.data), path)))
+                forkrun.map(lambda b: bytes(b.data), path, nodes=1)))
             self.assertTrue(all(r.startswith(b"p1:") or
                                 r.startswith(b"p2:") for r in res))
         finally:
@@ -158,7 +158,7 @@ class TestSweepExecution(unittest.TestCase):
             res = forkrun.sweep(
                 lambda b: (b.metadata[0].encode() + b":" +
                            bytes(b.data).strip()),
-                source=fd, args=[["q1", "q2"]])
+                source=fd, args=[["q1", "q2"]], nodes=1)
             self.assertEqual(sorted(res),
                              [b"q1:hello", b"q2:hello"])
         finally:
@@ -169,7 +169,7 @@ class TestSweepExecution(unittest.TestCase):
         res = forkrun.sweep(
             lambda b: ("%s=%s" % (b.metadata[0],
                                   b.metadata[1])).encode(),
-            args=[["a", "b"], ["1", "2"]], link=True)
+            args=[["a", "b"], ["1", "2"]], link=True, nodes=1)
         self.assertEqual(len(res), 2)
         self.assertIn(b"a=1", res)
         self.assertIn(b"b=2", res)
@@ -186,7 +186,7 @@ class TestSweepExecution(unittest.TestCase):
             res = forkrun.sweep(
                 lambda b: ("%s/%s" % (b.metadata[0],
                                       b.metadata[1])).encode(),
-                args_from=[f1, f2])
+                args_from=[f1, f2], nodes=1)
             self.assertEqual(sorted(res), [b"m1/n1", b"m2/n1"])
         finally:
             import shutil as _shutil
@@ -200,33 +200,33 @@ class TestSweepExecution(unittest.TestCase):
                 raise ValueError("bad combo")
             return b.metadata[0].encode()
 
-        res = forkrun.sweep(_sometimes, args=[["bad", "good"]])
+        res = forkrun.sweep(_sometimes, args=[["bad", "good"]], nodes=1)
         self.assertEqual(res, [b"good"])
 
     def test_sweep_empty_args(self):
         self.assertEqual(
-            forkrun.sweep(lambda b: b"never", args=[[]]), [])
+            forkrun.sweep(lambda b: b"never", args=[[]], nodes=1), [])
 
     def test_sweep_forced_mapping_conflicts(self):
         # Standalone batch↔combo mapping is load-bearing: silently
         # accepting lines=/bytes=/order= would scramble it.
         with self.assertRaises(ValueError):
-            forkrun.sweep(lambda b: b"x", args=[["a"]], lines=5)
+            forkrun.sweep(lambda b: b"x", args=[["a"]], lines=5, nodes=1)
         with self.assertRaises(ValueError):
-            forkrun.sweep(lambda b: b"x", args=[["a"]], bytes=64)
-        with self.assertRaises(ValueError):
-            forkrun.sweep(lambda b: b"x", args=[["a"]],
-                          order="none")
+            forkrun.sweep(lambda b: b"x", args=[["a"]], bytes=64, nodes=1)
         with self.assertRaises(ValueError):
             forkrun.sweep(lambda b: b"x", args=[["a"]],
-                          sink=lambda m, r: None)
+                          order="none", nodes=1)
         with self.assertRaises(ValueError):
-            forkrun.sweep(None, args=[["a"]], mode="splice")
+            forkrun.sweep(lambda b: b"x", args=[["a"]],
+                          sink=lambda m, r: None, nodes=1)
+        with self.assertRaises(ValueError):
+            forkrun.sweep(None, args=[["a"]], mode="splice", nodes=1)
 
     def test_sweep_orchestrator_passthrough(self):
         res = forkrun.sweep(
             lambda b: b.metadata[0].encode(),
-            args=[["a", "b", "c"]], orchestrator=True)
+            args=[["a", "b", "c"]], orchestrator=True, nodes=1)
         self.assertEqual(sorted(res), [b"a", b"b", b"c"])
 
     def test_metadata_default_none(self):
@@ -239,7 +239,7 @@ class TestSweepExecution(unittest.TestCase):
             write_lines(path, 50)
             res = forkrun.map(
                 lambda b: b"x" if b.metadata is None else b"y",
-                path, workers=2)
+                path, workers=2, nodes=1)
         finally:
             os.unlink(path)
         self.assertTrue(res)

@@ -1136,15 +1136,6 @@ def stream(payload, source, **kwargs):
 
 
 def _stream_gen(payload, source, **kwargs):
-    yield from _execute_streaming(
-        payload, source,
-        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers(kwargs.get("workers")),
-        on_error=kwargs.get("on_error", "retry"),
-        mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"))
-
-
-def _stream_gen(payload, source, **kwargs):
     # v1 true streaming: yields blobs in worker-completion order WHILE
     # workers run (not after collection). map() stays on the v0.5
     # post-completion path; run() (discard/worker-sink) needs no drain.
@@ -1601,6 +1592,8 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
     drain_status = None
     exhausted = False
     pids: list = []
+    scan_pid = None
+    scan_rc = None
     try:
         memfd, size = _spill_to_memfd(src_fd)
         try:
@@ -1609,8 +1602,43 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             pass
         if lib.fr_py_ingest_done() != RC_OK:
             raise RuntimeError("ingest signal failed")
-        if lib.fr_py_scan(memfd) != RC_OK:
-            raise RuntimeError("scan failed")
+        # W-PY39: fork the scanner so its pre-flight + publish
+        # overlap worker execution below (bash/NUMA topology).
+        # Workers arriving mid-scan trip the pre-flight bail
+        # (CASE B); the engine main loop always scans from byte 0.
+        scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
+
+        def _scan_pump():
+            # W-PY39 scanner watch for _drain_records: raises on
+            # scanner failure (else workers would hang without EOF
+            # and the drain would never exhaust); True once the
+            # scanner exited cleanly (drain termination stays
+            # worker/signal-driven).
+            nonlocal scan_pid, scan_rc
+            if scan_pid is None:
+                return True
+            try:
+                wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
+            except ChildProcessError:
+                scan_pid = None
+                return True
+            except OSError:
+                return False
+            if wpid != scan_pid:
+                return False
+            scan_pid = None
+            if os.WIFEXITED(scan_st) and \
+                    os.WEXITSTATUS(scan_st) == 0:
+                scan_rc = 0
+                return True
+            scan_rc = scan_st
+            try:
+                lib.fr_py_abort()
+            except Exception:
+                pass
+            raise RuntimeError(
+                "forkrun: materialized scanner failed (status %r)"
+                % (scan_st,))
 
         try:
             sys.stdout.flush()
@@ -1679,6 +1707,7 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             pump = _make_results_pump(results_r, order=order,
                                       stats=stats)
             drain_alive = True
+            scan_alive = True
             try:
                 alive = set(pids)
                 while True:
@@ -1693,6 +1722,36 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                         if wpid == pid:
                             alive.discard(pid)
                             statuses.append((pid, status))
+                    if scan_alive:
+                        # W-PY39: fail fast on scanner death (no EOF
+                        # can arrive without it); clean exit just
+                        # retires the watch (drain stays
+                        # worker-driven).
+                        try:
+                            wpid, scan_st = os.waitpid(
+                                scan_pid, os.WNOHANG)
+                        except ChildProcessError:
+                            scan_alive = False
+                            scan_pid = None
+                        except OSError:
+                            pass
+                        else:
+                            if wpid == scan_pid:
+                                scan_alive = False
+                                scan_pid = None
+                                if not (os.WIFEXITED(scan_st) and
+                                        os.WEXITSTATUS(scan_st)
+                                        == 0):
+                                    scan_rc = scan_st
+                                    try:
+                                        lib.fr_py_abort()
+                                    except Exception:
+                                        pass
+                                    raise RuntimeError(
+                                        "forkrun: materialized "
+                                        "scanner failed (status %r)"
+                                        % (scan_st,))
+                                scan_rc = 0
                     if drain_alive:
                         try:
                             wpid, _dst = os.waitpid(drain_pid,
@@ -1726,6 +1785,24 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                         drain_alive = False
                         drain_status = _dst
                 exhausted = True
+                # W-PY39 scanner join (backstop: the in-loop watch
+                # above already fail-fasted on error and retired on
+                # clean exit; workers cannot EOF without a clean
+                # scanner finish).
+                if scan_pid is not None and scan_rc is None:
+                    try:
+                        _, scan_st = os.waitpid(scan_pid, 0)
+                    except ChildProcessError:
+                        scan_st = None
+                    scan_pid = None
+                    if scan_st is not None and not (
+                            os.WIFEXITED(scan_st) and
+                            os.WEXITSTATUS(scan_st) == 0):
+                        raise RuntimeError(
+                            "forkrun: materialized scanner failed "
+                            "(status %r)" % (scan_st,))
+                else:
+                    scan_pid = None
             finally:
                 # Normal exhaustion falls through; abandonment
                 # (GeneratorExit) or consumer error lands here: reap,
@@ -1735,6 +1812,8 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                 # the results read end.
                 _teardown_stream(lib, pids, signal_r, out_fds,
                                  out_hold, memfd, src_fd, must_close,
+                                 extra_pids=([scan_pid]
+                                             if scan_pid else []),
                                  drain_pid=drain_pid,
                                  results_fd=results_r)
                 memfd = None
@@ -1746,17 +1825,37 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             try:
                 for blob in _drain_records(lib, signal_r, out_fds, pids,
                                            statuses, order=order,
-                                           stats=stats):
+                                           stats=stats, pump=_scan_pump):
                     yield blob
             finally:
                 # Normal exhaustion falls through; abandonment (GeneratorExit)
                 # or consumer error lands here: reap, close, destroy, re-raise
                 # (a fresh raise on the abandon path would mask GeneratorExit).
                 _teardown_stream(lib, pids, signal_r, out_fds, out_hold,
-                                 memfd, src_fd, must_close)
+                                 memfd, src_fd, must_close,
+                                 extra_pids=([scan_pid]
+                                             if scan_pid else []))
                 memfd = None
                 signal_r = None
                 out_fds = []
+
+        # W-PY39 scanner join (backstop for the non-drain branch:
+        # the pump fail-fasted on error and retired on clean exit;
+        # workers cannot EOF without a clean scanner finish).
+        if scan_pid is not None and scan_rc is None:
+            try:
+                _, scan_st = os.waitpid(scan_pid, 0)
+            except ChildProcessError:
+                scan_st = None
+            scan_pid = None
+            if scan_st is not None and not (
+                    os.WIFEXITED(scan_st) and
+                    os.WEXITSTATUS(scan_st) == 0):
+                raise RuntimeError(
+                    "forkrun: materialized scanner failed (status %r)"
+                    % (scan_st,))
+        else:
+            scan_pid = None
 
         failed = [s for s in statuses
                   if not (os.WIFEXITED(s[1]) and os.WEXITSTATUS(s[1]) == 0)]
@@ -1794,7 +1893,8 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         # no-ops when it did (Nones/empties) and save abandon paths where
         # setup itself raised before forking.
         _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
-                         src_fd, must_close)
+                         src_fd, must_close,
+                         extra_pids=([scan_pid] if scan_pid else []))
 
 
 def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
@@ -2328,6 +2428,36 @@ def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
             payload, source, sink=sink, lines=lines, bytes_=bytes_,
             workers=workers, on_error=on_error, collect=collect,
             order=order, splice=splice, c_drain=c_drain)
+
+
+def _fork_materialized_scanner(lib, memfd, engine_fds):
+    """Fork a scanner child over complete (materialized) input (W-PY39).
+
+    The child scrubs to engine fds + memfd, runs fr_py_scan to EOF,
+    and exits with the engine rc. Returns the child pid; the caller
+    MUST reap it (waitpid) and treat a nonzero rc as run failure
+    ("scan failed" — the synchronous fr_py_scan contract).
+
+    Materialized callers fork workers immediately after their
+    natural setup (output memfds, pipes, orderer/drain, reactor
+    state — the 1-5ms pre-flight window): workers arriving
+    mid-scan trip the engine pre-flight bail (CASE B → geometric
+    ramp from partial calibration), overlapping scan with
+    compute. A zero-window arrival is equally correct (ramp from
+    scratch): the engine main loop always scans from byte 0, so
+    CASE A/B differ only in batch sizing, never in completeness.
+    (The ingest paths keep their first-publish gate instead —
+    their input is still arriving while the scanner runs.)
+    """
+    pid = os.fork()
+    if pid == 0:
+        try:
+            scrub_fds(engine_fds | {memfd})
+            rc = lib.fr_py_scan(memfd)
+        except BaseException:
+            rc = 1
+        os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
+    return pid
 
 
 def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
@@ -2901,6 +3031,7 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
     signal_w = None
     drain_pid = None
     results_fd = None
+    scan_pid = None
     try:
         memfd, size = _spill_to_memfd(src_fd)
         try:
@@ -2909,8 +3040,12 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             pass
         if lib.fr_py_ingest_done() != RC_OK:
             raise RuntimeError("ingest signal failed")
-        if lib.fr_py_scan(memfd) != RC_OK:
-            raise RuntimeError("scan failed")
+        # W-PY39: fork the scanner so its pre-flight + publish
+        # overlap the setup + worker execution below (bash/NUMA
+        # topology). Workers arriving mid-scan trip the pre-flight
+        # bail (CASE B); the engine main loop always scans from
+        # byte 0, so completeness never depends on the race.
+        scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
 
         # Flush buffered stdio before forking (no duplicated output).
         try:
@@ -3002,6 +3137,29 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             signal_r = None
 
         failed = []
+        # W-PY39: join the scanner first — workers ran concurrently
+        # with it (this ordering is also crash-safe: a dead scanner
+        # reaps here instead of stranding workers in claim). A
+        # failed scan aborts the workers and fails the run (the
+        # synchronous fr_py_scan contract, preserved).
+        try:
+            _, scan_st = os.waitpid(scan_pid, 0)
+        except ChildProcessError:
+            scan_st = 0
+        scan_pid = None
+        if not (os.WIFEXITED(scan_st) and
+                os.WEXITSTATUS(scan_st) == 0):
+            try:
+                lib.fr_py_abort()
+            except Exception:
+                pass
+            for pid in pids:
+                try:
+                    os.waitpid(pid, 0)
+                except Exception:
+                    pass
+            raise RuntimeError(
+                "forkrun: scan failed (status %r)" % (scan_st,))
         try:
             for pid in pids:
                 _, status = os.waitpid(pid, 0)
@@ -3071,6 +3229,26 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
     finally:
+        if scan_pid is not None:
+            # Stray scanner (exception path): SIGKILL + reap so no
+            # zombie pins the pid and no child outlives the run.
+            try:
+                wpid, _ = os.waitpid(scan_pid, os.WNOHANG)
+                if wpid == 0:
+                    try:
+                        os.kill(scan_pid, 9)
+                    except OSError:
+                        pass
+            except ChildProcessError:
+                pass
+            except OSError:
+                pass
+            try:
+                os.waitpid(scan_pid, 0)
+            except ChildProcessError:
+                pass
+            except OSError:
+                pass
         if drain_pid is not None:
             # Stray drain (exception path): SIGKILL + reap so no
             # zombie pins the pid and no child outlives the run.
@@ -3371,6 +3549,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     results_fd = None
     drain_status = None
     state = None
+    scan_pid = None
+    scan_rc = None
     # W-PY22: pre-try defaults so the abort handler below never
     # NameErrors on early failures (spill/scan, before assignment).
     use_orderer = False
@@ -3382,8 +3562,12 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             pass
         if lib.fr_py_ingest_done() != RC_OK:
             raise RuntimeError("ingest signal failed")
-        if lib.fr_py_scan(memfd) != RC_OK:
-            raise RuntimeError("scan failed")
+        # W-PY39: fork the scanner so its pre-flight + publish
+        # overlap the setup + worker execution below (bash/NUMA
+        # topology). Workers arriving mid-scan trip the pre-flight
+        # bail (CASE B); the engine main loop always scans from
+        # byte 0, so completeness never depends on the race.
+        scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
 
         try:
             sys.stdout.flush()
@@ -3461,12 +3645,68 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                 signal_r, out_fds, workers, mode="memfd")
             signal_r = None
 
+        def _watch_scanner():
+            # W-PY39: the forked materialized scanner runs
+            # concurrently with supervision. A clean exit is the
+            # normal case (scan finished; workers still draining)
+            # and is only recorded. A failed scan aborts the run:
+            # without the scanner no EOF can arrive, so waiting
+            # workers would hang — fail loud instead.
+            nonlocal scan_pid, scan_rc
+            if scan_pid is None or scan_rc is not None:
+                return
+            try:
+                wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
+            except ChildProcessError:
+                return
+            except OSError:
+                return
+            if wpid != scan_pid:
+                return
+            if os.WIFEXITED(scan_st) and \
+                    os.WEXITSTATUS(scan_st) == 0:
+                scan_rc = 0
+                scan_pid = None
+                return
+            scan_rc = scan_st
+            scan_pid = None
+            try:
+                lib.fr_py_abort()
+            except Exception:
+                pass
+            raise RuntimeError(
+                "forkrun: materialized scanner failed (status %r)"
+                % (scan_st,))
+
         try:
-            reactor_run(state)
+            reactor_run(state, service=_watch_scanner)
         except KeyboardInterrupt:
             raise
 
         _reactor_failure_check(state, workers, on_error)
+
+        # Scanner join: strict when observed, proof-based when
+        # already reaped by the watch above after healthy workers
+        # (workers cannot EOF without a clean scanner finish).
+        if scan_pid is not None and scan_rc is None:
+            try:
+                wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
+            except ChildProcessError:
+                wpid, scan_st = scan_pid, None
+            if wpid == 0:
+                try:
+                    _, scan_st = os.waitpid(scan_pid, 0)
+                except ChildProcessError:
+                    scan_st = None
+            # Reaped (or already reaped): clear so teardown never
+            # signals a recycled pid.
+            scan_pid = None
+            if scan_st is not None and not (
+                    os.WIFEXITED(scan_st) and
+                    os.WEXITSTATUS(scan_st) == 0):
+                raise RuntimeError(
+                    "forkrun: materialized scanner failed (status %r)"
+                    % (scan_st,))
 
         if use_drain:
             # Every worker write end is closed (all reaped) — drop
@@ -3565,6 +3805,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
         _teardown_reactor(lib, state, out_fds=out_fds,
                           out_hold=out_hold, memfd=memfd,
                           src_fd=src_fd, must_close=must_close,
+                          extra_pids=[scan_pid] if scan_pid else [],
                           orderer_pid=orderer_pid, order_r=order_r,
                           order_w=order_w, trap_r=trap_r, trap_w=trap_w,
                           coll_fd=coll_fd, coll_hold=coll_hold,
@@ -3639,6 +3880,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     drain_alive = True
     exhausted = False
     state = None
+    scan_pid = None
+    scan_rc = None
     try:
         memfd, size = _spill_to_memfd(src_fd)
         try:
@@ -3647,8 +3890,12 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             pass
         if lib.fr_py_ingest_done() != RC_OK:
             raise RuntimeError("ingest signal failed")
-        if lib.fr_py_scan(memfd) != RC_OK:
-            raise RuntimeError("scan failed")
+        # W-PY39: fork the scanner so its pre-flight + publish
+        # overlap the setup + worker execution below (bash/NUMA
+        # topology). Workers arriving mid-scan trip the pre-flight
+        # bail (CASE B); the engine main loop always scans from
+        # byte 0, so completeness never depends on the race.
+        scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
 
         try:
             sys.stdout.flush()
@@ -3903,11 +4150,45 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
 
         _pending: list = []
         _stream_ok = False
+
+        def _watch_scanner():
+            # W-PY39: the forked materialized scanner runs
+            # concurrently with supervision. A clean exit is the
+            # normal case (scan finished; workers still draining)
+            # and is only recorded. A failed scan aborts the run:
+            # without the scanner no EOF can arrive, so waiting
+            # workers would hang — fail loud instead.
+            nonlocal scan_pid, scan_rc
+            if scan_pid is None or scan_rc is not None:
+                return
+            try:
+                wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
+            except ChildProcessError:
+                return
+            except OSError:
+                return
+            if wpid != scan_pid:
+                return
+            scan_pid = None
+            if os.WIFEXITED(scan_st) and \
+                    os.WEXITSTATUS(scan_st) == 0:
+                scan_rc = 0
+                return
+            scan_rc = scan_st
+            try:
+                lib.fr_py_abort()
+            except Exception:
+                pass
+            raise RuntimeError(
+                "forkrun: materialized scanner failed (status %r)"
+                % (scan_st,))
+
         try:
             try:
                 yield from reactor_loop(
                     state,
-                    drain_gen=_pump_drain_c if use_drain else _pump_drain)
+                    drain_gen=_pump_drain_c if use_drain else _pump_drain,
+                    service=_watch_scanner)
             finally:
                 pass
         except BaseException:
@@ -3928,6 +4209,32 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                 except Exception:
                     pass
             raise
+
+        # W-PY39 scanner join: strict when observed, proof-based
+        # when already reaped by the watch above after healthy
+        # workers (workers cannot EOF without a clean scanner
+        # finish).
+        if scan_pid is not None and scan_rc is None:
+            try:
+                wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
+            except ChildProcessError:
+                wpid, scan_st = scan_pid, None
+            if wpid == 0:
+                try:
+                    _, scan_st = os.waitpid(scan_pid, 0)
+                except ChildProcessError:
+                    scan_st = None
+            # Reaped (or already reaped): clear so teardown never
+            # signals a recycled pid.
+            scan_pid = None
+            if scan_st is not None and not (
+                    os.WIFEXITED(scan_st) and
+                    os.WEXITSTATUS(scan_st) == 0):
+                raise RuntimeError(
+                    "forkrun: materialized scanner failed (status %r)"
+                    % (scan_st,))
+        else:
+            scan_pid = None
 
         _reactor_failure_check(state, workers, on_error)
 
@@ -3989,6 +4296,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                           out_fds=out_fds, out_hold=out_hold,
                           memfd=memfd, src_fd=src_fd,
                           must_close=must_close,
+                          extra_pids=[scan_pid] if scan_pid else [],
                           orderer_pid=orderer_pid, order_r=order_r,
                           order_w=order_w, trap_r=trap_r, trap_w=trap_w,
                           coll_fd=coll_fd, coll_hold=coll_hold,

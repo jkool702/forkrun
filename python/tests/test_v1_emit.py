@@ -208,7 +208,7 @@ class TestWorkerEmitIntegration(unittest.TestCase):
         try:
             write_lines(path, 2000)
             out = forkrun.map(lambda b: bytes(b.data).upper(), path,
-                              workers=4, order="index")
+                              workers=4, order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)
@@ -222,7 +222,8 @@ class TestWorkerEmitIntegration(unittest.TestCase):
         try:
             write_lines(path, 1500)
             out = list(forkrun.stream(lambda b: bytes(b.data).upper(),
-                                      path, workers=4, order="index"))
+                                      path, workers=4, order="index",
+                                      nodes=1))
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)
@@ -236,9 +237,10 @@ class TestWorkerEmitIntegration(unittest.TestCase):
         try:
             write_lines(path, 100)
             self.assertEqual(
-                forkrun.map(lambda b: None, path, workers=2), [])
+                forkrun.map(lambda b: None, path, workers=2, nodes=1),
+                [])
             out = forkrun.map(lambda b: b"", path, workers=2,
-                              order="index")
+                              order="index", nodes=1)
             self.assertTrue(out)
             self.assertTrue(all(b == b"" for b in out))
             assert_no_zombies(self)
@@ -252,10 +254,10 @@ class TestWorkerEmitIntegration(unittest.TestCase):
         try:
             write_lines(path, 200)
             out = forkrun.map(lambda b: "s", path, workers=2,
-                              order="index")
+                              order="index", nodes=1)
             self.assertTrue(all(b == b"s" for b in out))
             out = forkrun.map(lambda b: memoryview(b"m"), path,
-                              workers=2, order="index")
+                              workers=2, order="index", nodes=1)
             self.assertTrue(all(b == b"m" for b in out))
             assert_no_zombies(self)
         finally:
@@ -268,7 +270,7 @@ class TestWorkerEmitIntegration(unittest.TestCase):
             path = fh.name
         try:
             write_lines(path, 50)
-            out = forkrun.map(lambda b: 42, path, workers=1)
+            out = forkrun.map(lambda b: 42, path, workers=1, nodes=1)
             self.assertEqual(out, [])
             assert_no_zombies(self)
         finally:
@@ -284,7 +286,7 @@ class TestWorkerEmitIntegration(unittest.TestCase):
             self.assertFalse(v1_available()["emit"])
             write_lines(path, 500)
             out = forkrun.map(lambda b: bytes(b.data).upper(), path,
-                              workers=2, order="index")
+                              workers=2, order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)
@@ -302,7 +304,7 @@ class TestWorkerEmitIntegration(unittest.TestCase):
         try:
             write_lines(path, 500)
             out = forkrun.map("cat", path, mode="spawn", workers=2,
-                              order="index")
+                              order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)

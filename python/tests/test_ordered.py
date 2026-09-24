@@ -22,7 +22,8 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun._reassembly import ReassemblyBuffer  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, write_lines)
 
 try:
     find_substrate()
@@ -82,7 +83,7 @@ class TestOrderedStreaming(unittest.TestCase):
         try:
             write_lines(path, 3000)
             out = list(forkrun.stream(marked, path, workers=4,
-                                      order="index"))
+                                      order="index", nodes=1))
             idxs = [int(rec.split(b":", 1)[0]) for rec in out]
             self.assertEqual(idxs, sorted(idxs))
             self.assertEqual(len(set(idxs)), len(idxs))
@@ -101,7 +102,7 @@ class TestOrderedStreaming(unittest.TestCase):
             path = fh.name
         try:
             write_lines(path, 3000)
-            out = list(forkrun.stream(ident, path, workers=4))
+            out = list(forkrun.stream(ident, path, workers=4, nodes=1))
             with open(path, "rb") as fh:
                 raw = fh.read()
             self.assertEqual(sorted(b"".join(out).splitlines()),
@@ -121,8 +122,8 @@ class TestOrderedStreaming(unittest.TestCase):
         try:
             write_lines(path, 3000)
             streamed = list(forkrun.stream(ident, path, workers=4,
-                                           order="index"))
-            mapped = forkrun.map(ident, path, workers=4, order="index")
+                                           order="index", nodes=1))
+            mapped = forkrun.map(ident, path, workers=4, order="index", nodes=1)
             self.assertEqual(streamed, mapped)
             assert_no_zombies(self)
         finally:
@@ -199,7 +200,7 @@ class TestOrderedStreaming(unittest.TestCase):
         try:
             self.assertEqual(list(forkrun.stream(
                 lambda b: bytes(b.data), path, workers=2,
-                order="index")), [])
+                order="index", nodes=1)), [])
             assert_no_zombies(self)
         finally:
             os.unlink(path)
@@ -212,7 +213,7 @@ class TestOrderedStreaming(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("only\n")
             out = list(forkrun.stream(lambda b: bytes(b.data), path,
-                                      workers=2, order="index"))
+                                      workers=2, order="index", nodes=1))
             self.assertEqual(b"".join(out), b"only\n")
             assert_no_zombies(self)
         finally:

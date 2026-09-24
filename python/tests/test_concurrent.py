@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, nfd, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, nfd, write_lines)
 
 try:
     find_substrate()
@@ -48,8 +49,8 @@ class TestSequentialInvocations(unittest.TestCase):
         try:
             write_lines(pa, 1500)
             write_lines(pb, 700, fmt="other %d\n")
-            out_a = forkrun.map(_identity, pa, workers=2, order="index")
-            out_b = forkrun.map(_upper, pb, workers=2, order="index")
+            out_a = forkrun.map(_identity, pa, workers=2, order="index", nodes=1)
+            out_b = forkrun.map(_upper, pb, workers=2, order="index", nodes=1)
             with open(pa, "rb") as fh:
                 self.assertEqual(b"".join(out_a), fh.read())
             with open(pb, "rb") as fh:
@@ -69,7 +70,7 @@ class TestSequentialInvocations(unittest.TestCase):
                 raw = fh.read()
             before = nfd()
             for _ in range(10):
-                out = forkrun.map(_identity, path, workers=2, order="index")
+                out = forkrun.map(_identity, path, workers=2, order="index", nodes=1)
                 self.assertEqual(b"".join(out), raw)
             self.assertEqual(nfd(), before)
             assert_no_zombies(self)
@@ -99,14 +100,14 @@ class TestConcurrentInvocations(unittest.TestCase):
             def run_a():
                 try:
                     results["a"] = forkrun.map(_identity, pa, workers=2,
-                                               order="index")
+                                               order="index", nodes=1)
                 except BaseException as exc:  # noqa: BLE001
                     errors["a"] = exc
 
             def run_b():
                 try:
                     results["b"] = forkrun.map(_upper, pb, workers=2,
-                                               order="index")
+                                               order="index", nodes=1)
                 except BaseException as exc:  # noqa: BLE001
                     errors["b"] = exc
 

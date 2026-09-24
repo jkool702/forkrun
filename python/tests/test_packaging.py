@@ -98,7 +98,7 @@ class TestPackaging(unittest.TestCase):
                 "import forkrun",
                 "assert 'target' in forkrun.__file__, forkrun.__file__",
                 "out = forkrun.map(lambda b: bytes(b.data), %r, "
-                "workers=2, order='index')" % inp,
+                "workers=2, order='index', nodes=1)" % inp,
                 "assert b''.join(out) == open(%r, 'rb').read()" % inp,
                 "print('INSTALLED-OK')",
             ])

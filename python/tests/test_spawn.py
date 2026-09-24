@@ -32,9 +32,9 @@ class TestSpawnValidation(unittest.TestCase):
 
     def test_spawn_callable_rejected(self):
         with self.assertRaises(ValueError):
-            forkrun.run(lambda b: None, "f.txt", mode="spawn")
+            forkrun.run(lambda b: None, "f.txt", mode="spawn", nodes=1)
         with self.assertRaises(ValueError):
-            forkrun.map(lambda b: None, "f.txt", mode="spawn")
+            forkrun.map(lambda b: None, "f.txt", mode="spawn", nodes=1)
 
     def test_spawn_bad_command_shape(self):
         with self.assertRaises(ValueError):
@@ -66,7 +66,7 @@ class TestSpawnMode(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("hello\nworld\n")
             out = forkrun.map("cat", path, mode="spawn", workers=2,
-                              order="index")
+                              order="index", nodes=1)
             self.assertEqual(b"".join(out), b"hello\nworld\n")
             assert_no_zombies(self)
         finally:
@@ -80,7 +80,7 @@ class TestSpawnMode(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("compress me\n" * 100)
             out = forkrun.map("gzip -c", path, mode="spawn", workers=2,
-                              order="index")
+                              order="index", nodes=1)
             self.assertTrue(len(out) > 0)
             self.assertEqual(b"".join(gzip.decompress(r) for r in out),
                              b"compress me\n" * 100)
@@ -96,7 +96,7 @@ class TestSpawnMode(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("old dog\nold cat\n")
             out = forkrun.map(["sed", "s/old/new/"], path, mode="spawn",
-                              workers=1, order="index")
+                              workers=1, order="index", nodes=1)
             self.assertEqual(b"".join(out), b"new dog\nnew cat\n")
             assert_no_zombies(self)
         finally:
@@ -112,7 +112,7 @@ class TestSpawnMode(unittest.TestCase):
             with open(path, "w") as fh:
                 for i in range(1000):
                     fh.write("MARKER\n" if i == 500 else "line %d\n" % i)
-            out = forkrun.map("grep MARKER", path, mode="spawn", workers=1)
+            out = forkrun.map("grep MARKER", path, mode="spawn", workers=1, nodes=1)
             self.assertIn(b"MARKER\n", b"".join(out))
             assert_no_zombies(self)
         finally:
@@ -125,7 +125,7 @@ class TestSpawnMode(unittest.TestCase):
         try:
             write_lines(path, 200)
             out = forkrun.map("nonexistent_command_xyz_123", path,
-                              mode="spawn", workers=1)
+                              mode="spawn", workers=1, nodes=1)
             self.assertEqual(out, [])
             assert_no_zombies(self)
         finally:
@@ -139,7 +139,7 @@ class TestSpawnMode(unittest.TestCase):
         try:
             write_lines(path, 100)
             out = forkrun.map(["sh", "-c", "cat; echo noise >&2"],
-                              path, mode="spawn", workers=1, order="index")
+                              path, mode="spawn", workers=1, order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)
@@ -152,7 +152,7 @@ class TestSpawnMode(unittest.TestCase):
             path = fh.name
         try:
             self.assertEqual(forkrun.map("cat", path, mode="spawn",
-                                         workers=2), [])
+                                         workers=2, nodes=1), [])
             assert_no_zombies(self)
         finally:
             os.unlink(path)
@@ -163,7 +163,7 @@ class TestSpawnMode(unittest.TestCase):
             path = fh.name
         try:
             write_lines(path, 1000)
-            out = list(forkrun.stream("cat", path, mode="spawn", workers=2))
+            out = list(forkrun.stream("cat", path, mode="spawn", workers=2, nodes=1))
             with open(path, "rb") as fh:
                 raw = fh.read()
             self.assertEqual(sorted(b"".join(out).splitlines()),
@@ -179,9 +179,9 @@ class TestSpawnMode(unittest.TestCase):
         try:
             write_lines(path, 1000)
             streamed = list(forkrun.stream("cat", path, mode="spawn",
-                                           workers=2, order="index"))
+                                           workers=2, order="index", nodes=1))
             mapped = forkrun.map("cat", path, mode="spawn", workers=2,
-                                 order="index")
+                                 order="index", nodes=1)
             self.assertEqual(streamed, mapped)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(streamed), fh.read())

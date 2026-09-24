@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, write_lines)
 
 try:
     find_substrate()
@@ -65,10 +66,10 @@ class TestStreamingIngest(unittest.TestCase):
             write_lines(path, 5000)
             exp = b"".join(forkrun.map(lambda b: bytes(b.data).upper(),
                                        path, workers=4, order="index",
-                                       streaming=False))
+                                       streaming=False, nodes=1))
             got = b"".join(forkrun.map(lambda b: bytes(b.data).upper(),
                                        path, workers=4, order="index",
-                                       streaming=True))
+                                       streaming=True, nodes=1))
             with open(path, "rb") as fh:
                 self.assertEqual(got, fh.read().upper())
             self.assertEqual(got, exp)
@@ -83,7 +84,7 @@ class TestStreamingIngest(unittest.TestCase):
         try:
             write_lines(path, 500)
             out = forkrun.map(lambda b: bytes(b.data), path, workers=2,
-                              order="index", streaming=False)
+                              order="index", streaming=False, nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)
@@ -92,15 +93,15 @@ class TestStreamingIngest(unittest.TestCase):
 
     def test_streaming_validation(self):
         with self.assertRaises(TypeError):
-            forkrun.run(lambda b: None, "f.txt", streaming="yes")
+            forkrun.run(lambda b: None, "f.txt", streaming="yes", nodes=1)
         with self.assertRaises(TypeError):
-            forkrun.map(lambda b: None, "f.txt", streaming=1)
+            forkrun.map(lambda b: None, "f.txt", streaming=1, nodes=1)
 
     def test_pipe_auto_streams(self):
         r, pid = _pipe_with_lines(1000)
         try:
             out = forkrun.map(lambda b: bytes(b.data).upper(), r,
-                              workers=2, order="index")
+                              workers=2, order="index", nodes=1)
             self.assertEqual(len(out) > 0, True)
             got = sorted(b for blob in out for b in blob.splitlines())
             exp = sorted(("line %d" % i).upper().encode()
@@ -118,10 +119,10 @@ class TestStreamingIngest(unittest.TestCase):
         try:
             write_lines(path, 2000)
             self.assertIsNone(forkrun.run(lambda b: None, path, workers=2,
-                                          streaming=True))
+                                          streaming=True, nodes=1))
             out = list(forkrun.stream(lambda b: bytes(b.data).upper(),
                                       path, workers=2, order="index",
-                                      streaming=True))
+                                      streaming=True, nodes=1))
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)
@@ -135,7 +136,7 @@ class TestStreamingIngest(unittest.TestCase):
         try:
             write_lines(path, 1000)
             out = forkrun.map("cat", path, mode="spawn", workers=2,
-                              order="index", streaming=True)
+                              order="index", streaming=True, nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             so = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -143,7 +144,7 @@ class TestStreamingIngest(unittest.TestCase):
             if os.path.exists(so):
                 out = forkrun.map("%s:process_v1" % so, path,
                                   mode="plugin", workers=2, order="index",
-                                  streaming=True)
+                                  streaming=True, nodes=1)
                 with open(path, "rb") as fh:
                     self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)
@@ -157,12 +158,12 @@ class TestStreamingIngest(unittest.TestCase):
         try:
             self.assertEqual(
                 forkrun.map(lambda b: bytes(b.data), path, workers=2,
-                            streaming=True), [])
+                            streaming=True, nodes=1), [])
             r, pid = _pipe_with_lines(0)
             try:
                 self.assertEqual(
                     forkrun.map(lambda b: bytes(b.data), r, workers=2,
-                                streaming=True), [])
+                                streaming=True, nodes=1), [])
                 os.waitpid(pid, 0)
             finally:
                 os.close(r)
@@ -176,7 +177,7 @@ class TestStreamingIngest(unittest.TestCase):
         r, pid = _pipe_with_lines(10, delay=0.3)
         try:
             gen = forkrun.stream(lambda b: bytes(b.data), r, workers=2,
-                                 streaming=True)
+                                 streaming=True, nodes=1)
             t0 = time.monotonic()
             first = next(gen)
             dt = time.monotonic() - t0
@@ -213,7 +214,7 @@ class TestStreamingIngest(unittest.TestCase):
         try:
             before = resource.getrusage(
                 resource.RUSAGE_SELF).ru_maxrss
-            forkrun.run(lambda b: None, r, workers=4, streaming=True)
+            forkrun.run(lambda b: None, r, workers=4, streaming=True, nodes=1)
             after = resource.getrusage(
                 resource.RUSAGE_SELF).ru_maxrss
             growth_mb = (after - before) / 1024.0
@@ -237,7 +238,7 @@ class TestStreamingIngest(unittest.TestCase):
                     fh.write("y" * 200000 + "\n")
             got = b"".join(forkrun.map(lambda b: bytes(b.data).upper(),
                                        path, workers=2, bytes=1 << 20,
-                                       order="index", streaming=True))
+                                       order="index", streaming=True, nodes=1))
             with open(path, "rb") as fh:
                 self.assertEqual(got, fh.read().upper())
             assert_no_zombies(self)

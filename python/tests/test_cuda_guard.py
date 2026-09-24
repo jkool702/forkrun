@@ -50,7 +50,7 @@ _LIVE_CUDA_DRIVER = "\n".join([
     "    sys.exit(0)",
     "import forkrun",
     "try:",
-    "    forkrun.run(lambda b: None, '/dev/null', workers=1)",
+    "    forkrun.run(lambda b: None, '/dev/null', workers=1, nodes=1)",
     "    sys.exit(1)",
     "except RuntimeError as e:",
     "    msg = str(e).lower()",
@@ -121,7 +121,8 @@ class TestCudaGuardContract(unittest.TestCase):
                     run_mod, "check_cuda_hazard",
                     return_value=(True, "fake hazard: spawn first")):
                 with self.assertRaisesRegex(RuntimeError, "spawn first"):
-                    forkrun.run(lambda b: None, path, workers=1)
+                    forkrun.run(lambda b: None, path, workers=1,
+                                nodes=1)
         finally:
             os.unlink(path)
 
@@ -151,7 +152,8 @@ class TestCudaGuardIntegration(unittest.TestCase):
         try:
             with open(path, "w") as fh:
                 fh.write("test\n")
-            out = forkrun.map(lambda b: b.copy(), path, workers=1)
+            out = forkrun.map(lambda b: b.copy(), path, workers=1,
+                              nodes=1)
             self.assertEqual(b"".join(out), b"test\n")
         finally:
             os.unlink(path)

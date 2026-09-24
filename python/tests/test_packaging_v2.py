@@ -201,7 +201,7 @@ class TestSdist(unittest.TestCase):
                 "sys.path.insert(0, %r)" % target,
                 "import forkrun",
                 "out = forkrun.map(lambda b: bytes(b.data), %r, "
-                "workers=2, order='index')" % inp,
+                "workers=2, order='index', nodes=1)" % inp,
                 "assert b''.join(out) == open(%r, 'rb').read()" % inp,
                 "print('SDIST-OK')",
             ])

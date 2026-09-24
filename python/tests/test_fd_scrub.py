@@ -83,7 +83,8 @@ class TestWorkerFDIsolation(unittest.TestCase):
                 fh.write("test\n")
                 path = fh.name
             try:
-                results = forkrun.map(fd_checker, path, workers=1)
+                results = forkrun.map(fd_checker, path, workers=1,
+                                        nodes=1)
                 # 0,1,2 + memfd + out + engine pipes/eventfds: small and
                 # bounded — crucially WITHOUT the parent's 3 extras.
                 self.assertLess(int(results[0]), 20,
@@ -111,7 +112,8 @@ class TestEventLoopNoDeadlock(unittest.TestCase):
             " for _ in range(5)]\n"
             "import forkrun\n"
             "out = forkrun.map(lambda b: bytes(b.data).upper(),\n"
-            "                  sys.argv[1], workers=2, order='index')\n"
+            "                  sys.argv[1], workers=2, order='index',\n"
+            "                  nodes=1)\n"
             "raw = open(sys.argv[1], 'rb').read()\n"
             "assert b''.join(out) == raw.upper(), 'results incorrect'\n"
             "ep.close()\n"
@@ -152,7 +154,8 @@ class TestEventLoopNoDeadlock(unittest.TestCase):
             "    os._exit(0)\n"
             "os.close(w)\n"
             "out = forkrun.map(lambda b: bytes(b.data).upper(), r,\n"
-            "                  workers=2, order='index', streaming=True)\n"
+            "                  workers=2, order='index', streaming=True,\n"
+            "                  nodes=1)\n"
             "os.close(r)\n"
             "os.waitpid(pid, 0)\n"
             "assert len(out) > 0, 'no results'\n"

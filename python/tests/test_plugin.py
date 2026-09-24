@@ -21,7 +21,8 @@ from forkrun._bindings import find_substrate  # noqa: E402
 from forkrun._plugin import (ForkrunCtx, PluginError,  # noqa: E402
                              load_plugin)
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, write_lines)
 
 try:
     find_substrate()
@@ -102,7 +103,7 @@ class TestPluginMode(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("hello world\nmixed CASE\n")
             out = forkrun.map(self._spec("process"), path, mode="plugin",
-                              workers=2, order="index")
+                              workers=2, order="index", nodes=1)
             self.assertEqual(b"".join(out), b"HELLO WORLD\nMIXED CASE\n")
             assert_no_zombies(self)
         finally:
@@ -117,7 +118,7 @@ class TestPluginMode(unittest.TestCase):
         try:
             write_lines(path, 2000)
             out = forkrun.map(self._spec("identify"), path, mode="plugin",
-                              workers=4, order="index")
+                              workers=4, order="index", nodes=1)
             idxs = [int(rec.split(b"=", 1)[1]) for rec in out]
             self.assertEqual(idxs, list(range(len(out))))
             self.assertGreater(len(out), 1)
@@ -132,7 +133,7 @@ class TestPluginMode(unittest.TestCase):
         try:
             write_lines(path, 300)
             out = forkrun.map(self._spec("always_fail"), path,
-                              mode="plugin", workers=1)
+                              mode="plugin", workers=1, nodes=1)
             self.assertEqual(out, [])
             assert_no_zombies(self)
         finally:
@@ -140,17 +141,17 @@ class TestPluginMode(unittest.TestCase):
 
     def test_plugin_callable_rejected(self):
         with self.assertRaises(ValueError):
-            forkrun.run(lambda b: None, "f.txt", mode="plugin")
+            forkrun.run(lambda b: None, "f.txt", mode="plugin", nodes=1)
         with self.assertRaises(ValueError):
-            forkrun.map(lambda b: None, "f.txt", mode="plugin")
+            forkrun.map(lambda b: None, "f.txt", mode="plugin", nodes=1)
 
     def test_plugin_bad_format_rejected(self):
         with self.assertRaises(ValueError):
-            forkrun.run("no_colon_here", "f.txt", mode="plugin")
+            forkrun.run("no_colon_here", "f.txt", mode="plugin", nodes=1)
         with self.assertRaises(ValueError):
-            forkrun.run(":nofunc", "f.txt", mode="plugin")
+            forkrun.run(":nofunc", "f.txt", mode="plugin", nodes=1)
         with self.assertRaises(ValueError):
-            forkrun.run(12345, "f.txt", mode="plugin")
+            forkrun.run(12345, "f.txt", mode="plugin", nodes=1)
 
     def test_plugin_empty_input(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
@@ -158,7 +159,7 @@ class TestPluginMode(unittest.TestCase):
             path = fh.name
         try:
             self.assertEqual(forkrun.map(self._spec("process"), path,
-                                         mode="plugin", workers=2), [])
+                                         mode="plugin", workers=2, nodes=1), [])
             assert_no_zombies(self)
         finally:
             os.unlink(path)
@@ -170,7 +171,7 @@ class TestPluginMode(unittest.TestCase):
         try:
             write_lines(path, 1000)
             out = list(forkrun.stream(self._spec("process"), path,
-                                      mode="plugin", workers=2))
+                                      mode="plugin", workers=2, nodes=1))
             with open(path, "rb") as fh:
                 raw = fh.read()
             self.assertEqual(sorted(b"".join(out).splitlines()),
@@ -187,9 +188,9 @@ class TestPluginMode(unittest.TestCase):
             write_lines(path, 1000)
             streamed = list(forkrun.stream(
                 self._spec("process"), path, mode="plugin", workers=2,
-                order="index"))
+                order="index", nodes=1))
             mapped = forkrun.map(self._spec("process"), path,
-                                 mode="plugin", workers=2, order="index")
+                                 mode="plugin", workers=2, order="index", nodes=1)
             self.assertEqual(streamed, mapped)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(streamed), fh.read().upper())
@@ -209,7 +210,7 @@ class TestPluginMode(unittest.TestCase):
             with open(path, "wb") as fh:
                 fh.write(b"q" * (3 * 1024 * 1024))
             out = forkrun.map(self._spec("process"), path, mode="plugin",
-                              workers=1, bytes=1024 * 1024, order="index")
+                              workers=1, bytes=1024 * 1024, order="index", nodes=1)
             self.assertEqual(b"".join(out), b"Q" * (3 * 1024 * 1024))
             assert_no_zombies(self)
         finally:

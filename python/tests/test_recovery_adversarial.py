@@ -36,7 +36,8 @@ import forkrun  # noqa: E402
 from forkrun._bindings import (FrPyBatch, RC_OK, find_substrate,  # noqa: E402
                                get)
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, write_lines)
 
 try:
     find_substrate()
@@ -174,7 +175,7 @@ class TestClaimPublishRace(unittest.TestCase):
         os.environ["FORKRUN_TEST_DIE_AT_CLAIM"] = "1"
         try:
             with self.assertRaisesRegex(RuntimeError, "race"):
-                forkrun.map(_up, path, workers=2, orchestrator=True)
+                forkrun.map(_up, path, workers=2, orchestrator=True, nodes=1)
         finally:
             del os.environ["FORKRUN_TEST_DIE_AT_CLAIM"]
             os.unlink(path)
@@ -243,7 +244,7 @@ class TestAckClearRace(unittest.TestCase):
         os.environ["FORKRUN_TEST_DIE_AT_COMMIT"] = "1"
         try:
             with self.assertRaisesRegex(RuntimeError, "race"):
-                forkrun.map(_up, path, workers=2, orchestrator=True)
+                forkrun.map(_up, path, workers=2, orchestrator=True, nodes=1)
         finally:
             del os.environ["FORKRUN_TEST_DIE_AT_COMMIT"]
             os.unlink(path)
@@ -267,16 +268,16 @@ class TestPythonOutputRollback(unittest.TestCase):
             try:
                 t0 = time.monotonic()
                 res = forkrun.map(spec, path, workers=2,
-                                  orchestrator=True, order=order)
+                                  orchestrator=True, order=order, nodes=1)
                 dt = time.monotonic() - t0
             finally:
                 sys.path.remove(plugin_dir)
-            healthy = forkrun.map(_up, path, workers=2, order=order)
+            healthy = forkrun.map(_up, path, workers=2, order=order, nodes=1)
             if order == "none":
                 # Completion order is nondeterministic — compare sets.
-                self.assertEqual(sorted(res), sorted(healthy))
+                self.assertEqual(lines_of(res), lines_of(healthy))
             else:
-                self.assertEqual(res, healthy)
+                self.assertEqual(joined_bytes(res), joined_bytes(healthy))
             self.assertLess(dt, 60)
         finally:
             os.unlink(path)
@@ -376,11 +377,11 @@ class TestPublishPayloadBoundary(unittest.TestCase):
             sys.path.insert(0, plugin_dir)
             try:
                 res = forkrun.map(spec, path, workers=2,
-                                  orchestrator=True, order="index")
+                                  orchestrator=True, order="index", nodes=1)
             finally:
                 sys.path.remove(plugin_dir)
-            healthy = forkrun.map(_up, path, workers=2, order="index")
-            self.assertEqual(res, healthy)
+            healthy = forkrun.map(_up, path, workers=2, order="index", nodes=1)
+            self.assertEqual(joined_bytes(res), joined_bytes(healthy))
         finally:
             os.unlink(path)
             import shutil as _shutil
@@ -405,13 +406,13 @@ class TestMultipleDeaths(unittest.TestCase):
             try:
                 t0 = time.monotonic()
                 res = forkrun.map(spec, path, workers=workers,
-                                  orchestrator=True, order="index")
+                                  orchestrator=True, order="index", nodes=1)
                 dt = time.monotonic() - t0
             finally:
                 sys.path.remove(plugin_dir)
             healthy = forkrun.map(_up, path, workers=workers,
-                                  order="index")
-            self.assertEqual(res, healthy)
+                                  order="index", nodes=1)
+            self.assertEqual(joined_bytes(res), joined_bytes(healthy))
             self.assertLess(dt, 120)
         finally:
             os.unlink(path)
@@ -439,11 +440,11 @@ class TestMultipleDeaths(unittest.TestCase):
             sys.path.insert(0, plugin_dir)
             try:
                 res = forkrun.map(spec, path, workers=2,
-                                  orchestrator=True, order="index")
+                                  orchestrator=True, order="index", nodes=1)
             finally:
                 sys.path.remove(plugin_dir)
-            healthy = forkrun.map(_up, path, workers=2, order="index")
-            self.assertEqual(res, healthy)
+            healthy = forkrun.map(_up, path, workers=2, order="index", nodes=1)
+            self.assertEqual(joined_bytes(res), joined_bytes(healthy))
         finally:
             os.unlink(path)
             import shutil as _shutil

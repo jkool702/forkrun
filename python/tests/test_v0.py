@@ -43,7 +43,7 @@ class TestMapExact(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 2000)
-            out = forkrun.map(_identity, path, workers=2, order="index")
+            out = forkrun.map(_identity, path, workers=2, order="index", nodes=1)
             self.assertTrue(len(out) > 1)
             idxs = [i for i, _ in enumerate(out)]
             self.assertEqual(idxs, sorted(idxs))
@@ -60,7 +60,7 @@ class TestMapExact(unittest.TestCase):
                                          delete=False) as fh:
             path = fh.name
         try:
-            out = forkrun.map(_identity, path, workers=2)
+            out = forkrun.map(_identity, path, workers=2, nodes=1)
             self.assertEqual(out, [])
         finally:
             os.unlink(path)
@@ -75,7 +75,7 @@ class TestMapExact(unittest.TestCase):
                 expected = fh.read()
             fd = os.open(path, os.O_RDONLY)
             try:
-                out = forkrun.map(_identity, fd, workers=2, order="index")
+                out = forkrun.map(_identity, fd, workers=2, order="index", nodes=1)
             finally:
                 os.close(fd)
             self.assertEqual(b"".join(out), expected)
@@ -88,7 +88,7 @@ class TestMapExact(unittest.TestCase):
                     os.write(w, chunk)
             os.close(w)
             try:
-                out = forkrun.map(_identity, r, workers=2, order="index")
+                out = forkrun.map(_identity, r, workers=2, order="index", nodes=1)
             finally:
                 os.close(r)
             self.assertEqual(b"".join(out), expected)
@@ -116,7 +116,7 @@ class TestRunSink(unittest.TestCase):
                 with open(sink_path, "ab") as out:
                     out.write(result)
 
-            self.assertIsNone(forkrun.run(up, path, sink=sink, workers=2))
+            self.assertIsNone(forkrun.run(up, path, sink=sink, workers=2, nodes=1))
             with open(sink_path, "rb") as fh:
                 got = fh.read()
             exp = b"".join(("line %d\n" % i).upper().encode()
@@ -138,7 +138,7 @@ class TestRunSink(unittest.TestCase):
                 fh.write("def up(batch):\n    return bytes(batch.data).upper()\n")
             sys.path.insert(0, moddir)
             try:
-                out = forkrun.map("v0mod:up", path, workers=2, order="index")
+                out = forkrun.map("v0mod:up", path, workers=2, order="index", nodes=1)
             finally:
                 sys.path.remove(moddir)
             exp = b"".join(("line %d\n" % i).upper().encode()
@@ -154,9 +154,9 @@ class TestRunSink(unittest.TestCase):
         try:
             _write_lines(path, 300)
             self.assertEqual(list(forkrun.stream(_identity, path, workers=2,
-                                                 order="index")),
+                                                 order="index", nodes=1)),
                              forkrun.map(_identity, path, workers=2,
-                                         order="index"))
+                                         order="index", nodes=1))
         finally:
             os.unlink(path)
 
@@ -182,7 +182,7 @@ class TestBatchSemantics(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 100)
-            out = forkrun.map(probe, path, workers=1, order="index")
+            out = forkrun.map(probe, path, workers=1, order="index", nodes=1)
             with open(path, "rb") as fh:
                 raw = fh.read()
             pos = 0
@@ -209,7 +209,7 @@ class TestBatchSemantics(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 200)
-            out = forkrun.map(probe, path, bytes=1024, workers=2)
+            out = forkrun.map(probe, path, bytes=1024, workers=2, nodes=1)
             self.assertEqual(sum(len(b) for b in out),
                              os.path.getsize(path))
         finally:
@@ -228,7 +228,7 @@ class TestBatchSemantics(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 50)
-            out = forkrun.map(probe, path, workers=1, order="index")
+            out = forkrun.map(probe, path, workers=1, order="index", nodes=1)
             with open(path, "rb") as fh:
                 raw = fh.read()
             for rec in out:
@@ -255,7 +255,7 @@ class TestErrors(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 2000)
-            out = forkrun.map(self._flaky, path, workers=1)
+            out = forkrun.map(self._flaky, path, workers=1, nodes=1)
             got = b"".join(out)
             # Unaffected batches are delivered exactly once.
             self.assertIn(b"line 100\n", got)
@@ -269,7 +269,7 @@ class TestErrors(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 2000)
-            out = forkrun.map(self._flaky, path, workers=1, on_error="skip")
+            out = forkrun.map(self._flaky, path, workers=1, on_error="skip", nodes=1)
             self.assertIn(b"line 100\n", b"".join(out))
         finally:
             os.unlink(path)
@@ -284,7 +284,7 @@ class TestErrors(unittest.TestCase):
         try:
             _write_lines(path, 500)
             with self.assertRaises(RuntimeError):
-                forkrun.map(always, path, workers=2, on_error="fail-fast")
+                forkrun.map(always, path, workers=2, on_error="fail-fast", nodes=1)
         finally:
             os.unlink(path)
 
@@ -298,7 +298,7 @@ class TestErrors(unittest.TestCase):
         try:
             _write_lines(path, 100)
             # retry path: every batch poisons, nothing delivered, no crash.
-            out = forkrun.map(bad, path, workers=1)
+            out = forkrun.map(bad, path, workers=1, nodes=1)
             self.assertEqual(out, [])
         finally:
             os.unlink(path)
@@ -364,7 +364,7 @@ class TestWPY2(unittest.TestCase):
             saved = self._redirect_fd(1, cap)
             try:
                 sys.stdout.flush()
-                forkrun.map(noisy, path, workers=2)
+                forkrun.map(noisy, path, workers=2, nodes=1)
                 sys.stdout.flush()
             finally:
                 os.dup2(saved, 1)
@@ -406,7 +406,7 @@ class TestWPY2(unittest.TestCase):
             saved = self._redirect_fd(2, cap)
             try:
                 sys.stderr.flush()
-                res = forkrun.map(thready, path, workers=1)
+                res = forkrun.map(thready, path, workers=1, nodes=1)
                 sys.stderr.flush()
             finally:
                 os.dup2(saved, 2)
@@ -422,7 +422,7 @@ class TestWPY2(unittest.TestCase):
             saved = self._redirect_fd(2, cap)
             try:
                 sys.stderr.flush()
-                forkrun.map(clean, path, workers=1)
+                forkrun.map(clean, path, workers=1, nodes=1)
                 sys.stderr.flush()
             finally:
                 os.dup2(saved, 2)
@@ -441,7 +441,7 @@ class TestWPY2(unittest.TestCase):
         try:
             with open(path, "w") as fh:
                 fh.write("only\n")
-            out = forkrun.map(_identity, path, workers=2, order="index")
+            out = forkrun.map(_identity, path, workers=2, order="index", nodes=1)
             self.assertEqual(len(out), 1)
             self.assertEqual(b"".join(out), b"only\n")
         finally:
@@ -454,7 +454,7 @@ class TestWPY2(unittest.TestCase):
         try:
             _write_lines(path, 50000)
             out = forkrun.map(_identity, path, workers=4, lines=500,
-                              order="index")
+                              order="index", nodes=1)
             self.assertEqual(len(out), 100)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
@@ -512,7 +512,7 @@ class TestEmitter(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 1000)
-            out = forkrun.map(_identity, path, workers=2, order="index")
+            out = forkrun.map(_identity, path, workers=2, order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
         finally:
@@ -529,14 +529,14 @@ class TestEmitter(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 3000)
-            out = forkrun.map(marked, path, workers=4, order="index")
+            out = forkrun.map(marked, path, workers=4, order="index", nodes=1)
             idxs = [int(rec.split(b":", 1)[0]) for rec in out]
             self.assertEqual(idxs, sorted(idxs))
             self.assertEqual(len(set(idxs)), len(idxs))
             # ...and unordered delivery still carries every line exactly once
             # (compare line multisets — batches and lines differ in
             # granularity, so sort lines, not blobs).
-            out2 = forkrun.map(_identity, path, workers=4)
+            out2 = forkrun.map(_identity, path, workers=4, nodes=1)
             with open(path, "rb") as fh:
                 raw = fh.read()
             self.assertEqual(sorted(b"".join(out2).splitlines()),
@@ -553,7 +553,7 @@ class TestEmitter(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 500)
-            self.assertEqual(forkrun.map(drop, path, workers=2), [])
+            self.assertEqual(forkrun.map(drop, path, workers=2, nodes=1), [])
         finally:
             os.unlink(path)
 
@@ -569,7 +569,7 @@ class TestEmitter(unittest.TestCase):
         try:
             _write_lines(path, 20000)  # ~200KB in, ~200KB out
             before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            out = forkrun.map(_identity, path, workers=4, order="index")
+            out = forkrun.map(_identity, path, workers=4, order="index", nodes=1)
             after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
@@ -594,13 +594,13 @@ class TestEmitter(unittest.TestCase):
             def up(batch):
                 return bytes(batch.data).upper()
 
-            collected = forkrun.map(up, path, workers=2)
+            collected = forkrun.map(up, path, workers=2, nodes=1)
 
             def sink(meta, result):
                 with open(sink_path, "ab") as out:
                     out.write(result)
 
-            forkrun.run(up, path, sink=sink, workers=2)
+            forkrun.run(up, path, sink=sink, workers=2, nodes=1)
             with open(sink_path, "rb") as fh:
                 sunk = fh.read()
             # Batch blobs vs lines differ in granularity — compare multisets.
@@ -622,7 +622,7 @@ class TestEmitter(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 1500)
-            out = forkrun.map(marked, path, workers=3, order="index")
+            out = forkrun.map(marked, path, workers=3, order="index", nodes=1)
             body = {}
             for rec in out:
                 idx = int(rec.split(b":", 1)[0])
@@ -648,7 +648,7 @@ class TestEmitter(unittest.TestCase):
             def amplify(batch):
                 return bytes(batch.data) * 4
 
-            out = forkrun.map(amplify, path, workers=4, order="index")
+            out = forkrun.map(amplify, path, workers=4, order="index", nodes=1)
             joined = b"".join(out)
             self.assertEqual(len(joined), 4 * len(raw))
             # Each batch blob is its raw span repeated 4x: the first

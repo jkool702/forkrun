@@ -104,7 +104,7 @@ class TestPipeFunctional(unittest.TestCase):
         try:
             write_lines(path, 1500)
             out = list(forkrun.stream(lambda b: bytes(b.data).upper(),
-                                      path, workers=4, order="index"))
+                                      path, workers=4, order="index", nodes=1))
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)
@@ -121,7 +121,7 @@ class TestPipeFunctional(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("x" * (3 << 20) + "\n")
             out = forkrun.map("cat", path, mode="spawn", workers=1,
-                              bytes=4 << 20)
+                              bytes=4 << 20, nodes=1)
             self.assertEqual(b"".join(out), b"x" * (3 << 20) + b"\n")
             assert_no_zombies(self)
         finally:
@@ -139,7 +139,7 @@ class TestPipeFunctional(unittest.TestCase):
             write_lines(path, 500)
             got = []
             for blob in forkrun.stream(lambda b: bytes(b.data), path,
-                                       workers=2):
+                                       workers=2, nodes=1):
                 got.append(blob)
                 _time.sleep(0.002)
             with open(path, "rb") as fh:

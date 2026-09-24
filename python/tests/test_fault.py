@@ -52,7 +52,7 @@ class TestWorkerSegfault(unittest.TestCase):
         try:
             write_lines(path, 200)
             with self.assertRaises(RuntimeError):
-                forkrun.map(_segv, path, workers=2)
+                forkrun.map(_segv, path, workers=2, nodes=1)
             assert_no_zombies(self)
         finally:
             os.unlink(path)
@@ -87,7 +87,7 @@ class TestWorkerSegfault(unittest.TestCase):
                     out.write(result)
 
             with self.assertRaises(RuntimeError):
-                forkrun.run(mixed, path, sink=sink, workers=1)
+                forkrun.run(mixed, path, sink=sink, workers=1, nodes=1)
             with open(sink_path, "rb") as fh:
                 got = fh.read()
             self.assertTrue(len(got) > 0)
@@ -115,7 +115,7 @@ class TestWorkerOOM(unittest.TestCase):
             def oom(batch):
                 raise MemoryError("simulated allocation failure")
 
-            out = forkrun.map(oom, path, workers=1)
+            out = forkrun.map(oom, path, workers=1, nodes=1)
             self.assertEqual(out, [])
             assert_no_zombies(self)
         finally:
@@ -138,7 +138,7 @@ class TestWorkerException(unittest.TestCase):
             saved = redirect_fd(2, cap)
             try:
                 sys.stderr.flush()
-                out = forkrun.map(bad, path, workers=1)
+                out = forkrun.map(bad, path, workers=1, nodes=1)
                 sys.stderr.flush()
             finally:
                 restore_fd(2, saved)
@@ -168,7 +168,7 @@ class TestWorkerException(unittest.TestCase):
                     raise KeyboardInterrupt("once")
                 return bytes(batch.data)
 
-            out = forkrun.map(flaky, path, workers=1, order="index")
+            out = forkrun.map(flaky, path, workers=1, order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)

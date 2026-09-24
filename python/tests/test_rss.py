@@ -43,7 +43,7 @@ _DISCARD_DRIVER = "\n".join([
     "sys.path.insert(0, 'python')",
     "import forkrun",
     "def none(batch): return None",
-    "forkrun.run(none, sys.argv[1], workers=4)",
+    "forkrun.run(none, sys.argv[1], workers=4, nodes=1)",
     "print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)",
 ])
 
@@ -52,7 +52,7 @@ _IDENTITY_DRIVER = "\n".join([
     "sys.path.insert(0, 'python')",
     "import forkrun",
     "def ident(batch): return bytes(batch.data)",
-    "out = forkrun.map(ident, sys.argv[1], workers=4, order='index')",
+    "out = forkrun.map(ident, sys.argv[1], workers=4, order='index', nodes=1)",
     "raw = open(sys.argv[1], 'rb').read()",
     "assert b''.join(out) == raw, 'inexact'",
     "print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)",

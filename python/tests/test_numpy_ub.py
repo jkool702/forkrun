@@ -113,7 +113,7 @@ class TestNumpyPastInvalidation(unittest.TestCase):
                         fh.write(status)
                 return bytes(batch.data)
 
-            out = forkrun.map(spy2, path, workers=1, order="index")
+            out = forkrun.map(spy2, path, workers=1, order="index", nodes=1)
             self.assertEqual(b"".join(out), raw)
             with open(obs_path) as fh:
                 status = fh.read()

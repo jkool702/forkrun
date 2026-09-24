@@ -76,7 +76,12 @@ class TestV1Detection(unittest.TestCase):
                                     "spill": False, "parse": False,
                                     "resume": False,
                                     "plugin_loop": False,
-                                    "spawn_loop": False})
+                                    "spawn_loop": False,
+                                    "orderer": False,
+                                    "order_pipe": False,
+                                    "scan_spawn": False,
+                                    "numa": False,
+                                    "drain": False})
         finally:
             if old is None:
                 del os.environ["FORKRUN_NO_V1"]
@@ -108,7 +113,7 @@ class TestSpawnV1(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("old dog\nold cat\n")
             out = forkrun.map(["sed", "s/old/new/"], path, mode="spawn",
-                              workers=1, order="index")
+                              workers=1, order="index", nodes=1)
             self.assertEqual(b"".join(out), b"new dog\nnew cat\n")
             assert_no_zombies(self)
         finally:
@@ -122,7 +127,8 @@ class TestSpawnV1(unittest.TestCase):
             with open(path, "w") as fh:
                 for i in range(1000):
                     fh.write("MARKER\n" if i == 500 else "line %d\n" % i)
-            out = forkrun.map("grep MARKER", path, mode="spawn", workers=1)
+            out = forkrun.map("grep MARKER", path, mode="spawn", workers=1,
+                              nodes=1)
             self.assertIn(b"MARKER\n", b"".join(out))
             assert_no_zombies(self)
         finally:
@@ -160,7 +166,7 @@ class TestSpawnV1(unittest.TestCase):
         try:
             write_lines(path, 500)
             out = forkrun.map("cat", path, mode="spawn", workers=2,
-                              order="index")
+                              order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)
@@ -192,7 +198,7 @@ class TestSpawnV1(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("x" * (3 << 20) + "\n")
             out = forkrun.map("cat", path, mode="spawn", workers=1,
-                              bytes=4 << 20)
+                              bytes=4 << 20, nodes=1)
             self.assertEqual(b"".join(out), b"x" * (3 << 20) + b"\n")
             assert_no_zombies(self)
         finally:
@@ -210,7 +216,7 @@ class TestSpawnV1(unittest.TestCase):
         try:
             write_lines(path, 20)
             out = forkrun.map(["ls", "/proc/self/fd"], path, mode="spawn",
-                              workers=2, order="index")
+                              workers=2, order="index", nodes=1)
             for blob in out:
                 self.assertEqual(sorted(blob.decode().split()),
                                  ["0", "1", "2", "3"])
@@ -228,7 +234,7 @@ class TestSpawnV1(unittest.TestCase):
         try:
             write_lines(path, 500)
             out = forkrun.map("cat", path, mode="spawn", workers=2,
-                              order="index")
+                              order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)
@@ -278,7 +284,8 @@ class TestPluginV1(unittest.TestCase):
         try:
             write_lines(path, 8, fmt="row %d\n")
             out = forkrun.map(_v1_spec("identify_v1"), path, mode="plugin",
-                              workers=2, lines=1, order="index")
+                              workers=2, lines=1, order="index",
+                              nodes=1)
             idxs = sorted(int(m.group(1)) for m in
                           (re.match(rb"idx=(\d+) kills=0\n", b) for b in out)
                           if m)
@@ -309,7 +316,8 @@ class TestPluginV1(unittest.TestCase):
         try:
             write_lines(path, 500)
             out = forkrun.map("%s:process" % PLUGIN_V0_SO, path,
-                              mode="plugin", workers=2, order="index")
+                              mode="plugin", workers=2, order="index",
+                              nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)
@@ -331,7 +339,7 @@ class TestPluginV1(unittest.TestCase):
         try:
             write_lines(path, 500)
             out = forkrun.map(_v1_spec("process_v1"), path, mode="plugin",
-                              workers=2, order="index")
+                              workers=2, order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)
@@ -365,7 +373,8 @@ class TestPluginV1(unittest.TestCase):
         try:
             write_lines(path, 500)
             out = forkrun.map("%s:process" % PLUGIN_V0_SO, path,
-                              mode="plugin", workers=2, order="index")
+                              mode="plugin", workers=2, order="index",
+                              nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)

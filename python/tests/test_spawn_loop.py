@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, v1_available  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, write_lines)
 
 try:
     find_substrate()
@@ -93,6 +94,9 @@ class TestCSpawnLoopParity(unittest.TestCase):
         assert_no_zombies(self)
 
     def _both(self, payload, path, **kw):
+        # C worker loops are UMA-only by gate — pin UMA so the
+        # parity compares loop implementations, not topologies.
+        kw.setdefault("nodes", 1)
         a = forkrun.map(payload, path, mode="spawn", **kw)
         b = forkrun.map(payload, path, mode="spawn", c_spawn_loop=True,
                         **kw)
@@ -102,7 +106,7 @@ class TestCSpawnLoopParity(unittest.TestCase):
         path = _make_input()
         try:
             a, b = self._both("tr a-z A-Z", path, workers=2)
-            self.assertEqual(sorted(a), sorted(b))
+            self.assertEqual(lines_of(a), lines_of(b))
         finally:
             os.unlink(path)
 
@@ -111,7 +115,7 @@ class TestCSpawnLoopParity(unittest.TestCase):
         try:
             a, b = self._both("tr a-z A-Z", path, workers=2,
                               order="index")
-            self.assertEqual(a, b)
+            self.assertEqual(joined_bytes(a), joined_bytes(b))
         finally:
             os.unlink(path)
 
@@ -120,7 +124,7 @@ class TestCSpawnLoopParity(unittest.TestCase):
         try:
             a, b = self._both("tr a-z A-Z", path, workers=4,
                               orchestrator=True, order="index")
-            self.assertEqual(a, b)
+            self.assertEqual(joined_bytes(a), joined_bytes(b))
         finally:
             os.unlink(path)
 
@@ -131,7 +135,7 @@ class TestCSpawnLoopParity(unittest.TestCase):
         try:
             a, b = self._both("cat", path, workers=2,
                               bytes=256 * 1024, order="index")
-            self.assertEqual(a, b)
+            self.assertEqual(joined_bytes(a), joined_bytes(b))
             self.assertGreater(len(a), 0)
         finally:
             os.unlink(path)
@@ -141,10 +145,10 @@ class TestCSpawnLoopParity(unittest.TestCase):
         on both paths (completed run, empty results)."""
         path = _make_input(120)
         try:
-            a = forkrun.map("false", path, mode="spawn", workers=1)
-            b = forkrun.map("false", path, mode="spawn", workers=1,
+            a = forkrun.map("false", path, mode="spawn", workers=1, nodes=1)
+            b = forkrun.map("false", path, mode="spawn", workers=1, nodes=1,
                             c_spawn_loop=True)
-            self.assertEqual(a, b)
+            self.assertEqual(joined_bytes(a), joined_bytes(b))
             self.assertEqual(a, [])
         finally:
             os.unlink(path)
@@ -152,11 +156,11 @@ class TestCSpawnLoopParity(unittest.TestCase):
     def test_fail_skip_parity(self):
         path = _make_input(120)
         try:
-            a = forkrun.map("false", path, mode="spawn", workers=1,
+            a = forkrun.map("false", path, mode="spawn", workers=1, nodes=1,
                             on_error="skip")
-            b = forkrun.map("false", path, mode="spawn", workers=1,
+            b = forkrun.map("false", path, mode="spawn", workers=1, nodes=1,
                             on_error="skip", c_spawn_loop=True)
-            self.assertEqual(a, b)
+            self.assertEqual(joined_bytes(a), joined_bytes(b))
             self.assertEqual(a, [])
         finally:
             os.unlink(path)
@@ -165,10 +169,10 @@ class TestCSpawnLoopParity(unittest.TestCase):
         path = _make_input(120)
         try:
             with self.assertRaises(RuntimeError):
-                forkrun.map("false", path, mode="spawn", workers=1,
+                forkrun.map("false", path, mode="spawn", workers=1, nodes=1,
                             on_error="fail-fast")
             with self.assertRaises(RuntimeError):
-                forkrun.map("false", path, mode="spawn", workers=1,
+                forkrun.map("false", path, mode="spawn", workers=1, nodes=1,
                             on_error="fail-fast", c_spawn_loop=True)
         finally:
             os.unlink(path)
@@ -187,10 +191,10 @@ class TestCSpawnLoopParity(unittest.TestCase):
         try:
             res = forkrun.map(cmd, path, mode="spawn", workers=2,
                               orchestrator=True, order="index",
-                              c_spawn_loop=True)
+                              c_spawn_loop=True, nodes=1)
             healthy = forkrun.map("cat", path, mode="spawn",
-                                  workers=2, order="index")
-            self.assertEqual(res, healthy)
+                                  workers=2, order="index", nodes=1)
+            self.assertEqual(joined_bytes(res), joined_bytes(healthy))
         finally:
             os.unlink(path)
             import shutil as _shutil

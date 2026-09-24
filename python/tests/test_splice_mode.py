@@ -40,20 +40,20 @@ class TestSpliceValidation(unittest.TestCase):
     def test_payload_required_absent(self):
         for bad in (lambda b: b, "cmd", ["a"], 42):
             with self.assertRaises(ValueError, msg=repr(bad)):
-                forkrun.map(bad, "f.txt", mode="splice")
+                forkrun.map(bad, "f.txt", mode="splice", nodes=1)
 
     def test_lines_rejected(self):
         with self.assertRaises(ValueError):
-            forkrun.map(None, "f.txt", mode="splice", lines=100)
+            forkrun.map(None, "f.txt", mode="splice", lines=100, nodes=1)
 
     def test_run_rejected(self):
         with self.assertRaises(ValueError):
-            forkrun.run(None, "f.txt", mode="splice")
+            forkrun.run(None, "f.txt", mode="splice", nodes=1)
 
     def test_sink_rejected(self):
         with self.assertRaises(ValueError):
             forkrun.run(None, "f.txt", mode="splice",
-                        sink=lambda m, r: None)
+                        sink=lambda m, r: None, nodes=1)
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
@@ -66,7 +66,7 @@ class TestSpliceMode(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("hello\nworld\n" * 100)
             out = forkrun.map(None, path, mode="splice", bytes=4096,
-                              workers=2, order="index")
+                              workers=2, order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)
@@ -82,7 +82,7 @@ class TestSpliceMode(unittest.TestCase):
         try:
             out = forkrun.map(None, path, mode="splice",
                               bytes=512 * 1024, workers=4,
-                              order="index")
+                              order="index", nodes=1)
             self.assertEqual(b"".join(out), data)
             assert_no_zombies(self)
         finally:
@@ -95,7 +95,7 @@ class TestSpliceMode(unittest.TestCase):
         try:
             self.assertEqual(
                 forkrun.map(None, path, mode="splice", bytes=4096,
-                            workers=1), [])
+                            workers=1, nodes=1), [])
             assert_no_zombies(self)
         finally:
             os.unlink(path)
@@ -108,7 +108,7 @@ class TestSpliceMode(unittest.TestCase):
         try:
             write_lines(path, 2000)
             out = forkrun.map(None, path, mode="splice", workers=2,
-                              order="index")
+                              order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)
@@ -123,7 +123,7 @@ class TestSpliceMode(unittest.TestCase):
             write_lines(path, 3000)
             out = list(forkrun.stream(None, path, mode="splice",
                                       bytes=64 * 1024, workers=2,
-                                      order="index"))
+                                      order="index", nodes=1))
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)
@@ -137,7 +137,7 @@ class TestSpliceMode(unittest.TestCase):
         try:
             write_lines(path, 3000)
             out = list(forkrun.stream(None, path, mode="splice",
-                                      bytes=64 * 1024, workers=2))
+                                      bytes=64 * 1024, workers=2, nodes=1))
             # Byte windows are order-free chunks: compare as a multiset
             # of lines (newlines may split across windows).
             with open(path, "rb") as fh:
@@ -156,7 +156,7 @@ class TestSpliceMode(unittest.TestCase):
             write_lines(path, 2000)
             out = forkrun.map(None, path, mode="splice",
                               bytes=64 * 1024, workers=2, order="index",
-                              streaming=True)
+                              streaming=True, nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)
@@ -180,7 +180,7 @@ class TestSpliceMode(unittest.TestCase):
         os.close(w)
         try:
             out = forkrun.map(None, r, mode="splice", bytes=16384,
-                              workers=2, order="index")
+                              workers=2, order="index", nodes=1)
             got = sorted(b for blob in out for b in blob.splitlines())
             exp = sorted(("line %d" % i).encode() for i in range(500))
             self.assertEqual(got, exp)
@@ -192,20 +192,22 @@ class TestSpliceMode(unittest.TestCase):
     def test_splice_faster_than_python_passthrough(self):
         # Same bytes moved both ways; the C loop must not lose to the
         # Python loop (margin 0.9× guards machine noise — measures
-        # non-regression, not a speedup ratio).
+        # non-regression, not a speedup ratio). 100k lines so loop
+        # time dominates fork overhead (~10ms fixed per run would
+        # decide 8ms-scale measurements on noise alone).
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
             path = fh.name
         try:
-            write_lines(path, 20000, fmt="line %06d padding data\n")
+            write_lines(path, 100000, fmt="line %06d padding data\n")
             t0 = time.perf_counter()
             ref = forkrun.map(lambda b: bytes(b.data), path, workers=4,
-                              order="index")
+                              order="index", nodes=1)
             t_py = time.perf_counter() - t0
             t0 = time.perf_counter()
             got = forkrun.map(None, path, mode="splice",
                               bytes=256 * 1024, workers=4,
-                              order="index")
+                              order="index", nodes=1)
             t_sp = time.perf_counter() - t0
             self.assertEqual(b"".join(got), b"".join(ref))
             self.assertLess(t_sp, t_py / 0.9,

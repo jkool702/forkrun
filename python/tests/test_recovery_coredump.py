@@ -209,7 +209,8 @@ class TestCoredumpLifecycleIntegration(unittest.TestCase):
             sys.path.insert(0, tmpdir)
             try:
                 res = forkrun.map("w30core_mod:payload", path,
-                                  workers=1, lines=10, order="index")
+                                  workers=1, lines=10, order="index",
+                                  nodes=1)
             finally:
                 sys.path.remove(tmpdir)
             # Full output (the final attempt succeeded, no poison):

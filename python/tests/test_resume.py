@@ -364,18 +364,18 @@ class TestResumePathValidation(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             forkrun.map(_up, self._input(), workers=2,
                         orchestrator=True, order="none",
-                        resume=self._ckpt())
+                        resume=self._ckpt(), nodes=1)
 
     def test_resume_without_reactor_fails(self):
         with self.assertRaises(RuntimeError):
             forkrun.map(_up, self._input(), workers=2,
-                        order="index", resume=self._ckpt())
+                        order="index", resume=self._ckpt(), nodes=1)
 
     def test_resume_splice_fails(self):
         with self.assertRaises(RuntimeError):
             forkrun.map(None, self._input(), workers=2, mode="splice",
                         bytes=1024, orchestrator=True, order="index",
-                        resume=self._ckpt())
+                        resume=self._ckpt(), nodes=1)
 
     def test_resume_numa_fails(self):
         with self.assertRaises(RuntimeError):
@@ -387,12 +387,12 @@ class TestResumePathValidation(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             forkrun.map(_up, self._input(), workers=2,
                         orchestrator=True, order="index",
-                        resume="/nonexistent/forkrun-test.ckpt")
+                        resume="/nonexistent/forkrun-test.ckpt", nodes=1)
 
     def test_resume_bad_type_fails(self):
         with self.assertRaises(TypeError):
             forkrun.map(_up, self._input(), workers=2,
-                        orchestrator=True, order="index", resume=123)
+                        orchestrator=True, order="index", resume=123, nodes=1)
 
     def test_resume_malformed_fails(self):
         fd, path = tempfile.mkstemp(suffix=".ckpt")
@@ -402,29 +402,29 @@ class TestResumePathValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             forkrun.map(_up, self._input(), workers=2,
                         orchestrator=True, order="index",
-                        resume=path)
+                        resume=path, nodes=1)
 
     def test_run_resume_fails(self):
         with self.assertRaises(RuntimeError):
             forkrun.run(_up, self._input(), workers=2,
-                        resume=self._ckpt())
+                        resume=self._ckpt(), nodes=1)
 
     def test_run_checkpoint_file_fails(self):
         with self.assertRaises(RuntimeError):
             forkrun.run(_up, self._input(), workers=2,
-                        checkpoint_file=self._ckpt() + ".out")
+                        checkpoint_file=self._ckpt() + ".out", nodes=1)
 
     def test_checkpoint_file_unsupported_path_fails(self):
         dest = self._ckpt() + ".out"
         with self.assertRaises(RuntimeError):
             forkrun.map(_up, self._input(), workers=2,
-                        order="none", checkpoint_file=dest)
+                        order="none", checkpoint_file=dest, nodes=1)
         self.assertFalse(os.path.exists(dest))
 
     def test_stream_resume_unsupported_path_fails(self):
         with self.assertRaises(RuntimeError):
             list(forkrun.stream(_up, self._input(), workers=2,
-                                order="none", resume=self._ckpt()))
+                                order="none", resume=self._ckpt(), nodes=1))
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
@@ -484,7 +484,7 @@ class TestResumeExecution(unittest.TestCase):
             forkrun.map(self._counter_payload(counter, limit, action),
                         path, workers=workers, orchestrator=True,
                         order="index", on_error="fail-fast",
-                        checkpoint_file=ckpt)
+                        checkpoint_file=ckpt, nodes=1)
         self.assertTrue(os.path.exists(ckpt),
                         "abort with progress must checkpoint")
 
@@ -514,7 +514,7 @@ class TestResumeExecution(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             forkrun.map(self._counter_payload(counter, 1), path,
                         workers=1, orchestrator=True, order="index",
-                        on_error="fail-fast", checkpoint_file=ckpt)
+                        on_error="fail-fast", checkpoint_file=ckpt, nodes=1)
         self.assertFalse(os.path.exists(ckpt))
 
     def test_no_checkpoint_on_success(self):
@@ -523,7 +523,7 @@ class TestResumeExecution(unittest.TestCase):
         self.addCleanup(
             lambda: os.path.exists(ckpt) and os.unlink(ckpt))
         res = forkrun.map(_up, path, workers=2, orchestrator=True,
-                          order="index", checkpoint_file=ckpt)
+                      order="index", checkpoint_file=ckpt, nodes=1)
         self.assertTrue(res)
         self.assertFalse(os.path.exists(ckpt))
 
@@ -552,7 +552,7 @@ class TestResumeExecution(unittest.TestCase):
         with open(ckpt + ".coll", "rb") as fh:
             sidecar_blob = fh.read()
         res = forkrun.map(_up, path, workers=4, orchestrator=True,
-                          order="index", resume=ckpt)
+                          order="index", resume=ckpt, nodes=1)
         # Non-vacuity: the resumed run delivered NEW records beyond
         # the sidecar (concat, no dedup — length strictly grows).
         from forkrun.run import _parse_records
@@ -577,9 +577,9 @@ class TestResumeExecution(unittest.TestCase):
                 lambda f=f: os.path.exists(f) and os.unlink(f))
         self._abort_run(path, counter, 8, ckpt)
         res = forkrun.map(_up, path, workers=4, orchestrator=True,
-                          order="index", resume=ckpt)
+                          order="index", resume=ckpt, nodes=1)
         expect = forkrun.map(_up, path, workers=4, orchestrator=True,
-                             order="index")
+                             order="index", nodes=1)
         self.assertEqual(b"".join(res), b"".join(expect))
         self.assertEqual(len(res), len(expect))
         # Sidecar consumed exactly once (no resurrection source).
@@ -605,7 +605,7 @@ class TestResumeExecution(unittest.TestCase):
             sidecar_list = _framed_lines(fh.read())
         self.assertEqual(len(sidecar_list), len(set(sidecar_list)))
         res = forkrun.map(_up, path, workers=4, orchestrator=True,
-                          order="index", resume=ckpt)
+                          order="index", resume=ckpt, nodes=1)
         final_list = _lines_list(b"".join(res))
         self.assertEqual(len(final_list), len(set(final_list)),
                          "duplicate delivery across abort+resume")
@@ -634,14 +634,14 @@ class TestResumeExecution(unittest.TestCase):
             forkrun.map(self._counter_payload(counter2, 12), path,
                         workers=2, orchestrator=True, order="index",
                         on_error="fail-fast", resume=ckpt,
-                        checkpoint_file=ckpt)
+                        checkpoint_file=ckpt, nodes=1)
         self.assertTrue(os.path.exists(ckpt))
         h2 = parse_checkpoint(ckpt).horizon
         self.assertGreaterEqual(h2, h1)
         res = forkrun.map(_up, path, workers=4, orchestrator=True,
-                          order="index", resume=ckpt)
+                          order="index", resume=ckpt, nodes=1)
         expect = forkrun.map(_up, path, workers=4, orchestrator=True,
-                             order="index")
+                             order="index", nodes=1)
         self.assertEqual(b"".join(res), b"".join(expect))
 
     def test_resume_sigint(self):
@@ -657,15 +657,26 @@ class TestResumeExecution(unittest.TestCase):
             self.addCleanup(
                 lambda f=f: os.path.exists(f) and os.unlink(f))
         payload = self._counter_payload(counter, 8, "sigint", fired)
-        with self.assertRaises(KeyboardInterrupt):
-            forkrun.map(payload, path, workers=2, orchestrator=True,
-                        order="index", checkpoint_file=ckpt)
+        # The SIGINT trigger needs the default disposition: background
+        # launchers (nohup/setsid/CI supervisors without job control)
+        # start children with SIGINT ignored, which Python then
+        # inherits instead of installing default_int_handler. Pin it
+        # explicitly (restored after) so the test is launcher-proof.
+        import signal as _signal
+        _old_int = _signal.getsignal(_signal.SIGINT)
+        _signal.signal(_signal.SIGINT, _signal.default_int_handler)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                forkrun.map(payload, path, workers=2, orchestrator=True,
+                            order="index", checkpoint_file=ckpt, nodes=1)
+        finally:
+            _signal.signal(_signal.SIGINT, _old_int)
         self.assertTrue(os.path.exists(ckpt),
                         "SIGINT abort must checkpoint")
         res = forkrun.map(_up, path, workers=4, orchestrator=True,
-                          order="index", resume=ckpt)
+                          order="index", resume=ckpt, nodes=1)
         expect = forkrun.map(_up, path, workers=4, orchestrator=True,
-                             order="index")
+                             order="index", nodes=1)
         self.assertEqual(b"".join(res), b"".join(expect))
 
 
@@ -705,7 +716,8 @@ class TestResumeStream(unittest.TestCase):
             return bytes(batch.data).upper()
 
         gen = forkrun.stream(_slow, path, workers=4, orchestrator=True,
-                             order="index", checkpoint_file=ckpt)
+                             order="index", checkpoint_file=ckpt,
+                             nodes=1)
         seen = []
         try:
             # ~64 batches for 20k lines at 50ms each: abandon after 20
@@ -735,7 +747,7 @@ class TestResumeStream(unittest.TestCase):
                         "abandoned too late — tail vacuous")
         resumed = list(forkrun.stream(
             _up, path, workers=4, orchestrator=True, order="index",
-            resume=ckpt))
+            resume=ckpt, nodes=1))
         resumed_lines = _lines_of(b"".join(resumed))
         self.assertTrue(tail_lines <= resumed_lines,
                         "resumed stream lost uncommitted bytes")

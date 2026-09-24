@@ -26,7 +26,8 @@ from forkrun._bindings import find_substrate, get, v1_available  # noqa: E402
 from forkrun.run import _parse_records_c, _spill_to_memfd  # noqa: E402
 from forkrun.run import _split_records  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, write_lines)
 
 try:
     find_substrate()
@@ -281,8 +282,8 @@ class TestCompleteParity(unittest.TestCase):
         path = _make_input()
         try:
             with _LegacyPath():
-                old = forkrun.map(_up, path, workers=4)
-            new = forkrun.map(_up, path, workers=4)
+                old = forkrun.map(_up, path, workers=4, nodes=1)
+            new = forkrun.map(_up, path, workers=4, nodes=1)
             self.assertEqual(_lines(old), _lines(new))
             with open(path, "rb") as fh:
                 expect = fh.read().upper()
@@ -294,8 +295,10 @@ class TestCompleteParity(unittest.TestCase):
         path = _make_input()
         try:
             with _LegacyPath():
-                old = forkrun.map(_up, path, workers=4, order="index")
-            new = forkrun.map(_up, path, workers=4, order="index")
+                old = forkrun.map(_up, path, workers=4, order="index",
+                                  nodes=1)
+            new = forkrun.map(_up, path, workers=4, order="index",
+                              nodes=1)
             self.assertEqual(old, new)
             flat = b"".join(new)
             with open(path, "rb") as fh:
@@ -307,10 +310,10 @@ class TestCompleteParity(unittest.TestCase):
         path = _make_input(n=500)
         try:
             with _LegacyPath():
-                old_none = forkrun.map(_none, path, workers=2)
-                old_empty = forkrun.map(_empty, path, workers=2)
-            new_none = forkrun.map(_none, path, workers=2)
-            new_empty = forkrun.map(_empty, path, workers=2)
+                old_none = forkrun.map(_none, path, workers=2, nodes=1)
+                old_empty = forkrun.map(_empty, path, workers=2, nodes=1)
+            new_none = forkrun.map(_none, path, workers=2, nodes=1)
+            new_empty = forkrun.map(_empty, path, workers=2, nodes=1)
             self.assertEqual(old_none, new_none)
             self.assertEqual(old_empty, new_empty)
         finally:
@@ -321,9 +324,9 @@ class TestCompleteParity(unittest.TestCase):
         try:
             with _LegacyPath():
                 old = sorted(forkrun.stream(_up, path, workers=4,
-                                            streaming=True))
+                                            streaming=True, nodes=1))
             new = sorted(forkrun.stream(_up, path, workers=4,
-                                        streaming=True))
+                                        streaming=True, nodes=1))
             self.assertEqual(old, new)
         finally:
             os.unlink(path)
@@ -339,7 +342,7 @@ class TestCompleteParity(unittest.TestCase):
                     fh.write(b"POISON-ME\n" if i == 150
                              else b"ok line %d\n" % i)
             res = forkrun.map(_fail_twice_factory(), path, workers=2,
-                              on_error="skip")
+                              on_error="skip", nodes=1)
             joined = b"".join(res)
             self.assertNotIn(b"POISON-ME", joined)
             self.assertIn(b"ok line 0", joined)

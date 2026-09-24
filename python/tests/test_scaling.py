@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, v1_available  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, write_lines)
 
 try:
     find_substrate()
@@ -101,6 +102,9 @@ class TestCWorkerLoopParity(unittest.TestCase):
         assert_no_zombies(self)
 
     def _both(self, path, **kw):
+        # C worker loops are UMA-only by gate — pin UMA so the
+        # parity compares loop implementations, not topologies.
+        kw.setdefault("nodes", 1)
         a = forkrun.map(V1_UP, path, mode="plugin", **kw)
         b = forkrun.map(V1_UP, path, mode="plugin", c_worker_loop=True,
                         **kw)
@@ -110,7 +114,7 @@ class TestCWorkerLoopParity(unittest.TestCase):
         path = _make_input()
         try:
             a, b = self._both(path, workers=2, order="none")
-            self.assertEqual(sorted(a), sorted(b))
+            self.assertEqual(lines_of(a), lines_of(b))
             self.assertTrue(len(a) > 0)
         finally:
             os.unlink(path)
@@ -119,7 +123,7 @@ class TestCWorkerLoopParity(unittest.TestCase):
         path = _make_input()
         try:
             a, b = self._both(path, workers=2, order="index")
-            self.assertEqual(a, b)
+            self.assertEqual(joined_bytes(a), joined_bytes(b))
         finally:
             os.unlink(path)
 
@@ -128,7 +132,7 @@ class TestCWorkerLoopParity(unittest.TestCase):
         try:
             a, b = self._both(path, workers=2, order="index",
                               orchestrator=True)
-            self.assertEqual(a, b)
+            self.assertEqual(joined_bytes(a), joined_bytes(b))
         finally:
             os.unlink(path)
 
@@ -137,27 +141,28 @@ class TestCWorkerLoopParity(unittest.TestCase):
         try:
             a, b = self._both(path, workers=2, order="none",
                               c_drain=True)
-            self.assertEqual(sorted(a), sorted(b))
+            self.assertEqual(lines_of(a), lines_of(b))
         finally:
             os.unlink(path)
 
     def test_ctx_fields_identical(self):
         path = _make_input(n=100)
         try:
-            a = forkrun.map(V1_IDENT, path, mode="plugin", workers=2)
+            a = forkrun.map(V1_IDENT, path, mode="plugin", workers=2,
+                            nodes=1)
             b = forkrun.map(V1_IDENT, path, mode="plugin", workers=2,
-                            c_worker_loop=True)
-            self.assertEqual(sorted(a), sorted(b))
+                            c_worker_loop=True, nodes=1)
+            self.assertEqual(lines_of(a), lines_of(b))
         finally:
             os.unlink(path)
 
     def test_fail_retry_poison_parity(self):
         path = _make_input(n=100)
         try:
-            a = forkrun.map(V1_FAIL, path, mode="plugin", workers=1)
-            b = forkrun.map(V1_FAIL, path, mode="plugin", workers=1,
+            a = forkrun.map(V1_FAIL, path, mode="plugin", workers=1, nodes=1)
+            b = forkrun.map(V1_FAIL, path, mode="plugin", workers=1, nodes=1,
                             c_worker_loop=True)
-            self.assertEqual(a, b)
+            self.assertEqual(joined_bytes(a), joined_bytes(b))
             self.assertEqual(a, [])
         finally:
             os.unlink(path)
@@ -165,11 +170,11 @@ class TestCWorkerLoopParity(unittest.TestCase):
     def test_fail_skip_parity(self):
         path = _make_input(n=100)
         try:
-            a = forkrun.map(V1_FAIL, path, mode="plugin", workers=1,
+            a = forkrun.map(V1_FAIL, path, mode="plugin", workers=1, nodes=1,
                             on_error="skip")
-            b = forkrun.map(V1_FAIL, path, mode="plugin", workers=1,
+            b = forkrun.map(V1_FAIL, path, mode="plugin", workers=1, nodes=1,
                             on_error="skip", c_worker_loop=True)
-            self.assertEqual(a, b)
+            self.assertEqual(joined_bytes(a), joined_bytes(b))
             self.assertEqual(a, [])
         finally:
             os.unlink(path)
@@ -178,10 +183,10 @@ class TestCWorkerLoopParity(unittest.TestCase):
         path = _make_input(n=100)
         try:
             with self.assertRaises(RuntimeError):
-                forkrun.map(V1_FAIL, path, mode="plugin", workers=1,
+                forkrun.map(V1_FAIL, path, mode="plugin", workers=1, nodes=1,
                             on_error="fail-fast")
             with self.assertRaises(RuntimeError):
-                forkrun.map(V1_FAIL, path, mode="plugin", workers=1,
+                forkrun.map(V1_FAIL, path, mode="plugin", workers=1, nodes=1,
                             on_error="fail-fast", c_worker_loop=True)
         finally:
             os.unlink(path)

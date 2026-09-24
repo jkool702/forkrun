@@ -37,3 +37,33 @@ def assert_no_zombies(testcase):
     except ChildProcessError:
         return
     testcase.fail("reaped unexpected child %r — zombie leak" % (pid,))
+
+
+def lines_of(blobs):
+    """All output lines across result blobs, sorted.
+
+    Split-agnostic: batch boundaries are an implementation
+    detail (pre-flight timing changes them run to run), so
+    cross-run comparisons must use lines (or joined bytes),
+    never blob identity or blob sort order.
+    """
+    out = []
+    for b in blobs:
+        if b is None:
+            continue
+        if isinstance(b, str):
+            b = b.encode()
+        out.extend(b.splitlines())
+    return sorted(out)
+
+
+def joined_bytes(blobs):
+    """Concatenated output bytes (split-agnostic, order-sensitive)."""
+    parts = []
+    for b in blobs:
+        if b is None:
+            continue
+        if isinstance(b, str):
+            b = b.encode()
+        parts.append(bytes(b))
+    return b"".join(parts)

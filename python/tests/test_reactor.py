@@ -30,7 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, write_lines)
 
 try:
     find_substrate()
@@ -56,15 +57,15 @@ class TestOrchestratorValidation(unittest.TestCase):
     def test_bad_orchestrator_rejected(self):
         for bad in ("yes", 1, 0, [], {}):
             with self.assertRaises(TypeError, msg=repr(bad)):
-                forkrun.map(_up, "f.txt", orchestrator=bad)
+                forkrun.map(_up, "f.txt", orchestrator=bad, nodes=1)
 
     def test_bad_orchestrator_run_rejected(self):
         with self.assertRaises(TypeError):
-            forkrun.run(_up, "f.txt", orchestrator="true")
+            forkrun.run(_up, "f.txt", orchestrator="true", nodes=1)
 
     def test_bad_orchestrator_stream_rejected(self):
         with self.assertRaises(TypeError):
-            forkrun.stream(_up, "f.txt", orchestrator=1)
+            forkrun.stream(_up, "f.txt", orchestrator=1, nodes=1)
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
@@ -75,20 +76,20 @@ class TestReactorBasic(unittest.TestCase):
     def test_map_parity_none(self):
         path = _make_input(1500)
         try:
-            simple = forkrun.map(_up, path, workers=4)
+            simple = forkrun.map(_up, path, workers=4, nodes=1)
             react = forkrun.map(_up, path, workers=4,
-                                orchestrator=True)
-            self.assertEqual(sorted(simple), sorted(react))
+                                orchestrator=True, nodes=1)
+            self.assertEqual(lines_of(simple), lines_of(react))
         finally:
             os.unlink(path)
 
     def test_map_parity_index(self):
         path = _make_input(1500)
         try:
-            simple = forkrun.map(_up, path, workers=4, order="index")
+            simple = forkrun.map(_up, path, workers=4, order="index", nodes=1)
             react = forkrun.map(_up, path, workers=4,
-                                orchestrator=True, order="index")
-            self.assertEqual(simple, react)
+                                orchestrator=True, order="index", nodes=1)
+            self.assertEqual(joined_bytes(simple), joined_bytes(react))
         finally:
             os.unlink(path)
 
@@ -96,17 +97,17 @@ class TestReactorBasic(unittest.TestCase):
         path = _make_input(800)
         try:
             self.assertIsNone(forkrun.run(_up, path, workers=2,
-                                          orchestrator=True))
+                                          orchestrator=True, nodes=1))
         finally:
             os.unlink(path)
 
     def test_stream_parity(self):
         path = _make_input(1500)
         try:
-            simple = sorted(forkrun.stream(_up, path, workers=4))
-            react = sorted(forkrun.stream(_up, path, workers=4,
-                                          orchestrator=True))
-            self.assertEqual(simple, react)
+            simple = forkrun.stream(_up, path, workers=4, nodes=1)
+            react = forkrun.stream(_up, path, workers=4,
+                                   orchestrator=True, nodes=1)
+            self.assertEqual(lines_of(simple), lines_of(react))
         finally:
             os.unlink(path)
 
@@ -114,11 +115,11 @@ class TestReactorBasic(unittest.TestCase):
         path = _make_input(1500)
         try:
             simple = list(forkrun.stream(_up, path, workers=4,
-                                         order="index"))
+                                         order="index", nodes=1))
             react = list(forkrun.stream(_up, path, workers=4,
                                         orchestrator=True,
-                                        order="index"))
-            self.assertEqual(simple, react)
+                                        order="index", nodes=1))
+            self.assertEqual(joined_bytes(simple), joined_bytes(react))
         finally:
             os.unlink(path)
 
@@ -126,11 +127,11 @@ class TestReactorBasic(unittest.TestCase):
         path = _make_input(3000)
         try:
             simple = forkrun.map(None, path, mode="splice",
-                                 bytes=32768, workers=2)
+                                 bytes=32768, workers=2, nodes=1)
             react = forkrun.map(None, path, mode="splice",
                                 bytes=32768, workers=2,
-                                orchestrator=True)
-            self.assertEqual(sorted(simple), sorted(react))
+                                orchestrator=True, nodes=1)
+            self.assertEqual(lines_of(simple), lines_of(react))
         finally:
             os.unlink(path)
 
@@ -149,13 +150,13 @@ class TestReactorBasic(unittest.TestCase):
             os._exit(0)
         os.close(w)
         try:
-            react = forkrun.map(_up, r, workers=2, orchestrator=True)
+            react = forkrun.map(_up, r, workers=2, orchestrator=True, nodes=1)
         finally:
             os.close(r)
             os.waitpid(pid, 0)
         path = _make_input(1500, prefix="pipe")
         try:
-            simple = forkrun.map(_up, path, workers=2)
+            simple = forkrun.map(_up, path, workers=2, nodes=1)
         finally:
             os.unlink(path)
 
@@ -186,14 +187,14 @@ class TestWorkerRespawn(unittest.TestCase):
             sys.path.insert(0, plugin_dir)
             try:
                 res = forkrun.map("w19segv_mod:payload", path,
-                                  workers=2, orchestrator=True)
+                                  workers=2, orchestrator=True, nodes=1)
             finally:
                 sys.path.remove(plugin_dir)
             # The crashed batch is best-effort (no escrow possible
             # for a death that runs no code); everything else lands.
             # Results are batch-granular blobs: batch 0 (lowest
             # lines) is the lost one, the tail must be intact.
-            healthy = forkrun.map(_up, path, workers=2)
+            healthy = forkrun.map(_up, path, workers=2, nodes=1)
             self.assertEqual(len(res), len(healthy) - 1)
             self.assertIn(b"LINE 1999\n", b"".join(res))
         finally:
@@ -231,13 +232,13 @@ class TestWorkerRespawn(unittest.TestCase):
                 t0 = time.monotonic()
                 res = forkrun.map("w28killonce_mod:payload", path,
                                   workers=2, orchestrator=True,
-                                  order="index")
+                                  order="index", nodes=1)
                 dt = time.monotonic() - t0
             finally:
                 sys.path.remove(plugin_dir)
-            healthy = forkrun.map(_up, path, workers=2, order="index")
+            healthy = forkrun.map(_up, path, workers=2, order="index", nodes=1)
             # Full recovery: every batch lands, order preserved.
-            self.assertEqual(res, healthy)
+            self.assertEqual(joined_bytes(res), joined_bytes(healthy))
             # No grace waits: one death + respawn, seconds not minutes.
             self.assertLess(dt, 60)
         finally:
@@ -261,7 +262,7 @@ class TestWorkerRespawn(unittest.TestCase):
                 t0 = time.monotonic()
                 with self.assertRaises(RuntimeError):
                     forkrun.map("w19kill_mod:payload", path,
-                                workers=1, orchestrator=True)
+                                workers=1, orchestrator=True, nodes=1)
                 dt = time.monotonic() - t0
             finally:
                 sys.path.remove(plugin_dir)
@@ -297,7 +298,7 @@ class TestWorkerRespawn(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,
                                             "respawn cap reached"):
                     forkrun.map("w19tack_mod:payload", path,
-                                workers=1, orchestrator=True)
+                                workers=1, orchestrator=True, nodes=1)
                 dt = time.monotonic() - t0
             finally:
                 sys.path.remove(plugin_dir)
@@ -327,7 +328,7 @@ class TestWorkerRespawn(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,
                                         "respawn cap reached"):
                 forkrun.map(_boom, path, workers=1,
-                            orchestrator=True, on_error="fail-fast")
+                            orchestrator=True, on_error="fail-fast", nodes=1)
             dt = time.monotonic() - t0
             self.assertLess(dt, 60)
         finally:
@@ -348,7 +349,7 @@ class TestTrapACK(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,
                                         "respawn cap reached"):
                 forkrun.map(_boom, path, workers=2,
-                            orchestrator=True, on_error="fail-fast")
+                            orchestrator=True, on_error="fail-fast", nodes=1)
         finally:
             os.unlink(path)
 
@@ -359,8 +360,8 @@ class TestTrapACK(unittest.TestCase):
             def _boom(batch):
                 raise ValueError("nope")
             res = forkrun.map(_boom, path, workers=2,
-                              orchestrator=True, on_error="retry")
-            healthy = forkrun.map(_up, path, workers=2)
+                              orchestrator=True, on_error="retry", nodes=1)
+            healthy = forkrun.map(_up, path, workers=2, nodes=1)
             # Poisoned batches are skipped, never silently kept.
             self.assertLess(len(res), len(healthy))
         finally:
@@ -434,9 +435,9 @@ class TestCOrderer(unittest.TestCase):
         path = _make_input(1500)
         try:
             via_c = forkrun.map(_up, path, workers=4,
-                                orchestrator=True, order="index")
+                                orchestrator=True, order="index", nodes=1)
             via_py = forkrun.map(_up, path, workers=4,
-                                 orchestrator=False, order="index")
+                                 orchestrator=False, order="index", nodes=1)
             self.assertEqual(via_c, via_py)
         finally:
             os.unlink(path)

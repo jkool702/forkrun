@@ -23,7 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate, get, v1_available  # noqa: E402
 
-from _helpers import assert_no_zombies, write_lines  # noqa: E402
+from _helpers import (assert_no_zombies, joined_bytes,  # noqa: E402
+                      lines_of, write_lines)
 
 try:
     find_substrate()
@@ -87,13 +88,15 @@ class TestCDrainBasic(unittest.TestCase):
         try:
             for order in ("none", "index"):
                 c_res = forkrun.map(_up, path, workers=4,
-                                    order=order, c_drain=True)
+                                    order=order, c_drain=True,
+                                    nodes=1)
                 py_res = forkrun.map(_up, path, workers=4,
-                                     order=order, c_drain=False)
+                                     order=order, c_drain=False,
+                                     nodes=1)
                 if order == "index":
                     self.assertEqual(c_res, py_res)
                 else:
-                    self.assertEqual(sorted(c_res), sorted(py_res))
+                    self.assertEqual(lines_of(c_res), lines_of(py_res))
         finally:
             os.unlink(path)
 
@@ -103,13 +106,13 @@ class TestCDrainBasic(unittest.TestCase):
         # default stays legacy so no user regresses.)
         path = _make_input(1000)
         try:
-            default = forkrun.map(_up, path, workers=2)
-            explicit = forkrun.map(_up, path, workers=2,
+            default = forkrun.map(_up, path, workers=2, nodes=1)
+            explicit = forkrun.map(_up, path, workers=2, nodes=1,
                                    c_drain=True)
-            legacy = forkrun.map(_up, path, workers=2,
+            legacy = forkrun.map(_up, path, workers=2, nodes=1,
                                  c_drain=False)
-            self.assertEqual(sorted(default), sorted(legacy))
-            self.assertEqual(sorted(default), sorted(explicit))
+            self.assertEqual(lines_of(default), lines_of(legacy))
+            self.assertEqual(lines_of(default), lines_of(explicit))
         finally:
             os.unlink(path)
 
@@ -117,7 +120,7 @@ class TestCDrainBasic(unittest.TestCase):
         path = _make_input()
         try:
             res = forkrun.map(_up, path, workers=4, order="index",
-                              c_drain=True)
+                              c_drain=True, nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(res), fh.read().upper())
         finally:
@@ -171,10 +174,11 @@ class TestCDrainBasic(unittest.TestCase):
         path = _make_input(2000)
         try:
             c_res = forkrun.map(None, path, mode="splice",
-                                bytes=32768, workers=2, c_drain=True)
+                                bytes=32768, workers=2, c_drain=True,
+                                nodes=1)
             py_res = forkrun.map(None, path, mode="splice",
                                  bytes=32768, workers=2,
-                                 c_drain=False)
+                                 c_drain=False, nodes=1)
             self.assertEqual(_lines(c_res), _lines(py_res))
         finally:
             os.unlink(path)
@@ -203,7 +207,7 @@ class TestCDrainStream(unittest.TestCase):
                                         c_drain=True))
             py_res = list(forkrun.stream(_up, path, workers=4,
                                          c_drain=False))
-            self.assertEqual(sorted(c_res), sorted(py_res))
+            self.assertEqual(lines_of(c_res), lines_of(py_res))
         finally:
             os.unlink(path)
 
@@ -256,14 +260,14 @@ class TestCDrainStream(unittest.TestCase):
         os.close(w)
         try:
             res = list(forkrun.stream(_up, r, workers=2,
-                                      c_drain=True))
+                                      c_drain=True, nodes=1))
         finally:
             os.close(r)
             os.waitpid(pid, 0)
         path = _make_input(1500, prefix="spipe")
         try:
             self.assertEqual(_lines(res), _lines(
-                forkrun.map(_up, path, workers=2)))
+                forkrun.map(_up, path, workers=2, nodes=1)))
         finally:
             os.unlink(path)
 
@@ -333,9 +337,9 @@ class TestCDrainReactor(unittest.TestCase):
                     # index+non-splice uses the C orderer under both
                     # settings (the flag is accepted but inert
                     # there) — still a valid equivalence check.
-                    self.assertEqual(a, b)
+                    self.assertEqual(joined_bytes(a), joined_bytes(b))
                 else:
-                    self.assertEqual(sorted(a), sorted(b))
+                    self.assertEqual(lines_of(a), lines_of(b))
         finally:
             os.unlink(path)
 
@@ -347,7 +351,7 @@ class TestCDrainReactor(unittest.TestCase):
             b = list(forkrun.stream(_up, path, workers=4,
                                     orchestrator=True,
                                     c_drain=False))
-            self.assertEqual(sorted(a), sorted(b))
+            self.assertEqual(lines_of(a), lines_of(b))
         finally:
             os.unlink(path)
 
@@ -355,10 +359,10 @@ class TestCDrainReactor(unittest.TestCase):
         path = _make_input(1500)
         try:
             a = forkrun.map(_up, path, workers=2, orchestrator=True,
-                            streaming=True, c_drain=True)
+                            streaming=True, c_drain=True, nodes=1)
             b = forkrun.map(_up, path, workers=2, orchestrator=True,
-                            streaming=True, c_drain=False)
-            self.assertEqual(sorted(a), sorted(b))
+                            streaming=True, c_drain=False, nodes=1)
+            self.assertEqual(lines_of(a), lines_of(b))
         finally:
             os.unlink(path)
 
@@ -379,10 +383,10 @@ class TestCDrainReactor(unittest.TestCase):
             try:
                 res = forkrun.map("w21adsegv_mod:payload", path,
                                   workers=2, orchestrator=True,
-                                  c_drain=True)
+                                  c_drain=True, nodes=1)
             finally:
                 sys.path.remove(d)
-            healthy = forkrun.map(_up, path, workers=2)
+            healthy = forkrun.map(_up, path, workers=2, nodes=1)
             rl, hl = _lines(res), _lines(healthy)
             self.assertTrue(rl)
             self.assertTrue(set(rl) <= set(hl))

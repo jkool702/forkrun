@@ -2,6 +2,181 @@
 
 ## v3.6.0 (unreleased)
 
+### Test-suite hardening: full green under fake NUMA (91 → 0)
+
+- **Topology isolation** (the bulk): `nodes="auto"` follows the
+  boot, so under `numa=fake=4` every default call takes the
+  NUMA pipeline — where workers<nodes strands unworked rings
+  and UMA-only gates (resume, C loops, NO_V1-masked symbols)
+  correctly refuse. Pinned `nodes=1` on all UMA-contract
+  calls across ~25 test files (plus the 2 v1 fallback and 8
+  complete/resume ERROR sites); NUMA-intent files untouched.
+- **Comparison doctrine** (W-PY39 fallout): overlapped
+  scanning makes small-run batching race-dependent, so
+  cross-run *blob* comparisons (`sorted(a)==sorted(b)`,
+  `a==b`) were converted to split-agnostic forms — new
+  `_helpers.lines_of` (line multisets) and `joined_bytes`
+  (order-sensitive). Joined/splitlines assertions were
+  already safe and untouched.
+- **Real fixes:** `v1_available()` NO_V1 dict now carries
+  the full key set (`numa` et al. — was `KeyError`);
+  removed the shadowed `_stream_gen`; splice timing test
+  workload 20k→100k lines (fork noise decided 8ms runs).
+- **Harness artifact, not product:** `test_resume_sigint`
+  failed only under background launchers (`nohup ... &`
+  starts children with SIGINT ignored, which Python
+  inherits). The test now pins `default_int_handler`
+  explicitly (restored after) — launcher-proof.
+- Result: 473 tests green (1 pip-toolchain skip), verified
+  with zero ERRORs/FAILs on a clean full-suite run.
+
+### Cleanup: dead `_stream_gen` + `v1_available` keys (W-PY40)
+
+- Removed the shadowed first `_stream_gen` definition
+  (`run.py`: stale W-PY6 version without `order`/`c_drain`
+  forwarding; the W-PY7 second definition was always the live
+  one — behavior-neutral deletion, single call site intact).
+- `v1_available()` NO_V1 escape-hatch dict now carries the
+  full key set (`numa`, `orderer`, `order_pipe`,
+  `scan_spawn`, `drain` as False — previously a `KeyError`
+  where the normal path returns False). The shape lock-in
+  test (`test_no_v1_kill_switch`) was extended to match.
+- The `KeyError` fix exposed the layer beneath: 8
+  ERRORs (4 `test_complete` parity + 4 `test_resume`) were
+  UMA-only paths running under fake-NUMA auto-topology
+  (NO_V1 masking / resume gate correctly refusing
+  multi-node). Pinned `nodes=1` at those 11 call sites plus
+  the 2 v1 fallback tests — same topology-isolation doctrine
+  as W-PY34. Result: ERRORs 8 → 0 in the affected files.
+  Remaining FAILs in those files are pre-existing
+  workers<nodes coverage flakes, verified identical on the
+  pristine tree.
+
+### UMA pre-flight overlap: forked materialized scanner (W-PY39)
+
+- **Diagnosis first.** The UMA materialized paths ran the scan
+  *synchronously in the parent* (`fr_py_scan` before any worker
+  existed — neither a data_ready gate nor immediate workers,
+  but a fourth sequence the work order didn't list). With
+  `active_waiters == 0` by construction, the engine pre-flight
+  always ran to EOF: 0.36s serial on 5M medium. The C
+  pre-flight itself is correct (bail check inside the loop,
+  every iteration, relaxed atomic, `target = W_max × Lmax`);
+  CASE B cannot lose data (the main loop always rescans from
+  byte 0 — batch sizing only).
+- **Fix (Python only, engine frozen):** new
+  `_fork_materialized_scanner` helper; all four materialized
+  executors (`_execute_locked`, `_execute_reactor_locked`,
+  `_execute_streaming`, `_execute_streaming_reactor`) fork the
+  scanner over complete input, do their natural setup (the
+  1-5ms pre-flight window), then fork workers immediately.
+  Workers arriving mid-scan trip the bail (CASE B → geometric
+  ramp); zero-window arrival ramps from scratch. Scanner-first
+  join order (crash-safe), abort + fail-loud on scan failure,
+  stray-scanner reap in every teardown, pid cleared after reap
+  (no recycled-pid signals). Ingest + NUMA paths untouched
+  (already concurrent).
+- **Result:** UMA medium 5M 1.7M → **2.3M rec/s** (+35%,
+  now above NUMA's 2.1M); Python 655k → 703k. Tier-3
+  recovery suites green on the modified paths; full-suite
+  failure set compared before/after (remaining diffs are
+  pre-existing fake-NUMA flakes, verified identical on the
+  pristine tree). Stream time-to-first-blob on 5M medium:
+  UMA 0.49s (was: spill 0.53s + serial scan 0.36s stacked),
+  NUMA 0.16s — the scan phase is hidden; the remaining UMA
+  serial cost is the memfd spill (splice reduction is
+  separate future work).
+- **Not done:** the dead duplicate `_stream_gen` (`run.py`)
+  flagged in W-PY35 is still there — left for the
+  refactor pass, not this order.
+
+### NUMA steady-state benchmarks at 5M records, fake-4 (W-PY35)
+
+- **Measurement only: no source changes** (new
+  `python/benchmarks/bench_numa_5m.py` + results in
+  `python/benchmarks/results/numa_5m_study.md`, reference
+  table appended to `DOCS/python/AI_benchmark_results.md`).
+- **No NUMA software tax at steady state** (same-boot UMA
+  baseline, 28 workers, `order=index`): forkrun C light
+  0.93-0.97×, medium 1.12-1.24×, heavy 1.28-1.29× of UMA;
+  Python UDF 1.00-1.09×. Per-node rings relieve claim
+  contention — the gain grows with per-record cost. The only
+  regression-shaped finding is spawn-on-NUMA (0.75×,
+  spawn-cost dominated); the C spawn loop stays UMA-only by
+  gate (recorded, unchanged).
+- **forkrun C NUMA beats same-boot Executor** 3.3× / 2.8× /
+  7.6× (light/medium/heavy) and 2.2× on tokenize (342k vs
+  158k docs/s); Python UDF at Executor parity. Worker sweep
+  monotonic in NUMA mode; streaming + NUMA + slow consumer
+  bounded (+0MB RSS).
+- **Correctness note:** output record-multisets proven
+  exactly equal UMA vs NUMA at 5M (light 5.0M/5.0M, medium
+  4997892/4997892 = Pool/Executor counts). Naive line counts
+  read <0.1% low on NUMA because output blobs don't
+  newline-terminate (junction artifact); the runner judges
+  completeness against a 99% threshold, which separates this
+  from genuine workers<nodes shortfall (25%+).
+- **20M scale confirmation:** light/medium/heavy × UMA/auto
+  at 28 workers hold or strengthen the ratios (1.20× / 1.29×
+  / 1.34× C; Python 1.03-1.18×). Absolutes drift ~15-20% on
+  both topologies over the long matrix while NUMA holds —
+  single-ring contention costs UMA more the longer the run.
+
+### Perf mechanism discovery: why NUMA wins (W-PY36)
+
+- **Measurement only** (`perf record -g --call-graph dwarf`,
+  inheritance default — perf 7.2 has no `--follow-forks`;
+  multiprocess capture verified: ~29 UMA / ~40 NUMA tasks).
+- **Every efficiency hypothesis falsified:** NUMA executes
+  +17.5% cycles at IPC 1.3→1.1, with 7× context switches,
+  67× migrations, 4× syscalls, +54% L1 misses — yet finishes
+  faster. The payload hotspot is identical (~73% in the
+  plugin's `snprintf` float path on both).
+- **The mechanism is pipeline overlap:** UMA serializes
+  ~0.9s spill+scan before workers fork; NUMA overlaps
+  ingest/index/scan with compute (publish-gated fork, 4
+  parallel scanners), feeding 10.1 vs 8.2 average CPUs.
+  Higher throughput via more aggregate parallelism despite
+  worse per-instruction efficiency everywhere.
+- **No easy wins left in the framework:** `libforkrun` self
+  time is <1%; 73% sits in payload float formatting
+  (already squeezed once in W-PY32). Full tables in
+  `python/benchmarks/results/numa_5m_study.md`.
+
+### Streaming + NUMA Tier-3 recovery verification (W-PY34)
+
+- **Verification order, not a feature: no engine or recovery-code
+  changes.** The W-PY28/29 WorkerTxn architecture covered active
+  streaming and multi-node NUMA as designed; this order proves it
+  with 13 new tests and documents the envelope honestly.
+- **Streaming Tier-3** (`python/tests/test_streaming_recovery.py`,
+  6 tests, `orchestrator=True`, `nodes=1`): SIGSEGV/SIGKILL
+  mid-stream unordered + ordered (stream continues, complete
+  output, recovered batch exactly once — Counter plus a
+  blob-uniqueness anti-double-emit gate), two simultaneous deaths,
+  ordered reassembly gap-holding (byte-exact reconstruction),
+  slow-consumer backpressure with bounded memory.
+- **NUMA Tier-3** (`python/tests/test_numa_recovery.py`, 7 tests,
+  `nodes="@2"`): crash recovery across nodes (escrow routed by
+  `txn->node`, respawn pinned via `fr_py_worker_init`), a
+  `wid_to_node` structural lock-in (respawn keeps its node;
+  workers >= nodes covers every ring), map + stream recovery, and
+  combined streaming + NUMA + crash in both orders.
+- **Two operating facts documented** (`RESILIENCE_PROTOCOL.md`
+  §7, twinned in `DOCS_ALL.md`): workers must cover every node
+  (an unworked node's born-local ring is never claimed — size
+  the pool to the topology), and `nodes="auto"` follows the boot
+  topology (under `numa=fake=N` every default call takes the NUMA
+  pipeline; single-node-authored callers must pass `nodes=1`).
+  NUMA batch granularity varies run to run — compare line
+  multisets / joined bytes, never blob identity.
+- **Pre-existing suite state (no W-PY34 regression):** booted
+  with `numa=fake=4`, the broader suite shows failures in tests
+  that assume single-node defaults with `workers < 4` (they fan
+  out to 4 NUMA nodes via `auto`) — e.g. `workers=1` runs lose
+  unworked nodes' shares. W-PY34 adds only the two new test
+  files; no existing test or source file was modified.
+
 ### C worker loop for spawn mode (W-PY33)
 
 - **New `fr_py_worker_spawn_loop`** (`_shim.c` additions only,

@@ -182,7 +182,7 @@ class TestSpillPaths(unittest.TestCase):
                 os.close(memfd)
             # End-to-end over the fallback path.
             out = forkrun.map(lambda b: bytes(b.data).upper(), path,
-                              workers=2, order="index")
+                              workers=2, order="index", nodes=1)
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(out), fh.read().upper())
             assert_no_zombies(self)

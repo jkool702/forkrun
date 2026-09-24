@@ -111,9 +111,9 @@ class TestYyjsonCorrectness(unittest.TestCase):
 
     def _run_both(self, path, workers=4):
         a = forkrun.map(self.scalar_spec, path, mode="plugin",
-                        workers=workers, order="index")
+                        workers=workers, order="index", nodes=1)
         b = forkrun.map(self.yyjson_spec, path, mode="plugin",
-                        workers=workers, order="index")
+                        workers=workers, order="index", nodes=1)
         return _records(a), _records(b)
 
     def _write_input(self, lines):
