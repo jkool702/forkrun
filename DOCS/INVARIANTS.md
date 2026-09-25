@@ -279,9 +279,38 @@ permanent runtime tripwire.
 
 ---
 
-## 16. Checklist Summary
+## 16. Scanner Base Determinism (F-PY-UMA1)
 
-If sections §1–16 above remain true, **forkrun is correct** — regardless of:
+**Invariant**
+The scanner's coordinate base (`buf_base_offset`, hence the first
+published window) must be deterministic — byte 0 — regardless of
+the fork-shared file offset it inherits.
+
+**Origin**
+The UMA scanner seeded its base from `lseek(SEEK_CUR)` on the
+fork-shared ingress memfd. Under sequential in-process runs that
+offset was observed nonzero (72–10120 in 15 caught instances),
+silently dropping the `[0, K)` head with torn seams — while the
+parent had verified offset 0 pre-fork. Forcing the base to 0
+eliminated all failures (0/48 forensic iters, 9–10/10 gates).
+
+**Enforced by**
+Explicit `lseek(fd, 0, SEEK_SET)` + `buf_base_offset = 0` at
+scanner entry (NUMA already hardcoded 0). All callers start at
+byte 0 by contract (materialized callers lseek first; streaming
+helpers fork pre-spill), so the reset changes no legitimate path.
+
+**Audit Rule**
+❌ Any coordinate seed read from shared mutable file state
+(SEEK_CUR, unanchored offsets) instead of an explicit reset.
+The query-then-trust pattern is the violation, however small
+the window between query and use.
+
+---
+
+## 17. Checklist Summary
+
+If sections §1–17 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement

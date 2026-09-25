@@ -19,6 +19,31 @@ forkrun C wins 2.8–7.6×; forkrun Python runs at
 formatting), <1% in the framework — make the payload
 faster before touching anything else.
 
+## Release numbers (v3.6.0, UMA, exact counts)
+
+28 workers, median-of-3 + warmup, `order="index"`, 5M
+records (20M row: 20M). `nodes=1` vs `@4` (4 forced logical
+nodes over 1 socket — the multi-node pipeline leg available
+on UMA). Rate is on valid records; `total` == input records
+on every row (filtered records emit blanks — medium drops
+2,108 and heavy 2,018 to quality gates, visible as
+total−valid).
+
+| test | type | nodes | M rec/s | time (s) | total (exact) | valid |
+|---|---|---|---|---|---|---|
+| light | C-plugin | 1 | 6.52 | 0.77 | 5000000 | 5000000 |
+| light | C-plugin | @4 | 4.74 | 1.05 | 5000000 | 5000000 |
+| medium | C-plugin | 1 | 2.29 | 2.18 | 5000000 | 4997892 |
+| medium | C-plugin | @4 | 1.80 | 2.78 | 5000000 | 4997892 |
+| heavy | C-plugin | 1 | 0.67 | 7.47 | 5000000 | 4997982 |
+| heavy | C-plugin | @4 | 0.58 | 8.56 | 5000000 | 4997982 |
+| medium-20M | C-plugin | 1 | 2.39 | 8.36 | 20000000 | 19991640 |
+| medium-20M | C-plugin | @4 | 1.82 | 10.97 | 20000000 | 19991640 |
+| light | python | 1 | 1.35 | 3.70 | 5000000 | 5000000 |
+| light | python | @4 | 1.09 | 4.59 | 5000000 | 5000000 |
+| medium | python | 1 | 0.67 | 7.48 | 5000000 | 4997892 |
+| medium | python | @4 | 0.59 | 8.52 | 5000000 | 4997892 |
+
 ## Scaling shape
 
 - Medium C: 361k (1w) → 965k (4w) → 1.6M (14w) → 1.7M
@@ -28,12 +53,13 @@ faster before touching anything else.
   chooses inside it). `lines=100` loses ~40% (per-batch
   costs dominate); `lines=50k+` loses ~35% (starvation:
   too few batches per worker).
-- UMA vs NUMA (fake-4, worst case for NUMA): light
-  5.8M→5.6M, medium 2.3M→2.1M, heavy 710k→710k. On
+- Multi-node pipeline cost (`@4` forced over 1 socket,
+  v3.6.0 table above): light 6.52M→4.74M, medium
+  2.29M→1.80M, heavy 0.67M→0.58M (0.73–0.87×). On
   single-socket, UMA is simpler and slightly faster; on
   real multi-socket, NUMA adds born-local memory wins.
-- 20M inputs hold the ratios (1.20×/1.29×/1.34× NUMA/UMA
-  on C) — steady-state, no degradation with size.
+- 20M inputs hold the ratios (medium C 2.39M→1.82M) —
+  steady-state, no degradation with size.
 
 ## Memory
 

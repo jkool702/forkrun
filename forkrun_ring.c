@@ -3943,7 +3943,16 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
 
   char *p = buf, *end = buf;
 
-  uint64_t buf_base_offset = is_numa ? 0 : lseek(fd_or_memfd, 0, SEEK_CUR);
+  /* F-PY-UMA1: deterministic coordinate base. The old SEEK_CUR query
+   * trusted the fork-shared file offset, which races under sequential
+   * in-process runs (sporadic head-loss with torn seams: the first
+   * published window started mid-line). Every caller starts at byte
+   * 0 (materialized callers lseek to 0 first; streaming helpers fork
+   * pre-spill; NUMA already hardcodes 0), so re-establish 0
+   * explicitly instead of querying. */
+  if (!is_numa)
+    lseek(fd_or_memfd, 0, SEEK_SET);
+  uint64_t buf_base_offset = 0;
   uint64_t batch_start = buf_base_offset;
 
   int phase = 0;

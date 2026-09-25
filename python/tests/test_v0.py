@@ -153,10 +153,16 @@ class TestRunSink(unittest.TestCase):
             path = fh.name
         try:
             _write_lines(path, 300)
-            self.assertEqual(list(forkrun.stream(_identity, path, workers=2,
-                                                 order="index", nodes=1)),
-                             forkrun.map(_identity, path, workers=2,
-                                         order="index", nodes=1))
+            # Split-agnostic parity: stream() and map() batch
+            # independently (adaptive L races run to run), so blob
+            # lists legitimately differ while joined bytes match.
+            # Never compare blob identity across runs (F-PY-UMA1:
+            # 3/30 spurious mismatches, all joined-identical).
+            self.assertEqual(b"".join(forkrun.stream(
+                _identity, path, workers=2,
+                order="index", nodes=1)), b"".join(forkrun.map(
+                    _identity, path, workers=2,
+                    order="index", nodes=1)))
         finally:
             os.unlink(path)
 

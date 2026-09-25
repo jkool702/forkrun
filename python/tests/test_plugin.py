@@ -191,7 +191,11 @@ class TestPluginMode(unittest.TestCase):
                 order="index", nodes=1))
             mapped = forkrun.map(self._spec("process"), path,
                                  mode="plugin", workers=2, order="index", nodes=1)
-            self.assertEqual(streamed, mapped)
+            # Split-agnostic parity: stream() and map() batch
+            # independently (adaptive L races run to run), so blob
+            # lists legitimately differ while joined bytes match
+            # (F-PY-UMA1 comparison doctrine).
+            self.assertEqual(joined_bytes(streamed), joined_bytes(mapped))
             with open(path, "rb") as fh:
                 self.assertEqual(b"".join(streamed), fh.read().upper())
             assert_no_zombies(self)

@@ -438,7 +438,10 @@ class TestCOrderer(unittest.TestCase):
                                 orchestrator=True, order="index", nodes=1)
             via_py = forkrun.map(_up, path, workers=4,
                                  orchestrator=False, order="index", nodes=1)
-            self.assertEqual(via_c, via_py)
+            # Split-agnostic parity: the C orderer and the Python
+            # reassembly consume the same records, but the two runs
+            # batch independently (F-PY-UMA1 comparison doctrine).
+            self.assertEqual(joined_bytes(via_c), joined_bytes(via_py))
         finally:
             os.unlink(path)
 

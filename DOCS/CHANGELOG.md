@@ -2,6 +2,39 @@
 
 ## v3.6.0 (unreleased)
 
+### UMA materialized execution race fix (F-PY-UMA1, W-PY42 v2)
+
+- **Root cause:** the UMA scanner seeded its coordinate base from
+  `lseek(SEEK_CUR)` on the fork-shared ingress memfd. Under
+  sequential in-process runs that offset was observed nonzero
+  (72–10120, 15 caught instances) although the parent verified
+  offset 0 pre-fork — the first published window started mid-line
+  and bytes `[0, K)` were never published (torn seams, head-loss).
+  W-PY39 concurrency fully preserved; no fence/claim changes.
+- **Fix:** explicit `lseek(fd, 0, SEEK_SET)` + `buf_base_offset = 0`
+  at scanner entry (NUMA already hardcoded 0; every caller starts
+  at byte 0 by contract). Minimal engine unfreeze (5 lines);
+  no blob rebuild needed beyond the normal substrate compile.
+  Python child-side `lseek` was tried first and proven
+  ineffective — the fix had to sit at/after the query.
+- **Detection:** sporadic UMA `map()` head-loss (~19–240 lines,
+  torn fragments) across 10 full-suite runs, always the UMA side
+  while NUMA/stream/recovery paths stayed complete. Forensics:
+  per-claim window logs + spill verification + a pre-reset probe
+  showing the race still fires but is neutralized.
+- **Also fixed (comparison doctrine, pre-existing):**
+  blob-identity assertions across runs in `test_stream_matches_map`,
+  `test_c_drain_vs_python_drain` (index), `test_c_drain_stream_ordered`,
+  `test_plugin_ordered`, `test_orderer_matches_reassembly` now
+  compare joined bytes (adaptive batching races run to run).
+- **Lock-in:** 0/48 forensic iters (was ~20% catch rate); 140/140
+  targeted tests; 100/100 minimal reproducer; `make check` green;
+  bash suites 91/91 + 263/263 (M8, M22, T12 green).
+  Residual: rare single-occurrence flakes in opt-in corners
+  (C-drain framing, reactor-ingest multiset) — green in isolation
+  (20–35×), tracked separately from this fix.
+- **Engine status:** surgical unfreeze (scanner entry only).
+
 ### Byte-mode M8: test bug, engine exonerated (F-BYTE1)
 
 - **Finding:** M8 (`-b 1048576 -s` with a `while read` payload)

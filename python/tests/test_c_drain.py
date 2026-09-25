@@ -94,7 +94,13 @@ class TestCDrainBasic(unittest.TestCase):
                                      order=order, c_drain=False,
                                      nodes=1)
                 if order == "index":
-                    self.assertEqual(c_res, py_res)
+                    # Split-agnostic parity: the C drain and the
+                    # Python drain consume the same records, but the
+                    # two runs batch independently (adaptive L races
+                    # run to run) — compare joined bytes (F-PY-UMA1),
+                    # never blob identity across runs.
+                    self.assertEqual(joined_bytes(c_res),
+                                     joined_bytes(py_res))
                 else:
                     self.assertEqual(lines_of(c_res), lines_of(py_res))
         finally:
@@ -219,7 +225,8 @@ class TestCDrainStream(unittest.TestCase):
             py_res = list(forkrun.stream(_up, path, workers=4,
                                          order="index",
                                          c_drain=False))
-            self.assertEqual(c_res, py_res)
+            # Same split-agnostic rule as above (F-PY-UMA1).
+            self.assertEqual(joined_bytes(c_res), joined_bytes(py_res))
         finally:
             os.unlink(path)
 
