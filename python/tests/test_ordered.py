@@ -112,7 +112,11 @@ class TestOrderedStreaming(unittest.TestCase):
             os.unlink(path)
 
     def test_ordered_matches_map(self):
-        # Same deterministic scan => identical key-ordered sequences.
+        # Same input through both entry points; the scan is
+        # deterministic but batching races run to run, so blob
+        # lists legitimately differ while joined bytes match
+        # (F-PY-UMA1 comparison doctrine — never blob identity
+        # across runs).
         def ident(batch):
             return bytes(batch.data)
 
@@ -124,7 +128,7 @@ class TestOrderedStreaming(unittest.TestCase):
             streamed = list(forkrun.stream(ident, path, workers=4,
                                            order="index", nodes=1))
             mapped = forkrun.map(ident, path, workers=4, order="index", nodes=1)
-            self.assertEqual(streamed, mapped)
+            self.assertEqual(joined_bytes(streamed), joined_bytes(mapped))
             assert_no_zombies(self)
         finally:
             os.unlink(path)
