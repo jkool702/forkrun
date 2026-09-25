@@ -233,6 +233,25 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### Byte-mode M8: test bug, engine exonerated (F-BYTE1)
+
+- M8 (`-b -s` with a `while read` payload) flaked under
+  fake NUMA: engine exonerated (windows contiguous and
+  byte-exact across seams) — `read` semantics on mid-line
+  splits was the cause. M8 payload swapped to a byte-safe
+  chunked passthrough; new M22 locks multi-batch `-b -s`
+  byte-exactness. Contract: `-b` chunks split mid-line by
+  design — payloads must be byte-safe. No engine change.
+
+### T12: poison-fill vs HUP race pinned open (F-T12-RACE)
+
+- T12 flaked ~30% (100 missing, 0 dupes) on pristine trees
+  too: the crash-looping batch poison-filled before the
+  HUP, so the checkpoint covered its bytes and resume
+  skipped it (per-spec). Test-only fix:
+  `FORKRUN_RETRY_LIMIT=-1` pins the hole open — 10/10 in
+  isolation, T2 green. No engine change.
+
 ### Python user documentation set (W-PY37)
 
 - Fourteen guides under `python/docs/` (QUICKSTART through
@@ -2650,7 +2669,7 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 - `<default>`                 : Pass arguments fully quoted via cmdline (`"${A[@]}"`). (no flag needed)
 - `-U`, `--unsafe`            : Pass arguments unquoted via cmdline (`${A[*]}`). *(WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the ultra-fast C-level vfork engine!)*
 - `-s`, `--stdin`             : Pass data to the worker via its `stdin` (instead of via cmdline arguments).
-- `-b`, `--bytes <N>`         : Byte mode. Split the stream into `<N>`-byte chunks instead of using delimiters (implies `-s`). Supports standard prefixes (e.g., `-b 1M`).
+- `-b`, `--bytes <N>`         : Byte mode. Split the stream into `<N>`-byte chunks instead of using delimiters (implies `-s`). Supports standard prefixes (e.g., `-b 1M`). Chunks split at arbitrary byte boundaries, mid-line by design — payloads must be byte-safe (not line-oriented) with `-b` in streaming mode (`-s`).
 - `-z`, `--null`              : Use NULL (`\0`) as the record delimiter instead of newline.
 - `-d`, `--delim <char>`      : Use a custom single-character record delimiter.
 

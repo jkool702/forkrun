@@ -2340,21 +2340,30 @@ if in_section M; then
     _MEXP=$(wc -c < "$_MD/input.txt" | tr -d ' ')
 
     cat > "$_MD/funcs.sh" << 'FUNCEOF'
-crash_cat() {
-    local line
-    while IFS= read -r line; do
-            for ((j=0;j<50;j++)); do :; done  # W-PY28: stretch runtime for size-gated HUP (worker deaths now recover instead of aborting)
-            printf '%s\n' "$line"
+# F-BYTE1: byte-safe slow passthrough. -b splits at arbitrary byte
+# boundaries (mid-line by design), so the payload MUST NOT use
+# line-oriented I/O: `while read` drops each batch's trailing
+# fragment (no newline) and emits the leading partial as a bogus
+# line. `read -N` is byte-oriented (exact chunks, `|| [[ -n ]]`
+# keeps the final partial); the busy loop preserves the HUP window.
+byte_safe_slow() {
+    local chunk
+    while IFS= read -r -N 4096 chunk || [[ -n $chunk ]]; do
+        for ((j=0;j<35000;j++)); do :; done
+        printf '%s' "$chunk"
     done
 }
 FUNCEOF
 
-    # W-PY28 note: single-batch run (-b 1MB covers the whole input),
-    # so ordered output appears all-at-once at completion — a size
-    # gate can never fire mid-run. Time-based HUP instead: the batch
-    # takes ~8s (busy-50 payload), HUP at readiness+3s always lands
-    # mid-batch on any runner speed.
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_cat' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -b 1048576 -s crash_cat > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; sleep 3; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+    # W-PY28 note: single-batch run on UMA (-b 1MB covers the whole
+    # input), so ordered output appears all-at-once at completion — a
+    # size gate can never fire mid-run. Time-based HUP instead: the
+    # batch takes ~4s (chunked busy-wait payload), HUP at
+    # readiness+3s always lands mid-batch on any runner speed.
+    # F-BYTE1 note: under fake-NUMA the input fans out per node, so
+    # this is multi-batch with mid-line seams — the byte-safe payload
+    # above is load-bearing, not cosmetic.
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='byte_safe_slow' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -k -b 1048576 -s byte_safe_slow > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; sleep 3; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
         > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
@@ -2368,7 +2377,7 @@ FUNCEOF
             mv "$_MD/output1_trunc.txt" "$_MD/output1.txt"
         fi
 
-        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_cat' frun -k -b 1048576 -s --resume '.forkrun_resume' crash_cat" \
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source 'funcs.sh'; cat input.txt | FORKRUN_EXTRA_FUNCS='byte_safe_slow' frun -k -b 1048576 -s --resume '.forkrun_resume' byte_safe_slow" \
             > "$_MD/output2.txt" 2>"$_MD/err2.txt"
 
         cat "$_MD/output1.txt" "$_MD/output2.txt" > "$_MD/combined.txt"
@@ -3039,6 +3048,50 @@ FUNCEOF
     fi
 
 
+
+# ============================================================================
+# M22: Byte-mode multi-batch content exactness (F-BYTE1 regression)
+# ============================================================================
+# -b splits at arbitrary byte boundaries (mid-line by design), so a
+# line-oriented payload (`while read`) corrupts every seam: the head
+# fragment dies in read's EOF-without-newline semantics while the
+# tail fragment emits as a bogus line (byte count even balances, so
+# line counts alone cannot catch it). This test locks the engine
+# side with a byte-safe payload: multi-batch -b -s delivery must be
+# byte-exact end to end. -b 262144 on ~589KB input structurally
+# forces >=3 batches regardless of timing; the chunked busy-wait
+# additionally forces publish-ahead timing on any topology.
+if in_section M; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/byte_seam_M22"; mkdir -p "$_MD"
+    seq 100000 > "$_MD/input.txt"
+
+    cat > "$_MD/funcs.sh" << 'FUNCEOF'
+byte_safe_slow() {
+    local chunk
+    while IFS= read -r -N 4096 chunk || [[ -n $chunk ]]; do
+        for ((j=0;j<5000;j++)); do :; done
+        printf '%s' "$chunk"
+    done
+}
+FUNCEOF
+
+    # No resume — pure content check through the ordered (-k) path.
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='byte_safe_slow' frun -k -b 262144 -s byte_safe_slow" \
+        > "$_MD/output.txt" 2>"$_MD/err.txt"
+
+    if cmp -s "$_MD/input.txt" "$_MD/output.txt"; then
+        TEST_RESULTS["M22: Byte-mode multi-batch content exactness"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "M22: Byte-mode multi-batch content exactness"
+    else
+        _ML=$(wc -l < "$_MD/output.txt" | tr -d ' ')
+        _MB=$(wc -c < "$_MD/output.txt" | tr -d ' ')
+        _MDIFF=$(diff "$_MD/input.txt" "$_MD/output.txt" | head -4 | tr '\n' ';')
+        TEST_RESULTS["M22: Byte-mode multi-batch content exactness"]="FAIL"
+        TEST_ERRORS["M22: Byte-mode multi-batch content exactness"]="lines=$_ML bytes=$_MB diff=${_MDIFF:0:160}"
+        ((FAILED_TESTS++)); _print_result FAIL "M22: Byte-mode multi-batch content exactness" "lines=$_ML bytes=$_MB"
+    fi
+fi
 
 # ============================================================================
 # SECTION N: Property-Based Invariants (Randomized Stress)
@@ -4850,6 +4903,14 @@ fi
 # edge (W-PY28: crashes recover instead of aborting, so the checkpoint
 # comes from an operator HUP, not a kill).
 # Resume with -l 37: run-2 batches straddle those intervals.
+# F-T12-RACE: the crash batch (holding line 19500) kill-loops until HUP.
+# With the default FORKRUN_RETRY_LIMIT=3 it can poison-fill BEFORE the
+# HUP under load (~30% of runs): a poisoned batch is resolved-as-failed,
+# so the checkpoint covers its bytes and resume correctly skips it —
+# leaving exactly its 100 lines missing (uniq=19900, dupes=0). The
+# engine is per-spec here; the test was racy. FORKRUN_RETRY_LIMIT=-1
+# (never poison) pins the hole open until HUP on both generations,
+# making the intended in-flight-at-HUP shape deterministic.
 if in_section T2; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/T12"; mkdir -p "$_MD"
@@ -4872,7 +4933,7 @@ crash_batch6() {
 }
 FUNCEOF
 
-    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 100 crash_batch6 > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
+    bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; rm -f .hup_ready; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_RETRY_LIMIT='-1' FORKRUN_TEST_CLEANROOM_PIDFILE='.hup_ready' frun -l 100 crash_batch6 > output1.txt 2>err1.txt & _hup_pid=\$!; for _i in \$(seq 1 100); do [[ -s .hup_ready ]] && break; sleep 0.2; done; _THRESH=100000; for _j in \$(seq 1 500); do _sz=\$(stat -c %s output1.txt 2>/dev/null || echo 0); (( _sz >= _THRESH )) && break; sleep 0.2; done; kill -HUP \$(cat .hup_ready); wait \$_hup_pid; true" \
         > /dev/null 2>&1
 
     if [[ ! -f "$_MD/.forkrun_resume" ]]; then
@@ -4887,7 +4948,7 @@ FUNCEOF
             head -c "$_MBYTES" "$_MD/output1.txt" > "$_MD/o1t.txt" && mv "$_MD/o1t.txt" "$_MD/output1.txt"
         fi
 
-        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' frun -l 37 --resume '.forkrun_resume' crash_batch6" \
+        bash -c "cd '$_MD'; source '$FRUN_SOURCE'; source funcs.sh; cat input.txt | FORKRUN_EXTRA_FUNCS='crash_batch6' FORKRUN_RETRY_LIMIT='-1' frun -l 37 --resume '.forkrun_resume' crash_batch6" \
             > "$_MD/output2.txt" 2>"$_MD/err2.txt"
 
         cat "$_MD/output1.txt" "$_MD/output2.txt" | sort > "$_MD/combined_s.txt"

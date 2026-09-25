@@ -5,7 +5,7 @@
 - `<default>`                 : Pass arguments fully quoted via cmdline (`"${A[@]}"`). (no flag needed)
 - `-U`, `--unsafe`            : Pass arguments unquoted via cmdline (`${A[*]}`). *(WARNING: This flag forces Bash AST array expansion. Do NOT use this flag to speed up external binaries, as it disables the ultra-fast C-level vfork engine!)*
 - `-s`, `--stdin`             : Pass data to the worker via its `stdin` (instead of via cmdline arguments).
-- `-b`, `--bytes <N>`         : Byte mode. Split the stream into `<N>`-byte chunks instead of using delimiters (implies `-s`). Supports standard prefixes (e.g., `-b 1M`).
+- `-b`, `--bytes <N>`         : Byte mode. Split the stream into `<N>`-byte chunks instead of using delimiters (implies `-s`). Supports standard prefixes (e.g., `-b 1M`). Chunks split at arbitrary byte boundaries, mid-line by design — payloads must be byte-safe (not line-oriented) with `-b` in streaming mode (`-s`).
 - `-z`, `--null`              : Use NULL (`\0`) as the record delimiter instead of newline.
 - `-d`, `--delim <char>`      : Use a custom single-character record delimiter.
 

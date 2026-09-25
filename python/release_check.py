@@ -93,8 +93,18 @@ def check_twins():
 
 @check("Tests: full suite passes")
 def check_tests():
-    proc = _run([sys.executable, "-m", "unittest", "discover",
-                 "-s", "python/tests"], timeout=1200)
+    # Anti-recursion: the suite contains
+    # test_packaging_v2.TestReleaseChecklist, which invokes THIS
+    # script on clean trees — running it unguarded nests suites
+    # without bound (each level takes ~90s to reach the test
+    # again). Mark the child run so the test skips itself there;
+    # every other test still runs, so coverage is intact.
+    env = dict(os.environ)
+    env["FORKRUN_UNDER_RELEASE_CHECK"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover",
+         "-s", "python/tests"], capture_output=True, text=True,
+        timeout=1200, cwd=REPO_ROOT, env=env)
     assert proc.returncode == 0, proc.stderr[-2000:]
     return True
 

@@ -66,6 +66,7 @@ typedef enum fr_convention {
     X(ring_order, FR_CONV_ARGC_ARGV) \
     X(ring_pipe, FR_CONV_ARGC_ARGV) \
     X(ring_poll, FR_CONV_ARGC_ARGV) \
+    X(ring_recover_worker, FR_CONV_ARGC_ARGV) \
     X(ring_revert_output, FR_CONV_ARGC_ARGV) \
     X(ring_scanner, FR_CONV_ARGC_ARGV) \
     X(ring_seal, FR_CONV_ARGC_ARGV) \

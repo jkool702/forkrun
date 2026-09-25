@@ -242,7 +242,14 @@ class TestReleaseChecklist(unittest.TestCase):
         The checklist asserts a clean tree, which a working tree
         cannot satisfy by construction; it skips there and runs
         fully on CI release branches / pre-tag checkouts.
+        Skips too when running UNDER release_check itself
+        (FORKRUN_UNDER_RELEASE_CHECK — otherwise the checklist's
+        own suite run would re-invoke the checklist without
+        bound).
         """
+        if os.environ.get("FORKRUN_UNDER_RELEASE_CHECK"):
+            self.skipTest("running under release_check — no recursion")
+            return
         proc = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, timeout=60, cwd=REPO_ROOT)

@@ -152,7 +152,22 @@ class TestCWorkerLoopParity(unittest.TestCase):
                             nodes=1)
             b = forkrun.map(V1_IDENT, path, mode="plugin", workers=2,
                             c_worker_loop=True, nodes=1)
-            self.assertEqual(lines_of(a), lines_of(b))
+            # Batch counts legitimately differ run to run (pre-flight
+            # race sets L), so compare identity SEMANTICS, not idx
+            # values: every batch reports kills=0 and each run's idx
+            # set is exactly range(N) (claimed exactly once).
+            import re as _re
+            for res in (a, b):
+                raw = lines_of(res)
+                pairs = [_re.match(rb"idx=(\d+) kills=(\d+)$",
+                                   bytes(x).strip()) for x in raw]
+                self.assertTrue(raw)
+                self.assertTrue(all(pairs),
+                                "unparseable ctx line in %r" % (raw,))
+                pairs = [p.groups() for p in pairs]
+                self.assertTrue(all(int(k) == 0 for _, k in pairs))
+                self.assertEqual(sorted(int(i) for i, _ in pairs),
+                                 list(range(len(pairs))))
         finally:
             os.unlink(path)
 

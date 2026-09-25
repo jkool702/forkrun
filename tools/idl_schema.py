@@ -151,6 +151,10 @@ SCHEMA = {
         "Poll FDs", _POLL_FIELDS),
     "ring_revert_output": _e(ARGC_ARGV, "ring_revert_output <fd>",
                            "Revert partial output"),
+    "ring_recover_worker": _e(
+        ARGC_ARGV,
+        "ring_recover_worker <wid> <incarn> [output_fd] [exit_code]",
+        "Recover dead worker's in-flight batch"),
     "ring_ack_init": _e(ARGC_ARGV, "ring_ack_init <fd>", "Sync output offset"),
     "ring_escrow_put": _e(ARGC_ARGV,
                           "ring_escrow_put <node> <idx> <cnt> <kills>",

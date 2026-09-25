@@ -2,6 +2,48 @@
 
 ## v3.6.0 (unreleased)
 
+### Byte-mode M8: test bug, engine exonerated (F-BYTE1)
+
+- **Finding:** M8 (`-b 1048576 -s` with a `while read` payload)
+  flaked under `numa=fake=4` (1–3 missing lines). Diagnosis
+  proved the engine innocent: batch windows are contiguous and
+  byte-exact across seams on UMA and NUMA (byte-safe payloads
+  verify `cmp`-exact); the corruption is `read` semantics on
+  mid-line splits (head fragment dropped at EOF-without-newline,
+  tail fragment emitted as a bogus line — line counts balance,
+  so only content comparison catches it).
+- **Root cause (test bug, not regression):** M8 assumed a
+  single-batch run (`-b 1MB` covers the 589KB input), true on
+  UMA but false under fake-4 (per-node fan-out → multi-batch
+  with mid-line seams). The W-PY28 HUP retiming kept the
+  assumption without accounting for NUMA multi-batching.
+- **Fix:** M8 payload swapped to byte-safe chunked
+  passthrough (`read -N 4096` + `printf '%s'`, busy-wait
+  preserves the ~4s HUP window); new M22 locks multi-batch
+  `-b -s` byte-exactness (`-b 262144`, `cmp -s`, no resume).
+- **Contract:** `-b` chunks split at arbitrary byte
+  boundaries, mid-line by design — payloads must be
+  byte-safe, not line-oriented (FLAGS.md). No engine change;
+  engine stays frozen, no blob rebuild.
+
+### T12: poison-fill vs HUP race pinned open (F-T12-RACE)
+
+- **Finding:** T12 (buffered `-l 100` resume with a
+  crash-looping batch, resumed at `-l 37`) flaked ~30%
+  (`uniq=19900`, exactly 100 missing, 0 dupes) on pristine
+  and modified trees alike. Diagnostics (checkpoint +
+  pre/post-truncation snapshots on failure) showed the crash
+  batch (global lines 19474–19573 under NUMA batching)
+  poison-filling *before* the HUP: poisoned batches are
+  resolved-as-failed, so the checkpoint covers their bytes
+  and resume correctly skips them. The engine is per-spec;
+  the test's crash-vs-HUP margin was load-dependent.
+- **Fix (test-only):** `FORKRUN_RETRY_LIMIT=-1` (never
+  poison) on both T12 generations pins the hole open until
+  HUP — 10/10 PASS in isolation, full T2 section green.
+  Checkpoint now shows the designed two-interval jagged
+  shape with a genuine hole at the crash batch's bytes.
+
 ### Python user documentation set (W-PY37)
 
 - Fourteen new guides under `python/docs/` (QUICKSTART,
