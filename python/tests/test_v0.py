@@ -338,8 +338,10 @@ class TestPurity(unittest.TestCase):
             src = fh.read()
         self.assertIn("mmap.mmap", src)
         self.assertIn("os._exit", src)
-        self.assertIn("os.fork", open(os.path.join(
-            os.path.dirname(__file__), "..", "forkrun", "run.py")).read())
+        with open(os.path.join(
+            os.path.dirname(__file__), "..", "forkrun", "run.py")) as _fh:
+            run_src = _fh.read()
+        self.assertIn("os.fork", run_src)
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")

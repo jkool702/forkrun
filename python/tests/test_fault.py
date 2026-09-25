@@ -164,7 +164,8 @@ class TestWorkerException(unittest.TestCase):
 
             def flaky(batch):
                 if not os.path.exists(flag):
-                    open(flag, "w").write("1")
+                    with open(flag, "w") as _fh:
+                        _fh.write("1")
                     raise KeyboardInterrupt("once")
                 return bytes(batch.data)
 

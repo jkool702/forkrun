@@ -96,10 +96,12 @@ def _write_kill_module(plugin_dir, name, condition, sig="SIGKILL",
     if per_batch:
         gate = ("MARK = MARKER + '.' + str(batch.batch_index)\n"
                 "    if (%s) and not os.path.exists(MARK):\n"
-                "        open(MARK, 'w').write('x')\n") % condition
+                "        with open(MARK, 'w') as _m:\n"
+                "            _m.write('x')\n") % condition
     else:
         gate = ("if (%s) and not os.path.exists(MARKER):\n"
-                "        open(MARKER, 'w').write('x')\n") % condition
+                "        with open(MARKER, 'w') as _m:\n"
+                "            _m.write('x')\n") % condition
     with open(mod_path, "w") as fh:
         fh.write(
             imports +
@@ -125,8 +127,9 @@ def _write_count_kill_module(plugin_dir, name, limit):
             "def payload(batch):\n"
             "    have = glob.glob(os.path.join(KDIR, 'k-*'))\n"
             "    if len(have) < LIMIT:\n"
-            "        open(os.path.join(KDIR, 'k-%%d' %% os.getpid()),\n"
-            "             'w').write('x')\n"
+            "        with open(os.path.join(KDIR, 'k-%%d' %% os.getpid()),\n"
+        "                      'w') as _m:\n"
+        "            _m.write('x')\n"
             "        os.kill(os.getpid(), signal.SIGKILL)\n"
             "    return bytes(batch.data).upper()\n" % (plugin_dir, limit))
     return name + ":payload"

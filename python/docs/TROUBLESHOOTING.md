@@ -51,6 +51,19 @@ at a *daemon your payload forked* (supported — double-fork
 and detach), or at another forkrun call still running in
 the same process (calls serialize on a process-wide lock).
 
+## Calling from threaded parents
+
+Concurrent `run()`/`map()` calls from threads are supported
+(serialized internally), and you will see CPython's
+`DeprecationWarning: ... multi-threaded, use of fork() ...`
+when workers fork — that warning is expected noise, not a
+failure. One real caveat: pass payloads as **callables**,
+not `"pkg.mod:func"` strings, from threaded parents. A
+string spec makes the forked worker `import` the module, and
+if another thread holds the import lock at fork time the
+child can deadlock. (Single-threaded parents are unaffected
+— the import happens post-fork with no contention.)
+
 ## `CUDA ... refusing to fork`
 
 A live CUDA context exists in the parent. Fork would

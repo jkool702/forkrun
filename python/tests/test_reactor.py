@@ -224,7 +224,8 @@ class TestWorkerRespawn(unittest.TestCase):
                     "def payload(batch):\n"
                     "    if (batch.batch_index == 0\n"
                     "            and not os.path.exists(MARKER)):\n"
-                    "        open(MARKER, 'w').write('x')\n"
+                    "        with open(MARKER, 'w') as _m:\n"
+                    "            _m.write('x')\n"
                     "        os.kill(os.getpid(), signal.SIGKILL)\n"
                     "    return bytes(batch.data).upper()\n" % marker)
             sys.path.insert(0, plugin_dir)
