@@ -143,6 +143,21 @@
   (already squeezed once in W-PY32). Full tables in
   `python/benchmarks/results/numa_5m_study.md`.
 
+### 20M re-profile + batch diagnostic: saturated, ship it (W-PY41)
+
+- New `python/benchmarks/diag_batch.py` (blobs = batches,
+  input lines = ground-truth records). 20M medium 28w: UMA
+  10130 batches × 1974 rec (948µs/batch), NUMA 14300 ×
+  1399 (696µs/batch) — ~1ms of real compute per batch vs
+  ns-scale claim/ack, overhead factor ≈ 1.0.
+- 20M counters scale linearly (UMA cycles 4.03×, task
+  4.0× for 4× data); avg CPUs stable (UMA 8.8, NUMA 11.0);
+  20M hotspot identical shape (snprintf family,
+  framework <1%) — no new hotspots, no idle gap from
+  batch sizing.
+- Verdict: workers saturated; the ceiling is payload
+  `snprintf`. No further framework optimization.
+
 ### Streaming + NUMA Tier-3 recovery verification (W-PY34)
 
 - **Verification order, not a feature: no engine or recovery-code

@@ -222,3 +222,53 @@ scan: none in the framework — 73% sits in the plugin's
 `snprintf` float path (payload-side, W-PY32 already squeezed
 the formatter once); the framework's own share
 (`libforkrun` self <1%) has nothing left to take.
+
+## W-PY41 batch diagnostic + 20M re-profile (post-W-PY39)
+
+Runner: `python/benchmarks/diag_batch.py` (map blobs = batches;
+input lines = ground-truth records).
+
+### Batch sizing (yyjson medium, 28 workers)
+
+| Scale | Topo | rec/s | batches | rec/batch | batch/s/worker | per-batch |
+|---|---|---|---|---|---|---|
+| 5M | UMA | 2.09M | 2570 | 1946 | 38.3 | 932µs |
+| 5M | auto | 1.70M | 4226 | 1183 | 51.2 | 698µs |
+| 20M | UMA | 2.08M | 10130 | 1974 | 37.7 | 948µs |
+| 20M | auto | 2.01M | 14300 | 1399 | 51.3 | 696µs |
+
+Per-batch wall time (~0.7-0.9ms of real compute) vs
+nanosecond-scale claim/ack: overhead factor ≈ 1.0. Batch
+sizing is NOT the limiter — no idleness signal here.
+
+### 20M counters (`perf stat -d -r 2`, medium yyjson 28w)
+
+| Metric | UMA 5M (W-PY36) | UMA 20M | NUMA 20M |
+|---|---|---|---|
+| Wall | 2.76s | 10.35s | 9.17s |
+| Task-clock / avg CPUs | 22.7s / 8.2 | 90.9s / 8.8 | 100.8s / 11.0 |
+| Cycles | 91.6B | 369B (4.03×) | 408B |
+| IPC | 1.3 | 1.3 | 1.2 |
+| L1 miss rate | 3.1% | 3.1% | 4.2% |
+| Ctx switches / migrations | 3k / 69 | 6k / 86 | 72k / 14k |
+
+Post-fix UMA gained ~0.8 avg CPUs (8.2→9.0 at 5M) from
+overlap. Everything scales linearly 5M→20M (cycles 4.0×,
+task 4.0×) — no scale-dependent inefficiency.
+
+### 20M hotspot (dwarf, cycles event)
+
+UMA: plugin children 86%, libc self 56% (snprintf float
+formatting), kernel 14%, `libforkrun` self 0.40%. NUMA:
+77% / 49% / 24% / 0.78%. Same shape as 5M — no new
+hotspots at 20M. The 73%-family snprintf share holds.
+
+### Verdict: SATURATED — ship it
+
+Workers are not idle between batches (nearly 1ms of
+payload compute per batch vs ns framework cost); avg CPUs
+are scale-stable; the framework owns <1% of cycles. The
+remaining ceiling is the per-record `snprintf` exact
+formatter (payload-side, already squeezed once in W-PY32).
+No further framework optimization available. Recordings:
+`/tmp/perf_uma_20m.data`, `/tmp/perf_numa_20m.data`.
