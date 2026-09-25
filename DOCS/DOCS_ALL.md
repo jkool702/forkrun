@@ -233,6 +233,109 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### Python user documentation set (W-PY37)
+
+- Fourteen guides under `python/docs/` (QUICKSTART through
+  COMPARISON) + `help(forkrun)` docstring; `python/README.md`
+  is the entry point, main README links in.
+- All 10+ examples executed verbatim; post-W-PY39 numbers
+  (medium C 2.3M UMA). Review caught two doc bugs pre-ship:
+  `batch.data.split` (memoryview — convert with `bytes()`
+  first) and a hand-redeclared plugin ctx struct (docs now
+  use the real `ring_loadables` header).
+
+### Test-suite hardening: full green under fake NUMA (91 → 0)
+
+- `nodes="auto"` follows the boot: under `numa=fake=4`
+  every default call takes the NUMA pipeline. Pinned
+  `nodes=1` on all UMA-contract calls (~25 test files).
+- Comparison doctrine: small-run batching is
+  race-dependent, so cross-run *blob* comparisons became
+  `lines_of` (multisets) / `joined_bytes` (ordered).
+- Real fixes: full `v1_available()` NO_V1 key set; dead
+  `_stream_gen` removed; splice timing test scaled out of
+  fork noise. `test_resume_sigint` pins
+  `default_int_handler` (background launchers inherit
+  SIGINT-ignored).
+- Result: 473 tests green (1 pip skip).
+
+### Repository reorganization + v3.6.0 version sweep (W-PY38)
+
+- One benchmark home: `benchmarks/python/` + 144-file
+  `misc_python_benchmarks/` merged into
+  `python/benchmarks/` (`core/`, `ml/`, `tokenize/`,
+  `stage0/`, `fault/`, `resume/`, `smoke/`, `streaming/`,
+  `throughput/`, `validation/`, `debug/`, `data_gen/`,
+  `shell/`); plugins → `ml/plugins/`. `benchmarks/` and
+  `misc_python_benchmarks/` eliminated; `docs_port/` →
+  `dev/supervisor/`.
+- Dedupe: one byte-identical group (4 copies → 1); rest
+  verified distinct. Import/path repair throughout
+  (`run_all.py`, stage0 ROOT/REPO, plugin sources).
+- Versions: engine, `META`, `frun -V`, UNIT_TESTS gates,
+  `__engine_version__` test all read v3.6.0.
+
+### Cleanup: dead `_stream_gen` + `v1_available` keys (W-PY40)
+
+- Removed the shadowed `_stream_gen` (behavior-neutral).
+- NO_V1 dict carries the full key set (`numa` et al.).
+- 8 ERRORs (UMA-only paths under auto-topology) resolved
+  via `nodes=1` pins; shape lock-in test extended.
+
+### UMA pre-flight overlap: forked materialized scanner (W-PY39)
+
+- Diagnosis: UMA materialized paths scanned synchronously
+  in-parent (no workers → pre-flight always to EOF, 0.36s
+  serial). Engine pre-flight verified correct; CASE B
+  cannot lose data (main loop rescans from byte 0).
+- Fix (Python only): forked scanner + immediate worker
+  fork across all four materialized executors, with
+  crash-safe join order and stray reaping.
+- Result: UMA medium 5M 1.7M → 2.3M rec/s (+35%, above
+  NUMA's 2.1M). Tier-3 suites green.
+
+### NUMA steady-state benchmarks at 5M records, fake-4 (W-PY35)
+
+- Same-boot UMA baselines, 28 workers: light 5.8M/5.6M,
+  medium 1.7M/2.1M, heavy 552k/710k (C); Python at
+  Executor parity. No NUMA software tax — per-node rings
+  relieve claim contention (mechanism corrected by
+  W-PY36/W-PY39: pipeline overlap, not contention relief).
+- forkrun C NUMA beats Executor 2.8–7.6×. Record
+  multisets proven exactly equal UMA vs NUMA (naive line
+  counts read low: blobs don't newline-terminate).
+- 20M confirmation: ratios hold/strengthen
+  (1.20×/1.29×/1.34×).
+
+### Perf mechanism discovery: why NUMA wins (W-PY36)
+
+- Every efficiency hypothesis falsified (NUMA: +17.5%
+  cycles, IPC 1.3→1.1, 7× ctx switches, 67× migrations,
+  4× syscalls — yet faster). Identical payload hotspot
+  (~73% plugin `snprintf`).
+- Mechanism: pipeline overlap (UMA serialized ~0.9s
+  spill+scan; NUMA overlaps ingest/scan with compute),
+  feeding 10.1 vs 8.2 avg CPUs. Framework owns <1% —
+  no easy wins left.
+
+### 20M re-profile + batch diagnostic: saturated, ship it (W-PY41)
+
+- New `diag_batch.py`: ~1ms payload compute per batch vs
+  ns framework cost (overhead ≈ 1.0). 20M counters scale
+  linearly; avg CPUs stable (8.8/11.0); no new hotspots.
+- Verdict: workers saturated; ceiling is payload
+  `snprintf`. Ship it.
+
+### Streaming + NUMA Tier-3 recovery verification (W-PY34)
+
+- No engine changes: 13 new tests prove WorkerTxn covers
+  active streaming (6 tests, UMA) and multi-node NUMA
+  (7 tests, `@2`) — SIGSEGV/SIGKILL, ordered gaps,
+  multi-death, backpressure, combined stream+NUMA+crash.
+- Operating facts (`RESILIENCE_PROTOCOL.md` §7): workers
+  must cover every node; `nodes="auto"` follows the boot;
+  compare line multisets, never blob identity.
+
 ### C worker loop for spawn mode (W-PY33)
 
 - New `fr_py_worker_spawn_loop` (claim→spawn→signal→ack in C, built
