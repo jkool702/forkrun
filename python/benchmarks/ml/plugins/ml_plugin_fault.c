@@ -14,8 +14,10 @@
  * - computed floats (ts_n, log_dur, log_pr) use C double arithmetic
  *   with shortest-ish formatting (validated with epsilon, not bytes)
  * - pass-through floats (scr, rate) and all ints/strings are exact
- * - records joined with '\n', no trailing newline; empty output
- *   writes nothing (the shim then emits no record, like None)
+ * - records joined with '\n', no trailing newline; filtered /
+ *   malformed records emit a blank segment, so segments == input
+ *   records (exact totals). A zero-line batch writes nothing
+ *   (the shim then emits no record, like None)
  * - data assumption: no backslash escapes inside string values
  *   (holds for generator output; malformed lines with escapes only
  *   diverge if they otherwise pass validation, which truncation
@@ -489,32 +491,27 @@ static int process_once(const char *data, size_t data_len,
                            le[-1] == '\r'))
             le--;
         if (le > ls) {
-            /* Separator first; retracted when the line skips. */
+            /* Separator first; KEPT when the line skips: filtered /
+             * malformed records emit a blank segment, so output
+             * segments == input records and totals stay exact.
+             * (Valid-record bytes are unchanged.) */
             if (nrec > 0) {
                 if (left < 1)
                     return -2;
                 *o++ = '\n';
                 left--;
             }
+            nrec++;
             if (json_struct_ok(ls, le) != 0) {
-                if (nrec > 0) {
-                    o--;
-                    left++;
-                }
+                /* malformed: blank segment (separator kept). */
             } else {
                 r = emit_medium(ls, le, &o, &left);
                 if (r == -2)
                     return -2;
-                if (r >= 0) {
-                    nrec++;
-                } else if (r == -1) {
-                    if (nrec > 0) {
-                        o--;
-                        left++;
-                    }
-                } else {
+                if (r < 0 && r != -1) {
                     return -1;
                 }
+                /* r >= 0 (emitted) or r == -1 (filtered: blank kept). */
             }
         }
         p = nl ? nl + 1 : end;

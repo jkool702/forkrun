@@ -82,7 +82,18 @@ def framework_versions(found):
 
 
 def count_results(results):
-    """Output records across the result shapes each system returns."""
+    """Output records across the result shapes each system returns.
+
+    Exactness contract (junction-proof): under map(), each blob is
+    an independent whole-record-multiple output, so records are
+    counted as non-blank segments *per blob* — never on the joined
+    stream. Payloads that join records with '\\n' and omit the
+    trailing newline (e.g. the C plugins) still count exactly;
+    naive joined-newline counting would merge one junction pair
+    per blob boundary and read low (the old W-PY35 artifact).
+    b"" and None contribute 0; interior blank segments are skipped
+    (benchmark payloads filter blanks by design).
+    """
     if results is None:
         return 0
     if isinstance(results, bytes):
@@ -99,6 +110,44 @@ def count_results(results):
             elif isinstance(chunk, (list, tuple)):
                 total += sum(1 for r in chunk if r)
             else:
+                total += 1
+        return total
+    if isinstance(results, int):
+        return results
+    return 0
+
+
+def count_total(results):
+    """Total output segments (valid + filtered-blank) — exact input
+    record count when payloads follow the blank-emission convention
+    (one segment per non-blank input line; see _forkrun_batch).
+
+    Differs from count_results (which skips blanks = valid records
+    only): join framing means segments == newlines + 1 per non-empty
+    blob. Residual: a degenerate single-record batch whose record
+    is filtered frames as b"" and counts 0 (real batches are huge).
+    """
+    if results is None:
+        return 0
+    if isinstance(results, (bytes, bytearray)):
+        text = bytes(results)
+        return text.count(b"\n") + (0 if len(text) == 0 else 1)
+    if isinstance(results, str):
+        return results.count("\n") + (0 if len(results) == 0 else 1)
+    if isinstance(results, (list, tuple)):
+        total = 0
+        for chunk in results:
+            if chunk is None:
+                continue
+            if isinstance(chunk, (list, tuple)):
+                total += count_total(chunk)
+            elif isinstance(chunk, (bytes, bytearray)):
+                # A map() blob: apply the framing rule.
+                total += count_total(chunk)
+            else:
+                # One pool/serial list element == one record (those
+                # paths emit "" for filtered records; map() blobs
+                # are bytes and never nest inside lists).
                 total += 1
         return total
     if isinstance(results, int):

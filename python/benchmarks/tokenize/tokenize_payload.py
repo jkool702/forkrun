@@ -108,7 +108,13 @@ def reset_tokenizer():
 
 
 def batch_payload(lines, tokenizer):
-    """Shared batch loop (forkrun/Pool/Executor/Ray/HF adapters)."""
+    """Shared batch loop (forkrun/Pool/Executor/Ray/HF adapters).
+
+    Exact-count convention (same as the ML payloads): one output
+    segment per non-blank input line (b"" when the document is
+    filtered), so segment counts sum to input docs exactly.
+    Validators skip b"".
+    """
     results = []
     for line in lines:
         if isinstance(line, bytes):
@@ -121,7 +127,9 @@ def batch_payload(lines, tokenizer):
                 continue
             line = line.encode()
         result = tokenizer.process_document(line)
-        if result is not None:
+        if result is None:
+            results.append(b"")
+        else:
             results.append(
                 json.dumps(result, separators=(",", ":")).encode())
     return results

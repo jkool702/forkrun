@@ -179,18 +179,25 @@ def process_event_heavy(line_bytes):
 # --- Batch-level wrappers (identical logic per framework) ---
 
 def _forkrun_batch(data, fn):
-    results = []
+    # Exact-count convention: every non-blank input line yields
+    # exactly one output segment (the transform, or b"" when the
+    # line is filtered/malformed), joined with "\n", no trailing
+    # newline. Per-blob segment counts (newlines + 1) then sum to
+    # input records exactly; input blanks are not records and stay
+    # silent. None only for a zero-line batch (degenerate).
+    segments = []
     for line in data.split(b"\n"):
         line = line.strip()
         if not line:
             continue
         try:
             r = fn(line)
-            if r is not None:
-                results.append(r)
+            segments.append(r if r is not None else b"")
         except ValueError:
-            continue
-    return b"\n".join(results) if results else None
+            segments.append(b"")
+    if not segments:
+        return None
+    return b"\n".join(segments)
 
 
 def forkrun_payload_light(batch):
@@ -209,6 +216,9 @@ def forkrun_payload_heavy(batch):
 
 
 def _pool_chunk(lines, fn):
+    # Same exact-count convention as _forkrun_batch, in list form:
+    # one entry per non-blank input line ("" for filtered/malformed),
+    # so len(result) == input records exactly. Validators skip "".
     results = []
     for line in lines:
         line = line.strip()
@@ -218,11 +228,13 @@ def _pool_chunk(lines, fn):
             line = line.encode()
         try:
             r = fn(line)
-            if r is not None:
+            if r is None:
+                results.append("")
+            else:
                 results.append(r.decode() if isinstance(r, bytes)
                                else r)
         except ValueError:
-            continue
+            results.append("")
     return results
 
 

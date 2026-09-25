@@ -751,26 +751,24 @@ static int process_once(const char *data, size_t data_len,
                            le[-1] == '\r'))
             le--;
         if (le > ls) {
-            /* Separator first; retracted when the line skips. */
+            /* Separator first; KEPT when the line skips: filtered /
+             * malformed records emit a blank segment, so output
+             * segments == input records and totals stay exact.
+             * (Valid-record bytes are unchanged.) */
             if (nrec > 0) {
                 if (left < 1)
                     return -2;
                 *o++ = '\n';
                 left--;
             }
+            nrec++;
             r = emit_medium_yyjson(ls, le, &o, &left);
             if (r == -2)
                 return -2;
-            if (r >= 0) {
-                nrec++;
-            } else if (r == -1) {
-                if (nrec > 0) {
-                    o--;
-                    left++;
-                }
-            } else {
+            if (r < 0 && r != -1) {
                 return -1;
             }
+            /* r >= 0 (emitted) or r == -1 (filtered: blank kept). */
         }
         p = nl ? nl + 1 : end;
     }

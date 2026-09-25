@@ -30,17 +30,17 @@ sys.path.insert(0, os.path.dirname(HERE))  # benchmarks/ root
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))  # python/ for forkrun
 
 import forkrun  # noqa: E402
+from bench_ml_pipeline import count_results  # noqa: E402
 
 
 def count_lines(blobs):
-    total = 0
-    for b in blobs:
-        if b is None:
-            continue
-        if isinstance(b, str):
-            b = b.encode()
-        total += bytes(b).count(b"\n")
-    return total
+    """Exact output records (was: naive per-blob newline count).
+
+    Delegates to count_results: blobs are whole-record multiples
+    under map(), so non-blank segments per blob sum exactly — no
+    junction loss on blobs without a trailing newline.
+    """
+    return count_results(blobs)
 
 
 def run_once(input_path, payload, workers, nodes):
@@ -49,9 +49,9 @@ def run_once(input_path, payload, workers, nodes):
                           workers=workers, nodes=nodes, order="index")
     dt = time.perf_counter() - t0
     n_batches = len(results)
-    # Output records are one JSON line each (may lack trailing
-    # newline per blob — junction undercount, see W-PY35 notes);
-    # input line count is the ground truth for records.
+    # Output records are one JSON line each; count_results sums
+    # non-blank segments per blob exactly (input line count stays
+    # the ground truth for records).
     return dt, n_batches, results
 
 

@@ -8,8 +8,9 @@
  *
  * Input: RAW borrowed window when FLAG_RAW granted, else pread.
  * Output: stdout (captured + framed by the shim). Records joined
- * with '\n', no trailing newline; empty output writes nothing
- * (shim emits no record, like None).
+ * with '\n', no trailing newline; filtered docs emit a blank
+ * segment, so segments == input docs (exact totals). A zero-line
+ * batch writes nothing (shim emits no record, like None).
  *
  * Conventions vs Python (validated, not assumed):
  * - malformed lines skip (structural gate + required-field checks)
@@ -609,31 +610,27 @@ static int process_once(const char *data, size_t data_len,
                            le[-1] == '\r'))
             le--;
         if (le > ls) {
+            /* Separator first; KEPT when the doc skips: filtered
+             * documents emit a blank segment, so output segments ==
+             * input docs and totals stay exact. (Valid-doc bytes
+             * are unchanged.) */
             if (nrec > 0) {
                 if (left < 1)
                     return -2;
                 *o++ = '\n';
                 left--;
             }
+            nrec++;
             if (json_struct_ok(ls, le) != 0) {
-                if (nrec > 0) {
-                    o--;
-                    left++;
-                }
+                /* malformed: blank segment (separator kept). */
             } else {
                 r = emit_doc(ls, le, &o, &left);
                 if (r == -2)
                     return -2;
-                if (r >= 0) {
-                    nrec++;
-                } else if (r == -1) {
-                    if (nrec > 0) {
-                        o--;
-                        left++;
-                    }
-                } else {
+                if (r < 0 && r != -1) {
                     return -1;
                 }
+                /* r >= 0 (emitted) or r == -1 (filtered: blank kept). */
             }
         }
         p = nl ? nl + 1 : end;

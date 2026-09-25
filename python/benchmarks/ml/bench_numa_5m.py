@@ -59,21 +59,6 @@ from ml_data_gen import generate_data  # noqa: E402
 VARIANTS = ("light", "medium", "heavy")
 
 
-def _count_lines(blobs):
-    """Decoded output lines across forkrun result blobs."""
-    total = 0
-    for b in blobs:
-        if b is None:
-            continue
-        if isinstance(b, (bytes, bytearray)):
-            total += b.count(b"\n")
-        elif isinstance(b, str):
-            total += b.count("\n")
-        elif isinstance(b, (list, tuple)):
-            total += _count_lines(b)
-    return total
-
-
 _REF_COUNTS = {}
 
 
@@ -94,17 +79,19 @@ def bench_forkrun_numa(ctx, path, n_records, payload, mode, workers,
 
     t, _ = time_it(run, trials=trials, warmup=1)
     out = run()
-    n_out = _count_lines(out)
+    # Exact per-blob record count (count_results): blobs are
+    # whole-record multiples under map(), so non-blank segments per
+    # blob sum exactly — no junction loss even though payloads (e.g.
+    # the C plugins: records joined with '\n', no trailing newline)
+    # don't terminate the last line of a blob.
+    n_out = count_results(out)
     key = (tag, workers)
     if nodes == 1 and key not in _REF_COUNTS:
         _REF_COUNTS[key] = n_out
     ref = _REF_COUNTS.get(key, n_records)
-    # Completeness is thresholded, not exact: worker output memfds
-    # do not newline-terminate blobs, so a naive whole-stream line
-    # count merges one junction pair per blob boundary (W-PY35
-    # finding — record multisets verified exactly equal regardless).
-    # Genuine topology shortfall (unworked nodes) is 25%+, two
-    # orders above the junction noise (<0.1%), so 1% separates them.
+    # Completeness stays thresholded (not exact): the 1% gate guards
+    # against genuine loss (poison-skip, stranded rings at 25%+),
+    # not counting noise — counting itself is now exact.
     complete = (n_out >= 0.99 * ref)
     rate = n_out / t if t > 0 else 0.0
     ctx.record("%s-%s-%dw" % (tag, nodes, workers), "forkrun-numa",
@@ -204,7 +191,7 @@ def bench_spawn_numa(ctx, path, n_records, workers, trials, nodes,
                    "gate: %s" % str(exc)[:120])
         return 0.0
     out = run()
-    n_out = _count_lines(out)
+    n_out = count_results(out)
     rate = n_out / t if t > 0 else 0.0
     ctx.record(label, "forkrun-numa", "spawn", rate, rss_mb(),
                "out=%d/%d lines%s" % (
