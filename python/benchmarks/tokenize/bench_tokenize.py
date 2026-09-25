@@ -124,7 +124,10 @@ def _forkrun_batch(batch):
     data = bytes(batch.data)
     out = batch_payload(
         [l for l in data.split(b"\n") if l.strip()], tok)
-    return b"\n".join(out) if out else None
+    # Terminated framing (same exact-count convention as the ML
+    # payloads): every doc ends with "\n", filtered docs emit bare
+    # "\n", so newline counts are exact totals.
+    return (b"\n".join(out) + b"\n") if out else None
 
 
 def _ray_batch(df):

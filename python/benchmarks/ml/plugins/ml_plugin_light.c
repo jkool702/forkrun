@@ -14,10 +14,10 @@
  * - computed floats (ts_n, log_dur, log_pr) use C double arithmetic
  *   with shortest-ish formatting (validated with epsilon, not bytes)
  * - pass-through floats (scr, rate) and all ints/strings are exact
- * - records joined with '\n', no trailing newline; filtered /
- *   malformed records emit a blank segment, so segments == input
- *   records (exact totals). A zero-line batch writes nothing
- *   (the shim then emits no record, like None)
+ * - every record (valid or blank-filtered) terminated with
+ *   '\n', so newline counts are exact totals; filtered /
+ *   malformed records emit a bare '\n'. A zero-line batch
+ *   writes nothing (the shim then emits no record, like None)
  * - data assumption: no backslash escapes inside string values
  *   (holds for generator output; malformed lines with escapes only
  *   diverge if they otherwise pass validation, which truncation
@@ -374,6 +374,16 @@ static int process_once(const char *data, size_t data_len,
             }
         }
         p = nl ? nl + 1 : end;
+    }
+    /* Terminated framing: every record (valid or blank-filtered)
+     * ends with '\n', so newline counts are exact totals with no
+     * degenerate cases (a lone filtered record is "\n", never b"").
+     * Valid-record bytes are unchanged (pure append). */
+    if (nrec > 0) {
+        if (left < 1)
+            return -2;
+        *o++ = '\n';
+        left--;
     }
     *nrec_out = nrec;
     return (int)(o - g_out);

@@ -79,11 +79,10 @@ def bench_forkrun_numa(ctx, path, n_records, payload, mode, workers,
 
     t, _ = time_it(run, trials=trials, warmup=1)
     out = run()
-    # Exact per-blob record count (count_results): blobs are
+    # Exact valid-record count (count_results): blobs are
     # whole-record multiples under map(), so non-blank segments per
-    # blob sum exactly — no junction loss even though payloads (e.g.
-    # the C plugins: records joined with '\n', no trailing newline)
-    # don't terminate the last line of a blob.
+    # blob sum exactly (payloads terminate every record, filtered
+    # records emit bare newlines).
     n_out = count_results(out)
     key = (tag, workers)
     if nodes == 1 and key not in _REF_COUNTS:
@@ -148,15 +147,11 @@ def bench_tokenize_numa(ctx, path, n_docs, workers, trials, nodes,
 
     t, _ = time_it(run, trials=trials, warmup=1)
     out = run()
-    # One JSON line per doc, no trailing newline: docs = newlines + 1
-    # per non-empty blob (count_blobs in bench_tokenize.py equivalent).
-    n_out = 0
-    for b in out:
-        if not b:
-            continue
-        if isinstance(b, str):
-            b = b.encode()
-        n_out += b.count(b"\n") + 1
+    # Valid docs only (non-blank segments per blob); filtered docs
+    # emit blanks under terminated framing, so a newline count would
+    # overcount — count_blobs skips them, same as the tokenize bench.
+    from bench_tokenize import count_blobs
+    n_out = count_blobs(out)
     rate = n_docs / t if t > 0 else 0.0
     ctx.record("%s-tok-%s-%dw" % (tag, nodes, workers),
                "forkrun-numa", mode, rate, rss_mb(),

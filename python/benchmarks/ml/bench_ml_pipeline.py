@@ -87,10 +87,8 @@ def count_results(results):
     Exactness contract (junction-proof): under map(), each blob is
     an independent whole-record-multiple output, so records are
     counted as non-blank segments *per blob* — never on the joined
-    stream. Payloads that join records with '\\n' and omit the
-    trailing newline (e.g. the C plugins) still count exactly;
-    naive joined-newline counting would merge one junction pair
-    per blob boundary and read low (the old W-PY35 artifact).
+    stream. Payloads terminate every record (filtered records emit
+    bare newlines), so joined streams stay parseable too.
     b"" and None contribute 0; interior blank segments are skipped
     (benchmark payloads filter blanks by design).
     """
@@ -120,20 +118,27 @@ def count_results(results):
 def count_total(results):
     """Total output segments (valid + filtered-blank) — exact input
     record count when payloads follow the blank-emission convention
-    (one segment per non-blank input line; see _forkrun_batch).
+    (one newline-terminated segment per non-blank input line; see
+    _forkrun_batch).
 
-    Differs from count_results (which skips blanks = valid records
-    only): join framing means segments == newlines + 1 per non-empty
-    blob. Residual: a degenerate single-record batch whose record
-    is filtered frames as b"" and counts 0 (real batches are huge).
+    Terminated framing makes newlines == records exactly (a lone
+    filtered record is b"\\n", never b""). The +1 fallback covers
+    only foreign/legacy unterminated blobs. b"" (degenerate empty
+    batch) counts 0; None contributes 0.
     """
     if results is None:
         return 0
     if isinstance(results, (bytes, bytearray)):
         text = bytes(results)
-        return text.count(b"\n") + (0 if len(text) == 0 else 1)
+        if len(text) == 0:
+            return 0
+        return text.count(b"\n") + (
+            0 if text.endswith(b"\n") else 1)
     if isinstance(results, str):
-        return results.count("\n") + (0 if len(results) == 0 else 1)
+        if len(results) == 0:
+            return 0
+        return results.count("\n") + (
+            0 if results.endswith("\n") else 1)
     if isinstance(results, (list, tuple)):
         total = 0
         for chunk in results:

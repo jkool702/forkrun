@@ -772,6 +772,16 @@ static int process_once(const char *data, size_t data_len,
         }
         p = nl ? nl + 1 : end;
     }
+    /* Terminated framing: every record (valid or blank-filtered)
+     * ends with '\n', so newline counts are exact totals with no
+     * degenerate cases (a lone filtered record is "\n", never b"").
+     * Valid-record bytes are unchanged (pure append). */
+    if (nrec > 0) {
+        if (left < 1)
+            return -2;
+        *o++ = '\n';
+        left--;
+    }
     *nrec_out = nrec;
     return (int)(o - g_out);
 }

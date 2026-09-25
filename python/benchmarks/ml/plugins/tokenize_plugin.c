@@ -8,9 +8,9 @@
  *
  * Input: RAW borrowed window when FLAG_RAW granted, else pread.
  * Output: stdout (captured + framed by the shim). Records joined
- * with '\n', no trailing newline; filtered docs emit a blank
- * segment, so segments == input docs (exact totals). A zero-line
- * batch writes nothing (shim emits no record, like None).
+ * with every doc (valid or blank-filtered) terminated by '\n',
+ * so newline counts are exact totals. A zero-line batch writes
+ * nothing (shim emits no record, like None).
  *
  * Conventions vs Python (validated, not assumed):
  * - malformed lines skip (structural gate + required-field checks)
@@ -634,6 +634,16 @@ static int process_once(const char *data, size_t data_len,
             }
         }
         p = nl ? nl + 1 : end;
+    }
+    /* Terminated framing: every record (valid or blank-filtered)
+     * ends with '\n', so newline counts are exact totals with no
+     * degenerate cases (a lone filtered record is "\n", never b"").
+     * Valid-record bytes are unchanged (pure append). */
+    if (nrec > 0) {
+        if (left < 1)
+            return -2;
+        *o++ = '\n';
+        left--;
     }
     *nrec_out = nrec;
     return (int)(o - g_out);

@@ -1,10 +1,10 @@
 """Exact benchmark totals: filtered records emit blanks (W-PY42 follow-up).
 
 Payload convention (ML + tokenize, Python + C): every non-blank
-input line yields exactly one output segment (the transform, or a
-blank segment when the line is filtered/malformed), joined with
-"\\n", no trailing newline. Input blanks are not records and stay
-silent. Consequence, locked in here:
+input line yields exactly one newline-terminated output segment
+(the transform, or a bare newline when filtered/malformed).
+Input blanks are not records and stay silent. Consequence,
+locked in here:
 
 - count_total() == non-blank input lines, on EVERY path
   (Python UDF, scalar C plugin, yyjson C plugin, tokenize).

@@ -181,10 +181,11 @@ def process_event_heavy(line_bytes):
 def _forkrun_batch(data, fn):
     # Exact-count convention: every non-blank input line yields
     # exactly one output segment (the transform, or b"" when the
-    # line is filtered/malformed), joined with "\n", no trailing
-    # newline. Per-blob segment counts (newlines + 1) then sum to
-    # input records exactly; input blanks are not records and stay
-    # silent. None only for a zero-line batch (degenerate).
+    # line is filtered/malformed), each terminated with "\n", so
+    # newline counts are exact totals with no degenerate cases
+    # (a lone filtered record is b"\n", never b""). Input blanks
+    # are not records and stay silent. None only for a zero-line
+    # batch (degenerate).
     segments = []
     for line in data.split(b"\n"):
         line = line.strip()
@@ -197,7 +198,7 @@ def _forkrun_batch(data, fn):
             segments.append(b"")
     if not segments:
         return None
-    return b"\n".join(segments)
+    return b"\n".join(segments) + b"\n"
 
 
 def forkrun_payload_light(batch):
