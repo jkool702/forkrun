@@ -299,7 +299,11 @@ class TestCompleteParity(unittest.TestCase):
                                   nodes=1)
             new = forkrun.map(_up, path, workers=4, order="index",
                               nodes=1)
-            self.assertEqual(old, new)
+            # Split-agnostic parity: adaptive batching is race-dependent
+            # (pre-flight overlap sets L per run), so blob counts/splits
+            # legitimately differ run to run. Joined bytes are the
+            # invariant — never compare blob identity across runs.
+            self.assertEqual(b"".join(old), b"".join(new))
             flat = b"".join(new)
             with open(path, "rb") as fh:
                 self.assertEqual(flat, fh.read().upper())
