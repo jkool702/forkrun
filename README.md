@@ -90,6 +90,8 @@ frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output na
 | ordered vs unordered | **1.34×** | reassembly cost grows with batch count (1.01× at 1M) |
 | First yield latency | **~7ms** | on a 0.5s job |
 
+> New to the Python frontend? Start at [`python/docs/QUICKSTART.md`](python/docs/QUICKSTART.md) — full guides (API, modes, fault tolerance, NUMA, streaming, examples, plugins, performance, troubleshooting, migration) live in [`python/docs/`](python/docs/).
+
 ### What These Benchmarks Do NOT Measure
 
 - **NUMA multi-node scaling** — single-node only; NUMA is Stage 5 P5.

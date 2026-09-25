@@ -2,6 +2,24 @@
 
 ## v3.6.0 (unreleased)
 
+### Python user documentation set (W-PY37)
+
+- Fourteen new guides under `python/docs/` (QUICKSTART,
+  INSTALLATION, API, MODES, CONFIGURATION, FAULT_TOLERANCE,
+  NUMA, STREAMING, EXAMPLES, PLUGINS, PERFORMANCE,
+  TROUBLESHOOTING, MIGRATION, COMPARISON) plus a
+  `help(forkrun)` package docstring; `python/README.md` is
+  now an entry point and the main README links in.
+- All 10+ examples executed verbatim during review (plus
+  the PLUGINS.md C example, byte-exact vs `tr`);
+  post-W-PY39 numbers throughout (medium C 2.3M UMA,
+  UMA-faster-or-tied on single-socket).
+- Review caught and fixed two doc bugs before shipping:
+  `batch.data.split(...)` (memoryview has no `.split` —
+  convert with `bytes(...)` first) and a hand-redeclared
+  plugin ctx struct with wrong field order (docs now use
+  the real `ring_loadables` header).
+
 ### Test-suite hardening: full green under fake NUMA (91 → 0)
 
 - **Topology isolation** (the bulk): `nodes="auto"` follows the

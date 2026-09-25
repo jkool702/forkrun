@@ -1,4 +1,22 @@
-"""forkrun Python frontend package (Stage 4 Phase 1 — W-PY1 v0).
+"""forkrun — NUMA-aware streaming parallelization for Python.
+
+Quick start::
+
+    import forkrun
+    results = forkrun.map(my_function, "input.txt", workers=8)
+
+Modes (``mode=``): ``"python"`` (callable payload, default),
+``"spawn"`` (external command), ``"plugin"`` (C callback in a
+``.so``), ``"splice"`` (kernel passthrough, payload must be
+``None``). Entry points: ``run`` (fire-and-forget),
+``map`` (collect), ``stream`` (live generator), ``sweep``
+(parameter combinations). ``Batch`` is the per-batch view
+(``.data`` borrowed memoryview — ``copy()`` to keep).
+
+Full guides: ``python/docs/`` (QUICKSTART, API, MODES,
+CONFIGURATION, FAULT_TOLERANCE, NUMA, STREAMING, EXAMPLES,
+PLUGINS, PERFORMANCE, TROUBLESHOOTING, MIGRATION,
+COMPARISON).
 
 Naming note: this is a namespaced API, so `forkrun.map` deliberately shadows
 the builtin `map` *inside this namespace only* (`forkrun.map(...)`, never a

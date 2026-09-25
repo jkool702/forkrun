@@ -1,5 +1,21 @@
 # forkrun Python frontend — v0.16.0 (W-PY23 release prep)
 
+> **New here?** Start with [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
+> (5 minutes to your first parallel job). Full user guides:
+> [`docs/API.md`](docs/API.md),
+> [`docs/MODES.md`](docs/MODES.md),
+> [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md),
+> [`docs/FAULT_TOLERANCE.md`](docs/FAULT_TOLERANCE.md),
+> [`docs/NUMA.md`](docs/NUMA.md),
+> [`docs/STREAMING.md`](docs/STREAMING.md),
+> [`docs/EXAMPLES.md`](docs/EXAMPLES.md),
+> [`docs/PLUGINS.md`](docs/PLUGINS.md),
+> [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md),
+> [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md),
+> [`docs/MIGRATION.md`](docs/MIGRATION.md),
+> [`docs/COMPARISON.md`](docs/COMPARISON.md).
+> What follows is the developer/contract reference.
+
 Minimum viable `forkrun.run()` over the C substrate via ctypes. No bash in
 the path: Python drives the engine (claim → payload → ack) directly.
 
