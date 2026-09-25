@@ -2,7 +2,7 @@
 
 v1.3 plan section 2.2: three schemas, one generation pipeline. This module
 is the call-schema half of that pipeline (call-args direction/optionality;
-state-ownership lives in docs_port/OWNERSHIP.md; doc-metadata rides the
+state-ownership lives in dev/supervisor/OWNERSHIP.md; doc-metadata rides the
 usage/doc strings below).
 
 In v3.5.2 this is ANNOTATION-ONLY scaffolding: every loadable is

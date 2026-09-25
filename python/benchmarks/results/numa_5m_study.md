@@ -26,7 +26,7 @@ overhead, measured at steady state?"
   this boot; `nodes="@2"` → 2 nodes.
 - Medium C = yyjson single-pass plugin (the W-PY32 default);
   light/heavy C = scalar plugins; Python = UDF payloads.
-- Runner: `python/benchmarks/bench_numa_5m.py`
+- Runner: `python/benchmarks/ml/bench_numa_5m.py`
   (`--tmpdir /tmp/numa5m` reuses the 5M inputs).
 - Raw machine data: `python/benchmarks/results/numa_5m.csv`
   (Parts B/C/D full precision; Part A ML rows are recorded in
@@ -225,7 +225,7 @@ the formatter once); the framework's own share
 
 ## W-PY41 batch diagnostic + 20M re-profile (post-W-PY39)
 
-Runner: `python/benchmarks/diag_batch.py` (map blobs = batches;
+Runner: `python/benchmarks/ml/diag_batch.py` (map blobs = batches;
 input lines = ground-truth records).
 
 ### Batch sizing (yyjson medium, 28 workers)

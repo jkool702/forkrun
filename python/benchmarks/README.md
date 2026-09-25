@@ -17,6 +17,25 @@ python3 python/benchmarks/run_all.py --csv /tmp/pybench.csv     # + CSV
 make -f Makefile.substrate bench                               # medium, 3 trials
 ```
 
+## Layout (W-PY38)
+
+- `run_all.py` — master runner (imports from `core/` + `ml/`).
+- `bench_harness.py` — shared infra (timing, RSS, tables, CSV).
+- `core/` — canonical suite: throughput, memory, fault, scaling,
+  baselines, splice, c_drain, streaming-ingest, batch-size.
+- `ml/` — ML pipeline (`bench_ml_pipeline.py`, `ml_*` payloads,
+  `bench_numa*.py`, `bench_niches.py`, `diag_batch.py`) +
+  `ml/plugins/` (C plugins incl. yyjson + tokenize plugin).
+- `tokenize/` — LLM tokenization (`bench_tokenize.py`,
+  `tokenize_*`, ad-hoc probes).
+- `stage0/` — Stage 0 falsification gate (self-contained;
+  `run_stage0.sh` entry point).
+- `fault/`, `resume/`, `smoke/`, `streaming/`, `throughput/`,
+  `validation/`, `debug/`, `data_gen/`, `shell/` — archived
+  ad-hoc probes from dev sessions (frozen as-found; see
+  `README_misc.md`. Expect bit-rot — check per-script notes).
+- `results/` — recorded result tables/CSVs.
+
 ## What each file measures
 
 - `bench_harness.py` — timing (median+N warm-up), RSS, deterministic
@@ -36,18 +55,18 @@ make -f Makefile.substrate bench                               # medium, 3 trial
 - `bench_niches.py` — Stage 0 workloads: JSONL ingestion, filter+
   transform, aggregation. (`batch.data` is a memoryview — payloads copy
   to bytes first; the copy is part of the measured path.)
-- `ml_data_gen.py` / `ml_payload.py` / `ml_native.py` /
-  `bench_ml_pipeline.py` — W-PY24 real-world ML pipeline benchmark:
+- `ml/ml_data_gen.py` / `ml/ml_payload.py` / `ml/ml_native.py` /
+  `ml/bench_ml_pipeline.py` — W-PY24 real-world ML pipeline benchmark:
   synthetic recommendation-event JSONL (light/medium/heavy) with the
   IDENTICAL Python transformation across forkrun, Ray Data, HF
   Datasets, Pool, Executor, and serial, plus native Polars/DuckDB
   expressions and crash-once fault injection. Needs
   `pip install ray polars duckdb datasets` (each skips cleanly if
   absent). Run:
-  `python3 python/benchmarks/bench_ml_pipeline.py --records 50000
+  `python3 python/benchmarks/ml/bench_ml_pipeline.py --records 50000
   --trials 3` (~30 min full matrix). Full write-up with verdicts:
   `results/ml_pipeline_study.md`.
-- `plugins/ml_plugin_{light,medium,heavy}.c` — W-PY24 C plugins for
+- `ml/plugins/ml_plugin_{light,medium,heavy}.c` — W-PY24 C plugins for
   the same ML workloads through the frozen ABI (dialect-2 +
   FLAG_RAW borrowed window, stdout capture): `gcc -O3 -shared
   -fPIC -march=native -I ring_loadables -o ml_plugin_X.so
@@ -56,14 +75,14 @@ make -f Makefile.substrate bench                               # medium, 3 trial
   Validated by JSON-value equality vs the Python path (light is
   byte-identical). `ml_plugin_fault.c` is the crash-once fault
   injector (FR_FAULT_MARKER/FR_FAULT_IDX env).
-- `tokenize_data_gen.py` / `tokenize_payload.py` /
-  `plugins/tokenize_plugin.c` / `bench_tokenize.py` — W-PY25 LLM
+- `tokenize/tokenize_data_gen.py` / `tokenize/tokenize_payload.py` /
+  `ml/plugins/tokenize_plugin.c` / `tokenize/bench_tokenize.py` — W-PY25 LLM
   tokenization benchmark: synthetic corpus (50–500 words/doc) +
   30k shared vocabulary, identical tokenizer rules in Python and
   C (suffix table/order, UNK, quality filters), 8-system matrix
   (serial/Pool/Executor/HF/Ray/forkrun-Python/forkrun-C/Polars
   map_batches). Run:
-  `python3 python/benchmarks/bench_tokenize.py --docs 20000
+  `python3 python/benchmarks/tokenize/bench_tokenize.py --docs 20000
   --trials 3` (~15 min). Write-up with verdicts:
   `results/tokenize_study.md` (+ `--min-words/--max-words` for
   the big-doc crossover).

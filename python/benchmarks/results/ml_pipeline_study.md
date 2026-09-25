@@ -1,6 +1,6 @@
 # ML Pipeline Study: Best-of-the-Best Comparison (W-PY24)
 
-Command: `python3 python/benchmarks/bench_ml_pipeline.py --records 50000
+Command: `python3 python/benchmarks/ml/bench_ml_pipeline.py --records 50000
 --trials 3 --csv results/ml_pipeline.csv` (fault section included).
 Hardware: 28c Intel i9-7940X. Engine v3.5.2, forkrun 0.16.0, Python 3.14.
 Ray 2.58, Polars 1.44.2, DuckDB 1.5.5, HF datasets 5.0.1, pyarrow 25.0.1.

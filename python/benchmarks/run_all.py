@@ -29,16 +29,16 @@ except ImportError as exc:
                      % exc)
     sys.exit(2)
 
-import bench_baselines  # noqa: E402
-import bench_batch_size  # noqa: E402
-import bench_c_drain  # noqa: E402
-import bench_fault  # noqa: E402
-import bench_memory  # noqa: E402
-import bench_niches  # noqa: E402
-import bench_numa  # noqa: E402
-import bench_splice  # noqa: E402
-import bench_streaming_ingest  # noqa: E402
-import bench_throughput  # noqa: E402
+from core import bench_baselines  # noqa: E402
+from core import bench_batch_size  # noqa: E402
+from core import bench_c_drain  # noqa: E402
+from core import bench_fault  # noqa: E402
+from core import bench_memory  # noqa: E402
+from ml import bench_niches  # noqa: E402
+from ml import bench_numa  # noqa: E402
+from core import bench_splice  # noqa: E402
+from core import bench_streaming_ingest  # noqa: E402
+from core import bench_throughput  # noqa: E402
 
 BENCHMARKS = {
     "python_noop": bench_throughput.bench_python_identity,

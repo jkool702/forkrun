@@ -56,13 +56,13 @@ python/tests/plugins/*.so
 .forkrun_resume
 
 # Stage 0 evidence harness scratch (regenerable; only results/ is committed)
-benchmarks/python/inputs/
-benchmarks/python/work/
-benchmarks/python/logs/
-benchmarks/python/*.log
+python/benchmarks/stage0/inputs/
+python/benchmarks/stage0/work/
+python/benchmarks/stage0/logs/
+python/benchmarks/stage0/*.log
 # Stage 0 operational noise (run timeline + failure marker, not evidence)
-benchmarks/python/results/progress.log
-benchmarks/python/results/stage0_error.txt
+python/benchmarks/stage0/results/progress.log
+python/benchmarks/stage0/results/stage0_error.txt
 
 # Editor session/swap files (never commit; W-V352-COMPLETE guardrail)
 *.swp

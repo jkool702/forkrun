@@ -1,6 +1,6 @@
 # LLM Tokenization Study: The Niche, Measured (W-PY25)
 
-Command: `python3 python/benchmarks/bench_tokenize.py --docs 20000
+Command: `python3 python/benchmarks/tokenize/bench_tokenize.py --docs 20000
 --trials 3 --csv results/tokenize.csv` (+ a `--min-words 500
 --max-words 800` big-doc run for the crossover).
 Hardware: 28c Intel i9-7940X. Engine v3.5.2, forkrun 0.16.0,

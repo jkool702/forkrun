@@ -48,6 +48,41 @@
 - Result: 473 tests green (1 pip-toolchain skip), verified
   with zero ERRORs/FAILs on a clean full-suite run.
 
+### Repository reorganization + v3.6.0 version sweep (W-PY38)
+
+- **Single benchmark home:** `benchmarks/python/` and the
+  144-file `misc_python_benchmarks/` merged into
+  `python/benchmarks/` (`core/`, `ml/`, `tokenize/`,
+  `stage0/`, `fault/`, `resume/`, `smoke/`, `streaming/`,
+  `throughput/`, `validation/`, `debug/`, `data_gen/`,
+  `shell/`; C plugins consolidated to `ml/plugins/`).
+  `benchmarks/` and `misc_python_benchmarks/` eliminated;
+  `docs_port/` → `dev/supervisor/`.
+- **Dedupe (honest):** exactly one byte-identical group
+  found (4 copies of a 262-byte streaming probe → kept
+  one); everything else verified distinct and kept. No
+  quota-driven deletions.
+- **Import/path repair:** per-subdir `sys.path` bootstraps
+  (`python/` entry restored for every moved file),
+  `repo_root` depth fixes, plugin-source paths, `run_all.py`
+  package imports, stage0 `ROOT`/`REPO` derivation, rental
+  script, `.gitignore`, Makefile csv target, and all doc
+  command paths. `test_single_pass`/`test_yyjson_plugin`
+  now import `ml.ml_data_gen` / `ml/plugins`.
+- **Versions:** engine `FORKRUN_RING_VERSION`, `META`,
+  `frun -V`, both UNIT_TESTS version gates, and the
+  `__engine_version__` test assertion all read v3.6.0
+  (verified: rebuilt `.so` reports v3.6.0, wheel installs
+  and imports). Historical v3.5.x references (archives,
+  scaffolding comments, old result tables) intentionally
+  untouched.
+- Verified: substrate rebuild, `run_all --list` + smoke
+  row, standalone entry points (`--help`), full python
+  suite green (473 tests, 0 failures — one clean run;
+  small-input NUMA tests remain intermittently load-flaky
+  at ~25%/run in full-suite context, green in isolation —
+  pre-existing, untouched paths), wheel build+install+import.
+
 ### Cleanup: dead `_stream_gen` + `v1_available` keys (W-PY40)
 
 - Removed the shadowed first `_stream_gen` definition
@@ -111,7 +146,7 @@
 ### NUMA steady-state benchmarks at 5M records, fake-4 (W-PY35)
 
 - **Measurement only: no source changes** (new
-  `python/benchmarks/bench_numa_5m.py` + results in
+  `python/benchmarks/ml/bench_numa_5m.py` + results in
   `python/benchmarks/results/numa_5m_study.md`, reference
   table appended to `DOCS/python/AI_benchmark_results.md`).
 - **No NUMA software tax at steady state** (same-boot UMA
@@ -163,7 +198,7 @@
 
 ### 20M re-profile + batch diagnostic: saturated, ship it (W-PY41)
 
-- New `python/benchmarks/diag_batch.py` (blobs = batches,
+- New `python/benchmarks/ml/diag_batch.py` (blobs = batches,
   input lines = ground-truth records). 20M medium 28w: UMA
   10130 batches × 1974 rec (948µs/batch), NUMA 14300 ×
   1399 (696µs/batch) — ~1ms of real compute per batch vs
@@ -288,7 +323,7 @@ and a static buffer would cap batch size.)
 
 ### yyjson-accelerated C plugin, medium workload (W-PY31)
 
-- **Vendored yyjson** (`python/benchmarks/plugins/yyjson.{h,c}`,
+- **Vendored yyjson** (`python/benchmarks/ml/plugins/yyjson.{h,c}`,
   as-is, zero deps, compiles warning-free) — the fastest C JSON
   library instead of a hand-rolled SIMD parser.
 - **New `ml_plugin_yyjson.c`** (new file; scalar file untouched,
@@ -448,7 +483,7 @@ and a static buffer would cap batch size.)
   Anything else (splice/stream/NUMA/run/streaming/v0-72B) raises
   loudly — never silently falls back. 13 new tests in
   `python/tests/test_scaling.py`; full suite 409 green.
-- **Diagnostics first** (`python/benchmarks/bench_scaling.py`,
+- **Diagnostics first** (`python/benchmarks/core/bench_scaling.py`,
   new): exp1 (no-output), exp2 (none-vs-index), exp3 (existing C
   orderer), exp4 (Python loop vs C loop), exp5 (perf-stat
   commands).
@@ -1091,7 +1126,7 @@ and a static buffer would cap batch size.)
   commits in v3.5.3+), no usage-string changes.
 
 - **Stage 2 ctypes spike (measurement, zero engine code):**
-  `benchmarks/python/ffi_spike.py` against a probe micro-library (not the
+  `python/benchmarks/stage0/ffi_spike.py` against a probe micro-library (not the
   engine): null-call floor 0.179us, claim-shaped 1.717us, claim-ptr
   0.483us, 1MiB MAP_SHARED memoryview 0.207us, Python 8-arg fixed cost
   0.050us (i9-7940X, best-of-7). New `ffi-boundary` row in the Stage 0

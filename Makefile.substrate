@@ -124,7 +124,7 @@ bench-large: python-substrate
 
 bench-csv: python-substrate
 	python3 python/benchmarks/run_all.py --scale medium --trials 5 \
-		--csv benchmarks/python/results_pybench.csv
+		--csv python/benchmarks/results/pybench.csv
 
 canary: $(OUT)
 	@file $(OUT) | sed 's/^/canary artifact: /'

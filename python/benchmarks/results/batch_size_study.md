@@ -3,7 +3,7 @@
 Command: `python3 python/benchmarks/run_all.py --scale medium --trials 3
 --filter batch` (+ `per_batch_cost`, `batch_memory`, `single_worker_*`,
 `jsonl_batch_sweep` rows). Standalone:
-`python3 python/benchmarks/bench_batch_size.py --scale medium`.
+`python3 python/benchmarks/core/bench_batch_size.py --scale medium`.
 Hardware: 28c Intel i9-7940X. Engine v3.5.2. Date: 2026-09-20.
 Scale: 1M lines (medium) except JSONL (100k, small) and memory (20MB).
 

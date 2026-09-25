@@ -49,11 +49,11 @@ faster before touching anything else.
 ## How to benchmark your workload
 
 ```bash
-python3 python/benchmarks/bench_numa_5m.py \
+python3 python/benchmarks/ml/bench_numa_5m.py \
   --records 1000000 --variants medium --workers 28 \
   --trials 2 --tmpdir /tmp/mybench --csv out.csv
 ```
 
 Generate once, reuse the `--tmpdir`. Compare same-boot
 (medians, warmup included by the harness). For quick
-batch-shape checks: `python/benchmarks/diag_batch.py`.
+batch-shape checks: `python/benchmarks/ml/diag_batch.py`.

@@ -32,7 +32,7 @@ import forkrun  # noqa: E402
 from forkrun._bindings import find_substrate  # noqa: E402
 
 from _helpers import assert_no_zombies, write_lines  # noqa: E402
-from ml_data_gen import generate_data, generate_event  # noqa: E402
+from ml.ml_data_gen import generate_data, generate_event  # noqa: E402
 
 try:
     find_substrate()
@@ -46,7 +46,8 @@ HAVE_GCC = _shutil.which("gcc") is not None
 
 REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PLUGIN_DIR = os.path.join(REPO_ROOT, "python", "benchmarks", "plugins")
+PLUGIN_DIR = os.path.join(REPO_ROOT, "python", "benchmarks", "ml",
+                                "plugins")
 
 
 def _build(tmpdir, srcs, out):

@@ -217,7 +217,7 @@ read low on NUMA because blobs don't newline-terminate
 (junction artifact, <0.1% — the runner's 99% threshold
 separates it from genuine 25%+ topology shortfall). Full
 tables: `python/benchmarks/results/numa_5m_study.md`. Runner:
-`python/benchmarks/bench_numa_5m.py`.
+`python/benchmarks/ml/bench_numa_5m.py`.
 
 ┌────────────────────────────────────────────────────────────────────┐
 │  NUMA fake-4 at 20M (W-PY35 follow-up): same harness, 28 workers   │

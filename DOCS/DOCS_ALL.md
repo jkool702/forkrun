@@ -351,7 +351,7 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
   Anything else (splice/stream/NUMA/run/streaming/v0-72B) raises
   loudly — never silently falls back. 13 new tests in
   `python/tests/test_scaling.py`; full suite 409 green.
-- **Diagnostics first** (`python/benchmarks/bench_scaling.py`,
+- **Diagnostics first** (`python/benchmarks/core/bench_scaling.py`,
   new): exp1 (no-output), exp2 (none-vs-index), exp3 (existing C
   orderer), exp4 (Python loop vs C loop), exp5 (perf-stat
   commands).
@@ -994,7 +994,7 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
   commits in v3.5.3+), no usage-string changes.
 
 - **Stage 2 ctypes spike (measurement, zero engine code):**
-  `benchmarks/python/ffi_spike.py` against a probe micro-library (not the
+  `python/benchmarks/stage0/ffi_spike.py` against a probe micro-library (not the
   engine): null-call floor 0.179us, claim-shaped 1.717us, claim-ptr
   0.483us, 1MiB MAP_SHARED memoryview 0.207us, Python 8-arg fixed cost
   0.050us (i9-7940X, best-of-7). New `ffi-boundary` row in the Stage 0
