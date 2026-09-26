@@ -1740,6 +1740,65 @@ int fr_py_ingest_eof_posted(void) {
                            __ATOMIC_ACQUIRE) != ~(uint64_t)0 ? 1 : 0;
 }
 
+/* F-NUMA1 diagnostic snapshot (env-gated consumer in run.py; read-only).
+ *
+ * Per-node completion state for the NUMA drain-verification audit:
+ * out[0] = write_idx (published slots, acquire), out[1] = read_idx
+ * (claimed slots, acquire), out[2] = scanner_finished (acquire),
+ * out[3] = chunk_queue_head (relaxed: chunks published by ingest),
+ * out[4] = chunk_queue_tail (relaxed: chunks consumed by indexer).
+ * Returns 0 ok, -1 bad node or no engine state. Pure loads — no
+ * mutation, no fences touched, no publish path altered. The Python
+ * parent calls this AFTER reactor_run (workers done) and BEFORE
+ * teardown destroys the engine; indices are monotonic and finished
+ * is sticky, so the window is stable. Never on a hot path (once per
+ * node per run, behind FORKRUN_DIAG_NUMA1=1 or the drain guard). */
+int fr_py_diag_node(int node, uint64_t *out) {
+    if (!out || !state || !g_state || node < 0 ||
+        node >= (int)global_num_nodes)
+        return -1;
+    out[0] = __atomic_load_n(&state[node].write_idx, __ATOMIC_ACQUIRE);
+    out[1] = __atomic_load_n(&state[node].read_idx, __ATOMIC_ACQUIRE);
+    out[2] = __atomic_load_n(&state[node].scanner_finished,
+                             __ATOMIC_ACQUIRE);
+    out[3] = __atomic_load_n(&state[node].chunk_queue_head,
+                             __ATOMIC_RELAXED);
+    out[4] = __atomic_load_n(&state[node].chunk_queue_tail,
+                             __ATOMIC_RELAXED);
+    /* out[5]: tail-emptiness for the F-NUMA1 drain guard. 1 when every
+     * slot in [read_idx, write_idx) is empty (lines==0 and end==off —
+     * the EOF sentinel / zero-length tail the claim loop ack-silents
+     * and the fork gate never counts in data_ready). 0 when any slot
+     * carries payload bytes. A node whose only unclaimed work is an
+     * empty tail lost nothing: small-scale nodes that receive no DATA
+     * (sentinel-only) never fork workers (helpers-done exits before
+     * the stall fallback) with complete output. The guard treats
+     * tail_all_empty as vacuous, never a violation. Bounded scan:
+     * the range cannot exceed the ring shield (RING_SIZE/2) plus the
+     * in-flight publish window; abort-open (0) on absurd ranges. */
+    {
+        uint64_t r = out[1], w = out[0];
+        int all_empty = 1;
+        if (w < r || w - r > (RING_SIZE / 2 + 1024))
+            all_empty = 0;
+        else {
+            uint64_t i;
+            for (i = r; i < w; i++) {
+                uint64_t slot = i & RING_MASK;
+                uint32_t lines = state[node].lines_ring[slot];
+                uint64_t off = state[node].offset_ring[slot];
+                uint64_t end = state[node].end_ring[slot];
+                if (lines > 0 || end > off) {
+                    all_empty = 0;
+                    break;
+                }
+            }
+        }
+        out[5] = (uint64_t)all_empty;
+    }
+    return 0;
+}
+
 /* =====================================================================
  * W-PY21-A: C drain process — data/control path separation.
  *

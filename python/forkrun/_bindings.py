@@ -251,6 +251,16 @@ def _setup_signatures(lib) -> None:
     except AttributeError:
         pass
     try:
+        # F-NUMA1: read-only per-node completion snapshot
+        # (write_idx, read_idx, scanner_finished, chunk_head,
+        # chunk_tail, tail_empty). Absent on pre-diagnostic builds —
+        # callers treat that as "telemetry unavailable", never fatal.
+        lib.fr_py_diag_node.argtypes = [ctypes.c_int,
+                                        ctypes.POINTER(ctypes.c_uint64)]
+        lib.fr_py_diag_node.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    try:
         # W-PY21-A: C drain process (data/control path separation).
         lib.fr_py_drain_loop.argtypes = [ctypes.c_int,
                                          ctypes.POINTER(ctypes.c_int),

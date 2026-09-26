@@ -5744,6 +5744,89 @@ def _numa_fork_pipeline(lib, memfd, src_fd, num_nodes, engine_fds):
             "ingest_death": ingest_death_r}
 
 
+def _numa_drain_audit(lib, num_nodes, forked, wid_node,
+                      workers, label="map/run"):
+    """F-NUMA1: per-node drain verification + telemetry (fail-loud guard).
+
+    Called after reactor supervision returns and BEFORE the parent
+    parses output: reads the read-only `fr_py_diag_node` snapshot per
+    node (write_idx, read_idx, scanner_finished, chunk_head,
+    chunk_tail) and verifies every node drained
+    (`read_idx == write_idx`). `forked` is the set of nodes that ever
+    got workers; `wid_node` maps wid → node (stable for the run).
+
+    Telemetry: one stderr block when FORKRUN_DIAG_NUMA1=1 (files, per
+    context hygiene — never return payload data, only indices).
+
+    Guard (REQUIRED, W-NUMA1 §12 — silent partial completion must
+    become impossible-or-loud): any node with `read != write` AND a
+    non-empty unclaimed tail raises RuntimeError naming the node,
+    ALWAYS (not only under the diag env var). Rationale: a healthy
+    run cannot violate it — workers exit only at EOF (C1+C2+C3 ⇒
+    read==write), and a node that never got workers but was
+    published to (fork-gate miss) is exactly the silent-loss shape.
+    A node whose unclaimed tail is ALL EMPTY (the EOF sentinel /
+    zero-length tail: never counted by the fork gate, never claimed,
+    contributes no output) is vacuous, not a violation — small-scale
+    sentinel-only nodes fork no workers with complete output.
+    Missing symbol (pre-diagnostic .so) disarms both paths silently.
+    """
+    import ctypes as _ctypes
+
+    diag = getattr(lib, "fr_py_diag_node", None)
+    rows = []
+    if diag is not None:
+        try:
+            diag.argtypes = [_ctypes.c_int,
+                             _ctypes.POINTER(_ctypes.c_uint64)]
+            diag.restype = _ctypes.c_int
+        except Exception:
+            diag = None
+    for node in range(num_nodes):
+        if diag is not None:
+            arr = (_ctypes.c_uint64 * 6)()
+            try:
+                rc = diag(node, arr)
+            except Exception:
+                rc = -1
+            if int(rc) == 0:
+                rows.append((node, int(arr[0]), int(arr[1]),
+                             int(arr[2]), int(arr[3]), int(arr[4]),
+                             int(arr[5])))
+                continue
+        rows.append((node, -1, -1, -1, -1, -1, -1))
+    if os.environ.get("FORKRUN_DIAG_NUMA1") == "1":
+        try:
+            per_node_wids = {}
+            for wid, nd in enumerate(wid_node or []):
+                per_node_wids.setdefault(nd, []).append(wid)
+            parts = ["forkrun [DIAG-NUMA1] %s completion:" % label,
+                     "  nodes=%d workers=%d forked=%s" % (
+                         num_nodes, workers, sorted(forked or ()))]
+            for (node, w, r, fin, ch, ct, te) in rows:
+                parts.append(
+                    "  node=%d write=%d read=%d finished=%d "
+                    "chunks(head=%d tail=%d) tail_empty=%d forked=%s "
+                    "wids=%s" % (
+                        node, w, r, fin, ch, ct, te,
+                        "yes" if node in (forked or ()) else "NO",
+                        per_node_wids.get(node, [])))
+            os.write(2, ("\n".join(parts) + "\n").encode())
+        except OSError:
+            pass
+    bad = [(node, w, r) for (node, w, r, _f, _c, _t, te) in rows
+           if w >= 0 and r >= 0 and w != r and te != 1]
+    if bad:
+        detail = ", ".join(
+            "node %d (write_idx=%d != read_idx=%d)" % (n, w, r)
+            for (n, w, r) in bad)
+        raise RuntimeError(
+            "forkrun: NUMA drain incomplete (%s): %d/%d node(s) "
+            "hold unclaimed published batches (%s) — refusing silent "
+            "partial completion" % (label, len(bad), num_nodes,
+                                    detail))
+
+
 def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                          workers, on_error, collect, order,
                          mode="python", numa_map="", num_nodes=2,
@@ -6032,6 +6115,9 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 raise
 
         _reactor_failure_check(state, workers, on_error)
+
+        _numa_drain_audit(lib, num_nodes, forked, wid_node,
+                          workers, label="map/run")
 
         if fallow_w is not None:
             try:
@@ -6646,6 +6732,9 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             pass
 
         _reactor_failure_check(state, workers, on_error)
+
+        _numa_drain_audit(lib, num_nodes, forked, stream_wid_node,
+                          workers, label="stream")
 
         if use_drain and cdrain_n["pid"] is not None:
             # Results EOF ⇒ the drain exited — join it for its rc
