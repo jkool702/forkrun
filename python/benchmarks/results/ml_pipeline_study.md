@@ -8,6 +8,17 @@ Date: 2026-09-21. Data: synthetic recommendation-system-style JSONL
 (see `ml_data_gen.py` — seeded, deterministic; distributions are
 synthetic assumptions, not production data).
 
+> **Scale framing (read first):** at 50k records and ~1M rec/s, the
+> whole run takes 20–50ms — this study measures **startup latency
+> plus throughput**, not steady state. forkrun's bring-up (fork +
+> scan + teardown) dominates these runtimes; every absolute below
+> understates sustained throughput by design. For steady state,
+> see the 5M tables (`AI_benchmark_results.md`, `RELEASE_v3.6.0.md`
+> §2: same logical workloads, 10–50× longer runs). Relative order
+> within a scale is the robust reading. Refreshed 2026-09-25
+> (engine v3.6.0, terminated framing, exact totals) below — verdict
+> unchanged.
+
 ## Verdict up front
 
 No single winner — the workload decides, exactly as designed:
@@ -56,6 +67,26 @@ expression language (medium only).
 | DuckDB native        | —        | —        | —        | 189k          |
 
 (units: records/s; best of worker sweep 1,2,4,8,14,28.)
+
+### Refresh 2026-09-25 (engine v3.6.0, same command)
+
+| System               | Light    | Medium   | Heavy    |
+|----------------------|----------|----------|----------|
+| Serial Python        | 152k     | 63k      | 6.5k     |
+| mp.Pool (best)       | 842k     | 546k     | 88k      |
+| ProcessPoolExecutor  | 1050k    | 620k     | 90k      |
+| HF Datasets num_proc | 78k      | 62k      | 32k      |
+| forkrun map (Python) | 588k     | 318k     | 69k      |
+| forkrun map (C plugin)| 1093k   | 486k     | 217k     |
+| forkrun yyjson (medium) | —     | 545k     | —        |
+| Ray Data             | 44k      | 39k      | 24k      |
+
+Rank order identical to the W-PY24 table (Executor ≈ Pool >
+forkrun-C > forkrun-Python ≫ HF > Ray at this scale); the
+medium-Executor uptick (551k→620k) is run variance on a
+50ms-scale measurement — compare §2 steady-state numbers
+for throughput claims. yyjson medium (545k) slots between
+scalar-C and Executor, as in §10 of the release table.
 
 Per-worker shape (medium): forkrun Python scales 62k(1w) →
 293k(14w) → 199k(28w, oversubscribed); Pool/Executor scale

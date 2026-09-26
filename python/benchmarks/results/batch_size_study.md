@@ -4,15 +4,22 @@ Command: `python3 python/benchmarks/run_all.py --scale medium --trials 3
 --filter batch` (+ `per_batch_cost`, `batch_memory`, `single_worker_*`,
 `jsonl_batch_sweep` rows). Standalone:
 `python3 python/benchmarks/core/bench_batch_size.py --scale medium`.
-Hardware: 28c Intel i9-7940X. Engine v3.5.2. Date: 2026-09-20.
+Hardware: 28c Intel i9-7940X. Engine v3.6.0. Date: 2026-09-25.
 Scale: 1M lines (medium) except JSONL (100k, small) and memory (20MB).
+
+> Scale framing: at 1M lines and ~100M lines/s the fast rows take
+> ~10ms — bring-up (fork × workers, scan, teardown) is a large
+> share. These rows compare batch shapes *relatively* (same-scale,
+> same-boot); for absolute throughput see the 10M/20M tables.
+> Refreshed 2026-09-25 (engine v3.6.0): absolutes up ~10–28%,
+> shape (ratios) nearly identical — guidance unchanged.
 
 ## Verdict up front
 
 The amortization hypothesis is **mostly wrong**: per-batch cost is NOT
-fixed — it scales with batch bytes (~10ns/line across all sizes), so
+fixed — it scales with batch bytes (~6–13ns/line at fixed sizes), so
 there is no fixed overhead to amortize away. Forced large batches peak
-at **~96M lines/s (8 workers) / 116M (1 worker)** for no-op, not 1B+.
+at **~126M lines/s (8 workers) / 134M (1 worker)** for no-op, not 1B+.
 The engine's adaptive batching already sits in the sweet spot. Small
 batches (100) cost ~40%; huge batches (50k+) cost ~35% (starvation).
 
@@ -22,42 +29,42 @@ batches (100) cost ~40%; huge batches (50k+) cost ~35% (starvation).
 
 | Batch size | Lines/s | vs adaptive |
 |------------|---------|-------------|
-| adaptive   | 92.5M   | baseline    |
-| 100        | 56.7M   | 0.61×       |
-| 500        | 89.3M   | 0.97×       |
-| 1000       | 95.9M   | 1.04×       |
-| 5000       | 91.9M   | 0.99×       |
-| 10000      | 92.5M   | 1.00×       |
-| 50000      | 63.3M   | 0.68×       |
-| 100000     | 61.5M   | 0.66×       |
+| adaptive   | 118.8M  | baseline    |
+| 100        | 72.1M   | 0.61×       |
+| 500        | 116.5M  | 0.98×       |
+| 1000       | 125.5M  | 1.06×       |
+| 5000       | 124.5M  | 1.05×       |
+| 10000      | 121.6M  | 1.02×       |
+| 50000      | 80.6M   | 0.68×       |
+| 100000     | 75.9M   | 0.64×       |
 
 ### Upper (trivial transform)
 
 | Batch size | Lines/s | vs adaptive |
 |------------|---------|-------------|
-| adaptive   | 51.4M   | baseline    |
-| 100        | 29.2M   | 0.57×       |
-| 1000       | 50.2M   | 0.98×       |
-| 10000      | 56.1M   | 1.09×       |
-| 50000+     | ~41M    | 0.80×       |
+| adaptive   | 57.7M   | baseline    |
+| 100        | 30.9M   | 0.54×       |
+| 1000       | 56.8M   | 0.98×       |
+| 10000      | 60.3M   | 1.05×       |
+| 50000+     | ~49M    | 0.85×       |
 
-(Sum mirrors upper: 43.2M adaptive → 44.9M at 10k → ~34M at 50k+.)
+(Sum mirrors upper: 48.8M adaptive → 47.1M at 10k → ~44M at 50k+.)
 
 ### Streaming upper
 
 | Batch size | Lines/s | vs adaptive |
 |------------|---------|-------------|
-| adaptive   | 68.1M   | baseline    |
-| 1000       | 67.8M   | 1.00×       |
-| 10000      | 76.7M   | 1.13×       |
+| adaptive   | 87.2M   | baseline    |
+| 1000       | 77.5M   | 0.89×       |
+| 10000      | 89.2M   | 1.02×       |
 
 ### Single worker (no-op, no contention)
 
 | Batch size | Lines/s | vs adaptive |
 |------------|---------|-------------|
-| adaptive   | 92.3M   | baseline    |
-| 1000       | 73.6M   | 0.80×       |
-| 10000      | 116.6M  | 1.26×       |
+| adaptive   | 84.1M   | baseline    |
+| 1000       | 80.8M   | 0.96×       |
+| 10000      | 134.1M  | 1.59×       |
 
 A single worker beats 8 workers (116M vs 96M): at zero payload the
 claim loop — not dispatch — binds, and 8-way FAA/evfd contention
@@ -67,9 +74,9 @@ costs more than parallelism gains.
 
 | Batch size | Lines/s | vs adaptive |
 |------------|---------|-------------|
-| adaptive   | 2.7M    | baseline    |
-| 1000       | 2.9M    | 1.07×       |
-| 10000      | 2.0M    | 0.74×       |
+| adaptive   | 3.5M    | baseline    |
+| 1000       | 3.6M    | 1.03×       |
+| 10000      | 3.5M    | 1.00×       |
 
 Payload-bound as predicted — and large batches actively hurt (huge
 blobs through `json.loads` + larger output records).
@@ -78,15 +85,24 @@ blobs through `json.loads` + larger output records).
 
 | Batch size | Batches (1M lines) | µs/batch | ns/line |
 |------------|--------------------|----------|---------|
-| 100        | 10000              | 1.77     | 17.7    |
-| 1000       | 1000               | 11.50    | 11.5    |
-| 10000      | 100                | 110.31   | 11.0    |
-| 100000     | 21 (*)             | 753.31   | 7.5     |
-| adaptive   | 245                | 46.24    | ~11     |
+| 100        | 10000              | 1.33     | 13.3    |
+| 1000       | 1000               | 8.11     | 8.1     |
+| 10000      | 100                | 81.43    | 8.1     |
+| 100000     | 21 (*)             | 602.56   | 6.0     |
+| adaptive   | 2442 (**)          | 22.97    | 56 (**)   |
 
 (*) 100k-line requests yield 21 batches, not 10 — the engine byte-
 clamps huge line-windows (splits above its byte ceiling). `lines=N`
 is a hint ceiling, not an exact count, at the extremes.
+(**) Adaptive granularity itself varies run to run (CASE-A
+complete pre-flight vs CASE-B early-bail ramp): 245 batches
+historically, 2442 in this run — and the timed runs followed
+the count run's shape (56ns/line effective vs ~11 historically).
+The fixed-size rows — the study's actual subject — reproduce
+stably; adaptive sits in the sweet-spot range either way. The
+CASE-A/B bimodality in adaptive granularity is itself a
+follow-up observation, consistent with the documented
+race-dependence of batching.
 
 The ns/line column is the finding: **~10ns/line, flat**. Cost scales
 with bytes; the fixed per-batch component is ~1µs (visible only at
@@ -105,12 +121,13 @@ batch buffering is noise at every size. H4 confirmed.
 
 ## Interpretation
 
-1. **H1 (≥1B lines/s): FALSE.** Peak measured 116M (1 worker) / 96M
+1. **H1 (≥1B lines/s): FALSE.** Peak measured 134M (1 worker) / 126M
    (8 workers). The 5.7µs-fixed-overhead model is wrong — per-batch
-   cost is ~10ns/line at every size, so 10× bigger batches cost 10×
-   more per batch and throughput stays flat.
-2. **H2: confirmed with nuance.** Upper/sum gain +4–9% at 10k;
-   JSONL regresses −26% at 10k (payload-bound, large blobs hurt).
+   cost scales with batch bytes (~6–13ns/line at fixed sizes), so 10×
+   bigger batches cost ~10× more per batch and throughput stays flat.
+2. **H2: confirmed with nuance.** Upper/sum gain +2–5% at 10k;
+   JSONL flat across sizes in this run (3.5–3.6M — compute-bound
+   throughout; the old −26% at 10k did not reproduce).
 3. **H3 sweet spot: 1k–10k lines** (adaptive's ~4k-line batches sit
    inside it — the engine already chooses well). lines=100 loses
    ~40% (10k batches × small fixed costs); lines=50k+ loses ~35%

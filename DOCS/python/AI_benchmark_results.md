@@ -1,19 +1,29 @@
 5M RECORDS, STEADY STATE (best of 8/14/28 workers, W-PY29):
 
+> **Refresh 2026-09-25 (engine v3.6.0):** forkrun rows below are
+> re-measured best-of-8/14/28 on UMA (terminated framing, exact
+> totals: light 5000000, medium 4997892, heavy 4997982, all
+> topologies). Competitor rows (Executor/Pool/Ray/HF/Polars/
+> DuckDB) are W-PY29-era — those codebases didn't change, and
+> re-running them buys nothing. Deltas vs W-PY29: medium C
+> +46% and heavy C +18% (W-PY39 forked-scanner overlap), light
+> C +2%, Python rows +7–12% (plateau shape unchanged: Python
+> still peaks at 14w).
+
 ┌────────────────────────────────────────────────────────────────────┐
 │  ML PIPELINE (sustained throughput, records/sec)                   │
 ├──────────────────────┬──────────┬──────────┬───────────────────────┤
 │ System               │ Light    │ Medium   │ Heavy                 │
 │                      │ (508MB)  │ (2.2GB)  │ (6.4GB)               │
 ├──────────────────────┼──────────┼──────────┼───────────────────────┤
-│ forkrun C plugin     │ 6,490k   │ 1,622k   │ 611k                  │
+│ forkrun C plugin     │ 6,606k   │ 2,366k   │ 718k                  │
 │ Executor             │ 1,641k   │   797k   │  94k                  │
 │ Pool                 │ 1,598k   │   757k   │  94k                  │
-│ forkrun Python       │ 1,611k   │   652k   │  89k                  │
+│ forkrun Python       │ 1,740k   │   730k   │  95k                  │
 │ Ray                  │   250k   │   184k   │  56k                  │
 │ HF Datasets          │   120k   │    90k   │  44k                  │
 ├──────────────────────┼──────────┼──────────┼───────────────────────┤
-│ forkrun C advantage  │  4.0×    │  2.0×    │  6.5×                 │
+│ forkrun C advantage  │  4.0×    │  3.0×    │  7.6×                 │
 └──────────────────────┴──────────┴──────────┴───────────────────────┘
 
 ┌────────────────────────────────────────────────────────────────────┐
@@ -21,15 +31,15 @@
 ├──────────────────────┬──────────────────────┬──────────────────────┤
 │ System               │ Docs/sec             │ Tokens/sec           │
 ├──────────────────────┼──────────────────────┼──────────────────────┤
-│ forkrun C plugin     │ 346,055              │ 97.7M                │
+│ forkrun C plugin     │ 304,531              │ 85.9M                │
 │ Executor             │ 167,156              │ 47.2M                │
 │ Pool                 │ 160,907              │ 45.4M                │
-│ forkrun Python       │ 146,025              │ 41.2M                │
+│ forkrun Python       │ 138,760              │ 39.2M                │
 │ HF Datasets          │  51,025              │ 14.4M                │
 │ Ray                  │  32,096              │  9.1M                │
 │ Polars UDF           │  15,382              │  4.3M                │
 ├──────────────────────┼──────────────────────┼──────────────────────┤
-│ forkrun C advantage  │ 2.1×                 │ 2.1×                 │
+│ forkrun C advantage  │ 1.8×                 │ 1.8×                 │
 └──────────────────────┴──────────────────────┴──────────────────────┘
 
 FORKRUN C PLUGIN WINS ALL FOUR UDF WORKLOADS OUTRIGHT.
@@ -108,18 +118,18 @@ medium -3%, heavy identical, tokenize +9%).
 Per-worker W-PY29 numbers (records/sec, 5M records):
 
 | Mode            │ Light 8w │ Light 14w │ Light 28w │
-│ forkrun Python  │   974k   │  1,591k   │  1,611k   │
-│ forkrun C       │ 3,891k   │  6,299k   │  6,490k   │
+│ forkrun Python  │ 1,080k   │  1,740k   │  1,711k   │
+│ forkrun C       │ 4,875k   │  6,555k   │  6,606k   │
 
 | Mode            │ Med 8w │ Med 14w │ Med 28w │ Heavy 8w │ Heavy 14w │ Heavy 28w │
-│ forkrun Python  │  418k  │   630k  │   652k  │   51k    │    83k    │    89k    │
-│ forkrun C       │  983k  │ 1,322k  │ 1,622k  │  359k    │   516k    │   611k    |
+│ forkrun Python  │  467k  │   730k  │   729k  │   54k    │    90k    │    95k    │
+│ forkrun C       │ 1,772k │ 2,286k  │ 2,366k  │  387k    │   603k    │   718k    |
 
 Per-worker tokenize (500k docs, 282.2 avg tok/doc):
 
 | Mode            │ 8w docs/s │ 14w docs/s │ 28w docs/s │ 28w tok/s │
-│ forkrun Python  │   85,742  │   135,524  │   146,025  │   41.2M   │
-│ forkrun C       │  212,805  │   304,696  │   346,055  │   97.7M   │
+│ forkrun Python  │   85,742  │   135,524  │   138,760  │   39.2M   │
+│ forkrun C       │  212,805  │   304,696  │   304,531  │   85.9M   │
 
 ┌────────────────────────────────────────────────────────────────────┐
 │  MEDIUM + yyjson (W-PY31): 5M records, order=index                  │

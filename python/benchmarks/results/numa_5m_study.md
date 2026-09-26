@@ -1,5 +1,34 @@
 # NUMA steady-state benchmarks at 5M records, fake-4 topology (W-PY35)
 
+> **Post-W-PY39 addendum (2026-09-25, engine v3.6.0 — read first):**
+> the "NUMA faster than UMA" finding below predates the W-PY39
+> forked materialized scanner, which removed UMA's ~0.9s serial
+> spill+scan phase (+35% UMA medium: 1.7M→2.3M). On current code
+> UMA leads on single-socket and the multi-node pipeline costs
+> a small tax — i.e. the NORMAL expectation, restored. Fresh
+> UMA-first numbers (28 workers, median-of-3, `order="index"`):
+>
+> | Workload | C nodes=1 | @4 forced | Python 1 / @4 |
+> |---|---|---|---|
+> | Light 5M | 6.52M | 4.74M (0.73) | 1.35M / 1.09M |
+> | Medium 5M | 2.29M | 1.80M (0.79) | 0.67M / 0.59M |
+> | Heavy 5M | 0.67M | 0.58M (0.87) | — |
+> | Medium 20M | 2.39M | 1.82M (0.76) | — |
+>
+> (`@4` = 4 forced-logical nodes over 1 socket — the multi-node
+> leg available on a UMA boot. Counts exact on every row:
+> light 5000000/5000000, medium 4997892, heavy 4997982,
+> 20M medium 19991640.) The fake-4 tables below stand as
+> topology findings (per-node rings relieve claim contention
+> at 28w; spawn stays spawn-bound at 0.75×; worker sweep
+> monotonic; streaming bounded) — but their UMA *absolutes*
+> and NUMA/UMA *ratios* are superseded by the rows above.
+> Real multi-socket hardware (where born-local placement pays)
+> remains unmeasured — the standing prediction is NUMA at
+> parity-or-better there, unproven.
+>
+> Original W-PY35 study follows unchanged.
+
 Question: "How much does the NUMA pipeline cost in software
 overhead, measured at steady state?"
 
@@ -46,8 +75,12 @@ overhead, measured at steady state?"
 
 Reading: there is no NUMA software tax at steady state — the
 pipeline is at parity (light) or FASTER (medium +12-24%,
-heavy +28-29%) on fake hardware. W-PY36 profiling corrected
-the first hypothesis offered here (ring-contention relief):
+heavy +28-29%) on fake hardware. [SUPERSEDED post-W-PY39 for
+absolutes and ratios — see addendum at top. The mechanism
+analysis (pipeline overlap) stands; only the winner flipped
+once UMA stopped serializing spill+scan.] W-PY36 profiling
+corrected the first hypothesis offered here (ring-contention
+relief):
 per-instruction efficiency is *worse* on NUMA everywhere
 (+17.5% cycles, IPC 1.3→1.1, 7× context switches, 67×
 migrations, 4× syscalls). The win is structural: UMA

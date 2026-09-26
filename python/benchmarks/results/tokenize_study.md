@@ -9,6 +9,16 @@ Date: 2026-09-21. Corpus: seeded synthetic documents (50–500
 words, Zipf-like mix) + sidecar .vocab (30k entries, single
 source of truth — every system loads the same file).
 
+> **Scale framing (read first):** at 20k docs the whole run
+> takes ~150–250ms at leader pace — bring-up (fork, vocab
+> load, pool startup) is a large share of every number below.
+> This study compares systems fairly *at small scale*, but its
+> absolutes understate steady state (notably Ray, whose ~3s
+> startup dominates a 20k-doc run). For steady state, see the
+> 500k-doc matrix (fresh 2026-09-25: C plugin ~305k docs/s).
+> Refreshed 2026-09-25 (engine v3.6.0) below — verdict
+> unchanged.
+
 ## Verdict up front
 
 The predicted 10× did NOT materialize — and the real story is
@@ -46,6 +56,28 @@ more interesting:
 | Polars map_batches | 15k  | 4.2M     | serial Python UDF (verified: POLARS_MAX_THREADS=1 matches default) |
 | Ray Data         | 13k    | 3.7M     | pandas batches + 3s startup  |
 | Serial Python    | 12k    | 3.4M     |                              |
+
+### Refresh 2026-09-25 (engine v3.6.0, same command)
+
+| System           | Docs/s | Tokens/s |
+|------------------|--------|----------|
+| Executor         | 118k   | 33.4M    |
+| Pool             | 112k   | 31.5M    |
+| forkrun C plugin | 91k    | 25.6M    |
+| forkrun Python   | 74k    | 21.0M    |
+| HF Datasets      | 26k    | 7.3M     |
+| Polars map_batches | 16k  | 4.4M     |
+| Serial Python    | 14k    | 3.9M     |
+| Ray Data         | 4k     | 1.0M     |
+
+Same rank order except the top two swap within noise
+(Executor 118k vs C 91k — at 20k docs/~200ms total, fork +
+vocab-load bring-up dominates; the 500k-doc steady-state
+matrix has C at 305k vs Executor 168k, decisive). Ray's
+drop (13k→4k) is startup accounting on a short run, not a
+regression. Use §5 fresh numbers (or `RELEASE_v3.6.0.md`)
+for throughput claims; keep this study for the big-doc
+crossover analysis below, which is scale-robust.
 
 Per-worker shape (plugin): 33k(1w) → 60k(2w) → 97k(4w) →
 131k(8w, peak) → 130k(14w) → 84k(28w, oversubscribed).

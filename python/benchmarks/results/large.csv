@@ -1,29 +1,102 @@
 name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
-Python no-op (run/discard),python,run,183031792.42322597,22.203125,-1.0,claim/ack loop only,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Python no-op (map/collect),python,map,182161861.6362893,22.203125,5.956498700844163,"per-worker memfds, parent parse",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Python no-op (stream),python,stream,177077680.31516305,22.26171875,-1.0,signal + pread per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Python upper (map),python,map,63188224.81936398,158.28515625,7.355314806178221,bytes(batch.data).upper() per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Python sum (map),python,map,53409496.98551517,158.28515625,21.325921618820413,sum(memoryview) per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Spawn cat (map),spawn,map,15139649.795003327,158.28515625,12.204897703289106,subprocess.run per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Spawn tr (map),spawn,map,15519966.92634452,158.28515625,-1.0,subprocess.run + tr per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Plugin upper (map),plugin,map,54254256.365957566,159.2109375,10.618086458136949,ctypes callback per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-stream vs map,python,stream,114721557.87470654,159.2109375,10.845276534343423,ratio=0.55x (map=63651695/s),28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ordered vs unordered (stream),python,stream,86492518.70839158,159.2109375,-1.0,ratio=1.34x (unordered=115811907/s),28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Python upper (lines=100),python,map,33838358.31105884,174.390625,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Python upper (lines=1000),python,map,60821234.70775651,174.390625,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Python upper (adaptive),python,map,65398275.39861093,174.390625,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python no-op (run/discard),python,run,198155650.41195682,19.359375,-1.0,claim/ack loop only,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python no-op (map/collect),python,map,195696098.75206298,19.359375,14.608087218278525,"per-worker memfds, parent parse",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python no-op (stream),python,stream,191348612.56204382,19.359375,-1.0,signal + pread per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python upper (map),python,map,68964111.32469057,160.34375,8.057543263431118,bytes(batch.data).upper() per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python sum (map),python,map,58384903.89208371,160.34375,23.589328399247286,sum(memoryview) per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Spawn cat (map),spawn,map,27391884.635350537,160.34375,26.185355054341105,subprocess.run per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Spawn tr (map),spawn,map,27263080.281406876,160.34375,-1.0,subprocess.run + tr per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Spawn v1 cat (map),spawn-v1,map,27469280.362154294,160.34375,26.208794743562724,"C posix_spawnp + concurrent splice pump, zero-copy input",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Spawn v1 tr (map),spawn-v1,map,27109367.77541448,160.34375,-1.0,C posix_spawnp + tr per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python upper emit (map),python,map,69799454.64722346,160.34375,-1.0,fr_py_emit: writev + zero-copy bytes,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python upper v0 writes (map),python,map,71186228.08339167,160.34375,-1.0,header pack + two writes + signal (fallback),28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Plugin upper (map),plugin,map,58047993.20011304,160.34375,13.044579415751945,ctypes callback per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Plugin v1 upper (map),plugin-v1,map,53643333.72290839,160.34375,14.150217514448762,"C-to-C call, frozen ABI, zero-copy input",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+stream vs map,python,stream,122783049.22180419,160.34375,12.757224837168904,ratio=0.60x (map=73616948/s),28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+stream slow-consumer,python,stream,6919194.7220755825,160.34375,-1.0,consumer 0.5ms/batch; 1MB signal pipe,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Ingest materialized upper (map),python,map,74678185.74832495,160.34375,-1.0,spill-then-scan (bounded inputs),28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Ingest streaming upper (map),python,map,47947468.829838626,160.34375,18.929324496396145,concurrent scan + fallow reclaim,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Ingest pipe upper (map),python,map,46427003.57289084,160.34375,-1.0,"unbounded-source shape, fallow-bounded",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python passthrough (map),python,map,73389339.03615928,160.34375,-1.0,"bytes(data) per batch, same bytes moved",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Splice 64KB (map),splice,map,75906685.81236081,160.34375,-1.0,C claim→sendfile→signal→ack,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Splice 512KB (map),splice,map,79565932.82530248,197.51953125,-1.0,C claim→sendfile→signal→ack,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Splice 1024KB (map),splice,map,69942081.87209547,231.50390625,-1.0,C claim→sendfile→signal→ack,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Splice 512KB (stream),splice,stream,91657551.47272831,236.13671875,-1.0,pipelined drain,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python drain (map),python,map,76115115.55594915,305.484375,-1.0,parent select+pread+parse per result,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+C drain (map),python,map,50631361.1756221,305.484375,-1.0,forked C loop; 0.7x — same framed bytes,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+UMA + C drain,python,map,51418387.00269254,390.64453125,-1.0,"single ring, C drain",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+NUMA @2 + C drain (1 online),python,map,39790770.10351357,390.64453125,-1.0,per-node rings; overhead +29.2%,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+NUMA @4 + C drain (1 online),python,map,39285229.75867185,390.64453125,-1.0,per-node rings; overhead +30.9%,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python drain (stream),python,stream,92425502.68727209,390.64453125,-1.0,parent select+pread per signal,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+C drain (stream),python,stream,85146407.58877294,390.64453125,-1.0,results pipe; 0.9x,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper nodes=1 (UMA),python,map,73564748.26965736,390.64453125,-1.0,"single ring, node 0",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper nodes=@2 (1 physical online),python,map,41182084.62652473,390.64453125,-1.0,"per-node rings, born-local ingest, pinning",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper nodes=@4 (1 physical online),python,map,40399528.388681285,390.64453125,-1.0,"per-node rings, born-local ingest, pinning",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper stream nodes=1,python,stream,94340883.78354998,390.64453125,-1.0,"live drain, per-worker memfds",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper stream nodes=@2,python,stream,38249367.01577297,390.64453125,-1.0,"live drain, per-worker memfds",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op (adaptive),python,map,176476401.59144765,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op (lines=100),python,map,86617465.57462397,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op (lines=500),python,map,159898059.22235376,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op (lines=1000),python,map,168175421.6272703,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op (lines=5000),python,map,172944150.19257218,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op (lines=10000),python,map,172175051.60967678,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op (lines=50000),python,map,93260691.46125951,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op (lines=100000),python,map,94499634.5965793,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op bytes=64KB,python,map,189720474.20064327,390.64453125,-1.0,byte-mode batching,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op bytes=256KB,python,map,186540220.24076536,390.64453125,-1.0,byte-mode batching,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op bytes=512KB,python,map,189885649.7216149,390.64453125,-1.0,byte-mode batching,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op bytes=1024KB,python,map,185995841.16303432,390.64453125,-1.0,byte-mode batching,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op bytes=4096KB,python,map,175146406.1817826,390.64453125,-1.0,byte-mode batching,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op lines=1000 (comparison),python,map,177814254.19220528,390.64453125,-1.0,"line-mode, boundary detection",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper (adaptive),python,map,74683723.94934058,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper (lines=100),python,map,35969792.252086565,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper (lines=500),python,map,62397708.70571088,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper (lines=1000),python,map,69402478.59696375,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper (lines=5000),python,map,74643272.7098812,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper (lines=10000),python,map,76305118.16311692,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper (lines=50000),python,map,56992185.437417865,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Upper (lines=100000),python,map,58181072.44860238,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Sum (adaptive),python,map,53974216.85256608,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Sum (lines=100),python,map,31125482.31318495,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Sum (lines=500),python,map,46935826.92542094,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Sum (lines=1000),python,map,50071687.13254988,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Sum (lines=5000),python,map,53565786.56542802,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Sum (lines=10000),python,map,54270437.917271785,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Sum (lines=50000),python,map,54669731.56897699,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Sum (lines=100000),python,map,54136127.057341546,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+JSONL (adaptive),python,map,3564553.606063914,390.64453125,-1.0,compute-bound control,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+JSONL (lines=1000),python,map,3566577.9299137294,390.64453125,-1.0,compute-bound control,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+JSONL (lines=10000),python,map,3552034.9237738466,390.64453125,-1.0,compute-bound control,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Stream upper (adaptive),python,stream,94568935.36120535,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Stream upper (lines=1000),python,stream,73642544.03811868,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Stream upper (lines=10000),python,stream,96467560.5133123,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op 1-worker (adaptive),python,map,188665949.66040686,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op 1-worker (lines=1000),python,map,112209729.13757557,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+No-op 1-worker (lines=10000),python,map,188095110.58551034,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Memory upper (lines=1000),python,map,0,390.64453125,-1.0,"peak RSS, clean process, exact run",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Memory upper (lines=10000),python,map,0,390.64453125,-1.0,"peak RSS, clean process, exact run",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Memory upper (lines=100000),python,map,0,390.64453125,-1.0,"peak RSS, clean process, exact run",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Per-batch cost (lines=100),python,measure,0,0,-1.0,1.14µs/batch × 100000 batches,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Per-batch cost (lines=1000),python,measure,0,0,-1.0,5.65µs/batch × 10000 batches,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Per-batch cost (lines=10000),python,measure,0,0,-1.0,54.76µs/batch × 1000 batches,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Per-batch cost (lines=100000),python,measure,0,0,-1.0,516.08µs/batch × 210 batches,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Per-batch cost (adaptive),python,measure,0,0,-1.0,22.97µs/batch × 2442 batches,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ordered vs unordered (stream),python,stream,87395308.5014013,390.64453125,-1.0,ratio=1.11x (unordered=97053643/s),28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python upper (lines=100),python,map,36128384.48282548,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python upper (lines=1000),python,map,70382669.87245536,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Python upper (adaptive),python,map,78543503.10433507,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
 RSS flat (no output),python,run,0,0.0,-1.0,"input 1->8MB, parent peak grew 0MB",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
 RSS output-sized (map),python,map,0,0.0,-1.0,"output 1->4MB, parent peak grew 0MB (collect-all)",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-"RSS bounded (stream, slow)",python,stream,0,174.390625,-1.0,"50MB output, slow consumer; parent peak, not output size",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-RSS amplification (map),python,map,0,174.390625,-1.0,"2MB in, 10MB out (collect-all)",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-RSS in-process (map),python,map,0,174.390625,-1.0,2442 batches exact; rate in throughput suite,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Healthy baseline,python,map,74213460.14697951,174.390625,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-10% failures (retry+poison),python,map,81135973.7338354,174.390625,-1.0,-9% vs healthy (skipped payload work),28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-100% failures (all poison),python,map,164770629.0604144,174.390625,-1.0,completes; every batch poisoned,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Serial Python (no-op),serial,baseline,27393002.350610465,174.390625,-1.0,I/O bound,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Serial Python (upper),serial,baseline,9779880.713788938,624.32421875,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-multiprocessing.Pool (upper),mp,baseline,1227369.0785285372,624.32421875,-1.0,small scale; per-line pickling,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun.map vs baselines,python,map,70354932.54397637,1227.23828125,-1.0,"7.1x vs serial, 21.5x vs mp.Pool (mp single-trial)",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-JSONL ingestion,python,map,3593675.2139932816,1227.23828125,26.574013140867052,json.loads per record,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Filter + transform,python,map,31372080.529956806,1227.23828125,-1.0,grep-like + upper per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-Aggregation (sum),python,map,49571739.088244095,1227.23828125,-1.0,int parse + sum per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+"RSS bounded (stream, slow)",python,stream,0,390.64453125,-1.0,"50MB output, slow consumer; parent peak, not output size",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+RSS amplification (map),python,map,0,390.64453125,-1.0,"2MB in, 10MB out (collect-all)",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+RSS in-process (map),python,map,0,390.64453125,-1.0,2442 batches exact; rate in throughput suite,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Healthy baseline,python,map,80576373.75641753,390.64453125,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+10% failures (retry+poison),python,map,87072025.43357955,390.64453125,-1.0,-7% vs healthy (skipped payload work),28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+100% failures (all poison),python,map,188066429.04253194,390.64453125,-1.0,completes; every batch poisoned,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Serial Python (no-op),serial,baseline,30115752.12159253,390.64453125,-1.0,I/O bound,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Serial Python (upper),serial,baseline,9636092.875427391,719.5234375,-1.0,,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+multiprocessing.Pool (upper),mp,baseline,1973834.338997092,719.5234375,-1.0,small scale; per-line pickling,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun.map vs baselines,python,map,75388107.2141379,1294.8984375,-1.0,"8.0x vs serial, 23.4x vs mp.Pool (mp single-trial)",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+JSONL ingestion,python,map,3656472.749970801,1294.8984375,27.259613904889328,json.loads per record,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Filter + transform,python,map,31422200.729727473,1294.8984375,-1.0,grep-like + upper per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+Aggregation (sum),python,map,51522664.23692119,1294.8984375,-1.0,int parse + sum per batch,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64

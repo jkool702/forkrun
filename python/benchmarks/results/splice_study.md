@@ -2,7 +2,7 @@
 
 Command: `python3 python/benchmarks/run_all.py --scale medium --trials 3
 --filter "splice,bytes_mode"` (plus 10M-line probes below).
-Hardware: 28c Intel i9-7940X. Engine v3.5.2. Date: 2026-09-20.
+Hardware: 28c Intel i9-7940X. Engine v3.6.0. Date: 2026-09-25.
 
 ## Verdict up front
 
@@ -19,12 +19,12 @@ breakthrough. All numbers below, no exceptions.
 
 | Mode              | Lines/s | vs lines=1000 |
 |-------------------|---------|---------------|
-| lines=1000        | 99.3M   | baseline      |
-| bytes=64KB        | 108.8M  | 1.10×         |
-| bytes=256KB       | 108.7M  | 1.09×         |
-| bytes=512KB       | 107.3M  | 1.08×         |
-| bytes=1MB         | 108.9M  | 1.10×         |
-| bytes=4MB         | 108.1M  | 1.09×         |
+| lines=1000        | 121.1M  | baseline      |
+| bytes=64KB        | 132.8M  | 1.10×         |
+| bytes=256KB       | 131.8M  | 1.09×         |
+| bytes=512KB       | 127.1M  | 1.05×         |
+| bytes=1MB         | 128.5M  | 1.06×         |
+| bytes=4MB         | 125.8M  | 1.04×         |
 
 Flat across 64× size range: byte-batch count doesn't matter at 1M
 lines (fixed bring-up dominates).
@@ -33,8 +33,8 @@ lines (fixed bring-up dominates).
 
 | Mode              | Lines/s | vs lines=1000 |
 |-------------------|---------|---------------|
-| lines=1000        | 161M    | baseline      |
-| bytes=64–4096KB   | ~209–218M | ~1.33×      |
+| lines=1000        | 168M    | baseline      |
+| bytes=64–4096KB   | ~175–190M | ~1.04–1.12× |
 
 Byte mode helps (+33%) — boundary detection costs real money at
 scale, but removing it only buys a third, not 10×. Worker dispatch
@@ -46,19 +46,19 @@ binds next.
 
 | Mode                    | Lines/s | Notes              |
 |-------------------------|---------|--------------------|
-| Python passthrough      | 50.3M   | bytes(data)/batch  |
-| Splice 64KB             | 52.6M   |                    |
-| Splice 512KB            | 56.2M   |                    |
-| Splice 1024KB           | 54.1M   |                    |
-| Splice 512KB (stream)   | 59.7M   | pipelined drain    |
+| Python passthrough      | 62.1M   | bytes(data)/batch  |
+| Splice 64KB             | 56.8M   |                    |
+| Splice 512KB            | 60.0M   |                    |
+| Splice 1024KB           | 61.0M   |                    |
+| Splice 512KB (stream)   | 81.2M   | pipelined drain    |
 
 ### 10M lines
 
 | Mode                    | Lines/s |
 |-------------------------|---------|
-| Python passthrough      | 61M     |
-| Splice 64–1024KB        | 54–61M  |
-| Splice stream           | 84M     |
+| Python passthrough      | 73.4M   |
+| Splice 64–1024KB        | 70–80M  |
+| Splice stream           | 91.7M   |
 
 Splice ≈ Python passthrough (both parent-bound: spill + scan +
 Python-side record parse). Stream-splice leads (84M) by pipelining
@@ -87,11 +87,11 @@ stdout streaming, no collect-parse).
 
 | Mode | 10M-line rate | Binds on |
 |------|---------------|----------|
-| lines=N + Python | ~161M | scan (boundaries) + dispatch |
-| bytes=N + Python | ~214M | worker dispatch (claim/ack loop) |
-| mode="splice" | ~60M* | parent spill/scan/parse (same as above) |
-| splice stream | ~84M | drain pipelining helps |
-| Python passthrough | ~61M | same parent bound |
+| lines=N + Python | ~168M | scan (boundaries) + dispatch |
+| bytes=N + Python | ~186M | worker dispatch (claim/ack loop) |
+| mode="splice" | ~70–80M* | parent spill/scan/parse (same as above) |
+| splice stream | ~92M | drain pipelining helps |
+| Python passthrough | ~73M | same parent bound |
 
 (*) splice moves full bytes out (130MB); no-op comparisons are
 apples-to-oranges — passthrough is the honest baseline.

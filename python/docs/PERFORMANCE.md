@@ -1,17 +1,28 @@
 # forkrun Performance (what to expect)
 
 Same-boot measured, 28 workers, 5M records, `order="index"`
-(full tables: `python/benchmarks/results/numa_5m_study.md`).
-Your box will differ; relative order is the robust reading.
+(full tables: `python/benchmarks/results/numa_5m_study.md`
+and `RELEASE_v3.6.0.md`). Your box will differ; relative
+order is the robust reading. All rows below are steady
+state (5M+ records / 500k+ docs — bring-up amortized); see
+the release table for the 20k–50k startup-latency
+microbenchmarks and why they read lower.
 
 ## Throughput (records/s)
 
 | Workload (size) | C plugin | Python UDF | Executor | Pool |
 |---|---|---|---|---|
-| Light (508MB) | 5.8M | 1.6M | 1.7M | 1.5M |
-| Medium (2.2GB) | 2.3M | 703k | 755k | 757k |
-| Heavy (6.4GB) | 710k | 90k | 93k | 92k |
-| Tokenize (500k docs) | 342k docs/s | 148k | 158k | 157k |
+| Light (508MB) | 6.5M | 1.7M | 1.7M | 1.5M |
+| Medium (2.2GB) | 2.3M | 730k | 755k | 757k |
+| Heavy (6.4GB) | 670k | 95k | 93k | 92k |
+| Tokenize (500k docs) | 305k docs/s | 139k | 168k | 160k |
+
+forkrun cells re-measured 2026-09-25 (engine v3.6.0, UMA,
+28w, exact totals); Executor/Pool cells are W-PY29-era and
+stable (those codebases didn't change — same standing:
+Python UDF at Executor parity, C plugin 2–4× the best
+UDF). absolutes carry ±10–20% run variance; relative order
+is the robust reading.
 
 forkrun C wins 2.8–7.6×; forkrun Python runs at
 `ProcessPoolExecutor` parity. Cost model (profiled):

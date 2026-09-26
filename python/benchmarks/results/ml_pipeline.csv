@@ -1,118 +1,124 @@
 name,mode,path,lines_per_s,rss_mb,cpu_pct,notes,hardware
-serial-light,serial,udf,146917.98320308045,230.61328125,-1.0,"out=50000/50000 records, 0.0GB in",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-light-1w,pool,udf,107045.33700388831,242.3125,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-light-1w,executor,udf,141323.91845940298,243.9765625,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-light-1w,hf_datasets,udf,53279.55763684604,275.5078125,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-light-1w,forkrun,udf,134563.17001267997,277.94921875,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-light-1w,plugin,c-callback,538289.8662920027,277.96484375,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-light-2w,pool,udf,239247.27182799845,287.875,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-light-2w,executor,udf,257270.46461580825,288.984375,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-light-2w,hf_datasets,udf,66980.93675567055,288.984375,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-light-2w,forkrun,udf,255964.67833610196,288.984375,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-light-2w,plugin,c-callback,849044.3326630467,288.984375,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-light-4w,pool,udf,450569.10843120085,291.26171875,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-light-4w,executor,udf,466437.8296742625,291.26171875,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-light-4w,hf_datasets,udf,69423.40009144178,291.26171875,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-light-4w,forkrun,udf,394039.248496091,291.26171875,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-light-4w,plugin,c-callback,1047011.5733792535,291.26171875,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-light-8w,pool,udf,781008.0951750877,291.45703125,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-light-8w,executor,udf,800338.6134539639,291.82421875,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-light-8w,hf_datasets,udf,80640.40845142397,291.82421875,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-light-8w,forkrun,udf,580401.1553603372,291.82421875,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-light-8w,plugin,c-callback,928413.5927587594,291.82421875,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-light-14w,pool,udf,856367.9318904004,292.23828125,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-light-14w,executor,udf,1023133.4987405399,292.23828125,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-light-14w,hf_datasets,udf,73224.03802094227,292.23828125,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-light-14w,forkrun,udf,514261.4574836374,292.23828125,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-light-14w,plugin,c-callback,686774.8196668198,292.23828125,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-light-28w,pool,udf,709876.4386232301,292.546875,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-light-28w,executor,udf,852808.6397920834,292.546875,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-light-28w,hf_datasets,udf,67053.18716396014,292.546875,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-light-28w,forkrun,udf,359831.935130739,292.546875,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-light-28w,plugin,c-callback,391209.48837864527,292.546875,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-light-1w,ray,udf,15681.491027782422,341.4140625,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-light-2w,ray,udf,30645.49187272544,341.4140625,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-light-4w,ray,udf,38817.6578049729,341.4140625,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-light-8w,ray,udf,42902.16879354094,342.6796875,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-light-14w,ray,udf,42780.3445605433,345.5234375,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-light-28w,ray,udf,42943.42010279702,348.3671875,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-serial-medium,serial,udf,63487.23741354957,396.0546875,-1.0,"out=49974/50000 records, 0.0GB in",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-medium-1w,pool,udf,55555.314198178836,421.05859375,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-medium-1w,executor,udf,62027.79895889996,433.03515625,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-medium-1w,hf_datasets,udf,28665.825807397632,504.80078125,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-medium-1w,forkrun,udf,61887.68126990384,504.80078125,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-medium-1w,plugin,c-callback,157363.09903283452,504.80078125,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-medium-2w,pool,udf,91498.91420394245,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-medium-2w,executor,udf,117100.50858974399,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-medium-2w,hf_datasets,udf,46525.61688307975,504.80078125,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-medium-2w,forkrun,udf,116297.34765173,504.80078125,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-medium-2w,plugin,c-callback,288418.4476108815,504.80078125,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-medium-4w,pool,udf,199381.2259592392,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-medium-4w,executor,udf,226862.75842791368,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-medium-4w,hf_datasets,udf,60146.40226048227,504.80078125,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-medium-4w,forkrun,udf,194642.1039247003,504.80078125,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-medium-4w,plugin,c-callback,417881.8741355017,504.80078125,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-medium-8w,pool,udf,291371.5524512091,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-medium-8w,executor,udf,376331.87142132566,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-medium-8w,hf_datasets,udf,62453.01316139237,504.80078125,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-medium-8w,forkrun,udf,283963.74176693545,504.80078125,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-medium-8w,plugin,c-callback,481238.0769469874,504.80078125,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-medium-14w,pool,udf,457430.8744289724,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-medium-14w,executor,udf,454316.66482566524,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-medium-14w,hf_datasets,udf,58704.16788430562,504.80078125,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-medium-14w,forkrun,udf,292985.2349819251,504.80078125,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-medium-14w,plugin,c-callback,366824.6352902793,504.80078125,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-medium-28w,pool,udf,452883.29053324304,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-medium-28w,executor,udf,550694.8718238886,504.80078125,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-medium-28w,hf_datasets,udf,48277.11602248415,504.80078125,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-medium-28w,forkrun,udf,198774.5058766614,504.80078125,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-medium-28w,plugin,c-callback,188522.0314143476,504.80078125,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-medium-1w,ray,udf,14230.901411362402,504.80078125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-medium-2w,ray,udf,16577.209957861505,504.80078125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-medium-4w,ray,udf,29335.970824990254,504.80078125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-medium-8w,ray,udf,37689.57391164166,504.80078125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-medium-14w,ray,udf,27731.446741737513,504.80078125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-medium-28w,ray,udf,37663.91019184639,504.80078125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-polars-native,polars,native,2222404.8548702826,605.1015625,-1.0,"out=49974 rows, lazy/streaming NDJSON",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-duckdb-native,duckdb,native,189439.30939042658,605.1015625,-1.0,"out=49974 rows, SQL/JSON",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-serial-heavy,serial,udf,6369.036542210995,605.1015625,-1.0,"out=49979/50000 records, 0.1GB in",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-heavy-1w,pool,udf,6767.687776987124,605.1015625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-heavy-1w,executor,udf,6984.4229847788865,637.953125,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-heavy-1w,hf_datasets,udf,5431.012442364306,795.80859375,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-heavy-1w,forkrun,udf,6396.17847310072,795.80859375,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-heavy-1w,plugin,c-callback,50202.65279742978,795.80859375,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-heavy-2w,pool,udf,12313.86937199212,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-heavy-2w,executor,udf,12791.51788677654,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-heavy-2w,hf_datasets,udf,10817.749001620547,795.80859375,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-heavy-2w,forkrun,udf,13407.850961795055,795.80859375,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-heavy-2w,plugin,c-callback,94614.20269986338,795.80859375,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-heavy-4w,pool,udf,25412.851983481778,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-heavy-4w,executor,udf,27443.419112647673,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-heavy-4w,hf_datasets,udf,18601.019447867595,795.80859375,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-heavy-4w,forkrun,udf,25834.455416122775,795.80859375,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-heavy-4w,plugin,c-callback,161116.78889195784,795.80859375,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-heavy-8w,pool,udf,50119.22054355627,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-heavy-8w,executor,udf,50918.451704803425,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-heavy-8w,hf_datasets,udf,27872.530678069266,795.80859375,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-heavy-8w,forkrun,udf,46969.313545063385,795.80859375,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-heavy-8w,plugin,c-callback,216205.86357779594,795.80859375,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-heavy-14w,pool,udf,70438.91096876143,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-heavy-14w,executor,udf,79116.84749182279,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-heavy-14w,hf_datasets,udf,32670.50707248332,795.80859375,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-heavy-14w,forkrun,udf,68193.27114957361,795.80859375,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-heavy-14w,plugin,c-callback,208169.90087745903,795.80859375,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-heavy-28w,pool,udf,83539.26863120132,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-executor-heavy-28w,executor,udf,84461.66602107555,795.80859375,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-hf-datasets-heavy-28w,hf_datasets,udf,28398.49025312138,795.80859375,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-heavy-28w,forkrun,udf,66645.74638947568,795.80859375,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-plugin-heavy-28w,plugin,c-callback,118201.6434110092,795.80859375,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-heavy-1w,ray,udf,4805.49360999965,795.80859375,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-heavy-2w,ray,udf,5616.508513251004,795.80859375,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-heavy-4w,ray,udf,10415.014396203767,795.80859375,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-heavy-8w,ray,udf,13727.99490105951,795.80859375,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-heavy-14w,ray,udf,17090.61797176512,795.80859375,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-heavy-28w,ray,udf,11867.65150427185,795.80859375,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-forkrun-fault-8w,forkrun,fault,0,795.80859375,-1.0,"survived, out=4887 records; crash-once SIGSEGV@idx5 + transient x5 all fired; orchestrator respawn; output truncated at hole",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-pool-fault-8w,pool,fault,0,795.80859375,-1.0,survived=False; POOL-DIED TimeoutError ,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-ray-fault-8w,ray,fault,0,795.80859375,-1.0,"survived, count=49525; crash-once SIGSEGV, task retry",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
-plugin-fault-8w,plugin,fault,0,795.80859375,-1.0,"survived, out=4887 records; crash-once SIGSEGV@idx5 fired; orchestrator respawn; output truncated at hole",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+serial-light,serial,udf,152390.39141516786,227.33984375,-1.0,"out=50000/50000 records, 0.0GB in",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-light-1w,pool,udf,118181.27629014984,241.62890625,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-light-1w,executor,udf,137424.23324502262,243.09765625,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-light-1w,hf_datasets,udf,50981.941248117735,273.6875,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-light-1w,forkrun,udf,130911.77308660805,273.6875,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-light-1w,plugin,c-callback,520595.17185916024,273.6875,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-light-2w,pool,udf,192313.7021067017,286.44140625,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-light-2w,executor,udf,253519.90972021752,287.89453125,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-light-2w,hf_datasets,udf,70484.7864809577,287.89453125,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-light-2w,forkrun,udf,239047.03345627867,287.89453125,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-light-2w,plugin,c-callback,803181.3305699942,287.89453125,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-light-4w,pool,udf,424573.70443581784,288.58203125,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-light-4w,executor,udf,481455.60590566054,288.75,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-light-4w,hf_datasets,udf,75101.66061160919,288.75,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-light-4w,forkrun,udf,426230.67202217376,288.75,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-light-4w,plugin,c-callback,1093304.1266557763,288.75,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-light-8w,pool,udf,646452.259602808,288.75,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-light-8w,executor,udf,810468.3068769563,288.75,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-light-8w,hf_datasets,udf,77838.18283619938,288.75,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-light-8w,forkrun,udf,588237.3287301684,288.75,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-light-8w,plugin,c-callback,996901.7688536901,288.75,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-light-14w,pool,udf,842437.95341511,288.75,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-light-14w,executor,udf,1050025.5040026868,288.75,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-light-14w,hf_datasets,udf,77677.83576579278,288.75,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-light-14w,forkrun,udf,434146.19567989756,288.75,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-light-14w,plugin,c-callback,687358.3999006804,288.75,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-light-28w,pool,udf,678572.5845644024,289.3515625,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-light-28w,executor,udf,926359.8912605569,289.44921875,-1.0,out=50000/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-light-28w,hf_datasets,udf,64213.94689862886,289.44921875,-1.0,"out=50000/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-light-28w,forkrun,udf,372847.63356386725,289.44921875,-1.0,"out=50000/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-light-28w,plugin,c-callback,406287.02519946557,289.44921875,-1.0,"out=50000/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-light-1w,ray,udf,16298.814713335305,338.89453125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-light-2w,ray,udf,31316.59721023486,338.89453125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-light-4w,ray,udf,38165.64348635292,338.89453125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-light-8w,ray,udf,43155.19660206296,338.89453125,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-light-14w,ray,udf,43117.60623917299,339.12109375,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-light-28w,ray,udf,43684.231527407035,342.40234375,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+serial-medium,serial,udf,62709.045070023036,390.08203125,-1.0,"out=49974/50000 records, 0.0GB in",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-medium-1w,pool,udf,52289.47210409974,416.171875,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-medium-1w,executor,udf,66460.11094588148,428.19921875,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-medium-1w,hf_datasets,udf,31375.73777897631,500.7734375,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-medium-1w,forkrun,udf,63958.64722429064,500.7734375,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-medium-1w,plugin,c-callback,154336.6456789488,500.7734375,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-yyjson-medium-1w,plugin,c-callback-yyjson,247677.92778298055,500.7734375,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-medium-2w,pool,udf,76381.01461160774,500.7734375,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-medium-2w,executor,udf,118522.2061555473,500.7734375,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-medium-2w,hf_datasets,udf,46143.786936033954,500.7734375,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-medium-2w,forkrun,udf,112038.91658410776,500.7734375,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-medium-2w,plugin,c-callback,272364.129143018,500.7734375,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-yyjson-medium-2w,plugin,c-callback-yyjson,403785.06503564253,500.7734375,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-medium-4w,pool,udf,146215.90218654886,503.75390625,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-medium-4w,executor,udf,232951.61647976874,503.75390625,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-medium-4w,hf_datasets,udf,57511.631451203175,503.75390625,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-medium-4w,forkrun,udf,196337.05423789233,503.75390625,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-medium-4w,plugin,c-callback,411364.11805750633,503.75390625,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-yyjson-medium-4w,plugin,c-callback-yyjson,545361.8161095118,503.75390625,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-medium-8w,pool,udf,288920.9934083443,503.75390625,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-medium-8w,executor,udf,407593.8849259171,503.75390625,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-medium-8w,hf_datasets,udf,62306.14067417058,503.75390625,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-medium-8w,forkrun,udf,284704.99025202316,503.75390625,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-medium-8w,plugin,c-callback,485754.08118411363,503.75390625,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-yyjson-medium-8w,plugin,c-callback-yyjson,529899.2808102617,503.75390625,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-medium-14w,pool,udf,545583.5372876072,505.43359375,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-medium-14w,executor,udf,620074.8308520861,505.43359375,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-medium-14w,hf_datasets,udf,60646.65644889025,505.43359375,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-medium-14w,forkrun,udf,317540.68851185904,505.43359375,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-medium-14w,plugin,c-callback,375380.6453717752,505.43359375,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-yyjson-medium-14w,plugin,c-callback-yyjson,390969.81093399593,505.43359375,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-medium-28w,pool,udf,491880.8087886739,505.9921875,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-medium-28w,executor,udf,595493.1435036454,505.9921875,-1.0,out=49974/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-medium-28w,hf_datasets,udf,50415.43869259852,505.9921875,-1.0,"out=49974/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-medium-28w,forkrun,udf,203685.50010465417,505.9921875,-1.0,"out=49974/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-medium-28w,plugin,c-callback,229661.08881080782,505.9921875,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-yyjson-medium-28w,plugin,c-callback-yyjson,240656.77736660076,505.9921875,-1.0,"out=49974/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-medium-1w,ray,udf,14732.074239078627,505.9921875,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-medium-2w,ray,udf,17780.806274221402,505.9921875,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-medium-4w,ray,udf,36051.12034443672,505.9921875,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-medium-8w,ray,udf,27718.29528628054,505.9921875,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-medium-14w,ray,udf,25951.15223753953,505.9921875,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-medium-28w,ray,udf,39252.211026583755,505.9921875,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+polars-native,polars,native,2367069.6304330043,614.25,-1.0,"out=49974 rows, lazy/streaming NDJSON",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+duckdb-native,duckdb,native,190850.30214342388,614.25,-1.0,"out=49974 rows, SQL/JSON",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+serial-heavy,serial,udf,6461.2811875568605,614.25,-1.0,"out=49979/50000 records, 0.1GB in",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-heavy-1w,pool,udf,7553.143686718872,614.25,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-heavy-1w,executor,udf,7522.0456203298345,641.53125,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-heavy-1w,hf_datasets,udf,6121.043817530522,789.47265625,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-heavy-1w,forkrun,udf,6712.584980441964,789.47265625,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-heavy-1w,plugin,c-callback,51989.895468505725,789.47265625,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-heavy-2w,pool,udf,13260.573461380012,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-heavy-2w,executor,udf,13707.358333065305,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-heavy-2w,hf_datasets,udf,10756.612977896837,789.47265625,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-heavy-2w,forkrun,udf,13446.111897681807,789.47265625,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-heavy-2w,plugin,c-callback,97710.43272468702,789.47265625,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-heavy-4w,pool,udf,26120.0518403003,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-heavy-4w,executor,udf,26485.907018703732,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-heavy-4w,hf_datasets,udf,19091.450428622524,789.47265625,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-heavy-4w,forkrun,udf,26013.15661282493,789.47265625,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-heavy-4w,plugin,c-callback,161846.066473628,789.47265625,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-heavy-8w,pool,udf,50900.04078567034,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-heavy-8w,executor,udf,51324.71485911696,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-heavy-8w,hf_datasets,udf,27749.354822725003,789.47265625,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-heavy-8w,forkrun,udf,47220.581419908915,789.47265625,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-heavy-8w,plugin,c-callback,216511.2154356096,789.47265625,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-heavy-14w,pool,udf,72933.40150968535,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-heavy-14w,executor,udf,76711.8873267129,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-heavy-14w,hf_datasets,udf,31952.217457707946,789.47265625,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-heavy-14w,forkrun,udf,68974.53368774203,789.47265625,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-heavy-14w,plugin,c-callback,213206.47922812946,789.47265625,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-heavy-28w,pool,udf,87612.73303372174,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+executor-heavy-28w,executor,udf,90491.67895512038,789.47265625,-1.0,out=49979/50000 records,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+hf-datasets-heavy-28w,hf_datasets,udf,29267.18207187525,789.47265625,-1.0,"out=49979/50000 of 50000 text rows, batched=1000",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-heavy-28w,forkrun,udf,69469.32092568988,789.47265625,-1.0,"out=49979/50000 records, order=index",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-plugin-heavy-28w,plugin,c-callback,123449.04179179888,789.47265625,-1.0,"out=49979/50000 records, frozen ABI",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-heavy-1w,ray,udf,4886.794699846221,789.47265625,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-heavy-2w,ray,udf,5550.983016560608,789.47265625,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-heavy-4w,ray,udf,9844.650201068795,789.47265625,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-heavy-8w,ray,udf,12251.228348890074,789.47265625,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-heavy-14w,ray,udf,22688.815494382314,789.47265625,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-heavy-28w,ray,udf,23956.181108983346,789.47265625,-1.0,"out=50000/50000 records, pandas batches, startup=3s",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+forkrun-fault-8w,forkrun,fault,0,789.47265625,-1.0,"survived, out=47780 records; crash-once SIGSEGV@idx5 + transient x5 all fired; orchestrator respawn; output truncated at hole",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+pool-fault-8w,pool,fault,0,789.47265625,-1.0,survived=False; POOL-DIED TimeoutError ,28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+ray-fault-8w,ray,fault,0,789.47265625,-1.0,"survived, count=49525; crash-once SIGSEGV, task retry",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
+plugin-fault-8w,plugin,fault,0,789.47265625,-1.0,"survived, out=47780 records; crash-once SIGSEGV@idx5 fired; orchestrator respawn; output truncated at hole",28c/Intel(R) Core(TM) i9-7940X CPU @ Linux 7.1.13-200.fc44.x86_64
