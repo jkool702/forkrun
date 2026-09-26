@@ -1712,6 +1712,33 @@ struct SharedState {
 
   uint64_t chunk_queue[META_RING_SIZE];
 
+  /* F-NUMA1: per-node indexer progress (last fully consumed chunk
+   * major, relaxed). The ingest meta-lifetime bound reads this to
+   * keep the global publish frontier within META_RING_SIZE/2 of the
+   * oldest indexer-unread chunk, so a ChunkMeta slot can never be
+   * recycled (same slot mod META_RING_SIZE) before every reader is
+   * done with it. Without the bound, a stalled node holds
+   * claimed-but-unread chunks while the frontier laps it by a full
+   * ring: readers then stamp batches with a future major (dup keys
+   * + gap at the victim major → the C orderer drops the tail,
+   * silent partial output, exit 0). Published once per consumed
+   * chunk; reset to 0 at init (conservative: pins the first 2048). */
+  uint64_t indexer_major ALIGNED(CACHE_LINE);
+  uint8_t _pad_indexer_major[CACHE_LINE - sizeof(uint64_t)];
+
+  /* F-NUMA1: per-node scanner progress (latest successfully claimed
+   * chunk major, relaxed). The ingest meta-lifetime bound pins on
+   * min(indexer_major, scan_claim_major): the indexer can race far
+   * ahead of its scanner (fast pread search vs shield-stalled scan),
+   * so indexer progress alone does not bound the scanner's reads —
+   * nine consecutive +4096-stale first-reads were observed on a node
+   * whose indexer had long moved on. Published at every successful
+   * claim (with the meta snapshot); abandon paths (F15 over-claim
+   * continue) publish nothing, leaving a conservative stale-low pin
+   * that self-heals on the next claim. */
+  uint64_t scan_claim_major ALIGNED(CACHE_LINE);
+  uint8_t _pad_scan_claim_major[CACHE_LINE - sizeof(uint64_t)];
+
   uint64_t read_idx ALIGNED(CACHE_LINE);
   uint8_t _pad_read_idx[CACHE_LINE - sizeof(uint64_t)];
 
@@ -2318,6 +2345,8 @@ static int ring_init_main(int argc, char **argv) {
       atomic_store_relaxed(&state[n].chunk_queue_head, 0);
       atomic_store_relaxed(&state[n].chunk_ready_head, 0);
       atomic_store_relaxed(&state[n].chunk_queue_tail, 0);
+      atomic_store_relaxed(&state[n].indexer_major, 0);
+      atomic_store_relaxed(&state[n].scan_claim_major, 0);
       atomic_store_relaxed(&state[n].read_idx, 0);
       atomic_store_relaxed(&state[n].write_idx, 0);
       atomic_store_relaxed(&state[n].ingest_complete, 0);
@@ -3051,6 +3080,68 @@ static int ring_numa_ingest_main(int argc, char **argv) {
       }
     }
 
+    /* F-NUMA1: meta-ring lifetime bound. The queue caps above bound
+     * per-node UNCLAIMED depth, but a node stalled with
+     * claimed-but-unread chunks lets the global publish frontier lap
+     * it by a full META_RING_SIZE: its ChunkMeta slot (same slot mod
+     * 4096) is then recycled before it is read, and batches get
+     * stamped with a future major (dup keys + gap at the victim
+     * major → the C orderer drops the tail: silent partial output,
+     * exit 0). Pin the frontier to < META_RING_SIZE/2 past the
+     * oldest unread chunk on any node with unfinished work (head >
+     * ready: published but indexer-unconsumed). The pin is
+     * min(indexer_major, scan_claim_major): the indexer alone is
+     * not sufficient, because it can race thousands of chunks ahead
+     * of its shield-stalled scanner (observed: nine consecutive
+     * +4096-stale first-reads on a node whose indexer had moved on;
+     * scanner progress is published at every successful claim).
+     * Both markers are conservative (stale reads stall more, never
+     * less). Nodes with empty queues don't pin; EOF bypasses via the
+     * break paths below, so this cannot deadlock a draining
+     * pipeline. Scanner mid-chunk re-reads are covered separately by
+     * the per-chunk meta snapshot (snapshot-once at claim, never
+     * re-dereference meta-> for the same chunk). */
+    while (1) {
+      uint64_t oldest = current_major;
+      bool pinned = false;
+      for (int i = 0; i < num_nodes; i++) {
+        /* F-NUMA1: qualify on ANY unfinished work — indexer-unread
+         * (head > ready) OR scanner-unclaimed (head > tail). The
+         * second clause is load-bearing: a node whose indexer
+         * drained fully (head == ready) but whose scanner stalled
+         * pre-claim holds unclaimed tickets whose metas still need
+         * protection; head == ready alone would wrongly exclude it
+         * (observed: thief stole such a ticket 4096 generations
+         * later and read recycled meta). Drained nodes
+         * (head <= min(ready, tail)) never pin. Liveness: a stuck
+         * node's queue is drained by thieves (stealing advances
+         * tail), which unpins it — backpressure, not deadlock. */
+        uint64_t h = atomic_load_relaxed(&state[i].chunk_queue_head);
+        uint64_t r = atomic_load_acquire(&state[i].chunk_ready_head);
+        uint64_t t = atomic_load_relaxed(&state[i].chunk_queue_tail);
+        uint64_t done = (r < t) ? r : t;
+        if (h > done) {
+          uint64_t m = atomic_load_relaxed(&state[i].indexer_major);
+          uint64_t s = atomic_load_relaxed(&state[i].scan_claim_major);
+          uint64_t pin = (m < s) ? m : s;
+          if (!pinned || pin < oldest) {
+            oldest = pin;
+            pinned = true;
+          }
+        }
+      }
+      if (!pinned || current_major < oldest + (META_RING_SIZE / 2))
+        break;
+
+      NUMA_CHECK_SCANNERS_DONE();
+
+      struct pollfd pfd = {.fd = evfd_chunk_done, .events = POLLIN};
+      if (poll(&pfd, 1, 10) > 0) {
+        uint64_t v;
+        sys_read(evfd_chunk_done, &v, 8);
+      }
+    }
+
     // INFINITE EVENT-DRIVEN INGEST GATE
     struct pollfd pfds_gate[2] = {
         {.fd = infd, .events = POLLIN},
@@ -3510,7 +3601,17 @@ static int ring_indexer_numa_main(int argc, char **argv) {
 
     uint64_t major_id = t_state->chunk_queue[my_idx & META_RING_MASK];
     struct ChunkMeta *meta = &g_state->meta_ring[major_id & META_RING_MASK];
-    uint64_t chunk_end = meta->raw_offset + meta->raw_length;
+    /* F-NUMA1: per-chunk meta snapshot (same doctrine as the scanner
+     * snapshot below). The backward search loop re-reads the range
+     * per 64KB window; a mid-search slot recycle would otherwise
+     * search a future chunk's bytes. Snapshot once at the gated
+     * point (queue entry observed), use locals thereafter. WRITES
+     * (actual_end publish) still go through meta (own slot,
+     * indexer-pinned while unread — see the ingest lifetime bound);
+     * prev-chunk reads stay as-is (documented note at the bound). */
+    uint64_t snap_raw_start = meta->raw_offset;
+    uint64_t snap_raw_len = meta->raw_length;
+    uint64_t chunk_end = snap_raw_start + snap_raw_len;
     uint64_t actual_end = chunk_end;
 
     // PHYSICS FIX: Bypass delimiter search in byte mode!
@@ -3521,11 +3622,11 @@ static int ring_indexer_numa_main(int argc, char **argv) {
     // (indexer); -L = neither (scanner publishes in the handoff chain).
     if (!byte_mode && !exact_lines_l) {
       uint64_t search_end = chunk_end;
-      while (search_end > meta->raw_offset) {
+      while (search_end > snap_raw_start) {
         uint64_t window_size =
-            (search_end - meta->raw_offset > sizeof(tail_buf))
+            (search_end - snap_raw_start > sizeof(tail_buf))
                 ? sizeof(tail_buf)
-                : (search_end - meta->raw_offset);
+                : (search_end - snap_raw_start);
         uint64_t window_start = search_end - window_size;
         ssize_t n;
         do {
@@ -3543,13 +3644,13 @@ static int ring_indexer_numa_main(int argc, char **argv) {
           break;
         search_end = window_start;
       }
-      if (search_end <= meta->raw_offset) {
-        if (meta->raw_length == 0) {
+      if (search_end <= snap_raw_start) {
+        if (snap_raw_len == 0) {
           // Genuine EOF sentinel (see the ingest-side EOF meta): raw_offset
           // here IS the true end-of-stream byte offset, so this really is the
           // final boundary -- emit it as-is so any trailing unterminated data
           // still gets flushed as the last record.
-          actual_end = meta->raw_offset;
+          actual_end = snap_raw_start;
         } else {
           // A real chunk (raw_length > 0) searched its entire window and found
           // no delimiter at all -- a single logical line spans at least this
@@ -3591,6 +3692,12 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       uint64_t v = mw;
       sys_write(evfd_meta_arr[my_node_id], &v, 8);
     }
+    /* F-NUMA1: publish consumed-through major for the ingest
+     * meta-lifetime bound (see ring_numa_ingest_main). Relaxed is
+     * sufficient: ingest uses it only as a conservative progress
+     * hint (a stale read stalls more, never less). major_id is the
+     * chunk just fully indexed above. */
+    atomic_store_relaxed(&t_state->indexer_major, major_id);
     my_idx++;
   }
 }
@@ -3910,6 +4017,17 @@ core_scanner_loop(int fd_or_memfd, int my_node_id, int fd_spawn, int num_nodes, 
   uint64_t Lmax = local_state->cfg_batch_max;
   uint64_t W = local_state->cfg_w_start;
   uint64_t W_max_val = local_state->cfg_w_max;
+  /* F-NUMA1: per-chunk meta snapshot staging (NUMA only; UMA paths
+   * leave these zero and never read them). Assigned at each NUMA
+   * chunk claim (claim+ready point); all downstream uses of the
+   * chunk descriptor in the same iteration read these, never meta->
+   * again — a mid-scan meta-slot recycle must not restamp batches.
+   * Function scope (not per-iteration): the byte/line tail paths
+   * below run outside the claim block. */
+  uint64_t snap_major = 0;
+  uint64_t snap_raw_start = 0;
+  uint64_t snap_raw_len = 0;
+  uint32_t snap_target = 0;
   uint64_t BytesMax = local_state->cfg_line_max;
   int64_t timeout_us = local_state->cfg_timeout_us;
   bool byte_mode = local_state->mode_byte;
@@ -4339,6 +4457,16 @@ uint64_t chunk_bounds[16] = {0};
       uint64_t claim_idx =
           __atomic_fetch_add(&t_state->chunk_queue_tail, 1, __ATOMIC_SEQ_CST);
 
+      /* F-NUMA1 TEMPORARY (revert): claim timestamp for the
+       * claim-to-snapshot latency probe (see below). */
+      uint64_t _claim_t_us = 0;
+      {
+        struct timespec _cts;
+        clock_gettime(CLOCK_MONOTONIC, &_cts);
+        _claim_t_us = (uint64_t)_cts.tv_sec * 1000000ULL +
+            (uint64_t)_cts.tv_nsec / 1000ULL;
+      }
+
       uint64_t _one = 1;
       sys_write(evfd_chunk_done, &_one, 8);
 
@@ -4407,6 +4535,65 @@ uint64_t chunk_bounds[16] = {0};
       uint64_t current_major = t_state->chunk_queue[claim_idx & META_RING_MASK];
       meta = &g_state->meta_ring[current_major & META_RING_MASK];
 
+      /* F-NUMA1: per-chunk meta snapshot. Every read of this chunk's
+       * descriptor below uses these locals, never meta-> again for
+       * the same chunk: a mid-scan recycle of the meta slot (same
+       * slot mod META_RING_SIZE, now bounded by the ingest lifetime
+       * bound but still possible across long shield stalls) would
+       * otherwise stamp later batches with a future major (dup keys
+       * + gap → silent orderer tail-drop). The snapshot instant is
+       * the claim+ready point, when the slot is provably this
+       * chunk's (indexer published ready for exactly this claim).
+       * WRITES (actual_end/cum_lines publish) still go through meta
+       * (own slot, indexer-pinned while unread — see the ingest
+       * lifetime bound). */
+      snap_major = meta->major_id;
+      snap_raw_start = meta->raw_offset;
+      snap_raw_len = meta->raw_length;
+      snap_target = meta->target_node;
+
+      /* F-NUMA1: publish scanner progress for the ingest
+       * meta-lifetime bound (see ring_numa_ingest_main). Every
+       * successful claim publishes here (with the snapshot above);
+       * abandon paths never reach this point, leaving a
+       * conservative stale-low pin. Relaxed store (progress hint). */
+      atomic_store_relaxed(&state[my_node_id].scan_claim_major,
+                           current_major);
+
+      /* F-NUMA1 tripwire (env-gated, zero cost when off): log queue
+       * vs meta major mismatches at claim time (first-read
+       * staleness). The lifetime bound above should make this
+       * unreachable; any firing is a loud diagnostic with node,
+       * claim, and both majors. The env flag is cached per process
+       * (one getenv for the run's lifetime, not per chunk).
+       * TEMPORARY EXTENSION (revert): also log claim-to-snapshot
+       * latency to distinguish scheduler-delayed readers (seconds)
+       * from model errors (microseconds). */
+      {
+        static int _mm_diag = -1;
+        if (_mm_diag < 0) {
+          const char *_cd = getenv("FORKRUN_DIAG_NUMA1");
+          _mm_diag = (_cd && _cd[0] == '1') ? 1 : 0;
+        }
+        if (_mm_diag) {
+          struct timespec _ts;
+          clock_gettime(CLOCK_MONOTONIC, &_ts);
+          uint64_t _now_us = (uint64_t)_ts.tv_sec * 1000000ULL +
+              (uint64_t)_ts.tv_nsec / 1000ULL;
+          uint64_t _wait_us = (_now_us >= _claim_t_us) ?
+              (_now_us - _claim_t_us) : 0;
+          if (current_major != snap_major || _wait_us > 100000) {
+            fprintf(stderr,
+                    "forkrun [DIAG-NUMA1] MISMATCH node=%d steal=%d "
+                    "claim=%" PRIu64 " queue-major=%" PRIu64
+                    " meta-major=%" PRIu64 " claim-to-snap-us=%" PRIu64
+                    "\n",
+                    my_node_id, (steal_target != my_node_id) ? 1 : 0,
+                    claim_idx, current_major, snap_major, _wait_us);
+          }
+        }
+      }
+
       // ====================================================================
       // v3.5.0: -L (exact lines) NUMA PATH — the Scanner-Handoff Chain.
       //
@@ -4433,8 +4620,8 @@ uint64_t chunk_bounds[16] = {0};
       // for data a scanner that exited will not produce.
       // ====================================================================
       if (is_numa && exact_lines && !byte_mode) {
-        uint64_t raw_start = meta->raw_offset;
-        uint64_t raw_end = raw_start + meta->raw_length;
+        uint64_t raw_start = snap_raw_start;
+        uint64_t raw_end = raw_start + snap_raw_len;
 
         // ---- (1) GATE: predecessor handoff, with cutoff escape ----
         uint64_t prev_cum = 0;
@@ -4532,7 +4719,7 @@ uint64_t chunk_bounds[16] = {0};
             prev_cum = limit_items; // sentinel: at/past the limit
           batch_start = raw_start;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, 0, raw_start, _skipped);
+          UNIFIED_SCANNER_FLUSH(0, true, snap_major, 0, raw_start, _skipped);
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
@@ -4542,10 +4729,10 @@ uint64_t chunk_bounds[16] = {0};
           atomic_store_release(&meta->cum_lines, prev_cum | FLAG_CUM_READY);
           __atomic_thread_fence(__ATOMIC_SEQ_CST);
           uint32_t mw = atomic_load_relaxed(
-              &state[meta->target_node].meta_waiters);
+              &state[snap_target].meta_waiters);
           if (mw > 0) {
             uint64_t v = mw;
-            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+            sys_write(evfd_meta_arr[snap_target], &v, 8);
           }
           UNIFIED_ADAPTIVE_COMMIT(true);
           continue;
@@ -4554,12 +4741,12 @@ uint64_t chunk_bounds[16] = {0};
         // ---- (3) EOF SENTINEL CHUNK: flush the pending partial batch ----
         // raw_length == 0 iff this is the ingest EOF sentinel; its
         // raw_offset is the true end-of-stream byte offset.
-        if (meta->raw_length == 0) {
-          uint64_t eof_off = meta->raw_offset;
+        if (snap_raw_len == 0) {
+          uint64_t eof_off = snap_raw_start;
           batch_start = handoff_start;
           bool _skipped = false;
           // Flush pending carried lines; zero-length sentinel (0) when none pending
-          UNIFIED_SCANNER_FLUSH(prev_cum % L, true, meta->major_id, 0, eof_off, _skipped);
+          UNIFIED_SCANNER_FLUSH(prev_cum % L, true, snap_major, 0, eof_off, _skipped);
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
@@ -4573,10 +4760,10 @@ uint64_t chunk_bounds[16] = {0};
           atomic_store_release(&meta->cum_lines, prev_cum | FLAG_CUM_READY);
           __atomic_thread_fence(__ATOMIC_SEQ_CST);
           uint32_t mw = atomic_load_relaxed(
-              &state[meta->target_node].meta_waiters);
+              &state[snap_target].meta_waiters);
           if (mw > 0) {
             uint64_t v = mw;
-            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+            sys_write(evfd_meta_arr[snap_target], &v, 8);
           }
           UNIFIED_ADAPTIVE_COMMIT(true);
           continue;
@@ -4652,7 +4839,7 @@ uint64_t chunk_bounds[16] = {0};
                     bool _is_last = (_bnd >= raw_end);
                     bool _skipped = false;
                     UNIFIED_SCANNER_FLUSH(lines_in_batch, _is_last,
-                                          meta->major_id, l_minor, _bnd,
+                                          snap_major, l_minor, _bnd,
                                           _skipped);
                     l_minor++;
                     if (_is_last && !_skipped) {
@@ -4666,7 +4853,7 @@ uint64_t chunk_bounds[16] = {0};
                   }
                   l_limit_hit = true;
                   atomic_store_release(&g_state->limit_cutoff_major,
-                                       meta->major_id + 1);
+                                       snap_major + 1);
                   break;
                 }
                 if (need > budget)
@@ -4711,7 +4898,7 @@ uint64_t chunk_bounds[16] = {0};
               uint64_t bnd = buf_base_offset + (uint64_t)(p - buf);
               bool is_last = (bnd >= raw_end);
               bool _skipped = false;
-              UNIFIED_SCANNER_FLUSH(lines_in_batch, is_last, meta->major_id, l_minor, bnd, _skipped);
+              UNIFIED_SCANNER_FLUSH(lines_in_batch, is_last, snap_major, l_minor, bnd, _skipped);
               l_minor++;
               if (is_last && !_skipped) {
                 l_last_flushed = true;
@@ -4729,7 +4916,7 @@ uint64_t chunk_bounds[16] = {0};
                 l_limit_hit = true;
                 // Cutoff BEFORE handoff (same ordering rule as the -n path)
                 atomic_store_release(&g_state->limit_cutoff_major,
-                                     meta->major_id + 1);
+                                     snap_major + 1);
                 break;
               }
             }
@@ -4747,7 +4934,7 @@ uint64_t chunk_bounds[16] = {0};
           // identically — the unified handoff.
           if (!l_last_flushed) {
             bool _skipped = false;
-            UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, l_minor, batch_start, _skipped);
+            UNIFIED_SCANNER_FLUSH(0, true, snap_major, l_minor, batch_start, _skipped);
             if (!_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
@@ -4762,10 +4949,10 @@ uint64_t chunk_bounds[16] = {0};
           atomic_store_release(&meta->cum_lines, my_cum | FLAG_CUM_READY);
           __atomic_thread_fence(__ATOMIC_SEQ_CST);
           uint32_t mw = atomic_load_relaxed(
-              &state[meta->target_node].meta_waiters);
+              &state[snap_target].meta_waiters);
           if (mw > 0) {
             uint64_t v = mw;
-            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+            sys_write(evfd_meta_arr[snap_target], &v, 8);
           }
           if (g_debug)
             fprintf(stderr,
@@ -4824,7 +5011,7 @@ uint64_t chunk_bounds[16] = {0};
             current_p_offset = actual_start;
 
             bool _skipped = false;
-            UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, 0, actual_start, _skipped);
+            UNIFIED_SCANNER_FLUSH(0, true, snap_major, 0, actual_start, _skipped);
             if (!_skipped) {
               chunk_bounds[cb_head & 15] = local_scan_idx;
               cb_head++;
@@ -4832,10 +5019,10 @@ uint64_t chunk_bounds[16] = {0};
             // Propagate cum_lines forward so subsequent chunks also skip cleanly
             atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
-            uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
+            uint32_t mw = atomic_load_relaxed(&state[snap_target].meta_waiters);
             if (mw > 0) {
               uint64_t v = mw;
-              sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+              sys_write(evfd_meta_arr[snap_target], &v, 8);
             }
             UNIFIED_ADAPTIVE_COMMIT(true);
             continue; // Move to next chunk
@@ -4852,7 +5039,7 @@ uint64_t chunk_bounds[16] = {0};
       if (actual_start >= actual_end) {
         batch_start = actual_start;
         bool _skipped = false;
-        UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, 0, actual_start, _skipped);
+        UNIFIED_SCANNER_FLUSH(0, true, snap_major, 0, actual_start, _skipped);
         if (!_skipped) {
           chunk_bounds[cb_head & 15] = local_scan_idx;
           cb_head++;
@@ -4860,10 +5047,10 @@ uint64_t chunk_bounds[16] = {0};
         if (limit_items > 0 && !byte_mode) {
           atomic_store_release(&meta->cum_lines, prev_cum_lines | FLAG_CUM_READY);
           __atomic_thread_fence(__ATOMIC_SEQ_CST);
-          uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
+          uint32_t mw = atomic_load_relaxed(&state[snap_target].meta_waiters);
           if (mw > 0) {
             uint64_t v = mw;
-            sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+            sys_write(evfd_meta_arr[snap_target], &v, 8);
           }
         }
         if (!_skipped) UNIFIED_ADAPTIVE_COMMIT(true);
@@ -4876,7 +5063,7 @@ uint64_t chunk_bounds[16] = {0};
           // Entire chunk past byte limit: emit empty sentinel and continue
           batch_start = actual_start;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(0, true, meta->major_id, 0, actual_start, _skipped);
+          UNIFIED_SCANNER_FLUSH(0, true, snap_major, 0, actual_start, _skipped);
           if (!_skipped) {
             chunk_bounds[cb_head & 15] = local_scan_idx;
             cb_head++;
@@ -5109,7 +5296,7 @@ uint64_t chunk_bounds[16] = {0};
 
           bool is_last = is_numa ? (current_p_offset >= chunk_end) : false;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(0, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, _skipped);
+          UNIFIED_SCANNER_FLUSH(0, is_last, is_numa ? snap_major : 0, minor_idx, current_p_offset, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
@@ -5314,7 +5501,7 @@ uint64_t chunk_bounds[16] = {0};
             limit_reached = true;
 
             // Publish 1-based cutoff signal BEFORE publishing cum_lines
-            atomic_store_release(&g_state->limit_cutoff_major, meta->major_id + 1);
+            atomic_store_release(&g_state->limit_cutoff_major, snap_major + 1);
           }
           chunk_lines_scanned += lines_found;
         }
@@ -5356,7 +5543,7 @@ uint64_t chunk_bounds[16] = {0};
                              ? (current_p_offset >= chunk_end || limit_reached)
                              : false;
           bool _skipped = false;
-          UNIFIED_SCANNER_FLUSH(pending_lines, is_last, is_numa ? meta->major_id : 0, minor_idx, current_p_offset, _skipped);
+          UNIFIED_SCANNER_FLUSH(pending_lines, is_last, is_numa ? snap_major : 0, minor_idx, current_p_offset, _skipped);
           if (is_last)
             chunk_eof_flushed = true;
           if (is_numa) {
@@ -5383,7 +5570,7 @@ uint64_t chunk_bounds[16] = {0};
 
     if (is_numa && !chunk_eof_flushed) {
       bool _skipped = false;
-      UNIFIED_SCANNER_FLUSH(pending_lines, true, meta->major_id, minor_idx, current_p_offset, _skipped);
+      UNIFIED_SCANNER_FLUSH(pending_lines, true, snap_major, minor_idx, current_p_offset, _skipped);
       minor_idx++;
       if (!_skipped) {
         chunk_bounds[cb_head & 15] = local_scan_idx;
@@ -5403,10 +5590,10 @@ uint64_t chunk_bounds[16] = {0};
         uint64_t my_cum_lines = prev_cum_lines + chunk_lines_scanned;
         atomic_store_release(&meta->cum_lines, my_cum_lines | FLAG_CUM_READY);
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        uint32_t mw = atomic_load_relaxed(&state[meta->target_node].meta_waiters);
+        uint32_t mw = atomic_load_relaxed(&state[snap_target].meta_waiters);
         if (mw > 0) {
           uint64_t v = mw;
-          sys_write(evfd_meta_arr[meta->target_node], &v, 8);
+          sys_write(evfd_meta_arr[snap_target], &v, 8);
         }
       }
     }
@@ -6986,6 +7173,8 @@ static int ring_order_main(int argc, char **argv) {
 
   uint64_t expected_major = 0;
   uint32_t expected_minor = 0;
+  /* F-NUMA1 diagnostic counters (read at the EOF summary below). */
+  uint64_t diag_recv = 0, diag_emit = 0;
 
   char pkt_buf[4096];
   size_t buffered = 0;
@@ -7095,6 +7284,7 @@ static int ring_order_main(int argc, char **argv) {
 
     for (size_t i = 0; i < count; i++) {
       struct OrderPacket *op = &ops[i];
+      diag_recv++;
       uint32_t actual_minor = op->minor_idx & ~FLAG_MAJOR_EOF;
       uint64_t op_key = numa_mode ? FR_PACK_KEY(op->major_idx, actual_minor) : op->major_idx;
 
@@ -7167,6 +7357,7 @@ static int ring_order_main(int argc, char **argv) {
           }
           struct HeapNode top;
           heap_pop(heap, &heap_sz, &top);
+          diag_emit++;
           if (memfd_mode) {
             off_t offset = (off_t)top.pkt.off;
             int _emit_rc = forkrun_emit_with_fallback(1, top.pkt.fd, offset, top.pkt.len, use_zerocopy);
@@ -7243,6 +7434,29 @@ static int ring_order_main(int argc, char **argv) {
       free(fd_states); free(heap); free(tracker_heap);
       sigaction(SIGPIPE, &sa_old, NULL);
       return EXECUTION_FAILURE;
+  }
+
+  /* F-NUMA1 diagnostic (env-gated, zero cost when off): ordered-mode
+   * completion summary — received/emitted counts plus the expected
+   * key vs heap leftovers at pipe EOF. Distinguishes gap loss
+   * (expected stuck, heap full) from early exit at a glance. */
+  {
+      const char *_diag = getenv("FORKRUN_DIAG_NUMA1");
+      if (_diag && _diag[0] == '1') {
+          uint64_t _exp_key = numa_mode
+              ? FR_PACK_KEY(expected_major, expected_minor)
+              : expected_major;
+          uint64_t _head_key = heap_sz > 0 ? heap[0].key : ~(uint64_t)0;
+          fprintf(stderr,
+                  "forkrun [DIAG-NUMA1] orderer done: numa=%d "
+                  "recv=%" PRIu64 " emitted=%" PRIu64 " "
+                  "expected=(%" PRIu64 ",%u) heap_left=%d head_key=%" PRIu64 " "
+                  "stdout_broken=%d\n",
+                  numa_mode ? 1 : 0, diag_recv, diag_emit,
+                  expected_major, expected_minor,
+                  heap_sz, _head_key, stdout_broken ? 1 : 0);
+          fflush(stderr);
+      }
   }
 
   for (int i = 0; i < fd_states_cap; i++) {
