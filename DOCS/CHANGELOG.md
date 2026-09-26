@@ -2,6 +2,123 @@
 
 ## v3.6.0 (unreleased)
 
+### NUMA per-node early-exit / silent partial completion (F-NUMA1, W-NUMA1)
+
+- **Symptom:** heavy-20M C-plugin runs under forced-logical `@4`
+  (28 workers, `order="index"`, 26.9GB input) returned silently
+  with ~22–35% of records missing — always a whole orderer-key
+  suffix from one gap major — with no error, no warning, clean
+  exit; `valid ≈ total` in every run. `nodes=1` stable 5/5.
+  Observed 2 of ~10 in the v3.6.0 benchmark re-run.
+- **Reproducer (latent, not a regression — forced-logical `@4` +
+  heavy-20M was never run before v3.6.0; W-PY35 used fake-4/auto;
+  the F-PY-UMA1 diff is verified UMA-path-only): sequential
+  in-process maps (the benchmark-harness shape), or a single map
+  from a ~20GB parent (retained output fattens the parent into
+  the same helper-startup skew). Fresh-small processes never
+  fail. Pre-fix capture rate ~40–80% per in-proc call ≥1.
+- **Root cause (engine, NUMA ChunkMeta lifetime):** a stalled
+  node's claimed-but-unread chunks let the global ingest publish
+  frontier lap it by a full `META_RING_SIZE` (4096). Its ChunkMeta
+  slot (same slot mod 4096) was then recycled before it was read,
+  so batches were stamped with a future major. Key forensics
+  (env-gated ack-key log): every failing run showed ack keys
+  duplicated at exactly `gap + 4096` (ten events across runs,
+  plus hidden downstream gaps at the same offset), each dup pair
+  spanning two nodes. Live mismatch logging later caught the
+  precise shape: `steal=1` claims whose queue-major vs meta-major
+  differ by exactly 4096 with 1–2µs claim-to-snapshot latency
+  (no scheduling delay — the ticket itself was stale: a thief
+  stole a long-orphaned ticket from a stalled victim's queue and
+  read its recycled slot). Per-node queue caps cannot prevent
+  this (they bound unclaimed depth, not claimed-unread lag —
+  and the indexer can race thousands of chunks ahead of its
+  shield-stalled scanner, so indexer progress alone does not
+  bound the scanner's reads). The dup keys sat in the C
+  orderer's heap behind the gap; at pipe EOF the leftovers were
+  freed with rc 0 — silent tail loss. (The orderer has no
+  expected-total by design; it cannot distinguish a gap from a
+  slow producer. Poison/skip paths advance the sequence and are
+  unaffected.)
+- **Fix (engine, surgical):** (1) ingest meta-lifetime bound
+  (`ring_numa_ingest_main`): stall publish while
+  `frontier - min(indexer_major, scan_claim_major) >=
+  META_RING_SIZE/2` over nodes with unfinished work
+  (`head > ready` OR `head > tail` — the second clause is
+  load-bearing: an indexer-drained but scanner-stalled node
+  holds unclaimed tickets whose metas still need protection).
+  New per-node progress markers (`indexer_major`, published per
+  consumed chunk; `scan_claim_major`, published per successful
+  claim — relaxed stores, init 0, conservative on staleness;
+  abandon paths never publish). Nodes with drained queues don't
+  pin; EOF bypasses; staleness stalls more, never less; thieves
+  draining a stuck node's queue unpin it (backpressure, not
+  deadlock). (2) Per-chunk meta snapshot in indexer and
+  scanner: copy `(major_id, raw_offset, raw_length[,
+  target_node])` to stack locals at the gated point and use
+  locals thereafter (publication writes still go through
+  `meta`). Kills the mid-scan re-read class outright; first-read
+  staleness is covered by the bound. No fence/claim/CAS changes;
+  no scanner-macro restructuring; no `try_simd_scan` touch;
+  UMA paths untouched. Measured cost: zero (dt 26.1–28.6s both
+  sides across 60+ heavy runs; bound never fires in healthy
+  operation).
+- **Defense in depth (REQUIRED):** the parent's NUMA completion
+  path (`_execute_numa_locked` map/run and `_execute_numa_stream`
+  stream) now asserts per-node `read_idx == write_idx` before
+  declaring success (`_numa_drain_audit`, read-only
+  `fr_py_diag_node` + `FORKRUN_DIAG_NUMA1` telemetry). Any
+  non-empty unclaimed tail raises `RuntimeError` naming node and
+  indices. Sentinel-only nodes (empty tail, never forked,
+  complete output) are vacuous, not violations. Silent partial
+  completion is now impossible-or-loud on every NUMA path.
+- **Detection story:** benchmark re-run caught it (2/10 silent
+  partials at ~25%); Phase-1 EOF audit exonerated worker claim,
+  scanner finalization, reactor supervision, and fork gating,
+  localizing to publication vs orderer; per-node drain telemetry
+  classified all failures as orderer-side loss with fully
+  drained rings; ack-key forensics gave the +4096 signature
+  (dup + gap, cross-node slot pairs); a 4× meta-ring diagnostic
+  build went 6/6 clean (wrap confirmed); queue-vs-meta mismatch
+  logging caught nine consecutive stale first-reads live, then
+  zero in ~600k subsequent fixed claims.
+- **Gates (final code: snapshot + dual-progress bound with
+  scanner-unread qualification + drain guard):** heavy-20M `@4`
+  in-proc quads (the failing shape) **32/32 clean**
+  (pre-fix ~40–80% partials in the same shape); fresh-fat
+  parents 4/4 clean; `nodes=1` heavy-20M 2/2 exact; F-PY-UMA1
+  forensic loop 10/10 clean (unaffected path); mismatch count 0
+  across all fixed runs (~600k claims; 9 caught on the interim
+  single-qualification build, which motivated the scanner
+  marker). Interim builds: in-proc quads 32/32
+  (single-qualification), 35/35 across fix variants.
+  Fail-loud guard proven (fault-injection unit test
+  `test_numa_drain_guard.py` 5/5 green; would-be silent
+  partials raise with node+indices);
+  `test_numa.py` + `test_numa_recovery.py` green (incl. the
+  empty-tail exemption). Residual known flakes (C-drain framing,
+  reactor-ingest multiset, T10b) out of scope, unchanged.
+- **Regression tests:** `python/tests/test_numa_drain_guard.py`
+  (guard logic: violation/empty-tail/missing-symbol,
+  engine-free). No scaled-down live reproducer exists by
+  construction: the recycle needs a 4096-chunk lap (<8GB inputs
+  cannot wrap the meta ring); the heavy-20M gate above is the
+  lock-in (manual, documented here — too slow for the suite).
+- **Docs:** INVARIANTS §17 (ChunkMeta lifetime); EOF_PROTOCOL §7
+  (parent-side completion rule); DOCS_ALL mirrors; this entry.
+- **Mover thread (F-PY-UMA1b):** positional audit of the NUMA
+  ingress path is clean (explicit offsets or pre-fork only);
+  filed as follow-up; not implicated here.
+- **Engine status:** surgical unfreeze (NUMA ingest/indexer/
+  scanner + 2 relaxed u64/node; shim additive read-only entry
+  points; Python parent guard). Red lines held (no CAS loops,
+  no index rollback, no fence changes, no macro
+  restructuring, no `try_simd_scan` touch, twins in lockstep,
+  canary stub list unchanged). Blob rebuild via CI auto-build
+  (required before release: the shipped `frun.bash` still
+  carries the pre-fix engine); bash suites re-run against the
+  rebuilt blob at release time.
+
 ### UMA materialized execution race fix (F-PY-UMA1, W-PY42 v2)
 
 - **Root cause:** the UMA scanner seeded its coordinate base from

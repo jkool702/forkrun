@@ -233,6 +233,23 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### NUMA per-node early-exit / silent partial completion (F-NUMA1, W-NUMA1)
+
+- Heavy-20M C-plugin runs under forced-logical `@4` returned
+  silently with ~22–35% of records missing (whole orderer-key
+  suffix from one gap major; exit 0, no warnings). Root cause:
+  engine NUMA ChunkMeta lifetime — a stalled node's
+  claimed-but-unread chunks let the ingest frontier lap it by a
+  full 4096-slot ring, recycling its meta slot before it was
+  read (batches stamped with a future major; dup keys at
+  `gap + 4096`; orderer drops the tail). Fixed by an ingest
+  meta-lifetime bound (frontier within 2048 of the oldest unread
+  chunk, indexer + scanner progress markers) plus a per-chunk
+  meta snapshot in indexer/scanner, plus a parent-side per-node
+  drain assert (fail-loud). 32/32 in-proc heavy gates clean;
+  mismatch tripwire at zero. Surgical engine unfreeze; blob
+  rebuild via CI auto-build before release.
+
 ### UMA materialized execution race fix (F-PY-UMA1, W-PY42 v2)
 
 - UMA scanner seeded its base from fork-shared `SEEK_CUR`,
@@ -2462,7 +2479,7 @@ Background: Computational Geophysics & Inverse Theory
 
 This document defines the formal protocol by which forkrun detects end-of-input and guarantees clean termination without lost wakeups, premature exits, or deadlocks. This protocol is a first-principles design, not derived from existing systems.
 
-> **Scope:** This protocol governs the Scanner→Worker boundary (`ring_claim`, `core_scanner_loop`). The Ingest→Scanner boundary uses a simplified 2-condition variant of the same rules.
+> **Scope:** This protocol governs the Scanner→Worker boundary (`ring_claim`, `core_scanner_loop`). The Ingest→Scanner boundary uses a simplified 2-condition variant of the same rules. §7 governs the Parent→Caller boundary (per-node drain verification before declaring NUMA completion).
 
 ---
 
@@ -2660,7 +2677,36 @@ Use this checklist when modifying any code in `ring_claim_main()`, `core_scanner
 
 ---
 
-## §7. Relationship to Other Documents
+## §7. Parent-Side Completion (NUMA; F-NUMA1)
+
+§§1–6 govern the Scanner→Worker boundary. The Parent→Caller
+boundary needs its own rule, because worker liveness alone cannot
+prove completeness: the reactor returns when no spawned worker is
+alive, but a node that never got workers (fork-gate miss) or whose
+batches were never claimed leaves no trace in worker statuses —
+the parent would parse a short output and return success.
+
+**Rule.** Before declaring NUMA completion (blocking or
+streaming), the parent must verify per-node drain:
+`read_idx == write_idx` on every node. A node whose unclaimed tail
+is entirely empty (EOF sentinel / zero-length tail: never counted
+by the fork gate, never claimed, contributes no output) is
+vacuous. Any other `read_idx != write_idx` raises `RuntimeError`
+naming the node and indices — silent partial completion becomes
+impossible-or-loud (the W-PY22 doctrine: refused instead of
+silent loss).
+
+**Scope note.** This rule verifies *drain*, not *publication*:
+a node whose ring drained exactly (`read == write`, including
+via the vacuous empty tail) passes even if its share looks small
+— publication completeness (every input byte assigned and
+published) is enforced separately by the pipeline's own EOF
+machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
+(INVARIANTS §17), not by this check.
+
+---
+
+## §8. Relationship to Other Documents
 
 | Document | Relationship |
 |---|---|
@@ -3229,9 +3275,65 @@ the window between query and use.
 
 ---
 
-## 17. Checklist Summary
+## 17. NUMA ChunkMeta Lifetime (F-NUMA1)
 
-If sections §1–17 above remain true, **forkrun is correct** — regardless of:
+**Invariant**
+A `ChunkMeta` slot must not be recycled (overwritten by chunk
+`major + META_RING_SIZE`) while any indexer or scanner can still
+read it. Concretely: the ingest publish frontier stays within
+`META_RING_SIZE/2` of the oldest unread chunk on any node with
+unfinished work, and every scanner reads a chunk's descriptor
+exactly once (snapshot at claim+ready) and never re-dereferences
+`meta->` for the same chunk.
+
+**Origin**
+Heavy-20M C-plugin runs under forced-logical `@4` completed
+cleanly (exit 0, no warnings) with ~22–31% of records missing —
+almost always a whole orderer-key suffix from one gap major. Key
+forensics: every failing run showed ack keys duplicated at exactly
+`gap + META_RING_SIZE` (ten events across runs, plus hidden
+downstream gaps at the same offset), each dup pair spanning two
+nodes. A stalled node's claimed-but-unread chunks let the global
+publish frontier lap it by a full meta ring: its slot (same slot
+mod 4096) was recycled before it was read, so batches were stamped
+with a future major. The dup keys sat in the C orderer's heap
+behind the gap; at pipe EOF the leftovers were freed with rc 0 —
+silent tail loss. Per-node queue caps cannot prevent this (they
+bound unclaimed depth, not claimed-unread lag, and the indexer can
+race thousands of chunks ahead of its shield-stalled scanner).
+Reproducer shape: sequential in-process maps (or one map from a
+~20GB parent — retained output slows helper startup into the same
+skew), never fresh-small processes.
+
+**Enforced by**
+(1) `indexer_major` + `scan_claim_major` per-node progress
+markers (relaxed stores; published per consumed chunk / per
+successful claim) and the ingest lifetime bound
+(`ring_numa_ingest_main`): stall publish while
+`frontier - min(marker) >= META_RING_SIZE/2` over nodes with
+`head > ready`. Indexer progress alone is insufficient (observed:
+nine consecutive +4096-stale first-reads on a node whose indexer
+had moved on) — the scanner marker is load-bearing. Nodes with
+empty queues don't pin; EOF bypasses; staleness stalls more, never
+less. (2) Per-chunk meta snapshot in indexer and scanner: copy
+`(major_id, raw_offset, raw_length[, target_node])` to stack
+locals at the gated point and use locals thereafter. Publication
+writes (`actual_end`, `cum_lines`) still go through `meta` (own
+slot, indexer-pinned while unread).
+
+**Audit Rule**
+❌ Any `meta->` read past the claim+ready snapshot point for the
+same chunk (per-flush `major_id`, search-window bounds,
+EOF-sentinel range). ❌ Any publish path that lets the global
+major frontier exceed the oldest unread chunk's generation window.
+New readers of `ChunkMeta` must either snapshot or prove their
+window is pinned by the lifetime bound.
+
+---
+
+## 18. Checklist Summary
+
+If sections §1–18 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement
