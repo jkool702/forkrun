@@ -102,13 +102,14 @@ Per-worker shape (5M): light C 3.9M (8w) → 6.3M (14w) → 6.5M
 (28w); medium C 983k → 1.32M → 1.62M; heavy C 359k → 516k →
 611k. Python UDF at Executor parity on all variants.
 Natively-expressible work goes to Polars (4.4× best UDF);
-DuckDB loses to forkrun-UDF. Fault injection: forkrun
-survives truncated (4887-record clean prefix, respawn works,
-signal death skips escrow — parent-side replay flagged
-follow-up); Ray recovers completely (task retry); Pool hangs
-(TimeoutError, no retry). Recovery tax single-digit % (burst
-28×SIGKILL ~20% at 28w; lone SIGSEGV ~0–3%).
-(`DOCS/python/AI_benchmark_results.md`, engine v3.5.2+W-PY29.)
+DuckDB loses to forkrun-UDF. Fault injection: forkrun recovers 
+autonomously with 100% byte-identical output to clean runs via 
+WorkerTxn recovery (reverting partial output via ftruncate and 
+re-executing orphans via escrow; burst 28×SIGKILL storm costs 
+~18–20% on 28w; lone SIGSEGV costs ~0–3%); Ray recovers via 
+task retry; Pool hangs indefinitely (TimeoutError, no retry).. 
+Recovery tax single-digit % (burst 28×SIGKILL ~20% at 28w; 
+lone SIGSEGV ~0–3%). (`DOCS/python/AI_benchmark_results.md`, engine v3.5.2+W-PY29.)
 
 ## 4. Python ML pipeline, 50k records — STARTUP-LATENCY MICROBENCHMARK (W-PY24 scale)
 
