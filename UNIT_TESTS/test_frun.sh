@@ -933,6 +933,68 @@ run_test "Timeout flush: 50ms timeout delivers trickle input" \
 "a
 b"
 
+# 6. CALLER IFS ROBUSTNESS (S2)
+# A hostile/inherited IFS=: must not break frun: the wrapper scans
+# argv for function names, then splits ${FORKRUN_EXTRA_FUNCS}
+# unquoted at build time (pre-fix: " mydouble" never splits under
+# IFS=:, declare misses, zero output, exit 0). Entry normalization
+# + RETURN-trap restore covers it. NOTE: FORKRUN_EXTRA_FUNCS must
+# NOT be pre-set here — the explicit single-word form needs no
+# splitting and would pass even pre-fix (vacuous).
+# 10 iterations in one test (fast: -l 1 exact batches, 5 lines each).
+run_test "Caller IFS=: full output x10 (S2)" \
+"for _i in {1..10}; do IFS=:; mydouble() { echo \$((\$1 * 2)); }; export -f mydouble 2>/dev/null; seq 5 | frun -k -l 1 mydouble || exit 1; done" \
+"2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10
+2
+4
+6
+8
+10"
+
 
 
 # NUMA Telemetry and Prefix Invariants (5-arg signature):

@@ -12,6 +12,17 @@ frun() {
 # FLAGS:  [-j <W>] [-l <L>][-b <bytes>] [-k|-u] [-s|-U] [-i|-I] [-d <char>] [-E] [-v] [-h]
 #  HELP:  . frun.bash && frun --help
 
+    # W-REL3/R19: normalize caller IFS. Unquoted expansions below
+    # (e.g. ${FORKRUN_EXTRA_FUNCS} at wrapper-build time) mis-split
+    # under a hostile/inherited IFS=: (zero output, exit 0). Save,
+    # normalize to default, restore on every return via RETURN trap
+    # (separate from the EXIT trap installed later; exec wipes traps
+    # anyway). Unset-IFS callers restore as default-set, which
+    # splits identically.
+    local _fr_saved_ifs="${IFS-$' \t\n'}"
+    IFS=$' \t\n'
+    trap 'IFS="$_fr_saved_ifs"' RETURN
+
     # --- MULTI-INPUT PARAMETER SWEEP (::: / ::::) INTERCEPT ---
     local _fr_has_sweep=false
     local -a _FR_SWEEP_ORIG=()
