@@ -2,6 +2,38 @@
 
 ## v3.6.0 (unreleased)
 
+### Executor duplication safety net — consistency manifest + checker (W-REL3a)
+
+- **Tripwire, not refactor:** the ten near-identical executors in
+  `python/forkrun/run.py` are the known root cause of the
+  P1–P5/B1/C4 class ("executor #N forgot something executor #1
+  remembered") and stay uncollapsed until v3.7 (W-REL4 #2,
+  owner-ratified). Until then, `dev/supervisor/
+  EXECUTOR_MANIFEST.md` (+ machine-readable
+  `python/tests/executor_manifest.json`) enumerates all ten with
+  their paths served and the eight invariants each must hold
+  (CUDA guard, RLock lifetime, fd hygiene, escrow discipline,
+  resume gating, ftruncate rollback, EOF verification, teardown
+  completeness) — each generalized from a defect that already
+  happened — with intentional deviations named and reasoned
+  (splice fail-loud non-deposit, discard-mode no-orderer,
+  NUMA/splice/run resume refusals).
+- **Mechanical checker** (`python/tests/
+  test_executor_consistency.py`, in the release gate): behavioral
+  probes, not AST — routing calls per executor, lock
+  acquire/release counts (exhaust + abandon), fd baselines
+  (success + injected failure), CUDA refusal on all ten
+  routings, resume refused-combos, one deposit loud-path
+  instance, drain-guard link, manifest-integrity self-check.
+  Failures name the executor and invariant. Deep ×10 coverage
+  stays in the linked lock-in tests.
+- **§4 cross-check:** every W-REL2 fix pattern grep-verified
+  across all siblings — findings fixed: none (one intentional
+  deviation recorded, zero behavior changes).
+- This manifest is W-REL4's design document (the enumeration
+  the collapse starts from) — the work is the refactor's first
+  phase, pulled forward to where it is cheap.
+
 ### Recovery is now the default — reactor supervision without opt-in (B1, W-REL1/R1)
 
 - **Defect:** QUICKSTART/FAULT_TOLERANCE/STREAMING/COMPARISON promised
