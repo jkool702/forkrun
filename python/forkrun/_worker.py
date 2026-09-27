@@ -654,10 +654,29 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                 else:
                     blob = _coerce_result(ret)
                     if blob is not None and out_fd is not None:
-                        _write_all(out_fd, _HDR.pack(batch.batch_index,
-                                                     len(blob)))
-                        if blob:
-                            _write_all(out_fd, blob)
+                        # W-REL2/R13: pre-record end for rollback —
+                        # the C-loop pattern verbatim
+                        # (_shim.c payload_error): truncate any
+                        # partial record on write failure
+                        # (append-once rule), so framing stays
+                        # parseable under ENOSPC; the shared failure
+                        # path below then retries the batch whole.
+                        try:
+                            _emit_end = os.lseek(out_fd, 0, os.SEEK_END)
+                        except OSError:
+                            _emit_end = -1
+                        try:
+                            _write_all(out_fd, _HDR.pack(
+                                batch.batch_index, len(blob)))
+                            if blob:
+                                _write_all(out_fd, blob)
+                        except OSError:
+                            if _emit_end >= 0:
+                                try:
+                                    os.ftruncate(out_fd, _emit_end)
+                                except OSError:
+                                    pass
+                            raise
                         # W-PY29: complete record durable — advance the
                         # rollback frontier (best-effort; emit/ordered
                         # paths advance in C anyway).

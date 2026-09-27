@@ -19,6 +19,7 @@ All tests deterministic: single-worker ordering where batch identity
 matters; byte/prefix properties (never timing) elsewhere.
 """
 
+import errno
 import os
 import sys
 import tempfile
@@ -245,6 +246,58 @@ class TestWorkerException(unittest.TestCase):
                 self.assertEqual(b"".join(out), fh.read())
             assert_no_zombies(self)
         finally:
+            os.unlink(path)
+            if os.path.exists(flag):
+                os.unlink(flag)
+
+
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestEmitRollback(unittest.TestCase):
+    """W-REL2/R13: the pure-Python v0 emit path rolls back partial
+    records on write failure (the C-loop payload_error pattern
+    verbatim: ftruncate to the pre-record end, append-once rule),
+    so framing stays parseable under ENOSPC and the retry
+    completes byte-exact."""
+
+    def test_injected_enospc_recovers_byte_exact(self):
+        # FORKRUN_NO_V1=1 forces the v0 Python writes (the C emit
+        # path already rolls back inside fr_py_emit). The first
+        # >1KB os.write anywhere fails once with ENOSPC (file flag:
+        # once-only across fork; the parent never writes big chunks
+        # via os.write — spill uses pwrite, signals are 16B — so
+        # the fault lands on a worker blob write).
+        old = os.environ.get("FORKRUN_NO_V1")
+        os.environ["FORKRUN_NO_V1"] = "1"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        flag = path + ".enospc"
+        real_write = os.write
+
+        def fail_once(fd, data):
+            if len(data) > 1024 and not os.path.exists(flag):
+                with open(flag, "w") as _fh:
+                    _fh.write("1")
+                raise OSError(errno.ENOSPC, "injected")
+            return real_write(fd, data)
+
+        try:
+            write_lines(path, 20000)
+            with open(path, "rb") as fh:
+                raw = fh.read()
+            import unittest.mock as _mock
+            with _mock.patch("os.write", side_effect=fail_once):
+                out = forkrun.map(lambda b: bytes(b.data), path,
+                                  workers=1, order="index", nodes=1)
+            self.assertTrue(os.path.exists(flag),
+                            "fault never fired — test vacuous")
+            self.assertEqual(b"".join(out), raw)
+            assert_no_zombies(self)
+        finally:
+            if old is None:
+                os.environ.pop("FORKRUN_NO_V1", None)
+            else:
+                os.environ["FORKRUN_NO_V1"] = old
             os.unlink(path)
             if os.path.exists(flag):
                 os.unlink(flag)
