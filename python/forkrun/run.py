@@ -647,6 +647,37 @@ def _resolve_workers(workers):
     return max(1, min(n, 64))
 
 
+def _resolve_workers_numa(workers, num_nodes=1):
+    """Resolve the effective worker count for a topology (W-NUMA2).
+
+    Single normalization point for the F-NUMA2 guarantee: on
+    multi-node topologies (`num_nodes > 1`) a pool smaller than the
+    node count strands born-local rings (RESILIENCE §7.3.1), so the
+    count is bumped to `num_nodes` with one UserWarning stating
+    requested vs effective. UMA (`num_nodes == 1`, the default —
+    callers that can only reach UMA executors omit it) never bumps.
+    Idempotent: an already-effective count passes through silently,
+    so downstream re-resolution never double-warns.
+    """
+    base = _resolve_workers(workers)
+    if num_nodes is None:
+        num_nodes = 1
+    try:
+        num_nodes = int(num_nodes)
+    except (TypeError, ValueError):
+        num_nodes = 1
+    if num_nodes > 1 and base < num_nodes:
+        import warnings as _warnings
+        _warnings.warn(
+            "forkrun: workers=%d raised to %d to cover %d NUMA "
+            "nodes (an uncovered node's born-local ring is never "
+            "claimed — pass workers>=nodes or nodes=1 for "
+            "single-node work)" % (base, num_nodes, num_nodes),
+            UserWarning, stacklevel=3)
+        return num_nodes
+    return base
+
+
 def _coerce_payload(payload, mode):
     """Normalize the payload + mode for the engine path (W-PY8, eager).
 
@@ -782,7 +813,7 @@ def run(payload, source, *, mode="python", sink=None, order="none",
         with _RUN_LOCK:
             _execute_numa_locked(
                 payload, source, sink=sink, lines=lines, bytes_=bytes,
-                workers=_resolve_workers(workers), on_error=on_error,
+                workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
                 collect=False, order=order, mode=mode,
                 numa_map=numa_map_str, num_nodes=num_nodes,
                 node_cpus=node_cpus, c_drain=c_drain)
@@ -798,12 +829,12 @@ def run(payload, source, *, mode="python", sink=None, order="none",
             with _RUN_LOCK:
                 _execute_ingest_reactor_locked(
                     payload, source, sink=sink, lines=lines,
-                    bytes_=bytes, workers=_resolve_workers(workers),
+                    bytes_=bytes, workers=_resolve_workers_numa(workers, num_nodes),
                     on_error=on_error, collect=False, order=order,
                     mode=mode, nodes=nodes, c_drain=c_drain)
             return None
         _execute_ingest(payload, source, sink=sink, lines=lines,
-                        bytes_=bytes, workers=_resolve_workers(workers),
+                        bytes_=bytes, workers=_resolve_workers_numa(workers, num_nodes),
                         on_error=on_error, collect=False, order=order,
                         mode=mode, nodes=nodes, c_drain=c_drain)
         return None
@@ -811,12 +842,12 @@ def run(payload, source, *, mode="python", sink=None, order="none",
         with _RUN_LOCK:
             _execute_reactor_locked(
                 payload, source, sink=sink, lines=lines, bytes_=bytes,
-                workers=_resolve_workers(workers), on_error=on_error,
+                workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
                 collect=False, order=order, mode=mode, nodes=nodes,
                 c_drain=c_drain)
         return None
     _execute(payload, source, sink=sink, lines=lines, bytes_=bytes,
-             workers=_resolve_workers(workers), on_error=on_error,
+             workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
              collect=False, order=order, c_drain=c_drain)
     return None
 
@@ -894,7 +925,7 @@ def map(payload, source, **kwargs):
             return _execute_numa_locked(
                 payload, source, sink=None,
                 lines=kwargs.get("lines"), bytes_=b,
-                workers=_resolve_workers(kwargs.get("workers")),
+                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
                 collect=True, order=order, mode=mode,
                 numa_map=numa_map_str, num_nodes=num_nodes,
@@ -911,13 +942,13 @@ def map(payload, source, **kwargs):
                 with _RUN_LOCK:
                     return _execute_ingest_reactor_locked(
                         None, source, sink=None, lines=None, bytes_=b,
-                        workers=_resolve_workers(kwargs.get("workers")),
+                        workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                         on_error=kwargs.get("on_error", "retry"),
                         collect=True, order=order, mode=mode,
                         nodes=nodes, splice=True, c_drain=c_drain)
             return _execute_ingest(
                 None, source, sink=None, lines=None, bytes_=b,
-                workers=_resolve_workers(kwargs.get("workers")),
+                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
                 collect=True, order=order, mode=mode, nodes=nodes,
                 splice=True, c_drain=c_drain)
@@ -925,13 +956,13 @@ def map(payload, source, **kwargs):
             with _RUN_LOCK:
                 return _execute_reactor_locked(
                     None, source, sink=None, lines=None, bytes_=b,
-                    workers=_resolve_workers(kwargs.get("workers")),
+                    workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                     on_error=kwargs.get("on_error", "retry"),
                     collect=True, order=order, mode=mode, nodes=nodes,
                     splice=True, c_drain=c_drain)
         return _execute(
             None, source, sink=None, lines=None, bytes_=b,
-            workers=_resolve_workers(kwargs.get("workers")),
+            workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
             on_error=kwargs.get("on_error", "retry"),
             collect=True, order=order, mode=mode, nodes=nodes,
             splice=True, c_drain=c_drain)
@@ -952,7 +983,7 @@ def map(payload, source, **kwargs):
                     payload, source, sink=None,
                     lines=kwargs.get("lines"),
                     bytes_=kwargs.get("bytes"),
-                    workers=_resolve_workers(kwargs.get("workers")),
+                    workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                     on_error=kwargs.get("on_error", "retry"),
                     collect=True, order=order, mode=mode, nodes=nodes,
                     c_drain=c_drain,
@@ -961,7 +992,7 @@ def map(payload, source, **kwargs):
         return _execute_ingest(
             payload, source, sink=None, lines=kwargs.get("lines"),
             bytes_=kwargs.get("bytes"),
-            workers=_resolve_workers(kwargs.get("workers")),
+            workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
             on_error=kwargs.get("on_error", "retry"),
             collect=True, order=order, mode=mode, nodes=nodes,
             c_drain=c_drain)
@@ -991,7 +1022,7 @@ def map(payload, source, **kwargs):
             return _execute_reactor_locked(
                 payload, source, sink=None,
                 lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-                workers=_resolve_workers(kwargs.get("workers")),
+                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
                 collect=True, order=order, mode=mode, nodes=nodes,
                 c_drain=c_drain,
@@ -1003,7 +1034,7 @@ def map(payload, source, **kwargs):
                 spawn_argv=spawn_argv)
     results = _execute(payload, source, sink=None,
                        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-                       workers=_resolve_workers(kwargs.get("workers")),
+                       workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                        on_error=kwargs.get("on_error", "retry"),
                        collect=True, order=order,
                        mode=mode, nodes=nodes, c_drain=c_drain,
@@ -1083,7 +1114,7 @@ def stream(payload, source, **kwargs):
             lines=kwargs.get("lines"),
             bytes_=(kwargs.get("bytes") or _SPLICE_DEFAULT_BYTES
                     if engine_mode == "splice" else kwargs.get("bytes")),
-            workers=_resolve_workers(kwargs.get("workers")),
+            workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
             on_error=kwargs.get("on_error", "retry"),
             mode=engine_mode, order=kwargs.get("order", "none"),
             orchestrator=orchestrator, numa_map=numa_map_str,
@@ -1099,14 +1130,14 @@ def stream(payload, source, **kwargs):
             if orchestrator:
                 return _splice_ingest_stream_reactor_gen(
                     source, bytes_=b,
-                    workers=_resolve_workers(kwargs.get("workers")),
+                    workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                     on_error=kwargs.get("on_error", "retry"),
                     nodes=kwargs.get("nodes", "auto"),
                     order=kwargs.get("order", "none"),
                     c_drain=kwargs.get("c_drain", True))
             return _splice_ingest_stream_gen(
                 source, bytes_=b,
-                workers=_resolve_workers(kwargs.get("workers")),
+                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
                 nodes=kwargs.get("nodes", "auto"),
                 order=kwargs.get("order", "none"),
@@ -1114,14 +1145,14 @@ def stream(payload, source, **kwargs):
         if orchestrator:
             return _splice_stream_reactor_gen(
                 source, bytes_=b,
-                workers=_resolve_workers(kwargs.get("workers")),
+                workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
                 nodes=kwargs.get("nodes", "auto"),
                 order=kwargs.get("order", "none"),
                 c_drain=kwargs.get("c_drain", True))
         return _splice_stream_gen(
             source, bytes_=b,
-            workers=_resolve_workers(kwargs.get("workers")),
+            workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
             on_error=kwargs.get("on_error", "retry"),
             nodes=kwargs.get("nodes", "auto"),
             order=kwargs.get("order", "none"),
@@ -1142,7 +1173,7 @@ def _stream_gen(payload, source, **kwargs):
     yield from _execute_streaming(
         payload, source,
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers(kwargs.get("workers")),
+        workers=_resolve_workers_numa(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
@@ -1176,7 +1207,7 @@ def _stream_reactor_gen(payload, source, **kwargs):
     yield from _execute_streaming_reactor(
         payload, source,
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers(kwargs.get("workers")),
+        workers=_resolve_workers_numa(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
@@ -1204,7 +1235,7 @@ def _ingest_stream_reactor_gen(payload, source, **kwargs):
     yield from _execute_ingest_stream_reactor(
         payload, source,
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers(kwargs.get("workers")),
+        workers=_resolve_workers_numa(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
@@ -2388,7 +2419,7 @@ def _ingest_stream_gen(payload, source, **kwargs):
     yield from _execute_ingest_stream(
         payload, source,
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
-        workers=_resolve_workers(kwargs.get("workers")),
+        workers=_resolve_workers_numa(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
@@ -5751,25 +5782,39 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
     Called after reactor supervision returns and BEFORE the parent
     parses output: reads the read-only `fr_py_diag_node` snapshot per
     node (write_idx, read_idx, scanner_finished, chunk_head,
-    chunk_tail) and verifies every node drained
-    (`read_idx == write_idx`). `forked` is the set of nodes that ever
+    chunk_tail) and verifies every node drained (every published
+    slot claimed: `read_idx >= write_idx`). `forked` is the set of nodes that ever
     got workers; `wid_node` maps wid → node (stable for the run).
 
     Telemetry: one stderr block when FORKRUN_DIAG_NUMA1=1 (files, per
     context hygiene — never return payload data, only indices).
 
     Guard (REQUIRED, W-NUMA1 §12 — silent partial completion must
-    become impossible-or-loud): any node with `read != write` AND a
-    non-empty unclaimed tail raises RuntimeError naming the node,
-    ALWAYS (not only under the diag env var). Rationale: a healthy
-    run cannot violate it — workers exit only at EOF (C1+C2+C3 ⇒
-    read==write), and a node that never got workers but was
-    published to (fork-gate miss) is exactly the silent-loss shape.
-    A node whose unclaimed tail is ALL EMPTY (the EOF sentinel /
-    zero-length tail: never counted by the fork gate, never claimed,
-    contributes no output) is vacuous, not a violation — small-scale
-    sentinel-only nodes fork no workers with complete output.
-    Missing symbol (pre-diagnostic .so) disarms both paths silently.
+    become impossible-or-loud): any node with `read < write` (more
+    published than claimed) AND a non-empty unclaimed tail is a
+    violation. Disposition depends on worker coverage: when the
+    pool covers every node (workers >= num_nodes — the only
+    configuration that can drain fully), it raises RuntimeError
+    naming the node, ALWAYS (a fork-gate miss, premature EOF, or
+    publication skip with full coverage is a system fault). When
+    the pool under-covers (workers < num_nodes — the documented
+    RESILIENCE §7.3.1 topology constraint: an unworked node's
+    born-local ring is never claimed), it emits one stderr
+    warning with the same detail and returns the partial output —
+    benchmark sweeps deliberately probe this shape (INCOMPLETE
+    rows), so it must stay observable, not fatal. Rationale: a
+    healthy covered run cannot violate it — workers exit only at
+    EOF (C1+C2+C3 ⇒ every published slot ticketed). The reverse
+    (`read > write`, claim overshoot by exactly the stragglers'
+    FAA tickets past the final publish) is benign by construction:
+    overshoot tickets wait, observe EOF, and exit without ack,
+    output, or order packets — every published slot is still
+    claimed exactly once. A node whose unclaimed tail is ALL EMPTY
+    (the EOF sentinel / zero-length tail: never counted by the fork
+    gate, never claimed, contributes no output) is vacuous, not a
+    violation — small-scale sentinel-only nodes fork no workers
+    with complete output. Missing symbol (pre-diagnostic .so)
+    disarms both paths silently.
     """
     import ctypes as _ctypes
 
@@ -5815,16 +5860,37 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
         except OSError:
             pass
     bad = [(node, w, r) for (node, w, r, _f, _c, _t, te) in rows
-           if w >= 0 and r >= 0 and w != r and te != 1]
-    if bad:
-        detail = ", ".join(
-            "node %d (write_idx=%d != read_idx=%d)" % (n, w, r)
-            for (n, w, r) in bad)
-        raise RuntimeError(
-            "forkrun: NUMA drain incomplete (%s): %d/%d node(s) "
-            "hold unclaimed published batches (%s) — refusing silent "
-            "partial completion" % (label, len(bad), num_nodes,
-                                    detail))
+           if w >= 0 and r >= 0 and w > r and te != 1]
+    if not bad:
+        return
+    detail = ", ".join(
+        "node %d (write_idx=%d != read_idx=%d)" % (n, w, r)
+        for (n, w, r) in bad)
+    try:
+        covered = len(set(wid_node or [])) >= num_nodes
+    except TypeError:
+        covered = False
+    if not covered:
+        # Documented topology constraint (RESILIENCE §7.3.1), not a
+        # system fault: the pool cannot drain nodes it never worked.
+        # Warn loudly (never silent) and return the partial output —
+        # benchmark sweeps probe this shape on purpose.
+        try:
+            os.write(2, ("forkrun [WARN]: NUMA partial completion "
+                         "(%s): %d/%d node(s) unclaimed (%s) — pool "
+                         "covers %d/%d node(s); size workers >= nodes "
+                         "or pass nodes=1 for single-node work\n"
+                         % (label, len(bad), num_nodes, detail,
+                            len(set(wid_node or [])), num_nodes)
+                         ).encode())
+        except OSError:
+            pass
+        return
+    raise RuntimeError(
+        "forkrun: NUMA drain incomplete (%s): %d/%d node(s) "
+        "hold unclaimed published batches (%s) — refusing silent "
+        "partial completion" % (label, len(bad), num_nodes,
+                                detail))
 
 
 def _execute_numa_locked(payload, source, *, sink, lines, bytes_,

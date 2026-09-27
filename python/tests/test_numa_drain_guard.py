@@ -70,8 +70,29 @@ class TestNumaDrainAudit(unittest.TestCase):
         self.assertIn("150", msg)
         self.assertIn("100", msg)
 
-    def test_empty_tail_is_vacuous(self):
-        # write != read but every unclaimed slot empty (sentinel-only
+    def test_undercoverage_warns_instead_of_raising(self):
+        # workers < nodes (documented RESILIENCE §7.3.1 topology
+        # constraint; benchmark sweeps probe it on purpose): loud
+        # stderr warning, partial output returned, no raise.
+        rows = _clean_rows(4)
+        rows[2] = (66, 0, 1, 5, 5, 0)
+        rows[3] = (54, 0, 1, 5, 5, 0)
+        lib = _StubLib(rows)
+        _numa_drain_audit(lib, 4, {0}, [0],
+                          1, label="map/run")
+
+    def test_claim_overshoot_is_benign(self):
+        # read > write by stragglers' FAA tickets past the final
+        # publish: they wait, observe EOF, and exit without ack —
+        # every published slot is still claimed exactly once.
+        rows = _clean_rows()
+        rows[0] = (130, 131, 1, 40, 40, 1)
+        lib = _StubLib(rows)
+        _numa_drain_audit(lib, 4, {0, 1, 2, 3},
+                          [0] * 7 + [1] * 7 + [2] * 7 + [3] * 7,
+                          28, label="map/run")
+
+    def test_empty_tail_is_vacuous(self):        # write != read but every unclaimed slot empty (sentinel-only
         # node that never forked workers): complete output, no raise.
         rows = _clean_rows()
         rows[3] = (1, 0, 1, 1, 1, 1)
