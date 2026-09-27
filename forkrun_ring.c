@@ -7273,7 +7273,23 @@ static int ring_order_main(int argc, char **argv) {
 
   while (1) {
     ssize_t n_read = robust_pipe_read(fd_in, pkt_buf + buffered, sizeof(pkt_buf) - buffered, false);
-    if (n_read <= 0) {
+    if (n_read < 0) {
+      // W-REL3/R16: a read ERROR is not EOF. The old `<= 0` break
+      // treated it as clean EOF, dropping every in-heap packet with
+      // exit 0 (silent loss — including via the Python
+      // ordered+reactor path, which shares ring_order_main).
+      // Abort loudly instead; 0 still means clean EOF below.
+      // (Mirrors the fallow loop's `n_read < 0 → alarm` pattern.)
+      builtin_error("forkrun: orderer order-pipe read failed: %s", strerror(errno));
+      pull_fire_alarm_reason(2);
+      for (int i = 0; i < fd_states_cap; i++) {
+          if (fd_states[i].heap) free(fd_states[i].heap);
+      }
+      free(fd_states); free(heap); free(tracker_heap);
+      sigaction(SIGPIPE, &sa_old, NULL);
+      return EXECUTION_FAILURE;
+    }
+    if (n_read == 0) {
       break;
     }
 
@@ -8140,6 +8156,11 @@ static int ring_copy_main(int argc, char **argv) {
                       continue;
                   }
                   inner_fatal = true; // Hard unrecoverable error
+                  pull_fire_alarm_reason(2); // W-REL3/R15: mirror the
+                  // NUMA twin (ring_numa_ingest_main) — without the
+                  // alarm this path breaks to EOF + SUCCESS (silent
+                  // partial input, exit 0); the alarm fails the run
+                  // loudly downstream instead.
                   break;
               }
               if (atomic_load_acquire(&state[0].scanner_finished)) {
