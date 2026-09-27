@@ -149,9 +149,9 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
     if on_error not in _VALID_ON_ERROR:
         raise ValueError(f"on_error must be one of {_VALID_ON_ERROR}, got {on_error!r}")
     if lines is not None and bytes_ is not None:
-        # F-PORT3: Bash -L+-b parity — line mode wins with a warning
-        # (frun.bash -L overrides -b, delivery preserved), not a hard
-        # error. Ranges are structurally unrepresentable here
+        # F-PORT3: Bash exact-lines-overrides-byte-mode parity — line
+        # mode wins with a warning (stdin delivery preserved), not a
+        # hard error. Ranges are structurally unrepresentable here
         # (lines: int|None — no N:M string form).
         import warnings as _warnings
         _warnings.warn(
