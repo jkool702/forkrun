@@ -1,10 +1,10 @@
 name: Native Ubuntu 24.04 Bash 5.2 vs 5.3
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - "NEW/REFACTOR2.7"
+  workflow_dispatch:
 
 permissions:
   contents: read
