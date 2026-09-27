@@ -302,8 +302,6 @@ jobs:
            exit "$fail"
 
       - name: Substrate canary (zero bash linkage)
-
-      - name: Substrate canary (zero bash linkage)
         shell: bash
         run: |
           # Fedora for everything: the link check runs in fedora:latest
