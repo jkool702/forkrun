@@ -22,7 +22,7 @@ jobs:
         run: |
           set -x
           sudo apt-get update
-          sudo apt-get install -y             bash-builtins             build-essential             file             git             python3             python3-pip             python3-venv
+          sudo apt-get install -y             bash-builtins             bison             build-essential             curl             file             git             python3             python3-pip             python3-venv
 
       - name: Report host/toolchain
         run: |
