@@ -46,11 +46,14 @@ MB/s uses decimal units (1 MB = 10⁶ bytes/s).
 | **forkrun C plugin vs Executor**    | **4.0×**                | **3.0×**                | **7.6×**               |
 | **forkrun C plugin vs Polars**      |           —             | **1.08×**               |          —             |
 
-**[†] Tested worker-failure recovery:** Forkrun automatically recovers from unhandled worker 
-exceptions, `SIGSEGV`, `SIGKILL`, and Linux OOM-kill, completing with 100% byte-exact output 
-(orphaned batches are rolled back via `ftruncate`, re-queued to escrow, and re-executed). 
-Ray Data's tested recovery uses task retry. The other systems were not observed to autonomously 
-recover from the injected worker-failure cases tested here; observed behavior included pipeline 
+**[†] Tested worker-failure recovery:** Forkrun automatically recovers from unhandled worker
+exceptions, `SIGSEGV`, and `SIGKILL`-class deaths — including OOM-kill, which the kernel
+delivers as SIGKILL — completing with 100% byte-exact output on the tested cases
+(orphaned batches are rolled back via `ftruncate`, re-queued to escrow, and re-executed). SIGKILL-tested;
+a cgroup-OOM scenario test is queued (no cgroup-specific test exists yet — the mechanism
+claim is true-by-mechanism, untested-by-scenario).
+Ray Data's tested recovery uses task retry. The other systems were not observed to autonomously
+recover from the injected worker-failure cases tested here; observed behavior included pipeline
 abort (`BrokenProcessPool`), lost state, or indefinite hang.
 
 ## 1. Bash engine (`frun`) vs GNU Parallel — main README, 100M+ lines
@@ -102,14 +105,21 @@ at 5M; 8,360 / 8,342 at 20M), identical both topologies.
 Method: median-of-3 + warmup, `order="index"`; medium C =
 yyjson single-pass plugin.
 
-NOTE† (heavy-20M `@4`, 26.9GB): 2 of ~10 runs returned silently
+NOTE† (heavy-20M `@4`, 26.9GB — RESOLVED as F-NUMA1, see below):
+2 of ~10 runs in the v3.6.0 benchmark re-run returned silently
 with ~25% of records (≈ one node's share) and no error; all
-other runs exact. Suspected per-node worker-fork gating under
-slow-draining huge rings on forced-logical topology — flagged
-for dedicated diagnosis, not a counting artifact (valid≈total
-in every run). `nodes=1` stable 5/5. The ~0.76 rate therefore
-carries low interpretive weight pending diagnosis (dedicated
-work order to follow).
+other runs exact. Root-caused since: a stalled node's
+claimed-but-unread chunks let the ingest publish frontier lap
+it by a full META_RING_SIZE (4096), recycling its ChunkMeta
+slot before it was read (stale-major tickets; dup ack keys at
+exactly gap + 4096). Fixed by the ingest meta-lifetime bound
+(stall publish at frontier − min(indexer, scan-claim) ≥ 2048
+over unfinished nodes) plus per-chunk meta snapshots and the
+parent-side per-node drain-audit guard (loud, never silent).
+Gated by `test_numa_drain_guard.py` and 10/10 byte-exact
+heavy-20M runs on BOTH topologies (fake-4 and UMA boot) with
+zero drain-audit warnings — the ~0.76 rate therefore stands
+as measured, and `nodes=1` was stable throughout.
 
 ## 3. Python ML pipeline vs best-of-the-best — W-PY29 era (same box class, best of 8/14/28w; competitors NOT re-run since)
 
@@ -313,10 +323,9 @@ speed). (`AI_benchmark_results.md` W-PY31–33.)
   re-run; forkrun rows re-measured faster in §2).
 - Counting note (§6 Part-D text) is retired by terminated
   framing: totals now exact, no junction artifact.
-- Known open item (not a counting artifact): heavy-20M `@4`
-  returned silently partial (~25%, one node's share) in 2 of
-  ~10 runs with no error; `nodes=1` stable. Flagged for
-  dedicated per-node fork-gate diagnosis.
+- F-NUMA1 resolved (was: "known open item" — heavy-20M `@4`
+  silently partial ~25% in 2 of ~10): meta-ring lapping fixed
+  and gated as above; the NOTE† stands corrected, not open.
 
 ## v3.6.0 claims (what the tables above support)
 
