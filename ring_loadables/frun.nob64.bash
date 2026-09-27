@@ -1023,7 +1023,7 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.5.2';  return 0  ;;
+            -V|--version|--VERSION)           echo 'forkrun v3.6.0';  return 0  ;;
 
             --) shift; break ;;
 
@@ -1835,22 +1835,12 @@ _forkrun_checkpoint_signal() {
     status=${trap_status:-$?}
     ${_ring_registered} && { ring_worker dec; ring_cleanup_waiter; }
 
-    if (( status != 0 )); then
-        (( RING_NUM_KILLS++ ))'
-        [[ "$order_mode" != "realtime" ]] && worker_func_src+='
-        [[ -n "${fd_out[$RING_WID]:-}" ]] && ring_revert_output "${fd_out[$RING_WID]}"
-        '
-        worker_func_src+='
-        ring_escrow_put "$RING_NODE_ID" "-" "-" "$RING_NUM_KILLS" || {
-            ring_abort
-            exit $status
-        }
-    fi
-
-    # Notify parent that the trap successfully fired
-    if (( status != 0 )); then
-        echo "$RING_WID" >&"${FD_TRAP_ACK_W}" 2>/dev/null
-    fi
+    # W-PY28: cleanup-only EXIT trap. Batch recovery (output revert,
+    # num_kills increment, escrow deposit) is parent-side now: the
+    # parent reads the dead worker WorkerTxn record (published at
+    # claim, cleared at ack) via ring_recover_worker. Doing it here
+    # too would double-deposit escrow. Poison-skip notices (P-lines)
+    # still go over FD_TRAP_ACK_W from the claim loop, not from here.
     exit $status
   '"'"' EXIT
 
@@ -1930,7 +1920,9 @@ W_NODE[$3]=$2
         local -a node_workers W_NODE fd_worker_r fd_worker_w P wID_free
         local -a W_INCARN=()
 
-        local -A trap_ack_pending
+        # W-PY28: trap_ack_pending removed (no trap-ACK grace —
+        # recovery is synchronous parent-side). _poll_timer_cmd stays
+        # (ring_poll takes the timer positionally) but is never armed.
         local _poll_timer_cmd=""
         # NOTE: `local _ret_val` / `local _fr_signalled` are initialized up
         # at the pidfile readiness write (they must predate it); re-declaring
@@ -1976,27 +1968,23 @@ W_NODE[$3]=$2
                     fi
                     break
                     ;;
-                TIMEOUT)
-                    echo "forkrun [FATAL]: Worker $POLL_ARG1 exited non-zero and EXIT trap did not confirm recovery within 3s grace period. Aborting." >&2
-                    ring_abort
-                    NORMAL_EXIT_FLAG=false
-                    _ret_val=2
-                    break
-                    ;;
+                # W-PY28: TIMEOUT arm removed. The 3s trap-ACK grace
+                # period no longer exists — deaths recover
+                # synchronously via ring_recover_worker in
+                # WORKER_DEATH, so no timer is ever armed
+                # (_poll_timer_cmd stays empty) and no TIMEOUT event
+                # can arrive here.
                 TRAP_ACK)
-                    # NEW: Catch Poisoned Batch Signals
+                    # W-PY28: poison-skip notices only. Worker-death
+                    # confirmations ("$wID" lines) are no longer sent
+                    # (cleanup-only EXIT trap) and the trap-ACK grace
+                    # is gone — recovery is parent-side via
+                    # ring_recover_worker, so there is nothing to
+                    # balance here. Non-P lines are ignored.
                     if [[ "$POLL_ARG1" == P:* ]]; then
                         local p_data="${POLL_ARG1#P:}"
                         POISONED_BATCHES+=("Index ${p_data%:*} (failed ${p_data##*:} times)")
                         continue
-                    fi
-
-                    wID=$POLL_ARG1
-                    (( trap_ack_pending[$wID]-- ))
-
-                    # If it balanced out to 0 (DEATH arrived first), clean it up
-                    if (( trap_ack_pending[$wID] == 0 )); then
-                        unset 'trap_ack_pending[$wID]'
                     fi
                     ;;
                 SPAWN)
@@ -2043,26 +2031,54 @@ W_NODE[$3]=$2
                     # tracks live workers, not cumulative spawn events.
                     (( nWorkers-- ))
 
-                    if (( status != 0 )); then
-                        (( trap_ack_pending[$wID]++ ))
+                    # W-PY29: universal parent-side recovery for ALL
+                    # deaths INCLUDING exit 0. The dead worker's
+                    # WorkerTxn record (IDLE → CLAIMING → CLAIMED →
+                    # COMMITTING → IDLE) tells us exactly what was in
+                    # flight — one path for payload errors, graceful
+                    # exits, SIGSEGV, SIGKILL, and OOM alike. The C
+                    # state machine is the sole classification
+                    # authority (IDLE + exit 0 → NORMAL_EXIT/free;
+                    # CLAIMED + exit 0 → FATAL/worker bug). No
+                    # trap-ACK wait, no 3s grace.
+                    ring_recover_worker "$wID" \
+                        "${W_INCARN[$wID]:-0}" \
+                        "${fd_out[$wID]:-}" \
+                        "$status"
+                    _recover_rc=$?
+                    case "$_recover_rc" in
+                        0|1|3)  # RECOVERED / NO_BATCH / ALREADY_DONE
+                            _respawn_wid=$wID
+                            ;;
+                        2)  # NORMAL_EXIT — EOF drain or teardown error
+                            wID_free[$wID]=''
+                            _respawn_wid=
+                            ;;
+                        4)  # RACE_DETECTED — CLAIMING/COMMITTING death
+                            echo "forkrun [FATAL]: Worker $wID died mid-transaction (race window); batch unattributable. Aborting." >&2
+                            ring_abort
+                            NORMAL_EXIT_FLAG=false
+                            _ret_val=1
+                            break
+                            ;;
+                        *)  # 5 FATAL (or unexpected) — abort
+                            echo "forkrun [FATAL]: Worker $wID recovery failed (rc=$_recover_rc). Aborting." >&2
+                            ring_abort
+                            NORMAL_EXIT_FLAG=false
+                            _ret_val=1
+                            break
+                            ;;
+                    esac
 
-                        if (( trap_ack_pending[$wID] == 0 )); then
-                            # TRAP_ACK already arrived! Clean up safely.
-                            unset 'trap_ack_pending[$wID]'
-                        elif (( trap_ack_pending[$wID] > 0 )); then
-                            _poll_timer_cmd="+$wID"
-                            echo "forkrun [WARN]: Worker $wID (node ${node_idx}) exited with status $status. Waiting up to 3s for EXIT trap confirmation." >&2
-                        fi
-
+                    if [[ -n "${_respawn_wid:-}" ]]; then
                         (( W_INCARN[$wID]++ ))
-                        # Unconditionally respawn replacement worker
+                        # Respawn replacement worker
                         ring_pipe fd_worker_r[$wID] fd_worker_w[$wID]
                         spawn_worker "$wID" "$node_idx" "$wID" "${fd_trap_ack_w}" "${W_INCARN[$wID]}"
                         exec {fd_worker_w[$wID]}>&-
                         ((nWorkers++))
                         (( node_workers[node_idx]++ ))
-                    else
-                        wID_free[$wID]=''
+                        unset _respawn_wid
                     fi
                     ;;
                 SCAN_DEATH)
