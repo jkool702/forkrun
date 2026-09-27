@@ -74,6 +74,13 @@ jobs:
             -e EXTRA_FLAGS="${{ matrix.extra_flags }}" \
             ${{ matrix.docker_image }} \
             bash -c '
+              set -euo pipefail   # W-REL1/R5: ANY failure below fails
+                                  # the job. Without this a failed
+                                  # variant silently yields a partial
+                                  # artifact set, and the warn-only
+                                  # missing-artifact path in the
+                                  # verify step ships the stale blob
+                                  # the updater retained (F31 class).
               # 1. Install Dependencies (Fedora/RHEL style)
               dnf install -y @development-tools gcc make bash-devel git grep sed binutils || \
               (apt-get update && apt-get install -y gcc make libbash-dev git grep sed binutils)
@@ -90,13 +97,22 @@ jobs:
               WARN_FLAGS="-DNDEBUG -Wall -Wextra "
               INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins "
               
-              DEFS=(
-                 "-DSHELL"
-                 "-DHAVE_CONFIG_H"
-                 "-DBUILD_OS=\"Linux\""
-                 "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
-                 "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
-              )
+               DEFS=(
+                  "-DSHELL"
+                  "-DHAVE_CONFIG_H"
+                  "-DBUILD_OS=\"Linux\""
+                  "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
+                  "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
+                  # W-REL1/R5: pin the wall-clock macros (same values
+                  # as Makefile.substrate) so builds are
+                  # byte-reproducible — the freshness gate below
+                  # byte-compares a clean rebuild against these
+                  # artifacts. Informational strings only; the
+                  # quoting rides the same "${DEFS[@]}" mechanism as
+                  # the entries above.
+                  "-D__DATE__=\"Sep  1 2026\""
+                  "-D__TIME__=\"00:00:00\""
+               )
               
               # Function to build specific variant
               build_variant() {
@@ -255,8 +271,102 @@ jobs:
               echo "VERIFY-FAIL: embedded b64[$key] failed to decode/verify" >&2; fail=1
             fi
           done
-          rm -rf "$tmpd"
-          exit "$fail"
+           rm -rf "$tmpd"
+           exit "$fail"
+
+      - name: Verify artifacts fresh (rebuild from source)
+        shell: bash
+        run: |
+          # W-REL1/R5 freshness gate: the blob-consistency check above
+          # proves embedded==artifact, but nothing proves
+          # artifact==current-source (a partial/silent build failure
+          # plus the updater's retain-old-blobs behavior ships stale
+          # engine — F31 class). This step clean-rebuilds every
+          # variant from the current checkout and byte-compares
+          # against the shipped artifacts. Mismatch ALWAYS fails
+          # (stale-engine shipping becomes structurally impossible).
+          # Exactness is real, not aspirational: the build pins
+          # __DATE__/__TIME__ (see DEFS above), /src is a fixed
+          # path, and the link is content-hashed — same source +
+          # same toolchain == identical bytes.
+          #
+          # Flags below MUST mirror the build job verbatim (same
+          # OPT/WARN/INCLUDES/DEFS, same -march per variant, same
+          # strip); any drift fails this gate loudly, which is the
+          # policing mechanism — keep both copies in sync.
+          set -euo pipefail
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            fedora:latest \
+            bash -c '
+              set -euo pipefail
+              dnf install -y bash-devel gcc make file binutils \
+                gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+                gcc-ppc64le-linux-gnu binutils-ppc64le-linux-gnu \
+                gcc-s390x-linux-gnu binutils-s390x-linux-gnu || \
+              echo "FRESH-WARN: some cross toolchains missing (see per-arch handling)"
+              FR_VERSION="$(grep -E "^VERSION:" META | sed -E "s/^VERSION:[ \t]*//")"
+              OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fomit-frame-pointer -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC -Wl,-O1 -Wl,--as-needed -Wl,-Bsymbolic -ldl"
+              WARN_FLAGS="-DNDEBUG -Wall -Wextra "
+              INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins "
+              DEFS=(
+                 "-DSHELL"
+                 "-DHAVE_CONFIG_H"
+                 "-DBUILD_OS=\"Linux\""
+                 "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
+                 "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
+                 "-D__DATE__=\"Sep  1 2026\""
+                 "-D__TIME__=\"00:00:00\""
+              )
+              # arch-key  cc-prefix  march-flag  strip-bin
+              VARIANTS=(
+                "x86-64-v2::gcc:-march=x86-64-v2:strip"
+                "x86-64-v3::gcc:-march=x86-64-v3:strip"
+                "x86-64-v4::gcc:-march=x86-64-v4:strip"
+                "aarch64:aarch64-linux-gnu-:gcc:-march=armv8-a+crc:aarch64-linux-gnu-strip"
+                "ppc64le:ppc64le-linux-gnu-:gcc::ppc64le-linux-gnu-strip"
+                "s390x:s390x-linux-gnu-:gcc::s390x-linux-gnu-strip"
+              )
+              fail=0
+              freshd="$(mktemp -d)"
+              for spec in "${VARIANTS[@]}"; do
+                key="${spec%%:*}"; rest="${spec#*:}"
+                pfx="${rest%%:*}"; rest="${rest#*:}"
+                cc="${rest%%:*}"; rest="${rest#*:}"
+                march="${rest%%:*}"; stripbin="${rest##*:}"
+                CCBIN="${pfx}${cc}"
+                artifact="ring_loadables/forkrun-libs/forkrun_ring.${key}.so"
+                if [[ ! -f "$artifact" ]]; then
+                  if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+                    echo "FRESH-FAIL: missing artifact $artifact on a tag ref" >&2; fail=1
+                  else
+                    echo "FRESH-WARN: missing artifact $artifact (non-tag ref; skipping)" >&2
+                  fi
+                  continue
+                fi
+                if ! command -v "$CCBIN" >/dev/null 2>&1; then
+                  echo "FRESH-WARN: no $CCBIN toolchain (skipping $key)" >&2
+                  continue
+                fi
+                echo ">>> Freshness rebuild $key ($CCBIN $march)..."
+                # shellcheck disable=SC2086
+                "$CCBIN" forkrun_ring.c \
+                   $OPT_FLAGS $WARN_FLAGS $INCLUDES \
+                   "${DEFS[@]}" "-DBUILD_ARCH=\"$key\"" \
+                   -shared \
+                   $march \
+                   -o "$freshd/fresh.so"
+                "$stripbin" --strip-unneeded "$freshd/fresh.so"
+                if cmp -s "$freshd/fresh.so" "$artifact"; then
+                  echo "FRESH-OK: $key rebuild == $artifact"
+                else
+                  echo "FRESH-FAIL: $key rebuild differs from $artifact (stale engine)" >&2; fail=1
+                fi
+              done
+              rm -rf "$freshd"
+              exit "$fail"
+            '
 
       - name: Substrate canary (zero bash linkage)
         shell: bash
