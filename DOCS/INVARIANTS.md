@@ -484,12 +484,16 @@ as D-PORT3); checkpoint filenames need no quoting layer
 process (`no-indexer-process`); materialized inputs need no
 fallow (bounded by contract).
 
-**Explicitly deferred (work orders in PORT_AUDIT §6)**
-D-PORT1 parent-side signal choreography (TERM/HUP/USR1+PREEMPT,
-no-downgrade, checkpoint-on-signal — no Python equivalent in
-v3.6.0); D-PORT2 abort-aware indexer-death classification (needs
-a `fr_py_abort_reason` shim binding — scope escalation, owner
-decision); D-PORT3 exit-code taxonomy full parity (API decision).
+**Resolved by W-PORTDEFER (no deferred items remain)**
+D-PORT3 cause-fidelity taxonomy (`exceptions.py`: signal classes
+with `signo`/`bash_code`, opt-in `strict_poison` for exit-3
+fidelity, 128+signo worker-death transport, mapping table in
+TROUBLESHOOTING.md); D-PORT1 opt-in `signal_policy="checkpoint"`
+(HUP/TERM + USR1-iff-PREEMPT for one run, restoration invariant,
+Bash signal-wins precedence); D-PORT2 `fr_py_abort_reason()`
+shim accessor (sanctioned additive read-only entry — engine
+still frozen) with record/excuse/fatal wiring in all NUMA
+watches, UMA scanner watches, and NUMA joins.
 
 **Audit Rule**
 ❌ Any new worker-init call site that passes a literal retry

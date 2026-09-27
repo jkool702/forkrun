@@ -44,11 +44,11 @@
 |---|---|---|---|
 | P1 | Workers cover every NUMA node, `workers≥nodes` + UserWarning (F-NUMA2/W-NUMA2; RESILIENCE §7.3.1; INVARIANTS §18) | `run.py:650 _resolve_workers_numa`, all dispatch sites; lock-in `test_numa_bump.py` | PORTED (reference) |
 | P2 | Per-node drain audit before NUMA completion, raise-vs-warn disposition (F-NUMA1; EOF_PROTOCOL §7) | `_execute_numa_locked` + `_execute_numa_stream` drain audit; lock-in `test_numa_drain_guard.py`; overshoot `read>write` benign-never-fires | PORTED (reference) |
-| P3 | Exit-code taxonomy 130/143/138/3/42/200/254, `&0xFF` (primer §3; D6; `frun.bash:1365-1388,1713-1737,2188-2189`) | Library raises, never exits (zero `signal.signal`/`sys.exit(3)` in `python/forkrun/`); workers exit 0/1 only (`_worker.py:157-194,419-522`); signal collapse →1 (`_reactor.py:320-323`); poison warn-only (`run.py:1911-1921` etc.); truncation clamp-not-mask (`_reactor.py:258`, `run.py:226` `0<=rc<256 else 1`); 200/254 N/A (`DIFFERENT-RETRY-TRANSPORT`: `fr_py_escrow_deposit`, `_worker.py:657-669`) | N/A-BY-DESIGN (`PYTHON-IS-IMPORTABLE-LIBRARY`) + deferred sub-gaps → D-PORT3 (poison surfacing needs API decision; signal-cause preservation needs `WTERMSIG` plumbing) |
-| P4 | Signal choreography: TERM/HUP/USR1+PREEMPT via reactor abort; trapped signal never downgraded by concurrent SIGPIPE (v3.5.0; `frun.bash:1365-1375,1945-1969`) | No `signal.signal`, no `FORKRUN_PREEMPT_MODE` read, no `abort_reason` binding, no ABORT event (`_reactor.py:711-891` death/spawn/trap only); KI paths inconsistent (`run.py:2754-2756` abort+raise vs `3712-3715,6180-6181` bare raise); TERM/HUP/USR1 default-kill, no checkpoint | MISSING → DEFERRED D-PORT1 (needs design: handlers + `fr_py_abort_reason` + checkpoint wiring; honest "not supported" statement shipped instead) |
+| P3 | Exit-code taxonomy 130/143/138/3/42/200/254, `&0xFF` (primer §3; D6; `frun.bash:1365-1388,1713-1737,2188-2189`) | Library raises, never exits (zero `signal.signal`/`sys.exit(3)` in `python/forkrun/`); workers exit 0/1 only (`_worker.py:157-194,419-522`); signal collapse →1 (`_reactor.py:320-323`); poison warn-only (`run.py:1911-1921` etc.); truncation clamp-not-mask (`_reactor.py:258`, `run.py:226` `0<=rc<256 else 1`); 200/254 N/A (`DIFFERENT-RETRY-TRANSPORT`: `fr_py_escrow_deposit`, `_worker.py:657-669`) | RESOLVED (W-PORTDEFER D-PORT3): cause fidelity, not number fidelity — `exceptions.py` taxonomy (`ForkrunSignalError/Interrupted/Preempted/Terminated/PoisonSkip` + `BASH_CODE_MAP`); 8 parent KI sites raise `ForkrunInterrupted` (still a `KeyboardInterrupt`); opt-in `strict_poison` raises `ForkrunPoisonSkip` (default warn-partial unchanged); worker signal deaths ride 128+signo (recovery-safe); mapping table in `TROUBLESHOOTING.md`; lock-in `test_taxonomy.py`. Zero existing-test changes |
+| P4 | Signal choreography: TERM/HUP/USR1+PREEMPT via reactor abort; trapped signal never downgraded by concurrent SIGPIPE (v3.5.0; `frun.bash:1365-1375,1945-1969`) | No `signal.signal`, no `FORKRUN_PREEMPT_MODE` read, no `abort_reason` binding, no ABORT event (`_reactor.py:711-891` death/spawn/trap only); KI paths inconsistent (`run.py:2754-2756` abort+raise vs `3712-3715,6180-6181` bare raise); TERM/HUP/USR1 default-kill, no checkpoint | RESOLVED (W-PORTDEFER D-PORT1): default installs nothing (honest contract kept); opt-in `signal_policy="checkpoint"` (run/map/stream) installs HUP/TERM (+USR1 iff `FORKRUN_PREEMPT_MODE=1`) for one run via per-branch guards + stream generator guard; handler records + aborts; existing teardown/checkpoint choreography runs; wrapper raises `ForkrunTerminated/Preempted` (Bash signal-wins precedence in guard `__exit__`); restoration always (release-blocking invariant); SIGINT never captured. Docs in FAULT_TOLERANCE/MIGRATION; lock-in `test_signals.py` (HUP→checkpoint→byte-identical resume) |
 | P5 | fd hygiene at EVERY fork site (death-pipe ends, `FD_TRAP_ACK_W`, `fd_fallow_w`; W-STDIN feeder scrub) | Blanket `scrub_fds(keep)` at every `os.fork` + targeted closes: `_reactor.py:198-262,994-1048`, `_worker.py:725-734,794-803,861-899`, `run.py:208-236,1551-1722,2069-2073,2483-2517,2640-2656,3132-3162,5689-5767`; W-STDIN feeder N/A (no feeder fork; spill is in-parent `run.py:388-486`; v1 spawn stdin is C `posix_spawnp` pump + `_cloexec_all`, `_worker.py:56-75`) | PORTED (EQUIVALENT-superset, `blanket-scrub+targeted-close`) |
 | P6 | D8-class stderr persistence (no durable fd-2 redirect) | `keep\|{0,1,2}` (`_fd_scrub.py:42`); only `fd>2` cloexec (`_worker.py:56-75`); zero `dup2(2`/`close(2` hits; `subprocess.run(capture_output=True)` per-batch only (`_spawn.py:75`) | PORTED |
-| P7 | INDEXER_DEATH abort-aware classification (`ring_abort_reason` before own abort; no `\|\|ring_abort`; no spurious FATAL on clean `\|head`) (D6; LA4; `frun.bash:1429-1451,2099-2143`) | Fork side EQUIVALENT (`run.py:5702-5724` no abort on either path); classification MISSING: `_watch_pipeline:6048-6097` keys on `fr_py_ingest_eof_posted`, `kind==error` always raises; no `fr_py_abort_reason` binding exists → clean `\|head` (reason-1) reports spurious `NUMA index/scan failed`, signal codes clobbered to 1 | MISSING → DEFERRED D-PORT2 (needs `fr_py_abort_reason` shim = scope escalation per red lines; owner decision required) |
+| P7 | INDEXER_DEATH abort-aware classification (`ring_abort_reason` before own abort; no `\|\|ring_abort`; no spurious FATAL on clean `\|head`) (D6; LA4; `frun.bash:1429-1451,2099-2143`) | Fork side EQUIVALENT (`run.py:5702-5724` no abort on either path); classification MISSING: `_watch_pipeline:6048-6097` keys on `fr_py_ingest_eof_posted`, `kind==error` always raises; no `fr_py_abort_reason` binding exists → clean `\|head` (reason-1) reports spurious `NUMA index/scan failed`, signal codes clobbered to 1 | RESOLVED (W-PORTDEFER D-PORT2, sanctioned additive shim entry): `fr_py_abort_reason()` (13-line read-only ACQUIRE load; engine diff empty, canary + IDL green); `_abort_reason_now()` queried BEFORE own abort + `_helper_death_disposition()` (record/excuse/fatal) wired into both NUMA watches, both UMA scanner watches, both NUMA join groups (excused set survives into joins); tail-loss + violent death still fatal; lock-in `test_abort_reason.py` (truth table, live accessor, NUMA-HUP suppression e2e) |
 | P8 | Trap-ACK 3s grace + catastrophic declaration; RACE no-grace (RESILIENCE §2.3/§4.1; post-W-PY28 bash removed grace, `frun.bash:1923-1976,2034-2062`) | Modern path: `rc 4→raise` no deadline, `rc 5→raise` (`_reactor.py:336-385`); legacy pre-W-PY28 `.so` path retains 3s deadlines (`_reactor.py:42,83-91,387-409,427-439,637-669,746-748,851-888`); poison `P:` inline (`_worker.py:433-437`) | EQUIVALENT (to current W-PY28 bash) |
 | P9 | Escrow drain + fd teardown (TATAS + continuous drain; EOF §4) | Engine-owned escrow/eventfds never closed by Python (`run.py:1608-1613,1963-1968,2551-2555`); EOF-anchored drains (`_drain_records:1282-1374`, `_make_results_pump:1379-1441`, `_reassembly.final_drain`); death-path deposits (`_worker.py:890-895`, `_reactor.py:499,560,622`); teardown closes nothing held (`_teardown_stream:1446-1511`, `_teardown_reactor:3386-3485`) | EQUIVALENT (`engine-owned-escrow`) |
 | P10 | Poison threshold + `FORKRUN_RETRY_LIMIT` semantics (retry/skip/fail-fast; 0=exactly-once, <0=unbounded; RESILIENCE §3–§5; `forkrun_ring.c:6430-6441`; `frun.bash:2188-2189`) | Validation PORTED (`_api.py:124-125`); per-mode dispatch PORTED (`_worker.py:514-522,648-669`, `_ON_ERROR_CODES:681`); threshold MISSING: all 7 init sites hardcode `3` (`run.py:1563`, `_worker.py:240,747,812`, `_reactor.py:478,554,616`), `_shim.c:158-170` overwrites `g_fr_config.retry_limit` unconditionally — `0`/`<0`/custom `FORKRUN_RETRY_LIMIT` unreachable | MISSING → F-PORT1 (FIXED this audit) |
@@ -82,10 +82,10 @@
 
 ## 2. Seed-target cross-reference (work order §2.3 — covered beyond)
 
-1. D10/PATH → P25 (F-PORT4). 2. Exit codes → P3 (D-PORT3 defer).
-3. stderr → P6 (PORTED). 4. Signals → P4 (D-PORT1 defer; KI known-good W-PY4;
-   operator-HUP→checkpoint: NO Python equivalent — honestly unsupported, see
-   D-PORT1 work order). 5. Mover → P24 (PORTED both sides; identity still
+1. D10/PATH → P25 (F-PORT4). 2. Exit codes → P3 (RESOLVED D-PORT3).
+3. stderr → P6 (PORTED). 4. Signals → P4 (RESOLVED D-PORT1; KI known-good W-PY4;
+   operator-HUP→checkpoint now opt-in via `signal_policy="checkpoint"`).
+   5. Mover → P24 (PORTED both sides; identity still
    unknown F-PY-UMA1b). 6. fd inheritance → P5 (PORTED).
 7. Sandbox semantics → P15 (N/A-BY-DESIGN, typed ledger) + P14 (F-PORT2) +
    P30 (N/A). 8. Version coherence → P26 (F-PORT5). 9. Escrow/fd
@@ -101,9 +101,9 @@
 | F-PORT4 | P25: spawn/plugin inherit hostile caller `PATH`/CWD | High (D10-class: CWD-planted binary execution) | FIXED (this audit): system-PATH `which` pin + absolute-path plugin rule + lock-in |
 | F-PORT5 | P26: `release_check.py` never verifies engine version / wheel-embedded `.so` / `META` mapping | Medium (release gate hole pre-tag) | FIXED (this audit): 3 new checks + lock-in |
 | F-PORT6 | P27: degenerate edges untested (no-trailing-NL, NUL, huge single line) | Medium (parity gap) | FIXED (this audit): `test_edge_degenerate.py` (test-only) + P16 M18-py/M19-py lock-ins |
-| D-PORT1 | P4: parent-side signal choreography (TERM/HUP/USR1+PREEMPT, no-downgrade, checkpoint-on-signal) | Medium | DEFERRED (needs design; work order §7 below) — honest statement: NO Python equivalent in v3.6.0 |
-| D-PORT2 | P7: abort-aware indexer-death classification (needs `fr_py_abort_reason`) | Medium | DEFERRED (scope escalation: shim change required; red lines bind) — work order §7 |
-| D-PORT3 | P3: exit-code taxonomy full parity (signal-cause preservation, poison raise-vs-warn) | Low | DEFERRED (API decision required; warn-only preserved in v3.6.0) — work order §7 |
+| D-PORT1 | P4: parent-side signal choreography (TERM/HUP/USR1+PREEMPT, no-downgrade, checkpoint-on-signal) | Medium | RESOLVED (W-PORTDEFER): opt-in `signal_policy="checkpoint"` + restoration invariant + `test_signals.py` |
+| D-PORT2 | P7: abort-aware indexer-death classification (needs `fr_py_abort_reason`) | Medium | RESOLVED (W-PORTDEFER): sanctioned 13-line shim accessor + record/excuse/fatal wiring + `test_abort_reason.py`; engine diff empty, canary + IDL green |
+| D-PORT3 | P3: exit-code taxonomy full parity (signal-cause preservation, poison raise-vs-warn) | Low | RESOLVED (W-PORTDEFER): cause-fidelity taxonomy + `strict_poison` opt-in + `test_taxonomy.py`; zero existing-test changes |
 
 ## 4. Coverage statement (final in completion report §5)
 
@@ -119,7 +119,8 @@
   (C-drain framing header, reactor-ingest multiset, T10b, M1a).
 - Matrix status: 30 parent items + 2 contract items, all dispositioned:
   11 PORTED, 8 EQUIVALENT, 7 N/A-BY-DESIGN, 6 MISSING→fixed (F-PORT1..6),
-  3 MISSING→deferred with work orders (D-PORT1..3). Zero UNKNOWN remain.
+  3 MISSING→RESOLVED by design (D-PORT1..3, W-PORTDEFER). Zero UNKNOWN,
+  zero DEFERRED remain.
 
 ## 5. Verification log
 
@@ -132,10 +133,11 @@
 | `make -f Makefile.substrate check` | PASS (canary + 521-test suite) |
 | Engine untouched (`git diff -- forkrun_ring.c python/forkrun/_shim.c` empty) | HELD — diff empty, verified |
 | New findings carry changelog + lock-in test | DONE — CHANGELOG v3.6.0 entry (twinned in DOCS_ALL) + 6 lock-in suites |
-| Incident during verification | One `TestPurity` failure (F-PORT3 comment cited the wrapper filename — banned literal in transport files); fixed by rewording, TestPurity green. One background-run nested-suite failure under parallel load (M1a: suite must run foreground); all foreground re-runs green. |
+| Incident during verification | One `TestPurity` failure (F-PORT3 comment cited the wrapper filename — banned literal in transport files); fixed by rewording, TestPurity green. One background-run nested-suite failure: FULLY DECOMPOSED from `/tmp/port_adj10.log` (no M1a flake, no product bug) — (1) the nested suite's single failure was the same `TestPurity` incident above (`_api.py: frun.bash`, fixed), and (2) the checklist's tree-clean gate correctly failed on the implementer's own in-progress docs edits (`M DOCS/CHANGELOG.md, DOCS_ALL.md, INVARIANTS.md`). The anti-recursion guard worked (nested skip=1). M1a (foreground runs) stands as a rule but is exonerated for this incident. |
+| W-PORTDEFER verification | Full suite ×3 foreground green (546 tests: 521 + 25 new); targeted (taxonomy/signals/abort_reason) ×10 green; `make check` green; canary + IDL green; frozen files (`forkrun_ring.c`, `forkrun_substrate.h`, `substratestubs.c`) untouched; shim diff exactly the 13-line accessor; `release_check.py` 17/17 PASS on the clean tree |
 
-## 6. Deferred work orders (for §7 commit)
+## 6. Deferred work orders (W-PORTDEFER: all three RESOLVED)
 
-- D-PORT1: parent-side signal choreography (handlers + abort-reason + checkpoint wiring + HUP→checkpoint equivalent-or-honest-unsupported + no-downgrade rule).
-- D-PORT2: `fr_py_abort_reason` shim binding + abort-aware `_watch_pipeline`/joins suppression (mirror `frun.bash:2130-2142`).
-- D-PORT3: exit-code taxonomy API decision (signal-cause preservation via `WTERMSIG` sentinel; poisoned-run raise-vs-warn contract).
+- D-PORT1: RESOLVED — opt-in `signal_policy="checkpoint"` + restoration invariant (`_signals.py`, per-branch/stream guards, FAULT_TOLERANCE/MIGRATION docs, `test_signals.py`).
+- D-PORT2: RESOLVED — `fr_py_abort_reason` shim binding + abort-aware watches/joins suppression + `test_abort_reason.py` (canary + IDL green, engine diff empty).
+- D-PORT3: RESOLVED — cause-fidelity taxonomy + `strict_poison` opt-in + mapping table + `test_taxonomy.py` (zero existing-test changes).

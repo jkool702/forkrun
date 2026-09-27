@@ -2,6 +2,58 @@
 
 ## v3.6.0 (unreleased)
 
+### Deferred port-audit items resolved — design decisions ratified (W-PORTDEFER)
+
+- **D-PORT3 (P3) cause-fidelity taxonomy (keystone, first).**
+  Ratified: parity means causes, not numbers — a library's
+  contract is exceptions. New `forkrun.exceptions`:
+  `ForkrunSignalError` base; `ForkrunInterrupted` (≙130, also
+  a `KeyboardInterrupt`, so W-PY22 callers are unaffected);
+  `ForkrunPreempted` (≙138); `ForkrunTerminated` (≙143);
+  `ForkrunPoisonSkip` (≙3, `.count`, opt-in only);
+  `BASH_CODE_MAP`. All 8 parent KI sites raise
+  `ForkrunInterrupted`; worker signal deaths ride 128+signo
+  (recovery-safe: the C core branches on ==0); opt-in
+  `strict_poison` (run/map/stream, default False) raises
+  `ForkrunPoisonSkip` — the default stays warn-and-partial,
+  and `_execute_streaming` stashes the count pre-teardown (its
+  summary runs post-destroy). Mapping table in
+  TROUBLESHOOTING.md. Lock-in `test_taxonomy.py`. Zero
+  existing-test expectation changes.
+- **D-PORT1 (P4) opt-in signal policy.** Ratified: default
+  installs nothing (non-invasive); `signal_policy=
+  "checkpoint"` installs HUP/TERM (+USR1 iff
+  `FORKRUN_PREEMPT_MODE=1`) for one run via per-branch guards
+  and a stream generator guard; the handler records + aborts;
+  existing teardown/checkpoint choreography runs; the wrapper
+  raises `ForkrunTerminated`/`ForkrunPreempted` (Bash
+  signal-wins precedence, including guard-`__exit__`
+  translation of abort-driven RuntimeErrors — never
+  KI/GeneratorExit). Restoration is a release-blocking
+  invariant; SIGINT is never captured. Docs in
+  FAULT_TOLERANCE.md/MIGRATION.md. Lock-in `test_signals.py`
+  (HUP→checkpoint→byte-identical resume).
+- **D-PORT2 (P7) abort-aware classification.** Ratified:
+  sanction one additive shim entry — `fr_py_abort_reason()`
+  (13 lines, read-only ACQUIRE load of the byte
+  `ring_abort_reason_main` already exposes; W-PY22 snapshot
+  precedent; engine diff empty, canary + IDL green, no blob
+  rebuild). `_abort_reason_now()` queried BEFORE the handler's
+  own abort + `_helper_death_disposition()`
+  (record/excuse/fatal) wired into both NUMA watches, both UMA
+  scanner watches, and both NUMA join groups (excused set
+  survives into joins). Clean+EOF unchanged; tail-loss and
+  violent death still fatal. Lock-in `test_abort_reason.py`.
+- **PORT_AUDIT.md:** P3/P4/P7 DEFERRED → RESOLVED with
+  mechanisms; the background-run incident is fully decomposed
+  (nested failure = the known TestPurity comment + the
+  checklist correctly failing on in-progress docs edits — no
+  M1a flake, no product bug); zero DEFERRED remain.
+- **Gates:** full suite ×3 (546 tests), targeted
+  (taxonomy/signals/abort_reason) ×10, `make check`, canary,
+  IDL, frozen files untouched, `release_check.py` re-verified
+  below.
+
 ### Differential frontend audit — Bash fix history vs Python port (W-PORTAUDIT)
 
 - **Method:** walked the Bash parent/orchestration fix history
