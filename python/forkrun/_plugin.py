@@ -83,6 +83,16 @@ def load_plugin(path, function_name):
     if not isinstance(path, str) or not path:
         raise PluginError("plugin path must be a non-empty string, "
                           "got %r" % (path,))
+    # F-PORT4 (D10-class): bare filenames (no /) resolve via CWD and
+    # LD_LIBRARY_PATH — a CWD-planted .so must not load. Require an
+    # explicit path (absolute or relative with a slash), then
+    # realpath-normalize it (Bash-side realpath parity).
+    if "/" not in path:
+        raise PluginError(
+            "plugin path must contain '/' (absolute or explicit "
+            "relative path, not a bare filename resolved via CWD): "
+            "got %r" % (path,))
+    path = os.path.realpath(path)
     if not os.path.exists(path):
         raise PluginError("plugin not found: %s" % path)
     try:

@@ -70,6 +70,25 @@ def make_spawn_payload(command):
             "mode='spawn' requires a command (str or list), got %s"
             % type(command).__name__)
 
+    # F-PORT4 (D10-class): pin the executable at build time against the
+    # SYSTEM default PATH (os.defpath), never the caller's inherited
+    # PATH — a CWD-planted binary must not execute. Bare names that do
+    # not resolve on the system path keep their original spelling so
+    # missing commands still fail lazily at payload time (SpawnError
+    # -> escrow -> poison, the v0 contract). Paths containing /
+    # (absolute or explicit relative) are realpath-normalized but
+    # never PATH-searched. Bytes argv elements skip pinning (exotic).
+    import os as _os
+    import shutil as _shutil
+    _exe = argv[0] if argv and isinstance(argv[0], str) else None
+    if _exe:
+        if "/" not in _exe:
+            _resolved = _shutil.which(_exe, path=_os.defpath)
+            if _resolved is not None:
+                argv = [_resolved] + list(argv[1:])
+        else:
+            argv = [_os.path.realpath(_exe)] + list(argv[1:])
+
     def spawn_payload(batch):
         try:
             result = subprocess.run(
