@@ -197,18 +197,41 @@ def write_checkpoint(path, state):
 
 
 def check_checkpoint_safety(path):
-    """Integrity defense (not a code-execution boundary).
+    """Ownership + permission gate (F-PORT2: Bash layer-1 parity).
 
-    Checks the file exists and is not group/world-writable.
+    - Foreign-UID files are refused (hard reject, like Bash's
+      ownership gate: a checkpoint from another user is never
+      resumed silently).
+    - Group/world-writable files are refused (Bash 8#022 rule made
+      fail-closed: Python has no interactive preview surface, so
+      the TTY-less fail-closed rule applies always).
+    - FORKRUN_TRUST_RESUME=1 bypasses both (explicit operator
+      override, same name/semantics as Bash) with a recorded
+      warning. Parsing stays strict regardless (typed
+      byte-coordinate ledger carries no code — P15).
+    - Unstatable files fail closed.
     Returns (is_safe, warnings).
     """
+    if os.environ.get("FORKRUN_TRUST_RESUME") == "1":
+        return True, ["FORKRUN_TRUST_RESUME=1: ownership/permission "
+                      "checks bypassed for %s" % (path,)]
     try:
         st = os.stat(path)
     except (OSError, FileNotFoundError):
         return False, ["cannot stat checkpoint file: %s" % (path,)]
+    try:
+        uid = os.getuid()
+    except AttributeError:
+        uid = None  # non-POSIX without getuid: ownership check vacuous
+    if uid is not None and st.st_uid != uid:
+        return False, ["refusing to resume from foreign-owned "
+                       "checkpoint %r (uid %d; set "
+                       "FORKRUN_TRUST_RESUME=1 to override)"
+                       % (path, st.st_uid)]
     if st.st_mode & 0o022:
         return False, ["checkpoint file is group/world-writable "
-                       "(fix with: chmod go-w %r)" % (path,)]
+                       "(fix with: chmod go-w %r; or set "
+                       "FORKRUN_TRUST_RESUME=1 to override)" % (path,)]
     return True, []
 
 
