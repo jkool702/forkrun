@@ -16,6 +16,8 @@ from typing import Any, Callable, Literal, Optional, Union
 import io
 import os
 
+from forkrun._cuda_guard import check_cuda_hazard
+
 Mode = Literal["python", "spawn", "plugin", "splice"]
 Order = Literal["none", "index"]
 OnError = Literal["retry", "fail-fast", "skip"]
@@ -216,6 +218,16 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
     checkpoint_path = (None if checkpoint_file is None
                        else _validate_resume_path(
                            "checkpoint_file", checkpoint_file, False))
+    # W-REL2/R9: CUDA-fork hazard guard lives HERE — the single
+    # public-API entry covering every downstream path (run/map/
+    # stream, reactor, streaming, NUMA — exactly where torch/JAX
+    # users live). Runs in the PARENT after validation (bad args
+    # still report as validation errors) and before any engine
+    # contact or forking. Fail fast — never fork under a live
+    # context. Per-path calls were deleted as redundant.
+    hazard, message = check_cuda_hazard()
+    if hazard:
+        raise RuntimeError(message)
     return RunConfig(payload=payload, source=source, mode=mode, sink=sink,
                      order=order, lines=lines, bytes=bytes_, workers=workers,
                      nodes=nodes, on_error=on_error, streaming=streaming,

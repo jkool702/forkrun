@@ -45,7 +45,6 @@ import sys
 
 from ._api import _validate
 from ._bindings import RC_OK, get, load
-from ._cuda_guard import check_cuda_hazard
 from ._fd_scrub import scrub_fds, snapshot_fds
 from ._pipes import make_pipe
 from ._plugin import make_plugin_payload
@@ -2628,10 +2627,6 @@ def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
-    # CUDA-fork hazard guard (W-PY5, same position as _execute).
-    hazard, message = check_cuda_hazard()
-    if hazard:
-        raise RuntimeError(message)
     with _RUN_LOCK:
         return _execute_ingest_locked(
             payload, source, sink=sink, lines=lines, bytes_=bytes_,
@@ -3189,11 +3184,6 @@ def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
-    # CUDA-fork hazard guard (W-PY5): runs in the PARENT before any engine
-    # contact or forking. Fail fast — never fork under a live context.
-    hazard, message = check_cuda_hazard()
-    if hazard:
-        raise RuntimeError(message)
     with _RUN_LOCK:
         return _execute_locked(payload, source, sink=sink, lines=lines,
                                bytes_=bytes_, workers=workers,
@@ -3775,14 +3765,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
-    # CUDA-fork hazard guard (W-PY5, same position as _execute):
-    # runs in the PARENT before any engine contact or forking.
-    # W-REL1/R1: the default now rides this executor, so the guard
-    # must live here too (pre-flip opt-in path bypassed it — latent).
-    hazard, message = check_cuda_hazard()
-    if hazard:
-        raise RuntimeError(message)
     if c_worker_loop:
+        # W-PY26: reactor + C loop needs collection, a dialect-gated
         # W-PY26: reactor + C loop needs collection, a dialect-gated
         # spec, and no sink (the C loop has no sink hook). Splice
         # never reaches here with the flag (map() gates raw modes).
@@ -4139,12 +4123,6 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
-    # CUDA-fork hazard guard (W-PY5, same position as _execute).
-    # W-REL1/R1: stream() defaults ride this executor — guard here
-    # too (pre-flip opt-in path bypassed it — latent).
-    hazard, message = check_cuda_hazard()
-    if hazard:
-        raise RuntimeError(message)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
@@ -4646,12 +4624,6 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
-    # CUDA-fork hazard guard (W-PY5, same position as _execute).
-    # W-REL1/R1: streaming defaults ride this executor — guard here
-    # too (pre-flip opt-in path bypassed it — latent).
-    hazard, message = check_cuda_hazard()
-    if hazard:
-        raise RuntimeError(message)
     pre_fds = snapshot_fds()
     lib = load()
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
@@ -5157,12 +5129,6 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
-    # CUDA-fork hazard guard (W-PY5, same position as _execute).
-    # W-REL1/R1: streaming-stream defaults ride this executor —
-    # guard here too (pre-flip opt-in path bypassed it — latent).
-    hazard, message = check_cuda_hazard()
-    if hazard:
-        raise RuntimeError(message)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))

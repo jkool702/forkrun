@@ -26,7 +26,7 @@ except FileNotFoundError:
     HAVE_LIB = False
 
 REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__)))
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _TORCH_VIRGIN_DRIVER = "\n".join([
     "import sys",
@@ -106,10 +106,10 @@ class TestCudaGuardContract(unittest.TestCase):
 
     def test_simulated_hazard_refuses_run(self):
         # Positive control without a GPU: a hazard verdict refuses out of
-        # run() with the actionable message (patch at the run seam).
-        import importlib  # noqa: PLC0415
-
-        run_mod = importlib.import_module("forkrun.run")
+        # run() with the actionable message (patch at the run seam —
+        # W-REL2/R9: the guard lives in _api._validate, the single
+        # public-API entry covering all paths).
+        import forkrun._api as _api_mod  # noqa: PLC0415
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
                                          delete=False) as fh:
@@ -118,7 +118,7 @@ class TestCudaGuardContract(unittest.TestCase):
             with open(path, "w") as fh:
                 fh.write("x\n")
             with mock.patch.object(
-                    run_mod, "check_cuda_hazard",
+                    _api_mod, "check_cuda_hazard",
                     return_value=(True, "fake hazard: spawn first")):
                 with self.assertRaisesRegex(RuntimeError, "spawn first"):
                     forkrun.run(lambda b: None, path, workers=1,
@@ -155,6 +155,55 @@ class TestCudaGuardIntegration(unittest.TestCase):
             out = forkrun.map(lambda b: b.copy(), path, workers=1,
                               nodes=1)
             self.assertEqual(b"".join(out), b"test\n")
+        finally:
+            os.unlink(path)
+
+
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestCudaGuardStreamRefusal(unittest.TestCase):
+    """W-REL2/R9: the hoisted guard covers the stream paths (where
+    torch/JAX users live) — a mocked live CUDA context refuses
+    eagerly at stream() call time, before any fork."""
+
+    def _live_cuda_cdll(self, real_cdll):
+        import ctypes as _ctypes
+
+        class _FakeCudaLib:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            @property
+            def cuCtxGetCurrent(self):
+                def _current(ctxptr):
+                    _ctypes.cast(
+                        ctxptr,
+                        _ctypes.POINTER(_ctypes.c_void_p))[0] = 0xDEAD
+                    return 0
+                return _current
+
+        def _fake_cdll(name, *args, **kwargs):
+            if "libcuda" in str(name):
+                return _FakeCudaLib()
+            return real_cdll(name, *args, **kwargs)
+
+        return _fake_cdll
+
+    def test_stream_refuses_live_context(self):
+        import ctypes as _ctypes
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        try:
+            with open(path, "w") as fh:
+                fh.write("x\n")
+            with mock.patch("ctypes.CDLL",
+                            side_effect=self._live_cuda_cdll(
+                                _ctypes.CDLL)):
+                # Eager: stream() validates at call time (no next()).
+                with self.assertRaisesRegex(RuntimeError, "spawn"):
+                    forkrun.stream(lambda b: None, path, workers=1,
+                                   nodes=1)
         finally:
             os.unlink(path)
 
