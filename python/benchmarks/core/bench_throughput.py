@@ -214,12 +214,20 @@ def bench_emit_upper(ctx):
     """
     path = ctx.input_path()
     n = SCALES[ctx.scale]
-    t, _ = time_it(lambda: _map_upper(path), trials=ctx.trials)
+
+    def _map_upper_uma(p):
+        # Emit-path comparison is topology-agnostic; pin UMA so the
+        # v0 row (FORKRUN_NO_V1 masks every fast-path symbol, NUMA
+        # included) stays valid on multi-node boots.
+        return forkrun.map(lambda b: bytes(b.data).upper(), p,
+                           workers=_nworkers(), nodes=1)
+
+    t, _ = time_it(lambda: _map_upper_uma(path), trials=ctx.trials)
     ctx.record("Python upper emit (map)", "python", "map", n / t,
                rss_mb(), "fr_py_emit: writev + zero-copy bytes")
     os.environ["FORKRUN_NO_V1"] = "1"
     try:
-        t, _ = time_it(lambda: _map_upper(path), trials=ctx.trials)
+        t, _ = time_it(lambda: _map_upper_uma(path), trials=ctx.trials)
     finally:
         del os.environ["FORKRUN_NO_V1"]
     ctx.record("Python upper v0 writes (map)", "python", "map", n / t,

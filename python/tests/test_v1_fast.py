@@ -143,7 +143,7 @@ class TestSpawnV1(unittest.TestCase):
         try:
             write_lines(path, 200)
             out = forkrun.map("nonexistent_command_xyz_123", path,
-                              mode="spawn", workers=1)
+                              mode="spawn", workers=1, nodes=1)
             self.assertEqual(out, [])
             assert_no_zombies(self)
         finally:
@@ -301,7 +301,7 @@ class TestPluginV1(unittest.TestCase):
         try:
             write_lines(path, 100)
             out = forkrun.map(_v1_spec("always_fail_v1"), path,
-                              mode="plugin", workers=1)
+                              mode="plugin", workers=1, nodes=1)
             self.assertEqual(out, [])
             assert_no_zombies(self)
         finally:

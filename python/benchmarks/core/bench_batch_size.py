@@ -40,11 +40,11 @@ def _label(lines):
     return "lines=%d" % lines if lines else "adaptive"
 
 
-def _map_noop(path, lines=None, workers=None):
+def _map_noop(path, lines=None, workers=None, nodes="auto"):
     kw = {} if lines is None else {"lines": lines}
     return forkrun.map(lambda b: None, path,
                        workers=_nworkers() if workers is None else workers,
-                       **kw)
+                       nodes=nodes, **kw)
 
 
 def _map_upper(path, lines=None):
@@ -190,12 +190,15 @@ def bench_stream_batch_sweep(ctx):
 
 def bench_single_worker_isolation(ctx):
     """Single worker: dispatch cost without multi-worker interference
-    (no ring contention). Adaptive + two fixed sizes."""
+    (no ring contention). Adaptive + two fixed sizes. UMA-pinned:
+    the study isolates dispatch, not topology (workers=1 cannot
+    cover a multi-node ring — RESILIENCE §7.3.1)."""
     path = ctx.input_path()
     n = SCALES[ctx.scale]
     for lines in [None, 1000, 10000]:
         t, _ = time_it(
-            lambda lines=lines: _map_noop(path, lines=lines, workers=1),
+            lambda lines=lines: _map_noop(path, lines=lines, workers=1,
+                                          nodes=1),
             trials=ctx.trials)
         ctx.record("No-op 1-worker (%s)" % _label(lines), "python",
                    "map", n / t, rss_mb(), "")

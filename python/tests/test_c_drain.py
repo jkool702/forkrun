@@ -137,9 +137,10 @@ class TestCDrainBasic(unittest.TestCase):
         os.close(fd)
         try:
             self.assertEqual(
-                forkrun.map(_up, path, workers=2, c_drain=True), [])
+                forkrun.map(_up, path, workers=2, nodes=1,
+                            c_drain=True), [])
             self.assertEqual(
-                list(forkrun.stream(_up, path, workers=2,
+                list(forkrun.stream(_up, path, workers=2, nodes=1,
                                     c_drain=True)), [])
         finally:
             os.unlink(path)
@@ -148,11 +149,15 @@ class TestCDrainBasic(unittest.TestCase):
         path = _make_input(500)
         try:
             # run() discards (no out memfds): drain not engaged,
-            # flag accepted harmlessly either way.
+            # flag accepted harmlessly either way. nodes=1: this is
+            # a UMA-shape test (workers=2 < fake-4 nodes); under
+            # numa=fake=N, auto would fan out to N rings and strand
+            # unworked nodes (RESILIENCE §7.3.1 — the drain guard
+            # rightly refuses that silent shape).
             self.assertIsNone(forkrun.run(_up, path, workers=2,
-                                          c_drain=True))
+                                          nodes=1, c_drain=True))
             self.assertIsNone(forkrun.run(_up, path, workers=2,
-                                          c_drain=False))
+                                          nodes=1, c_drain=False))
         finally:
             os.unlink(path)
 
