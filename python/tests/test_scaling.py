@@ -12,6 +12,8 @@ No threads anywhere (fork-before-threads stays intact).
 """
 
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -64,6 +66,67 @@ def _need_so(testcase, path):
         testcase.skipTest("missing fixture %s" % path)
 
 
+# W-REL1/R3: build missing fixtures here instead of inheriting them
+# from test_v1_fast.py's setUpModule (which sorts later, so this
+# module's parity tests silently skipped inside release_check.py's
+# nested-suite skip). Idempotent: rebuild only when the .so is
+# missing or older than its source; skip-with-reason when no
+# toolchain exists. _BUILD_ERROR carries the reason to setUp.
+_BUILD_ERROR = None
+
+
+def _build_fixture(src, so):
+    if os.path.exists(so) and (
+            os.path.getmtime(so) >= os.path.getmtime(src)):
+        return
+    if shutil.which("gcc") is None:
+        raise unittest.SkipTest("gcc not available — cannot build %s"
+                                % os.path.basename(so))
+    subprocess.run(
+        ["gcc", "-shared", "-fPIC", "-O2", "-o", so, src],
+        check=True, capture_output=True, timeout=300)
+
+
+def setUpModule():
+    # Fixture .so files (mirror test_v1_fast.py's gcc line for v1;
+    # same line builds the v0 fixture test_v0_plugin_rejected needs).
+    global _BUILD_ERROR
+    plugins = os.path.join(REPO_ROOT, "python", "tests", "plugins")
+    try:
+        _build_fixture(os.path.join(plugins, "test_plugin_v1.c"), V1_SO)
+        _build_fixture(os.path.join(plugins, "test_plugin.c"), V0_SO)
+    except unittest.SkipTest as exc:
+        _BUILD_ERROR = str(exc)
+        return
+    except Exception as exc:  # noqa: BLE001
+        _BUILD_ERROR = "fixture build failed: %s" % exc
+        return
+    # Substrate .so: build when absent so the parity tests below RUN
+    # inside gates that never built it (release_check.py's nested
+    # skip suppresses the packaging-driver builds). HAVE_LIB is
+    # re-resolved at runtime in setUp (the class-level skipUnless
+    # below had to go — it froze the import-time value).
+    global HAVE_LIB
+    if not HAVE_LIB:
+        if shutil.which("gcc") is None or shutil.which("make") is None:
+            _BUILD_ERROR = "no toolchain — cannot build substrate"
+            return
+        try:
+            subprocess.run(
+                ["make", "-f", "Makefile.substrate", "python-substrate"],
+                check=True, capture_output=True, timeout=900,
+                cwd=REPO_ROOT)
+        except Exception as exc:  # noqa: BLE001
+            _BUILD_ERROR = "substrate build failed: %s" % exc
+            return
+        try:
+            find_substrate()
+            HAVE_LIB = True
+        except FileNotFoundError:
+            _BUILD_ERROR = "substrate .so not built"
+            return
+
+
 class TestCWorkerLoopValidation(unittest.TestCase):
     """Eager validation of the c_worker_loop flag (engine-free shape)."""
 
@@ -89,11 +152,17 @@ class TestCWorkerLoopValidation(unittest.TestCase):
                            c_worker_loop=True)
 
 
-@unittest.skipUnless(HAVE_LIB, "substrate .so not built")
 class TestCWorkerLoopParity(unittest.TestCase):
     """Byte-identical results to the Python worker loop."""
 
     def setUp(self):
+        # W-REL1/R3: runtime gating (setUpModule above may have built
+        # what import time lacked — a class-level skipUnless would
+        # freeze the stale value and silently skip inside gates).
+        if _BUILD_ERROR is not None:
+            self.skipTest(_BUILD_ERROR)
+        if not HAVE_LIB:
+            self.skipTest("substrate .so not built")
         _need_so(self, V1_SO)
         if not _has_loop():
             self.skipTest("fr_py_worker_plugin_loop absent — rebuild")
