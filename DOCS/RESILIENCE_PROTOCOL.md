@@ -228,12 +228,16 @@ the dead worker's node (`txn->node`), never the parent's:
 
 ### 7.3 Topology preconditions (read before operating NUMA)
 
-1. **Workers must cover every node** (`workers >= nodes`).
-   Rings are born-local and workers claim locally only (stealing
-   is scanner-side); a node with no worker never has its ring
-   claimed, and its share of the input is silently lost. The
-   reactor does not (and cannot cheaply) rebalance this — size
-   the pool to the topology.
+1. **Workers cover every node — enforced, not advised**
+   (W-NUMA2). On multi-node topologies the parent raises the
+   effective worker count to at least the node count
+   (`workers < nodes` → bumped to `nodes`, one `UserWarning`
+   stating requested vs effective). The underlying fact stands:
+   rings are born-local and workers claim locally only
+   (stealing is scanner-side); without the guarantee, a node
+   with no worker would never have its ring claimed. The F-NUMA1
+   drain guard remains as the backstop for genuine runtime
+   anomalies (fork failures, respawn exhaustion), not config.
 2. **`nodes="auto"` follows the boot topology.** Booted with
    `numa=fake=N`, auto resolves to N nodes and every call takes
    the NUMA pipeline. Single-node-authored tests and scripts

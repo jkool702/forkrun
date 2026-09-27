@@ -2,6 +2,41 @@
 
 ## v3.6.0 (unreleased)
 
+### NUMA minimum 1 worker per node — parent-side enforcement (F-NUMA2, W-NUMA2)
+
+- **Gap:** user-supplied `workers < nodes` on a multi-node
+  topology left born-local rings permanently unworked (workers
+  claim locally only; stealing covers orphans, not healthy
+  unassigned rings). W-PY34 documented it as operator guidance;
+  F-NUMA1's drain guard made violations loud — but loud failure
+  is still failure for satisfiable config. Found in the fake-4
+  release leg: small-worker tests and benchmark sweep rows hit
+  the guard instead of completing.
+- **Fix (Python frontend only — no engine/shim changes):**
+  single normalization point
+  (`_resolve_workers_numa(workers, num_nodes)`) applied at
+  every run/map/stream dispatch site: `max(workers, num_nodes)`
+  on multi-node topologies with one `UserWarning` (requested vs
+  effective); UMA exempt; idempotent (no double-warn on
+  re-resolution). Sweep delegates to `map()`, covered
+  automatically. Bash already enforced coverage (sentinel
+  `max(nproc, nodes)` + `--nodes` reconciliation block that
+  bumps explicit maps to the node count) — documented, no Bash
+  change.
+- **Lock-in:** `test_numa_bump.py` (bump+warning+exactness,
+  equal/above-no-warning, UMA exempt, guard-quiet, stream path,
+  distribution-floor unit) 7/7 green; `test_numa.py` +
+  `test_numa_recovery.py` green; full suite 7/8 green (single
+  unidentified singleton across 8 runs — consistent with the
+  documented residual flakes; 5/5 clean hunt with full capture);
+  `make check` green (canary + suite); 5M medium `@4` sanity
+  (no warning at 28 workers, throughput within variance);
+  heavy-20M `@4` + `auto` in-proc quads clean with zero
+  mismatches.
+- **Docs:** RESILIENCE §7.3 upgraded to guarantee;
+  CONFIGURATION `workers` interaction; INVARIANTS §18;
+  DOCS_ALL mirrors; this entry.
+
 ### NUMA per-node early-exit / silent partial completion (F-NUMA1, W-NUMA1)
 
 - **Symptom:** heavy-20M C-plugin runs under forced-logical `@4`

@@ -10,8 +10,11 @@ Number of parallel worker processes. Default is the CPU
 count (capped at 64). Rules of thumb:
 
 - CPU-bound Python: `workers = os.cpu_count()`.
-- One worker per NUMA node minimum — a node with no worker
-  never has its ring claimed (see [NUMA.md](NUMA.md)).
+- Multi-node topologies raise small pools: `workers < nodes`
+  is bumped to `nodes` (one `UserWarning` stating requested vs
+  effective) — every NUMA node is guaranteed ≥ 1 worker, since
+  an uncovered node's born-local ring is never claimed
+  (see [NUMA.md](NUMA.md)).
 - More workers than ~2× CPUs oversubscribes (measured
   plateau 14→28 on medium Python).
 

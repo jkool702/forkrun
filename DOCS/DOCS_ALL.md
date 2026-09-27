@@ -233,6 +233,14 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### NUMA minimum 1 worker per node — parent-side enforcement (F-NUMA2, W-NUMA2)
+
+- Under-provisioned pools (`workers < nodes`) stranded
+  born-local rings. Fixed by parent-side bump to the node count
+  (one `UserWarning`, UMA exempt, single normalization point);
+  Bash already enforced coverage. Lock-in tests green; drain
+  guard stays as backstop. No engine changes.
+
 ### NUMA per-node early-exit / silent partial completion (F-NUMA1, W-NUMA1)
 
 - Heavy-20M C-plugin runs under forced-logical `@4` returned
@@ -2687,14 +2695,21 @@ batches were never claimed leaves no trace in worker statuses —
 the parent would parse a short output and return success.
 
 **Rule.** Before declaring NUMA completion (blocking or
-streaming), the parent must verify per-node drain:
-`read_idx == write_idx` on every node. A node whose unclaimed tail
-is entirely empty (EOF sentinel / zero-length tail: never counted
-by the fork gate, never claimed, contributes no output) is
-vacuous. Any other `read_idx != write_idx` raises `RuntimeError`
-naming the node and indices — silent partial completion becomes
+streaming), the parent must verify per-node drain: every published
+slot claimed (`read_idx >= write_idx`) on every node. A node whose
+unclaimed tail is entirely empty (EOF sentinel / zero-length
+tail: never counted by the fork gate, never claimed, contributes
+no output) is vacuous. Any other `read_idx < write_idx` is a
+violation with a coverage-dependent disposition: with full worker
+coverage (workers >= num_nodes) it raises `RuntimeError` naming
+the node and indices — silent partial completion becomes
 impossible-or-loud (the W-PY22 doctrine: refused instead of
-silent loss).
+silent loss). With under-coverage (workers < num_nodes — the
+documented RESILIENCE §7.3.1 topology constraint, deliberately
+probed by benchmark sweeps) it emits one stderr warning and
+returns the partial output. (`read_idx > write_idx` is benign
+claim overshoot — stragglers' FAA tickets past the final publish
+exit via EOF without ack — and never fires.)
 
 **Scope note.** This rule verifies *drain*, not *publication*:
 a node whose ring drained exactly (`read == write`, including
@@ -3331,9 +3346,45 @@ window is pinned by the lifetime bound.
 
 ---
 
-## 18. Checklist Summary
+## 18. Per-Node Worker Coverage (F-NUMA2)
 
-If sections §1–18 above remain true, **forkrun is correct** — regardless of:
+**Invariant**
+On multi-node topologies the parent must guarantee ≥ 1 worker
+per node before ingest begins; worker counts below the node
+count are raised, not honored.
+
+**Origin**
+User-supplied `workers < nodes` left born-local rings permanently
+unworked (workers claim locally only; stealing covers orphans,
+not healthy unassigned rings). The F-NUMA1 drain guard made
+the resulting shortfall loud (RuntimeError at completion), but
+loud failure is still failure for a configuration the parent
+could have satisfied. Correctness of exactly-once delivery
+dominates the user's worker-count lower bound: nobody asks for
+fewer workers *because* they want stranded data.
+
+**Enforced by**
+Single normalization point
+(`_resolve_workers_numa(workers, num_nodes)`): `max(workers,
+num_nodes)` on multi-node topologies with one `UserWarning`
+(requested vs effective); UMA exempt; idempotent (effective
+counts pass through silently, downstream re-resolution never
+double-warns). Per-node distribution is round-robin from node 0,
+so `workers >= nodes` covers all nodes by construction. The
+F-NUMA1 drain guard stays as the backstop for genuine runtime
+anomalies.
+
+**Audit Rule**
+❌ Any NUMA executor path that forks workers from a raw user
+count without passing through the normalization point. ❌ Any
+conditional bump (input-size heuristics, "looks unneeded") —
+the invariant is unconditional on multi-node topologies.
+
+---
+
+## 19. Checklist Summary
+
+If sections §1–19 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement
@@ -3932,12 +3983,16 @@ the dead worker's node (`txn->node`), never the parent's:
 
 ### 7.3 Topology preconditions (read before operating NUMA)
 
-1. **Workers must cover every node** (`workers >= nodes`).
-   Rings are born-local and workers claim locally only (stealing
-   is scanner-side); a node with no worker never has its ring
-   claimed, and its share of the input is silently lost. The
-   reactor does not (and cannot cheaply) rebalance this — size
-   the pool to the topology.
+1. **Workers cover every node — enforced, not advised**
+   (W-NUMA2). On multi-node topologies the parent raises the
+   effective worker count to at least the node count
+   (`workers < nodes` → bumped to `nodes`, one `UserWarning`
+   stating requested vs effective). The underlying fact stands:
+   rings are born-local and workers claim locally only
+   (stealing is scanner-side); without the guarantee, a node
+   with no worker would never have its ring claimed. The F-NUMA1
+   drain guard remains as the backstop for genuine runtime
+   anomalies (fork failures, respawn exhaustion), not config.
 2. **`nodes="auto"` follows the boot topology.** Booted with
    `numa=fake=N`, auto resolves to N nodes and every call takes
    the NUMA pipeline. Single-node-authored tests and scripts

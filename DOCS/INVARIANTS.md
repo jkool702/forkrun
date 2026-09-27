@@ -364,9 +364,45 @@ window is pinned by the lifetime bound.
 
 ---
 
-## 18. Checklist Summary
+## 18. Per-Node Worker Coverage (F-NUMA2)
 
-If sections §1–18 above remain true, **forkrun is correct** — regardless of:
+**Invariant**
+On multi-node topologies the parent must guarantee ≥ 1 worker
+per node before ingest begins; worker counts below the node
+count are raised, not honored.
+
+**Origin**
+User-supplied `workers < nodes` left born-local rings permanently
+unworked (workers claim locally only; stealing covers orphans,
+not healthy-but-unassigned rings). The F-NUMA1 drain guard made
+the resulting shortfall loud (RuntimeError at completion), but
+loud failure is still failure for a configuration the parent
+could have satisfied. Correctness of exactly-once delivery
+dominates the user's worker-count lower bound: nobody asks for
+fewer workers *because* they want stranded data.
+
+**Enforced by**
+Single normalization point
+(`_resolve_workers_numa(workers, num_nodes)`): `max(workers,
+num_nodes)` on multi-node topologies with one `UserWarning`
+(requested vs effective); UMA exempt; idempotent (effective
+counts pass through silently, so downstream re-resolution never
+double-warns). Per-node distribution is round-robin from node 0,
+so `workers >= nodes` covers all nodes by construction. The
+F-NUMA1 drain guard stays as the backstop for genuine runtime
+anomalies.
+
+**Audit Rule**
+❌ Any NUMA executor path that forks workers from a raw user
+count without passing through the normalization point. ❌ Any
+conditional bump (input-size heuristics, "looks unneeded") —
+the invariant is unconditional on multi-node topologies.
+
+---
+
+## 19. Checklist Summary
+
+If sections §1–19 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement
