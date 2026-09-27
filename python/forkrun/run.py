@@ -2641,7 +2641,34 @@ def _mover_sentry(memfd, tag):
         sys.stderr.write(
             "forkrun [MOVER] tag=%s pid=%d pos=%r t=%.3f\n"
             % (tag, os.getpid(), pos, _time.monotonic()))
-        sys.stderr.flush()
+        # Layout snapshot: which numbers are eventfds/pipes/memfds
+        # (decisive for fd-confusion theories; gate-only cost).
+        try:
+            fds = sorted(int(e) for e in os.listdir("/proc/self/fd")
+                         if e.isdigit())
+        except OSError:
+            fds = []
+        kinds = []
+        for fdn in fds:
+            try:
+                link = os.readlink("/proc/self/fd/%d" % fdn)
+            except OSError:
+                continue
+            if "eventfd" in link:
+                kinds.append("%d=ev" % fdn)
+            elif "pipe:" in link:
+                kinds.append("%d=pp" % fdn)
+            elif "memfd:" in link:
+                kinds.append("%d=mm:%s" % (
+                    fdn, link.split("/memfd:")[1][:18]))
+            elif link.startswith("/dev/") or link.startswith("/tmp/"):
+                kinds.append("%d=F" % fdn)
+        try:
+            sys.stderr.write("forkrun [MOVER] fds pid=%d %s\n"
+                             % (os.getpid(), " ".join(kinds)))
+            sys.stderr.flush()
+        except Exception:
+            pass
     except Exception:
         pass
 
