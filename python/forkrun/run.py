@@ -2641,77 +2641,7 @@ def _mover_sentry(memfd, tag):
         sys.stderr.write(
             "forkrun [MOVER] tag=%s pid=%d fd=%s pos=%r t=%.3f\n"
             % (tag, os.getpid(), memfd, pos, _time.monotonic()))
-        # Layout snapshot: which numbers are eventfds/pipes/memfds
-        # (decisive for fd-confusion theories; gate-only cost).
-        try:
-            fds = sorted(int(e) for e in os.listdir("/proc/self/fd")
-                         if e.isdigit())
-        except OSError:
-            fds = []
-        kinds = []
-        for fdn in fds:
-            try:
-                link = os.readlink("/proc/self/fd/%d" % fdn)
-            except OSError:
-                continue
-            if "eventfd" in link:
-                kinds.append("%d=ev" % fdn)
-            elif "pipe:" in link:
-                kinds.append("%d=pp" % fdn)
-            elif "memfd:" in link:
-                kinds.append("%d=mm:%s" % (
-                    fdn, link.split("/memfd:")[1][:18]))
-            elif link.startswith("/dev/") or link.startswith("/tmp/"):
-                kinds.append("%d=F" % fdn)
-        try:
-            sys.stderr.write("forkrun [MOVER] fds pid=%d %s\n"
-                             % (os.getpid(), " ".join(kinds)))
-            # Leftover check: live children older than this run
-            # (stale workers outliving destroy/re-init would carry
-            # stale fd tables into new runs — H8 candidate).
-            try:
-                me = os.getpid()
-                now = _time.monotonic()
-                boot = None
-                try:
-                    with open("/proc/stat") as sfh:
-                        for ln in sfh:
-                            if ln.startswith("btime"):
-                                boot = int(ln.split()[1])
-                                break
-                except OSError:
-                    pass
-                olds = []
-                for entry in os.listdir("/proc"):
-                    if not entry.isdigit():
-                        continue
-                    opid = int(entry)
-                    if opid == me:
-                        continue
-                    try:
-                        with open("/proc/%d/stat" % opid) as fh:
-                            parts = fh.read().rsplit(")", 1)[1].split()
-                        ppid = int(parts[1])
-                        if ppid != me:
-                            continue
-                        start = int(parts[19]) / 100.0
-                        if boot is not None:
-                            age = _time.time() - (boot + start)
-                        else:
-                            age = -1.0
-                        with open("/proc/%d/comm" % opid) as fh:
-                            comm = fh.read().strip()
-                        olds.append("%d:%s:%.1fs" % (opid, comm, age))
-                    except (OSError, ValueError, IndexError):
-                        continue
-                sys.stderr.write("forkrun [MOVER] kids pid=%d %s\n"
-                                 % (me, " ".join(olds) if olds
-                                    else "-"))
-            except Exception:
-                pass
-            sys.stderr.flush()
-        except Exception:
-            pass
+        sys.stderr.flush()
     except Exception:
         pass
 
