@@ -32,6 +32,12 @@ try:
 except FileNotFoundError:
     HAVE_LIB = False
 
+# W-REL1/R2: repo root derived from this file's location — never a
+# hardcoded absolute path (a hardcoded cwd broke CI on any machine
+# that isn't the author's box).
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def _up(batch):
     return bytes(batch.data).upper()
@@ -308,7 +314,7 @@ class TestCDrainStream(unittest.TestCase):
         try:
             code = "\n".join([
                 "import sys, time",
-                "sys.path.insert(0, 'python')",
+                "sys.path.insert(0, %r)" % os.path.join(REPO_ROOT, "python"),
                 "import forkrun",
                 "n = 0",
                 "for blob in forkrun.stream(",
@@ -320,7 +326,7 @@ class TestCDrainStream(unittest.TestCase):
             ])
             proc = subprocess.run(
                 [sys.executable, "-c", code], capture_output=True,
-                text=True, timeout=300, cwd="/mnt/ramdisk/forkrun")
+                text=True, timeout=300, cwd=REPO_ROOT)
             self.assertEqual(proc.returncode, 0,
                              proc.stderr[-2000:])
             self.assertGreater(
