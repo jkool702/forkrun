@@ -69,9 +69,23 @@ class TestOptionValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             forkrun.run("p:m", source="f", order="sorted")
 
-    def test_lines_bytes_exclusive(self):
+    def test_lines_bytes_lines_win_with_warning(self):
+        # F-PORT3: Bash -L+-b parity — lines= wins with one UserWarning
+        # (not a hard error); the effective config keeps lines.
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", UserWarning)
+            cfg = forkrun._validate_config("p:m", "f", lines=10, bytes_=10,
+                                           mode="python", sink=None,
+                                           order="none", workers=None,
+                                           nodes="auto", on_error="retry")
+        self.assertEqual(cfg.lines, 10)
+        self.assertIsNone(cfg.bytes)
+        self.assertTrue(any("lines= overrides bytes=" in str(w.message)
+                            for w in caught))
+        # Zero/negative still rejected:
         with self.assertRaises(ValueError):
-            forkrun.run("p:m", source="f", lines=10, bytes=10)
+            forkrun.run("p:m", source="f", lines=0)
 
     def test_nonpositive(self):
         with self.assertRaises(ValueError):

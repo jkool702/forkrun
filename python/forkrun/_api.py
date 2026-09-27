@@ -149,7 +149,16 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
     if on_error not in _VALID_ON_ERROR:
         raise ValueError(f"on_error must be one of {_VALID_ON_ERROR}, got {on_error!r}")
     if lines is not None and bytes_ is not None:
-        raise ValueError("lines= and bytes= are mutually exclusive (-l / -b analogues)")
+        # F-PORT3: Bash -L+-b parity — line mode wins with a warning
+        # (frun.bash -L overrides -b, delivery preserved), not a hard
+        # error. Ranges are structurally unrepresentable here
+        # (lines: int|None — no N:M string form).
+        import warnings as _warnings
+        _warnings.warn(
+            "forkrun [WARNING]: lines= overrides bytes= (line mode "
+            "wins, stdin delivery preserved)",
+            UserWarning, stacklevel=3)
+        bytes_ = None
     for name, val in (("lines", lines), ("bytes", bytes_), ("workers", workers)):
         if val is not None and (not isinstance(val, int) or val <= 0):
             raise ValueError(f"{name} must be a positive int, got {val!r}")
