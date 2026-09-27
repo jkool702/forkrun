@@ -76,6 +76,17 @@ def require_resume_path(where, *, order, orchestrator, mode,
     num_nodes > 1 (NUMA multi-node) is rejected: per-node rings make
     the global byte frontier unsafe to resume in v3.6.0.
     """
+    if os.environ.get("FORKRUN_NO_V1"):
+        # W-REL2/R12: the kill switch masks the C orderer/resume
+        # symbols the checkpoint ledger needs — resume under it
+        # silently truncates (measured 15->12, committed records
+        # vanish with no warning). Refused instead of silent, per
+        # the W-PY22 doctrine; the message names the incompatibility.
+        raise RuntimeError(
+            "%s: resume/checkpoint_file is incompatible with "
+            "FORKRUN_NO_V1=1 (the kill switch masks the C orderer "
+            "and resume symbols); unset the hatch or drop resume=/"
+            "checkpoint_file=" % (where,))
     if num_nodes != 1:
         raise RuntimeError(
             "%s: resume/checkpoint_file on multi-node NUMA paths "

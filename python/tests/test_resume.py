@@ -430,6 +430,23 @@ class TestResumePathValidation(unittest.TestCase):
             list(forkrun.stream(_up, self._input(), workers=2,
                                 order="none", resume=self._ckpt(), nodes=1))
 
+    def test_resume_no_v1_hatch_fails_loud(self):
+        # W-REL2/R12: resume= under FORKRUN_NO_V1=1 silently dropped
+        # committed records (measured 15->12, no warning — the kill
+        # switch masks the C orderer/resume symbols the ledger
+        # needs). Now refused loudly, naming the incompatibility.
+        old = os.environ.get("FORKRUN_NO_V1")
+        os.environ["FORKRUN_NO_V1"] = "1"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "FORKRUN_NO_V1"):
+                forkrun.map(_up, self._input(), workers=2,
+                            order="index", resume=self._ckpt(), nodes=1)
+        finally:
+            if old is None:
+                os.environ.pop("FORKRUN_NO_V1", None)
+            else:
+                os.environ["FORKRUN_NO_V1"] = old
+
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 class TestResumeExecution(unittest.TestCase):
