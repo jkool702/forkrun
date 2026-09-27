@@ -2008,6 +2008,13 @@ fi
 # pipelines, so the backgrounded HUP-flow shape cannot deliver it — a
 # killer subshell signals the cleanroom pid instead while frun runs
 # foreground and records its exit code.
+# LAUNCH NOTE (v3.6.0): the *suite itself* must also run in the
+# foreground (no trailing `&` anywhere above it). A backgrounded
+# shell starts with SIGINT ignored, bash cannot un-ignore a signal
+# ignored on entry, and the ignore inherits irreversibly down to
+# frun — so M1a's kill -INT no-ops (exit 0, no checkpoint) while
+# M1b (SIGUSR1, never auto-ignored) stays green. Not a product
+# bug; re-run foreground.
 if in_section M; then
     ((TOTAL_TESTS++))
     _MD="$TEST_DIR/resume_M1a"; mkdir -p "$_MD"
