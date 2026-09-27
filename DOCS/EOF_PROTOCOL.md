@@ -212,14 +212,21 @@ batches were never claimed leaves no trace in worker statuses —
 the parent would parse a short output and return success.
 
 **Rule.** Before declaring NUMA completion (blocking or
-streaming), the parent must verify per-node drain:
-`read_idx == write_idx` on every node. A node whose unclaimed tail
-is entirely empty (EOF sentinel / zero-length tail: never counted
-by the fork gate, never claimed, contributes no output) is
-vacuous. Any other `read_idx != write_idx` raises `RuntimeError`
-naming the node and indices — silent partial completion becomes
+streaming), the parent must verify per-node drain: every published
+slot claimed (`read_idx >= write_idx`) on every node. A node whose
+unclaimed tail is entirely empty (EOF sentinel / zero-length
+tail: never counted by the fork gate, never claimed, contributes
+no output) is vacuous. Any other `read_idx < write_idx` is a
+violation with a coverage-dependent disposition: with full worker
+coverage (workers >= num_nodes) it raises `RuntimeError` naming
+the node and indices — silent partial completion becomes
 impossible-or-loud (the W-PY22 doctrine: refused instead of
-silent loss).
+silent loss). With under-coverage (workers < num_nodes — the
+documented RESILIENCE §7.3.1 topology constraint, deliberately
+probed by benchmark sweeps) it emits one stderr warning and
+returns the partial output. (`read_idx > write_idx` is benign
+claim overshoot — stragglers' FAA tickets past the final publish
+exit via EOF without ack — and never fires.)
 
 **Scope note.** This rule verifies *drain*, not *publication*:
 a node whose ring drained exactly (`read == write`, including
