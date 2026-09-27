@@ -2,6 +2,57 @@
 
 ## v3.6.0 (unreleased)
 
+### Differential frontend audit — Bash fix history vs Python port (W-PORTAUDIT)
+
+- **Method:** walked the Bash parent/orchestration fix history
+  (CHANGELOG v3.5.0–v3.6.0 + primer §3 ledger + seed targets) into
+  a 32-item matrix (`dev/supervisor/PORT_AUDIT.md`, the living
+  port-invariants artifact): 11 PORTED, 8 EQUIVALENT, 7
+  N/A-BY-DESIGN (each with a named structural reason), 6
+  MISSING fixed below, 3 deferred with work orders. Engine-layer
+  items ride the shared TU automatically (no audit findings).
+  Standing rule: F-NUMA2 was also "different architecture" until
+  it wasn't.
+- **F-PORT1 (P10): `FORKRUN_RETRY_LIMIT` honored.** All 7
+  worker-init sites hardcoded `3`, making `0`/`<0`/custom
+  unreachable despite the documented env. Single point
+  `_resolve_retry_limit()`; unparseable values fail closed.
+  Lock-in `test_retry_limit.py` (limit-0 executes once per batch,
+  default 3x).
+- **F-PORT2 (P14): checkpoint ownership gate.** Only the 022 mask
+  was checked; foreign-UID files resumed silently and
+  `FORKRUN_TRUST_RESUME` was unread. Now: foreign UID refused,
+  go-w fail-closed (no interactive preview surface in Python),
+  `TRUST_RESUME=1` bypasses both with a recorded warning (Bash
+  layer-1 parity). Lock-in `test_checkpoint_gate.py`.
+- **F-PORT3 (P18): `lines=`+`bytes=` warns, lines wins** (Bash
+  `-L`-overrides-`-b` parity) instead of a hard error.
+  Zero/negative still rejected. Lock-in in `test_api_surface.py`.
+- **F-PORT4 (P25): hostile-PATH pinning (D10-class).** Spawn
+  `argv[0]` resolves at build against `os.defpath` (never caller
+  PATH); unresolvable names keep lazy payload-time `SpawnError`
+  (poison path intact); slash-paths realpath-normalized. Plugin
+  load rejects bare filenames, realpaths the rest. Lock-in
+  `test_hostile_path.py` (hostile `cat` end-to-end).
+- **F-PORT5 (P26): release-gate version coherence.** 3 new
+  `release_check.py` checks (17 total): META mapping, built
+  engine version (stale/`"unknown"` fails), wheel-embedded `.so`
+  version by the same read path. Lock-in `test_release_version.py`.
+- **F-PORT6 (P27+P16): degenerate-edge parity.** New
+  `test_edge_degenerate.py`: no-trailing-newline, NUL-laden
+  (lines+bytes), 3MB single line (lines+bytes) byte-exact, plus
+  M18-py (HORIZON==EOF clean no-op) and M19-py (stale horizon
+  raises loudly).
+- **Deferred with work orders (owner sign-off):** D-PORT1
+  signal choreography (no Python TERM/HUP/USR1 equivalent in
+  v3.6.0); D-PORT2 abort-aware indexer classification (needs a
+  `fr_py_abort_reason` shim binding — scope escalation, engine
+  red lines bind); D-PORT3 exit-code taxonomy full parity (API
+  decision; warn-only poison preserved).
+- **Survivors promoted** to INVARIANTS §19 (Frontend Port
+  Guarantees) with audit rules. Python-only changes; engine
+  untouched (`forkrun_ring.c`/`_shim.c` diff empty).
+
 ### NUMA minimum 1 worker per node — parent-side enforcement (F-NUMA2, W-NUMA2)
 
 - **Gap:** user-supplied `workers < nodes` on a multi-node

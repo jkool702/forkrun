@@ -125,11 +125,14 @@
 
 | Gate | Status |
 |---|---|
-| Full Python suite green ×3 | NOT RUN (runs at fix completion) |
-| Targeted tests green ×10 (touched paths) | NOT RUN |
-| `make -f Makefile.substrate check` | NOT RUN |
-| Engine untouched (`git diff -- forkrun_ring.c python/forkrun/_shim.c` empty) | HELD (no code changes yet) |
-| New findings carry changelog + lock-in test | IN PROGRESS (fixes follow) |
+| Full Python suite green ×3 (foreground per M1a) | PASS 3/3 — 521 tests, 1 skip (TestReleaseChecklist skips on dirty tree by design; runs post-commit in release_check) |
+| Targeted tests green ×10, foreground (retry/gate/api/hostile/edge) | PASS 10/10 |
+| Adjacent suites green ×10, foreground (spawn/plugin/resume/recover/fault/v0/numa_bump/packaging_v2, 122 tests/iter) | PASS 10/10 |
+| release_version checks ×3, foreground | PASS 3/3 |
+| `make -f Makefile.substrate check` | PASS (canary + 521-test suite) |
+| Engine untouched (`git diff -- forkrun_ring.c python/forkrun/_shim.c` empty) | HELD — diff empty, verified |
+| New findings carry changelog + lock-in test | DONE — CHANGELOG v3.6.0 entry (twinned in DOCS_ALL) + 6 lock-in suites |
+| Incident during verification | One `TestPurity` failure (F-PORT3 comment cited the wrapper filename — banned literal in transport files); fixed by rewording, TestPurity green. One background-run nested-suite failure under parallel load (M1a: suite must run foreground); all foreground re-runs green. |
 
 ## 6. Deferred work orders (for §7 commit)
 
