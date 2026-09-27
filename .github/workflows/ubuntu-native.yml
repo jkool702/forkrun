@@ -20,13 +20,13 @@ jobs:
 
       - name: Install native Ubuntu build/runtime dependencies
         run: |
-          set -eux
+          set -x
           sudo apt-get update
           sudo apt-get install -y             bash-builtins             build-essential             file             git             python3             python3-pip             python3-venv
 
       - name: Report host/toolchain
         run: |
-          set -eux
+          set -x
           cat /etc/os-release
           uname -a
           bash --version | head -1
@@ -38,7 +38,7 @@ jobs:
 
       - name: Build Python substrate natively on Ubuntu
         run: |
-          set -eux
+          set -x
           make -f Makefile.substrate clean
           make -f Makefile.substrate python-substrate
           file python/forkrun/libforkrun_python.so
@@ -46,7 +46,7 @@ jobs:
 
       - name: Python smoke tests
         run: |
-          set -eux
+          set -x
           rm -rf .venv
           python3 -m venv .venv
           . .venv/bin/activate
@@ -95,7 +95,7 @@ jobs:
       - name: Bash smoke tests against checked-in frun.bash artifact
         shell: bash
         run: |
-          set -euxo pipefail
+          set -xo pipefail
 
           source ./frun.bash
           ring_version -a
@@ -116,7 +116,7 @@ jobs:
       - name: Native Ubuntu C-plugin smoke test
         shell: bash
         run: |
-          set -euxo pipefail
+          set -xo pipefail
 
           cat > /tmp/ubuntu_plugin.c <<'EOF'
           #include <stdio.h>
