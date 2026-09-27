@@ -1,0 +1,160 @@
+name: Native Ubuntu 24.04 Bash 5.2 vs 5.3
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "NEW/REFACTOR2.7"
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-native-bash53:
+    name: Ubuntu 24.04 native Bash A/B
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ubuntu build/runtime dependencies
+        run: |
+          set -x
+          sudo apt-get update
+          sudo apt-get install -y             bash-builtins             build-essential             bison             file             git             python3             python3-pip             python3-venv
+
+      - name: Report Ubuntu baseline
+        run: |
+          set -x
+          cat /etc/os-release
+          uname -a
+          bash --version | head -1
+          gcc --version | head -1
+          python3 --version
+          ldd --version | head -1
+          test -f /usr/include/bash/command.h
+          test -f /usr/include/bash/builtins/common.h
+
+      - name: Build Bash 5.3 side-by-side
+        env:
+          BASH53_SHA256: 62dd49c44c399ed1b3f7f731e87a782334d834f08e098a35f2c87547d5dbb269
+        run: |
+          set -eux
+          cd "$RUNNER_TEMP"
+          curl -fsSLO https://ftp.gnu.org/pub/gnu/bash/bash-5.3.tar.gz
+          echo "$BASH53_SHA256  bash-5.3.tar.gz" | sha256sum -c -
+          rm -rf bash-5.3
+          tar xf bash-5.3.tar.gz
+          cd bash-5.3
+          ./configure --prefix="$RUNNER_TEMP/bash-5.3-prefix"
+          make -j"$(nproc)"
+          make install
+          "$RUNNER_TEMP/bash-5.3-prefix/bin/bash" --version | head -1
+
+      - name: Python substrate and smoke tests
+        run: |
+          set -x
+          make -f Makefile.substrate clean
+          make -f Makefile.substrate python-substrate
+
+          rm -rf .venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install .
+
+          python - <<'PY'
+          from pathlib import Path
+          import forkrun
+
+          p = Path("/tmp/forkrun_ubuntu_python_input.txt")
+          data = b"".join(f"line {i}\n".encode() for i in range(2000))
+          p.write_bytes(data)
+
+          got = b"".join(forkrun.map(
+              lambda batch: bytes(batch.data),
+              str(p),
+              workers=4,
+              nodes=1,
+              order="index",
+          ))
+          assert got == data
+
+          got = b"".join(forkrun.map(
+              lambda batch: bytes(batch.data).upper(),
+              str(p),
+              workers=4,
+              nodes=1,
+              order="index",
+          ))
+          assert got == data.upper()
+
+          got = b"".join(forkrun.map(
+              "cat",
+              str(p),
+              mode="spawn",
+              workers=4,
+              nodes=1,
+              order="index",
+          ))
+          assert got == data
+
+          print("Python Ubuntu smoke: OK")
+          PY
+
+      - name: Bash 5.2 native smoke
+        shell: bash
+        run: |
+          set -xo pipefail
+          source ./frun.bash
+          echo "Bash runtime: $BASH_VERSION"
+          ring_version -a
+
+          printf 'line %s\n' $(seq 1 2000) > /tmp/forkrun_ubuntu_bash_input.txt
+          frun -k cat < /tmp/forkrun_ubuntu_bash_input.txt > /tmp/forkrun_ubuntu_bash52_out.txt
+          cmp /tmp/forkrun_ubuntu_bash_input.txt /tmp/forkrun_ubuntu_bash52_out.txt
+          echo "Bash 5.2 + frun.bash: OK"
+
+      - name: Bash 5.3 native smoke
+        run: |
+          set -x
+          "$RUNNER_TEMP/bash-5.3-prefix/bin/bash" --noprofile --norc -c '
+            set -xo pipefail
+            echo "Bash runtime: $BASH_VERSION"
+            source ./frun.bash
+            ring_version -a
+
+            printf "line %s\n" $(seq 1 2000) > /tmp/forkrun_ubuntu_bash53_input.txt
+            frun -k cat < /tmp/forkrun_ubuntu_bash53_input.txt > /tmp/forkrun_ubuntu_bash53_out.txt
+            cmp /tmp/forkrun_ubuntu_bash53_input.txt /tmp/forkrun_ubuntu_bash53_out.txt
+            echo "Bash 5.3 + frun.bash: OK"
+          '
+
+      - name: Native Ubuntu C-plugin smoke under Bash 5.3
+        run: |
+          set -x
+
+          cat > /tmp/ubuntu_plugin.c <<'EOF'
+          #include <stdio.h>
+          #include <string.h>
+
+          int process(int argc, char **argv) {
+              size_t total = 0;
+              for (int i = 0; i < argc; ++i)
+                  total += strlen(argv[i]);
+              printf("%d %zu\n", argc, total);
+              return 0;
+          }
+          EOF
+
+          gcc -O2 -shared -fPIC -o /tmp/ubuntu_plugin.so /tmp/ubuntu_plugin.c
+
+          "$RUNNER_TEMP/bash-5.3-prefix/bin/bash" --noprofile --norc -c '
+            set -xo pipefail
+            source ./frun.bash
+            printf "a\nbb\nccc\n" > /tmp/ubuntu_plugin_input.txt
+            frun -C /tmp/ubuntu_plugin.so:process -k < /tmp/ubuntu_plugin_input.txt > /tmp/ubuntu_plugin_out.txt
+            test -s /tmp/ubuntu_plugin_out.txt
+            echo "Bash 5.3 + native Ubuntu C plugin: OK"
+          '
