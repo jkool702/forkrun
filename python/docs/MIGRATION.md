@@ -37,6 +37,13 @@ almost 1:1.
   bash EXIT trap with the reactor on.
 - **Functions, not programs.** `run`/`map`/`stream` compose
   in-process (results are Python objects, not stdout text).
+- **Signals are opt-in.** Bash traps HUP/TERM/USR1 into
+  abort+checkpoint by default; Python installs nothing by
+  default (host-safe). Pass `signal_policy="checkpoint"` for
+  the Bash behavior, and expect `ForkrunTerminated` /
+  `ForkrunPreempted` / `ForkrunInterrupted` (Bash 143/138/130)
+  instead of exit codes — see the mapping table in
+  TROUBLESHOOTING.md.
 
 ## Minimal translation
 

@@ -114,6 +114,11 @@ class RunConfig:
     # continuation); True raises ForkrunPoisonSkip carrying the
     # engine's poisoned count instead of returning partial output.
     strict_poison: bool = False
+    # D-PORT1: opt-in parent signal policy. Default "default"
+    # installs nothing (library non-invasive); "checkpoint"
+    # installs HUP/TERM (+USR1 under FORKRUN_PREEMPT_MODE=1)
+    # handlers for the run, restoring afterwards.
+    signal_policy: Any = "default"
     # W-PY22 resume: checkpoint file to resume FROM (byte coordinates)
     # and/or checkpoint file to publish TO on abort. Path gating
     # (C-orderer executors only) happens in run.py — here only the
@@ -147,7 +152,8 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
               order: str, lines: Any, bytes_: Any, workers: Any,
               nodes: Any, on_error: str, streaming: Any = None,
               resume: Any = None, checkpoint_file: Any = None,
-              strict_poison: Any = False) -> RunConfig:
+              strict_poison: Any = False,
+              signal_policy: Any = "default") -> RunConfig:
     if mode not in _VALID_MODES:
         raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
     if order not in _VALID_ORDERS:
@@ -184,6 +190,8 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
     if not isinstance(strict_poison, bool):
         raise TypeError(
             f"strict_poison must be bool, got {type(strict_poison).__name__}")
+    from forkrun._signals import validate_signal_policy as _vsp
+    signal_policy = _vsp(signal_policy)
     if mode == "splice":
         # Passthrough has no payload hook: payload must be absent (an
         # ignored payload would silently drop user code — reject the
@@ -212,4 +220,5 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
                      order=order, lines=lines, bytes=bytes_, workers=workers,
                      nodes=nodes, on_error=on_error, streaming=streaming,
                      resume=resume_path, checkpoint_file=checkpoint_path,
-                     strict_poison=strict_poison)
+                     strict_poison=strict_poison,
+                     signal_policy=signal_policy)

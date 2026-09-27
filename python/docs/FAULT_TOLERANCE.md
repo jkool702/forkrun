@@ -63,6 +63,36 @@ sidecar, so abort+resume is byte-identical to an
 uninterrupted run. For `stream()`, persist what you consume:
 engine commit is exactly-once, Python consumption is not.
 
+## Operator signals (D-PORT1): opt-in `signal_policy`
+
+By default forkrun installs **no** signal handlers — a library
+must not capture its host's signals. Ctrl-C in a foreground
+script raises through as `ForkrunInterrupted` (still a
+`KeyboardInterrupt`); anything else keeps its ambient
+disposition.
+
+Pass `signal_policy="checkpoint"` (run/map/stream) when you want
+Bash-style graceful abort: HUP/TERM handlers are installed for
+the run (plus USR1, but only under `FORKRUN_PREEMPT_MODE=1` —
+the Bash conditional trap), an operator signal aborts the
+engine, the armed W-PY22 checkpoint publishes, and the run
+raises `ForkrunTerminated` / `ForkrunPreempted` (Bash 143/138)
+*after* teardown. Prior handlers are always restored, even on
+failure. SIGINT is never captured.
+
+```python
+try:
+    forkrun.map(payload, src, order="index", orchestrator=True,
+                checkpoint_file="run.ckpt",
+                signal_policy="checkpoint")
+except forkrun.ForkrunTerminated:
+    results = forkrun.map(payload, src, order="index",
+                          orchestrator=True, resume="run.ckpt")
+```
+
+Without `checkpoint_file=` (or off C-orderer paths) the signal
+still aborts and raises — there is just no file to resume from.
+
 ## Operational notes
 
 - Deaths are reported on stderr (`N worker death(s)
