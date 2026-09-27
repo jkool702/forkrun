@@ -1,0 +1,140 @@
+name: Native Ubuntu 24.04 smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "NEW/REFACTOR2.7"
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-native:
+    name: Ubuntu 24.04 native
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native Ubuntu build/runtime dependencies
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y             bash-builtins             build-essential             file             git             python3             python3-pip             python3-venv
+
+      - name: Report host/toolchain
+        run: |
+          set -eux
+          cat /etc/os-release
+          uname -a
+          bash --version | head -1
+          gcc --version | head -1
+          python3 --version
+          ld.bfd --version | head -1
+          test -f /usr/include/bash/command.h
+          test -f /usr/include/bash/builtins/common.h
+
+      - name: Build Python substrate natively on Ubuntu
+        run: |
+          set -eux
+          make -f Makefile.substrate clean
+          make -f Makefile.substrate python-substrate
+          file python/forkrun/libforkrun_python.so
+          python3 -c 'import sys; sys.path.insert(0, "python"); import forkrun; print("forkrun", forkrun.__version__); print("engine", forkrun.__engine_version__)'
+
+      - name: Python smoke tests
+        run: |
+          set -eux
+          rm -rf .venv
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install .
+          python - <<'PY'
+          from pathlib import Path
+          import forkrun
+
+          p = Path("/tmp/forkrun_ubuntu_input.txt")
+          data = b"".join(f"line {i}\n".encode() for i in range(2000))
+          p.write_bytes(data)
+
+          got = b"".join(forkrun.map(
+              lambda batch: bytes(batch.data),
+              str(p),
+              workers=4,
+              nodes=1,
+              order="index",
+          ))
+          assert got == data
+          print("python map/index: OK")
+
+          got = b"".join(forkrun.map(
+              lambda batch: bytes(batch.data).upper(),
+              str(p),
+              workers=4,
+              nodes=1,
+              order="index",
+          ))
+          assert got == data.upper()
+          print("python map/transform: OK")
+
+          got = b"".join(forkrun.map(
+              "cat",
+              str(p),
+              mode="spawn",
+              workers=4,
+              nodes=1,
+              order="index",
+          ))
+          assert got == data
+          print("python spawn/cat: OK")
+          PY
+
+      - name: Bash smoke tests against checked-in frun.bash artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          source ./frun.bash
+          ring_version -a
+
+          printf 'line %s\n' $(seq 1 2000) > /tmp/forkrun_ubuntu_input.txt
+
+          frun -k cat < /tmp/forkrun_ubuntu_input.txt > /tmp/forkrun_ubuntu_cat.txt
+          cmp /tmp/forkrun_ubuntu_input.txt /tmp/forkrun_ubuntu_cat.txt
+          echo "bash external cat: OK"
+
+          fr_test() {
+            printf '%s\n' "$@"
+          }
+          frun -k fr_test < /tmp/forkrun_ubuntu_input.txt > /tmp/forkrun_ubuntu_func.txt
+          cmp /tmp/forkrun_ubuntu_input.txt /tmp/forkrun_ubuntu_func.txt
+          echo "bash builtin/function path: OK"
+
+      - name: Native Ubuntu C-plugin smoke test
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cat > /tmp/ubuntu_plugin.c <<'EOF'
+          #include <stdio.h>
+          #include <string.h>
+
+          int process(int argc, char **argv) {
+              size_t total = 0;
+              for (int i = 0; i < argc; ++i)
+                  total += strlen(argv[i]);
+              printf("%d %zu\\n", argc, total);
+              return 0;
+          }
+          EOF
+
+          gcc -O2 -shared -fPIC -o /tmp/ubuntu_plugin.so /tmp/ubuntu_plugin.c
+
+          source ./frun.bash
+          printf 'a\nbb\nccc\n' > /tmp/ubuntu_plugin_input.txt
+          frun -C /tmp/ubuntu_plugin.so:process -k < /tmp/ubuntu_plugin_input.txt > /tmp/ubuntu_plugin_out.txt
+          test -s /tmp/ubuntu_plugin_out.txt
+          echo "bash C plugin/dlopen path: OK"
