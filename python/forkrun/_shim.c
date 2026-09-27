@@ -694,6 +694,11 @@ int fr_py_exec_spawn(char **argv, int argc, uint64_t in_off, uint64_t in_len,
             }
             if (rev & (POLLIN | POLLHUP)) {
                 while (1) {
+                    /* NOTE (W-REL1/R4): SPLICE_F_MOVE here is NOT the
+                     * ingress hazard removed below — the source is a
+                     * PIPE (no page cache, nothing fallow punches),
+                     * and cap_fd is never hole-punched. Only
+                     * memfd-source splices race PUNCH_HOLE. */
                     ssize_t n = splice(stdout_pipe[0], NULL, cap_fd, NULL,
                                        1 << 20, SPLICE_F_MOVE);
                     if (n < 0) {
@@ -723,8 +728,20 @@ int fr_py_exec_spawn(char **argv, int argc, uint64_t in_off, uint64_t in_len,
             if (rev & POLLOUT) {
                 while (in_left > 0) {
                     size_t want = in_left > (1 << 20) ? (1 << 20) : (size_t)in_left;
+                    /* NO SPLICE_F_MOVE here, ever (W-REL1/R4): it asks
+                     * the kernel to detach pages from the tmpfs page
+                     * cache, and when the fallow reaper concurrently
+                     * calls fallocate(PUNCH_HOLE) on this same ingress
+                     * memfd the two paths deadlock in a kernel-level
+                     * lock inversion on the inode/page locks. The
+                     * engine removed both splice flags at
+                     * forkrun_ring.c:~7800 with exactly this
+                     * post-mortem; flags=0 copies pages instead of
+                     * moving them (noise at 1MB batches — the spawn
+                     * benchmark cannot tell). Do not re-add without
+                     * re-reading that post-mortem. */
                     ssize_t n = splice(ingress_fd, &splice_off, stdin_pipe[1],
-                                       NULL, want, SPLICE_F_MOVE);
+                                       NULL, want, 0);
                     if (n < 0) {
                         if (errno == EINTR)
                             continue;
