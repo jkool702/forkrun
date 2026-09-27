@@ -403,6 +403,11 @@ def _spill_to_memfd(src_fd) -> tuple[int, int]:
     Returns (memfd_fd, size). v0 materializes the whole input (bounded
     inputs only — see module docstring).
 
+    INVARIANTS.md §20: this fd's file offset is UNDEFINED — never
+    read or relied upon by any consumer (all access is explicit-
+    offset or mmap-windowed). The pre-fork lseek(0) below is belt
+    only; correctness never depends on the position.
+
     W-PY18 addendum: kernel copy first (copy_file_range via
     fr_py_copy_range, explicit offsets — never touches fd positions),
     userspace pread/pwrite loop on -1 (exotic pairs) or shortfall.
@@ -1763,20 +1768,17 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
     scan_rc = None
     try:
         memfd, size = _spill_to_memfd(src_fd)
-        _mover_sentry(memfd, "C0-spill-done")
         try:
             os.lseek(memfd, 0, os.SEEK_SET)
         except OSError:
             pass
         if lib.fr_py_ingest_done() != RC_OK:
             raise RuntimeError("ingest signal failed")
-        _mover_sentry(memfd, "C1-pre-scan-fork")
         # W-PY39: fork the scanner so its pre-flight + publish
         # overlap worker execution below (bash/NUMA topology).
         # Workers arriving mid-scan trip the pre-flight bail
         # (CASE B); the engine main loop always scans from byte 0.
         scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
-        _mover_sentry(memfd, "C2-post-scan-fork")
 
         def _scan_pump():
             # W-PY39 scanner watch for _drain_records: raises on
@@ -2587,7 +2589,10 @@ def _new_ingress_memfd():
     """Create the streaming-ingest memfd (parent writes, scanner + workers
     read). Falls back to an anonymous temp file where memfd_create is
     unavailable (same rationale as _spill_to_memfd). Returns (fd, hold)
-    where hold keeps a fallback file alive (empty for memfd)."""
+    where hold keeps a fallback file alive (empty for memfd).
+
+    INVARIANTS.md §20: this fd's file offset is UNDEFINED — never
+    read or relied upon (explicit offsets / mmap windows only)."""
     try:
         return os.memfd_create("forkrun_ingress"), []
     except AttributeError:
@@ -2617,33 +2622,6 @@ def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
             workers=workers, on_error=on_error, strict_poison=strict_poison,
             collect=collect,
             order=order, splice=splice, c_drain=c_drain)
-
-
-def _mover_sentry(memfd, tag):
-    """F-PY-UMA1b position sentry (investigation only).
-
-    Env-gated (FORKRUN_DIAG_MOVER=1), zero default cost: snapshots
-    the ingress memfd's shared file offset (a SEEK_CUR query moves
-    nothing) with pid + timestamp to stderr. Parent-side only —
-    no engine contact. Checkpoints: C0 spill-done, C1
-    pre-scan-fork, C2 post-scan-fork, C3 post-worker-fork, C4
-    post-worker-join, C5 pre-destroy.
-    """
-    if os.environ.get("FORKRUN_DIAG_MOVER") != "1":
-        return
-    if memfd is None:
-        return
-    try:
-        pos = os.lseek(memfd, 0, os.SEEK_CUR)
-    except Exception as exc:
-        pos = "ERR:%s" % (exc,)
-    try:
-        sys.stderr.write(
-            "forkrun [MOVER] tag=%s pid=%d fd=%s pos=%r t=%.3f\n"
-            % (tag, os.getpid(), memfd, pos, _time.monotonic()))
-        sys.stderr.flush()
-    except Exception:
-        pass
 
 
 def _fork_materialized_scanner(lib, memfd, engine_fds):
@@ -3253,21 +3231,18 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
     scan_pid = None
     try:
         memfd, size = _spill_to_memfd(src_fd)
-        _mover_sentry(memfd, "C0-spill-done")
         try:
             os.lseek(memfd, 0, os.SEEK_SET)
         except OSError:
             pass
         if lib.fr_py_ingest_done() != RC_OK:
             raise RuntimeError("ingest signal failed")
-        _mover_sentry(memfd, "C1-pre-scan-fork")
         # W-PY39: fork the scanner so its pre-flight + publish
         # overlap the setup + worker execution below (bash/NUMA
         # topology). Workers arriving mid-scan trip the pre-flight
         # bail (CASE B); the engine main loop always scans from
         # byte 0, so completeness never depends on the race.
         scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
-        _mover_sentry(memfd, "C2-post-scan-fork")
 
         # Flush buffered stdio before forking (no duplicated output).
         try:
@@ -3345,7 +3320,6 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             else:
                 pids.append(pid)
 
-        _mover_sentry(memfd, "C3-post-worker-fork")
         if use_drain:
             # Parent never writes signals and (no respawns here)
             # keeps no spare: close the write end now, fork the
@@ -3422,7 +3396,6 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                     " (on_error=%s)" % on_error))
 
         # Parent-side poison summary (g_state is MAP_SHARED: the parent
-        _mover_sentry(memfd, "C4-post-worker-join")
         # observes worker increments without IPC). Read BEFORE destroy.
         try:
             npois = lib.fr_py_poisoned_count()
@@ -3515,7 +3488,6 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             except OSError:
                 pass
         out_hold.clear()
-        _mover_sentry(memfd, "C5-pre-destroy")
         if memfd is not None:
             try:
                 os.close(memfd)
@@ -3847,21 +3819,18 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     use_orderer = False
     try:
         memfd, size = _spill_to_memfd(src_fd)
-        _mover_sentry(memfd, "C0-spill-done")
         try:
             os.lseek(memfd, 0, os.SEEK_SET)
         except OSError:
             pass
         if lib.fr_py_ingest_done() != RC_OK:
             raise RuntimeError("ingest signal failed")
-        _mover_sentry(memfd, "C1-pre-scan-fork")
         # W-PY39: fork the scanner so its pre-flight + publish
         # overlap the setup + worker execution below (bash/NUMA
         # topology). Workers arriving mid-scan trip the pre-flight
         # bail (CASE B); the engine main loop always scans from
         # byte 0, so completeness never depends on the race.
         scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
-        _mover_sentry(memfd, "C2-post-scan-fork")
 
         try:
             sys.stdout.flush()
@@ -4188,21 +4157,18 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     scan_rc = None
     try:
         memfd, size = _spill_to_memfd(src_fd)
-        _mover_sentry(memfd, "C0-spill-done")
         try:
             os.lseek(memfd, 0, os.SEEK_SET)
         except OSError:
             pass
         if lib.fr_py_ingest_done() != RC_OK:
             raise RuntimeError("ingest signal failed")
-        _mover_sentry(memfd, "C1-pre-scan-fork")
         # W-PY39: fork the scanner so its pre-flight + publish
         # overlap the setup + worker execution below (bash/NUMA
         # topology). Workers arriving mid-scan trip the pre-flight
         # bail (CASE B); the engine main loop always scans from
         # byte 0, so completeness never depends on the race.
         scan_pid = _fork_materialized_scanner(lib, memfd, engine_fds)
-        _mover_sentry(memfd, "C2-post-scan-fork")
 
         try:
             sys.stdout.flush()

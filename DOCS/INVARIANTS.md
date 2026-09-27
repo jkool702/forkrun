@@ -506,9 +506,60 @@ structural reason and a PORT_AUDIT entry.
 
 ---
 
-## 20. Checklist Summary
+## 20. Ingress Memfd Position Is Undefined (F-PY-UMA1b)
 
-If sections §1–20 above remain true, **forkrun is correct** — regardless of:
+**Invariant**
+The file offset of the ingress memfd is not maintained by any
+forkrun contract and must never be read or relied upon. All
+access uses explicit offsets (`pread`/`pwrite`, offset-bearing
+`sendfile`/`splice`/`copy_file_range`, `mmap` windows). Any new
+code touching the ingress fd must follow this discipline —
+positional `read`/`write`/offset-less syscalls on it are a
+contract violation even when they appear to work.
+
+**Origin**
+F-PY-UMA1: the UMA scanner seeded its coordinate base from
+`lseek(SEEK_CUR)` on the fork-shared ingress memfd and silently
+dropped `[0, K)` whenever the position was nonzero (fixed by
+unconditional base 0). W-MOVER then proved a live offset-mover
+still exists on the current tree: 8-byte positional reads on the
+shared ingress from `do_lockfree_claim`'s eventfd-drain path
+(`sys_read(evfd_data_arr[my_numa_node], &v, 8)`), traced via
+LD_PRELOAD (40K–1.5M per suite run, mostly EOF-spin, some
+advancing), return-PC resolved into `do_lockfree_claim`,
+per-event array capture showing the slot naming the ingress fd.
+Parent-side sentry (1000+ samples): pre-fork always 0, movement
+in worker-fork through teardown windows, always multiples of 8.
+Harmless post-F-PY-UMA1 (nothing reads position; stray packets
+are validated away; suite green) but real — and a latent hazard
+to any future positional consumer. The fd-aliasing origin
+(slot↔ingress number collision in forked children while the
+parent layout verifies pristine) is carried as an explicit
+residual; the engine-side hardening (fd-identity validation in
+the claim path) needs engine changes and is halted per red
+lines for owner decision. The scanner-side contract — never
+read the position — holds regardless of what moves it.
+
+**Enforced by**
+Scanner base hardcoded 0 (`core_scanner_loop` entry re-establishes
+it instead of querying); pre-fork `lseek(0)` at every materialized
+spill site; the spill/chunk/scan/emit/plugin/tokenize paths all
+use explicit offsets (audited); lock-in `test_mover.py`
+(position-independence under a deliberately dirtied offset +
+ten-sequential-maps head exactness).
+
+**Audit Rule**
+❌ Any `read`/`write`/`sendfile`/`splice` on the ingress fd
+without an explicit offset argument. ❌ Any `lseek(SEEK_CUR)`
+query of the ingress offset outside narrowly-scoped,
+env-gated diagnostics. ❌ Any new consumer of ingress bytes
+that is not `pread`/explicit-offset/`mmap`-window based.
+
+---
+
+## 21. Checklist Summary
+
+If sections §1–21 above remain true, **forkrun is correct** — regardless of:
 * batching heuristics (Pre-Flight Popcount, Geometric Fallback, or PID Steady-State)
 * wake frequency
 * NUMA placement
