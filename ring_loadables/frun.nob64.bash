@@ -1313,9 +1313,16 @@ toc() { :; }
                 # complete file, never a torn one. If ANY stage of content
                 # generation fails, publish NOTHING (keep the previous
                 # checkpoint intact) rather than a header-less fragment.
-                local _target_tmp="${_target_chk}.tmp.$$"
+                # W-REL3/R18: mktemp (O_EXCL regular file, mode 600),
+                # never a predictable ".tmp.$$" name — a pre-planted
+                # symlink at a predictable path used to be followed by
+                # the redirect/append/chmod below (arbitrary overwrite +
+                # chmod 600 of the link target). mktemp in the SAME dir
+                # keeps the rename atomic; failure publishes nothing.
+                local _target_tmp=""
+                _target_tmp="$(mktemp "${_target_chk}.tmp.XXXXXX" 2>/dev/null)" || _target_tmp=""
                 local _publish_ok=0
-                if ring_dump_resume > "$_target_tmp"; then
+                if [[ -n "$_target_tmp" ]] && ring_dump_resume > "$_target_tmp"; then
                     _publish_ok=1
                     local FORKRUN_EXTRA_DEFS=""
                     for nn in ${FORKRUN_EXTRA_FUNCS:-}; do
@@ -1334,7 +1341,7 @@ toc() { :; }
                     chmod 600 "$_target_tmp" 2>/dev/null
                     mv -f "$_target_tmp" "$_target_chk" 2>/dev/null || _publish_ok=0
                 fi
-                [[ "$_publish_ok" == 0 ]] && rm -f "$_target_tmp" 2>/dev/null
+                [[ "$_publish_ok" == 0 && -n "$_target_tmp" ]] && rm -f "$_target_tmp" 2>/dev/null
 
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes="$(grep -E '^FORKRUN_RESUME_STDOUT_BYTES=' "$_target_chk" 2>/dev/null)"

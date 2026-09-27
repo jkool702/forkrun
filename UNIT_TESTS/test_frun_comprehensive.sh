@@ -5097,6 +5097,48 @@ if in_section T; then
     fi
 fi
 
+# --- R14: checkpoint publish ignores pre-planted symlinks (S1) ---
+# The EXIT-trap checkpoint publisher must not follow a predictable
+# tmp name: the old ".tmp.$$" construction let a pre-planted symlink
+# redirect the create/append/chmod into an arbitrary victim file.
+# Plant symlinks for a 128-pid window below the cleanroom pid:
+# the trap's $$ is the cleanroom MAIN shell while the pidfile
+# carries a subshell's BASHPID (strace-proven, a few pids higher),
+# so the exact old-model name is unknowable — but it necessarily
+# lies below the pidfile pid (ancestors start first, pids are
+# monotonic). Pre-fix one of the plants is followed; post-fix
+# mktemp names never collide. Abort via SIGTERM (R10 pattern),
+# then verify: victim content AND mode untouched, checkpoint
+# still published, no regular predictable-tmp file left.
+if in_section R; then
+    ((TOTAL_TESTS++))
+    _MD="$TEST_DIR/R_SYMLINK"; mkdir -p "$_MD"
+    seq 20000 > "$_MD/input.txt"; rm -f "$_MD/.forkrun_resume" "$_MD/cleanroom.pid"
+    echo "VICTIM-CONTENT" > "$_MD/victim.txt"; chmod 644 "$_MD/victim.txt"
+
+    export FORKRUN_TEST_CLEANROOM_PIDFILE="$_MD/cleanroom.pid"
+    bash -c "source '$FRUN_SOURCE'; cd '$_MD'; cat input.txt | FORKRUN_TEST_CLEANROOM_PIDFILE='$_MD/cleanroom.pid' frun -k -s -l 1 sleep 0.1 & FPID=\$!; for (( _w=0; _w<1000; _w++ )); do [[ -f '$_MD/cleanroom.pid' ]] && break; sleep 0.01; done; _CP=\$(cat '$_MD/cleanroom.pid'); for (( _p=_CP-128; _p<_CP; _p++ )); do (( _p > 0 )) && ln -sf victim.txt \".forkrun_resume.tmp.\$_p\" 2>/dev/null; done; kill -TERM \$_CP; wait \$FPID" \
+        > "$_MD/output.txt" 2>"$_MD/err.txt"
+    _REXIT=$?
+    unset FORKRUN_TEST_CLEANROOM_PIDFILE
+
+    _s1_ok=1; _s1_why=""
+    [[ "$(cat "$_MD/victim.txt")" == "VICTIM-CONTENT" ]] || { _s1_ok=0; _s1_why="victim content changed"; }
+    [[ "$(stat -c %a "$_MD/victim.txt")" == "644" ]] || { _s1_ok=0; _s1_why="victim mode changed: $(stat -c %a "$_MD/victim.txt")"; }
+    [[ -f "$_MD/.forkrun_resume" ]] || { _s1_ok=0; _s1_why="no checkpoint published (vacuous?)"; }
+    # Regular files only (the planted symlink itself is expected to
+    # remain — a successful publish renames its mktemp away).
+    [[ -n "$(find "$_MD" -maxdepth 1 -type f -name '.forkrun_resume.tmp.*' -print -quit)" ]] && { _s1_ok=0; _s1_why="predictable tmp left behind"; }
+    if (( _s1_ok == 1 )); then
+        TEST_RESULTS["R14: checkpoint symlink-safe publish (S1)"]="PASS"; ((PASSED_TESTS++))
+        _print_result PASS "R14: checkpoint symlink-safe publish (S1)"
+    else
+        TEST_RESULTS["R14: checkpoint symlink-safe publish (S1)"]="FAIL"
+        TEST_ERRORS["R14: checkpoint symlink-safe publish (S1)"]="$_s1_why (exit=$_REXIT)"
+        ((FAILED_TESTS++)); _print_result FAIL "R14: checkpoint symlink-safe publish (S1)" "$_s1_why (exit=$_REXIT)"
+    fi
+fi
+
 # ============================================================================
 # SUMMARY
 # ============================================================================
