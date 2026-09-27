@@ -1560,7 +1560,9 @@ def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
         except Exception:
             pass
         try:
-            if lib.fr_py_worker_init(wid, 0, 0, 3, 0) != 0:
+            # F-PORT1: poison threshold from FORKRUN_RETRY_LIMIT, never hardcoded.
+            from ._api import _resolve_retry_limit as _retry_limit
+            if lib.fr_py_worker_init(wid, 0, 0, _retry_limit(), 0) != 0:
                 os._exit(1)
             rc = lib.fr_py_worker_splice_loop(
                 wid, memfd, out_fd,

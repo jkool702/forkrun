@@ -27,6 +27,31 @@ _VALID_MODES = ("python", "spawn", "plugin", "splice")
 _VALID_ORDERS = ("none", "index")
 _VALID_ON_ERROR = ("retry", "fail-fast", "skip")
 
+# Bash parity default: the engine's poison threshold (F-PORT1). The
+# Bash frontend reads FORKRUN_RETRY_LIMIT at worker init
+# (ring_worker inc → g_fr_config.retry_limit); the Python port
+# hardcoded 3 at every init site, making 0/<0/custom unreachable
+# despite CONFIGURATION.md/FAULT_TOLERANCE.md documenting the env.
+DEFAULT_RETRY_LIMIT = 3
+
+
+def _resolve_retry_limit():
+    """Poison threshold for worker init (F-PORT1).
+
+    Reads FORKRUN_RETRY_LIMIT (int; default 3). Semantics match the
+    engine: <0 never poisons, 0 poisons on first failure
+    (exactly-once), N poisons after N total executions. Unparseable
+    values raise ValueError fail-closed (never silently 3).
+    """
+    raw = os.environ.get("FORKRUN_RETRY_LIMIT", None)
+    if raw is None or raw == "":
+        return DEFAULT_RETRY_LIMIT
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "FORKRUN_RETRY_LIMIT must be an integer, got %r" % (raw,))
+
 
 def _reject_iterable_source(source: Any) -> None:
     """Reject iterables/generators with the stated reason.

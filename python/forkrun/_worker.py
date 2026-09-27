@@ -237,7 +237,10 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
     # W-PY29: init FIRST — fr_py_worker_init resets fr_py_txn_out_fd
     # (calling _set_out before it silently disarms transaction
     # publication; that was Bug 1 — output_start stuck at init).
-    if lib.fr_py_worker_init(wid, node, wincarn, 3, 0) != 0:
+    # F-PORT1: poison threshold comes from FORKRUN_RETRY_LIMIT
+    # (never hardcoded — 0/<0/custom must reach the engine).
+    from ._api import _resolve_retry_limit as _retry_limit
+    if lib.fr_py_worker_init(wid, node, wincarn, _retry_limit(), 0) != 0:
         return 1
     # W-PY28: name the output fd for transaction publication and sync
     # the ack offset (respawned generations append to a reused fd).
@@ -735,6 +738,7 @@ def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
         except Exception:
             pass
         try:
+            from ._api import _resolve_retry_limit as _retry_limit
             rc = lib.fr_py_worker_plugin_loop(
                 wid,
                 plugin_path.encode("utf-8")
@@ -744,7 +748,7 @@ def _fork_c_plugin_worker(lib, wid, plugin_path, plugin_func, memfd_fd,
                 memfd_fd, out_fd,
                 signal_w if signal_w is not None else -1,
                 fallow_w if fallow_w is not None else -1,
-                -1, -1, 0, 3,
+                -1, -1, 0, _retry_limit(),
                 _ON_ERROR_CODES.get(on_error, 0))
         except BaseException:
             rc = 1
@@ -804,12 +808,13 @@ def _fork_c_spawn_worker(lib, wid, spawn_argv, memfd_fd,
         except Exception:
             pass
         try:
+            from ._api import _resolve_retry_limit as _retry_limit
             rc = lib.fr_py_worker_spawn_loop(
                 wid, argv_c, len(_argv_b),
                 memfd_fd, out_fd,
                 signal_w if signal_w is not None else -1,
                 fallow_w if fallow_w is not None else -1,
-                -1, -1, 0, 3,
+                -1, -1, 0, _retry_limit(),
                 _ON_ERROR_CODES.get(on_error, 0))
         except BaseException:
             rc = 1

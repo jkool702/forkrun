@@ -475,7 +475,9 @@ def _splice_child_main(ctx, wid, node, incarn, death_w):
     except Exception:
         pass
     try:
-        if lib.fr_py_worker_init(wid, node, incarn, 3, 0) != 0:
+        # F-PORT1: poison threshold from FORKRUN_RETRY_LIMIT, never hardcoded.
+        from ._api import _resolve_retry_limit as _retry_limit
+        if lib.fr_py_worker_init(wid, node, incarn, _retry_limit(), 0) != 0:
             return 1
         order_w = ctx.get("order_w", -1)
         if order_w is not None and order_w >= 0:
@@ -547,11 +549,13 @@ def _c_plugin_child_main(ctx, wid, node, incarn, death_w):
         ord_fd = ord_w if ord_w is not None and ord_w >= 0 else -1
         trap = trap_w if trap_w is not None and trap_w >= 0 else -1
         on_error = ctx.get("on_error", "retry")
+        from ._api import _resolve_retry_limit as _retry_limit
         rc = lib.fr_py_worker_plugin_loop(
             wid,
             path.encode("utf-8") if isinstance(path, str) else path,
             func.encode("utf-8") if isinstance(func, str) else func,
-            ctx["memfd"], out_fd, sig, fal, ord_fd, trap, incarn, 3,
+            ctx["memfd"], out_fd, sig, fal, ord_fd, trap, incarn,
+            _retry_limit(),
             _ON_ERROR_CODES.get(on_error, 0))
     except BaseException:
         rc = 1
@@ -611,9 +615,11 @@ def _c_spawn_child_main(ctx, wid, node, incarn, death_w):
         ord_fd = ord_w if ord_w is not None and ord_w >= 0 else -1
         trap = trap_w if trap_w is not None and trap_w >= 0 else -1
         on_error = ctx.get("on_error", "retry")
+        from ._api import _resolve_retry_limit as _retry_limit
         rc = lib.fr_py_worker_spawn_loop(
             wid, argv_c, len(_argv_b),
-            ctx["memfd"], out_fd, sig, fal, ord_fd, trap, incarn, 3,
+            ctx["memfd"], out_fd, sig, fal, ord_fd, trap, incarn,
+            _retry_limit(),
             _ON_ERROR_CODES.get(on_error, 0))
     except BaseException:
         rc = 1
