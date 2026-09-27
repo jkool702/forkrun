@@ -176,5 +176,52 @@ class TestEventLoopNoDeadlock(unittest.TestCase):
         self.assertIn("STREAMING-EVENT-LOOP-OK", proc.stdout)
 
 
+class TestTeardownFdClosure(unittest.TestCase):
+    """W-REL2/R11: spawn_r + fallow_w spares leaked +2 fds/run on
+    the failure path (never in _teardown_reactor's close list).
+    Failing reactor runs must return the fd table to baseline."""
+
+    def test_failing_runs_leave_no_fds(self):
+        import gc
+
+        import forkrun
+        from forkrun._bindings import find_substrate
+
+        try:
+            find_substrate()
+        except FileNotFoundError:
+            self.skipTest("libforkrun_python.so not built")
+
+        def always(batch):
+            raise RuntimeError("boom")
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        try:
+            with open(path, "w") as fh:
+                for i in range(2000):
+                    fh.write("line %d\n" % i)
+            gc.collect()
+            before = len(os.listdir("/proc/self/fd"))
+            # Failure via the streaming-ingest reactor (spawn pipe +
+            # fallow spares live here) ...
+            with self.assertRaises(RuntimeError):
+                forkrun.map(always, path, workers=2, nodes=1,
+                            streaming=True, on_error="fail-fast")
+            gc.collect()
+            self.assertEqual(len(os.listdir("/proc/self/fd")), before,
+                             "fds leaked on streaming failure path")
+            # ... and via the plain materialized reactor.
+            with self.assertRaises(RuntimeError):
+                forkrun.map(always, path, workers=2, nodes=1,
+                            on_error="fail-fast")
+            gc.collect()
+            self.assertEqual(len(os.listdir("/proc/self/fd")), before,
+                             "fds leaked on materialized failure path")
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3735,6 +3735,51 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
             os.close(fd)
         except OSError:
             pass
+    # W-REL2/R11: the spawn_r + fallow_w spares leaked +2 fds/run on
+    # the failure path (never in any close list). Every reactor path
+    # parks them on state (spawn_r attribute, ctx["fallow_w"]), so
+    # closing from state covers all six teardown callers with no
+    # signature change. Mark -1 afterwards (a stale number must
+    # never be reused); double-close is EBADF-caught, safe.
+    if state is not None:
+        try:
+            _ctx = state.ctx or {}
+        except AttributeError:
+            _ctx = {}
+        for fd in (getattr(state, "spawn_r", -1),
+                   _ctx.get("fallow_w", -1)):
+            if fd is None or fd < 0:
+                continue
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            state.spawn_r = -1
+        except AttributeError:
+            pass
+        try:
+            if "fallow_w" in _ctx:
+                _ctx["fallow_w"] = -1
+        except TypeError:
+            pass
+        # W-REL2/R11: the scanner death-pipe read end (parked by
+        # _execute_ingest_reactor_locked; -1/unset elsewhere).
+        # Unclassified on abort paths (no clean/error verdict ever
+        # arrived) — without this it leaks +1 fd per failing run.
+        try:
+            _scan_death = getattr(state, "scan_death_r", -1)
+        except AttributeError:
+            _scan_death = -1
+        if _scan_death is not None and _scan_death >= 0:
+            try:
+                os.close(_scan_death)
+            except OSError:
+                pass
+            try:
+                state.scan_death_r = -1
+            except AttributeError:
+                pass
     if coll_hold is not None:
         coll_hold.clear()
     if must_close and src_fd is not None:
@@ -4785,6 +4830,12 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                         engine_fds=engine_fds, splice=splice)
         state.spawn_r = -1  # W-REL1/R1: spawn disarmed (see above)
         state.trap_ack_r = trap_r
+        # W-REL2/R11: park the scanner death-pipe read end on state
+        # so teardown can close it on paths where the death pipe is
+        # never definitively classified (abort before clean/error —
+        # otherwise +1 fd/run). _watch_helpers syncs this alongside
+        # the local on consume.
+        state.scan_death_r = scan_death_r
 
         def _watch_helpers():
             # Fallow death (WNOHANG) is fatal; scanner state comes
@@ -4816,6 +4867,9 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                     helpers["scan_kind"] = kind
                     helpers["scan_code"] = code
                     scan_death_r = None
+                    state.scan_death_r = -1  # W-REL2/R11: keep the
+                    # teardown-parked copy in sync (stale numbers
+                    # must never be closed post-reuse).
                     if kind == "error" or not gate_issued:
                         lib.fr_py_abort()
                         raise RuntimeError(
