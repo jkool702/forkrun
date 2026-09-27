@@ -48,6 +48,23 @@ DRAIN_BURST = 64
 ORDER_PIPE_SIZE = 4096
 
 
+def _death_cause(status):
+    """Worker-death cause from a waitpid status (D-PORT3).
+
+    Returns (exit_code, signo_or_None). Signal deaths map to the
+    shell 128+signo convention (Bash 130/143 reachable) instead of
+    collapsing to 1: the C recovery core only branches on ==0, so
+    recovery behavior is unchanged while the reactor keeps the true
+    cause for taxonomy errors and forensics.
+    """
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status), None
+    if os.WIFSIGNALED(status):
+        _sig = os.WTERMSIG(status)
+        return 128 + _sig, _sig
+    return 1, None  # stopped/continued: generic crash
+
+
 class WorkerSlot:
     """One worker's lifecycle state (bash: W_INCARN, P, W_NODE arrays)."""
 
@@ -317,10 +334,10 @@ class ReactorState:
         except KeyError:
             pass
 
-        if os.WIFEXITED(status):
-            exit_code = os.WEXITSTATUS(status)
-        else:
-            exit_code = 1  # signaled — a crash by definition
+        # D-PORT3: signaled deaths ride the shell 128+signo
+        # convention (not a flat 1) — recovery-safe (the C core
+        # branches on ==0 only) and cause-faithful.
+        exit_code, exit_signo = _death_cause(status)
 
         # W-PY29: universal parent-side recovery for ALL deaths,
         # INCLUDING exit 0. The C state machine
@@ -370,12 +387,15 @@ class ReactorState:
             if _rrc == 4:
                 raise RuntimeError(
                     "forkrun: Worker %d died in the claim-without-"
-                    "publish race; batch unattributable. Aborting."
-                    % (wid,))
+                    "publish race%s; batch unattributable. Aborting."
+                    % (wid, (" (signal %d)" % exit_signo)
+                       if exit_signo is not None else ""))
             if _rrc == 5:
                 raise RuntimeError(
                     "forkrun: Worker %d recovery failed "
-                    "(orphan revert/escrow). Aborting." % (wid,))
+                    "(orphan revert/escrow%s). Aborting."
+                    % (wid, ("; death signal %d" % exit_signo)
+                       if exit_signo is not None else ""))
             # rc 0 (RECOVERED) / 1 (NO_BATCH) / 3 (ALREADY_DONE):
             # the death is accounted for — proceed to the respawn tail
             # like a confirmed death. (rc 2 with a non-zero exit still

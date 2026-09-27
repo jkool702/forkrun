@@ -109,6 +109,11 @@ class RunConfig:
     nodes: Nodes = "auto"
     on_error: OnError = "retry"
     streaming: Optional[bool] = None
+    # D-PORT3: opt-in strict poison (Bash exit-3 cause fidelity).
+    # Default False preserves warn-and-return-partial (Bash -E
+    # continuation); True raises ForkrunPoisonSkip carrying the
+    # engine's poisoned count instead of returning partial output.
+    strict_poison: bool = False
     # W-PY22 resume: checkpoint file to resume FROM (byte coordinates)
     # and/or checkpoint file to publish TO on abort. Path gating
     # (C-orderer executors only) happens in run.py — here only the
@@ -141,7 +146,8 @@ def _validate_resume_path(name: str, value: Any, must_exist: bool) -> Any:
 def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
               order: str, lines: Any, bytes_: Any, workers: Any,
               nodes: Any, on_error: str, streaming: Any = None,
-              resume: Any = None, checkpoint_file: Any = None) -> RunConfig:
+              resume: Any = None, checkpoint_file: Any = None,
+              strict_poison: Any = False) -> RunConfig:
     if mode not in _VALID_MODES:
         raise ValueError(f"mode must be one of {_VALID_MODES}, got {mode!r}")
     if order not in _VALID_ORDERS:
@@ -175,6 +181,9 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
         raise TypeError(f"sink must be None or callable on_batch(batch_meta, result), got {type(sink).__name__}")
     if streaming is not None and not isinstance(streaming, bool):
         raise TypeError(f"streaming must be None, True, or False, got {streaming!r}")
+    if not isinstance(strict_poison, bool):
+        raise TypeError(
+            f"strict_poison must be bool, got {type(strict_poison).__name__}")
     if mode == "splice":
         # Passthrough has no payload hook: payload must be absent (an
         # ignored payload would silently drop user code — reject the
@@ -202,4 +211,5 @@ def _validate(payload: Any, source: Any, *, mode: str, sink: Any,
     return RunConfig(payload=payload, source=source, mode=mode, sink=sink,
                      order=order, lines=lines, bytes=bytes_, workers=workers,
                      nodes=nodes, on_error=on_error, streaming=streaming,
-                     resume=resume_path, checkpoint_file=checkpoint_path)
+                     resume=resume_path, checkpoint_file=checkpoint_path,
+                     strict_poison=strict_poison)

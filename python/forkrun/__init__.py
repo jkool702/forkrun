@@ -40,6 +40,9 @@ from forkrun._api import RunConfig  # noqa: F401
 # Stage 0 harness and tests can assert validation without reaching into _api.
 from forkrun._api import _validate as _validate_config  # noqa: F401
 from forkrun._batch import Batch  # noqa: F401
+from forkrun.exceptions import (BASH_CODE_MAP, ForkrunInterrupted,  # noqa: F401
+                                ForkrunPoisonSkip, ForkrunPreempted,
+                                ForkrunSignalError, ForkrunTerminated)
 from forkrun.run import map, run, stream, sweep  # noqa: F401
 
 __version__ = "0.16.0"
@@ -61,4 +64,6 @@ except Exception:  # noqa: BLE001
     __engine_version__ = "unknown"
 
 __all__ = ["run", "map", "stream", "sweep", "Batch", "RunConfig",
+           "ForkrunSignalError", "ForkrunInterrupted", "ForkrunPreempted",
+           "ForkrunTerminated", "ForkrunPoisonSkip", "BASH_CODE_MAP",
            "__version__", "__engine_version__"]

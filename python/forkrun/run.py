@@ -55,12 +55,23 @@ from ._resume import (checkpoint_on_abort, consume_sidecar,
 from ._spawn import make_spawn_payload
 from ._worker import _HDR, _c_plugin_spec, _c_spawn_spec, \
     _fork_c_plugin_worker, _fork_c_spawn_worker, worker_main
+from .exceptions import ForkrunInterrupted, ForkrunPoisonSkip
 
 import fcntl as _fcntl
 import time as _time
 
 # W-PY18: default byte-batch for mode="splice" (bash -b default).
 _SPLICE_DEFAULT_BYTES = 512 * 1024
+
+# D-PORT3: parent-side SIGINT translation (Bash exit 130). Every
+# `except KeyboardInterrupt` site below aborts first, then raises
+# ForkrunInterrupted chained from the original — which IS a
+# KeyboardInterrupt, so W-PY22 abort→checkpoint→resume callers
+# (assertRaises(KeyboardInterrupt)) keep working unchanged.
+_INTERRUPTED_MSG = (
+    "forkrun: interrupted by SIGINT in the parent (Bash exit 130); "
+    "abort issued, partial work discarded — resume from the "
+    "checkpoint when checkpoint_file= was armed")
 
 # W-PY16 worker fork timing: the scanner's pre-flight BAILS when a
 # worker is already waiting (active_waiters > 0 → CASE B → phase 1),
@@ -748,7 +759,7 @@ def run(payload, source, *, mode="python", sink=None, order="none",
         lines=None, bytes=None, workers=None, nodes="auto",
         on_error="retry", streaming=None, orchestrator=None,
         c_drain=None, resume=None, checkpoint_file=None,
-        c_worker_loop=None):
+        c_worker_loop=None, strict_poison=False):
     """Run payload over source in parallel. See module docstring for v0 scope.
 
     mode="python": payload is "pkg.mod:func" | callable (Batch -> bytes).
@@ -781,11 +792,16 @@ def run(payload, source, *, mode="python", sink=None, order="none",
       C orderer on any run path); passing either raises
       RuntimeError. Use map()/stream() with orchestrator=True,
       order="index".
+    strict_poison: False (default) = poisoned batches warn and the
+      run continues (Bash -E continuation semantics). True =
+      raise ForkrunPoisonSkip (Bash exit 3) carrying the engine's
+      poisoned count instead of returning partial output.
     """
     _validate(payload, source, mode=mode, sink=sink, order=order,
               lines=lines, bytes_=bytes, workers=workers, nodes=nodes,
               on_error=on_error, streaming=streaming,
-              resume=resume, checkpoint_file=checkpoint_file)
+              resume=resume, checkpoint_file=checkpoint_file,
+              strict_poison=strict_poison)
     if resume is not None or checkpoint_file is not None:
         raise RuntimeError(
             "run(): resume=/checkpoint_file= require a C-orderer-backed "
@@ -814,6 +830,7 @@ def run(payload, source, *, mode="python", sink=None, order="none",
             _execute_numa_locked(
                 payload, source, sink=sink, lines=lines, bytes_=bytes,
                 workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
+                strict_poison=strict_poison,
                 collect=False, order=order, mode=mode,
                 numa_map=numa_map_str, num_nodes=num_nodes,
                 node_cpus=node_cpus, c_drain=c_drain)
@@ -830,12 +847,14 @@ def run(payload, source, *, mode="python", sink=None, order="none",
                 _execute_ingest_reactor_locked(
                     payload, source, sink=sink, lines=lines,
                     bytes_=bytes, workers=_resolve_workers_numa(workers, num_nodes),
-                    on_error=on_error, collect=False, order=order,
+                    on_error=on_error, strict_poison=strict_poison,
+                    collect=False, order=order,
                     mode=mode, nodes=nodes, c_drain=c_drain)
             return None
         _execute_ingest(payload, source, sink=sink, lines=lines,
                         bytes_=bytes, workers=_resolve_workers_numa(workers, num_nodes),
-                        on_error=on_error, collect=False, order=order,
+                        on_error=on_error, strict_poison=strict_poison,
+                        collect=False, order=order,
                         mode=mode, nodes=nodes, c_drain=c_drain)
         return None
     if orchestrator:
@@ -843,11 +862,13 @@ def run(payload, source, *, mode="python", sink=None, order="none",
             _execute_reactor_locked(
                 payload, source, sink=sink, lines=lines, bytes_=bytes,
                 workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
+                strict_poison=strict_poison,
                 collect=False, order=order, mode=mode, nodes=nodes,
                 c_drain=c_drain)
         return None
     _execute(payload, source, sink=sink, lines=lines, bytes_=bytes,
              workers=_resolve_workers_numa(workers, num_nodes), on_error=on_error,
+             strict_poison=strict_poison,
              collect=False, order=order, c_drain=c_drain)
     return None
 
@@ -879,6 +900,11 @@ def map(payload, source, **kwargs):
       (C-orderer path); anything else raises RuntimeError loudly.
       Engine commit is exactly-once; Python consumption is not
       (persist consumed results yourself for end-to-end exactly-once).
+
+    strict_poison: False (default) = poisoned batches warn and map
+      returns partial output (Bash -E continuation semantics).
+      True = raise ForkrunPoisonSkip (Bash exit 3) carrying the
+      engine's poisoned count instead.
     """
     mode = kwargs.get("mode", "python")
     nodes = kwargs.get("nodes", "auto")
@@ -888,7 +914,8 @@ def map(payload, source, **kwargs):
               nodes=nodes, on_error=kwargs.get("on_error", "retry"),
               streaming=kwargs.get("streaming"),
               resume=kwargs.get("resume"),
-              checkpoint_file=kwargs.get("checkpoint_file"))
+              checkpoint_file=kwargs.get("checkpoint_file"),
+              strict_poison=kwargs.get("strict_poison", False))
     orchestrator = _validate_orchestrator(kwargs.get("orchestrator"))
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
     numa_map_str, num_nodes, node_cpus = _resolve_numa(nodes)
@@ -927,6 +954,7 @@ def map(payload, source, **kwargs):
                 lines=kwargs.get("lines"), bytes_=b,
                 workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
+                strict_poison=kwargs.get("strict_poison", False),
                 collect=True, order=order, mode=mode,
                 numa_map=numa_map_str, num_nodes=num_nodes,
                 node_cpus=node_cpus,
@@ -944,12 +972,14 @@ def map(payload, source, **kwargs):
                         None, source, sink=None, lines=None, bytes_=b,
                         workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                         on_error=kwargs.get("on_error", "retry"),
+                        strict_poison=kwargs.get("strict_poison", False),
                         collect=True, order=order, mode=mode,
                         nodes=nodes, splice=True, c_drain=c_drain)
             return _execute_ingest(
                 None, source, sink=None, lines=None, bytes_=b,
                 workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
+                strict_poison=kwargs.get("strict_poison", False),
                 collect=True, order=order, mode=mode, nodes=nodes,
                 splice=True, c_drain=c_drain)
         if orchestrator:
@@ -958,12 +988,14 @@ def map(payload, source, **kwargs):
                     None, source, sink=None, lines=None, bytes_=b,
                     workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                     on_error=kwargs.get("on_error", "retry"),
+                    strict_poison=kwargs.get("strict_poison", False),
                     collect=True, order=order, mode=mode, nodes=nodes,
                     splice=True, c_drain=c_drain)
         return _execute(
             None, source, sink=None, lines=None, bytes_=b,
             workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
             on_error=kwargs.get("on_error", "retry"),
+            strict_poison=kwargs.get("strict_poison", False),
             collect=True, order=order, mode=mode, nodes=nodes,
             splice=True, c_drain=c_drain)
     if _detect_streaming(source, kwargs.get("streaming")):
@@ -985,6 +1017,7 @@ def map(payload, source, **kwargs):
                     bytes_=kwargs.get("bytes"),
                     workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                     on_error=kwargs.get("on_error", "retry"),
+                    strict_poison=kwargs.get("strict_poison", False),
                     collect=True, order=order, mode=mode, nodes=nodes,
                     c_drain=c_drain,
                     resume=kwargs.get("resume"),
@@ -994,6 +1027,7 @@ def map(payload, source, **kwargs):
             bytes_=kwargs.get("bytes"),
             workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
             on_error=kwargs.get("on_error", "retry"),
+            strict_poison=kwargs.get("strict_poison", False),
             collect=True, order=order, mode=mode, nodes=nodes,
             c_drain=c_drain)
     plugin_spec = None
@@ -1024,6 +1058,7 @@ def map(payload, source, **kwargs):
                 lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
                 workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
+                strict_poison=kwargs.get("strict_poison", False),
                 collect=True, order=order, mode=mode, nodes=nodes,
                 c_drain=c_drain,
                 resume=kwargs.get("resume"),
@@ -1036,6 +1071,7 @@ def map(payload, source, **kwargs):
                        lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
                        workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                        on_error=kwargs.get("on_error", "retry"),
+                       strict_poison=kwargs.get("strict_poison", False),
                        collect=True, order=order,
                        mode=mode, nodes=nodes, c_drain=c_drain,
                        c_worker_loop=c_worker_loop,
@@ -1072,6 +1108,11 @@ def stream(payload, source, **kwargs):
       For stream() there is no output sidecar: the consumer owns
       everything yielded live, and the checkpoint covers the engine
       frontier beyond it.
+
+    strict_poison: False (default) = poisoned batches warn and the
+      stream yields partial output (Bash -E continuation semantics).
+      True = raise ForkrunPoisonSkip (Bash exit 3) at exhaustion
+      instead of returning normally.
     """
     _validate(payload, source, mode=kwargs.get("mode", "python"),
               sink=None, order=kwargs.get("order", "none"),
@@ -1081,7 +1122,8 @@ def stream(payload, source, **kwargs):
               on_error=kwargs.get("on_error", "retry"),
               streaming=kwargs.get("streaming"),
               resume=kwargs.get("resume"),
-              checkpoint_file=kwargs.get("checkpoint_file"))
+              checkpoint_file=kwargs.get("checkpoint_file"),
+              strict_poison=kwargs.get("strict_poison", False))
     orchestrator = _validate_orchestrator(kwargs.get("orchestrator"))
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
     if _validate_c_worker_loop(kwargs.get("c_worker_loop")):
@@ -1116,6 +1158,7 @@ def stream(payload, source, **kwargs):
                     if engine_mode == "splice" else kwargs.get("bytes")),
             workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
             on_error=kwargs.get("on_error", "retry"),
+            strict_poison=kwargs.get("strict_poison", False),
             mode=engine_mode, order=kwargs.get("order", "none"),
             orchestrator=orchestrator, numa_map=numa_map_str,
             num_nodes=num_nodes, node_cpus=node_cpus,
@@ -1132,6 +1175,7 @@ def stream(payload, source, **kwargs):
                     source, bytes_=b,
                     workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                     on_error=kwargs.get("on_error", "retry"),
+                    strict_poison=kwargs.get("strict_poison", False),
                     nodes=kwargs.get("nodes", "auto"),
                     order=kwargs.get("order", "none"),
                     c_drain=kwargs.get("c_drain", True))
@@ -1139,6 +1183,7 @@ def stream(payload, source, **kwargs):
                 source, bytes_=b,
                 workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
+                strict_poison=kwargs.get("strict_poison", False),
                 nodes=kwargs.get("nodes", "auto"),
                 order=kwargs.get("order", "none"),
                 c_drain=kwargs.get("c_drain", True))
@@ -1147,6 +1192,7 @@ def stream(payload, source, **kwargs):
                 source, bytes_=b,
                 workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
                 on_error=kwargs.get("on_error", "retry"),
+                strict_poison=kwargs.get("strict_poison", False),
                 nodes=kwargs.get("nodes", "auto"),
                 order=kwargs.get("order", "none"),
                 c_drain=kwargs.get("c_drain", True))
@@ -1154,6 +1200,7 @@ def stream(payload, source, **kwargs):
             source, bytes_=b,
             workers=_resolve_workers_numa(kwargs.get("workers"), num_nodes),
             on_error=kwargs.get("on_error", "retry"),
+            strict_poison=kwargs.get("strict_poison", False),
             nodes=kwargs.get("nodes", "auto"),
             order=kwargs.get("order", "none"),
             c_drain=kwargs.get("c_drain", True))
@@ -1175,28 +1222,32 @@ def _stream_gen(payload, source, **kwargs):
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
         workers=_resolve_workers_numa(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
+        strict_poison=kwargs.get("strict_poison", False),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
         c_drain=kwargs.get("c_drain", True))
 
 
 def _splice_stream_gen(source, *, bytes_, workers, on_error, nodes,
-                       order, c_drain=True):
+                       order, c_drain=True, strict_poison=False):
     # W-PY18 stream() over the C passthrough loop (materialized
     # ingest, live results): yields raw byte-windows as they arrive.
     yield from _execute_streaming(
         None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, mode="splice", nodes=nodes, order=order,
+        on_error=on_error, strict_poison=strict_poison,
+        mode="splice", nodes=nodes, order=order,
         splice=True, c_drain=c_drain)
 
 
 def _splice_ingest_stream_gen(source, *, bytes_, workers, on_error,
-                              nodes, order, c_drain=True):
+                              nodes, order, c_drain=True,
+                              strict_poison=False):
     # W-PY18 stream() over passthrough + streaming ingest (unbounded
     # in, live out — the bash -s shape): spill and drain interleave.
     yield from _execute_ingest_stream(
         None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, mode="splice", nodes=nodes, order=order,
+        on_error=on_error, strict_poison=strict_poison,
+        mode="splice", nodes=nodes, order=order,
         splice=True, c_drain=c_drain)
 
 
@@ -1209,6 +1260,7 @@ def _stream_reactor_gen(payload, source, **kwargs):
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
         workers=_resolve_workers_numa(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
+        strict_poison=kwargs.get("strict_poison", False),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
         splice=kwargs.get("mode") == "splice",
@@ -1218,13 +1270,15 @@ def _stream_reactor_gen(payload, source, **kwargs):
 
 
 def _splice_stream_reactor_gen(source, *, bytes_, workers, on_error,
-                               nodes, order, c_drain=True):
+                               nodes, order, c_drain=True,
+                               strict_poison=False):
     # W-PY19 stream() over splice + reactor (materialized ingest,
     # live results, respawn on death). Python reassembly only (the C
     # orderer needs OrderPackets the splice loop never sends).
     yield from _execute_streaming_reactor(
         None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, mode="splice", nodes=nodes, order=order,
+        on_error=on_error, strict_poison=strict_poison,
+        mode="splice", nodes=nodes, order=order,
         splice=True, c_drain=c_drain)
 
 
@@ -1237,6 +1291,7 @@ def _ingest_stream_reactor_gen(payload, source, **kwargs):
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
         workers=_resolve_workers_numa(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
+        strict_poison=kwargs.get("strict_poison", False),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
         c_drain=kwargs.get("c_drain", True),
@@ -1246,11 +1301,12 @@ def _ingest_stream_reactor_gen(payload, source, **kwargs):
 
 def _splice_ingest_stream_reactor_gen(source, *, bytes_, workers,
                                       on_error, nodes, order,
-                                      c_drain=True):
+                                      c_drain=True, strict_poison=False):
     # W-PY19 stream() over splice + streaming ingest + reactor.
     yield from _execute_ingest_stream_reactor(
         None, source, lines=None, bytes_=bytes_, workers=workers,
-        on_error=on_error, mode="splice", nodes=nodes, order=order,
+        on_error=on_error, strict_poison=strict_poison,
+        mode="splice", nodes=nodes, order=order,
         splice=True, c_drain=c_drain)
 
 
@@ -1575,7 +1631,7 @@ def _fork_splice_worker(lib, wid, memfd, out_fd, signal_w, fallow_w,
 
 
 def _execute_streaming(payload, source, *, lines, bytes_, workers,
-                       on_error, mode="python", nodes="auto",
+                       on_error, strict_poison=False, mode="python", nodes="auto",
                        order="none", stats=None, splice=False,
                        c_drain=True):
     """v1 streaming pipeline: a GENERATOR. Fork happens on first next(),
@@ -1727,6 +1783,10 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         signal_w = None
 
         statuses: list = []
+        # D-PORT3: the drain-branch finally below destroys the engine
+        # before the shared poison summary runs, so the count is
+        # stashed pre-teardown (the summary uses max(live, stashed)).
+        npois_stashed = 0
         if use_drain:
             # W-PY21-A: the C drain owns signal_r from here on; the
             # parent consumes the results pipe (never signals/memfds).
@@ -1818,6 +1878,9 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                         drain_alive = False
                         drain_status = _dst
                 exhausted = True
+                # Workers are gone: the engine poison count is final —
+                # stash it before the finally below destroys the engine.
+                npois_stashed = _poisoned_now(lib)
                 # W-PY39 scanner join (backstop: the in-loop watch
                 # above already fail-fasted on error and retired on
                 # clean exit; workers cannot EOF without a clean
@@ -1860,6 +1923,9 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                                            statuses, order=order,
                                            stats=stats, pump=_scan_pump):
                     yield blob
+                # Workers are gone: stash the engine poison count
+                # before the finally below destroys the engine.
+                npois_stashed = _poisoned_now(lib)
             finally:
                 # Normal exhaustion falls through; abandonment (GeneratorExit)
                 # or consumer error lands here: reap, close, destroy, re-raise
@@ -1914,6 +1980,11 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             npois = lib.fr_py_poisoned_count()
         except Exception:
             npois = 0
+        # _execute_streaming's branch finallys above already destroyed
+        # the engine: prefer the pre-teardown stash when the live
+        # read comes back zero (npois_stashed is always defined in
+        # this function — initialized beside statuses above).
+        npois = max(npois, npois_stashed)
         if npois:
             try:
                 os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "
@@ -1921,6 +1992,7 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                              ).encode())
             except OSError:
                 pass
+            _raise_for_poisoned(npois, strict_poison)
     finally:
         # Idempotent second layer: teardown already ran inside; these are
         # no-ops when it did (Nones/empties) and save abandon paths where
@@ -1931,7 +2003,7 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
 
 
 def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
-                           on_error, mode="python", nodes="auto",
+                           on_error, strict_poison=False, mode="python", nodes="auto",
                            order="none", stats=None, splice=False,
                            c_drain=True):
     """stream() over a streaming source: a GENERATOR (W-PY16).
@@ -2408,6 +2480,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                              ).encode())
             except OSError:
                 pass
+            _raise_for_poisoned(npois, strict_poison)
     finally:
         _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                          src_fd, must_close,
@@ -2423,6 +2496,7 @@ def _ingest_stream_gen(payload, source, **kwargs):
         lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
         workers=_resolve_workers_numa(kwargs.get("workers")),
         on_error=kwargs.get("on_error", "retry"),
+        strict_poison=kwargs.get("strict_poison", False),
         mode=kwargs.get("mode", "python"), nodes=kwargs.get("nodes", "auto"),
         order=kwargs.get("order", "none"),
         c_drain=kwargs.get("c_drain", True))
@@ -2443,7 +2517,7 @@ def _new_ingress_memfd():
 
 
 def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
-                    on_error, collect, order, mode="python", nodes="auto",
+                    on_error, strict_poison=False, collect, order, mode="python", nodes="auto",
                     splice=False, c_drain=True):
     """Streaming-ingest entry for map/run (blocking, like _execute)."""
     if mode not in ("python", "splice"):
@@ -2459,7 +2533,8 @@ def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
     with _RUN_LOCK:
         return _execute_ingest_locked(
             payload, source, sink=sink, lines=lines, bytes_=bytes_,
-            workers=workers, on_error=on_error, collect=collect,
+            workers=workers, on_error=on_error, strict_poison=strict_poison,
+            collect=collect,
             order=order, splice=splice, c_drain=c_drain)
 
 
@@ -2525,7 +2600,7 @@ def _fork_ingest_helpers(lib, memfd, fallow_r, fallow_w, engine_fds):
 
 
 def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
-                           workers, on_error, collect, order,
+                           workers, on_error, strict_poison=False, collect, order,
                            splice=False, c_drain=True):
     """map/run over a streaming source (W-PY16, collect/discard).
 
@@ -2753,9 +2828,9 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     total_written += n
                 _watch_helpers()
                 _maybe_fork_workers()
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
-            raise
+            raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
         # Post-stall-fork gate grace: after a stall-triggered fork, the
         # gate must not land before phase-1 entry (entry follows the
         # bail within ms; the grace is conservative). Otherwise gate at
@@ -2818,14 +2893,14 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 if not (os.WIFEXITED(status) and
                         os.WEXITSTATUS(status) == 0):
                     failed.append((pid, status))
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
             for pid in pids:
                 try:
                     os.waitpid(pid, 0)
                 except Exception:
                     pass
-            raise
+            raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
 
         if use_drain and drain_pid is not None:
             # Signal EOF (all workers gone) terminates the drain on
@@ -2898,6 +2973,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                              ).encode())
             except OSError:
                 pass
+            _raise_for_poisoned(npois, strict_poison)
 
         if not collect:
             return None
@@ -3001,6 +3077,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
 
 
 def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
+               strict_poison=False,
                collect, order, mode="python", nodes="auto", splice=False,
                c_drain=True, c_worker_loop=False, plugin_spec=None,
                c_spawn_loop=False, spawn_argv=None):
@@ -3018,7 +3095,8 @@ def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
     with _RUN_LOCK:
         return _execute_locked(payload, source, sink=sink, lines=lines,
                                bytes_=bytes_, workers=workers,
-                               on_error=on_error, collect=collect,
+                               on_error=on_error, strict_poison=strict_poison,
+                               collect=collect,
                                order=order, splice=splice,
                                c_drain=c_drain,
                                c_worker_loop=c_worker_loop,
@@ -3028,7 +3106,7 @@ def _execute(payload, source, *, sink, lines, bytes_, workers, on_error,
 
 
 def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
-                    on_error, collect, order, splice=False,
+                    on_error, strict_poison=False, collect, order, splice=False,
                     c_drain=True, c_worker_loop=False, plugin_spec=None,
                     c_spawn_loop=False, spawn_argv=None):
     # W-PY21-A: c_drain moves result byte movement (signal consume +
@@ -3198,14 +3276,14 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                 _, status = os.waitpid(pid, 0)
                 if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
                     failed.append((pid, status))
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
             for pid in pids:
                 try:
                     os.waitpid(pid, 0)
                 except Exception:
                     pass
-            raise
+            raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
         finally:
             pass
 
@@ -3244,6 +3322,7 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                              ).encode())
             except OSError:
                 pass
+            _raise_for_poisoned(npois, strict_poison)
 
         if not collect:
             return None
@@ -3349,7 +3428,30 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
 # what happens when a worker dies (respawn + continue vs abort).
 # =====================================================================
 
-def _reactor_poison_summary(lib, state) -> None:
+def _poisoned_now(lib) -> int:
+    """Best-effort live poisoned count (0 when unreadable)."""
+    try:
+        return int(lib.fr_py_poisoned_count() or 0)
+    except Exception:
+        return 0
+
+
+def _raise_for_poisoned(npois, strict_poison) -> None:
+    """Raise ForkrunPoisonSkip under opt-in strict_poison (D-PORT3).
+
+    Default (False) preserves warn-and-return-partial (Bash -E
+    continuation semantics). strict_poison=True maps Bash exit 3 to
+    a caller-visible exception carrying the engine's poisoned count.
+    """
+    if strict_poison and npois:
+        raise ForkrunPoisonSkip(
+            "forkrun: %d batch(es) poisoned (retry limit reached) "
+            "(Bash exit 3); re-run the offending input with a fixed "
+            "payload, or run without strict_poison for warn-and-"
+            "partial results" % (npois,), count=npois)
+
+
+def _reactor_poison_summary(lib, state, strict_poison=False) -> None:
     """Poison summary: engine scalar count + reactor batch list."""
     try:
         npois = lib.fr_py_poisoned_count()
@@ -3362,6 +3464,7 @@ def _reactor_poison_summary(lib, state) -> None:
                          ).encode())
         except OSError:
             pass
+        _raise_for_poisoned(npois, strict_poison)
     if getattr(state, "poisoned_batches", None):
         from ._reactor import report_poisoned as _report
         _report(state.poisoned_batches)
@@ -3499,7 +3602,7 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
 
 
 def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
-                            workers, on_error, collect, order,
+                            workers, on_error, strict_poison=False, collect, order,
                             mode="python", nodes="auto", splice=False,
                             c_drain=True, resume=None,
                             checkpoint_file=None, c_worker_loop=False,
@@ -3713,8 +3816,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
 
         try:
             reactor_run(state, service=_watch_scanner)
-        except KeyboardInterrupt:
-            raise
+        except KeyboardInterrupt as _ki:
+            raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
 
         _reactor_failure_check(state, workers, on_error)
 
@@ -3790,7 +3893,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                         "forkrun: C orderer failed (status %r)"
                         % (_ost,))
 
-        _reactor_poison_summary(lib, state)
+        _reactor_poison_summary(lib, state, strict_poison)
 
         if not collect:
             return None
@@ -3847,7 +3950,7 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
 
 
 def _execute_streaming_reactor(payload, source, *, lines, bytes_,
-                               workers, on_error, mode="python",
+                               workers, on_error, strict_poison=False, mode="python",
                                nodes="auto", order="none", stats=None,
                                splice=False, c_drain=True, resume=None,
                                checkpoint_file=None):
@@ -4315,7 +4418,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                 and not use_drain:
             stats["reassembly_max"] = reassembly.max_size
 
-        _reactor_poison_summary(lib, state)
+        _reactor_poison_summary(lib, state, strict_poison)
         # W-PY22: normal exhaustion — generator completed; the
         # abort handler above must not fire on the way out.
         _stream_ok = True
@@ -4338,7 +4441,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
 
 
 def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
-                                   bytes_, workers, on_error, collect,
+                                   bytes_, workers, on_error, strict_poison=False, collect,
                                    order, mode="python", nodes="auto",
                                    splice=False, c_drain=True, resume=None,
                                    checkpoint_file=None):
@@ -4581,9 +4684,9 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 _watch_helpers()
                 _maybe_fork_workers()
                 reactor_poll_once(state)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
-            raise
+            raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
         if stall_forked:
             while True:
                 try:
@@ -4648,8 +4751,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if workers_forked:
             try:
                 reactor_run(state)
-            except KeyboardInterrupt:
-                raise
+            except KeyboardInterrupt as _ki:
+                raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
         else:
             # Empty input: no workers ever existed. Drop the spares
             # whose EOF the helpers wait on (reaper + orderer).
@@ -4750,7 +4853,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 except OSError:
                     pass
 
-        _reactor_poison_summary(lib, state)
+        _reactor_poison_summary(lib, state, strict_poison)
 
         if not collect:
             return None
@@ -4807,7 +4910,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
 
 
 def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
-                                     workers, on_error, mode="python",
+                                     workers, on_error, strict_poison=False, mode="python",
                                      nodes="auto", order="none",
                                      stats=None, splice=False,
                                      c_drain=True, resume=None,
@@ -5408,7 +5511,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 and not use_drain:
             stats["reassembly_max"] = drain["reassembly"].max_size
 
-        _reactor_poison_summary(lib, state)
+        _reactor_poison_summary(lib, state, strict_poison)
     finally:
         if spare_signal_w is not None and spare_signal_w >= 0:
             try:
@@ -5896,7 +5999,7 @@ def _numa_drain_audit(lib, num_nodes, forked, wid_node,
 
 
 def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
-                         workers, on_error, collect, order,
+                         workers, on_error, strict_poison=False, collect, order,
                          mode="python", numa_map="", num_nodes=2,
                          node_cpus=None, splice=False, c_drain=True):
     """Blocking map/run over the NUMA pipeline (W-PY21).
@@ -6179,8 +6282,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 signal_r = None
             try:
                 reactor_run(state, service=_watch_pipeline)
-            except KeyboardInterrupt:
-                raise
+            except KeyboardInterrupt as _ki:
+                raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
 
         _reactor_failure_check(state, workers, on_error)
 
@@ -6283,7 +6386,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 except OSError:
                     pass
 
-        _reactor_poison_summary(lib, state)
+        _reactor_poison_summary(lib, state, strict_poison)
 
         if not collect:
             return None
@@ -6304,12 +6407,12 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if order == "index":
             records.sort(key=lambda kv: kv[0])
         return [blob for _, blob in records]
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as _ki:
         try:
             lib.fr_py_abort()
         except Exception:
             pass
-        raise
+        raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
         extra = []
         if pipe is not None:
@@ -6339,7 +6442,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
 
 
 def _numa_stream_gen(payload, source, *, lines, bytes_, workers,
-                       on_error, mode, order, orchestrator, numa_map,
+                       on_error, strict_poison, mode, order, orchestrator, numa_map,
                        num_nodes, node_cpus, splice=False, c_drain=True):
     # stream() over the NUMA pipeline: live drain while the ingest
     # feeds per-node rings. Always reactor-supervised (the NUMA path
@@ -6347,13 +6450,13 @@ def _numa_stream_gen(payload, source, *, lines, bytes_, workers,
     _ = orchestrator  # accepted for call uniformity; NUMA implies reactor
     yield from _execute_numa_stream(
         payload, source, lines=lines, bytes_=bytes_, workers=workers,
-        on_error=on_error, mode=mode, order=order,
+        on_error=on_error, strict_poison=strict_poison, mode=mode, order=order,
         numa_map=numa_map, num_nodes=num_nodes, node_cpus=node_cpus,
         splice=splice, c_drain=c_drain)
 
 
 def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
-                         on_error, mode="python", order="none",
+                         on_error, strict_poison=False, mode="python", order="none",
                          numa_map="", num_nodes=2, node_cpus=None,
                          stats=None, splice=False, c_drain=True):
     """stream() over the NUMA pipeline (W-PY21 generator).
@@ -6899,7 +7002,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                 and not use_drain:
             stats["reassembly_max"] = drain["reassembly"].max_size
 
-        _reactor_poison_summary(lib, state)
+        _reactor_poison_summary(lib, state, strict_poison)
     finally:
         if spare_signal_w is not None and spare_signal_w >= 0:
             try:

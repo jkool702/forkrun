@@ -1,5 +1,27 @@
 # forkrun Troubleshooting
 
+## Bash exit code ↔ Python exception (D-PORT3 mapping table)
+
+A Python library's contract is *exceptions*, not process exit
+status — so parity with the Bash taxonomy means **cause
+fidelity, not number fidelity**. All five live in
+`forkrun.exceptions` (also re-exported at `forkrun.*`):
+
+| Bash code | Python exception | Cause | Remedy |
+|---|---|---|---|
+| 130 (SIGINT, foreground-only) | `ForkrunInterrupted` (also a `KeyboardInterrupt`) | Ctrl-C / SIGINT in the parent | Re-run; resume from the checkpoint when `checkpoint_file=` was armed |
+| 138 (SIGUSR1 under `FORKRUN_PREEMPT_MODE=1`) | `ForkrunPreempted` | Scheduler preemption notice | Checkpoint-and-requeue like any preemption; only raised under the opt-in `signal_policy="checkpoint"` when preemption mode is armed |
+| 143 (SIGTERM; HUP aborts) | `ForkrunTerminated` | Operator/overlord TERM or HUP | Resume from the published checkpoint (raised *after* teardown + checkpoint) |
+| 3 (poison-skip) | `ForkrunPoisonSkip` (`.count`) | Batches crossed the retry limit | Fix the payload/input and re-run the offending batches; raised only under opt-in `strict_poison=True` — the default stays warn-and-partial |
+| 1 (faults), 42, 200/254 | plain `RuntimeError` (etc.) | Claim race, orphan-revert failure, trap-ACK timeout, worker crash, spawn/plugin errors | Read the message: it names the wid/batch/pipe; no signal cause exists to preserve |
+
+`on_error` governs *payload* errors (retry/skip/fail-fast), not
+pipeline aborts — aborts always raise, never return partial
+results silently. Catching `RuntimeError` still catches
+everything (all taxonomy classes derive from it, and
+`ForkrunInterrupted` additionally satisfies
+`except KeyboardInterrupt`).
+
 ## Empty results (`[]` or fewer lines than input)
 
 Almost always one of these:
