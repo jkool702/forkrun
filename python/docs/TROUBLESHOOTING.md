@@ -96,8 +96,8 @@ guard fires on live contexts, not loaded libraries.
 
 ## Resume complaints
 
-- `resume=`/`checkpoint_file=` outside
-  `orchestrator=True, order="index"`, UMA, non-splice
+- `resume=`/`checkpoint_file=` with `orchestrator=False`
+  (or outside `order="index"`, UMA, non-splice)
   raises `RuntimeError` — checkpoints need the C-orderer
   tracker; anything else would be silent loss.
 - A stale horizon (checkpoint past EOF) fails loudly;

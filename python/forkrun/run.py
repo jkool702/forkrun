@@ -780,11 +780,13 @@ def run(payload, source, *, mode="python", sink=None, order="none",
       files materialize); True forces streaming ingest (bounded ingress
       via the fallow reaper — TB-scale/unbounded sources); False forces
       the materialized path.
-    orchestrator: None (default) = current fork-and-wait behavior;
-      True = W-PY19 reactor supervision (death pipes, bounded respawn,
-      trap-ACK confirmation, C orderer for order="index"). False =
-      current behavior explicitly. The reactor is additive: identical
-      results, stronger fault tolerance.
+    orchestrator: None (default) = W-PY19 reactor supervision
+      (death pipes, bounded respawn, trap-ACK confirmation, C orderer
+      for order="index") — worker death is recovered automatically.
+      True = same as the default explicitly. False = legacy
+      fork-and-wait fail-fast: a worker death raises RuntimeError.
+      The reactor is additive: identical results, stronger fault
+      tolerance.
     nodes: None/"auto" (default) = detect topology (single-socket →
       UMA, unchanged); 1 = force UMA; N = first N physical nodes;
       "0,1" = explicit physicals; "@N" = N forced logical nodes
@@ -821,6 +823,10 @@ def run(payload, source, *, mode="python", sink=None, order="none",
             "path (map()/stream() with orchestrator=True, "
             "order='index'); run() has no C orderer")
     orchestrator = _validate_orchestrator(orchestrator)
+    if orchestrator is None:
+        # W-REL1/R1 (ratified Option A): recovery is the default.
+        # None rides the reactor; explicit False keeps fail-fast.
+        orchestrator = True
     c_drain = _validate_c_drain(c_drain)
     if _validate_c_worker_loop(c_worker_loop):
         raise RuntimeError(
@@ -905,7 +911,9 @@ def map(payload, source, **kwargs):
 
     orchestrator=True: W-PY19 reactor supervision (death pipes,
       bounded respawn, trap-ACK, C orderer for order="index").
-      Default None = current fork-and-wait behavior.
+      Default None rides the reactor (same as True); False selects
+      legacy fork-and-wait fail-fast (worker death raises
+      RuntimeError).
 
     nodes: None/"auto" (default) = detect; 1 = force UMA; N/"0,1"/
       "@N" = W-PY21 NUMA pipeline (per-node rings, born-local
@@ -919,7 +927,8 @@ def map(payload, source, **kwargs):
     resume: None (default) or checkpoint path to resume FROM
       (W-PY22, byte coordinates). checkpoint_file: None (default)
       or path to publish a checkpoint TO on abort. Both require
-      orchestrator=True, order="index", UMA single-node, non-splice
+      the reactor path (the default; orchestrator=False rejects),
+      order="index", UMA single-node, non-splice
       (C-orderer path); anything else raises RuntimeError loudly.
       Engine commit is exactly-once; Python consumption is not
       (persist consumed results yourself for end-to-end exactly-once).
@@ -938,9 +947,12 @@ def map(payload, source, **kwargs):
               streaming=kwargs.get("streaming"),
               resume=kwargs.get("resume"),
               checkpoint_file=kwargs.get("checkpoint_file"),
-              strict_poison=kwargs.get("strict_poison", False),
-              signal_policy=kwargs.get("signal_policy", "default"))
+               strict_poison=kwargs.get("strict_poison", False),
+               signal_policy=kwargs.get("signal_policy", "default"))
     orchestrator = _validate_orchestrator(kwargs.get("orchestrator"))
+    if orchestrator is None:
+        # W-REL1/R1 (ratified Option A): recovery is the default.
+        orchestrator = True
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
     numa_map_str, num_nodes, node_cpus = _resolve_numa(nodes)
     # W-PY26: gate the C worker loop to its envelope (mode/plugin +
@@ -1143,7 +1155,8 @@ def stream(payload, source, **kwargs):
 
     orchestrator=True: W-PY19 reactor supervision (death pipes,
       bounded respawn, trap-ACK, C orderer for order="index").
-      Default None = current streaming behavior.
+      Default None rides the reactor (same as True); False selects
+      legacy fail-fast. Resume needs the reactor path (the default).
 
     nodes: None/"auto" (default) = detect; 1 = force UMA; N/"0,1"/
       "@N" = W-PY21 NUMA pipeline (uniform over files and pipes).
@@ -1173,8 +1186,11 @@ def stream(payload, source, **kwargs):
               streaming=kwargs.get("streaming"),
               resume=kwargs.get("resume"),
               checkpoint_file=kwargs.get("checkpoint_file"),
-              strict_poison=kwargs.get("strict_poison", False))
+               strict_poison=kwargs.get("strict_poison", False))
     orchestrator = _validate_orchestrator(kwargs.get("orchestrator"))
+    if orchestrator is None:
+        # W-REL1/R1 (ratified Option A): recovery is the default.
+        orchestrator = True
     c_drain = _validate_c_drain(kwargs.get("c_drain"))
     if _validate_c_worker_loop(kwargs.get("c_worker_loop")):
         raise RuntimeError(
@@ -3759,6 +3775,13 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    # CUDA-fork hazard guard (W-PY5, same position as _execute):
+    # runs in the PARENT before any engine contact or forking.
+    # W-REL1/R1: the default now rides this executor, so the guard
+    # must live here too (pre-flip opt-in path bypassed it — latent).
+    hazard, message = check_cuda_hazard()
+    if hazard:
+        raise RuntimeError(message)
     if c_worker_loop:
         # W-PY26: reactor + C loop needs collection, a dialect-gated
         # spec, and no sink (the C loop has no sink hook). Splice
@@ -4116,6 +4139,12 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    # CUDA-fork hazard guard (W-PY5, same position as _execute).
+    # W-REL1/R1: stream() defaults ride this executor — guard here
+    # too (pre-flip opt-in path bypassed it — latent).
+    hazard, message = check_cuda_hazard()
+    if hazard:
+        raise RuntimeError(message)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
@@ -4617,6 +4646,12 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    # CUDA-fork hazard guard (W-PY5, same position as _execute).
+    # W-REL1/R1: streaming defaults ride this executor — guard here
+    # too (pre-flip opt-in path bypassed it — latent).
+    hazard, message = check_cuda_hazard()
+    if hazard:
+        raise RuntimeError(message)
     pre_fds = snapshot_fds()
     lib = load()
     if lib.fr_py_init(lines or 0, bytes_ or 0) != RC_OK:
@@ -4668,7 +4703,9 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if collect:
             out_fds, out_hold = _new_output_memfds(workers)
         fallow_r, fallow_w = os.pipe()
-        spawn_r, spawn_w = os.pipe()
+        # W-REL1/R1: no spawn pipe (scanner disarmed above) — keep
+        # the names bound for the close-out below.
+        spawn_r, spawn_w = None, None
 
         use_orderer = (collect and order == "index" and not splice
                        and _v1a(lib).get("orderer"))
@@ -4720,18 +4757,33 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             except BaseException:
                 rc = 1
             os._exit(rc if isinstance(rc, int) and 0 <= rc < 256 else 1)
-        # Spawn-aware scanner with a death pipe (bash SCAN_DEATH).
+        # Plain scanner with a death pipe (bash SCAN_DEATH).
+        # W-REL1/R1: spawn DISARMED (spawn_w=-1 → fr_py_scan
+        # semantics). A spawn-aware scanner forks workers during
+        # pre-flight via the parent's per-chunk reactor poll; those
+        # early workers trip the CASE-B bail and phase 1 with
+        # complete input publishes nothing — racy silent suffix
+        # loss (workers exit clean, no warning, no poison).
+        # Same rationale as _execute_ingest_stream_reactor's
+        # spawn_w=-1; the locked ingest path never had spawn
+        # requests either. Dynamic scaling on this path never
+        # worked (ceiling == workers: extras only forked into the
+        # early-exit cascade) — nothing that works is lost.
         scan_pid, scan_death_r = fork_scanner_with_death_pipe(
-            lib, memfd, spawn_w, engine_fds)
-        # Parent drops write copies it never uses (scanner owns
-        # spawn_w; the fallow read end belongs to the reaper). The
-        # SPARES for future respawns (fallow_w) stay open in ctx.
-        for _fd in (spawn_w, fallow_r):
+            lib, memfd, -1, engine_fds)
+        # Parent drops copies it never uses (no scanner-owned
+        # spawn_w now — both spawn ends close; the fallow read end
+        # belongs to the reaper). The SPARES for future respawns
+        # (fallow_w) stay open in ctx.
+        for _fd in (spawn_w, spawn_r, fallow_r):
+            if _fd is None:
+                continue
             try:
                 os.close(_fd)
             except OSError:
                 pass
         spawn_w = None
+        spawn_r = None
         fallow_r = None
 
         state = ReactorState(workers, num_nodes=1,
@@ -4745,7 +4797,7 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                         order_w=order_w if use_orderer else -1,
                         trap_ack_w=trap_w, on_error=on_error,
                         engine_fds=engine_fds, splice=splice)
-        state.spawn_r = spawn_r
+        state.spawn_r = -1  # W-REL1/R1: spawn disarmed (see above)
         state.trap_ack_r = trap_r
 
         def _watch_helpers():
@@ -4867,7 +4919,19 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                         # EOF) and skip workers — nothing to consume.
                         # With c_drain the unused signal pipe goes
                         # too (no workers ⇒ no drain forked).
-                        _drop_fallow_copies()
+                        # W-REL1/R1: inline close — the
+                        # _execute_ingest-local helper of the same
+                        # name is not in scope here; its bare
+                        # reference was a latent NameError on this
+                        # empty-input branch (unreachable pre-flip:
+                        # the default never rode the reactor).
+                        if fallow_w is not None:
+                            try:
+                                os.close(fallow_w)
+                            except OSError:
+                                pass
+                            fallow_w = None
+                            state.ctx["fallow_w"] = -1
                         if use_drain:
                             for _fd in (signal_w, signal_r):
                                 if _fd is not None:
@@ -5093,6 +5157,12 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
     if not (nodes == "auto" or nodes == 1):
         raise NotImplementedError(
             "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
+    # CUDA-fork hazard guard (W-PY5, same position as _execute).
+    # W-REL1/R1: streaming-stream defaults ride this executor —
+    # guard here too (pre-flip opt-in path bypassed it — latent).
+    hazard, message = check_cuda_hazard()
+    if hazard:
+        raise RuntimeError(message)
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))

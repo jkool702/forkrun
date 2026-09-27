@@ -55,7 +55,8 @@ forkrun.map(payload, source, orchestrator=True, order="index",
             resume="run.ckpt")
 ```
 
-Requires `orchestrator=True, order="index"`, single node,
+Requires the reactor path (the default — `orchestrator=False`
+rejects), `order="index"`, single node,
 non-splice (the C-orderer paths — anything else raises
 `RuntimeError` rather than checkpointing something it can't
 track). `map()` preserves already-committed output in a

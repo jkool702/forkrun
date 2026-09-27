@@ -367,9 +367,13 @@ class TestResumePathValidation(unittest.TestCase):
                         resume=self._ckpt(), nodes=1)
 
     def test_resume_without_reactor_fails(self):
+        # orchestrator=False opts out of the reactor (W-REL1/R1 the
+        # default rides it) — resume still requires the C-orderer
+        # path and fails loudly.
         with self.assertRaises(RuntimeError):
             forkrun.map(_up, self._input(), workers=2,
-                        order="index", resume=self._ckpt(), nodes=1)
+                        order="index", resume=self._ckpt(), nodes=1,
+                        orchestrator=False)
 
     def test_resume_splice_fails(self):
         with self.assertRaises(RuntimeError):

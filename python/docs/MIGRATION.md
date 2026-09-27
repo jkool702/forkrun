@@ -17,7 +17,7 @@ almost 1:1.
 | `-C plugin:fn` | `mode="plugin"`, `"path:fn"` | Same frozen ABI — a bash `-C` plugin works unchanged |
 | `cmd ...` (per-batch exec) | `mode="spawn"`, `"cmd ..."` | Same stdin/stdout contract |
 | `-b` passthrough | `mode="splice"`, payload `None` | Same kernel passthrough |
-| `--resume FILE` | `resume=FILE` (+ `orchestrator=True, order="index"`) | Same byte-coordinate ledger |
+| `--resume FILE` | `resume=FILE` (+ `order="index"`; the reactor is the default, `orchestrator=False` rejects) | Same byte-coordinate ledger |
 | `-s` (streaming) | `stream()` / `streaming=True` | Live drain instead of collect |
 
 ## Semantic differences that matter

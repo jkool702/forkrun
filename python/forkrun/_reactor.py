@@ -16,8 +16,10 @@ Design mirrors the bash wrapper:
   - SCAN_DEATH → abort if the scanner failed
   - TIMEOUT → worker died without trap-ACK inside the grace (fatal)
 
-OPT-IN: only used when run/map/stream are called with
-orchestrator=True. Default paths never import this module's loop.
+OPT-IN... no longer: since W-REL1/R1 the reactor is the DEFAULT
+(run/map/stream with orchestrator=None ride this module's loop);
+orchestrator=False selects legacy fork-and-wait fail-fast, which
+never imports this module. Default paths DO import this loop.
 
 Death-pipe semantics: each worker holds the write end of its own
 pipe; the parent holds the read end and closes its write copy at

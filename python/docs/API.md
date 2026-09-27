@@ -104,7 +104,7 @@ else raises `TypeError`.
 | `on_error` | `str` | `"retry"` | all — `"retry"`, `"skip"`, `"fail-fast"` |
 | `nodes` | `str`/`int` | `"auto"` | all — `"auto"`, `1`, `N`, `"0,1"`, `"@N"` |
 | `streaming` | `bool`/`None` | `None` (auto) | all — force streaming ingest or materialized |
-| `orchestrator` | `bool`/`None` | `None` | all — `True` enables death-pipe supervision + respawn |
+| `orchestrator` | `bool`/`None` | `None` (= reactor) | all — `None`/`True` = death-pipe supervision + respawn (worker death recovers); `False` = fail-fast fork-and-wait |
 | `c_drain` | `bool`/`None` | `False` | `map`/`stream` — forked C result collection (opt-in) |
 | `c_worker_loop` | `bool` | `False` | `map` + `mode="plugin"` — C worker loop (opt-in) |
 | `c_spawn_loop` | `bool` | `False` | `map` + `mode="spawn"` — C worker loop (opt-in) |

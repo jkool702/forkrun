@@ -233,6 +233,32 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### Recovery is now the default — reactor supervision without opt-in (B1, W-REL1/R1)
+
+- **Defect:** QUICKSTART/FAULT_TOLERANCE/STREAMING/COMPARISON promised
+  unconditional automatic recovery, but `run`/`map`/`stream` defaulted
+  to `orchestrator=None` (fork-and-wait): a mid-batch worker death
+  raised `RuntimeError`. Recovery was opt-in (`orchestrator=True`).
+- **Fix (ratified Option A):** the default flips — `None` rides the
+  W-PY19 reactor (death pipes, bounded respawn cap 3/slot, trap-ACK,
+  C orderer for `order="index"`). A transient mid-batch death now
+  recovers byte-exact on the default path; a batch that kills every
+  attempt is poison-skipped; all-death trips the respawn cap and
+  raises `RuntimeError` (bounded, never infinite). Explicit
+  `orchestrator=False` preserves the previous fail-fast behavior.
+- **Resume gating widens accordingly:** resume/checkpoint needs the
+  reactor path — now the default — plus `order="index"`, UMA,
+  non-splice. No caller change required.
+- **Migration:** recovery is now the default; pass
+  `orchestrator=False` for the previous fail-fast behavior.
+- **Lock-in:** `test_fault.py` L-series reworked (default-path death
+  recovers byte-exact; paired `orchestrator=False` variants assert
+  the old `RuntimeError` + survivor-prefix contract);
+  `test_resume.py::test_resume_without_reactor_fails` now pins
+  `orchestrator=False`. Docs aligned (CONFIGURATION/API/
+  FAULT_TOLERANCE/MIGRATION/TROUBLESHOOTING/`python/README.md`
+  Robustness). Python-only changes; engine untouched.
+
 ### Ingress-memfd offset mover identified and closed (F-PY-UMA1b, W-MOVER)
 
 - **Hunt:** env-gated parent-side position sentry

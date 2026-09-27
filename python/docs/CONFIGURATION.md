@@ -66,12 +66,14 @@ like this box's `numa=fake=4`). Full guide:
 
 ## orchestrator: None (default) / True / False
 
-- `True`: reactor supervision — death pipes, bounded respawn
-  (cap 3/slot), trap-ACK confirmation, C orderer for
-  `order="index"`. Additive: identical results, stronger
-  fault tolerance. Required for `resume=`/`checkpoint_file=`.
-- Default/`False`: fork-and-wait (same-process retry covers
-  payload errors; process death of a worker is best-effort).
+- `None` (default) / `True`: reactor supervision — death pipes,
+  bounded respawn (cap 3/slot), trap-ACK confirmation, C orderer
+  for `order="index"`. Additive: identical results, stronger
+  fault tolerance. Worker death is recovered automatically.
+  Required for `resume=`/`checkpoint_file=`.
+- `False`: legacy fork-and-wait fail-fast (same-process retry
+  covers payload errors; a true process death raises
+  `RuntimeError` instead of recovering).
 
 ## sink (run() only, default None)
 

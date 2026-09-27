@@ -191,9 +191,12 @@ live CUDA context exists in the parent (fork would corrupt driver state).
 ## Robustness (W-PY4 characterization)
 
 - **Faults:** Python exceptions → escrow retry → poison-skip, pipeline
-  continues. True process death (segfault) kills the worker without a
-  deposit: survivors drain the rest, the parent raises `RuntimeError`
-  (without the reactor), no zombies. `KeyboardInterrupt` inside a
+  continues. True process death (segfault) is recovered via respawn
+  on the default path (transient deaths complete byte-exact; a batch
+  that kills every attempt is poison-skipped, all-death trips the
+  bounded respawn cap and raises `RuntimeError`). `orchestrator=False`
+  selects legacy fail-fast (any worker death raises `RuntimeError`,
+  no zombies). `KeyboardInterrupt` inside a
   payload is a payload error (retry path), not a global abort.
 - **Reuse:** sequential and thread-concurrent `run()` calls in one process
   are correct (a process-wide lock serializes engine access; fd counts
@@ -263,14 +266,17 @@ live CUDA context exists in the parent (fork would corrupt driver state).
   (payload-bound — tune the payload, not `lines`). Memory flat across
   the 100× range. Full tables:
    `python/benchmarks/results/batch_size_study.md`.
-- **Reactor orchestration (W-PY19, opt-in):** `orchestrator=True`
-  supervises workers with per-worker death pipes (kernel-observable
-  exit), bounded respawn (cap 3/slot), trap-ACK confirmation (3s
-  grace), and the C orderer for `order="index"`. A segfaulted
-  worker is respawned and the pipeline completes minus the crashed
-  batch (best-effort, with a stderr recovery note); unconfirmed
-  death raises `RuntimeError` after the grace. Healthy-path results
-  are byte-identical to the default path.
+- **Reactor orchestration (W-PY19, the default since W-REL1/R1):**
+  `run`/`map`/`stream` supervise workers with per-worker death pipes
+  (kernel-observable exit), bounded respawn (cap 3/slot), trap-ACK
+  confirmation (3s grace), and the C orderer for `order="index"`.
+  A segfaulted worker is respawned and a transient death completes
+  byte-exact (best-effort per batch: a batch that kills every attempt
+  is poison-skipped; cap-reaching all-death raises `RuntimeError`),
+  with a stderr recovery note; unconfirmed
+  death raises `RuntimeError` after the grace. `orchestrator=False`
+  selects the legacy fail-fast fork-and-wait path (healthy-path results
+  byte-identical either way).
 - **Parameter sweeps (W-PY20):** `forkrun.sweep(payload,
   args=[["a", "b"], ["x", "y"]])` runs the payload once per
   combination (Cartesian; `link=True` zips, `args_from=[files]`
@@ -295,7 +301,7 @@ live CUDA context exists in the parent (fork would corrupt driver state).
   No threads anywhere (fork-before-threads intact); the reactor
   is unchanged.
 - **Resume/checkpoint (W-PY22, C-orderer paths only):**
-  `map()`/`stream()` with `orchestrator=True, order="index"`
+  `map()`/`stream()` with `order="index"` (reactor is the default)
   accept `resume=<ckpt>` (resume FROM) and
   `checkpoint_file=<path>` (publish TO on abort). Anything else
   (`run()`, unordered, non-reactor, splice, multi-node NUMA)
