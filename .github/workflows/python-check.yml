@@ -48,3 +48,28 @@ jobs:
             -w /src \
             fedora:latest \
             bash -c 'dnf install -y bash-devel gcc make file python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'
+
+  sanitizer-asan-ubsan:
+    # W-REL1/R6: ASan+UBSan legs — ADVISORY for v3.6.0
+    # (continue-on-error: red here never blocks the tag) flipping to
+    # blocking for v3.6.1. triage findings as issues labeled
+    # `advisory-pending-triage` (report, don't panic-fix).
+    # TSan is INTENTIONALLY deferred, with rationale: forkrun's
+    # coordination is cross-process on shared MAP_SHARED (fork, not
+    # threads) — TSan observes races within a single process only
+    # and produces known noise on this architecture; the
+    # cross-process ordering protocol is guaranteed by
+    # INVARIANTS.md and exercised by the stress matrix (same scope
+    # note as the release runbook's sanitizer section). Re-evaluate
+    # post-v3.6.0.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v3
+      - name: ASan+UBSan canary + substrate + smoke (advisory)
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            fedora:latest \
+            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file python3 libasan libubsan && make -f Makefile.substrate canary CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" OUT=/tmp/asan_canary.so && make -f Makefile.substrate python-substrate CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" PY_OUT=/tmp/asan_substrate.so && cd python/tests && FORKRUN_LIB=/tmp/asan_substrate.so LD_PRELOAD="$(ldconfig -p | grep libasan | awk "NR==1{print $NF}")" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 -m unittest test_v0 test_fault test_reactor test_spawn -v'
