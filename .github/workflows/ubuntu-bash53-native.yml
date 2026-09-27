@@ -103,19 +103,6 @@ jobs:
           print("Python Ubuntu smoke: OK")
           PY
 
-      - name: Bash 5.2 native smoke
-        shell: bash
-        run: |
-          set -xo pipefail
-          source ./frun.bash
-          echo "Bash runtime: $BASH_VERSION"
-          ring_version -a
-
-          printf 'line %s\n' $(seq 1 2000) > /tmp/forkrun_ubuntu_bash_input.txt
-          frun -k cat < /tmp/forkrun_ubuntu_bash_input.txt > /tmp/forkrun_ubuntu_bash52_out.txt
-          cmp /tmp/forkrun_ubuntu_bash_input.txt /tmp/forkrun_ubuntu_bash52_out.txt
-          echo "Bash 5.2 + frun.bash: OK"
-
       - name: Bash 5.3 native smoke
         run: |
           set -x
@@ -158,3 +145,16 @@ jobs:
             test -s /tmp/ubuntu_plugin_out.txt
             echo "Bash 5.3 + native Ubuntu C plugin: OK"
           '
+
+      - name: Bash 5.2 native smoke
+        shell: bash
+        run: |
+          set -xo pipefail
+          source ./frun.bash
+          echo "Bash runtime: $BASH_VERSION"
+          ring_version -a
+
+          printf 'line %s\n' $(seq 1 2000) > /tmp/forkrun_ubuntu_bash_input.txt
+          frun -k cat < /tmp/forkrun_ubuntu_bash_input.txt > /tmp/forkrun_ubuntu_bash52_out.txt
+          cmp /tmp/forkrun_ubuntu_bash_input.txt /tmp/forkrun_ubuntu_bash52_out.txt
+          echo "Bash 5.2 + frun.bash: OK"
