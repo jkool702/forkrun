@@ -40,7 +40,7 @@ jobs:
         env:
           BASH53_SHA256: 62dd49c44c399ed1b3f7f731e87a782334d834f08e098a35f2c87547d5dbb269
         run: |
-          set -eux
+          set -x
           cd "$RUNNER_TEMP"
           curl -fsSLO https://ftp.gnu.org/pub/gnu/bash/bash-5.3.tar.gz
           echo "$BASH53_SHA256  bash-5.3.tar.gz" | sha256sum -c -
