@@ -1520,6 +1520,19 @@ typedef char fr_txn_size_128_bytes[(sizeof(struct WorkerTxn) == 128) ? 1 : -1];
 #define META_RING_SIZE 4096
 #define META_RING_MASK (META_RING_SIZE - 1)
 
+/* W-REL3/R17: hard ceiling for logical NUMA nodes, shared by the
+ * init-time cap (ring_init_main) and the ingest clamp
+ * (ring_numa_ingest_main). state[] and every evfd/escrow array are
+ * mmap'd/calloc'd for exactly global_num_nodes entries, so any
+ * target_node at or above this bound is an OOB index (the ingest
+ * clamp used 1024 while the arrays stop at 512 — latent; Python
+ * defended it, the engine did not). Single source: the two use
+ * sites cannot textually diverge again. */
+#define FR_MAX_LOGICAL_NODES 512
+_Static_assert(FR_MAX_LOGICAL_NODES <= META_RING_SIZE,
+               "node ceiling must stay within meta-ring capacity "
+               "(see the C3-fix headroom note in ring_init_main)");
+
 // ChunkMeta: Lock-free metadata describing a slice of physical data added by
 // ingest. Workers and the global scanner use this to align physical bounds
 // without taking locks.
@@ -2286,8 +2299,8 @@ static int ring_init_main(int argc, char **argv) {
   }
 
     // C3-fix: meta_ring in-flight bound. 512 logical nodes leaves safe headroom.
-  if (global_num_nodes > 512) {
-    builtin_error("forkrun: --nodes=@N above 512 is not supported (meta_ring capacity); got %u", global_num_nodes);
+  if (global_num_nodes > FR_MAX_LOGICAL_NODES) {
+    builtin_error("forkrun: --nodes=@N above %u is not supported (meta_ring capacity); got %u", (unsigned)FR_MAX_LOGICAL_NODES, global_num_nodes);
     if (g_logical_to_phys_map) {
       free(g_logical_to_phys_map);
       g_logical_to_phys_map = NULL;
@@ -2886,8 +2899,10 @@ static int ring_numa_ingest_main(int argc, char **argv) {
   int num_nodes = atoi(argv[3]);
   if (num_nodes < 1)
     num_nodes = 1;
-  if (num_nodes > 1024)
-    num_nodes = 1024;
+  // W-REL3/R17: clamp to the array bound, not 1024 — target_node
+  // indexes state[]/evfd arrays sized for FR_MAX_LOGICAL_NODES.
+  if (num_nodes > FR_MAX_LOGICAL_NODES)
+    num_nodes = FR_MAX_LOGICAL_NODES;
 
   uint64_t chunk_size = 2 * 1024 * 1024ULL;
 
