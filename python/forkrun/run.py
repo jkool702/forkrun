@@ -3514,6 +3514,47 @@ def _poisoned_now(lib) -> int:
         return 0
 
 
+def _abort_reason_now(lib):
+    """Abort reason without touching abort state (D-PORT2/D6 mirror).
+
+    Returns 0 (unset), 1 (SIGPIPE/downstream close), 2 (fault),
+    or None when unknown (no engine / pre-D-PORT2 substrate /
+    unreadable). Never raises; never aborts. Query BEFORE the
+    handler's own abort — the order is the fix.
+    """
+    try:
+        fn = getattr(lib, "fr_py_abort_reason", None)
+    except Exception:
+        return None
+    if fn is None:
+        return None
+    try:
+        return int(fn())
+    except Exception:
+        return None
+
+
+def _helper_death_disposition(kind, eof_ok, reason):
+    """D6 abort-aware classification for helper deaths (D-PORT2).
+
+    Returns 'record' (clean drain: file it, continue), 'excuse'
+    (expected abort-path exit: file it, mark excused, continue —
+    no abort, no raise), or 'fatal' (abort + raise).
+    - clean + EOF posted → 'record' (normal drain, unchanged).
+    - anything + abort already in flight (reason not in
+      (0, None, -1)) → 'excuse' (the helper's non-zero exit is its
+      expected emergency path; re-aborting would print a spurious
+      FATAL and clobber the abort's own outcome).
+    - else → 'fatal' (clean-before-EOF with no abort is tail
+      loss; error with no abort is violent death).
+    """
+    if kind == "clean" and eof_ok:
+        return "record"
+    if reason not in (0, None, -1):
+        return "excuse"
+    return "fatal"
+
+
 def _raise_for_poisoned(npois, strict_poison) -> None:
     """Raise ForkrunPoisonSkip under opt-in strict_poison (D-PORT3).
 
@@ -3884,6 +3925,16 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                 return
             scan_rc = scan_st
             scan_pid = None
+            # D-PORT2/D6: query the abort reason BEFORE our own
+            # abort — an abort already in flight makes this an
+            # expected emergency exit. Retire it as observed (the
+            # code stays honest in scan_rc; the abort's own outcome
+            # governs the run) instead of raising a spurious fatal
+            # over it.
+            if _helper_death_disposition(
+                    "error", False,
+                    _abort_reason_now(lib)) == "excuse":
+                return
             try:
                 lib.fr_py_abort()
             except Exception:
@@ -4389,6 +4440,16 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                 scan_rc = 0
                 return
             scan_rc = scan_st
+            # D-PORT2/D6: query the abort reason BEFORE our own
+            # abort — an abort already in flight makes this an
+            # expected emergency exit. Retire it as observed (the
+            # code stays honest in scan_rc; the abort's own outcome
+            # governs the run) instead of raising a spurious fatal
+            # over it.
+            if _helper_death_disposition(
+                    "error", False,
+                    _abort_reason_now(lib)) == "excuse":
+                return
             try:
                 lib.fr_py_abort()
             except Exception:
@@ -6269,15 +6330,25 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                         pids[node], deaths[node])
                     if kind == "running":
                         continue
-                    if kind == "error" or not eof_posted:
-                        helpers[key][node] = (kind, code)
-                        deaths[node] = None
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: NUMA %s %d failed "
-                            "(status %r)" % (key, node, code))
+                    # D-PORT2/D6: query the abort reason BEFORE our
+                    # own abort — an abort already in flight makes
+                    # this death an expected emergency exit, not a
+                    # fatal one (re-aborting would print a spurious
+                    # FATAL and clobber the abort's own outcome).
+                    disp = _helper_death_disposition(
+                        kind, bool(eof_posted),
+                        _abort_reason_now(lib))
                     helpers[key][node] = (kind, code)
                     deaths[node] = None
+                    if disp != "fatal":
+                        if disp == "excuse":
+                            helpers.setdefault(
+                                "excused", set()).add((key, node))
+                        continue
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: NUMA %s %d failed "
+                        "(status %r)" % (key, node, code))
 
         def _fork_node(node):
             for wid, nd in enumerate(wid_node):
@@ -6435,6 +6506,12 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                           ("scan", pipe["scanner_pids"])):
             for node in range(num_nodes):
                 if node in helpers[key]:
+                    # D-PORT2: deaths excused by the abort-aware
+                    # watch (abort already in flight) stay excused
+                    # here — re-raising them would clobber the
+                    # abort's own outcome with a spurious fatal.
+                    if (key, node) in helpers.get("excused", ()):
+                        continue
                     kind, code = helpers[key][node]
                     if kind == "error":
                         raise RuntimeError(
@@ -6447,6 +6524,16 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                     _st = None
                 if _st is not None and not (
                         os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
+                    # Fresh death at join time: same D6 rule — an
+                    # abort in flight makes it expected (file it as
+                    # excused); otherwise violent death (fatal).
+                    if _helper_death_disposition(
+                            "error", False,
+                            _abort_reason_now(lib)) == "excuse":
+                        helpers[key][node] = ("error", _st)
+                        helpers.setdefault(
+                            "excused", set()).add((key, node))
+                        continue
                     raise RuntimeError(
                         "forkrun: NUMA %s %d failed (status %r)"
                         % (key, node, _st))
@@ -6725,15 +6812,25 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                         pids[node], deaths[node])
                     if kind == "running":
                         continue
-                    if kind == "error" or not eof_posted:
-                        helpers[key][node] = (kind, code)
-                        deaths[node] = None
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: NUMA %s %d failed "
-                            "(status %r)" % (key, node, code))
+                    # D-PORT2/D6: query the abort reason BEFORE our
+                    # own abort — an abort already in flight makes
+                    # this death an expected emergency exit, not a
+                    # fatal one (re-aborting would print a spurious
+                    # FATAL and clobber the abort's own outcome).
+                    disp = _helper_death_disposition(
+                        kind, bool(eof_posted),
+                        _abort_reason_now(lib))
                     helpers[key][node] = (kind, code)
                     deaths[node] = None
+                    if disp != "fatal":
+                        if disp == "excuse":
+                            helpers.setdefault(
+                                "excused", set()).add((key, node))
+                        continue
+                    lib.fr_py_abort()
+                    raise RuntimeError(
+                        "forkrun: NUMA %s %d failed "
+                        "(status %r)" % (key, node, code))
 
         def _fork_timing():
             if len(forked) >= num_nodes:
@@ -7048,6 +7145,12 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                           ("scan", pipe["scanner_pids"])):
             for node in range(num_nodes):
                 if node in helpers[key]:
+                    # D-PORT2: deaths excused by the abort-aware
+                    # watch (abort already in flight) stay excused
+                    # here — re-raising them would clobber the
+                    # abort's own outcome with a spurious fatal.
+                    if (key, node) in helpers.get("excused", ()):
+                        continue
                     kind, code = helpers[key][node]
                     if kind == "error":
                         raise RuntimeError(
@@ -7060,6 +7163,16 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                     _st = None
                 if _st is not None and not (
                         os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
+                    # Fresh death at join time: same D6 rule — an
+                    # abort in flight makes it expected (file it as
+                    # excused); otherwise violent death (fatal).
+                    if _helper_death_disposition(
+                            "error", False,
+                            _abort_reason_now(lib)) == "excuse":
+                        helpers[key][node] = ("error", _st)
+                        helpers.setdefault(
+                            "excused", set()).add((key, node))
+                        continue
                     raise RuntimeError(
                         "forkrun: NUMA %s %d failed (status %r)"
                         % (key, node, _st))

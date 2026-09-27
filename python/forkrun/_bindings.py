@@ -351,6 +351,15 @@ def _setup_signatures(lib) -> None:
         lib.fr_py_output_advanced.restype = ctypes.c_int
     except AttributeError:
         pass
+    try:
+        # D-PORT2: read-only abort-reason query (0 unset, 1 SIGPIPE/
+        # downstream close, 2 internal fault; -1 no engine). Missing
+        # on pre-D-PORT2 substrates — callers fall back to treating
+        # every non-zero helper death as fatal.
+        lib.fr_py_abort_reason.argtypes = []
+        lib.fr_py_abort_reason.restype = ctypes.c_int
+    except AttributeError:
+        pass
 
 
 def load(path: str | None = None):

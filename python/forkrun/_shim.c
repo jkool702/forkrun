@@ -374,6 +374,19 @@ int fr_py_abort(void) {
     return 0;
 }
 
+/* Read-only abort-reason accessor (D-PORT2): the exact byte
+ * ring_abort_reason_main exposes to Bash (0 unset, 1 downstream
+ * SIGPIPE/close, 2 internal fault), via the same ACQUIRE load.
+ * Additive surface only — no engine logic touched (W-PY22
+ * fr_py_resume_snapshot precedent: shim reads, engine frozen).
+ * Returns -1 with no live engine (distinguishes "no engine" from
+ * "no abort", which Bash reports as EXECUTION_FAILURE). */
+int fr_py_abort_reason(void) {
+    if (!g_state)
+        return -1;
+    return (int)__atomic_load_n(&g_state->abort_reason, __ATOMIC_ACQUIRE);
+}
+
 /* Number of batches that crossed the poison threshold (parent-side
  * diagnostic: g_state is MAP_SHARED, so the parent observes worker
  * increments without IPC). */
