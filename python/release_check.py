@@ -71,6 +71,52 @@ def check_changelog_version():
     return True
 
 
+def _so_engine_version(so_path):
+    """Read fr_py_version() from a substrate .so file (F-PORT5).
+
+    Returns the version string, or raises AssertionError when the
+    symbol is missing/unreadable. Used by the engine-match checks
+    so wheel-embedded and tree-built substrates are compared by
+    the same code path.
+    """
+    import ctypes
+    lib = ctypes.CDLL(so_path)
+    fn = getattr(lib, "fr_py_version", None)
+    assert fn is not None, "no fr_py_version in %s" % so_path
+    fn.argtypes = []
+    fn.restype = ctypes.c_char_p
+    ver = fn()
+    assert ver, "empty fr_py_version from %s" % so_path
+    return ver.decode("utf-8") if isinstance(ver, bytes) else str(ver)
+
+
+@check("Version: META maps %s" % PROJECT_VERSION)
+def check_meta_mapping():
+    # F-PORT5: META is the Bash-side version source (-V, CI blob
+    # rebuild trigger); it must name the release being tagged, or
+    # the shipped frun.bash and the Python wheel diverge silently.
+    with open(os.path.join(REPO_ROOT, "META")) as fh:
+        meta = fh.read()
+    assert ("VERSION: %s" % PROJECT_VERSION) in meta, \
+        "META lacks VERSION: %s:\n%s" % (PROJECT_VERSION, meta)
+    return True
+
+
+@check("Version: built engine is %s" % PROJECT_VERSION)
+def check_engine_version():
+    # F-PORT5: the tree-built substrate must report the release
+    # version — a stale local .so (or an unbuilt one, "unknown")
+    # passing silently is wheel-vs-local drift by another name.
+    sys.path.insert(0, os.path.join(REPO_ROOT, "python"))
+    import forkrun
+    eng = forkrun.__engine_version__
+    assert eng == PROJECT_VERSION, (
+        "engine %r != %s (rebuild: make -f Makefile.substrate "
+        "python-substrate; $FORKRUN_LIB override?)"
+        % (eng, PROJECT_VERSION))
+    return True
+
+
 @check("Docs: CHANGELOG/DOCS_ALL section structure matches")
 def check_twins():
     # DOCS_ALL.md embeds CHANGELOG.md (plus every other doc), so
@@ -207,6 +253,37 @@ def check_readme_version():
         content = fh.read()
     assert PY_VERSION in content, "README lacks %s" % PY_VERSION
     return True
+
+
+@check("Wheel: embedded .so reports %s" % PROJECT_VERSION)
+def check_wheel_so_version():
+    # F-PORT5: the wheel must SHIP the release engine, not a stale
+    # local build. Extract the packaged .so and read its version by
+    # the same helper as the tree-built substrate.
+    import zipfile
+    workdir = tempfile.mkdtemp(prefix="forkrun_release_sovers_")
+    try:
+        proc = _run([sys.executable, "-m", "pip", "wheel", ".",
+                     "--no-deps", "-w", workdir], timeout=900)
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        wheels = glob.glob(os.path.join(workdir, "*.whl"))
+        assert wheels, "no wheel built"
+        with zipfile.ZipFile(wheels[0]) as zf:
+            so_names = [n for n in zf.namelist()
+                        if n.endswith("libforkrun_python.so")]
+            assert so_names, "no substrate .so in wheel"
+            so_data = zf.read(so_names[0])
+        so_path = os.path.join(workdir, "libforkrun_python.so")
+        with open(so_path, "wb") as fh:
+            fh.write(so_data)
+        ver = _so_engine_version(so_path)
+        assert ver == PROJECT_VERSION, \
+            "wheel-embedded engine %r != %s (stale substrate build)" \
+            % (ver, PROJECT_VERSION)
+        return True
+    finally:
+        import shutil
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 @check("Tree: no uncommitted changes")
