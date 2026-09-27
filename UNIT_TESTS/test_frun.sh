@@ -995,6 +995,20 @@ run_test "Caller IFS=: full output x10 (S2)" \
 8
 10"
 
+# 7. MISSING COMMAND (S4)
+# Nonexistent command: every batch exits 127, workers exit 127 at
+# EOF with zero successes -> run-fatal rc=127 + notice (pre-fix:
+# rc=0 silent). Mixed 127+success still completes (transient-127
+# preserved, second test).
+run_test "Missing command fails loud rc=127 (S4)" \
+"seq 10 | frun nosuchcmd_xyz" \
+"" \
+127
+run_test "Mixed 127+success completes (S4/transient-127)" \
+"printf 'a\nbad\nc\n' | frun -k -l 1 sh -c 'if [ \"\$1\" = bad ]; then exit 127; fi; echo \"\$1\"' sh" \
+"a
+c"
+
 
 
 # NUMA Telemetry and Prefix Invariants (5-arg signature):

@@ -1829,6 +1829,7 @@ _forkrun_checkpoint_signal() {
                 pCode+=' || {
             ret=$?
             (( ret == 137 || ret == 139 || ret == 200 || ret == 254 )) && exit $ret
+            if (( ret == 127 )); then (( ++_fr_w127 )); fi
         }'
             fi
         }
@@ -1883,6 +1884,12 @@ worker_func_src+='
     RING_POISONED=0
     FRUN_CLAIM_BYTES=0
     REPLY=0
+    # W-REL3/R20: per-worker 127 accounting (missing command). A
+    # worker whose every batch exited 127 exits 127 itself at EOF
+    # so the parent can tell missing-command apart from clean;
+    # mixed 127+success exits 0 (transient-127 preserved).
+    _fr_w127=0
+    _fr_wclaims=0
     '
    [[ "$order_mode" != "realtime" ]] && worker_func_src+='
     # Initialize the output tracking for this specific worker slot
@@ -1903,7 +1910,7 @@ worker_func_src+='
                 '
         ${insert_id_flag:-false} && worker_func_src+='((W_BATCH++))
                 '
-        worker_func_src+="${pCode}"'
+        worker_func_src+='(( ++_fr_wclaims )); '"${pCode}"'
             fi
         fi
         '"${ring_ack_str}"' || {
@@ -1921,6 +1928,19 @@ worker_func_src+='
         FRUN_CLAIM_BYTES=0
         REPLY=0
     done
+    # W-REL3/R20: EOF exit code carries the whole-run verdict.
+    # All-claimed-batches-127 (missing command) exits 127
+    # so the parent can tell it apart from clean EOF; anything with
+    # a success exits 0 (transient-127 preserved); zero-claim idle
+    # workers exit 126 — NEITHER success evidence NOR missing
+    # evidence (default 28 workers on small inputs leave most idle;
+    # their exits must not veto the fatal). 126 never escapes: the
+    # parent census maps it to neutral. if-form: -e safe.
+    # NOTE: no apostrophes in this block — it lives inside the
+    # worker_func_src single-quoted string, where an apostrophe
+    # would close the string (parse break at reactor code).
+    if (( _fr_wclaims == 0 )); then exit 126; fi
+    if (( _fr_wclaims == _fr_w127 )); then exit 127; fi
   } {fd_read}<"/proc/self/fd/'"${ingress_memfd}"'"'
   if ! ${stdin_flag}; then
       worker_func_src+=' 0</dev/null'
@@ -1937,6 +1957,10 @@ W_NODE[$3]=$2
         nWorkers=0
         local -a node_workers W_NODE fd_worker_r fd_worker_w P wID_free
         local -a W_INCARN=()
+        # W-REL3/R20: EOF-exit census (missing command). Workers that
+        # saw only 127s exit 127 at EOF (worker-side, above); clean
+        # workers exit 0. All-127-with-no-0 is run-fatal (below).
+        local -i _w127eof=0 _w0eof=0
 
         # W-PY28: trap_ack_pending removed (no trap-ACK grace —
         # recovery is synchronous parent-side). _poll_timer_cmd stays
@@ -2071,6 +2095,15 @@ W_NODE[$3]=$2
                         2)  # NORMAL_EXIT — EOF drain or teardown error
                             wID_free[$wID]=''
                             _respawn_wid=
+                            # W-REL3/R20: census the EOF exit code —
+                            # 127 here means the worker's every batch
+                            # was 127 (missing command); 0 is clean;
+                            # 126 is idle (saw nothing: neutral).
+                            if (( status == 127 )); then
+                                (( ++_w127eof ))
+                            elif (( status == 0 )); then
+                                (( ++_w0eof ))
+                            fi
                             ;;
                         4)  # RACE_DETECTED — CLAIMING/COMMITTING death
                             echo "forkrun [FATAL]: Worker $wID died mid-transaction (race window); batch unattributable. Aborting." >&2
@@ -2205,6 +2238,16 @@ W_NODE[$3]=$2
 
             # If we were going to exit 0, change it to exit 3 to signal data loss
             (( _ret_val == 0 )) && _ret_val=3
+        fi
+
+        # W-REL3/R20: all-workers-127 is run-fatal (missing command):
+        # 127-exits with zero 0-exits means no batch succeeded
+        # anywhere (empty input has no 127s — stays clean; mixed
+        # 127+success stays poison-class per W-PY13 transient-127).
+        # Only upgrades a would-be-0 exit; never masks a real one.
+        if (( ${_w127eof:-0} > 0 && ${_w0eof:-0} == 0 )) && (( ${_ret_val:-0} == 0 )); then
+            echo "forkrun [ERROR]: command not found — all workers exited 127 with zero successful batches (see 'command not found' above; check the command exists on PATH)." >&2
+            _ret_val=127
         fi
 
         exec {fd_write}>&- {fd_scan}>&- {ingress_memfd}>&-
