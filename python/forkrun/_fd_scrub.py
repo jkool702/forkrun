@@ -18,9 +18,13 @@ exec(), and forkrun's children never exec (they run C directly).
 
 The keep set MUST include the engine's own fds (escrow pipes,
 eventfds) — not just the job fds. Closing those breaks escrow
-retry/poison (silent retry loss: the deposit return is unchecked) and
-forces claim-polling into POLLNVAL hot-spins. Callers snapshot them
+retry/poison and forces claim-polling into POLLNVAL hot-spins.
+Callers snapshot them
 (see run.py: fds present after fr_py_init minus fds present before).
+W-REL2/R14a: a refused deposit is no longer a silent-continue even
+when the keep set is right (closed fd, blocking/EBADF) — the return
+is checked, retried once, then poison-skipped LOUDLY (§6: escrow
+advisory, never required for forward progress).
 """
 
 from __future__ import annotations

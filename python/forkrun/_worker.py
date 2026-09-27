@@ -216,6 +216,47 @@ def _trap_ack_notify(trap_ack_w, msg) -> None:
         pass
 
 
+def _escrow_deposit_retry(lib, kills):
+    """fr_py_escrow_deposit with one retry (W-REL2/R14a).
+
+    Returns 0 on success, nonzero when the deposit is refused
+    twice (or the binding itself raises). Callers must NEVER
+    silent-continue a nonzero return (INVARIANTS §6: escrow is
+    advisory, never required for forward progress — a refused
+    deposit goes loud, never quiet).
+    """
+    try:
+        rc = lib.fr_py_escrow_deposit(kills)
+    except Exception:
+        return 1
+    if rc == 0:
+        return 0
+    try:
+        rc = lib.fr_py_escrow_deposit(kills)
+    except Exception:
+        return 1
+    return rc
+
+
+def _escrow_deposit_exit_loud(lib, wid):
+    """Exit-path escrow deposit that is never silent (W-REL2/R14a).
+
+    For workers/C-loops that are exiting anyway: retry once, and on
+    refusal emit a loud stderr notice naming the worker instead of
+    swallowing (the old try/except: pass). The in-flight batch is
+    then owned by parent-side transaction recovery. Always returns
+    None — callers continue their teardown unconditionally.
+    """
+    if _escrow_deposit_retry(lib, 1) != 0:
+        try:
+            os.write(2, ("forkrun [WARN]: worker %d escrow deposit "
+                         "refused (pipe failure); parent-side recovery "
+                         "owns the in-flight batch — never silent.\n"
+                         % (wid,)).encode())
+        except OSError:
+            pass
+
+
 def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
          signal_w, on_error, fallow_fd=None, trap_ack_w=None,
          order_target=-1, wincarn=0, node=0):
@@ -345,6 +386,29 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
         """
         return _complete_fn(-1, wid, bidx, fallow_w, _out,
                             None, 0)
+
+    def _deposit_or_loud_skip(bidx, kills):
+        """Escrow deposit with one retry, else LOUD poison-skip
+        (W-REL2/R14a: INVARIANTS §6 — a refused deposit must skip
+        loudly, never silent-continue and never stall). Emits the
+        stderr notice naming the batch, notifies P:idx:kills so
+        parent poison accounting stays coherent, then acks/skips
+        exactly like a poisoned batch. Returns 0 to continue the
+        claim loop, nonzero only when the skip's own ack fails
+        (fatal, like any poison-path ack failure).
+        """
+        if _escrow_deposit_retry(lib, kills) == 0:
+            return 0
+        try:
+            os.write(2, ("forkrun [WARN]: Skipping batch %d "
+                         "(escrow deposit refused twice; refused "
+                         "instead of silent loss).\n" % (bidx,)).encode())
+        except OSError:
+            pass
+        _trap_ack_notify(trap_w, "P:%d:%d\n" % (bidx, kills))
+        if use_complete:
+            return _commit_silent(bidx)
+        return _ack(lib, fallow_w, order_tgt)
 
     def _success(bidx):
         """Signal (indices only) + ack. Shared by v0 and v1 paths."""
@@ -524,7 +588,9 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
                     lib.fr_py_abort()
                     return 1
                 _flush()
-                lib.fr_py_escrow_deposit(claimed.num_kills + 1)
+                if _deposit_or_loud_skip(claimed.batch_idx,
+                                        claimed.num_kills + 1) != 0:
+                    return 1
                 continue
             batch = Batch.from_window(
                 claimed.batch_idx, claimed.offset, claimed.length,
@@ -669,7 +735,9 @@ def _run(wid, payload_spec, sink_spec, memfd_fd, file_size, out_fd,
             # covers exactly the deaths that run no code here
             # (SIGSEGV/SIGKILL/OOM), where this deposit never happens.
             _flush()
-            lib.fr_py_escrow_deposit(claimed.num_kills + 1)
+            if _deposit_or_loud_skip(claimed.batch_idx,
+                                    claimed.num_kills + 1) != 0:
+                return 1
             continue
     finally:
         if out_fd is not None:
@@ -891,11 +959,10 @@ def worker_main_with_death_pipe(wid, node, payload_spec, sink_spec,
             #    failure paths in _run already deposited with exact
             #    kills; this covers only unexpected crashes, where 1
             #    is the safe-direction estimate — an underestimate
-            #    merely retries, never poisons early).
-            try:
-                get().fr_py_escrow_deposit(1)
-            except Exception:
-                pass
+            #    merely retries, never poisons early). W-REL2/R14a:
+            #    never silent — a refused deposit is announced
+            #    (parent-side recovery owns the batch).
+            _escrow_deposit_exit_loud(get(), wid)
             # 2. trap-ACK confirmation for the reactor's 3s grace.
             _trap_ack_notify(trap_ack_w, "%d\n" % (wid,))
         # 3. death-pipe close → parent observes worker exit.

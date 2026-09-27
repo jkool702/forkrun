@@ -519,10 +519,10 @@ def _splice_child_main(ctx, wid, node, incarn, death_w):
     except BaseException:
         rc = 1
     if rc != 0:
-        try:
-            lib.fr_py_escrow_deposit(1)
-        except Exception:
-            pass
+        # W-REL2/R14a: never silent — refusal is announced
+        # (parent-side recovery owns the batch); teardown continues.
+        from ._worker import _escrow_deposit_exit_loud
+        _escrow_deposit_exit_loud(lib, wid)
         if trap_w is not None and trap_w >= 0:
             try:
                 os.write(trap_w, ("%d\n" % (wid,)).encode())
@@ -582,10 +582,10 @@ def _c_plugin_child_main(ctx, wid, node, incarn, death_w):
     except BaseException:
         rc = 1
     if rc != 0:
-        try:
-            lib.fr_py_escrow_deposit(1)
-        except Exception:
-            pass
+        # W-REL2/R14a: never silent — refusal is announced
+        # (parent-side recovery owns the batch); teardown continues.
+        from ._worker import _escrow_deposit_exit_loud
+        _escrow_deposit_exit_loud(lib, wid)
         if trap_w is not None and trap_w >= 0:
             try:
                 os.write(trap_w, ("%d\n" % (wid,)).encode())
@@ -646,10 +646,10 @@ def _c_spawn_child_main(ctx, wid, node, incarn, death_w):
     except BaseException:
         rc = 1
     if rc != 0:
-        try:
-            lib.fr_py_escrow_deposit(1)
-        except Exception:
-            pass
+        # W-REL2/R14a: never silent — refusal is announced
+        # (parent-side recovery owns the batch); teardown continues.
+        from ._worker import _escrow_deposit_exit_loud
+        _escrow_deposit_exit_loud(lib, wid)
         if trap_w is not None and trap_w >= 0:
             try:
                 os.write(trap_w, ("%d\n" % (wid,)).encode())
