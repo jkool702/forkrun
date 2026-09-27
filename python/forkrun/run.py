@@ -377,9 +377,12 @@ def _resolve_c_spawn_loop(c_spawn_loop, raw_mode, num_nodes):
 # (parent threads are fine — workers fork from whichever thread holds the
 # lock; the child never touches it). One lock for the whole pipeline:
 # coarse, deterministic, v0-appropriate.
+# W-REL2/R10: RLock, not Lock. Same-thread nesting (a forkrun.map call
+# inside a live stream() iteration) is legitimate and must re-enter
+# instead of deadlocking; cross-thread contenders still serialize.
 import threading as _threading
 
-_RUN_LOCK = _threading.Lock()
+_RUN_LOCK = _threading.RLock()
 
 
 def _open_source(source):
@@ -1305,10 +1308,21 @@ def _guarded_gen(guard, gen):
     restored at exhaustion (with pending-signal translation), or
     on abandonment (GeneratorExit propagates unmasked, same
     doctrine as teardown: never mask GeneratorExit).
+
+    W-REL2/R10: the process-wide _RUN_LOCK is ALSO held here, for
+    the same lazy lifetime. Every stream() path returns through
+    this choke point, so all five stream executors (and the
+    reactor executors they drive) serialize against concurrent
+    run/map/stream in other threads — engine globals are
+    process-global. Same-thread nesting re-enters via RLock;
+    abandonment (close()/GeneratorExit) releases through the
+    with-finally together with the signal guard, riding the
+    existing W-PY6 cleanup.
     """
-    with guard as _sg:
-        yield from gen
-        _sg.check()
+    with _RUN_LOCK:
+        with guard as _sg:
+            yield from gen
+            _sg.check()
 
 
 def _stream_gen(payload, source, **kwargs):
