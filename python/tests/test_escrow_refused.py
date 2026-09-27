@@ -110,5 +110,60 @@ class TestEscrowRefusedLoud(unittest.TestCase):
                     os.unlink(extra)
 
 
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestDoubleDepositSingleEntry(unittest.TestCase):
+    """W-REL2/R14b: fr_py_escrow_deposit clears worker_last_cnt on
+    success (mirroring ring_ack_main). Two deposits without an
+    intervening claim must leave exactly one escrow entry — the
+    batch executes once, never twice.
+
+    Shape: the payload deposits twice itself, then segfaults (so
+    the EXIT-trap deposit is a third no-claim deposit attempt).
+    Pre-fix the duplicate entries corrupt recovery (observed:
+    inexact output — missing lines); post-fix the batch appears
+    exactly once. Verified FAIL pre-fix / 10x10 PASS post-fix.
+    Deterministic: workers=2, order=index.
+    """
+
+    def tearDown(self):
+        assert_no_zombies(self)
+
+    def test_double_deposit_no_duplicates(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        flag = path + ".killed"
+        try:
+            write_lines(path, 500)
+            with open(path, "rb") as fh:
+                raw_lines = fh.read().splitlines()
+
+            def killer(batch):
+                from forkrun._bindings import get as _get
+                data = bytes(batch.data)
+                if b"line 100" in data and not os.path.exists(flag):
+                    with open(flag, "w") as _fh:
+                        _fh.write("1")
+                    lib = _get()
+                    lib.fr_py_escrow_deposit(1)
+                    lib.fr_py_escrow_deposit(1)
+                    import ctypes
+
+                    ctypes.string_at(0)
+                return data
+
+            out = forkrun.map(killer, path, workers=2,
+                              order="index", nodes=1)
+            out_lines = b"".join(out).splitlines()
+            self.assertEqual(len(out_lines), len(set(out_lines)),
+                             "duplicated output lines (double-deposit)")
+            self.assertEqual(set(out_lines), set(raw_lines),
+                             "every input line exactly once")
+        finally:
+            os.unlink(path)
+            if os.path.exists(flag):
+                os.unlink(flag)
+
+
 if __name__ == "__main__":
     unittest.main()

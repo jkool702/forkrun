@@ -360,6 +360,12 @@ int fr_py_escrow_deposit(unsigned int kills) {
             (ssize_t)sizeof(ep)) {
             __atomic_store_n(&state[node].escrow_pending, 1,
                              __ATOMIC_RELEASE);
+            /* W-REL2/R14b: clear on successful deposit, mirroring
+             * ring_ack_main's worker_last_cnt = 0. Without this a
+             * second deposit without an intervening claim re-sends
+             * the same batch (double-deposit → duplicate output);
+             * the engine side never had this bug. */
+            worker_last_cnt = 0;
             return 0;
         }
         return 1;
