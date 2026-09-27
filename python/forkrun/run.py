@@ -2639,8 +2639,8 @@ def _mover_sentry(memfd, tag):
         pos = "ERR:%s" % (exc,)
     try:
         sys.stderr.write(
-            "forkrun [MOVER] tag=%s pid=%d pos=%r t=%.3f\n"
-            % (tag, os.getpid(), pos, _time.monotonic()))
+            "forkrun [MOVER] tag=%s pid=%d fd=%s pos=%r t=%.3f\n"
+            % (tag, os.getpid(), memfd, pos, _time.monotonic()))
         # Layout snapshot: which numbers are eventfds/pipes/memfds
         # (decisive for fd-confusion theories; gate-only cost).
         try:
