@@ -33,7 +33,7 @@ char *get_string_value(const char *n) { (void)n; return 0; }
 /* --- builtins --- */
 void builtin_error(const char *fmt, ...) { (void)fmt; }
 void builtin_usage(void) {}
-int make_builtin_argv(void *list, int *argc) { if (argc) *argc = 0; return 0; }
+int make_builtin_argv(void *list, int *argc) { (void)list; /* signature fidelity: mirrors bash's make_builtin_argv(WORD_LIST *); the stub ignores the list. */ if (argc) *argc = 0; return 0; }
 int add_builtin(void *bp, int keep) { (void)bp; (void)keep; return 0; }
 void xfree(void *p) { free(p); }
 char *xmalloc_dup(const char *s) { return s ? strdup(s) : 0; }

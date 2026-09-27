@@ -7443,9 +7443,11 @@ static int ring_order_main(int argc, char **argv) {
   {
       const char *_diag = getenv("FORKRUN_DIAG_NUMA1");
       if (_diag && _diag[0] == '1') {
-          uint64_t _exp_key = numa_mode
-              ? FR_PACK_KEY(expected_major, expected_minor)
-              : expected_major;
+          /* _exp_key intentionally not materialized (W-REL1/R7):
+           * the packed expectation is already printed as
+           * (major, minor) below next to head_key — a separate
+           * packed local served no diagnostic and tripped
+           * -Wunused-variable. */
           uint64_t _head_key = heap_sz > 0 ? heap[0].key : ~(uint64_t)0;
           fprintf(stderr,
                   "forkrun [DIAG-NUMA1] orderer done: numa=%d "
@@ -9660,8 +9662,8 @@ static int ring_tui_main(int argc, char **argv) {
     }
 
     char str_throughput[32], str_bandwidth[32], str_batch_rate[32];
-    char str_fallowed[32],   str_in_use[64],    str_total[32];
-    char str_finished[32],   str_remaining[32];
+    char str_fallowed[32],   str_in_use[96],    str_total[32];
+    char str_finished[32],   str_remaining[48];
 
     while (!tui_exit && !atomic_load_relaxed(&state[0].emergency_abort)) {
         uint64_t now       = get_us_time();
@@ -9745,7 +9747,7 @@ static int ring_tui_main(int argc, char **argv) {
         format_bytes((double)waiting_bytes,  b_w);
         format_bytes((double)ingest_off,     str_total);
 
-        char total_label[32];
+        char total_label[48];
         snprintf(total_label, sizeof(total_label), "%s Total", str_total);
         snprintf(str_fallowed, sizeof(str_fallowed), "%s Freed", b_f);
 
