@@ -166,6 +166,9 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        # W-REL5-F (F2): 3.13 joins the CI version matrix (python-check
+        # version-matrix job); the floor stays 3.10 (python_requires).
+        "Programming Language :: Python :: 3.13",
         "Topic :: System :: Distributed Computing",
         "Topic :: System :: Parallel Processing",
         "Topic :: Scientific/Engineering",
