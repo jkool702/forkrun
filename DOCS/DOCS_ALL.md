@@ -4532,9 +4532,21 @@ forkrun is designed to run anywhere with zero friction:
 
 **Supported bash versions** (v3.6.0 verification status — bootstrap = source + load + `ring_version`; suites = 92 + 264):
 
-| Bash | Bootstrap + smoke ×10 | Full suites | Status |
-|------|----------------------|-------------|--------|
-| 4.4 (RHEL 8) | ✅ 10/10 | — (worker runtime segfaults — pre-existing, under investigation; see `dev/supervisor/BASHCOMPAT_DIAGNOSIS.md` follow-up) | load path verified |
+> **Two-axis reality (read both):** the *bash* axis below was verified on
+> new-glibc iron. Independently, the shipped x86-64 loadables require
+> `GLIBC_ABI_GNU2_TLS` (gcc-16 TLSDESC codegen; absent on glibc ≤2.39 —
+> Ubuntu ≤24.04, Debian 12, RHEL ≤9), so on those distros even the
+> bootloader `enable` fails regardless of bash version (proven by CI
+> `ENABLE-DIAG` capture; non-x86 blobs don't carry the requirement).
+> A D-wave toolchain item (rebuild with `-mtls-dialect=gnu`, proven
+> locally to drop the requirement with zero payload change) will lift
+> that wall. Until then: **new glibc → table below applies; old glibc
+> → nothing loads yet** (pure-shell parsing works everywhere, but that
+> is not a usable state).
+
+| Bash | Bootstrap + smoke ×10 | Full suites | Status (on new glibc) |
+|------|----------------------|-------------|----------------------|
+| 4.4 (RHEL 8) | ✅ 10/10 | — (worker runtime segfaults — pre-existing, wave-independent, under investigation) | load path verified |
 | 5.0 | ✅ 10/10 | — (same worker-runtime finding as 4.4) | load path verified |
 | 5.1 | ✅ 10/10 | — (same worker-runtime finding as 4.4) | load path verified |
 | 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
