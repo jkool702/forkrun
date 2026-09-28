@@ -149,19 +149,7 @@ jobs:
                   "-DBUILD_OS=\"Linux\""
                   "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
                   "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
-                  # v3.6.0 W-GITHASH: provenance for ring_version -h.
-                  # Value computed once above (never in the build loop)
-                  # so the freshness byte-compare stays exact.
                   "-DGIT_HASH=\"$FR_GIT_HASH\""
-                  # W-REL1/R5: pin the wall-clock macros (same values
-                  # as Makefile.substrate) so builds are
-                  # byte-reproducible — the freshness gate below
-                  # byte-compares a clean rebuild against these
-                  # artifacts. Informational strings only; the
-                  # quoting rides the same "${DEFS[@]}" mechanism as
-                  # the entries above.
-                  "-D__DATE__=\"Sep  1 2026\""
-                  "-D__TIME__=\"00:00:00\""
                )
               
               # Function to build specific variant
