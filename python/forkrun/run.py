@@ -4624,6 +4624,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                 os.close(spare_signal_w)
             except OSError:
                 pass
+            spare_signal_w = None
         _teardown_reactor(lib, state, signal_r=signal_r,
                           out_fds=out_fds, out_hold=out_hold,
                           memfd=memfd, src_fd=src_fd,
@@ -5784,6 +5785,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 os.close(spare_signal_w)
             except OSError:
                 pass
+            spare_signal_w = None
         _teardown_reactor(lib, state, signal_r=signal_r,
                           out_fds=out_fds, out_hold=out_hold,
                           memfd=memfd, mem_hold=mem_hold,
@@ -7343,6 +7345,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                 os.close(spare_signal_w)
             except OSError:
                 pass
+            spare_signal_w = None
         extra = []
         if pipe is not None:
             extra = ([pipe["fallow_pid"], pipe["ingest_pid"]]

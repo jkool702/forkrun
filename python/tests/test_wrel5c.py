@@ -185,5 +185,65 @@ class TestC4DeliverThenUnlink(unittest.TestCase):
                 os.unlink(coll_path)
 
 
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestC5SpareNulled(unittest.TestCase):
+    """C5 (M19): teardown must not receive a closed spare number."""
+
+    def test_spare_is_none_at_teardown(self):
+        import forkrun  # noqa: PLC0415
+        import sys as _sys  # noqa: PLC0415
+        from _helpers import write_lines  # noqa: PLC0415
+
+        _run_mod = _sys.modules["forkrun.run"]
+        seen = []
+        real = _run_mod._teardown_reactor
+
+        def _spy(lib, state, **kw):
+            seen.append(kw.get("spare_signal_w", "absent"))
+            return real(lib, state, **kw)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        try:
+            write_lines(path, 200)
+
+            from unittest import mock as _mock  # noqa: PLC0415
+            for _ in range(5):
+                del seen[:]
+                with _mock.patch.object(_run_mod, "_teardown_reactor",
+                                        side_effect=_spy):
+                    # Abandon mid-stream with workers provably live
+                    # (slow payload: first result arrives while
+                    # hundreds of batches remain). The spare is
+                    # still set at finally time (the mid-run
+                    # _close_spare only fires once no worker is
+                    # alive). Pre-fix the finally closed it without
+                    # nulling and handed the stale number to
+                    # teardown (double-close).
+                    def _slow(batch):
+                        import time as _time  # noqa: PLC0415
+                        _time.sleep(0.5)
+                        return bytes(batch.data)
+
+                    gen = forkrun.stream(
+                        _slow, path, workers=2, nodes=1, c_drain=True)
+                    try:
+                        next(gen)
+                    except StopIteration:
+                        pass
+                    gen.close()
+                    import gc as _gc  # noqa: PLC0415
+                    _gc.collect()
+                self.assertTrue(seen, "teardown never ran")
+                for val in seen:
+                    self.assertIsNone(
+                        val, "stale spare fd passed to teardown: %r"
+                        % (val,))
+            assert_no_zombies(self)
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()
