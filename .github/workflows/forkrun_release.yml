@@ -94,7 +94,17 @@ jobs:
               # W-BASHCOMPAT-BC6: record the resolved toolchain into the
               # log (provenance visibility for the blob-build container;
               # informational only — never gate on it here).
-              echo "provenance: $(bash --version | head -1) // $(rpm -q bash-devel 2>/dev/null || echo no-bash-devel-rpm)"
+               echo "provenance: $(bash --version | head -1) // $(rpm -q bash-devel 2>/dev/null || echo no-bash-devel-rpm)"
+               # W-GITHASH hardening: the engine includes <config.h>
+               # under HAVE_CONFIG_H. If bash-devel is missing or
+               # incomplete, the gcc error ("config.h: No such file")
+               # looks like a flags problem and invites blaming the
+               # most recent workflow edit. Fail here instead, with the
+               # actual cause named.
+               if [ ! -f /usr/include/bash/config.h ]; then
+                 echo "ERROR: bash-devel headers incomplete (/usr/include/bash/config.h missing); cannot build loadable" >&2
+                 exit 1
+               fi
 
               # 2. Extract Version from META
               FR_VERSION="unknown"
