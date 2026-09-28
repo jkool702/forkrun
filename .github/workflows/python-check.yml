@@ -1,7 +1,7 @@
 name: python-v0
 on:
   push:
-    branches: [ "main", "NEW/REFACTOR2.9" ]  # TEMP-W-REL5-G0 (revert before merge)
+    branches: [ "main" ]
     paths:
       - "python/**"
       - "forkrun_ring.c"

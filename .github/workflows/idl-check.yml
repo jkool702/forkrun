@@ -1,7 +1,7 @@
 name: idl-check
 on:
   push:
-    branches: [ "main", "NEW/REFACTOR2.9" ]  # TEMP-W-REL5-G0 (revert before merge)
+    branches: [ "main" ]
     paths:
       - "forkrun_ring.c"
       - "forkrun_callschema.h"
