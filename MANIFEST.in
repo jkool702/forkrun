@@ -13,8 +13,9 @@ include substratestubs.c
 include Makefile.substrate
 include ring_loadables/forkrun_plugin.h
 
-# Python package (modules + shim source)
+# Python package (modules + shim source + type marker)
 recursive-include python/forkrun *.py *.c
+include python/forkrun/py.typed
 
 # Documentation and license (PyPI page + legal)
 include python/README.md

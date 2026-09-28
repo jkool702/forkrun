@@ -43,7 +43,7 @@ import os
 import struct
 import sys
 
-from ._api import _validate
+from ._api import Mode, Nodes, OnError, Order, _validate
 from ._bindings import RC_OK, get, load
 from ._fd_scrub import scrub_fds, snapshot_fds
 from ._pipes import make_pipe
@@ -61,6 +61,7 @@ from .exceptions import ForkrunInterrupted, ForkrunPoisonSkip
 
 import fcntl as _fcntl
 import time as _time
+from typing import Any, Callable, Iterator, List, Optional
 
 # W-PY18: default byte-batch for mode="splice" (bash -b default).
 _SPLICE_DEFAULT_BYTES = 512 * 1024
@@ -798,11 +799,16 @@ def _detect_streaming(source, streaming):
         return False
 
 
-def run(payload, source, *, mode="python", sink=None, order="none",
-        lines=None, bytes=None, workers=None, nodes="auto",
-        on_error="retry", streaming=None, orchestrator=None,
-        c_drain=None, resume=None, checkpoint_file=None,
-        c_worker_loop=None, strict_poison=False, signal_policy="default"):
+def run(payload: Any, source: Any, *, mode: Mode = "python",
+        sink: Optional[Callable[..., Any]] = None, order: Order = "none",
+        lines: Optional[int] = None, bytes: Optional[int] = None,
+        workers: Optional[int] = None, nodes: Nodes = "auto",
+        on_error: OnError = "retry", streaming: Optional[bool] = None,
+        orchestrator: Optional[bool] = None, c_drain: Optional[bool] = None,
+        resume: Optional[Any] = None,
+        checkpoint_file: Optional[Any] = None,
+        c_worker_loop: Optional[bool] = None, strict_poison: bool = False,
+        signal_policy: Optional[str] = "default") -> None:
     """Run payload over source in parallel. See module docstring for v0 scope.
 
     mode="python": payload is "pkg.mod:func" | callable (Batch -> bytes).
@@ -939,7 +945,7 @@ def run(payload, source, *, mode="python", sink=None, order="none",
     return None
 
 
-def map(payload, source, **kwargs):
+def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
     """Batch-granular map: payload(Batch) -> result per batch, ordered by
     batch_index. v0 collects parent-side after workers exit (not streaming).
 
@@ -1191,7 +1197,7 @@ def map(payload, source, **kwargs):
     return results
 
 
-def stream(payload, source, **kwargs):
+def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[bytes]:
     """Yield results as they arrive — TRUE v1 streaming.
 
     order="none" (default): worker-completion order (first-finished first).
@@ -5834,8 +5840,11 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 # syscalls, no new IPC).
 # =====================================================================
 
-def sweep(payload, source=None, *, args=None, args_from=None,
-          link=False, workers=None, on_error="retry", **kwargs):
+def sweep(payload: Any, source: Any = None, *,
+          args: Optional[List[List[Any]]] = None,
+          args_from: Optional[List[Any]] = None, link: bool = False,
+          workers: Optional[int] = None, on_error: OnError = "retry",
+          **kwargs: Any) -> List[bytes]:
     """Parameter sweep: run payload once per argument combination.
 
     payload: Batch -> bytes (receives .metadata with the sweep tuple;

@@ -147,7 +147,7 @@ setup(
     ],
     package_dir={"": "python"},
     packages=["forkrun"],
-    package_data={"forkrun": [SO_NAME]},
+    package_data={"forkrun": [SO_NAME, "py.typed"]},
     cmdclass={"build_py": BuildSubstratePy},
     # The wheel carries a compiled .so: tag it for this platform so
     # pip refuses it elsewhere (never py3-none-any).
