@@ -2982,7 +2982,13 @@ _forkrun_file_to_base64() {
     fi
 
 
-    { (( ${#FUNCNAME[@]} > 1 )) && [[ "${FUNCNAME[1]}" == *'frun'* ]]; } || shopt ${extglobState} extglob
+    # W-REL5-E7: unconditional extglob restore (the old self-guard
+    # skipped the restore when the caller matched *'frun'* — but both
+    # repo callers run in $() subshells whose shopt state is discarded
+    # on exit anyway, so the guard was inert there and only leaked
+    # extglob into direct interactive callers with frun-named
+    # functions. Restore unconditionally: leave no trace.
+    shopt ${extglobState} extglob
 }
 
 unset "b64"
