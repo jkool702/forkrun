@@ -151,6 +151,70 @@ class TestB2StreamTaxonomy(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestB5ReactorPollNonblocking(unittest.TestCase):
+    """B5: reactor_poll_once never blocks on an unreaped child
+    (death-pipe EOF precedes os._exit — WNOHANG + bounded spin,
+    then defer to the reap sweep)."""
+
+    def test_poll_defers_unreaped_child(self):
+        from forkrun._reactor import (ReactorState, WorkerSlot,
+                                      reactor_poll_once)
+
+        state = ReactorState(2)
+        death_r, death_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(death_r)
+            except OSError:
+                pass
+            try:
+                os.close(death_w)  # EOF now; exit comes 3s later
+            except OSError:
+                pass
+            time.sleep(3)
+            os._exit(0)
+        # Parent drops its write copy (like spawn_worker): the
+        # pipe is at EOF while the child is still alive.
+        try:
+            os.close(death_w)
+        except OSError:
+            pass
+        slot = WorkerSlot(0, 0, pid, death_r, -1)
+        state.workers[0] = slot
+        # Settle: the child has closed its write copy (EOF
+        # present) but sleeps 3s before exiting (descheduled
+        # child between pipe EOF and os._exit).
+        time.sleep(0.5)
+        try:
+            t0 = time.monotonic()
+            try:
+                reactor_poll_once(state)
+            except RuntimeError:
+                # Pre-fix classify path (blocking reap, then
+                # engine-less _classify raises): the latency
+                # below is the real assertion.
+                pass
+            dt = time.monotonic() - t0
+        finally:
+            # Reap the child (exited by now or shortly after).
+            try:
+                os.waitpid(pid, 0)
+            except (ChildProcessError, OSError):
+                pass
+            try:
+                os.close(death_r)
+            except OSError:
+                pass
+        # Bounded: spin only, not the 3s child sleep.
+        self.assertLess(dt, 2.0)
+        # Deferred, slot untouched (still alive, pipe open) for
+        # the reap sweep — never a blocking reap inside the poll.
+        self.assertTrue(state.workers[0].alive)
+        assert_no_zombies(self)
+
+
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 class TestB4BoundedHelperJoin(unittest.TestCase):
     """B4: helper joins are bounded (SIGKILL on expiry + alarm
     naming the helper) instead of unbounded os.waitpid(pid, 0)."""
@@ -246,14 +310,14 @@ class TestB3IngestReactorLiveness(unittest.TestCase):
                 except OSError:
                     pass
 
-        real_wd = _reactor_mod.ReactorState.worker_died
+        real_wd = _reactor_mod.ReactorState.worker_died_poll
         observed = []
 
         def _spy_wd(self, wid):
             observed.append((wid, time.monotonic()))
             return real_wd(self, wid)
 
-        _reactor_mod.ReactorState.worker_died = _spy_wd
+        _reactor_mod.ReactorState.worker_died_poll = _spy_wd
         wt = threading.Thread(target=_writer, daemon=True)
         wt.start()
         try:
@@ -299,7 +363,7 @@ class TestB3IngestReactorLiveness(unittest.TestCase):
             self.assertIsInstance(err, RuntimeError)
             self.assertIn("signal 9", str(err))
         finally:
-            _reactor_mod.ReactorState.worker_died = real_wd
+            _reactor_mod.ReactorState.worker_died_poll = real_wd
             try:
                 os.close(rfd)
             except OSError:

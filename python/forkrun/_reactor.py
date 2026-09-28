@@ -43,6 +43,13 @@ from collections import defaultdict
 # FR_TRAP_ACK_GRACE_MS_DEFAULT in forkrun_substrate.h.
 TRAP_ACK_GRACE_S = 3.0
 
+# W-REL5-B5: bounded death-confirm spin for worker_died_poll.
+# Death-pipe EOF precedes os._exit, so a descheduled child is
+# briefly unreaped while its pipe already signals death. The poll
+# twin spins this long (then defers to the reap sweep) instead of
+# blocking like worker_died.
+DEATH_CONFIRM_SPIN_S = 0.5
+
 # Per-round drain burst cap (see reactor_loop §4).
 DRAIN_BURST = 64
 
@@ -291,6 +298,9 @@ class ReactorState:
 
         The caller must have PROOF of exit (death-pipe EOF): this
         waitpids blocking, which returns at once for a dead child.
+        Poll loops must use worker_died_poll instead (W-REL5-B5:
+        EOF precedes os._exit, so this blocks on a descheduled
+        child).
         Returns ("respawned", new_slot) | ("clean", None) |
         ("pending", None). "pending" means a non-zero death whose
         trap-ACK grace is still running: the husk slot stays until
@@ -306,6 +316,42 @@ class ReactorState:
             status = 0  # already reaped elsewhere; treat as clean
         except OSError:
             status = 1
+        return self._classify(slot, status)
+
+    def worker_died_poll(self, wid):
+        """Non-blocking twin of worker_died (W-REL5-B5).
+
+        WNOHANG reap; a live-but-EOF-signaled child (death-pipe
+        EOF precedes os._exit — a descheduled child is briefly
+        unreaped while already dead) spins bounded
+        (DEATH_CONFIRM_SPIN_S), then defers as ("deferred", None)
+        with the slot untouched (still alive, pipe open): the
+        out-of-band reap_clean_exits sweep classifies it on a
+        later round (the pipe stays EOF-readable, so no event is
+        lost). Returns worker_died's ("respawned" | "clean" |
+        "pending", ...) when the child reaped, ("deferred", None)
+        otherwise, ("clean", None) for unknown/dead slots (same
+        as worker_died). Never blocks beyond the spin — use this
+        (not worker_died) from every poll loop.
+        """
+        slot = self.workers.get(wid)
+        if slot is None or not slot.alive:
+            return ("clean", None)
+        deadline = _time.monotonic() + DEATH_CONFIRM_SPIN_S
+        while True:
+            try:
+                wpid, status = os.waitpid(slot.pid, os.WNOHANG)
+            except ChildProcessError:
+                status = 0  # already reaped elsewhere; treat as clean
+                break
+            except OSError:
+                status = 1
+                break
+            if wpid == slot.pid:
+                break
+            if _time.monotonic() >= deadline:
+                return ("deferred", None)
+            _time.sleep(0.005)
         return self._classify(slot, status)
 
     def note_exit(self, wid, status):
@@ -828,12 +874,15 @@ def reactor_loop(state, drain_gen=None, poll_timeout=0.1, service=None):
                     # Readable death pipe: consume to EOF. Any bytes
                     # (none are ever written — the pipe is purely a
                     # kernel-observable lifetime channel) or EOF both
-                    # mean the worker is gone; worker_died reaps it.
+                    # mean the worker is gone; the non-blocking poll
+                    # twin reaps it (W-REL5-B5: EOF precedes os._exit,
+                    # so a descheduled child defers to the sweep
+                    # instead of stalling the loop).
                     try:
                         os.read(fd, 4096)
                     except OSError:
                         pass
-                    kind, _new = state.worker_died(wid)
+                    kind, _new = state.worker_died_poll(wid)
                     _slot = state.workers.get(wid)
                     if _slot is not None and not _slot.alive:
                         # Respawn failed or cap reached with no live
@@ -940,8 +989,11 @@ def reactor_poll_once(state, poll_timeout=0.0):
     the timeout check and the out-of-band reap sweep. Used by
     blocking ingest paths that must supervise workers WHILE spilling
     synchronously (they cannot enter reactor_run until the spill and
-    gate are done). Never blocks beyond poll_timeout (0 = pure poll).
-    Raises RuntimeError on trap-ACK timeout.
+    gate are done). Blocks at most poll_timeout plus the bounded
+    death-confirm spin (DEATH_CONFIRM_SPIN_S — W-REL5-B5: death-pipe
+    EOF precedes os._exit, so an unreaped child defers to the sweep
+    instead of stalling the spill). Raises RuntimeError on
+    trap-ACK timeout.
     """
     state.check_trap_timeouts()
     watch = []
@@ -982,7 +1034,11 @@ def reactor_poll_once(state, poll_timeout=0.0):
                     os.read(fd, 4096)
                 except OSError:
                     pass
-                state.worker_died(wid)
+                # W-REL5-B5: the non-blocking twin — worker_died
+                # would block here on a descheduled child (EOF
+                # precedes os._exit), contradicting this function's
+                # contract and stalling the spill loop.
+                state.worker_died_poll(wid)
     state.reap_clean_exits()
     state.check_trap_timeouts()
 
