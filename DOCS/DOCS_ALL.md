@@ -1159,6 +1159,39 @@ hygiene (no C changes — C-diff empty; bites in
   no product change. Lock-ins: `order_w`-None-at-teardown (×5)
   + fd stability across 10 mixed runs.
 
+### Bash loadable compatibility (W-BASHCOMPAT fix phase)
+
+Bootstrap-side fix (the `.so` needed nothing — Phase 0 proved the
+symbol floor 4.4-clean). Load path verified 4.4→5.3; worker runtime
+on ≤5.1 segfaults pre-existing and wave-independent (proven on
+pristine `main:frun.bash` too — see report; floor matrix below is
+shaped by that finding).
+
+- **BC-1:** the 0.9MB single-line `declare` (proximate CI killer,
+  dies pre-`enable`) replaced by `declare -A b64=()` + 32KiB
+  appends framed by `START..END` markers (max line 32,798B).
+  Values byte-identical per key (7/7 md5). New
+  `_forkrun_b64_emit_chunked` helper + both blob emitters use the
+  same algorithm; runtime backup copies the region via sed (~5ms,
+  helper fallback for curl-idiom/marker-less sources). Bring-up
+  0.12s → 0.07s.
+- **BC-2:** two `-e` deaths closed in `_forkrun_base64_to_file`
+  (`rm` on live memfd → `|| true`; NUL-less-payload `read` →
+  `|| [[ -n out ]]`, EOF-empty stays fail-closed). No-e behavior
+  identical. Bite: source under `-e` + `ring_version` (pre rc=1,
+  post rc=0).
+- **BC-3:** supported-version matrix in README (+ `DOCS_ALL`
+  mirror); floor stays 4.4 with per-version verification status.
+- **BC-4:** `bashcompat-smoke.yml` (5 legs: full round-trip on
+  5.2/5.3, bootstrap-only on 4.4–5.1 pending the worker finding).
+- **BC-5:** canary stubs version-annotated (14× `since 4.4`, 5×
+  unexported markers) + `make canary-versions` gate over the
+  shipped prebuilts (12 stub-matches each, `add_builtin` noted
+  lazy-never-bound).
+- **BC-6:** blob-build container pin documented (informational) +
+  toolchain provenance recorded in build logs (no image change —
+  no blob cycle).
+
 ## v3.5.14 (unreleased)
 
 ### Python frontend: C drain process, opt-in (W-PY21-A)
@@ -4496,6 +4529,16 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 
 forkrun is designed to run anywhere with zero friction:
 *   **Required:** Bash ≥ 4.4 (`mapfile -d` needs 4.4; Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`), GNU coreutils (`sed -z`, `base64 -w 0`, `truncate --size=` are GNU-only — no busybox support). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
+
+**Supported bash versions** (v3.6.0 verification status — bootstrap = source + load + `ring_version`; suites = 92 + 264):
+
+| Bash | Bootstrap + smoke ×10 | Full suites | Status |
+|------|----------------------|-------------|--------|
+| 4.4 (RHEL 8) | ✅ 10/10 | — (worker runtime segfaults — pre-existing, under investigation; see `dev/supervisor/BASHCOMPAT_DIAGNOSIS.md` follow-up) | load path verified |
+| 5.0 | ✅ 10/10 | — (same worker-runtime finding as 4.4) | load path verified |
+| 5.1 | ✅ 10/10 | — (same worker-runtime finding as 4.4) | load path verified |
+| 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
+| 5.3 | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
 
 ---
 

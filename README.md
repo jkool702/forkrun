@@ -123,6 +123,16 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 forkrun is designed to run anywhere with zero friction:
 *   **Required:** Bash ≥ 4.4 (`mapfile -d` needs 4.4; Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`), GNU coreutils (`sed -z`, `base64 -w 0`, `truncate --size=` are GNU-only — no busybox support). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
 
+**Supported bash versions** (v3.6.0 verification status — bootstrap = source + load + `ring_version`; suites = 92 + 264):
+
+| Bash | Bootstrap + smoke ×10 | Full suites | Status |
+|------|----------------------|-------------|--------|
+| 4.4 (RHEL 8) | ✅ 10/10 | — (worker runtime segfaults — pre-existing, under investigation; see `dev/supervisor/BASHCOMPAT_DIAGNOSIS.md` follow-up) | load path verified |
+| 5.0 | ✅ 10/10 | — (same worker-runtime finding as 4.4) | load path verified |
+| 5.1 | ✅ 10/10 | — (same worker-runtime finding as 4.4) | load path verified |
+| 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
+| 5.3 | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
+
 ---
 
 ## 🏛️ Legacy Version (v2)

@@ -2431,3 +2431,36 @@ hygiene (no C changes — C-diff empty; bites in
   `order_w` paths). Remainder already closed by C5/R11/DEDUP —
   no product change. Lock-ins: `order_w`-None-at-teardown (×5)
   + fd stability across 10 mixed runs.
+
+### Bash loadable compatibility (W-BASHCOMPAT fix phase)
+
+Bootstrap-side fix (the `.so` needed nothing — Phase 0 proved the
+symbol floor 4.4-clean). Load path verified 4.4→5.3; worker runtime
+on ≤5.1 segfaults pre-existing and wave-independent (proven on
+pristine `main:frun.bash` too — see report; floor matrix below is
+shaped by that finding).
+
+- **BC-1:** the 0.9MB single-line `declare` (proximate CI killer,
+  dies pre-`enable`) replaced by `declare -A b64=()` + 32KiB
+  appends framed by `START..END` markers (max line 32,798B).
+  Values byte-identical per key (7/7 md5). New
+  `_forkrun_b64_emit_chunked` helper + both blob emitters use the
+  same algorithm; runtime backup copies the region via sed (~5ms,
+  helper fallback for curl-idiom/marker-less sources). Bring-up
+  0.12s → 0.07s.
+- **BC-2:** two `-e` deaths closed in `_forkrun_base64_to_file`
+  (`rm` on live memfd → `|| true`; NUL-less-payload `read` →
+  `|| [[ -n out ]]`, EOF-empty stays fail-closed). No-e behavior
+  identical. Bite: source under `-e` + `ring_version` (pre rc=1,
+  post rc=0).
+- **BC-3:** supported-version matrix in README (+ `DOCS_ALL`
+  mirror); floor stays 4.4 with per-version verification status.
+- **BC-4:** `bashcompat-smoke.yml` (5 legs: full round-trip on
+  5.2/5.3, bootstrap-only on 4.4–5.1 pending the worker finding).
+- **BC-5:** canary stubs version-annotated (14× `since 4.4`, 5×
+  unexported markers) + `make canary-versions` gate over the
+  shipped prebuilts (12 stub-matches each, `add_builtin` noted
+  lazy-never-bound).
+- **BC-6:** blob-build container pin documented (informational) +
+  toolchain provenance recorded in build logs (no image change —
+  no blob cycle).
