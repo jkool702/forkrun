@@ -2097,6 +2097,10 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
     if (target_fd > 0) {
         if (target_fd != ack_cached_target_fd) {
             ack_cached_target_fd = target_fd;
+            /* W-REL5-D (D2 twin): reset the offset with the mode (see
+             * forkrun_ring.c) -- otherwise a cross-file curr can wrap
+             * the sendfile length. */
+            last_ack_offset = 0;
             struct stat st;
             ack_cached_mode =
                 (fstat(target_fd, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;

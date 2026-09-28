@@ -6602,6 +6602,10 @@ static int ring_ack_main(int argc, char **argv) {
   if (fd_target > 0) {
     if (fd_target != ack_cached_target_fd) {
       ack_cached_target_fd = fd_target;
+      /* W-REL5-D (D2): the offset belongs to the previous file. Without
+       * this reset, curr - last_ack_offset below can go negative across
+       * an fd change and wrap to a ~16-exabyte sendfile length. */
+      last_ack_offset = 0;
       struct stat st;
       ack_cached_mode =
           (fstat(fd_target, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
@@ -7110,19 +7114,26 @@ struct OrderFdState {
     off_t last_punched;
 };
 
+/* W-REL5-D (D1): p_fd arrives framing-controlled off the order pipe. The
+ * old `int new_cap = p_fd + 128` overflowed (UB) on huge values and a
+ * p_fd of 10M forced a ~400MB realloc+memset. Cap the table (fail-safe:
+ * out-of-range input is dropped best-effort, same as the OOM path
+ * below) and do the sizing in size_t. */
+#define ORDER_FDSTATE_MAX_FD 1048576
+
 static inline void safe_hole_punch(int p_fd, off_t p_off, size_t p_len, struct OrderFdState **fd_states_ptr, int *fd_states_cap_ptr) {
-    if (p_fd < 0) return;
+    if (p_fd < 0 || p_fd >= ORDER_FDSTATE_MAX_FD) return;
 
     struct OrderFdState *fd_states = *fd_states_ptr;
     int fd_states_cap = *fd_states_cap_ptr;
 
     if (p_fd >= fd_states_cap) {
-        int new_cap = p_fd + 128;
+        size_t new_cap = (size_t)p_fd + 128;
         struct OrderFdState *new_states = realloc(fd_states, new_cap * sizeof(struct OrderFdState));
         if (!new_states) return;
-        memset(&new_states[fd_states_cap], 0, (new_cap - fd_states_cap) * sizeof(struct OrderFdState));
+        memset(&new_states[fd_states_cap], 0, (new_cap - (size_t)fd_states_cap) * sizeof(struct OrderFdState));
         *fd_states_ptr = new_states;
-        *fd_states_cap_ptr = new_cap;
+        *fd_states_cap_ptr = (int)new_cap;
         fd_states = new_states;
     }
 
@@ -8322,7 +8333,14 @@ static int ring_revert_output_main(int argc, char **argv) {
     if (argc < 2) return EXECUTION_FAILURE;
     int fd = atoi(argv[1]);
     if (fd >= 0) {
-        if (ftruncate(fd, last_ack_offset) == -1) return EXECUTION_FAILURE;
+        /* W-REL5-D (D3): never grow a file by truncating -- copy the
+         * recovery-path guards (S_ISREG, size >= target). A larger
+         * last_ack_offset would otherwise zero-extend the file. */
+        struct stat st;
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+            (uint64_t)st.st_size >= (uint64_t)last_ack_offset) {
+            if (ftruncate(fd, last_ack_offset) == -1) return EXECUTION_FAILURE;
+        }
         if (lseek(fd, last_ack_offset, SEEK_SET) == (off_t)-1) return EXECUTION_FAILURE;
     }
     return EXECUTION_SUCCESS;
