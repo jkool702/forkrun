@@ -74,6 +74,13 @@ jobs:
             -e EXTRA_FLAGS="${{ matrix.extra_flags }}" \
             ${{ matrix.docker_image }} \
             bash -c '
+              set -euo pipefail   # W-REL1/R5: ANY failure below fails
+                                  # the job. Without this a failed
+                                  # variant silently yields a partial
+                                  # artifact set, and the warn-only
+                                  # missing-artifact path in the
+                                  # verify step ships the stale blob
+                                  # the updater retained (F31 class).
               # 1. Install Dependencies (Fedora/RHEL style)
               dnf install -y @development-tools gcc make bash-devel git grep sed binutils || \
               (apt-get update && apt-get install -y gcc make libbash-dev git grep sed binutils)
@@ -90,13 +97,22 @@ jobs:
               WARN_FLAGS="-DNDEBUG -Wall -Wextra "
               INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins "
               
-              DEFS=(
-                 "-DSHELL"
-                 "-DHAVE_CONFIG_H"
-                 "-DBUILD_OS=\"Linux\""
-                 "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
-                 "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
-              )
+               DEFS=(
+                  "-DSHELL"
+                  "-DHAVE_CONFIG_H"
+                  "-DBUILD_OS=\"Linux\""
+                  "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
+                  "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
+                  # W-REL1/R5: pin the wall-clock macros (same values
+                  # as Makefile.substrate) so builds are
+                  # byte-reproducible — the freshness gate below
+                  # byte-compares a clean rebuild against these
+                  # artifacts. Informational strings only; the
+                  # quoting rides the same "${DEFS[@]}" mechanism as
+                  # the entries above.
+                  "-D__DATE__=\"Sep  1 2026\""
+                  "-D__TIME__=\"00:00:00\""
+               )
               
               # Function to build specific variant
               build_variant() {
@@ -116,14 +132,41 @@ jobs:
                     $march_flag \
                     -o "$out_file"
                  
-                 strip --strip-unneeded "$out_file"
-                 
-                 # SANITY CHECK: Try to enable and run version check
-                 echo ">>> Testing loadable..."
-                 enable -f "$out_file" ring_version && \
-                 ring_version -a || exit 1
-                 enable -d ring_version
-              }
+                  strip --strip-unneeded "$out_file"
+                  
+                  # SANITY CHECK: Try to enable and run version check
+                  echo ">>> Testing loadable..."
+                  enable -f "$out_file" ring_version && \
+                  ring_version -a || exit 1
+                  enable -d ring_version
+
+                  # W-REL3/R5 freshness gate (colocated): rebuild the
+                  # identical variant from current source and
+                  # byte-compare. Same container/toolchain/headers/flags
+                  # seconds apart, so any divergence is stale source or
+                  # nondeterminism (the __DATE__/__TIME__ pins in DEFS
+                  # make it exact) — mismatch fails the job, making
+                  # stale-engine shipping structurally impossible.
+                  # (Colocated deliberately: a separate-container
+                  # rebuild proved sensitive to image/toolchain drift
+                  # between docker runs, i.e. false-positive-prone.)
+                  echo ">>> Freshness rebuild $arch_name..."
+                  gcc forkrun_ring.c \
+                     $OPT_FLAGS $WARN_FLAGS $INCLUDES \
+                     "${DEFS[@]}" "$ARCH_DEF" \
+                     -shared \
+                     $march_flag \
+                     -o "$out_file.fresh"
+                  strip --strip-unneeded "$out_file.fresh"
+                  if cmp -s "$out_file.fresh" "$out_file"; then
+                     echo "FRESH-OK: $arch_name rebuild == artifact"
+                  else
+                     echo "FRESH-FAIL: $arch_name rebuild differs (stale source or nondeterministic build)" >&2
+                     rm -f "$out_file.fresh"
+                     exit 1
+                  fi
+                  rm -f "$out_file.fresh"
+               }
 
               # 4. Logic Branch based on Architecture
               if [ "$TARGET_ARCH" == "x86_64" ]; then
@@ -255,8 +298,8 @@ jobs:
               echo "VERIFY-FAIL: embedded b64[$key] failed to decode/verify" >&2; fail=1
             fi
           done
-          rm -rf "$tmpd"
-          exit "$fail"
+           rm -rf "$tmpd"
+           exit "$fail"
 
       - name: Substrate canary (zero bash linkage)
         shell: bash
