@@ -48,7 +48,7 @@ jobs:
             -v $PWD:/src \
             -w /src \
             fedora:latest \
-            bash -c 'dnf install -y bash-devel gcc make file python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'
+            bash -c 'dnf install -y bash-devel gcc make file diffutils python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'
 
   sanitizer-asan-ubsan:
     # W-REL1/R6: ASan+UBSan legs — ADVISORY for v3.6.0
@@ -74,4 +74,4 @@ jobs:
             -v $PWD:/src \
             -w /src \
             fedora:latest \
-            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file python3 libasan libubsan && make -f Makefile.substrate canary CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" OUT=/tmp/asan_canary.so && make -f Makefile.substrate python-substrate CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" PY_OUT=/tmp/asan_substrate.so && cd python/tests && FORKRUN_LIB=/tmp/asan_substrate.so LD_PRELOAD="$(ldconfig -p | grep libasan | awk "NR==1{print $NF}")" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 -m unittest test_v0 test_fault test_reactor test_spawn -v'
+            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file diffutils python3 libasan libubsan && make -f Makefile.substrate canary CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" OUT=/tmp/asan_canary.so && make -f Makefile.substrate python-substrate CC="gcc -fsanitize=address,undefined" CFLAGS="-O1 -g -fPIC -Wall -Wextra -fno-omit-frame-pointer" PY_OUT=/tmp/asan_substrate.so && cd python/tests && FORKRUN_LIB=/tmp/asan_substrate.so LD_PRELOAD="$(ldconfig -p | grep libasan | awk "NR==1{print \$NF}")" ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 -m unittest test_v0 test_fault test_reactor test_spawn -v'
