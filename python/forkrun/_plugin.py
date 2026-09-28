@@ -75,10 +75,18 @@ class ForkrunCtx(ctypes.Structure):
 def load_plugin(path, function_name):
     """Dlopen a plugin .so and bind one function (parent-side, pre-fork).
 
-    Dlopening without calling is fork-safe (no plugin state or threads
-    exist yet); calls happen post-fork in workers. Returns (lib, func)
-    with func typed as int (*)(ForkrunCtx *): 0 = success.
-    Raises PluginError on missing file, load failure, or missing symbol.
+    CONSTRAINT (W-REL5-C8): the dlopen itself runs in the PARENT, so
+    ELF initializers execute parent-side and a plugin linking
+    libstdc++/libgomp (or any initializer that starts threads) can
+    create threads BEFORE the fork — forking a multithreaded parent
+    is unsupported (same reason _shim.c keeps plugin invocation
+    post-fork-only). Only the *call* is fork-safe (post-fork in
+    workers, no plugin state or threads exist yet at that point).
+    Do not load thread-spawning plugins on this path; a
+    dialect-probe rework (load in a forked probe child) is deferred
+    as not pre-tag material. Returns (lib, func) with func typed
+    as int (*)(ForkrunCtx *): 0 = success. Raises PluginError on
+    missing file, load failure, or missing symbol.
     """
     if not isinstance(path, str) or not path:
         raise PluginError("plugin path must be a non-empty string, "
