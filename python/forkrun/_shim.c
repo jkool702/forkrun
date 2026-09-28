@@ -1492,9 +1492,23 @@ int fr_py_worker_splice_loop(int wid, int ingress_fd, int out_fd,
  *   mapping (the same ring_call FLAG_RAW mechanism the v1 plugin
  *   path uses internally — this only EXPOSES the pointer to Python).
  *   NULL on failure. Lifetime: valid until the worker's next remap
- *   (streaming growth) or exit; unacked windows are never punched,
- *   and hole reads zero-fill regardless. Materialized workers map
- *   once, so the window is stable for the run there.
+ *   (streaming growth) or exit; unacked windows are never punched.
+ *   Materialized workers map once, so the window is stable for the run
+ *   there.
+ *   W-REL5-D (D14): the old trailing clause here ("hole reads
+ *   zero-fill regardless") was TRUE for read()/pread and FALSE for
+ *   this MAP_SHARED window (and the plugin RAW window): accessing a
+ *   punched range through a live mapping faults SIGBUS instead of
+ *   returning zeroes. The safety argument is therefore
+ *   invariant-based, not mechanical: fallow punches only behind the
+ *   acked contiguous prefix, so a live (unacked) window's pages are
+ *   intact -- the same guarantee the C RAW tier documents -- plus the
+ *   standing rule that views die at payload return (batch.copy() to
+ *   persist). No mechanical re-validation is attempted: mincore races
+ *   the punch (TOCTOU), mlock does not pin punched pages, and a
+ *   SIGBUS-handler/longjmp recovery is too risky inside workers.
+ *   A use-after-ack/punch window access is a contract violation, not
+ *   a handled error.
  * ===================================================================== */
 int64_t fr_py_copy_range(int src_fd, uint64_t src_off, int dst_fd,
                          uint64_t dst_off, uint64_t length) {

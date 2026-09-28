@@ -9137,24 +9137,24 @@ static void ring_call_close_scrub(int f, int keep_in, int keep_out) {
  * trap-ack/fallow write ends. The persistent-feeder alternative is
  * recorded in docs_port/ as deferred; fork-per-large-batch stands until
  * fork rate ever measurably matters. */
-static void ring_call_scrub_feeder_child(int src_fd, int pipe_w, int pipe_r) {
+static void ring_call_scrub_feeder_child(int src_fd, int pipe_w, int pipe_r,
+                                         int trap_fd, int fallow_fd) {
     /* Reader death must surface as an EPIPE return, never as a signal. */
     signal(SIGPIPE, SIG_IGN);
 
     /* Its copy of the pipe read end: the parent owns the reader side. */
     ring_call_close_scrub(pipe_r, src_fd, pipe_w);
 
-    /* Flat hazard fds (worker-visible shell variables).
-     * W-STAGE1: deliberately NOT fr_config_t — frontend plumbing read in
+    /* Flat hazard fds (worker-visible shell variables, pre-resolved to
+     * ints above the fork -- see the fork site).
+     * W-STAGE1: deliberately NOT fr_config_t -- frontend plumbing read in
      * the W-STDIN fork path (mode signaling / fd hygiene), not engine
      * configuration. The §2.1 taxonomy (mode signaling ≠ config) keeps
      * these as env reads; Python will signal its own way at Stage 4+. */
-    const char *s_trap = get_string_value("FD_TRAP_ACK_W");
-    if (s_trap && s_trap[0])
-        ring_call_close_scrub(atoi(s_trap), src_fd, pipe_w);
-    const char *s_fallow = get_string_value("fd_fallow_w");
-    if (s_fallow && s_fallow[0])
-        ring_call_close_scrub(atoi(s_fallow), src_fd, pipe_w);
+    if (trap_fd >= 0)
+        ring_call_close_scrub(trap_fd, src_fd, pipe_w);
+    if (fallow_fd >= 0)
+        ring_call_close_scrub(fallow_fd, src_fd, pipe_w);
 
     /* Worker death-pipe write end for this worker.
      * W-REL5-D (D-SEGFIX): arrives via FD_WORKER_W (exported per worker by
@@ -9237,8 +9237,22 @@ static int ring_call_stdin_setup(int fd, size_t length, int *saved_stdin,
         /* Forked concurrent feed (large batch): the child splices while
          * the parent runs the callback. Forked under the caller's SIGCHLD
          * shield so bash's reaper cannot steal the child (ring_exec rule:
-         * never invent a new pattern; never kill on ECHILD — a shielded,
-         * unreaped pid cannot be recycled). */
+         * never invent a new pattern; never kill on ECHILD -- a shielded,
+         * unreaped pid cannot be recycled).
+         * W-REL5-D (D15): resolve the scrub's shell-variable fds HERE,
+         * above the fork. get_string_value between fork() and _exit()
+         * with no exec runs bash internals in the child (allocator/locks
+         * may be mid-flight); only async-signal-safe calls run post-fork
+         * (signal/close/getenv/splice/_exit). The values cannot change
+         * between here and the fork (straight-line code). fd-closing
+         * behavior is untouched. */
+        int scrub_trap_fd = -1, scrub_fallow_fd = -1;
+        const char *s_trap_pre = get_string_value("FD_TRAP_ACK_W");
+        if (s_trap_pre && s_trap_pre[0])
+            scrub_trap_fd = atoi(s_trap_pre);
+        const char *s_fallow_pre = get_string_value("fd_fallow_w");
+        if (s_fallow_pre && s_fallow_pre[0])
+            scrub_fallow_fd = atoi(s_fallow_pre);
         pid_t pid = fork();
         if (pid < 0) {
             close(pfd[0]);
@@ -9246,9 +9260,10 @@ static int ring_call_stdin_setup(int fd, size_t length, int *saved_stdin,
             return 254;
         }
         if (pid == 0) {
-            /* Child: feed the pipe, then _exit — never return into bash.
+            /* Child: feed the pipe, then _exit -- never return into bash.
              * pfd[0] is closed by the scrub below (pipe_r). */
-            ring_call_scrub_feeder_child(fd, pfd[1], pfd[0]);
+            ring_call_scrub_feeder_child(fd, pfd[1], pfd[0], scrub_trap_fd,
+                                         scrub_fallow_fd);
             off_t offset = tls_batch_offset;
             size_t left = length;
             while (left > 0) {
