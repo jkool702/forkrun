@@ -2795,10 +2795,11 @@ while True: time.sleep(60)'
         # W-REL5-A2: shell-local only, never exported. Child processes
         # must not inherit a stale fd number via the environment.
         FORKRUN_MEMFD_LOADABLES_BASE64="${FORKRUN_MEMFD_LOADABLES_BASE64}"
-        # W-BASHCOMPAT-BC1: chunked emission (a single `declare -p`
-        # line is the 0.9MB death the recovery source below would
-        # evaluate on old bash).
-        _forkrun_b64_emit_chunked >&${FORKRUN_MEMFD_LOADABLES_BASE64}
+        # W-BASHCOMPAT-BC1: backup the payload for later recovery
+        # sourcing. Region copy (~5ms); helper fallback covers
+        # curl-idiom sources and marker-less (pre-BC) files.
+        _forkrun_b64_backup_to_fd "${BASH_SOURCE[0]}" "${FORKRUN_MEMFD_LOADABLES_BASE64}" \
+            || _forkrun_b64_emit_chunked >&${FORKRUN_MEMFD_LOADABLES_BASE64}
         ring_seal "${FORKRUN_MEMFD_LOADABLES_BASE64}"
         need_memfd_b64_flag=false
     fi
@@ -2842,27 +2843,67 @@ while True: time.sleep(60)'
 _forkrun_b64_emit_chunked() {
     # Emit b64[] as line-bounded chunked appends (W-BASHCOMPAT-BC1).
     # A single 0.9MB `declare` dies on older bash before enable -f
-    # ever runs; no line here approaches that size (32KiB pieces,
-    # %q-quoted to single lines each). Keys sorted for byte-stable
-    # output. MUST stay in sync with the inline copies in
+    # ever runs; no line here approaches that size (32KiB pieces).
+    # Keys sorted for byte-stable output. MUST stay in sync with the inline copies in
     # ring_loadables/update_frun_base64.bash and
     # ring_loadables/local_compile/compile.new.bash (same
     # algorithm). Caller redirects stdout (a file splice or the
     # base64-backup memfd write).
-    local _bck _bcv
+    # Speed: values stream through read -N (C-speed buffered reads;
+    # bash substring copies cost ~90ms here; a printf+fold pipeline
+    # is lossy — read(1) strips the newline delimiters, so folded
+    # output cannot reassemble exactly). Plain base64 runs emit BARE
+    # (no quoting work); only chunks with other bytes pay %q
+    # (~1ms/32KiB). The case guard is a basic glob (no extglob
+    # needed); bare emission is exact for [A-Za-z0-9+/=] (no
+    # glob/tilde/history/quote meaning in an assignment RHS).
+    # Decoded-byte checksums at bootstrap fail loudly on any
+    # quoting bug — never silently.
+    local _bck _bcp
     printf 'declare -A b64=()\n'
     while IFS= read -r _bck; do
         [[ -n ${_bck} ]] || continue
-        _bcv=${b64[${_bck}]}
-        if [[ -z ${_bcv} ]]; then
+        if [[ -z ${b64[${_bck}]} ]]; then
             printf 'b64[%q]+=%q\n' "${_bck}" ""
             continue
         fi
-        while [[ -n ${_bcv} ]]; do
-            printf 'b64[%q]+=%q\n' "${_bck}" "${_bcv:0:32768}"
-            _bcv=${_bcv:32768}
-        done
+        # NOTE: no herestring (<<< appends \n); printf %s adds nothing.
+        while IFS= read -r -N 32768 _bcp || [[ -n ${_bcp} ]]; do
+            case ${_bcp} in
+                *[!A-Za-z0-9+,/=]*)
+                    printf 'b64[%q]+=%q\n' "${_bck}" "${_bcp}" ;;
+                *)
+                    printf 'b64[%s]+=%s\n' "${_bck}" "${_bcp}" ;;
+            esac
+        done < <(printf '%s' "${b64[${_bck}]}")
     done < <(printf '%s\n' "${!b64[@]}" | LC_ALL=C sort)
+}
+
+
+_forkrun_b64_backup_to_fd() {
+    # Copy the payload region (START..END markers) of a frun.bash
+    # file into an open fd (W-BASHCOMPAT-BC1). C-speed (~5ms) where
+    # bash-level re-emission costs ~90ms. Returns nonzero (caller
+    # falls back to _forkrun_b64_emit_chunked) when the source is
+    # unreadable (e.g. source <(curl...) process substitution,
+    # already consumed) or predates END markers. Marker lines are
+    # comments, so the copy sources exactly like the file region.
+    #
+    # Marker strings are ASSEMBLED, never literal: line-oriented
+    # marker scans (the CI verify awk, twin tooling, sh-format)
+    # must match only real marker lines, never this code.
+    local _src=$1 _fd=$2 _mk_s _mk_e
+    _mk_s='# <@@@@@< _BASE64_'
+    _mk_s+='START_ >@@@@@> #'
+    _mk_e='# <@@@@@< _BASE64_'
+    _mk_e+='END_ >@@@@@> #'
+    case ${_src} in
+        /dev/fd/*|/proc/self/fd/*) return 1 ;;
+    esac
+    [[ -r ${_src} ]] || return 1
+    grep -q "${_mk_e}" "${_src}" || return 1
+    sed -n "/${_mk_s}/,/${_mk_e}/p" "${_src}" >&${_fd} || return 1
+    return 0
 }
 
 
@@ -3034,6 +3075,7 @@ unset "b64"
 # <@@@@@< _BASE64_START_ >@@@@@> #
 
 declare -A b64=()   # removed base64
+# <@@@@@< _BASE64_END_ >@@@@@> #
 
 # W-REL5-A5: source-time nounset guard. Sourcing inherits the caller
 # positional list and _forkrun_bootstrap_setup reads $1, so sourcing
