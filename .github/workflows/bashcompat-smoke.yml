@@ -1,7 +1,7 @@
 name: bashcompat-smoke
 on:
   push:
-    branches: [ "main", "NEW/REFACTOR2.9" ]  # TEMP (revert after green run)
+    branches: [ "main" ]
     paths:
       - "frun.bash"
       - "ring_loadables/frun.nob64.bash"
