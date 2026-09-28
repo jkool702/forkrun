@@ -39,13 +39,42 @@ original fix-phase assumptions wherever they conflict.
 
 | Gate | Result |
 |---|---|
-| Bootstrap+smoke ×10/version | 50/50 (runs on 5.2/5.3; bootstrap-only 4.4/5.0/5.1) |
-| Bash suites 5.2 + 5.3 foreground | 92+264 green on both, zero failures |
+| Bootstrap+smoke ×10/version (local) | 50/50 (runs on 5.2/5.3; bootstrap-only 4.4/5.0/5.1) |
+| Bash suites 5.2 + 5.3 foreground | 92+264 green on both, zero failures (re-run on final tree) |
 | Perf | bring-up 0.12→0.07s; 34MB splice pre/post equal (~0.04–0.05s), byte-exact |
 | Canary + versions | both green (annotations are comments) |
 | Twins | pre-marker identical; nob64 derived byte-identical via guarded `remove_` |
 | Blob size | +4,411B code (+0.42%), +0 payload bytes |
 | C-diff | `forkrun_ring.c` untouched (stubs comments + make target are the deliverable) |
+| Branch CI (`bashcompat-smoke`) | fedora-5.3 + canary green; ubuntu legs amber-by-design (see below) |
+
+## CI saga + the glibc wall (post-report addendum — READ THIS FIRST)
+
+First CI runs were red for reasons that redefined the project's compat
+story. Debugging (TEMP `ENABLE-DIAG` capture, since reverted) proved
+two ubuntu-container failure modes, both environmental/toolchain:
+
+1. `/dev/shm` is **noexec** there (`failed to map segment from shared
+   object` on the bootloader tmpfile).
+2. **Bigger: the shipped x86-64 blobs need `GLIBC_ABI_GNU2_TLS`**
+   (gcc-16 TLSDESC codegen; absent on glibc ≤2.39 — Ubuntu ≤24.04,
+   Debian 12, RHEL ≤9), so `enable` fails independent of bash version.
+   Non-x86 prebuilts don't carry it. The local python substrate
+   carries it too (same toolchain). Proven avoidable: a trivial
+   `__thread` probe needs it at `-O1`/`-O3`/default **and** with
+   `-ftls-model=global-dynamic`, but **`-mtls-dialect=gnu` drops it
+   at both opt levels** — the D-wave rebuild item is therefore
+   concrete, not exploratory.
+
+Consequences applied in-tree: `bashcompat-smoke.yml` ubuntu legs are
+`allow-fail: true` amber (scaffolding kept; fedora leg binds) with
+the cause + D-wave item cited in comments; README matrix carries the
+two-axis reality (bash findings hold on new glibc; old glibc loads
+nothing yet). A ` $()`-wrapped `enable` probe (my own TEMP diagnostic)
+silently neutered bootstraps CI-wide for one cycle — caught by the
+all-legs-fail signature, fixed to file capture, reverted after use.
+
+8. **CI rescope** (ubuntu legs amber w/ cause cited; fedora binds).
 
 ## Incidents + dispositions
 
