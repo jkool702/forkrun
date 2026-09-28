@@ -22,6 +22,11 @@ Returns `None`. See [MODES.md](MODES.md) for the `mode` variants.
 engine output stays exactly-once, but a death between sink and
 ack re-runs your side effects — keep sinks idempotent.
 
+Naming: `forkrun.run` is the `run()` function itself, not a
+module (the implementation lives in `forkrun/run.py`,
+shadowed on purpose) — `import forkrun; forkrun.run(...)`
+is the whole call surface.
+
 ## forkrun.map(payload, source, **kwargs)
 
 Same as `run()`, but collects and returns every result.

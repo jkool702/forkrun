@@ -52,6 +52,7 @@ No PyPI upload is automated in-tree; releases are cut manually.
 | `ImportError: forkrun requires Linux` | Non-Linux host — not supported, by design |
 | `libforkrun_python.so not found` | Substrate never built — run the `make` line above, or reinstall |
 | `__engine_version__ == "unknown"` | Same as above; import still works for validation-only use, engine calls will fail until the `.so` exists |
+| Bad `$FORKRUN_LIB`, yet `import forkrun` succeeds | By design: import dlopens the substrate and swallows the lookup failure (`FileNotFoundError` → `"unknown"`), so validation-only use never breaks. Engine calls raise the same `FileNotFoundError` later — unset/fix `$FORKRUN_LIB` (search order: `$FORKRUN_LIB`, package dir, repo root, CWD) and rebuild |
 | bash headers missing on Debian/Ubuntu | Expected — use Fedora/RHEL or the container image |
 | `pip install` fails on setuptools | Needs `setuptools>=61` + `wheel` (PEP 517 build) |
 
