@@ -284,5 +284,92 @@ class TestC7TornSignalGuard(unittest.TestCase):
             self.assertEqual(self._drain_torn(), [])
 
 
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestC9SigkillBackoff(unittest.TestCase):
+    """C9 (M11): SIGKILL deaths back off; persistent killers still end."""
+
+    def _run_killer(self, max_kills, path):
+        import time as _time  # noqa: PLC0415
+        import forkrun  # noqa: PLC0415
+        from _helpers import write_lines  # noqa: PLC0415
+
+        flag = path + ".kills"
+        if os.path.exists(flag):
+            os.unlink(flag)
+
+        def _killer(batch):
+            try:
+                with open(flag) as fh:
+                    n = int(fh.read() or 0)
+            except OSError:
+                n = 0
+            if n < max_kills:
+                with open(flag, "w") as fh:
+                    fh.write(str(n + 1))
+                os.kill(os.getpid(), 9)
+                raise AssertionError("unreachable")
+            return bytes(batch.data)
+
+        t0 = _time.monotonic()
+        try:
+            out = forkrun.map(_killer, path, workers=1, nodes=1)
+        finally:
+            dt = _time.monotonic() - t0
+        if os.path.exists(flag):
+            os.unlink(flag)
+        return out, dt
+
+    def test_transient_killer_completes_with_backoff(self):
+        # limit=None -> unbounded kills would abort; killer stops
+        # after 2: pre-fix completes in ~ms (no backoff); post-fix
+        # the 2 backoffs cost >= 2x50ms floor AND completes exact.
+        from _helpers import write_lines  # noqa: PLC0415
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        try:
+            write_lines(path, 300)
+            with open(path, "rb") as fh:
+                want = sorted(fh.read().splitlines(keepends=True))
+            for _ in range(10):
+                out, dt = self._run_killer(2, path)
+                got = sorted(b"".join(out).splitlines(keepends=True))
+                self.assertEqual(got, want)
+                self.assertGreaterEqual(
+                    dt, 0.09,
+                    "no backoff observed (completed in %.3fs)" % dt)
+            assert_no_zombies(self)
+        finally:
+            os.unlink(path)
+
+    def test_persistent_killer_terminates_bounded(self):
+        import forkrun  # noqa: PLC0415
+        from _helpers import write_lines  # noqa: PLC0415
+
+        def _nfd():
+            return len(os.listdir("/proc/self/fd"))
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        try:
+            write_lines(path, 100)
+
+            def _always_kill(batch):
+                os.kill(os.getpid(), 9)
+                raise AssertionError("unreachable")
+
+            base = _nfd()
+            with self.assertRaises(RuntimeError):
+                forkrun.map(_always_kill, path, workers=1, nodes=1)
+            import gc as _gc  # noqa: PLC0415
+            _gc.collect()
+            self.assertEqual(_nfd(), base)
+            assert_no_zombies(self)
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()

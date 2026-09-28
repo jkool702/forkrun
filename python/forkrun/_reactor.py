@@ -50,6 +50,16 @@ TRAP_ACK_GRACE_S = 3.0
 # blocking like worker_died.
 DEATH_CONFIRM_SPIN_S = 0.5
 
+# W-REL5-C9: SIGKILL/OOM-class respawn backoff bounds (jittered).
+# Immediate respawn burns all generations in ~0.01s when every new
+# worker is SIGKILLed at birth (OOM pressure, kill -9 loops) —
+# aborting runs a short delay survives. Deterministic crashes
+# (plain exit != 0, other signals) keep immediate respawn: the
+# batch-level escrow/retry/poison path already converges those
+# fast, and delaying them only postpones the abort.
+RESPAWN_SIGKILL_BACKOFF_MIN_S = 0.05
+RESPAWN_SIGKILL_BACKOFF_MAX_S = 0.2
+
 # Per-round drain burst cap (see reactor_loop §4).
 DRAIN_BURST = 64
 
@@ -481,6 +491,18 @@ class ReactorState:
         if cap is not None and cap >= 0 and slot.incarn >= cap:
             self.n_unrecovered += 1
             return ("pending", None)  # cap reached: no respawn
+        if exit_signo == 9:  # SIGKILL: OOM-class/environmental death
+            # W-REL5-C9: jittered backoff before respawning (cap
+            # already enforced above, so a persistent killer still
+            # terminates via ("pending", None) — just slower, giving
+            # transient pressure a chance to clear). Other deaths
+            # respawn immediately (deterministic crashes converge
+            # via escrow/poison without delay).
+            import random as _random  # noqa: PLC0415
+
+            _time.sleep(_random.uniform(
+                RESPAWN_SIGKILL_BACKOFF_MIN_S,
+                RESPAWN_SIGKILL_BACKOFF_MAX_S))
         new_slot = self.spawn_worker(wid=wid, node=slot.node)
         if new_slot is None:
             self.n_unrecovered += 1
