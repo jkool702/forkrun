@@ -55,7 +55,7 @@ PY_SHIM_OBJ = forkrun_python_shim.o
 
 all: canary
 
-.PHONY: all canary check clean python-substrate FORCE bench bench-small bench-large bench-csv reproducibility-check clean-python
+.PHONY: all canary canary-versions check clean python-substrate FORCE bench bench-small bench-large bench-csv reproducibility-check clean-python
 
 # Rewritten only when the compiler identity/options actually change, so its
 # mtime bumps exactly when dependent objects must rebuild.
@@ -147,6 +147,14 @@ canary: $(OUT)
 	  exit 1; \
 	fi
 	@echo "canary OK: $(OUT) links with no undefined symbols"
+
+# W-BASHCOMPAT-BC5: version-floor gate over the canary closure. Every
+# bash-internal stub carries its first-export version (or an explicit
+# unexported marker); the checker fails on missing annotations,
+# post-floor versions, and stub-matched undefined symbols above the
+# floor in the shipped prebuilts. Run wherever the canary runs.
+canary-versions:
+	python3 tools/check_canary_versions.py
 
 check: canary
 	python3 -m unittest discover -s python/tests
