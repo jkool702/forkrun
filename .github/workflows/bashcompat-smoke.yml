@@ -20,7 +20,6 @@ on:
       - "ring_loadables/local_compile/**"
       - "forkrun_ring.c"
       - ".github/workflows/bashcompat-smoke.yml"
-
   workflow_dispatch:
 
 permissions:
