@@ -235,13 +235,23 @@ frun __exec__ "$@"
         fi
     fi
 
-   # --- HELPER: Expand units (IEC/IEEE prefixes) ---
+    # --- HELPER: Expand units (IEC/IEEE prefixes) ---
     _expand_unit() {
         local val iec num p
         val="${1,,}"
         iec=false
-        [[ "${val#[+-]}" == '0' ]] && { REPLY="${val}"; return 0; }
-        [[ "${val}" == *.* ]] && val="${val%%.*}"
+        # W-REL5-A10: fail-closed validation. Anything that is not a
+        # plain integer with an optional single unit suffix is refused
+        # with a clear error instead of being silently misparsed
+        # (1.5G truncated to 1, -5M clamped to INT64_MAX, 1e3 exponent
+        # form clamped, 0x10 read as octal 8, 1_000 mangled). Empty
+        # stays empty-ok for open ranges; 0 stays 0.
+        if [[ -z "$val" ]]; then REPLY=""; return 0; fi
+        [[ "$val" == "0" ]] && { REPLY=0; return 0; }
+        [[ "$val" =~ ^\+?[0-9]+(([kmgtpe]i?)?b?)?$ ]] || {
+            printf 'forkrun [ERROR]: invalid size or count value %q (want <integer>[k|m|g|t|p|e][i][B], e.g. 100, 1k, 2MiB).\n' "$1" >&2
+            return 1
+        }
         [[ "${val}" == +* ]] && { iec=true; val="${val#+}"; }
         num="${val//[^0-9]/}"
         [[ $num ]] || if [[ ${val} ]]; then return 1; else REPLY=''; return 0; fi
@@ -267,19 +277,24 @@ frun __exec__ "$@"
         if [[ "$val" == *:* ]]; then
             v1="${val%:*}"; v2="${val#*:}"
 
-            _expand_unit "$v1"; ring_init_opts+=("--${type}0=${REPLY}");
+            # W-REL5-A10: propagate _expand_unit refusal instead of
+            # running on with a stale REPLY.
+            _expand_unit "$v1" || { echo "forkrun [ERROR]: Invalid ${type} range bound: '$v1'" >&2; NORMAL_EXIT_FLAG=true; return 1; }
+            ring_init_opts+=("--${type}0=${REPLY}");
             [[ $REPLY ]] && case "${type}" in
                 lines)    byte_mode_flag=false   ;;
                 bytes)    byte_mode_flag=true    ;;
             esac
 
-            _expand_unit "$v2"; ring_init_opts+=("--${type}-max=${REPLY}")
+            _expand_unit "$v2" || { echo "forkrun [ERROR]: Invalid ${type} range bound: '$v2'" >&2; NORMAL_EXIT_FLAG=true; return 1; }
+            ring_init_opts+=("--${type}-max=${REPLY}")
             [[ $REPLY ]] && case "${type}" in
                 workers)  nWorkersMax="${REPLY}" ;;
                 lines)    byte_mode_flag=false   ;;
             esac
          else
-            _expand_unit "$val"; ring_init_opts+=("--${type}=${REPLY}")
+            _expand_unit "$val" || { echo "forkrun [ERROR]: Invalid ${type} value: '$val'" >&2; NORMAL_EXIT_FLAG=true; return 1; }
+            ring_init_opts+=("--${type}=${REPLY}")
             case "${type}" in
                 workers)  [[ $REPLY ]] && nWorkersMax="${REPLY}" ;;
                 lines)    byte_mode_flag=false   ;;
@@ -1005,19 +1020,19 @@ EOF
             @(-l|--lines|--batchsize)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-l|--lines|--batchsize)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && _parse_count "lines" "${arg}" ;;
+                [[ ${arg} ]] && { _parse_count "lines" "${arg}" || return 1; } ;;
 
             # --- BYTES (-b 1M) ---
             @(-b|--bytes)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-b|--bytes)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                ${is_sweep:-false} || _parse_count "bytes" "${arg:-}" ;;
+                ${is_sweep:-false} || { _parse_count "bytes" "${arg:-}" || return 1; } ;;
 
             # --- WORKERS (-j 4 or -j 1:8) ---
             @(-j|-P|--workers)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-j|-P|--workers)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && _parse_count "workers" "${arg}" ;;
+                [[ ${arg} ]] && { _parse_count "workers" "${arg}" || return 1; } ;;
 
             --greedy|--GREEDY)                ring_init_opts+=('--greedy') ;;
 
@@ -1025,7 +1040,12 @@ EOF
             @(-t|--timeout)?(?([= $'\t'])+([0-9.+-])))
                 arg="${1##@(-t|--timeout)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9.+-])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--timeout='"${REPLY}") ;;
+                # W-REL5-A10: loud refusal on invalid timeout instead
+                # of silently running with no timeout set.
+                [[ ${arg} ]] && {
+                    _expand_unit "${arg}" || { echo "forkrun [ERROR]: Invalid value for -t / --timeout: '${arg}'" >&2; NORMAL_EXIT_FLAG=true; return 1; }
+                    ring_init_opts+=('--timeout='"${REPLY}")
+                } ;;
 
             # --- NUMA NODES (--nodes auto) ---
             @(--nodes|--numa)?(?([= $'\t'])*))
@@ -1061,7 +1081,32 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.6.0';  return 0  ;;
+            -V|--version|--VERSION)
+                # W-REL5-A11: single-sourced version. The engine
+                # ring_version builtin is authoritative when loaded;
+                # otherwise read META (beside this file when running
+                # sourced, else beside the invocation cwd, which is
+                # the repo root in dev flows; BASH_SOURCE is -- in
+                # the cleanroom). The static string is a last resort
+                # only, never the source of truth.
+                if [[ "$(type -t ring_version 2>/dev/null)" == "builtin" ]]; then
+                    printf 'forkrun %s\n' "$(ring_version)"
+                else
+                    _fr_src="${BASH_SOURCE[0]:-}"
+                    case "$_fr_src" in */*) _fr_meta="${_fr_src%/*}/META" ;; *) _fr_meta="./META" ;; esac
+                    _fr_version=""
+                    if [[ -f "$_fr_meta" ]] && [[ "$(grep -E '^NAME:' "$_fr_meta" | head -n 1)" == "NAME: forkrun" ]]; then
+                        _fr_version="$(grep -E '^VERSION:' "$_fr_meta" | head -n 1)"
+                        _fr_version="${_fr_version#VERSION: }"
+                    fi
+                    if [[ -n "$_fr_version" ]]; then
+                        printf 'forkrun %s\n' "$_fr_version"
+                    else
+                        echo 'forkrun v3.6.0'
+                    fi
+                    unset _fr_src _fr_meta _fr_version
+                fi
+                return 0  ;;
 
             --) shift; break ;;
 
@@ -2013,6 +2058,8 @@ W_NODE[$3]=$2
         # at the pidfile readiness write (they must predate it); re-declaring
         # them here would reset trap-recorded signal state. Do not add back.
         local -a POISONED_BATCHES=()
+        # W-REL5-A9: one-shot latch for the 254 diagnostic below.
+        local _fr_e2big_warned=false
 
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
@@ -2104,6 +2151,18 @@ W_NODE[$3]=$2
                     wID=$POLL_ARG1
                     wait "${P[$wID]}" 2>/dev/null
                     status=$?
+
+                    # W-REL5-A9: 254 is the payload-exec failure code
+                    # (posix_spawnp failed: E2BIG, Argument list too
+                    # long, when a single record exceeds the 128 KiB
+                    # MAX_ARG_STRLEN ceiling; a splice-path 254 is an
+                    # infrastructure failure). It used to ride the
+                    # generic retry path and surface only as poisoned.
+                    # Name it once, loudly; retries still poison as before.
+                    if (( status == 254 )) && ! ${_fr_e2big_warned:-false}; then
+                        _fr_e2big_warned=true
+                        echo "forkrun [ERROR]: worker $wID exited 254 (payload exec failed: posix_spawnp E2BIG, Argument list too long, when a record exceeds the 128 KiB per-record ceiling MAX_ARG_STRLEN; split records or use -b chunking. A splice-path 254 is an infrastructure failure and is retried, then poisoned, as before)." >&2
+                    fi
 
                     exec {fd_worker_r[$wID]}<&-
                     unset 'fd_worker_r[$wID]' 'fd_worker_w[$wID]' 'P[$wID]'

@@ -93,12 +93,16 @@ We maintain two dedicated branches specifically configured for sanitizer testing
 1. Checkout the desired testing branch and copy your modified `forkrun_ring.c` into it.
 2. Push, wait for the CI workflow, and merge the PR.
 3. **CRITICAL GOTCHA #1 (The `exec -c` Trap):**
-   Before running the tests, you must open `frun.bash` and modify the initial bash `exec` call.
-   Change:
-   `exec -c "${BASH:-bash}" --norc --noprofile -c ...`
-   To:
-   `exec "${BASH:-bash}" --norc --noprofile -c ...`
-   *(Removing the `-c` from the `exec` command is mandatory. If you leave it in, it clears the environment variables required by the sanitizers, silently disabling them).*
+   Never hand-edit the release `frun.bash` itself — hand edits are how the `-V` echo, `FORKRUN_RING_VERSION`, and `META` drift apart. The version is single-sourced: `frun --version` reads the engine `ring_version` builtin first, then `META`, so a version bump touches `META` (and the C default) only, never the wrapper text. For sanitizer runs, copy the wrapper to a scratch path and modify the copy:
+   ```bash
+   cp frun.bash /tmp/frun.san.bash
+   # In /tmp/frun.san.bash ONLY, change the initial bash exec call:
+   #   exec -c "${BASH:-bash}" --norc --noprofile -c ...
+   # To:
+   #   exec "${BASH:-bash}" --norc --noprofile -c ...
+   # Then run the suites against the copy (e.g. FRUN_SOURCE=/tmp/frun.san.bash).
+   ```
+   *(Dropping that first `-c` in the scratch copy is mandatory. If you leave it in, it clears the environment variables required by the sanitizers, silently disabling them. Discard the copy when done — never merge it back into the release file.)*
 
 4. **CRITICAL GOTCHA #2 (TSan Execution):**
    When testing on the `TESTING/TSAN` branch, you must force `LD_PRELOAD` to inject the TSan library. Run the test scripts like this:

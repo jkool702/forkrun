@@ -857,6 +857,80 @@ once (R5 freshness gate proves embedded == current source).
   `python/benchmarks/results/tokenize_study.md` (+ CSV).
   No version bump (benchmarks only).
 
+### Bash front-end hardening, S-class + sourced-library contract (W-REL5-A)
+
+Zero Python, zero C — `frun.bash` + twins only. Every behavioral
+item bite-then-green (pre-fix failing demonstration first).
+
+- **A1 (BLOCKED, spec collision):** loadable memfds with
+  `cloexec=1` close at the cleanroom `exec -c`, so the child
+  `enable -f /proc/self/fd/N` fails and every run aborts
+  (demonstrated rc=1 in scratch). Shipped fix deferred: cloexec
+  needs an explicit fd pass-through at the exec site, which the
+  work order did not authorize. No tree change; leak confirmed
+  pre-fix (fork+exec children inherit both memfds).
+- **A2:** `FORKRUN_MEMFD_LOADABLES`,
+  `FORKRUN_MEMFD_LOADABLES_BASE64`, `FORKRUN_RING_ENABLED` are
+  plain shell-local assignments, never exported. Children no
+  longer inherit stale fd numbers; parent-side re-guards read
+  shell variables and still fast-path (repeat runs rc 0).
+- **A3:** file-scope `shopt -s extglob` recorded as
+  `_FORKRUN_SRC_EXTGLOB_WAS_SET` and restored to source-time
+  state on RETURN trap + pre-exec in the wrapper (nested calls
+  run in pipeline subshells or fresh shells, hence contained).
+  Sourcing no longer permanently mutates caller shell options.
+- **A4 (S5):** bootstrap `.so` extraction used a predictable
+  `forkrun_boot_PID_RANDOM` path — a pre-planted symlink
+  redirected the truncate into an arbitrary file (victim emptied
+  10/10 pre-fix). Now `mktemp` O_EXCL in the candidate dir;
+  `$PWD` dropped from candidates. Victim untouched 10/10
+  post-fix, no leftover files.
+- **A5 (S3):** scoped nounset — `set +u` at `frun` entry with
+  `$-` save/restore on RETURN, plus a source-time guard around
+  the file-scope bootstrap call (the actual kill path: it reads
+  `$1` from caller positionals). `set -u; . frun.bash` + run is
+  green 10/10; the flag is restored on return.
+- **A6:** unchecked `ring_memfd_create` (ingress) and
+  `ring_set_resume` now fail loudly with actionable text
+  (`RLIMIT_NOFILE`/`ulimit -n`/dmesg guidance; horizon +
+  stdout_bytes values), `NORMAL_EXIT_FLAG` set, rc 1. Pre-fix
+  the ingress case ended in a bare redirection error with a
+  silent rc 0 having run nothing, and resume failures continued
+  silently on uninitialized state.
+- **A7:** `_forkrun_get_arch` failure propagates (`|| return 1`,
+  bootstrap rc 1) — unsupported arch prints only the arch
+  message instead of INVALID ARCH + 7x bad array subscript +
+  bogus temp-dir error. `armv7` dropped from the supported-arch
+  claim (no case branch, no b64 key, no `.so`).
+- **A8:** resume parser fails closed on any missing required
+  key, naming it. A `HORIZON`-only file was silently accepted
+  (stdout bytes defaulting to a truncate-to-zero); now refused
+  naming `FORKRUN_RESUME_STDOUT_BYTES`. Fully-keyed files still
+  accepted.
+- **A9:** worker exit 254 is now diagnosed once, loudly
+  (posix_spawnp `E2BIG`, Argument list too long). Per-record
+  ceiling documented here: a single record larger than 128 KiB
+  (`MAX_ARG_STRLEN`) cannot be passed as an argument and fails
+  the spawn; split records or use `-b`/`--bytes` chunking.
+  Retry-then-poison behavior is unchanged (splice-path 254
+  included). A 200 KiB record still poisons (rc 3) but now names
+  the ceiling.
+- **A10:** `_expand_unit` rejects fractional (`1.5G`),
+  negative (`-5M`), exponent (`1e3`), hex (`0x10`), and
+  underscore (`1_000`) forms with a clear error instead of
+  silently misparsing (truncate to 1 / clamp to INT64_MAX /
+  octal 8 / mangled). Range-bound, `-t`, `-l`, `-b`, `-j`
+  call sites propagate the refusal. Valid forms (`1k`, `1Ki`,
+  `1M`, `1G`, `16E`, ranges, `0`, empty bounds) behave as
+  before, including the `16E` int64 clamp + warning.
+- **A11:** `--version` is single-sourced — engine
+  `ring_version` builtin first, then `META` (beside the file
+  when sourced, else beside the invocation cwd), static string
+  last resort only. `DOCS/MAINTAINERS.md` sanitizer GOTCHA #1
+  no longer instructs hand-editing the release artifact (the
+  drift mechanism); it directs a scratch copy plus states the
+  single-source rule.
+
 ## v3.5.14 (unreleased)
 
 ### Python frontend: C drain process, opt-in (W-PY21-A)
