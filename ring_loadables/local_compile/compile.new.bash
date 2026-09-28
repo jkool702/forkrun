@@ -114,11 +114,39 @@ for f in forkrun_ring.*.so; do
     b64[${key}]="$(_forkrun_file_to_base64 "$f")"
 done
   
-# Write new file
+# Write new file: header + function through marker, chunked payload,
+# then the existing file tail verbatim (nounset save/restore +
+# bootstrap invocation live after the payload — dropping them breaks
+# sourcing). Payload shape mirrors _forkrun_b64_emit_chunked.
 {
     printf '%s\n%s' "$a0" "$a1"
-    declare -p b64
-    printf '\n\n_forkrun_bootstrap_setup --force\n\n'
+    echo
+    echo '# W-BASHCOMPAT-BC1: chunked b64 payload, 32KiB %q appends (see _forkrun_b64_emit_chunked; regenerated region, do not hand-edit).'
+    echo 'declare -A b64=()'
+    while IFS= read -r _bck; do
+        [[ -n ${_bck} ]] || continue
+        _bcv=${b64[${_bck}]}
+        if [[ -z ${_bcv} ]]; then
+            printf 'b64[%q]+=%q\n' "${_bck}" ""
+            continue
+        fi
+        while [[ -n ${_bcv} ]]; do
+            printf 'b64[%q]+=%q\n' "${_bck}" "${_bcv:0:32768}"
+            _bcv=${_bcv:32768}
+        done
+    done < <(printf '%s\n' "${!b64[@]}" | LC_ALL=C sort)
+    _past_payload=false
+    while IFS= read -r a || [[ -n $a ]]; do
+        if ! $_past_payload; then
+            [[ -z ${a} ]] && continue
+            [[ "${a}" == 'declare -A b64='* ]] && continue
+            [[ "${a}" == 'b64['*']+='* ]] && continue
+            [[ "${a}" == '# W-BASHCOMPAT-BC1'* ]] && continue
+            _past_payload=true
+            echo
+        fi
+        echo "$a"
+    done < <(awk 'f{print} /# <@@@@@< _BASE64_START_ >@@@@@> #/{f=1}' ./frun.bash | tail -n +2)
 } >./frun.new.bash
 
 chmod +x ./frun.new.bash
