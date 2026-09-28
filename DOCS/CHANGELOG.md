@@ -2395,3 +2395,39 @@ changes — C-diff empty; bites in `python/tests/test_wrel5c.py`).
   immediate respawn (escrow/poison converges fast). Bite (×10):
   transient 2-kill payload completes byte-exact past a 0.09s
   floor; persistent killer raises bounded with clean fds.
+
+### Python surface truthfulness (W-REL5-E-PYTHON)
+
+Docs-adjacent Python surface: exports, annotations, dead code, fd
+hygiene (no C changes — C-diff empty; bites in
+`python/tests/test_wrel5e.py` + `test_wrel5c.py`).
+
+- **E5:** `RunConfig` dropped from `__all__` (imported a phantom
+  contract — no public entry returns it; class stays in `_api`
+  for the `_validate_config` seam). `signal_policy: Any` →
+  `Optional[str]` (D-PORT1 union). `bytes` field KEPT with a
+  shadowing-contained comment (rename would churn constructor +
+  seam asserts for zero function). Bite: import raises (×5).
+- **E6:** `run`/`map`/`stream`/`sweep` annotated (post-B1
+  signatures matched exactly; `Mode`/`Order`/`OnError`/`Nodes`
+  wired; internals unannotated by scope). `py.typed` marker added
+  and packaged (wheel verified to contain it + the `.so`).
+  `get_type_hints` resolves all four; B1 tests green untouched.
+- **E7:** dead code deleted with grep evidence each: duplicate
+  `def _watch_live` (identical, shadowed); duplicated mode-check
+  in `_execute_streaming` (entry single-guards kept as
+  fail-closed backstops); redundant inner `wid_to_node` import;
+  `rc==127` sites kept deliberately (defensive child
+  terminators, not dead); ten unreachable `memfd→tempfile`
+  fallbacks + both `_tmp_hold` lists (order cited six — same
+  `AttributeError`-on-existing-API class in ten spots);
+  `_forkrun_file_to_base64` self-guard made unconditional
+  (inert in all repo paths — both callers are `$()` subshells;
+  twins identical, syntax + functional probe green).
+- **E15:** teardown close-audit complete: every `os.close` in
+  `run.py` classifies nulled / flag-nulled / member-nulled /
+  rebind-before-use / terminal, with zero fd-creating calls
+  between any close and its teardown (script-verified all six
+  `order_w` paths). Remainder already closed by C5/R11/DEDUP —
+  no product change. Lock-ins: `order_w`-None-at-teardown (×5)
+  + fd stability across 10 mixed runs.
