@@ -37,57 +37,61 @@ jobs:
       - name: Stub annotations vs shipped undefined symbols
         run: python3 tools/check_canary_versions.py
 
-  # W-BASHCOMPAT-BC4: per-version load-smoke. The v3.6.0 loadable bug
-  # died in the 0.9MB single-line declare BEFORE enable -f ever ran —
-  # so this gate boots the REAL bootstrap (fresh source under -e,
-  # then a trivial frun round-trip), never just enable -f. Minutes
-  # per leg. Image↔bash pinning: ubuntu:18.04 ships 4.4, 20.04 ships
-  # 5.0, 22.04 ships 5.1, 24.04 ships 5.2; fedora:latest carries the
-  # newest (5.3-class at time of writing — assert it, don't assume).
+  # W-REL5-D D-LEGS: compat legs that test USE, not LOAD. Three waves
+  # of green "load" gates passed while the product segfaulted on <=5.1
+  # (D-SEGFIX: engine walked bash ARRAY structs, head 24->16 in
+  # 5.1->5.2) -- every leg below runs a real `frun -k` round-trip x10
+  # (fresh shell per iteration: bootstrap + version + workload +
+  # byte-compare), the gate that would have caught it in wave 1.
+  # Image<->bash pinning: ubuntu:18.04 ships 4.4, 20.04 ships 5.0,
+  # 24.04 ships 5.2; ubi8 ships 4.4 on glibc 2.28; fedora:latest
+  # carries the newest (5.3-class at time of writing -- assert it,
+  # don't assume); 5.1 is source-built per W-MAPAPI (recipe below).
+  # allow-fail key (read before flipping any to false):
+  # - ubi8: amber until the toolchain floor drops below glibc 2.38.
+  #   D-TLS removed GLIBC_ABI_GNU2_TLS, but gcc-16's __isoc23_strto*
+  #   aliasing keeps max GLIBC at 2.38 (Ubuntu 24.04 ok, Debian
+  #   12/RHEL<=9 still blocked). Expected red at load till then.
+  # - 4.4/5.0/5.1 distro legs + 24.04: amber until this wave's blob
+  #   cycle (the tree blob still carries the pre-D-SEGFIX engine, so
+  #   <=5.1 legs segfault and 24.04 fails enable on GNU2_TLS). Green
+  #   after the cycle; then bind them (TODO).
+  # - fedora 5.3 binds now (new glibc + new bash run any engine).
   version-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # Ubuntu legs are amber until the D-wave toolchain fix: the
-    # shipped x86-64 blobs need GLIBC_ABI_GNU2_TLS (gcc-16 TLSDESC
-    # codegen; absent on glibc <=2.39, i.e. all these images), so
-    # enable fails there independent of bash version (proven by
-    # ENABLE-DIAG capture). allow-fail keeps the scaffolding while
-    # the D-wave item (rebuild with -mtls-dialect=gnu, proven
-    # locally to drop the requirement) lands. Fedora leg binds.
+    timeout-minutes: 30
     continue-on-error: ${{ matrix.allow-fail }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Full round-trip legs (worker runtime verified here).
-          - bash: "5.2"
-            image: ubuntu:24.04
-            workload: full
-            allow-fail: true
           - bash: "5.3"
             image: fedora:latest
-            workload: full
+            kind: distro
             allow-fail: false
-          # Bootstrap-only legs: worker execution segfaults on ≤5.1
-          # (pre-existing, wave-independent — proven on pristine
-          # main:frun.bash too; NOT a bootstrap defect). These legs
-          # lock the BC-1/BC-2 bootstrap fixes; upgrade them to full
-          # round-trips when the worker-runtime finding is fixed.
-          - bash: "4.4"
-            image: ubuntu:18.04
-            workload: bootstrap
+          - bash: "5.2"
+            image: ubuntu:24.04
+            kind: distro
             allow-fail: true
           - bash: "5.0"
             image: ubuntu:20.04
-            workload: bootstrap
+            kind: distro
             allow-fail: true
-          - bash: "5.1"
+          - bash: "4.4"
+            image: ubuntu:18.04
+            kind: distro
+            allow-fail: true
+          - bash: "4.4-ubi8"
+            image: registry.access.redhat.com/ubi8/ubi:latest
+            kind: distro
+            allow-fail: true
+          - bash: "5.1-source"
             image: ubuntu:22.04
-            workload: bootstrap
+            kind: source-5.1
             allow-fail: true
     steps:
       - uses: actions/checkout@v3
-      - name: Bootstrap + smoke on bash ${{ matrix.bash }} (${{ matrix.image }})
+      - name: Round-trip x10 on ${{ matrix.bash }} (${{ matrix.image }})
         run: |
           docker run --rm \
             -v $PWD:/src \
@@ -95,28 +99,42 @@ jobs:
             ${{ matrix.image }} \
             bash -c '
               set -euo pipefail
-              echo "runner bash: $(bash --version | head -1)"
+              if [ "${{ matrix.kind }}" = "source-5.1" ]; then
+                (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gcc make gzip coreutils curl)) || true
+                curl -fsSL https://ftp.gnu.org/gnu/bash/bash-5.1.tar.gz | tar xz
+                # W-MAPAPI kit: the C23-strict host compiler needs the
+                # gnu17 retry for 5.1 sources; older compilers take the
+                # plain build. Either way the binary below is 5.1.
+                (cd bash-5.1 && ./configure -q && (make -j2 || make -j2 CFLAGS="-g -O2 -std=gnu17 -Wno-error"))
+                BASH_UNDER_TEST="$PWD/bash-5.1/bash"
+                "$BASH_UNDER_TEST" --version | head -1 | grep -q "version 5\.1" || { echo "source-5.1 build did not yield bash 5.1" >&2; exit 3; }
+              else
+                BASH_UNDER_TEST="bash"
+                echo "runner bash: $($BASH_UNDER_TEST --version | head -1)"
+                (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gzip coreutils)) || true
+                (command -v dnf >/dev/null && dnf install -y gzip coreutils diffutils) || true
+                (command -v microdnf >/dev/null && microdnf install -y gzip coreutils diffutils) || true
+              fi
               # 4.4 floor: mapfile -d must exist (README floor claim).
-              bash -c "type mapfile" >/dev/null
-              # Distro tooling for the bootstrap decode path.
-              (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gzip coreutils)) || true
-              (command -v dnf >/dev/null && dnf install -y gzip coreutils diffutils) || true
+              $BASH_UNDER_TEST -c "type mapfile" >/dev/null
               # Loud tool assertion (EOL images can lack gzip): silent
               # -e deaths here used to hide missing tools entirely.
-              for t in gzip base64 truncate mktemp md5sum grep sed awk; do
+              for t in gzip base64 truncate mktemp md5sum grep sed awk seq cmp; do
                 command -v $t >/dev/null || { echo "CI-ENV missing tool: $t" >&2; exit 3; }
               done
-              # FULL bootstrap under -e (the v3.6.0 death shape), then
-              # version probe + workload per leg (full round-trip
-              # where workers run; bootstrap+version where the
-              # worker-runtime finding is open).
-              source ./frun.bash
-              ring_version -a
-              if [ "${{ matrix.workload }}" = "full" ]; then
-                seq 1 200 > /tmp/bc_input.txt
-                frun -k -j1 -l1 echo < /tmp/bc_input.txt > /tmp/bc_out.txt
-                cmp /tmp/bc_input.txt /tmp/bc_out.txt && echo "bash ${{ matrix.bash }} round-trip: OK"
-              else
-                echo "bash ${{ matrix.bash }} bootstrap-only leg: OK"
-              fi
+              # USE gate: ten fresh shells, each bootstrapping under -e
+              # (the v3.6.0 death shape), probing the version, and
+              # running an ordered workload with byte-compare. echo is
+              # the payload (prints its args back); -k asserts order.
+              seq 1 1000 > /tmp/bc_input.txt
+              for i in $(seq 1 10); do
+                $BASH_UNDER_TEST --noprofile --norc -c "
+                  set -e
+                  source ./frun.bash
+                  ring_version -a
+                  frun -k -j1 -l1 echo < /tmp/bc_input.txt > /tmp/bc_out.txt
+                "
+                cmp /tmp/bc_input.txt /tmp/bc_out.txt || { echo "bash ${{ matrix.bash }} round-trip $i: MISMATCH" >&2; exit 1; }
+              done
+              echo "bash ${{ matrix.bash }} round-trip x10: OK"
             '
