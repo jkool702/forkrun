@@ -151,6 +151,48 @@ class TestB2StreamTaxonomy(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestB4BoundedHelperJoin(unittest.TestCase):
+    """B4: helper joins are bounded (SIGKILL on expiry + alarm
+    naming the helper) instead of unbounded os.waitpid(pid, 0)."""
+
+    def test_wedged_helper_reaped_with_alarm(self):
+        import sys as _sys
+
+        from _helpers import redirect_fd, restore_fd
+
+        _run_mod = _sys.modules["forkrun.run"]
+        pid = os.fork()
+        if pid == 0:
+            time.sleep(30)
+            os._exit(0)
+        cap = tempfile.mktemp(suffix=".err")
+        self.addCleanup(lambda: os.path.exists(cap)
+                        and os.unlink(cap))
+        saved = redirect_fd(2, cap)
+        try:
+            t0 = time.monotonic()
+            st = _run_mod._join_helper_bounded(
+                pid, "test-helper", timeout=0.5)
+            dt = time.monotonic() - t0
+        finally:
+            restore_fd(2, saved)
+        # Bounded: ~timeout, not 30s.
+        self.assertLess(dt, 5.0)
+        # Reaped via SIGKILL on expiry.
+        self.assertTrue(st is not None and os.WIFSIGNALED(st)
+                        and os.WTERMSIG(st) == 9)
+        with open(cap, "rb") as fh:
+            err = fh.read()
+        self.assertIn(b"test-helper", err)
+        try:
+            leaked = os.waitpid(pid, os.WNOHANG)
+            self.fail("helper child leaked: %r" % (leaked,))
+        except ChildProcessError:
+            pass
+        assert_no_zombies(self)
+
+
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 class TestB3IngestReactorLiveness(unittest.TestCase):
     """B3: the ingest-reactor spill observes worker deaths while the
     source is stalled (O_NONBLOCK + drain-to-EAGAIN + poll per

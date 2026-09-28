@@ -49,8 +49,10 @@ from ._fd_scrub import scrub_fds, snapshot_fds
 from ._pipes import make_pipe
 from ._plugin import make_plugin_payload
 from ._reassembly import ReassemblyBuffer
-from ._resume import (checkpoint_on_abort, consume_sidecar,
-                      require_resume_path, resume_begin)
+from ._resume import (ORDERER_REAP_TIMEOUT, WORKER_REAP_TIMEOUT,
+                       _waitpid_bounded, checkpoint_on_abort,
+                       consume_sidecar, require_resume_path,
+                       resume_begin)
 from ._signals import guard as _signal_guard
 from ._spawn import make_spawn_payload
 from ._worker import _HDR, _c_plugin_spec, _c_spawn_spec, \
@@ -1666,6 +1668,45 @@ def _make_results_pump(results_r, order="none", stats=None):
     return pump
 
 
+# W-REL5-B4: default deadline for helper joins (scanner, fallow
+# reaper, C drain, C orderer, NUMA ingest/indexers). Helpers are
+# expected to exit promptly once their EOF lands (workers are
+# already reaped / EOF posted by then); a helper still alive past
+# this is wedged — SIGKILL (via _waitpid_bounded) is mercy, and the
+# alarm names it. Worker COMPLETION joins stay unbounded (the run
+# IS the wait); post-abort worker reaps use WORKER_REAP_TIMEOUT
+# (abort already woke them); the orderer uses ORDERER_REAP_TIMEOUT.
+_HELPER_JOIN_TIMEOUT = 10.0
+
+
+def _join_helper_bounded(pid, name, timeout=_HELPER_JOIN_TIMEOUT):
+    """Bounded join for one helper child (W-REL5-B4).
+
+    Reaps with a deadline via _resume._waitpid_bounded (SIGKILL on
+    expiry, then reap); on expiry an alarm naming the helper goes
+    to stderr. Returns the wait status, or None when no status is
+    obtainable (reaped elsewhere / unreaped even after SIGKILL —
+    callers treat None like the old ChildProcessError leniency).
+    Never raises.
+    """
+    start = _time.monotonic()
+    try:
+        _reaped, status = _waitpid_bounded(pid, timeout)
+    except Exception:
+        return None
+    if not _reaped:
+        status = None
+    if _time.monotonic() - start >= max(timeout, 0.0):
+        try:
+            os.write(2, ("forkrun [WARN]: helper '%s' (pid %s) did "
+                         "not exit within %.1fs (SIGKILL issued); "
+                         "continuing.\n" % (name, pid, timeout)
+                         ).encode())
+        except OSError:
+            pass
+    return status
+
+
 def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                      src_fd, must_close, extra_pids=(), fallow_w=None,
                      drain_pid=None, results_fd=None):
@@ -1714,14 +1755,14 @@ def _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                     pass
         except ChildProcessError:
             pass
-    for pid in list(pids) + list(extra_pids) + (
-            [drain_pid] if drain_pid is not None else []):
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
-        except OSError:
-            pass
+    for _pid, _name in (
+            [(_p, "worker") for _p in pids]
+            + [(_p, "helper") for _p in extra_pids]
+            + ([(drain_pid, "drain")] if drain_pid is not None
+               else [])):
+        # W-REL5-B4: bounded (kill already issued above; the spin
+        # reaps promptly in practice, the deadline covers D-state).
+        _join_helper_bounded(_pid, _name)
     for fd in out_fds:
         try:
             os.close(fd)
@@ -2011,16 +2052,12 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                         yield blob
                 # Workers are gone and the results pipe hit EOF, so
                 # the drain has exited (it terminates on signal EOF)
-                # — join it here to capture its rc. Blocking is safe:
-                # EOF implies the write end is closed.
+                # — join it here to capture its rc. Bounded
+                # (W-REL5-B4): EOF implies the write end is closed.
                 if drain_alive:
-                    try:
-                        _, _dst = os.waitpid(drain_pid, 0)
-                    except ChildProcessError:
-                        pass
-                    except OSError:
-                        pass
-                    else:
+                    # W-REL5-B4: bounded.
+                    _dst = _join_helper_bounded(drain_pid, "drain")
+                    if _dst is not None:
                         drain_alive = False
                         drain_status = _dst
                 exhausted = True
@@ -2032,10 +2069,9 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
                 # clean exit; workers cannot EOF without a clean
                 # scanner finish).
                 if scan_pid is not None and scan_rc is None:
-                    try:
-                        _, scan_st = os.waitpid(scan_pid, 0)
-                    except ChildProcessError:
-                        scan_st = None
+                    # W-REL5-B4: bounded (proof-based leniency below
+                    # covers the reaped-elsewhere None).
+                    scan_st = _join_helper_bounded(scan_pid, "scanner")
                     scan_pid = None
                     if scan_st is not None and not (
                             os.WIFEXITED(scan_st) and
@@ -2088,10 +2124,9 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         # the pump fail-fasted on error and retired on clean exit;
         # workers cannot EOF without a clean scanner finish).
         if scan_pid is not None and scan_rc is None:
-            try:
-                _, scan_st = os.waitpid(scan_pid, 0)
-            except ChildProcessError:
-                scan_st = None
+            # W-REL5-B4: bounded (proof-based leniency below covers
+            # the reaped-elsewhere None).
+            scan_st = _join_helper_bounded(scan_pid, "scanner")
             scan_pid = None
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
@@ -2520,15 +2555,12 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                         # input) and the spill is done — nothing will
                         # ever arrive.
                         break
-                # Join the drain for its rc (EOF seen ⇒ exited).
+                # Join the drain for its rc (EOF seen ⇒ exited;
+                # bounded, W-REL5-B4).
                 if drain["pid"] is not None and drain["alive"]:
-                    try:
-                        _, _dst = os.waitpid(drain["pid"], 0)
-                    except ChildProcessError:
-                        pass
-                    except OSError:
-                        pass
-                    else:
+                    # W-REL5-B4: bounded.
+                    _dst = _join_helper_bounded(drain["pid"], "drain")
+                    if _dst is not None:
                         drain["alive"] = False
                         drain["status"] = _dst
                 drain_status = drain["status"]
@@ -2583,17 +2615,16 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
         # Scanner join: strict when observed, proof-based when already
         # reaped by teardown after healthy workers + complete drain
         # (workers cannot EOF without a clean scanner finish; see the
-        # locked path for the full argument).
+        # locked path for the full argument). Join is bounded
+        # (W-REL5-B4).
         if scan_pid is not None and helpers["scan_rc"] is None:
             try:
                 wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
             except ChildProcessError:
                 wpid, scan_st = scan_pid, None
             if wpid == 0:
-                try:
-                    _, scan_st = os.waitpid(scan_pid, 0)
-                except ChildProcessError:
-                    scan_st = None
+                # W-REL5-B4: bounded.
+                scan_st = _join_helper_bounded(scan_pid, "scanner")
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
@@ -2601,10 +2632,8 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                     "forkrun: ingest scanner failed (status %r)"
                     % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
-            try:
-                _, fallow_st = os.waitpid(fallow_pid, 0)
-            except ChildProcessError:
-                fallow_st = None
+            # W-REL5-B4: bounded (WARN-lenient below covers None).
+            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
             if fallow_st is not None and not (
                     os.WIFEXITED(fallow_st) and
                     os.WEXITSTATUS(fallow_st) == 0):
@@ -3038,19 +3067,20 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
         except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
             for pid in pids:
-                try:
-                    os.waitpid(pid, 0)
-                except Exception:
-                    pass
+                # W-REL5-B4: bounded post-abort reap (abort woke
+                # claim-gated workers; a straggler gets SIGKILL).
+                _join_helper_bounded(pid, "worker",
+                                     WORKER_REAP_TIMEOUT)
             raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
 
         if use_drain and drain_pid is not None:
             # Signal EOF (all workers gone) terminates the drain on
             # its own — reap it. Worker error below wins on the
             # failed path (results moot, child still reaped).
-            try:
-                _, _dst = os.waitpid(drain_pid, 0)
-            except ChildProcessError:
+            # W-REL5-B4: bounded (None ⇒ reaped elsewhere, same
+            # leniency as the old ChildProcessError branch).
+            _dst = _join_helper_bounded(drain_pid, "drain")
+            if _dst is None:
                 _dst = 0
             drain_status = _dst
             drain_pid = None
@@ -3068,21 +3098,19 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
         # Join the scanner (strict) and the reaper (lenient warn).
         # helpers["scan_rc"] set means _watch_helpers observed the exit
         # during the run — check it. Otherwise the scanner is either
-        # still alive (blocking join) or was already reaped by teardown
-        # after healthy workers + complete drain — which PROVES a clean
-        # finish (workers cannot reach EOF without scanner_finished, and
-        # any crash/abort fails workers first). Same leniency the
-        # reaper has always had.
+        # still alive (bounded join, W-REL5-B4) or was already reaped
+        # by teardown after healthy workers + complete drain — which
+        # PROVES a clean finish (workers cannot reach EOF without
+        # scanner_finished, and any crash/abort fails workers first).
+        # Same leniency the reaper has always had.
         if scan_pid is not None and helpers["scan_rc"] is None:
             try:
                 wpid, scan_st = os.waitpid(scan_pid, os.WNOHANG)
             except ChildProcessError:
                 wpid, scan_st = scan_pid, None
             if wpid == 0:
-                try:
-                    _, scan_st = os.waitpid(scan_pid, 0)
-                except ChildProcessError:
-                    scan_st = None
+                # W-REL5-B4: bounded.
+                scan_st = _join_helper_bounded(scan_pid, "scanner")
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
@@ -3090,10 +3118,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     "forkrun: ingest scanner failed (status %r)"
                     % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
-            try:
-                _, fallow_st = os.waitpid(fallow_pid, 0)
-            except ChildProcessError:
-                fallow_st = None
+            # W-REL5-B4: bounded (WARN-lenient below covers None).
+            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
             if fallow_st is not None and not (
                     os.WIFEXITED(fallow_st) and
                     os.WEXITSTATUS(fallow_st) == 0):
@@ -3126,12 +3152,8 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 pass
             except OSError:
                 pass
-            try:
-                os.waitpid(drain_pid, 0)
-            except ChildProcessError:
-                pass
-            except OSError:
-                pass
+            # W-REL5-B4: bounded (kill already issued above).
+            _join_helper_bounded(drain_pid, "drain")
         if results_fd is not None:
             try:
                 os.close(results_fd)
@@ -3172,15 +3194,12 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                         pass
             except ChildProcessError:
                 pass
-        for pid in [fallow_pid, scan_pid]:
-            if pid is None:
+        for _pid, _name in ((fallow_pid, "fallow"),
+                            (scan_pid, "scanner")):
+            if _pid is None:
                 continue
-            try:
-                os.waitpid(pid, 0)
-            except ChildProcessError:
-                pass
-            except OSError:
-                pass
+            # W-REL5-B4: bounded (kill already issued above).
+            _join_helper_bounded(_pid, _name)
         if memfd is not None:
             try:
                 os.close(memfd)
@@ -3325,9 +3344,10 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
         # reaps here instead of stranding workers in claim). A
         # failed scan aborts the workers and fails the run (the
         # synchronous fr_py_scan contract, preserved).
-        try:
-            _, scan_st = os.waitpid(scan_pid, 0)
-        except ChildProcessError:
+        # W-REL5-B4: bounded (None ⇒ reaped elsewhere, read as
+        # clean like the old ChildProcessError branch).
+        scan_st = _join_helper_bounded(scan_pid, "scanner")
+        if scan_st is None:
             scan_st = 0
         scan_pid = None
         if not (os.WIFEXITED(scan_st) and
@@ -3337,10 +3357,9 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             except Exception:
                 pass
             for pid in pids:
-                try:
-                    os.waitpid(pid, 0)
-                except Exception:
-                    pass
+                # W-REL5-B4: bounded post-abort reap.
+                _join_helper_bounded(pid, "worker",
+                                     WORKER_REAP_TIMEOUT)
             raise RuntimeError(
                 "forkrun: scan failed (status %r)" % (scan_st,))
         try:
@@ -3351,10 +3370,9 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
         except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
             for pid in pids:
-                try:
-                    os.waitpid(pid, 0)
-                except Exception:
-                    pass
+                # W-REL5-B4: bounded post-abort reap.
+                _join_helper_bounded(pid, "worker",
+                                     WORKER_REAP_TIMEOUT)
             raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
         finally:
             pass
@@ -3365,9 +3383,10 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             # failed path below this still runs first: results are
             # moot but the child must be reaped. A drain failure
             # there is secondary — the worker error below wins.)
-            try:
-                _, _dst = os.waitpid(drain_pid, 0)
-            except ChildProcessError:
+            # W-REL5-B4: bounded (None ⇒ reaped elsewhere, same
+            # leniency as the old ChildProcessError branch).
+            _dst = _join_helper_bounded(drain_pid, "drain")
+            if _dst is None:
                 _dst = 0
             drain_pid = None
             if not failed and _dst != 0 and not (
@@ -3405,12 +3424,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                 pass
             except OSError:
                 pass
-            try:
-                os.waitpid(scan_pid, 0)
-            except ChildProcessError:
-                pass
-            except OSError:
-                pass
+            # W-REL5-B4: bounded (kill already issued above).
+            _join_helper_bounded(scan_pid, "scanner")
         if drain_pid is not None:
             # Stray drain (exception path): SIGKILL + reap so no
             # zombie pins the pid and no child outlives the run.
@@ -3425,12 +3440,8 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                 pass
             except OSError:
                 pass
-            try:
-                os.waitpid(drain_pid, 0)
-            except ChildProcessError:
-                pass
-            except OSError:
-                pass
+            # W-REL5-B4: bounded (kill already issued above).
+            _join_helper_bounded(drain_pid, "drain")
         if results_fd is not None:
             try:
                 os.close(results_fd)
@@ -3627,12 +3638,8 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
         except OSError:
             pass
     for pid in live:
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
-        except OSError:
-            pass
+        # W-REL5-B4: bounded (kill already issued above).
+        _join_helper_bounded(pid, "worker")
     for pid in list(extra_pids) + ([orderer_pid]
                                    if orderer_pid is not None else []) + (
                                        [drain_pid]
@@ -3650,18 +3657,14 @@ def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
             pass
         except OSError:
             pass
-    for pid in list(extra_pids) + ([orderer_pid]
-                                   if orderer_pid is not None else []) + (
-                                       [drain_pid]
-                                       if drain_pid is not None else []):
-        if pid is None:
-            continue
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
-        except OSError:
-            pass
+    for _pid, _name in (
+            [(_p, "helper") for _p in extra_pids if _p is not None]
+            + ([(orderer_pid, "orderer")]
+               if orderer_pid is not None else [])
+            + ([(drain_pid, "drain")] if drain_pid is not None
+               else [])):
+        # W-REL5-B4: bounded (kill already issued above).
+        _join_helper_bounded(_pid, _name)
     for fd in list(out_fds):
         try:
             os.close(fd)
@@ -3977,10 +3980,9 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             except ChildProcessError:
                 wpid, scan_st = scan_pid, None
             if wpid == 0:
-                try:
-                    _, scan_st = os.waitpid(scan_pid, 0)
-                except ChildProcessError:
-                    scan_st = None
+                # W-REL5-B4: bounded (reaped-elsewhere None keeps
+                # the proof-based leniency below).
+                scan_st = _join_helper_bounded(scan_pid, "scanner")
             # Reaped (or already reaped): clear so teardown never
             # signals a recycled pid.
             scan_pid = None
@@ -4005,9 +4007,11 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                 signal_w = None
                 state.ctx["signal_w"] = -1
             if drain_pid is not None:
-                try:
-                    _, _dst = os.waitpid(drain_pid, 0)
-                except ChildProcessError:
+                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
+                # same leniency as the old ChildProcessError
+                # branch).
+                _dst = _join_helper_bounded(drain_pid, "drain")
+                if _dst is None:
                     _dst = 0
                 drain_status = _dst
                 drain_pid = None
@@ -4029,9 +4033,12 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                 order_w = None
                 state.ctx["order_w"] = -1
             if orderer_pid is not None:
-                try:
-                    _, _ost = os.waitpid(orderer_pid, 0)
-                except ChildProcessError:
+                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
+                # same leniency as the old ChildProcessError
+                # branch).
+                _ost = _join_helper_bounded(
+                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
+                if _ost is None:
                     _ost = 0
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
@@ -4519,10 +4526,9 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             except ChildProcessError:
                 wpid, scan_st = scan_pid, None
             if wpid == 0:
-                try:
-                    _, scan_st = os.waitpid(scan_pid, 0)
-                except ChildProcessError:
-                    scan_st = None
+                # W-REL5-B4: bounded (reaped-elsewhere None keeps
+                # the proof-based leniency below).
+                scan_st = _join_helper_bounded(scan_pid, "scanner")
             # Reaped (or already reaped): clear so teardown never
             # signals a recycled pid.
             scan_pid = None
@@ -4541,14 +4547,10 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             # Workers are gone and the results pipe hit EOF, so the
             # drain has exited — join it for its rc (worker error
             # above already raised; teardown covers that path).
+            # W-REL5-B4: bounded.
             if drain_st["alive"]:
-                try:
-                    _, _dst = os.waitpid(drain_pid, 0)
-                except ChildProcessError:
-                    pass
-                except OSError:
-                    pass
-                else:
+                _dst = _join_helper_bounded(drain_pid, "drain")
+                if _dst is not None:
                     drain_st["alive"] = False
                     drain_st["status"] = _dst
             drain_status = drain_st["status"]
@@ -4567,9 +4569,12 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                     pass
                 order_w = None
             if orderer_pid is not None:
-                try:
-                    _, _ost = os.waitpid(orderer_pid, 0)
-                except ChildProcessError:
+                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
+                # same leniency as the old ChildProcessError
+                # branch).
+                _ost = _join_helper_bounded(
+                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
+                if _ost is None:
                     _ost = 0
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
@@ -5017,6 +5022,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             # Same for the drain's signal EOF: drop the signal spare,
             # then join the drain for its rc (worker error above
             # already raised — teardown covers that path).
+            # W-REL5-B4: bounded (None ⇒ reaped elsewhere, same
+            # leniency as the old ChildProcessError branch).
             if signal_w is not None:
                 try:
                     os.close(signal_w)
@@ -5024,9 +5031,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                     pass
                 signal_w = None
                 state.ctx["signal_w"] = -1
-            try:
-                _, _dst = os.waitpid(drain_pid, 0)
-            except ChildProcessError:
+            _dst = _join_helper_bounded(drain_pid, "drain")
+            if _dst is None:
                 _dst = 0
             drain_pid = None
             if _dst != 0 and not (
@@ -5041,9 +5047,12 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                     pass
                 order_w = None
             if orderer_pid is not None:
-                try:
-                    _, _ost = os.waitpid(orderer_pid, 0)
-                except ChildProcessError:
+                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
+                # same leniency as the old ChildProcessError
+                # branch).
+                _ost = _join_helper_bounded(
+                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
+                if _ost is None:
                     _ost = 0
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
@@ -5059,11 +5068,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
         if helpers["scan_kind"] is None:
             # Never observed via the death pipe (already reaped by
             # teardown after healthy workers, or still alive):
-            # blocking join proves a clean finish.
-            try:
-                _, scan_st = os.waitpid(scan_pid, 0)
-            except ChildProcessError:
-                scan_st = None
+            # bounded join proves a clean finish (W-REL5-B4).
+            scan_st = _join_helper_bounded(scan_pid, "scanner")
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
@@ -5071,10 +5077,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                     "forkrun: ingest scanner failed (status %r)"
                     % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
-            try:
-                _, fallow_st = os.waitpid(fallow_pid, 0)
-            except ChildProcessError:
-                fallow_st = None
+            # W-REL5-B4: bounded (WARN-lenient below covers None).
+            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
             if fallow_st is not None and not (
                     os.WIFEXITED(fallow_st) and
                     os.WEXITSTATUS(fallow_st) == 0):
@@ -5670,14 +5674,10 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
         if use_drain and cdrain["pid"] is not None:
             # Results EOF ⇒ the drain exited — join it for its rc
             # (worker error above already raised; teardown covers).
+            # W-REL5-B4: bounded.
             if cdrain["alive"]:
-                try:
-                    _, _dst = os.waitpid(cdrain["pid"], 0)
-                except ChildProcessError:
-                    pass
-                except OSError:
-                    pass
-                else:
+                _dst = _join_helper_bounded(cdrain["pid"], "drain")
+                if _dst is not None:
                     cdrain["alive"] = False
                     cdrain["status"] = _dst
             cdrain_status = cdrain["status"]
@@ -5706,9 +5706,12 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     pass
                 order_w = None
             if orderer_pid is not None:
-                try:
-                    _, _ost = os.waitpid(orderer_pid, 0)
-                except ChildProcessError:
+                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
+                # same leniency as the old ChildProcessError
+                # branch).
+                _ost = _join_helper_bounded(
+                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
+                if _ost is None:
                     _ost = 0
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
@@ -5721,10 +5724,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                 "forkrun: ingest scanner failed (status %r)"
                 % (helpers["scan_code"],))
         if helpers["scan_kind"] is None:
-            try:
-                _, scan_st = os.waitpid(scan_pid, 0)
-            except ChildProcessError:
-                scan_st = None
+            # W-REL5-B4: bounded (None keeps the leniency below).
+            scan_st = _join_helper_bounded(scan_pid, "scanner")
             if scan_st is not None and not (
                     os.WIFEXITED(scan_st) and
                     os.WEXITSTATUS(scan_st) == 0):
@@ -5732,10 +5733,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     "forkrun: ingest scanner failed (status %r)"
                     % (scan_st,))
         if fallow_pid is not None and helpers["fallow_rc"] is None:
-            try:
-                _, fallow_st = os.waitpid(fallow_pid, 0)
-            except ChildProcessError:
-                fallow_st = None
+            # W-REL5-B4: bounded (WARN-lenient below covers None).
+            fallow_st = _join_helper_bounded(fallow_pid, "fallow")
             if fallow_st is not None and not (
                     os.WIFEXITED(fallow_st) and
                     os.WEXITSTATUS(fallow_st) == 0):
@@ -6550,7 +6549,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         if use_drain and drain_pid is not None:
             # Drop the signal spare so the drain observes EOF, then
             # join it for its rc (worker error above already raised;
-            # teardown covers that path).
+            # teardown covers that path). W-REL5-B4: bounded.
             if signal_w is not None:
                 try:
                     os.close(signal_w)
@@ -6558,9 +6557,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                     pass
                 signal_w = None
                 state.ctx["signal_w"] = -1
-            try:
-                _, _dst = os.waitpid(drain_pid, 0)
-            except ChildProcessError:
+            _dst = _join_helper_bounded(drain_pid, "drain")
+            if _dst is None:
                 _dst = 0
             drain_pid = None
             if _dst != 0 and not (
@@ -6575,9 +6573,10 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                     pass
                 order_w = None
             if orderer_pid is not None:
-                try:
-                    _, _ost = os.waitpid(orderer_pid, 0)
-                except ChildProcessError:
+                # W-REL5-B4: bounded.
+                _ost = _join_helper_bounded(
+                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
+                if _ost is None:
                     _ost = 0
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
@@ -6589,15 +6588,14 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
         # Helper joins: ingest strict-clean; indexers/scanners
         # strict unless already observed (proof-based leniency only
         # when teardown already reaped them — same rule as UMA).
+        # All bounded (W-REL5-B4); None keeps the leniency below.
         if helpers["ingest_kind"] == "error":
             raise RuntimeError(
                 "forkrun: NUMA ingest failed (status %r)"
                 % (helpers["ingest_code"],))
         if helpers["ingest_kind"] is None:
-            try:
-                _, _st = os.waitpid(pipe["ingest_pid"], 0)
-            except ChildProcessError:
-                _st = None
+            _st = _join_helper_bounded(pipe["ingest_pid"],
+                                       "numa-ingest")
             if _st is not None and not (
                     os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
                 raise RuntimeError(
@@ -6618,10 +6616,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                             "forkrun: NUMA %s %d failed (status %r)"
                             % (key, node, code))
                     continue
-                try:
-                    _, _st = os.waitpid(pids[node], 0)
-                except ChildProcessError:
-                    _st = None
+                _st = _join_helper_bounded(
+                    pids[node], "numa-%s-%d" % (key, node))
                 if _st is not None and not (
                         os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
                     # Fresh death at join time: same D6 rule — an
@@ -6638,10 +6634,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                         "forkrun: NUMA %s %d failed (status %r)"
                         % (key, node, _st))
         if helpers["fallow_rc"] is None:
-            try:
-                _, _fst = os.waitpid(pipe["fallow_pid"], 0)
-            except ChildProcessError:
-                _fst = None
+            _fst = _join_helper_bounded(pipe["fallow_pid"],
+                                        "numa-fallow")
             if _fst is not None and not (
                     os.WIFEXITED(_fst) and os.WEXITSTATUS(_fst) == 0):
                 try:
@@ -7185,14 +7179,10 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
         if use_drain and cdrain_n["pid"] is not None:
             # Results EOF ⇒ the drain exited — join it for its rc
             # (worker error above already raised; teardown covers).
+            # W-REL5-B4: bounded.
             if cdrain_n["alive"]:
-                try:
-                    _, _dst = os.waitpid(cdrain_n["pid"], 0)
-                except ChildProcessError:
-                    pass
-                except OSError:
-                    pass
-                else:
+                _dst = _join_helper_bounded(cdrain_n["pid"], "drain")
+                if _dst is not None:
                     cdrain_n["alive"] = False
                     cdrain_n["status"] = _dst
             if cdrain_n["status"] is not None and cdrain_n["status"] != 0 \
@@ -7218,9 +7208,12 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                     pass
                 order_w = None
             if orderer_pid is not None:
-                try:
-                    _, _ost = os.waitpid(orderer_pid, 0)
-                except ChildProcessError:
+                # W-REL5-B4: bounded (None ⇒ reaped elsewhere,
+                # same leniency as the old ChildProcessError
+                # branch).
+                _ost = _join_helper_bounded(
+                    orderer_pid, "orderer", ORDERER_REAP_TIMEOUT)
+                if _ost is None:
                     _ost = 0
                 if _ost != 0 and not (
                         os.WIFEXITED(_ost) and
@@ -7233,10 +7226,9 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                 "forkrun: NUMA ingest failed (status %r)"
                 % (helpers["ingest_code"],))
         if helpers["ingest_kind"] is None:
-            try:
-                _, _st = os.waitpid(pipe["ingest_pid"], 0)
-            except ChildProcessError:
-                _st = None
+            # W-REL5-B4: bounded (None keeps the leniency below).
+            _st = _join_helper_bounded(pipe["ingest_pid"],
+                                       "numa-ingest")
             if _st is not None and not (
                     os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
                 raise RuntimeError(
@@ -7257,10 +7249,10 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                             "forkrun: NUMA %s %d failed (status %r)"
                             % (key, node, code))
                     continue
-                try:
-                    _, _st = os.waitpid(pids[node], 0)
-                except ChildProcessError:
-                    _st = None
+                # W-REL5-B4: bounded (None keeps the leniency
+                # below).
+                _st = _join_helper_bounded(
+                    pids[node], "numa-%s-%d" % (key, node))
                 if _st is not None and not (
                         os.WIFEXITED(_st) and os.WEXITSTATUS(_st) == 0):
                     # Fresh death at join time: same D6 rule — an
@@ -7277,10 +7269,9 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                         "forkrun: NUMA %s %d failed (status %r)"
                         % (key, node, _st))
         if helpers["fallow_rc"] is None:
-            try:
-                _, _fst = os.waitpid(pipe["fallow_pid"], 0)
-            except ChildProcessError:
-                _fst = None
+            # W-REL5-B4: bounded (WARN-lenient below covers None).
+            _fst = _join_helper_bounded(pipe["fallow_pid"],
+                                        "numa-fallow")
             if _fst is not None and not (
                     os.WIFEXITED(_fst) and os.WEXITSTATUS(_fst) == 0):
                 try:
