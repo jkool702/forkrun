@@ -2485,7 +2485,11 @@ _forkrun_base64_to_file() {
     # determine if we are outputting to stout or to a file
     exec {fd0}<&0
     if (( $# > 0 )); then
-        [[ -f "$1" ]] && \rm -f "$1" &>/dev/null
+        # W-BASHCOMPAT-BC2: rm failure must not kill -e shells. On a
+        # live memfd target (/proc/self/fd/N) rm dies EPERM with rc=1
+        # as the FINAL command — non-exempt under errexit. The `:`
+        # truncate below owns freshness, so a failed rm is benign.
+        [[ -f "$1" ]] && { \rm -f "$1" &>/dev/null || true; }
         outFile="$1"
         : >"${outFile}"
     else
@@ -2502,7 +2506,11 @@ _forkrun_base64_to_file() {
         read -r -d $'\036' -u "${fd0}" out
         if [[ -z ${out} ]]; then
             # second char of data section was $'\036' --> payload was gzip compressed
-            read -r -d $'' -u "${fd0}" out
+            # W-BASHCOMPAT-BC2: EOF-with-data is the NORMAL terminator
+            # here (the shipped payload carries no trailing NUL), so a
+            # bare `read` returns 1 on valid input and -e shells die.
+            # Succeed when bytes arrived; stay fail-closed on empty.
+            read -r -d $'' -u "${fd0}" out || [[ -n ${out} ]]
             noCompressFlag=false
         else
             noCompressFlag=true
@@ -2787,7 +2795,10 @@ while True: time.sleep(60)'
         # W-REL5-A2: shell-local only, never exported. Child processes
         # must not inherit a stale fd number via the environment.
         FORKRUN_MEMFD_LOADABLES_BASE64="${FORKRUN_MEMFD_LOADABLES_BASE64}"
-        declare -p b64 >&${FORKRUN_MEMFD_LOADABLES_BASE64}
+        # W-BASHCOMPAT-BC1: chunked emission (a single `declare -p`
+        # line is the 0.9MB death the recovery source below would
+        # evaluate on old bash).
+        _forkrun_b64_emit_chunked >&${FORKRUN_MEMFD_LOADABLES_BASE64}
         ring_seal "${FORKRUN_MEMFD_LOADABLES_BASE64}"
         need_memfd_b64_flag=false
     fi
@@ -2826,6 +2837,33 @@ while True: time.sleep(60)'
     return 0
 }
 
+
+
+_forkrun_b64_emit_chunked() {
+    # Emit b64[] as line-bounded chunked appends (W-BASHCOMPAT-BC1).
+    # A single 0.9MB `declare` dies on older bash before enable -f
+    # ever runs; no line here approaches that size (32KiB pieces,
+    # %q-quoted to single lines each). Keys sorted for byte-stable
+    # output. MUST stay in sync with the inline copies in
+    # ring_loadables/update_frun_base64.bash and
+    # ring_loadables/local_compile/compile.new.bash (same
+    # algorithm). Caller redirects stdout (a file splice or the
+    # base64-backup memfd write).
+    local _bck _bcv
+    printf 'declare -A b64=()\n'
+    while IFS= read -r _bck; do
+        [[ -n ${_bck} ]] || continue
+        _bcv=${b64[${_bck}]}
+        if [[ -z ${_bcv} ]]; then
+            printf 'b64[%q]+=%q\n' "${_bck}" ""
+            continue
+        fi
+        while [[ -n ${_bcv} ]]; do
+            printf 'b64[%q]+=%q\n' "${_bck}" "${_bcv:0:32768}"
+            _bcv=${_bcv:32768}
+        done
+    done < <(printf '%s\n' "${!b64[@]}" | LC_ALL=C sort)
+}
 
 
 _forkrun_file_to_base64() {
