@@ -502,12 +502,18 @@ EOF
                         esac
                     done < "$_proc_rf"
 
-                    if [[ -z "${FORKRUN_RESUME_HORIZON:-}" ]]; then
-                        echo "forkrun [ERROR]: Invalid or corrupt resume file '$resume_file' (missing stream coordinates)." >&2
-                        exec {_rf_fd}<&-
-                        NORMAL_EXIT_FLAG=true
-                        return 1
-                    fi
+                    # W-REL5-A8: fail closed on ANY missing required
+                    # key, naming it. A missing STDOUT_BYTES used to
+                    # pass empty and resume as truncate-to-zero.
+                    local _req_key
+                    for _req_key in FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES; do
+                        if [[ -z "${!_req_key:-}" ]]; then
+                            echo "forkrun [ERROR]: Invalid or corrupt resume file '$resume_file' (missing required key ${_req_key})." >&2
+                            exec {_rf_fd}<&-
+                            NORMAL_EXIT_FLAG=true
+                            return 1
+                        fi
+                    done
 
                     resume_flag=true
 
@@ -1319,10 +1325,26 @@ toc() { :; }
     : "${FORKRUN_NUM_NODES:=1}" # Fallback safety
 
     # Create Data Memfd
-    ring_memfd_create ingress_memfd 1
+    # W-REL5-A6: an unchecked failure here used to surface as a bare
+    # redirection error before the EXIT trap installed, with no
+    # checkpoint, no cleanup and no diagnostic. Fail loudly instead.
+    ring_memfd_create ingress_memfd 1 || {
+        echo "forkrun [FATAL]: ring_memfd_create failed for the ingress memfd (fd exhaustion? check RLIMIT_NOFILE via ulimit -n, currently $(ulimit -n); memfd denials also appear in dmesg)." >&2
+        NORMAL_EXIT_FLAG=true
+        return 1
+    }
 
     # NEW: Apply Checkpoint if Resuming
-     ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "$FORKRUN_RESUME_STDOUT_BYTES" "${FORKRUN_RESUME_JAGGED[@]}"
+    # W-REL5-A6: ring_set_resume failure used to fall through silently
+    # and run on uninitialized resume state. Fail loudly instead.
+    # Braced so a false resume_flag cannot trip the OR branch.
+     ${resume_flag} && {
+         ring_set_resume "$FORKRUN_RESUME_HORIZON" "$FORKRUN_RESUME_STDOUT_BYTES" "${FORKRUN_RESUME_JAGGED[@]}" || {
+             echo "forkrun [FATAL]: ring_set_resume failed (horizon ${FORKRUN_RESUME_HORIZON:-unset}, stdout_bytes ${FORKRUN_RESUME_STDOUT_BYTES:-unset}); refusing to run on uninitialized resume state." >&2
+             NORMAL_EXIT_FLAG=true
+             return 1
+         }
+     }
 
     # # # # # MAIN # # # # #
     {
@@ -2347,7 +2369,7 @@ _forkrun_get_arch() {
         ARCH="$ARCH0"
         ;;
     *)
-        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: x86_64 aarch64 armv7 riscv64 s390x ppc64le\n\n' >&2
+        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: x86_64 aarch64 riscv64 s390x ppc64le\n\n' >&2
         return 1
         ;;
     esac
@@ -2560,8 +2582,12 @@ _forkrun_base64_to_file() {
     # check for the memfd_create loadable
     enable | sed -zE 's/\n/ /g' | grep -qE '(ring_((memfd_create)|(seal)|(list)) .*){3}' || need_memfd_create_flag=true
 
-    # set ARCH
-    _forkrun_get_arch "$1"
+    # set ARCH. W-REL5-A7: propagate the failure. An unsupported
+    # arch used to print INVALID ARCH and then fall through into
+    # b64 lookups with ARCH unset, producing a cascade of bad array
+    # subscript errors plus a meaningless temp-dir error. Now the
+    # arch message is the only output.
+    _forkrun_get_arch "$1" || return 1
 
     # if we need the b64 get it from the memfd
     ${need_b64_flag} && {
