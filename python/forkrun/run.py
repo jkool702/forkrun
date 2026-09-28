@@ -206,13 +206,10 @@ def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
 
     lib = _get()
     if mode == "memfd":
-        try:
-            results_fd = os.memfd_create("forkrun_results")
-        except AttributeError:
-            import tempfile as _tf
-            _tmp = _tf.TemporaryFile(prefix="forkrun_results_")
-            _fork_drain._tmp_hold.append(_tmp)
-            results_fd = _tmp.fileno()
+        # W-REL5-E7: no tempfile fallback (os.memfd_create exists on
+        # all supported Pythons, floor 3.10 — the AttributeError arm
+        # could never fire).
+        results_fd = os.memfd_create("forkrun_results")
         results_r = None
     else:
         results_r, results_w, _ = make_pipe()
@@ -252,9 +249,6 @@ def _fork_drain(signal_r, out_fds, workers, mode="memfd"):
             pass
         return pid, results_r
     return pid, results_fd
-
-
-_fork_drain._tmp_hold = []
 
 
 def _validate_orchestrator(orchestrator):
@@ -451,16 +445,9 @@ def _spill_to_memfd(src_fd) -> tuple[int, int]:
     userspace pread/pwrite loop on -1 (exotic pairs) or shortfall.
     Either way the bytes are identical; only the copy count differs.
     """
-    try:
-        memfd = os.memfd_create("forkrun_ingress")
-    except AttributeError:
-        # Fallback for old Pythons: tmpfs-backed anonymous file.
-        import tempfile as _tf
-
-        tmp = _tf.TemporaryFile(prefix="forkrun_ingress_")
-        memfd = tmp.fileno()
-        # Keep tmp alive via the fd only is unsafe (GC closes it); stash.
-        _spill_to_memfd._tmp_hold.append(tmp)
+    # W-REL5-E7: no tempfile fallback (os.memfd_create exists on all
+    # supported Pythons, floor 3.10).
+    memfd = os.memfd_create("forkrun_ingress")
     size = 0
     lib = None
     try:
@@ -541,9 +528,6 @@ def _spill_to_memfd(src_fd) -> tuple[int, int]:
     return memfd, size
 
 
-_spill_to_memfd._tmp_hold = []
-
-
 def _new_output_memfds(n) -> tuple[list, list]:
     """Create one output memfd per worker, PRE-FORK (W-PY3 correction).
 
@@ -551,30 +535,15 @@ def _new_output_memfds(n) -> tuple[list, list]:
     table — the parent could never read it. So the parent creates all N
     here; children inherit them across fork and write their own slice
     (worker i writes fd i only — never shared between workers). The
-    parent preads them after waitpid. Falls back to anonymous temp files
-    where os.memfd_create is unavailable.
-    Returns (fds, hold) where hold keeps fallback files alive.
+    parent preads them after waitpid.
+    Returns (fds, hold) where hold is always empty (kept so callers
+    unpack two values; W-REL5-E7 removed the tempfile fallback).
     """
     fds: list = []
     hold: list = []
-    try:
-        for i in range(n):
-            fds.append(os.memfd_create("forkrun_out%d" % i))
-        return fds, hold
-    except AttributeError:
-        for fd in fds:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-        fds = []
-        import tempfile as _tf
-
-        for _ in range(n):
-            tmp = _tf.TemporaryFile(prefix="forkrun_out_")
-            hold.append(tmp)
-            fds.append(tmp.fileno())
-        return fds, hold
+    for i in range(n):
+        fds.append(os.memfd_create("forkrun_out%d" % i))
+    return fds, hold
 
 
 def _read_fd_all(fd) -> bytes:
@@ -1882,12 +1851,6 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
     if order not in ("none", "index"):
         raise ValueError(
             "order must be 'none' or 'index', got %r" % (order,))
-    if mode not in ("python", "splice"):
-        raise NotImplementedError(
-            "v0 supports mode='python' only (spawn/plugin are Stage 5)")
-    if not (nodes == "auto" or nodes == 1):
-        raise NotImplementedError(
-            "v0 supports nodes='auto'/1 only (multi-node is Stage 5)")
     use_drain = bool(c_drain)
     if use_drain:
         _require_drain_symbol()
@@ -2355,34 +2318,6 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             state["fork_at"] = _time.monotonic()
             _fork_drain_if_needed()
 
-        def _watch_live():            # Same helper-liveness rule as the locked path (abort +
-            # raise on death / premature clean scanner exit).
-            for pid, name in ((scan_pid, "scanner"),
-                              (fallow_pid, "fallow")):
-                if pid is None:
-                    continue
-                try:
-                    wpid, st = os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    continue
-                if wpid != pid:
-                    continue
-                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
-                if name == "scanner":
-                    helpers["scan_rc"] = st
-                    if not ok or not gate["issued"]:
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: ingest scanner failed "
-                            "(status %r)" % (st,))
-                else:
-                    helpers["fallow_rc"] = st
-                    if not ok:
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: ingest reaper failed "
-                            "(status %r)" % (st,))
-
         def _maybe_fork_workers():
             # Fork-timing rule (see module constants): first DATA
             # publish, or stall timeout pre-gate (slow-source
@@ -2702,19 +2637,13 @@ def _ingest_stream_gen(payload, source, **kwargs):
 
 def _new_ingress_memfd():
     """Create the streaming-ingest memfd (parent writes, scanner + workers
-    read). Falls back to an anonymous temp file where memfd_create is
-    unavailable (same rationale as _spill_to_memfd). Returns (fd, hold)
-    where hold keeps a fallback file alive (empty for memfd).
+    read). Returns (fd, hold) where hold is always empty (W-REL5-E7
+    removed the tempfile fallback; os.memfd_create exists on all
+    supported Pythons, floor 3.10).
 
     INVARIANTS.md §20: this fd's file offset is UNDEFINED — never
     read or relied upon (explicit offsets / mmap windows only)."""
-    try:
-        return os.memfd_create("forkrun_ingress"), []
-    except AttributeError:
-        import tempfile as _tf
-
-        tmp = _tf.TemporaryFile(prefix="forkrun_ingress_")
-        return tmp.fileno(), [tmp]
+    return os.memfd_create("forkrun_ingress"), []
 
 
 def _execute_ingest(payload, source, *, sink, lines, bytes_, workers,
@@ -3921,13 +3850,8 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                              ORDER_PIPE_SIZE)
             except OSError:
                 pass
-            try:
-                coll_fd = os.memfd_create("forkrun_ordered")
-            except AttributeError:
-                import tempfile as _tf
-                _tmp = _tf.TemporaryFile(prefix="forkrun_ordered_")
-                coll_hold.append(_tmp)
-                coll_fd = _tmp.fileno()
+            # W-REL5-E7: no tempfile fallback (floor 3.10).
+            coll_fd = os.memfd_create("forkrun_ordered")
             orderer_pid = spawn_orderer(order_r, coll_fd,
                                         engine_fds=engine_fds,
                                         out_fds=out_fds)
@@ -4261,13 +4185,8 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                              ORDER_PIPE_SIZE)
             except OSError:
                 pass
-            try:
-                coll_fd = os.memfd_create("forkrun_ordered")
-            except AttributeError:
-                import tempfile as _tf
-                _tmp = _tf.TemporaryFile(prefix="forkrun_ordered_")
-                coll_hold.append(_tmp)
-                coll_fd = _tmp.fileno()
+            # W-REL5-E7: no tempfile fallback (floor 3.10).
+            coll_fd = os.memfd_create("forkrun_ordered")
             orderer_pid = spawn_orderer(order_r, coll_fd,
                                         engine_fds=engine_fds,
                                         out_fds=out_fds)
@@ -4767,13 +4686,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                              ORDER_PIPE_SIZE)
             except OSError:
                 pass
-            try:
-                coll_fd = os.memfd_create("forkrun_ordered")
-            except AttributeError:
-                import tempfile as _tf
-                _tmp = _tf.TemporaryFile(prefix="forkrun_ordered_")
-                coll_hold.append(_tmp)
-                coll_fd = _tmp.fileno()
+            # W-REL5-E7: no tempfile fallback (floor 3.10).
+            coll_fd = os.memfd_create("forkrun_ordered")
             orderer_pid = spawn_orderer(order_r, coll_fd,
                                         engine_fds=engine_fds,
                                         out_fds=out_fds)
@@ -5310,13 +5224,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                              ORDER_PIPE_SIZE)
             except OSError:
                 pass
-            try:
-                coll_fd = os.memfd_create("forkrun_ordered")
-            except AttributeError:
-                import tempfile as _tf
-                _tmp = _tf.TemporaryFile(prefix="forkrun_ordered_")
-                coll_hold.append(_tmp)
-                coll_fd = _tmp.fileno()
+            # W-REL5-E7: no tempfile fallback (floor 3.10).
+            coll_fd = os.memfd_create("forkrun_ordered")
             orderer_pid = spawn_orderer(order_r, coll_fd,
                                         engine_fds=engine_fds,
                                         out_fds=out_fds)
@@ -6393,13 +6302,8 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                              ORDER_PIPE_SIZE)
             except OSError:
                 pass
-            try:
-                coll_fd = os.memfd_create("forkrun_ordered")
-            except AttributeError:
-                import tempfile as _tf
-                _tmp = _tf.TemporaryFile(prefix="forkrun_ordered_")
-                coll_hold.append(_tmp)
-                coll_fd = _tmp.fileno()
+            # W-REL5-E7: no tempfile fallback (floor 3.10).
+            coll_fd = os.memfd_create("forkrun_ordered")
             orderer_pid = spawn_orderer(order_r, coll_fd,
                                         unordered=False, numa=True,
                                         engine_fds=engine_fds,
@@ -6422,9 +6326,10 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                 pass
             must_close = False
 
-        from ._numa import wid_to_node
         # wid → node blocks (stable for the run: respawns reuse the
         # wid, hence the same memfd and the same claim ring).
+        # (W-REL5-E7: the duplicate function-level import that was
+        # here is gone — the top-of-function import above binds it.)
         wid_node = wid_to_node(workers, num_nodes)
 
         state = ReactorState(workers, num_nodes=num_nodes,
@@ -6874,13 +6779,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                              ORDER_PIPE_SIZE)
             except OSError:
                 pass
-            try:
-                coll_fd = os.memfd_create("forkrun_ordered")
-            except AttributeError:
-                import tempfile as _tf
-                _tmp = _tf.TemporaryFile(prefix="forkrun_ordered_")
-                coll_hold.append(_tmp)
-                coll_fd = _tmp.fileno()
+            # W-REL5-E7: no tempfile fallback (floor 3.10).
+            coll_fd = os.memfd_create("forkrun_ordered")
             orderer_pid = spawn_orderer(order_r, coll_fd,
                                         unordered=False, numa=True,
                                         engine_fds=engine_fds,
