@@ -104,6 +104,8 @@ jobs:
                if [ ! -f /usr/include/bash/config.h ]; then
                  echo "ERROR: bash-devel headers incomplete (/usr/include/bash/config.h missing); cannot build loadable" >&2
                  exit 1
+               else
+                 echo "config.h found at /usr/include/bash/config.h" >&2
                fi
 
               # 2. Extract Version from META
