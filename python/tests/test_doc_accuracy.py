@@ -147,6 +147,18 @@ DOC_CLAIMS = [
         "assertion_summary": "loader binds the int(*)(ctx*) signature; "
                              "layout pins the 72B v0 struct both sides",
     },
+    {
+        "claim": "In-worker sink= is at-least-once: engine output "
+                 "exactly-once, sink side effects may re-run",
+        "doc_source": "python/docs/API.md",
+        "key_phrase": "at-least-once",
+        "covering_tests": [
+            "test_fault.TestWorkerSegfault."
+            "test_mixed_segfault_recovers_byte_exact",
+        ],
+        "assertion_summary": "sink delivers payload-side under the "
+                             "worker-death recovery path",
+    },
 ]
 
 
@@ -231,6 +243,9 @@ class TestDocAccuracy(unittest.TestCase):
 
     def test_claim_plugin_conventions(self):
         self.assertEqual(_check_entry(DOC_CLAIMS[9]), [])
+
+    def test_claim_sink_at_least_once(self):
+        self.assertEqual(_check_entry(DOC_CLAIMS[10]), [])
 
 
 if __name__ == "__main__":

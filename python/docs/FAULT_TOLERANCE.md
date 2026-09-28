@@ -21,9 +21,11 @@ cache-local stores per batch).
 
 ## What is NOT covered
 
-- **Realtime output** (workers writing stdout directly):
-  at-least-once — a crash can duplicate. Use the default
-  collected paths for exactly-once delivery.
+- **In-worker `sink=` side effects** (the Python realtime
+  path): at-least-once — the sink runs before commit, so a
+  crash between sink and ack re-runs it. Use the default
+  collected paths for exactly-once delivery, and keep sinks
+  idempotent.
 - **Ambiguous-window deaths** (dying mid-claim or mid-ack):
   the ticket can't be attributed safely, so the run aborts
   loudly instead of risking loss/duplication — then you

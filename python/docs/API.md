@@ -18,6 +18,10 @@ forkrun.run("./plug.so:fn", "data.txt", mode="plugin")  # C callback
 
 Returns `None`. See [MODES.md](MODES.md) for the `mode` variants.
 
+`sink` runs in the worker before commit, so it is at-least-once:
+engine output stays exactly-once, but a death between sink and
+ack re-runs your side effects — keep sinks idempotent.
+
 ## forkrun.map(payload, source, **kwargs)
 
 Same as `run()`, but collects and returns every result.
