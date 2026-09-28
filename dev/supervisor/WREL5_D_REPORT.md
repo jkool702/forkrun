@@ -114,8 +114,10 @@ export — D-SEGFIX call sites), `frun.nob64.bash` twin (regenerated),
 - Referee gates: executor-consistency + invariant-gate +
   doc-accuracy + shim-ABI **30/30 green** (final tree); checker
   (in-suite), canary + canary-versions + IDL green.
-- `release_check.py` 17/17: PENDING (runs after this report
-  commits — the tree-clean gate needs it committed).
+- `release_check.py` **17/17 ALL CHECKS PASSED** (incl. a 4th
+  full-suite green, wheel-embedded `.so` v3.6.0, tree-clean,
+  engine-frozen — the tree-clean gate required this report
+  committed first).
 - Twins lockstep: nob64 regenerated (43 code lines, 0 b64);
   CHANGELOG/DOCS_ALL mirror appended (twins check in gate).
 - Sanitizers: DEFERRED to the very end per owner (not this wave).
