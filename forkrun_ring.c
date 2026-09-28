@@ -6919,10 +6919,16 @@ struct HeapNode {
 static void heap_push(struct HeapNode **heap_ptr, int *sz, int *cap,
                       uint64_t key, struct OrderPacket pkt) {
   if (*sz >= *cap) {
-    int new_cap = (*cap) * 2;
+    /* W-REL5-D (D7): size_t doubling with overflow guard. `int`
+     * new_cap = *cap * 2 is UB past 2^30 and a wrapped negative cap
+     * reallocs small (heap overflow). The ceiling keeps new_cap *
+     * sizeof bounded; breach pulls the alarm like the OOM path. */
+    size_t new_cap = (size_t)(*cap) * 2;
+    if (new_cap < 64) new_cap = 64;
+    if (new_cap > (size_t)INT_MAX / sizeof(struct HeapNode)) { pull_fire_alarm(); return; }
     void *new_ptr = realloc(*heap_ptr, new_cap * sizeof(struct HeapNode));
     if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
-    *cap = new_cap;
+    *cap = (int)new_cap;
     *heap_ptr = new_ptr;
   }
   struct HeapNode *heap = *heap_ptr;
@@ -7064,10 +7070,13 @@ static int ring_copy_chunk(int fd_in, int fd_out, off_t off, size_t len) {
 
 static inline void interval_heap_push(struct IntervalNode **heap_ptr, int *sz, int *cap, uint64_t s, uint64_t e) {
     if (*sz >= *cap) {
-        int new_cap = (*cap) * 2;
+        /* W-REL5-D (D7): same size_t + overflow guard as heap_push. */
+        size_t new_cap = (size_t)(*cap) * 2;
+        if (new_cap < 64) new_cap = 64;
+        if (new_cap > (size_t)INT_MAX / sizeof(struct IntervalNode)) { pull_fire_alarm(); return; }
         void *new_ptr = realloc(*heap_ptr, new_cap * sizeof(struct IntervalNode));
         if (!new_ptr) { pull_fire_alarm(); return; } // Drop on OOM to prevent segfault
-        *cap = new_cap;
+        *cap = (int)new_cap;
         *heap_ptr = new_ptr;
     }
     struct IntervalNode *heap = *heap_ptr;
@@ -9799,7 +9808,11 @@ static int ring_tui_main(int argc, char **argv) {
         uint64_t active_bytes  = read_offset - fallowed;
         uint64_t waiting_bytes = ingest_off - read_offset; // ingested but not yet consumed
 
-        char b_f[16], b_a[16], b_w[16];
+        /* W-REL5-D (D6): format_bytes hardcodes a 32-byte snprintf
+         * bound -- these holders must be 32, not 16 (a %.0f B render of
+         * a huge double exceeds 16). Not currently reachable with huge
+         * values, but a stack-smash landmine all the same. */
+        char b_f[32], b_a[32], b_w[32];
         format_bytes((double)fallowed,       b_f);
         format_bytes((double)active_bytes,   b_a);
         format_bytes((double)waiting_bytes,  b_w);
@@ -9809,7 +9822,7 @@ static int ring_tui_main(int argc, char **argv) {
         snprintf(total_label, sizeof(total_label), "%s Total", str_total);
         snprintf(str_fallowed, sizeof(str_fallowed), "%s Freed", b_f);
 
-        char b_inuse[16];
+        char b_inuse[32];
         format_bytes((double)(active_bytes + waiting_bytes), b_inuse);
         snprintf(str_in_use, sizeof(str_in_use),
                  "%s In Use (%s Act, %s Wait)", b_inuse, b_a, b_w);

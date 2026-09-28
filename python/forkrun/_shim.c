@@ -1256,6 +1256,19 @@ int fr_py_emit(int out_fd, int signal_fd, uint64_t wid, uint64_t batch_idx,
                     }
                 }
                 while (niov > 0 && iov[0].iov_len == 0) {
+                    /* W-REL5-D (D4): with niov == 1 (header-only emit)
+                     * there is no iov[1] -- copying it reads
+                     * uninitialized stack on every zero-length emit.
+                     * Mark done instead. (A bare `break` here would
+                     * leave niov == 1 with len 0, and the outer loop
+                     * would writev a zero-length iovec, observe n == 0
+                     * and wrongly return -1 for a successful b""
+                     * emit -- test_v1_emit pins the None-vs-b""
+                     * distinction.) */
+                    if (niov == 1) {
+                        niov = 0;
+                        break;
+                    }
                     iov[0] = iov[1];
                     niov--;
                 }
@@ -2299,13 +2312,19 @@ int64_t fr_py_parse_descriptors(const char *input, uint64_t input_len,
         return -1;
     if (!descriptors && max_descriptors > 0)
         return -1;
-    while (off + 16 <= input_len && count < max_descriptors) {
+    /* W-REL5-D (D5): off/data_len are framing-controlled u64s -- `off +
+     * data_len > input_len` wraps on huge data_len and skips the
+     * truncation break (bogus giant descriptor -> caller-side OOB).
+     * Subtraction form cannot wrap (off <= input_len is the loop
+     * invariant: 0 at entry, off+16+data_len <= input_len preserved). */
+    while (count < max_descriptors && off <= input_len &&
+           input_len - off >= 16) {
         uint64_t batch_idx, data_len;
 
         memcpy(&batch_idx, input + off, 8);
         memcpy(&data_len, input + off + 8, 8);
         off += 16;
-        if (off + data_len > input_len)
+        if (data_len > input_len - off)
             break; /* truncated record — stop here */
         descriptors[count].batch_idx = batch_idx;
         descriptors[count].offset = off;
