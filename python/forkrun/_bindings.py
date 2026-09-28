@@ -384,11 +384,28 @@ def get() -> ctypes.CDLL:
     return _LIB
 
 
+def _substrate_candidates():
+    """Co-located candidate paths (no CWD — W-REL5-C1, D10-class).
+
+    A CWD-planted libforkrun_python.so must never load: the substrate
+    is dlopened before any validation runs, so CWD entries are a
+    library-load hijack primitive. Explicit opt-in remains via
+    $FORKRUN_LIB (checked by find_substrate before these).
+    """
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    return [
+        os.path.join(pkg_dir, "libforkrun_python.so"),
+        os.path.join(os.path.dirname(pkg_dir), "libforkrun_python.so"),
+        os.path.join(os.path.dirname(os.path.dirname(pkg_dir)),
+                     "libforkrun_python.so"),
+    ]
+
+
 def find_substrate() -> str:
     """Locate libforkrun_python.so.
 
     Search order: $FORKRUN_LIB, the package directory (co-located build),
-    the repo root, the CWD.
+    the repo root. CWD is deliberately NOT searched (C1).
     """
     env = os.environ.get("FORKRUN_LIB")
     if env:
@@ -396,17 +413,7 @@ def find_substrate() -> str:
             raise FileNotFoundError(
                 "FORKRUN_LIB=%r does not exist" % (env,))
         return env
-    pkg_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(pkg_dir, "libforkrun_python.so"),
-        os.path.join(os.path.dirname(pkg_dir), "libforkrun_python.so"),
-        os.path.join(os.path.dirname(os.path.dirname(pkg_dir)),
-                     "libforkrun_python.so"),
-        os.path.join(os.getcwd(), "libforkrun_python.so"),
-        os.path.join(os.getcwd(), "python", "forkrun",
-                     "libforkrun_python.so"),
-    ]
-    for cand in candidates:
+    for cand in _substrate_candidates():
         if os.path.exists(cand):
             return cand
     raise FileNotFoundError(
