@@ -603,8 +603,19 @@ class TestResumeExecution(unittest.TestCase):
                              order="index", nodes=1)
         self.assertEqual(b"".join(res), b"".join(expect))
         self.assertEqual(len(res), len(expect))
-        # Sidecar consumed exactly once (no resurrection source).
-        self.assertFalse(os.path.exists(ckpt + ".coll"))
+        # W-REL5-C4 (deliver-then-unlink): the consumed sidecar is
+        # RETAINED after a successful resume — deleting it before
+        # durable delivery would lose the prefix permanently on a
+        # crash between unlink and user persistence (OOM during
+        # result assembly is the canonical trigger). A stale
+        # sidecar is re-read only on explicit re-resume from the
+        # same spent checkpoint, which still delivers byte-identical
+        # output (engine horizon skips committed bytes; the sidecar
+        # covers exactly them) — crash-safety over tidiness.
+        self.assertTrue(os.path.exists(ckpt + ".coll"))
+        re = forkrun.map(_up, path, workers=4, orchestrator=True,
+                         order="index", resume=ckpt, nodes=1)
+        self.assertEqual(b"".join(re), b"".join(expect))
 
     def test_engine_commit_exactly_once(self):
         """No input line is delivered twice across abort + resume."""
