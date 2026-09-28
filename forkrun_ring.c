@@ -2697,8 +2697,12 @@ static int ring_init_main(int argc, char **argv) {
       fd_escrow_r[n] = pfd[0];
       fd_escrow_w[n] = pfd[1];
     } else {
-      fd_escrow_r[n] = -1;
-      fd_escrow_w[n] = -1;
+      /* W-REL5-D (D8): never run escrow-less silently (the first worker
+       * death would return a bare FATAL with no diagnostic). Match the
+       * eventfd failure above: loud error + teardown + init failure. */
+      builtin_error("forkrun: escrow pipe creation failed (FD limit reached?)");
+      ring_destroy_main(0, NULL);
+      return EXECUTION_FAILURE;
     }
 
     // (Indexer death pipes are bash-owned — see the fd_escrow declaration
@@ -8058,7 +8062,7 @@ static int ring_copy_main(int argc, char **argv) {
             use_bounce = false;
             break;
         }
-        if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+        if (state && state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
             limit_reached_exit = true;
             off = st.st_size;
             use_bounce = false;
@@ -8071,7 +8075,7 @@ static int ring_copy_main(int argc, char **argv) {
           to_copy = chunk;
         size_t copied_in_chunk = 0;
         while (copied_in_chunk < to_copy) {
-          if (atomic_load_acquire(&state[0].scanner_finished)) {
+          if (state && atomic_load_acquire(&state[0].scanner_finished)) {
               limit_reached_exit = true;
               break;
           }
@@ -8109,7 +8113,7 @@ static int ring_copy_main(int argc, char **argv) {
             use_bounce = false;
             break;
         }
-        if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
+        if (state && state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) {
             limit_reached_exit = true;
             use_bounce = false;
             break;
@@ -8148,13 +8152,17 @@ static int ring_copy_main(int argc, char **argv) {
     while (1) {
       // EMERGENCY BYPASS: Check fire alarm before scanner_finished
       if (state && atomic_load_relaxed(&state[0].emergency_abort)) break;
-      if (state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) break;
+      /* W-REL5-D (D10): NULL-state guard consistency -- ring_copy_main
+       * guarded `state` in some reads but dereferenced it unconditionally
+       * in others (all state[0] reads in this function are now guarded;
+       * a NULL state simply skips the limit/finished fast paths). */
+      if (state && state[0].cfg_limit > 0 && atomic_load_acquire(&state[0].scanner_finished)) break;
 
       struct pollfd pfd_in = {.fd = infd, .events = POLLIN};
       int p_res = poll(&pfd_in, 1, 10);
       if (p_res <= 0) {
           if (p_res < 0 && errno != EINTR && errno != EAGAIN) break;
-          if (atomic_load_acquire(&state[0].scanner_finished)) {
+          if (state && atomic_load_acquire(&state[0].scanner_finished)) {
               limit_reached_exit = true;
               break;
           }
@@ -8197,7 +8205,7 @@ static int ring_copy_main(int argc, char **argv) {
                   // loudly downstream instead.
                   break;
               }
-              if (atomic_load_acquire(&state[0].scanner_finished)) {
+              if (state && atomic_load_acquire(&state[0].scanner_finished)) {
                  limit_reached_exit = true;
                  break;
               }
@@ -9307,12 +9315,18 @@ static int ring_call_stdin_setup(int fd, size_t length, int *saved_stdin,
  * Returns 1 when the feeder failed (non-zero exit, signal death, or lost),
  * 0 otherwise. A lost (ECHILD) child is failure, never silent success. */
 static int ring_call_stdin_teardown(int saved_stdin, pid_t feeder) {
+    /* W-REL5-D (D9): a failed fd-0 restore leaves fd 0 dangling (the
+     * closed pipe end) for the rest of the worker's life. Fail the
+     * batch for retry instead (the caller converts this to cb_ret = 1
+     * with a warning when the plugin itself succeeded). */
+    int restore_bad = 0;
     if (saved_stdin >= 0) {
-        dup2(saved_stdin, 0);
+        if (dup2(saved_stdin, 0) < 0)
+            restore_bad = 1;
         close(saved_stdin);
     }
     if (feeder <= 0)
-        return 0;
+        return restore_bad;
     int status = 0;
     while (waitpid(feeder, &status, 0) == -1) {
         if (errno == EINTR)
@@ -9320,7 +9334,7 @@ static int ring_call_stdin_teardown(int saved_stdin, pid_t feeder) {
         return 1;
     }
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
-        return 0;
+        return restore_bad;
     return 1;
 }
 
