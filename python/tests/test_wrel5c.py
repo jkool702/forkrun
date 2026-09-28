@@ -96,5 +96,35 @@ class TestC3SweepResumeRejected(unittest.TestCase):
         self._sweep_raises(checkpoint_file="/tmp/x.ckpt")
 
 
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestC2OffMainThreadLoud(unittest.TestCase):
+    """C2 (M17): checkpoint policy off the main thread must raise."""
+
+    def test_raises_with_remedy(self):
+        import threading  # noqa: PLC0415
+        from forkrun._signals import guard  # noqa: PLC0415
+
+        errors = []
+
+        def _enter():
+            try:
+                with guard("checkpoint"):
+                    pass
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        for _ in range(5):
+            th = threading.Thread(target=_enter)
+            th.start()
+            th.join()
+            self.assertEqual(len(errors), 1)
+            self.assertIn("main thread", errors.pop())
+        # Main thread itself still works (returns the guard).
+        with guard("checkpoint"):
+            pass
+        with guard("default"):
+            pass
+
+
 if __name__ == "__main__":
     unittest.main()

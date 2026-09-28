@@ -92,6 +92,21 @@ class SignalGuard:
     def __enter__(self):
         if self.policy != POLICY_CHECKPOINT:
             return self
+        # W-REL5-C2: signal.signal works only on the main thread —
+        # anywhere else every per-sig install below raises ValueError
+        # and the guard would run the whole job unguarded (silent
+        # no-op in exactly the threaded/event-loop hosts this module
+        # exists for). Fail loudly with the remedy instead.
+        import threading as _threading  # noqa: PLC0415
+
+        if _threading.current_thread() is not \
+                _threading.main_thread():
+            raise RuntimeError(
+                "forkrun signal_policy='checkpoint' requires the "
+                "main thread (signal.signal is main-thread-only; "
+                "called from %r). Run forkrun on the main thread, "
+                "or use the default policy."
+                % (_threading.current_thread().name,))
         for sig in self._wanted():
             try:
                 self._old[sig] = _signal.getsignal(sig)
