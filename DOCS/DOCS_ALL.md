@@ -1006,6 +1006,72 @@ E16 (LEGACY/history, registered-not-executed).
   `RuntimeError`; no tests, not in the gate) and its
   `python/README.md` bullet.
 
+### Python behavioral correctness (W-REL5-B)
+
+Bite-then-green wave over the shipped Python API surface (no C
+changes — C-diff empty; full suite ×3, release_check, and the perf
+band are coordinator-executed post-merge).
+
+- **B1:** `map()`/`stream()`/`sweep()` reject unknown keyword
+  arguments (`TypeError` whitelist, shared
+  `_reject_unknown_kwargs`) — a `wokers=` typo no longer silently
+  runs a different pipeline. `sink=` is REJECTED on the collecting
+  frontends (`ValueError`, same wording as sweep's pre-existing
+  gate): the payload return value IS the result there; the
+  worker-side sink lives only on `run()`. Honoring it would have
+  meant threading a side channel through every collect path for
+  no composable use; rejecting matches the sweep precedent and
+  fails closed. Lock-in `python/tests/test_wrel5b.py` (×5).
+- **B2:** `SIGINT` mid-`stream()` now raises `ForkrunInterrupted`
+  (still a `KeyboardInterrupt`) on all four stream executors (+
+  the NUMA twin in lockstep), uniform with the six blocking
+  executors and `MIGRATION.md`'s taxonomy presentation. Lock-in
+  (×5, all four executors).
+- **B3:** the ingest-reactor spill (`_execute_ingest_reactor_locked`)
+  sets `O_NONBLOCK` on the source (dup'd when borrowed) and
+  drains to `EAGAIN` per quantum, so worker/helper deaths and the
+  stall-fork rule are observed while the source is slow (sibling
+  pattern of the two streaming pumps). Finding: pre-fix workers
+  never fork during a stall at all; a SIGKILL landing while
+  pre-gate workers claim-spin is the honest claim-without-publish
+  abort (rc==4), not a respawn case — the bite asserts prompt
+  observation/termination, not recovery. Lock-in (×10).
+- **B4:** helper joins (scanner, fallow reaper, C drain, C orderer,
+  NUMA ingest/indexers/scanners) are bounded via
+  `_join_helper_bounded` (`_resume._waitpid_bounded` + SIGKILL on
+  expiry + stderr alarm naming the helper). Timeouts: helpers
+  10s, orderer `ORDERER_REAP_TIMEOUT`, post-abort worker reaps
+  `WORKER_REAP_TIMEOUT`. Worker COMPLETION joins stay unbounded
+  (the run IS the wait — bounding them would SIGKILL healthy
+  slow workers). Unit lock-in (×5) + checker across all ten
+  executors.
+- **B5:** `ReactorState.worker_died_poll` (WNOHANG + bounded
+  0.5s confirm spin, then defer to the `reap_clean_exits`
+  sweep) replaces the blocking `worker_died` in `reactor_loop`
+  and `reactor_poll_once` (lockstep); `worker_died` itself is
+  unchanged for direct/test use. `reactor_poll_once`'s docstring
+  now states the bounded spin honestly. Lock-in (×10).
+- **B6 (verify-only):** the single `_api._validate` call (with
+  the R9-hoisted CUDA guard) covers all ten executor paths —
+  `run`/`map`/`stream` validate before any engine contact or
+  fork, `sweep` rides `map()`; no per-path CUDA calls exist
+  (that would revert R9); no bypass found. Evidence: checker
+  I1 probe (all ten routings refuse) + `test_cuda_guard`.
+- **B7 (verify-only):** every `stream()` return (all eight UMA
+  branches + NUMA) rides `_guarded_gen`, which holds the
+  process-wide `RLock` across the generator lifetime;
+  same-thread nesting re-enters (no lock-type change).
+  Documented-but-unenforced gap: none — checker I2 probes
+  (exhaust + abandon, all ten incl. NUMA stream) and
+  `test_stream_lock` (serialization + nested RLock) enforce it.
+- **B8:** worker-failure raises carry `.signo` (first signal
+  death, `None` for plain exits) via the shared
+  `_raise_worker_failure` (four plain paths, message
+  byte-identical) and `_reactor_failure_check` (reactor path).
+  Class stays plain `RuntimeError` (Bash exit-1 contract —
+  `test_taxonomy.TestCrashStaysRuntimeError` still passes).
+  Bite: SIGSEGV'd worker ⇒ `.signo == 11` on both paths (×5).
+
 ## v3.5.14 (unreleased)
 
 ### Python frontend: C drain process, opt-in (W-PY21-A)
