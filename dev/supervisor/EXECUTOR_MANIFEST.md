@@ -182,3 +182,43 @@ executors (evidence lines in the rows above).
 | deposit | one loud-path instance (default) | ×10 → `test_escrow_refused.py` |
 | EOF | drain-guard link only | `test_numa_drain_guard.py` |
 | manifest | evidence-column populated | this file |
+
+## W-DEDUP addendum (2026-09-28, branch NEW/REFACTOR2.9)
+
+Consolidation landed per `DEDUP_DESIGN.md` (costume-detection PASS):
+**3 cores + 10 thin wrappers + 6 shared helpers**, not 1 + 10 if-blocks.
+
+- New module `python/forkrun/_executor_core.py`: `ExecutorSpec`,
+  `fork_workers` (single splice/c_plugin/c_spawn/python dispatch),
+  `collect_records` (drain-vs-direct + order), `report_poison`,
+  `init_engine` (UMA vs NUMA selection), `teardown_union` (union fd set,
+  1 supervision branch). Cycle-safe via `sys.modules["forkrun.run"]`
+  lazy binding.
+- Ported (behavior-preserving, same names/signatures/probe points):
+  #1 `_execute_locked` (fork+collect+poison to core),
+  #2 `_execute_ingest_locked` (fork+collect+poison to core),
+  #3 `_execute_streaming` (fork to core; live-drain + stashed poison stay
+  generator-local by shape),
+  #4 `_execute_ingest_stream` (fork to core; same shape note).
+- Not ported (already single-sourced, documented as justified):
+  #5-#8 reactor join/disposition (shared `ReactorState`/`reactor_loop` in
+  `_reactor.py`; orderer/resume/c-loop variants are parameters),
+  #9-#10 NUMA pipeline (shared `_numa_fork_pipeline` +
+  `_numa_drain_audit`; topology is a genuinely different executor).
+- R-D8 ABI gate: `tools/gen_shim.py` + `forkrun_shim.h` (45 extern decls)
+  + `tools/generated/shim_signatures.json` (56 entries with linkage) +
+  `test_shim_abi.py` (5/5) + `shim-check.yml` CI. Triple agreement:
+  JSON externs == `_bindings` bound == `.so` exports (45/45/45).
+- Deviations re-justified: every prior deviation is now either a named
+  parameter (`escrow_fail_loud`, `signal_r_to_close`, `fallow_w`,
+  `collect=False` no-orderer) or a still-declared shape deviation
+  (generator stashed-poison, NUMA unified ingest, reactor-implied
+  supervision). Zero behavior changes (smoke: 6 UMA paths byte-identical;
+  routing + ABI gates green).
+- `executor_manifest.json`: unchanged (10 names, 8 invariants each —
+  probes still hit the same entry points, now executing consolidated
+  code; evidence column remains accurate).
+
+| Checker probe | New assertions | Linked (not duplicated) |
+|---|---|---|
+| ABI (R-D8) | exports == table == bindings; arity; order | `test_shim_abi.py` (signatures only) |
