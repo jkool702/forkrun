@@ -980,7 +980,7 @@ static int ring_exec_splice_main(int argc, char **argv) {
   X(ring_numa_stats, ring_numa_stats_main, "ring_numa_stats",                  \
     "Print NUMA telemetry")                                                    \
   X(ring_list, ring_list_main, "ring_list [VAR]", "List loadables")            \
-  X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_arr> <work_arr> [timer] [trap_ack] [indexer_arr]", "Poll FDs") \
+  X(ring_poll, ring_poll_main, "ring_poll <spawn_fd> <scan_pairs> <work_pairs> [timer] [trap_ack] [indexer_pairs]", "Poll FDs") \
   X(ring_revert_output, ring_revert_output_main, "ring_revert_output <fd>", "Revert partial output") \
   X(ring_ack_init, ring_ack_init_main, "ring_ack_init <fd>", "Sync output offset") \
   X(ring_escrow_put, ring_escrow_put_main, "ring_escrow_put <node> <idx> <cnt> <kills>", "Deposit to escrow") \
@@ -8540,11 +8540,66 @@ static inline uint64_t get_mono_ms(void) {
     return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
+/* W-REL5-D (D-SEGFIX): load "id:fd" pair lists into the poll set.
+ *
+ * bash 5.1's `struct array` keeps `head` at offset 24 (with an int
+ * num_elements at 16); 5.2 moved `head` to 16 (num_elements int64 at 8).
+ * Any arr->head/element_forw walk compiled from new headers therefore
+ * misreads old bash: offset-16 yields the small int num_elements used as
+ * a pointer, and the next hop faults reading NULL+0x11 -- a deterministic
+ * SEGV in ring_poll on bash <=5.1 on the very first call (all helpers
+ * drain fine; the reactor never reaches its first event). bind_*,
+ * find_variable and get_string_value are exported and layout-stable since
+ * 4.4, but none of them iterates arrays (subscripted
+ * find_variable("name[i]") resolves NULL on every version -- probed on
+ * 5.1.0 and 5.3). So the frontend flattens each fd array to an "id:fd"
+ * word list ("${!arr[@]}" order, shell-side and version-proof) and this
+ * parser consumes it. A malformed word stops the scan (fail-safe: the
+ * tail is ignored, never a bad fd); the max_poll ceiling keeps its
+ * documented drop-tail behavior (D5/F23b). */
+static void ring_poll_load_list(const char *list, int type_val, int count_core,
+                                struct pollfd *pfds, struct PollMeta *meta,
+                                int *p_cnt, int *p_core_cnt, int max_poll)
+{
+    const char *p;
+    if (!list || !*list)
+        return;
+    p = list;
+    while (*p) {
+        long id, fd;
+        char *end;
+        while (*p == ' ')
+            p++;
+        if (!*p)
+            break;
+        id = strtol(p, &end, 10);
+        if (end == p || *end != ':')
+            break;
+        p = end + 1;
+        fd = strtol(p, &end, 10);
+        if (end == p)
+            break;
+        if (*p_cnt >= max_poll)
+            break;
+        pfds[*p_cnt].fd = (int)fd;
+        pfds[*p_cnt].events = POLLHUP | POLLIN | POLLERR;
+        meta[*p_cnt].id = (arrayind_t)id;
+        meta[*p_cnt].type = type_val;
+        (*p_cnt)++;
+        if (count_core)
+            (*p_core_cnt)++;
+        p = end;
+    }
+}
+
 static int ring_poll_main(int argc, char **argv) {
     if (argc < 4) return EXECUTION_FAILURE;
     int fd_spawn_r = atoi(argv[1]);
-    const char *scan_arr_name = argv[2];
-    const char *work_arr_name = argv[3];
+    /* D-SEGFIX: argv[2]/argv[3]/argv[6] are "id:fd" pair lists flattened
+     * by the frontend (see ring_poll_load_list) -- never array names.
+     * Walking bash ARRAY structs here segfaults on bash <=5.1. */
+    const char *scan_pairs = argv[2];
+    const char *work_pairs = argv[3];
 
     // Optional 4th arg: Per-worker timer command (+wID, -wID, -1)
     if (argc >= 5 && argv[4][0] != '\0') {
@@ -8569,10 +8624,10 @@ static int ring_poll_main(int argc, char **argv) {
     // Optional 5th arg: trap ack pipe
     int fd_trap_ack_r = (argc >= 6 && argv[5][0] != '\0') ? atoi(argv[5]) : -1;
 
-    // Optional 6th arg: indexer-death array name (preconditions gate, v1.3 §2.0).
+    // Optional 6th arg: indexer-death pair list (preconditions gate, v1.3 §2.0).
     // When omitted the reactor behaves exactly as before (bash passes its
-    // fd_indexer_death_r array; UMA/flat mode passes an empty/unset name).
-    const char *indexer_arr_name = (argc >= 7 && argv[6][0] != '\0') ? argv[6] : NULL;
+    // fd_indexer_death_r list; UMA/flat mode passes an empty/unset string).
+    const char *indexer_pairs = (argc >= 7 && argv[6][0] != '\0') ? argv[6] : NULL;
 
     int max_poll = 8192;
     struct pollfd *pfds = malloc(max_poll * sizeof(struct pollfd));
@@ -8603,38 +8658,17 @@ static int ring_poll_main(int argc, char **argv) {
         // Do NOT increment core_cnt. Trap ack pipe alone shouldn't prevent shutdown.
     }
 
-    // Helper macro to load Bash arrays dynamically
-    #define LOAD_ARRAY(arr_name, type_val) \
-        do { \
-            SHELL_VAR *v = find_variable(arr_name); \
-            if (v && array_p(v)) { \
-                ARRAY *arr = array_cell(v); \
-                if (arr) { \
-                    ARRAY_ELEMENT *ae; \
-                    for (ae = element_forw(arr->head); ae != arr->head; ae = element_forw(ae)) { \
-                        if (p_cnt >= max_poll) break; \
-                        char *val = element_value(ae); \
-                        if (val && val[0]) { \
-                            pfds[p_cnt].fd = atoi(val); \
-                            pfds[p_cnt].events = POLLHUP | POLLIN | POLLERR; \
-                            meta[p_cnt].id = element_index(ae); \
-                            meta[p_cnt].type = type_val; \
-                            p_cnt++; \
-                            core_cnt++; \
-                        } \
-                    } \
-                } \
-            } \
-        } while(0)
-
-    // 3. Load Scanner and Worker Death Pipes
-    LOAD_ARRAY(scan_arr_name, 1);
-    LOAD_ARRAY(work_arr_name, 2);
+    // 3. Load Scanner and Worker Death Pipes (D-SEGFIX "id:fd" pair
+    // lists -- never bash ARRAY structs; see ring_poll_load_list).
+    ring_poll_load_list(scan_pairs, 1, 1, pfds, meta, &p_cnt, &core_cnt,
+                        max_poll);
+    ring_poll_load_list(work_pairs, 2, 1, pfds, meta, &p_cnt, &core_cnt,
+                        max_poll);
 
     // 3b. Load Indexer Death Pipes (kernel-observable liveness; POLLHUP on
     // indexer SIGKILL/OOM). Not core_cnt: an indexer death reports via
     // INDEXER_DEATH -> ring_abort, it never keeps a drained loop alive.
-    // (UMA/flat pipeline has no indexer_numa: array unset/empty -> no-op.)
+    // (UMA/flat pipeline has no indexer_numa: empty list -> no-op.)
     // CEILING TIE (D5 / F23b): indexer entries draw on the SAME pfds/meta
     // budget as the spawn, trap-ack, scanner and worker entries — `max_poll`
     // (== FR_MAX_POLL_WORKERS) is ONE ceiling for all classes, and at extreme
@@ -8642,25 +8676,9 @@ static int ring_poll_main(int argc, char **argv) {
     // (the `p_cnt >= max_poll` guard just breaks out). Any future bound
     // consolidation must treat these as a single budget, never as independent
     // per-class limits.
-    if (indexer_arr_name) {
-        SHELL_VAR *xiv = find_variable(indexer_arr_name);
-        if (xiv && array_p(xiv)) {
-            ARRAY *xarr = array_cell(xiv);
-            if (xarr) {
-                ARRAY_ELEMENT *xae;
-                for (xae = element_forw(xarr->head); xae != xarr->head; xae = element_forw(xae)) {
-                    if (p_cnt >= max_poll) break;
-                    char *xval = element_value(xae);
-                    if (xval && xval[0]) {
-                        pfds[p_cnt].fd = atoi(xval);
-                        pfds[p_cnt].events = POLLHUP | POLLIN | POLLERR;
-                        meta[p_cnt].id = element_index(xae);
-                        meta[p_cnt].type = 4;
-                        p_cnt++;
-                    }
-                }
-            }
-        }
+    if (indexer_pairs) {
+        ring_poll_load_list(indexer_pairs, 4, 0, pfds, meta, &p_cnt,
+                            &core_cnt, max_poll);
     }
 
     uint64_t g_poll_deadline_ms = 0;
@@ -9073,8 +9091,8 @@ static void ring_call_close_scrub(int f, int keep_in, int keep_out) {
  * /proc opens, no closefrom sweep. The two flat numbers come from shell
  * variables the worker already holds (FD_TRAP_ACK_W is exported at spawn;
  * fd_fallow_w is a worker-visible global); the worker death-pipe write end
- * is read from the fd_worker_w array at this worker's RING_WID via the
- * same find_variable/array_cell walk ring_poll uses for death watches.
+ * arrives via FD_WORKER_W (exported per worker at spawn; D-SEGFIX: the old
+ * fd_worker_w array walk misread bash <=5.1 -- see ring_poll_load_list).
  * Anything unresolvable is skipped best-effort.
  *
  * The child keeps ONLY the ingress fd and the pipe write end (plus 0,1,2,
@@ -9104,31 +9122,18 @@ static void ring_call_scrub_feeder_child(int src_fd, int pipe_w, int pipe_r) {
     if (s_fallow && s_fallow[0])
         ring_call_close_scrub(atoi(s_fallow), src_fd, pipe_w);
 
-    /* Worker death-pipe write end: fd_worker_w[$RING_WID].
-     * W-STAGE1: reads the bash-surface RING_WID (not g_fr_config.ring_wid)
-     * on purpose — this scrub walks the frontend's own array topology, so
-     * it speaks the frontend's coordinates directly. Same value either way;
-     * the env read documents that this is frontend plumbing, not config. */
-    const char *s_wid = get_string_value("RING_WID");
-    if (s_wid && s_wid[0]) {
-        SHELL_VAR *wv = find_variable("fd_worker_w");
-        if (wv && array_p(wv)) {
-            ARRAY *arr = array_cell(wv);
-            if (arr) {
-                int want = atoi(s_wid);
-                ARRAY_ELEMENT *ae;
-                for (ae = element_forw(arr->head); ae != arr->head;
-                     ae = element_forw(ae)) {
-                    if (element_index(ae) == want) {
-                        char *val = element_value(ae);
-                        if (val && val[0])
-                            ring_call_close_scrub(atoi(val), src_fd, pipe_w);
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    /* Worker death-pipe write end for this worker.
+     * W-REL5-D (D-SEGFIX): arrives via FD_WORKER_W (exported per worker by
+     * spawn_worker). The previous find_variable("fd_worker_w")+arr->head
+     * walk is the same 5.1-broken ARRAY-struct read as ring_poll (head
+     * 24->16 in 5.1->5.2; subscripted find_variable("name[i]") resolves
+     * NULL everywhere, so no in-engine array read can replace it).
+     * getenv reads environ directly: valid post-fork with no bash API in
+     * the child. W-STAGE1 taxonomy unchanged: frontend plumbing, not
+     * engine config. */
+    const char *s_ww = getenv("FD_WORKER_W");
+    if (s_ww && s_ww[0])
+        ring_call_close_scrub(atoi(s_ww), src_fd, pipe_w);
 }
 
 /* stdin tier setup for C plugins (v3.5.2 W-STDIN). Creates the feed pipe

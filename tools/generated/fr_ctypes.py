@@ -105,11 +105,11 @@ FIELDS = {
     ],
     "ring_poll": [
         ("IN", "I32", "spawn_fd", False),
-        ("IN", "STR", "scan_arr", False),
-        ("IN", "STR", "work_arr", False),
+        ("IN", "STR", "scan_pairs", False),
+        ("IN", "STR", "work_pairs", False),
         ("IN", "I32", "timer", True),
         ("IN", "I32", "trap_ack", True),
-        ("IN", "STR", "indexer_arr", True),
+        ("IN", "STR", "indexer_pairs", True),
     ],
 }
 
@@ -147,7 +147,7 @@ USAGE = {
     "ring_numa_stats": 'ring_numa_stats',
     "ring_order": 'ring_order <FD> <PFX|memfd> [unordered]',
     "ring_pipe": 'ring_pipe <ARR|RD> [WR]',
-    "ring_poll": 'ring_poll <spawn_fd> <scan_arr> <work_arr> [timer] [trap_ack] [indexer_arr]',
+    "ring_poll": 'ring_poll <spawn_fd> <scan_pairs> <work_pairs> [timer] [trap_ack] [indexer_pairs]',
     "ring_recover_worker": 'ring_recover_worker <wid> <incarn> [output_fd] [exit_code]',
     "ring_revert_output": 'ring_revert_output <fd>',
     "ring_scanner": 'ring_scanner <fd> [spawn_fd]',

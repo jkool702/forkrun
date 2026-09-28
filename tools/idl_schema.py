@@ -71,15 +71,17 @@ _CALL_FIELDS = (
     ("IN", "PTR", "fixed", False),
 )
 
-# ring_poll <spawn_fd> <scan_arr> <work_arr> [timer] [trap_ack]
-# [indexer_arr] — fd + array-name inputs, trailing three optional.
+# ring_poll <spawn_fd> <scan_pairs> <work_pairs> [timer] [trap_ack]
+# [indexer_pairs] — fd + "id:fd" pair-list inputs, trailing three
+# optional (D-SEGFIX: pair lists replaced array names; the engine never
+# walks bash ARRAY structs).
 _POLL_FIELDS = (
     ("IN", "I32", "spawn_fd", False),
-    ("IN", "STR", "scan_arr", False),
-    ("IN", "STR", "work_arr", False),
+    ("IN", "STR", "scan_pairs", False),
+    ("IN", "STR", "work_pairs", False),
     ("IN", "I32", "timer", True),
     ("IN", "I32", "trap_ack", True),
-    ("IN", "STR", "indexer_arr", True),
+    ("IN", "STR", "indexer_pairs", True),
 )
 
 
@@ -147,7 +149,7 @@ SCHEMA = {
     "ring_list": _e(ARGC_ARGV, "ring_list [VAR]", "List loadables"),
     "ring_poll": _e(
         ARGC_ARGV,
-        "ring_poll <spawn_fd> <scan_arr> <work_arr> [timer] [trap_ack] [indexer_arr]",
+        "ring_poll <spawn_fd> <scan_pairs> <work_pairs> [timer] [trap_ack] [indexer_pairs]",
         "Poll FDs", _POLL_FIELDS),
     "ring_revert_output": _e(ARGC_ARGV, "ring_revert_output <fd>",
                            "Revert partial output"),

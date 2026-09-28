@@ -1942,6 +1942,12 @@ _forkrun_checkpoint_signal() {
   export RING_WID="$3"
   export FD_TRAP_ACK_W="$4"
   export RING_WINCARN="$5"
+  # W-REL5-D (D-SEGFIX): the feeder-child fd scrub reads the death-pipe
+  # write end for this worker from environ (no bash ARRAY-struct walk in
+  # the engine: head moved 24->16 in 5.1->5.2, old-bash reads fault). Set
+  # beside RING_WID; ring_pipe created fd_worker_w[$3] before every
+  # spawn_worker call, so this is never empty here.
+  export FD_WORKER_W="${fd_worker_w[$3]:-}"
 
   _ring_registered=false
 
@@ -2078,7 +2084,42 @@ W_NODE[$3]=$2
             wID_free[$nn]=''
         done
 
-        while ring_poll "$fd_spawn_arg" fd_scan_death_r fd_worker_r "$_poll_timer_cmd" "$fd_trap_ack_r" fd_indexer_death_r; do
+        # W-REL5-D (D-SEGFIX): flatten fd watch-arrays to "id:fd" pair
+        # lists for ring_poll. The engine must NEVER walk bash ARRAY
+        # structs (head moved 24->16 in 5.1->5.2; a new-header build
+        # reading old bash faults at NULL+0x11 on the first poll) and
+        # subscripted find_variable("name[i]") resolves NULL on every
+        # version, so the shell expands indices itself ("${!arr[@]}" is
+        # ascending and version-proof) and the engine parses pairs.
+        # Rebuilt every reactor iteration: membership changes only at
+        # SPAWN/DEATH branches, but rebuild-always cannot desync (the
+        # loop is event-driven; a handful of entries; microseconds).
+        # The (( )) guards keep empty arrays safe under `set -u`/4.4.
+        local _fr_scan_list="" _fr_work_list="" _fr_indexer_list=""
+        _fr_build_poll_lists() {
+            local _fr_k
+            _fr_scan_list=""
+            if (( ${#fd_scan_death_r[@]} > 0 )); then
+                for _fr_k in "${!fd_scan_death_r[@]}"; do
+                    _fr_scan_list+="$_fr_k:${fd_scan_death_r[$_fr_k]} "
+                done
+            fi
+            _fr_work_list=""
+            if (( ${#fd_worker_r[@]} > 0 )); then
+                for _fr_k in "${!fd_worker_r[@]}"; do
+                    _fr_work_list+="$_fr_k:${fd_worker_r[$_fr_k]} "
+                done
+            fi
+            _fr_indexer_list=""
+            if (( ${#fd_indexer_death_r[@]} > 0 )); then
+                for _fr_k in "${!fd_indexer_death_r[@]}"; do
+                    _fr_indexer_list+="$_fr_k:${fd_indexer_death_r[$_fr_k]} "
+                done
+            fi
+            return 0
+        }
+
+        while _fr_build_poll_lists; ring_poll "$fd_spawn_arg" "$_fr_scan_list" "$_fr_work_list" "$_poll_timer_cmd" "$fd_trap_ack_r" "$_fr_indexer_list"; do
             _poll_timer_cmd=""
 
             # v3.5.0: external signal observed → treat as ABORT with the

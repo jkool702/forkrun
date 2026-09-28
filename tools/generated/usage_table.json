@@ -124,7 +124,7 @@
     "doc": "Create pipe"
   },
   "ring_poll": {
-    "usage": "ring_poll <spawn_fd> <scan_arr> <work_arr> [timer] [trap_ack] [indexer_arr]",
+    "usage": "ring_poll <spawn_fd> <scan_pairs> <work_pairs> [timer] [trap_ack] [indexer_pairs]",
     "doc": "Poll FDs"
   },
   "ring_recover_worker": {

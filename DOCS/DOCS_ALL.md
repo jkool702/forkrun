@@ -4546,13 +4546,13 @@ forkrun is designed to run anywhere with zero friction:
 
 | Bash | Bootstrap + smoke ×10 | Full suites | Status (on new glibc) |
 |------|----------------------|-------------|----------------------|
-| 4.4 (RHEL 8) | ✅ 10/10 bootstrap only | — (worker execution segfaults — pre-existing, version-intrinsic; W-MAPAPI control reproduces on source-built 5.1.0, pristine `main:frun.bash` fails identically) | ❌ NOT usable — bootstrap only; RHEL8 additionally gated on D-TLS glibc fix |
-| 5.0 | ✅ 10/10 bootstrap only | — (same worker-runtime finding as 4.4) | ❌ NOT usable — bootstrap only |
-| 5.1 | ✅ 10/10 bootstrap only | — (same worker-runtime finding as 4.4) | ❌ NOT usable — bootstrap only |
+| 4.4 (RHEL 8) | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable; RHEL8 additionally gated on D-TLS glibc fix |
+| 5.0 | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable |
+| 5.1 | ✅ 10/10 incl. round-trips (D-SEGFIX, source-built 5.1.0 + extracted 5.1.16, byte-exact) | — (suites run on 5.2/5.3 only) | ✅ usable |
 | 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
 | 5.3 | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
 
-> **Effective floor (W-REL5-D): bash ≥5.2 until D-SEGFIX lands.** If D-SEGFIX parks, the floor stays 5.2+ with ≤5.1 as the open 3.6.1 item; if it lands, the floor returns to ≥4.4. "Bootstrap-only" above is not compatibility — no workload runs on ≤5.1 yet.
+> **Effective floor (W-REL5-D): bash ≥4.4.** D-SEGFIX landed (worker segfault root-caused to the engine's `ARRAY`-struct walk + fixed via pair-list flattening; round-trips byte-exact on 4.4/5.0/5.1) and ships in this wave's blob cycle — until the cycle, shipped blobs still carry the old engine. glibc ≥2.28 likewise waits on D-TLS.
 
 ---
 
