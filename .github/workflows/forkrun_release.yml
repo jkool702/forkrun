@@ -81,7 +81,7 @@ jobs:
             -e GITHUB_REF_TYPE="${{ github.ref_type }}" \
             ${{ matrix.docker_image }} \
             bash -c '
-              #set -euo pipefail   # W-REL1/R5: ANY failure below fails
+              set -euo pipefail   # W-REL1/R5: ANY failure below fails
                                   # the job. Without this a failed
                                   # variant silently yields a partial
                                   # artifact set, and the warn-only
@@ -139,7 +139,7 @@ jobs:
                # so the artifact doesn't embed the build path. This also
                # flows into COMPILER_FLAGS below, so ring_version -f
                # shows the reproducibility flag alongside the rest.
-               OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fomit-frame-pointer -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC -Wl,-O1 -Wl,--as-needed -Wl,-Bsymbolic -ldl -ffile-prefix-map=/src=."
+               OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fomit-frame-pointer -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC -Wl,-O1 -Wl,--as-needed -Wl,-Bsymbolic -ldl -ffile-prefix-map=/src=. "
               WARN_FLAGS="-DNDEBUG -Wall -Wextra "
               INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins "
               
