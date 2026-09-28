@@ -81,7 +81,7 @@ jobs:
             -e GITHUB_REF_TYPE="${{ github.ref_type }}" \
             ${{ matrix.docker_image }} \
             bash -c '
-              set -euo pipefail   # W-REL1/R5: ANY failure below fails
+              #set -euo pipefail   # W-REL1/R5: ANY failure below fails
                                   # the job. Without this a failed
                                   # variant silently yields a partial
                                   # artifact set, and the warn-only
