@@ -94,5 +94,5 @@ CI record vehicle only.
 **R-V2 disposition: still open** — recommendation on file (accept
 containment); unchanged by this order.
 
-**Tree SHA (this report):** 326b488666c1f39fc1f33d14a6af4cfc4dd1f6b7 (NEW/REFACTOR2.9; SHA line corrected post-amend).
+**Tree SHA:** code-freeze 326b488 (all legs run at this tree); this report finalized in the child commit touching only this file.
 report commit on `NEW/REFACTOR2.9`).
