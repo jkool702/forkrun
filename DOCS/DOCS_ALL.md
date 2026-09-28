@@ -4546,11 +4546,13 @@ forkrun is designed to run anywhere with zero friction:
 
 | Bash | Bootstrap + smoke ×10 | Full suites | Status (on new glibc) |
 |------|----------------------|-------------|----------------------|
-| 4.4 (RHEL 8) | ✅ 10/10 | — (worker runtime segfaults — pre-existing, wave-independent, under investigation) | load path verified |
-| 5.0 | ✅ 10/10 | — (same worker-runtime finding as 4.4) | load path verified |
-| 5.1 | ✅ 10/10 | — (same worker-runtime finding as 4.4) | load path verified |
+| 4.4 (RHEL 8) | ✅ 10/10 bootstrap only | — (worker execution segfaults — pre-existing, version-intrinsic; W-MAPAPI control reproduces on source-built 5.1.0, pristine `main:frun.bash` fails identically) | ❌ NOT usable — bootstrap only; RHEL8 additionally gated on D-TLS glibc fix |
+| 5.0 | ✅ 10/10 bootstrap only | — (same worker-runtime finding as 4.4) | ❌ NOT usable — bootstrap only |
+| 5.1 | ✅ 10/10 bootstrap only | — (same worker-runtime finding as 4.4) | ❌ NOT usable — bootstrap only |
 | 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
 | 5.3 | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
+
+> **Effective floor (W-REL5-D): bash ≥5.2 until D-SEGFIX lands.** If D-SEGFIX parks, the floor stays 5.2+ with ≤5.1 as the open 3.6.1 item; if it lands, the floor returns to ≥4.4. "Bootstrap-only" above is not compatibility — no workload runs on ≤5.1 yet.
 
 ---
 
