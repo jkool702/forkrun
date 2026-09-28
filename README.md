@@ -121,7 +121,7 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 ## 🛠 Requirements & Dependencies
 
 forkrun is designed to run anywhere with zero friction:
-*   **Required:** Bash ≥ 4.0 (Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
+*   **Required:** Bash ≥ 4.4 (`mapfile -d` needs 4.4; Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`), GNU coreutils (`sed -z`, `base64 -w 0`, `truncate --size=` are GNU-only — no busybox support). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
 
 ---
 

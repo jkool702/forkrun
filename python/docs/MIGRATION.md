@@ -14,7 +14,7 @@ almost 1:1.
 | `-l N` | `lines=N` | Mutually exclusive with `-b`/`bytes=` |
 | `-b N` | `bytes=N` | splice mode takes `bytes=` only |
 | `-E` (retry) | `on_error="retry"` (default) | `"skip"` / `"fail-fast"` likewise |
-| `-C plugin:fn` | `mode="plugin"`, `"path:fn"` | Same frozen ABI — a bash `-C` plugin works unchanged |
+| `-C plugin:fn` | `mode="plugin"`, `"path:fn"` | Only dialect-tagged (`forkrun_use_ctx` 1/2) plugins transfer unchanged (v1 frozen ABI); the default v0 path is a one-arg ctx convention, not the bash legacy two-arg form |
 | `cmd ...` (per-batch exec) | `mode="spawn"`, `"cmd ..."` | Same stdin/stdout contract |
 | `-b` passthrough | `mode="splice"`, payload `None` | Same kernel passthrough |
 | `--resume FILE` | `resume=FILE` (+ `order="index"`; the reactor is the default, `orchestrator=False` rejects) | Same byte-coordinate ledger |

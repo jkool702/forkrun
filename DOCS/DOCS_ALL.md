@@ -857,6 +857,155 @@ once (R5 freshness gate proves embedded == current source).
   `python/benchmarks/results/tokenize_study.md` (+ CSV).
   No version bump (benchmarks only).
 
+### Bash front-end hardening, S-class + sourced-library contract (W-REL5-A)
+
+Zero Python, zero C — `frun.bash` + twins only. Every behavioral
+item bite-then-green (pre-fix failing demonstration first).
+
+- **A1 (BLOCKED, spec collision):** loadable memfds with
+  `cloexec=1` close at the cleanroom `exec -c`, so the child
+  `enable -f /proc/self/fd/N` fails and every run aborts
+  (demonstrated rc=1 in scratch). Shipped fix deferred: cloexec
+  needs an explicit fd pass-through at the exec site, which the
+  work order did not authorize. No tree change; leak confirmed
+  pre-fix (fork+exec children inherit both memfds).
+- **A2:** `FORKRUN_MEMFD_LOADABLES`,
+  `FORKRUN_MEMFD_LOADABLES_BASE64`, `FORKRUN_RING_ENABLED` are
+  plain shell-local assignments, never exported. Children no
+  longer inherit stale fd numbers; parent-side re-guards read
+  shell variables and still fast-path (repeat runs rc 0).
+- **A3:** file-scope `shopt -s extglob` recorded as
+  `_FORKRUN_SRC_EXTGLOB_WAS_SET` and restored to source-time
+  state on RETURN trap + pre-exec in the wrapper (nested calls
+  run in pipeline subshells or fresh shells, hence contained).
+  Sourcing no longer permanently mutates caller shell options.
+- **A4 (S5):** bootstrap `.so` extraction used a predictable
+  `forkrun_boot_PID_RANDOM` path — a pre-planted symlink
+  redirected the truncate into an arbitrary file (victim emptied
+  10/10 pre-fix). Now `mktemp` O_EXCL in the candidate dir;
+  `$PWD` dropped from candidates. Victim untouched 10/10
+  post-fix, no leftover files.
+- **A5 (S3):** scoped nounset — `set +u` at `frun` entry with
+  `$-` save/restore on RETURN, plus a source-time guard around
+  the file-scope bootstrap call (the actual kill path: it reads
+  `$1` from caller positionals). `set -u; . frun.bash` + run is
+  green 10/10; the flag is restored on return.
+- **A6:** unchecked `ring_memfd_create` (ingress) and
+  `ring_set_resume` now fail loudly with actionable text
+  (`RLIMIT_NOFILE`/`ulimit -n`/dmesg guidance; horizon +
+  stdout_bytes values), `NORMAL_EXIT_FLAG` set, rc 1. Pre-fix
+  the ingress case ended in a bare redirection error with a
+  silent rc 0 having run nothing, and resume failures continued
+  silently on uninitialized state.
+- **A7:** `_forkrun_get_arch` failure propagates (`|| return 1`,
+  bootstrap rc 1) — unsupported arch prints only the arch
+  message instead of INVALID ARCH + 7x bad array subscript +
+  bogus temp-dir error. `armv7` dropped from the supported-arch
+  claim (no case branch, no b64 key, no `.so`).
+- **A8:** resume parser fails closed on any missing required
+  key, naming it. A `HORIZON`-only file was silently accepted
+  (stdout bytes defaulting to a truncate-to-zero); now refused
+  naming `FORKRUN_RESUME_STDOUT_BYTES`. Fully-keyed files still
+  accepted.
+- **A9:** worker exit 254 is now diagnosed once, loudly
+  (posix_spawnp `E2BIG`, Argument list too long). Per-record
+  ceiling documented here: a single record larger than 128 KiB
+  (`MAX_ARG_STRLEN`) cannot be passed as an argument and fails
+  the spawn; split records or use `-b`/`--bytes` chunking.
+  Retry-then-poison behavior is unchanged (splice-path 254
+  included). A 200 KiB record still poisons (rc 3) but now names
+  the ceiling.
+- **A10:** `_expand_unit` rejects fractional (`1.5G`),
+  negative (`-5M`), exponent (`1e3`), hex (`0x10`), and
+  underscore (`1_000`) forms with a clear error instead of
+  silently misparsing (truncate to 1 / clamp to INT64_MAX /
+  octal 8 / mangled). Range-bound, `-t`, `-l`, `-b`, `-j`
+  call sites propagate the refusal. Valid forms (`1k`, `1Ki`,
+  `1M`, `1G`, `16E`, ranges, `0`, empty bounds) behave as
+  before, including the `16E` int64 clamp + warning.
+- **A11:** `--version` is single-sourced — engine
+  `ring_version` builtin first, then `META` (beside the file
+  when sourced, else beside the invocation cwd), static string
+  last resort only. `DOCS/MAINTAINERS.md` sanitizer GOTCHA #1
+  no longer instructs hand-editing the release artifact (the
+  drift mechanism); it directs a scratch copy plus states the
+  single-source rule.
+
+### Docs, dead code, hygiene (W-REL5-E)
+
+Zero product behavior changes (docs + deletions + help text +
+output-identical bash single-sourcing only). Excluded by design:
+E5, E6, E7, E15 (Python-file overlap, sequenced post-merge) and
+E16 (LEGACY/history, registered-not-executed).
+
+- **E1:** plugin ABI docs corrected (`MODES.md`, `MIGRATION.md`,
+  `PLUGINS.md`). The default v0 path is a one-arg 72B ctx
+  convention (`int process(struct fr_py_plugin_ctx *ctx)`),
+  not the frozen 128B engine ABI and not the bash legacy
+  two-arg form (which would take the ctx pointer as `argc`
+  and garbage as `argv`). Only dialect-tagged plugins
+  (`forkrun_use_ctx` 1/2) interchange with bash `-C` via the
+  v1 `ring_call` path. Doc-accuracy row added (loader +
+  layout covering tests, engine-free).
+- **E2:** Python floor reconciled to 3.10 (honest per the
+  PEP-604 `str | None` at `_bindings.py:365`, read-only
+  cited, not edited). `setup.py` `>=3.8` → `>=3.10`, 3.8/3.9
+  classifiers dropped; `release_check.py` metadata check now
+  asserts the `Requires-Python: >=3.10` value inside the
+  existing check (check count unchanged); the pinning
+  packaging test moved with it. `INSTALLATION.md` already
+  said 3.10+, verified.
+- **E3:** `sink=` documented at-least-once (one sentence each
+  in `API.md`, `FAULT_TOLERANCE.md` — the old stdout-warning
+  bullet described a pattern that does not exist in Python).
+  Sink runs before commit: engine output exactly-once, sink
+  side effects re-run on death-between-sink-and-ack — keep
+  sinks idempotent. Doc-accuracy row added (sink-under-
+  crash-recovery covering test).
+- **E4:** import side effects documented (`INSTALLATION.md`
+  troubleshooting: import dlopens and swallows a bad
+  `$FORKRUN_LIB` to `"unknown"`; `API.md`: `forkrun.run`
+  is the function, not a module — documented, not renamed).
+- **E8:** deleted `ring_loadables/local_compile/compile.sh`
+  (wrong flags vs CI, no `-`→`_` key normalization so an
+  `x86-64-v2`-style key dies as a bad array subscript at
+  bootstrap, writes `./frun.new.bash` without applying it;
+  `update_frun_base64.bash` is the fixed successor).
+- **E9:** deleted ungated drifted twins
+  `ring_loadables/forkrun_ring.c.txt` and
+  `ring_loadables/frun.nob64.bash.txt` (no CI gate references
+  either; the gated twins — `frun.bash`↔`frun.nob64.bash`
+  pre-b64 region, `UNIT_TESTS/test_frun_comprehensive.sh`↔
+  `.txt` — are untouched).
+- **E10:** supported-arch list single-sourced in
+  `_forkrun_get_arch` (`_supported_arches`; the error string
+  prints the variable, output byte-identical, probed). The
+  b64 keys from CI must name the same set (comment cites the
+  workflow matrix + normalizer). Twins kept byte-identical.
+- **E11:** nine honored-but-unlisted env vars added to the
+  `### ENVIRONMENT VARS` help block (`frun.bash` + twin) and
+  `DOCS/FLAGS.md`: `FORKRUN_DEBUG`, `FORKRUN_TRUST_RESUME`,
+  `FORKRUN_C_STDIN`, `FORKRUN_SWEEP_ARGS`, `FORKRUN_TMPDIR`,
+  `FORKRUN_NUM_NODES`, three `FORKRUN_TEST_*_PIDFILE` hooks
+  (internal/test-only status marked where applicable).
+- **E12:** help-text corrections, `frun.bash` + twin + docs
+  only, no logic: completion drops nonexistent `--debug`
+  and internal-only `--fast`; `-X` note drops `-I` from the
+  fast-path exclusion (`-I` stays fast — the gate never
+  excluded `insert_id_flag`); `-v` narrowed to what it does
+  (spawn summary, plugin-compile notes, NUMA stats;
+  `toc()` timing is dead code). Twins byte-identical.
+- **E13:** portability floor corrected (`README.md` via
+  symlink `DOCS/README.md`, `DOCS/FORKRUN_OVERVIEW.md`, and
+  both `DOCS_ALL.md` embeds): Bash ≥ 4.4 (`mapfile -d`),
+  GNU-only `sed -z` / `base64 -w 0` / `truncate --size=`,
+  no busybox support.
+- **E14:** deleted `python/stage0_harness.py` (TBD/
+  UNMEASURED skeleton, `check_surface()` passes on
+  `NotImplementedError`/`OSError`/`FileNotFoundError`/
+  `RuntimeError`; no tests, not in the gate) and its
+  `python/README.md` bullet.
+
 ## v3.5.14 (unreleased)
 
 ### Python frontend: C drain process, opt-in (W-PY21-A)
@@ -3181,7 +3330,7 @@ Utilization also scales *down* correctly: `-b 512k` on a 100 MB input sustains ~
 - **Zero-copy data path**: `splice()`, `copy_file_range()`, and `sendfile()` move data without userspace copies. Scanner publishes byte-offsets and line counts. Workers read directly from the backing memfd.
 - **Self-tuning**: Automatic worker scaling, adaptive batch sizing, and early partial flush for low-latency trickle inputs. No manual `-n` or `-j` tuning required.
 - **Fault-tolerant & Self-healing**: Built-in automatic recovery for unexpectedly killed workers (e.g., OOM kills, segfaults). `forkrun` automatically traps the failure, isolates and discards corrupted partial output, safely respawns the worker, and re-dispatches the poisoned batch without deadlocking the pipeline.
-- **Single-file deployment**: Ships as one bash file with an embedded loadable `.so`. Zero external dependencies beyond a handful of standard Linux utilities (e.g., sed, base64, gzip, rm, cat) — no heavy runtimes like Perl (unlike GNU Parallel) or Python, making it perfect for lightweight containerized deployments. Requires only a Linux kernel ≥ 3.17 and Bash ≥ 4.0 (Bash ≥ 5.1 recommended for array performance). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
+- **Single-file deployment**: Ships as one bash file with an embedded loadable `.so`. Zero external dependencies beyond a handful of standard Linux utilities (e.g., sed, base64, gzip, rm, cat) — no heavy runtimes like Perl (unlike GNU Parallel) or Python, making it perfect for lightweight containerized deployments. Requires only a Linux kernel ≥ 3.17 and Bash ≥ 4.4 (`mapfile -d` needs 4.4; Bash ≥ 5.1 recommended for array performance), plus GNU coreutils (`sed -z`, `base64 -w 0`, `truncate --size=` are GNU-only — no busybox support). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
 - **Auditable Builds**: the embedded C extension is compiled and injected by a public GitHub Actions workflow; the git history of the base64 blob traces every byte to a specific CI run of `forkrun_ring.c`. (Reproducible builds with published checksums are on the roadmap and would upgrade this to cryptographic attestation.)
 
 ## Why It Matters for Frontier: Data Prep
@@ -4193,7 +4342,7 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 ## 🛠 Requirements & Dependencies
 
 forkrun is designed to run anywhere with zero friction:
-*   **Required:** Bash ≥ 4.0 (Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
+*   **Required:** Bash ≥ 4.4 (`mapfile -d` needs 4.4; Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`), GNU coreutils (`sed -z`, `base64 -w 0`, `truncate --size=` are GNU-only — no busybox support). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
 
 ---
 

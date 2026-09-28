@@ -152,7 +152,7 @@ setup(
     # The wheel carries a compiled .so: tag it for this platform so
     # pip refuses it elsewhere (never py3-none-any).
     options={"bdist_wheel": {"plat_name": PLATFORM_TAG}},
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     install_requires=[],
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -163,8 +163,6 @@ setup(
         "Operating System :: POSIX :: Linux",
         "Programming Language :: C",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",

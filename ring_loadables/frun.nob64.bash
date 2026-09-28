@@ -1,9 +1,14 @@
 #!/usr/bin/bash
 
+# W-REL5-A3: record source-time extglob state under a name frun()
+# does not shadow (its local extglob_was_set records entry state).
+# frun() restores this source-time state on RETURN so sourcing the
+# library never permanently mutates caller shell options.
 if shopt -q extglob; then
-   extglob_was_set=true;
+   _FORKRUN_SRC_EXTGLOB_WAS_SET=true;
 else
    shopt -s extglob;
+   _FORKRUN_SRC_EXTGLOB_WAS_SET=false;
 fi
 
 frun() {
@@ -20,8 +25,17 @@ frun() {
     # anyway). Unset-IFS callers restore as default-set, which
     # splits identically.
     local _fr_saved_ifs="${IFS-$' \t\n'}"
+    # W-REL5-A5: scoped nounset guard. frun indexes caller positionals
+    # that are unbound under set -u, so relax for the call and restore
+    # on RETURN alongside the IFS and extglob restores.
+    local _fr_saved_u=$-
+    set +u
     IFS=$' \t\n'
-    trap 'IFS="$_fr_saved_ifs"' RETURN
+    # W-REL5-A3: the RETURN trap also restores the SOURCE-time extglob
+    # state, so one frun invocation undoes the shopt -s extglob that
+    # sourcing performed. Nested frun calls run in pipeline subshells
+    # or fresh exec-ed shells, so the restore cannot leak outward.
+    trap 'IFS="$_fr_saved_ifs"; if [[ "${_fr_saved_u}" == *u* ]]; then set -u; else set +u; fi; ${_FORKRUN_SRC_EXTGLOB_WAS_SET:-true} || shopt -u extglob' RETURN
 
     # --- MULTI-INPUT PARAMETER SWEEP (::: / ::::) INTERCEPT ---
     local _fr_has_sweep=false
@@ -147,6 +161,13 @@ frun() {
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
 
+        # W-REL5-A3: undo the source-time shopt -s extglob in THIS
+        # shell before exec replaces it. The cleanroom enables its
+        # own extglob, and nested frun calls run in subshells, so
+        # this restore cannot leak inward. The RETURN trap repeats
+        # it for paths that return instead of exec.
+        ${_FORKRUN_SRC_EXTGLOB_WAS_SET:-true} || shopt -u extglob
+
         # Check if already setup (and FD is valid), otherwise bootstrap
         { ${FORKRUN_RING_ENABLED:-false} && (( ${FORKRUN_MEMFD_LOADABLES:-0} > 0 )); } || _forkrun_bootstrap_setup --fast
 
@@ -214,13 +235,23 @@ frun __exec__ "$@"
         fi
     fi
 
-   # --- HELPER: Expand units (IEC/IEEE prefixes) ---
+    # --- HELPER: Expand units (IEC/IEEE prefixes) ---
     _expand_unit() {
         local val iec num p
         val="${1,,}"
         iec=false
-        [[ "${val#[+-]}" == '0' ]] && { REPLY="${val}"; return 0; }
-        [[ "${val}" == *.* ]] && val="${val%%.*}"
+        # W-REL5-A10: fail-closed validation. Anything that is not a
+        # plain integer with an optional single unit suffix is refused
+        # with a clear error instead of being silently misparsed
+        # (1.5G truncated to 1, -5M clamped to INT64_MAX, 1e3 exponent
+        # form clamped, 0x10 read as octal 8, 1_000 mangled). Empty
+        # stays empty-ok for open ranges; 0 stays 0.
+        if [[ -z "$val" ]]; then REPLY=""; return 0; fi
+        [[ "$val" == "0" ]] && { REPLY=0; return 0; }
+        [[ "$val" =~ ^\+?[0-9]+(([kmgtpe]i?)?b?)?$ ]] || {
+            printf 'forkrun [ERROR]: invalid size or count value %q (want <integer>[k|m|g|t|p|e][i][B], e.g. 100, 1k, 2MiB).\n' "$1" >&2
+            return 1
+        }
         [[ "${val}" == +* ]] && { iec=true; val="${val#+}"; }
         num="${val//[^0-9]/}"
         [[ $num ]] || if [[ ${val} ]]; then return 1; else REPLY=''; return 0; fi
@@ -246,19 +277,24 @@ frun __exec__ "$@"
         if [[ "$val" == *:* ]]; then
             v1="${val%:*}"; v2="${val#*:}"
 
-            _expand_unit "$v1"; ring_init_opts+=("--${type}0=${REPLY}");
+            # W-REL5-A10: propagate _expand_unit refusal instead of
+            # running on with a stale REPLY.
+            _expand_unit "$v1" || { echo "forkrun [ERROR]: Invalid ${type} range bound: '$v1'" >&2; NORMAL_EXIT_FLAG=true; return 1; }
+            ring_init_opts+=("--${type}0=${REPLY}");
             [[ $REPLY ]] && case "${type}" in
                 lines)    byte_mode_flag=false   ;;
                 bytes)    byte_mode_flag=true    ;;
             esac
 
-            _expand_unit "$v2"; ring_init_opts+=("--${type}-max=${REPLY}")
+            _expand_unit "$v2" || { echo "forkrun [ERROR]: Invalid ${type} range bound: '$v2'" >&2; NORMAL_EXIT_FLAG=true; return 1; }
+            ring_init_opts+=("--${type}-max=${REPLY}")
             [[ $REPLY ]] && case "${type}" in
                 workers)  nWorkersMax="${REPLY}" ;;
                 lines)    byte_mode_flag=false   ;;
             esac
          else
-            _expand_unit "$val"; ring_init_opts+=("--${type}=${REPLY}")
+            _expand_unit "$val" || { echo "forkrun [ERROR]: Invalid ${type} value: '$val'" >&2; NORMAL_EXIT_FLAG=true; return 1; }
+            ring_init_opts+=("--${type}=${REPLY}")
             case "${type}" in
                 workers)  [[ $REPLY ]] && nWorkersMax="${REPLY}" ;;
                 lines)    byte_mode_flag=false   ;;
@@ -295,7 +331,7 @@ EOF
   -d, --delim <char>    : Use a custom single-character record delimiter.
 
 ### EXECUTION BACKENDS
-  -X, --external        : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. (NOTE: If -U or -i or -I are used, the ultra-fast-path is disabled, and this flag has no effect).
+  -X, --external        : Force external binary execution to enable the ultra-fast C-level vfork engine, which is FASTER than parallelizing the equivalent builtin command. If a command exists as both a builtin and a disk binary, this prefers the disk binary. (NOTE: If -U or -i are used, the ultra-fast-path is disabled, and this flag has no effect; -I stays on the fast path).
   -C, --plugin <so:fn>    : Load a native C plugin for zero-tax execution. Format: `-C path/to/plugin.so:function_name`. If a .c file exists alongside the .so, it will be auto-compiled with `gcc -O3 -shared -fPIC`. With `-C`, `-s`/`-b` select stdin delivery (the plugin reads its batch from fd 0 until EOF); a plugin declaring FLAG_RAW receives the raw window instead. See DOCS/C_PLUGIN.md for additional info.
 
 ### OUTPUT MODES
@@ -325,7 +361,7 @@ EOF
                           0:3: Explicitly bind to physical NUMA nodes 0 and 1 and 2 and 3.
   --halt <val>          : Halt the pipeline if too many batches fail. Format: fail=N or fail=N% (e.g., --halt fail=10%).
   -N, --dry-run         : Dry run. Print the generated command strings instead of executing them.
-  -v, --verbose         : Increase verbosity (prints timing and flag summaries to stderr). Implies --stats.
+  -v, --verbose         : Increase verbosity (prints the worker-spawn summary, plugin-compile notes, and NUMA stats to stderr). Implies --stats.
   +v, --no-verbose      : Decrease verbosity. Disables --stats.
   -V, --version         : Prints forkrun version number
   --stats               : Prints NUMA statistics to stderr (currently ignored for UMA)
@@ -382,6 +418,13 @@ EOF
       0 or false: Disable preemption handling entirely.
       1 or true: Force-enable preemption handling (useful for testing or non-SLURM environments that send SIGTERM/SIGUSR1).
       When enabled, forkrun catches SIGTERM (preemption/scancel) and SIGUSR1 (SLURM --signal=B:USR1@<time>) to freeze the pipeline and generate a checkpoint for perfect resume capability.
+  FORKRUN_DEBUG         : Engine diagnostics flag (read by the C substrate; forwarded into the cleanroom). Off by default.
+  FORKRUN_TRUST_RESUME  : `=1` bypasses the interactive resume consent gate for unattended resumption (see --resume above). Prefer confirming.
+  FORKRUN_C_STDIN       : Internal ambient mode flag for `-C` with `-s`/`-b` (plugin reads its batch from fd 0). Managed by the wrapper.
+  FORKRUN_SWEEP_ARGS    : Internal sweep plumbing (serialized sweep dimensions). Managed by the wrapper.
+  FORKRUN_TMPDIR        : Bootstrap override: preferred directory for the transient `.so` extraction (ahead of the XDG/runtime/shm/tmp fallbacks).
+  FORKRUN_NUM_NODES     : Nodes in play, computed by the wrapper from `--nodes`/`--numa` (default 1). Read-only signal, not a knob — presetting it has no effect.
+  FORKRUN_TEST_FALLOW_PIDFILE / FORKRUN_TEST_INDEXER_PIDFILE / FORKRUN_TEST_CLEANROOM_PIDFILE: Test-only hooks (pidfile targeting for signal/chaos tests). No effect on production runs.
 
 EOF
                 ;;
@@ -481,12 +524,18 @@ EOF
                         esac
                     done < "$_proc_rf"
 
-                    if [[ -z "${FORKRUN_RESUME_HORIZON:-}" ]]; then
-                        echo "forkrun [ERROR]: Invalid or corrupt resume file '$resume_file' (missing stream coordinates)." >&2
-                        exec {_rf_fd}<&-
-                        NORMAL_EXIT_FLAG=true
-                        return 1
-                    fi
+                    # W-REL5-A8: fail closed on ANY missing required
+                    # key, naming it. A missing STDOUT_BYTES used to
+                    # pass empty and resume as truncate-to-zero.
+                    local _req_key
+                    for _req_key in FORKRUN_RESUME_HORIZON FORKRUN_RESUME_STDOUT_BYTES; do
+                        if [[ -z "${!_req_key:-}" ]]; then
+                            echo "forkrun [ERROR]: Invalid or corrupt resume file '$resume_file' (missing required key ${_req_key})." >&2
+                            exec {_rf_fd}<&-
+                            NORMAL_EXIT_FLAG=true
+                            return 1
+                        fi
+                    done
 
                     resume_flag=true
 
@@ -978,19 +1027,19 @@ EOF
             @(-l|--lines|--batchsize)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-l|--lines|--batchsize)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && _parse_count "lines" "${arg}" ;;
+                [[ ${arg} ]] && { _parse_count "lines" "${arg}" || return 1; } ;;
 
             # --- BYTES (-b 1M) ---
             @(-b|--bytes)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-b|--bytes)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                ${is_sweep:-false} || _parse_count "bytes" "${arg:-}" ;;
+                ${is_sweep:-false} || { _parse_count "bytes" "${arg:-}" || return 1; } ;;
 
             # --- WORKERS (-j 4 or -j 1:8) ---
             @(-j|-P|--workers)?(?([= $'\t'])?([\+\-])+([0-9:])*([a-zA-Z])))
                 arg="${1##@(-j|-P|--workers)?([= $'\t'])}";
                 [[ ${arg}${2//?([\+\-])+([0-9:])*([a-zA-Z])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && _parse_count "workers" "${arg}" ;;
+                [[ ${arg} ]] && { _parse_count "workers" "${arg}" || return 1; } ;;
 
             --greedy|--GREEDY)                ring_init_opts+=('--greedy') ;;
 
@@ -998,7 +1047,12 @@ EOF
             @(-t|--timeout)?(?([= $'\t'])+([0-9.+-])))
                 arg="${1##@(-t|--timeout)?([= $'\t'])}";
                 [[ ${arg}${2//+([0-9.+-])/} ]] || { shift; arg="$1"; }
-                [[ ${arg} ]] && _expand_unit "${arg}" && ring_init_opts+=('--timeout='"${REPLY}") ;;
+                # W-REL5-A10: loud refusal on invalid timeout instead
+                # of silently running with no timeout set.
+                [[ ${arg} ]] && {
+                    _expand_unit "${arg}" || { echo "forkrun [ERROR]: Invalid value for -t / --timeout: '${arg}'" >&2; NORMAL_EXIT_FLAG=true; return 1; }
+                    ring_init_opts+=('--timeout='"${REPLY}")
+                } ;;
 
             # --- NUMA NODES (--nodes auto) ---
             @(--nodes|--numa)?(?([= $'\t'])*))
@@ -1034,7 +1088,32 @@ EOF
             # help system
             -h|-\?|--help|--help=*|--usage)  _frun_displayHelp "$1";  return 0  ;;
 
-            -V|--version|--VERSION)           echo 'forkrun v3.6.0';  return 0  ;;
+            -V|--version|--VERSION)
+                # W-REL5-A11: single-sourced version. The engine
+                # ring_version builtin is authoritative when loaded;
+                # otherwise read META (beside this file when running
+                # sourced, else beside the invocation cwd, which is
+                # the repo root in dev flows; BASH_SOURCE is -- in
+                # the cleanroom). The static string is a last resort
+                # only, never the source of truth.
+                if [[ "$(type -t ring_version 2>/dev/null)" == "builtin" ]]; then
+                    printf 'forkrun %s\n' "$(ring_version)"
+                else
+                    _fr_src="${BASH_SOURCE[0]:-}"
+                    case "$_fr_src" in */*) _fr_meta="${_fr_src%/*}/META" ;; *) _fr_meta="./META" ;; esac
+                    _fr_version=""
+                    if [[ -f "$_fr_meta" ]] && [[ "$(grep -E '^NAME:' "$_fr_meta" | head -n 1)" == "NAME: forkrun" ]]; then
+                        _fr_version="$(grep -E '^VERSION:' "$_fr_meta" | head -n 1)"
+                        _fr_version="${_fr_version#VERSION: }"
+                    fi
+                    if [[ -n "$_fr_version" ]]; then
+                        printf 'forkrun %s\n' "$_fr_version"
+                    else
+                        echo 'forkrun v3.6.0'
+                    fi
+                    unset _fr_src _fr_meta _fr_version
+                fi
+                return 0  ;;
 
             --) shift; break ;;
 
@@ -1298,10 +1377,26 @@ toc() { :; }
     : "${FORKRUN_NUM_NODES:=1}" # Fallback safety
 
     # Create Data Memfd
-    ring_memfd_create ingress_memfd 1
+    # W-REL5-A6: an unchecked failure here used to surface as a bare
+    # redirection error before the EXIT trap installed, with no
+    # checkpoint, no cleanup and no diagnostic. Fail loudly instead.
+    ring_memfd_create ingress_memfd 1 || {
+        echo "forkrun [FATAL]: ring_memfd_create failed for the ingress memfd (fd exhaustion? check RLIMIT_NOFILE via ulimit -n, currently $(ulimit -n); memfd denials also appear in dmesg)." >&2
+        NORMAL_EXIT_FLAG=true
+        return 1
+    }
 
     # NEW: Apply Checkpoint if Resuming
-     ${resume_flag} && ring_set_resume "$FORKRUN_RESUME_HORIZON" "$FORKRUN_RESUME_STDOUT_BYTES" "${FORKRUN_RESUME_JAGGED[@]}"
+    # W-REL5-A6: ring_set_resume failure used to fall through silently
+    # and run on uninitialized resume state. Fail loudly instead.
+    # Braced so a false resume_flag cannot trip the OR branch.
+     ${resume_flag} && {
+         ring_set_resume "$FORKRUN_RESUME_HORIZON" "$FORKRUN_RESUME_STDOUT_BYTES" "${FORKRUN_RESUME_JAGGED[@]}" || {
+             echo "forkrun [FATAL]: ring_set_resume failed (horizon ${FORKRUN_RESUME_HORIZON:-unset}, stdout_bytes ${FORKRUN_RESUME_STDOUT_BYTES:-unset}); refusing to run on uninitialized resume state." >&2
+             NORMAL_EXIT_FLAG=true
+             return 1
+         }
+     }
 
     # # # # # MAIN # # # # #
     {
@@ -1970,6 +2065,8 @@ W_NODE[$3]=$2
         # at the pidfile readiness write (they must predate it); re-declaring
         # them here would reset trap-recorded signal state. Do not add back.
         local -a POISONED_BATCHES=()
+        # W-REL5-A9: one-shot latch for the 254 diagnostic below.
+        local _fr_e2big_warned=false
 
         for ((i=0; i<FORKRUN_NUM_NODES; i++)); do node_workers[i]=0; done
         node_worker_max=$(( nWorkersMax / FORKRUN_NUM_NODES ))
@@ -2061,6 +2158,18 @@ W_NODE[$3]=$2
                     wID=$POLL_ARG1
                     wait "${P[$wID]}" 2>/dev/null
                     status=$?
+
+                    # W-REL5-A9: 254 is the payload-exec failure code
+                    # (posix_spawnp failed: E2BIG, Argument list too
+                    # long, when a single record exceeds the 128 KiB
+                    # MAX_ARG_STRLEN ceiling; a splice-path 254 is an
+                    # infrastructure failure). It used to ride the
+                    # generic retry path and surface only as poisoned.
+                    # Name it once, loudly; retries still poison as before.
+                    if (( status == 254 )) && ! ${_fr_e2big_warned:-false}; then
+                        _fr_e2big_warned=true
+                        echo "forkrun [ERROR]: worker $wID exited 254 (payload exec failed: posix_spawnp E2BIG, Argument list too long, when a record exceeds the 128 KiB per-record ceiling MAX_ARG_STRLEN; split records or use -b chunking. A splice-path 254 is an infrastructure failure and is retried, then poisoned, as before)." >&2
+                    fi
 
                     exec {fd_worker_r[$wID]}<&-
                     unset 'fd_worker_r[$wID]' 'fd_worker_w[$wID]' 'P[$wID]'
@@ -2273,7 +2382,7 @@ _frun_complete() {
           -E --retry-nonzero-exit +E --no-retry-nonzero-exit \
           -l --lines --batchsize -b --bytes -j -P --workers -t --timeout --nodes --numa \
           -o --order -d --delim --delimiter -h --help --usage --halt \
-          --resume --checkpoint-file --tui --debug --fast --version"
+          --resume --checkpoint-file --tui --version"
 
     # File completion for --resume and --checkpoint-file
     if [[ ${prev} == --resume || ${prev} == --checkpoint-file ]]; then
@@ -2307,6 +2416,14 @@ _forkrun_get_arch() {
 
     local ARCH0="$1"
 
+    # W-REL5-E10: single source for the supported-arch list. The
+    # error string below prints this variable (never a retyped
+    # literal), and the b64[] keys populated by CI (matrix in
+    # .github/workflows/forkrun_release.yml, `-`→`_` normalized
+    # by ring_loadables/update_frun_base64.bash) must name the
+    # same set — edit here, not the copies.
+    local _supported_arches='x86_64 aarch64 riscv64 s390x ppc64le'
+
     : "${ARCH0:=$(uname -m)}"
 
     case "$ARCH0" in
@@ -2326,7 +2443,7 @@ _forkrun_get_arch() {
         ARCH="$ARCH0"
         ;;
     *)
-        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: x86_64 aarch64 armv7 riscv64 s390x ppc64le\n\n' >&2
+        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: %s\n\n' "$_supported_arches" >&2
         return 1
         ;;
     esac
@@ -2539,8 +2656,12 @@ _forkrun_base64_to_file() {
     # check for the memfd_create loadable
     enable | sed -zE 's/\n/ /g' | grep -qE '(ring_((memfd_create)|(seal)|(list)) .*){3}' || need_memfd_create_flag=true
 
-    # set ARCH
-    _forkrun_get_arch "$1"
+    # set ARCH. W-REL5-A7: propagate the failure. An unsupported
+    # arch used to print INVALID ARCH and then fall through into
+    # b64 lookups with ARCH unset, producing a cascade of bad array
+    # subscript errors plus a meaningless temp-dir error. Now the
+    # arch message is the only output.
+    _forkrun_get_arch "$1" || return 1
 
     # if we need the b64 get it from the memfd
     ${need_b64_flag} && {
@@ -2566,7 +2687,6 @@ _forkrun_base64_to_file() {
             "${TMPDIR:-}"                # Standard env var
             "/tmp"                       # Universal fallback
             "${HOME}/.cache"             # User disk fallback
-            "$PWD"                       # Last resort
             "python"                     # Fileless fallback via python
             "perl"                       # Fileless fallback via perl
         )
@@ -2617,8 +2737,12 @@ while True: time.sleep(60)'
                 # Skip empty, non-existent, or non-writable directories
                 { [[ $dir ]] && [[ -d "$dir" ]] && [[ -w "$dir" ]]; } || continue
 
-                # Generate path with high entropy (30-bit random hex)
-                printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
+                # W-REL5-A4: mktemp O_EXCL in the candidate dir. The old
+                # predictable forkrun_boot_PID_RANDOM name let a
+                # pre-planted symlink redirect the truncate below into
+                # an arbitrary file. mktemp owns the file, so no plant
+                # can be followed; failure moves to the next candidate.
+                tmp_so="$(mktemp "${dir}/forkrun_boot.XXXXXX" 2>/dev/null)" || continue
             fi
 
             # Try to extract loadable
@@ -2660,7 +2784,9 @@ while True: time.sleep(60)'
 
         # open a memfd, write b64 to it, and seal it
         ring_memfd_create 'FORKRUN_MEMFD_LOADABLES_BASE64' 0
-        export FORKRUN_MEMFD_LOADABLES_BASE64="${FORKRUN_MEMFD_LOADABLES_BASE64}"
+        # W-REL5-A2: shell-local only, never exported. Child processes
+        # must not inherit a stale fd number via the environment.
+        FORKRUN_MEMFD_LOADABLES_BASE64="${FORKRUN_MEMFD_LOADABLES_BASE64}"
         declare -p b64 >&${FORKRUN_MEMFD_LOADABLES_BASE64}
         ring_seal "${FORKRUN_MEMFD_LOADABLES_BASE64}"
         need_memfd_b64_flag=false
@@ -2670,7 +2796,9 @@ while True: time.sleep(60)'
     ${force_flag} && ${have_memfd_loadables_flag} && exec {FORKRUN_MEMFD_LOADABLES}>&-
     unset "FORKRUN_MEMFD_LOADABLES"
     ring_memfd_create 'FORKRUN_MEMFD_LOADABLES' 0
-    export FORKRUN_MEMFD_LOADABLES="${FORKRUN_MEMFD_LOADABLES}"
+    # W-REL5-A2: shell-local only, never exported. The staleness
+    # re-guard below reads the shell variable in the parent only.
+    FORKRUN_MEMFD_LOADABLES="${FORKRUN_MEMFD_LOADABLES}"
     truncate -s "${b64[$ARCH]%% *}" "/proc/self/fd/${FORKRUN_MEMFD_LOADABLES}"
     _forkrun_base64_to_file <<<"${b64[$ARCH]}" "/proc/self/fd/${FORKRUN_MEMFD_LOADABLES}"
     ring_seal "${FORKRUN_MEMFD_LOADABLES}"
@@ -2690,7 +2818,10 @@ while True: time.sleep(60)'
 
     # clear massive b64 array
     unset "b64"
-    export FORKRUN_RING_ENABLED=true
+    # W-REL5-A2: shell-local readiness flag, never exported. The
+    # wrapper re-guard reads it in this shell only; exported copies
+    # would hand children a stale claim about fds they do not own.
+    FORKRUN_RING_ENABLED=true
 
     return 0
 }
@@ -2860,4 +2991,11 @@ unset "b64"
 
 declare -A b64=()   # removed base64
 
+# W-REL5-A5: source-time nounset guard. Sourcing inherits the caller
+# positional list and _forkrun_bootstrap_setup reads $1, so sourcing
+# under set -u aborted the sourcing shell before any frun call ran.
+_frun_saved_u_at_source=$-
+set +u
 _forkrun_bootstrap_setup --force
+if [[ "${_frun_saved_u_at_source}" == *u* ]]; then set -u; else set +u; fi
+unset _frun_saved_u_at_source

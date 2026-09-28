@@ -340,7 +340,6 @@ live CUDA context exists in the parent (fork would corrupt driver state).
 - `forkrun/_numa.py` — NUMA topology, pinning, worker distribution.
 - `forkrun/run.py` — parent orchestration (init/spill/scan/fork/wait).
 - `forkrun/_worker.py` — forked claim/payload/ack loop (`os._exit` only).
-- `stage0_harness.py` — table schema + surface check.
 - `tests/test_api_surface.py` — engine-free validation tests.
 - `tests/test_v0.py` — v0 engine tests (need the built `.so`).
 - `tests/test_reactor.py` — reactor tests (need the built `.so`).

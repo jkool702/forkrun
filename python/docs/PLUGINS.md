@@ -75,9 +75,14 @@ print(len(forkrun.map('./myplugin.so:process', 'data.txt',
 - **Return 0 on success.** Non-zero rides retry-then-poison
   like a Python exception (truncated like `ring_call`:
   nonzero → `& 0xFF`, never silent 0).
-- **No `forkrun_use_ctx` export** means the legacy 72B
-  two-arg convention — still supported (parent probes,
-  never guesses), but new code should opt into the ctx.
+- **No `forkrun_use_ctx` export** means the v0 one-arg 72B
+  convention (`int fn(struct fr_py_plugin_ctx *ctx)` — the
+  parent probes the tag, never guesses). A legacy bash
+  two-arg entry point must NOT be called through v0: it would
+  receive the ctx pointer as `argc` and garbage as `argv`.
+  Interchange with bash `-C` requires opting into dialect 1/2
+  (v1 dispatches through `ring_call`); new code should opt
+  into the ctx.
 - **Keep it pure-batch:** no threads, no retained state
   across calls (workers may be respawned; the engine may
   re-execute your batch after a crash — exactly-once
