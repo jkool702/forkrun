@@ -1,0 +1,104 @@
+name: bashcompat-smoke
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "frun.bash"
+      - "ring_loadables/frun.nob64.bash"
+      - "ring_loadables/update_frun_base64.bash"
+      - "ring_loadables/remove_frun_base64.bash"
+      - "ring_loadables/local_compile/**"
+      - "forkrun_ring.c"
+      - ".github/workflows/bashcompat-smoke.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "frun.bash"
+      - "ring_loadables/frun.nob64.bash"
+      - "ring_loadables/update_frun_base64.bash"
+      - "ring_loadables/remove_frun_base64.bash"
+      - "ring_loadables/local_compile/**"
+      - "forkrun_ring.c"
+      - ".github/workflows/bashcompat-smoke.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # W-BASHCOMPAT-BC5: version-floor gate over the canary closure
+  # (runs on ubuntu-latest: binutils preinstalled, no container).
+  canary-versions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v3
+      - name: Stub annotations vs shipped undefined symbols
+        run: python3 tools/check_canary_versions.py
+
+  # W-BASHCOMPAT-BC4: per-version load-smoke. The v3.6.0 loadable bug
+  # died in the 0.9MB single-line declare BEFORE enable -f ever ran —
+  # so this gate boots the REAL bootstrap (fresh source under -e,
+  # then a trivial frun round-trip), never just enable -f. Minutes
+  # per leg. Image↔bash pinning: ubuntu:18.04 ships 4.4, 20.04 ships
+  # 5.0, 22.04 ships 5.1, 24.04 ships 5.2; fedora:latest carries the
+  # newest (5.3-class at time of writing — assert it, don't assume).
+  version-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Full round-trip legs (worker runtime verified here).
+          - bash: "5.2"
+            image: ubuntu:24.04
+            workload: full
+          - bash: "5.3"
+            image: fedora:latest
+            workload: full
+          # Bootstrap-only legs: worker execution segfaults on ≤5.1
+          # (pre-existing, wave-independent — proven on pristine
+          # main:frun.bash too; NOT a bootstrap defect). These legs
+          # lock the BC-1/BC-2 bootstrap fixes; upgrade them to full
+          # round-trips when the worker-runtime finding is fixed.
+          - bash: "4.4"
+            image: ubuntu:18.04
+            workload: bootstrap
+          - bash: "5.0"
+            image: ubuntu:20.04
+            workload: bootstrap
+          - bash: "5.1"
+            image: ubuntu:22.04
+            workload: bootstrap
+    steps:
+      - uses: actions/checkout@v3
+      - name: Bootstrap + smoke on bash ${{ matrix.bash }} (${{ matrix.image }})
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            ${{ matrix.image }} \
+            bash -c '
+              set -euo pipefail
+              echo "runner bash: $(bash --version | head -1)"
+              # 4.4 floor: mapfile -d must exist (README floor claim).
+              bash -c "type mapfile" >/dev/null
+              # Distro tooling for the bootstrap decode path.
+              (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gzip coreutils)) || true
+              (command -v dnf >/dev/null && dnf install -y gzip coreutils diffutils) || true
+              # FULL bootstrap under -e (the v3.6.0 death shape), then
+              # version probe + workload per leg (full round-trip
+              # where workers run; bootstrap+version where the
+              # worker-runtime finding is open).
+              source ./frun.bash
+              ring_version -a
+              if [ "${{ matrix.workload }}" = "full" ]; then
+                seq 1 200 > /tmp/bc_input.txt
+                frun -k -j1 -l1 echo < /tmp/bc_input.txt > /tmp/bc_out.txt
+                cmp /tmp/bc_input.txt /tmp/bc_out.txt && echo "bash ${{ matrix.bash }} round-trip: OK"
+              else
+                echo "bash ${{ matrix.bash }} bootstrap-only leg: OK"
+              fi
+            '
