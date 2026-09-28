@@ -11,12 +11,14 @@ Bash-frontend functionality in v3.6.0).
 ``signal_policy="checkpoint"`` (opt-in) installs SIGHUP/SIGTERM
 handlers — plus SIGUSR1 when ``FORKRUN_PREEMPT_MODE=1``
 (mirroring the Bash conditional trap; Bash exit 138) — for the
-duration of one run. The handler records the signal and raises
-the engine fire alarm; the run's existing abort teardown then
-reaps, and the armed W-PY22 checkpoint choreography publishes,
-before the wrapper translates the pending signal into
-``ForkrunTerminated`` / ``ForkrunPreempted``. SIGINT is NEVER
-captured (stays ``KeyboardInterrupt`` → ``ForkrunInterrupted``).
+duration of one run. The handler records the signal into a
+preallocated slot array and raises the engine fire alarm; it never
+allocates and never calls arbitrary code (W-REL5-C6). The run's
+existing abort teardown then reaps, and the armed W-PY22
+checkpoint choreography publishes, before the wrapper translates
+the pending signal into ``ForkrunTerminated`` / ``ForkrunPreempted``.
+SIGINT is NEVER captured (stays ``KeyboardInterrupt`` →
+``ForkrunInterrupted``).
 
 **Handler restoration is a correctness invariant, not cleanup
 nicety** (W-PORTDEFER red line): previous dispositions are saved
@@ -32,6 +34,11 @@ import signal as _signal
 POLICY_DEFAULT = "default"
 POLICY_CHECKPOINT = "checkpoint"
 _VALID_POLICIES = (POLICY_DEFAULT, POLICY_CHECKPOINT)
+
+# W-REL5-C6: handler-side signal slots (preallocated — indexed
+# stores never allocate, unlike list.append). Saturation drops
+# extras (pending is already non-empty, so check() still fires).
+_MAX_PENDING_SLOTS = 32
 
 
 def validate_signal_policy(value):
@@ -65,23 +72,53 @@ class SignalGuard:
     def __init__(self, policy, abort_fn=None):
         self.policy = validate_signal_policy(policy)
         self._abort_fn = abort_fn or _abort_current
+        self._custom_abort = abort_fn is not None
         self._old = {}
         self.pending = []
+        self._slots = [0] * _MAX_PENDING_SLOTS
+        self._nslots = 0
+        self._engine_abort = None
         self._armed_preempt = (
             os.environ.get("FORKRUN_PREEMPT_MODE") == "1")
 
     def _handler(self, signo, _frame):
-        # Handler context (main thread, between bytecodes): record
-        # first, then abort. Never raises — a raising handler would
-        # replace the in-flight exception machinery unpredictably.
+        # Handler context (main thread, between bytecodes): indexed
+        # store into preallocated slots (never allocates), then the
+        # engine fire alarm ONLY (pre-resolved ctypes call — the
+        # engine's fr_py_abort is a single write() and safe here).
+        # Arbitrary callables (self._abort_fn) NEVER run in handler
+        # context — they are honored at drain time (check()/pump)
+        # instead. Never raises.
         try:
-            self.pending.append(signo)
+            if self._nslots < _MAX_PENDING_SLOTS:
+                self._slots[self._nslots] = signo
+                self._nslots += 1
         except Exception:
             pass
         try:
-            self._abort_fn()
+            _abort = self._engine_abort
+            if _abort is not None:
+                _abort()
         except Exception:
             pass
+
+    def _drain(self):
+        """Move handler slots to pending (normal context ONLY).
+
+        Allocation and arbitrary abort_fn calls are safe here
+        (never in _handler). Custom abort_fn runs once per drained
+        signal; the engine alarm already fired synchronously.
+        """
+        if self._nslots:
+            for i in range(self._nslots):
+                self.pending.append(self._slots[i])
+            if self._custom_abort:
+                for _ in range(self._nslots):
+                    try:
+                        self._abort_fn()
+                    except Exception:
+                        pass
+            self._nslots = 0
 
     def _wanted(self):
         sigs = [_signal.SIGHUP, _signal.SIGTERM]
@@ -107,6 +144,14 @@ class SignalGuard:
                 "called from %r). Run forkrun on the main thread, "
                 "or use the default policy."
                 % (_threading.current_thread().name,))
+        # W-REL5-C6: pre-resolve the engine alarm BEFORE any signal
+        # can arrive, so the handler performs zero attribute chains
+        # or imports (allocation-free steady state).
+        try:
+            from ._bindings import get as _get  # noqa: PLC0415
+            self._engine_abort = _get().fr_py_abort
+        except Exception:
+            self._engine_abort = None
         for sig in self._wanted():
             try:
                 self._old[sig] = _signal.getsignal(sig)
@@ -120,6 +165,7 @@ class SignalGuard:
 
     def __exit__(self, *exc):
         self.restore()
+        self._drain()
         if (self.policy == POLICY_CHECKPOINT and exc[0] is not None
                 and issubclass(exc[0], RuntimeError) and self.pending):
             # Abort-driven engine failure (worker-failure RuntimeError
@@ -149,6 +195,7 @@ class SignalGuard:
         there) — the raise then carries a resumable state.
         No pending signal: returns None.
         """
+        self._drain()
         if not self.pending:
             return None
         from .exceptions import (ForkrunPreempted,  # noqa: PLC0415

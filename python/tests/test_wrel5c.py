@@ -371,5 +371,33 @@ class TestC9SigkillBackoff(unittest.TestCase):
             os.unlink(path)
 
 
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestC6HandlerHygiene(unittest.TestCase):
+    """C6 (M16): handler records without allocating or calling out."""
+
+    def test_handler_defers_custom_abort(self):
+        import signal as _signal  # noqa: PLC0415
+        from unittest import mock as _mock  # noqa: PLC0415
+        from forkrun._signals import SignalGuard  # noqa: PLC0415
+        from forkrun.exceptions import ForkrunTerminated  # noqa: PLC0415
+
+        custom = _mock.Mock()
+        guard = SignalGuard("checkpoint", abort_fn=custom)
+        # Direct handler invocation (no install): arbitrary callables
+        # must NOT run in handler context; nothing allocates into
+        # pending there either (preallocated slots instead).
+        guard._handler(_signal.SIGHUP, None)
+        custom.assert_not_called()
+        self.assertEqual(guard.pending, [])
+        self.assertEqual(guard._nslots, 1)
+        # Drain time (normal context): pending fills, custom honored,
+        # taxonomy raise carries the signal.
+        with self.assertRaises(ForkrunTerminated) as ctx:
+            guard.check()
+        self.assertEqual(guard.pending, [_signal.SIGHUP])
+        custom.assert_called_once_with()
+        self.assertEqual(ctx.exception.signo, _signal.SIGHUP)
+
+
 if __name__ == "__main__":
     unittest.main()
