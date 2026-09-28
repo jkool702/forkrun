@@ -418,6 +418,13 @@ EOF
       0 or false: Disable preemption handling entirely.
       1 or true: Force-enable preemption handling (useful for testing or non-SLURM environments that send SIGTERM/SIGUSR1).
       When enabled, forkrun catches SIGTERM (preemption/scancel) and SIGUSR1 (SLURM --signal=B:USR1@<time>) to freeze the pipeline and generate a checkpoint for perfect resume capability.
+  FORKRUN_DEBUG         : Engine diagnostics flag (read by the C substrate; forwarded into the cleanroom). Off by default.
+  FORKRUN_TRUST_RESUME  : `=1` bypasses the interactive resume consent gate for unattended resumption (see --resume above). Prefer confirming.
+  FORKRUN_C_STDIN       : Internal ambient mode flag for `-C` with `-s`/`-b` (plugin reads its batch from fd 0). Managed by the wrapper.
+  FORKRUN_SWEEP_ARGS    : Internal sweep plumbing (serialized sweep dimensions). Managed by the wrapper.
+  FORKRUN_TMPDIR        : Bootstrap override: preferred directory for the transient `.so` extraction (ahead of the XDG/runtime/shm/tmp fallbacks).
+  FORKRUN_NUM_NODES     : Nodes in play, computed by the wrapper from `--nodes`/`--numa` (default 1). Read-only signal, not a knob — presetting it has no effect.
+  FORKRUN_TEST_FALLOW_PIDFILE / FORKRUN_TEST_INDEXER_PIDFILE / FORKRUN_TEST_CLEANROOM_PIDFILE: Test-only hooks (pidfile targeting for signal/chaos tests). No effect on production runs.
 
 EOF
                 ;;
