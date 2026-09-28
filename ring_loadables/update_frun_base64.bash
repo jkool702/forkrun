@@ -34,16 +34,23 @@ echo '# W-BASHCOMPAT-BC1: chunked b64 payload, 32KiB %q appends (see _forkrun_b6
 echo 'declare -A b64=()'
 while IFS= read -r _bck; do
     [[ -n ${_bck} ]] || continue
-    _bcv=${b64[${_bck}]}
-    if [[ -z ${_bcv} ]]; then
+    if [[ -z ${b64[${_bck}]} ]]; then
         printf 'b64[%q]+=%q\n' "${_bck}" ""
         continue
     fi
-    while [[ -n ${_bcv} ]]; do
-        printf 'b64[%q]+=%q\n' "${_bck}" "${_bcv:0:32768}"
-        _bcv=${_bcv:32768}
-    done
+    # NOTE: no herestring (<<< appends \n); printf %s adds nothing.
+    # Plain read (not fold — read strips newline delimiters, so
+    # folded output cannot reassemble exactly).
+    while IFS= read -r -N 32768 _bcp || [[ -n ${_bcp} ]]; do
+        case ${_bcp} in
+            *[!A-Za-z0-9+,/=]*)
+                printf 'b64[%q]+=%q\n' "${_bck}" "${_bcp}" ;;
+            *)
+                printf 'b64[%s]+=%s\n' "${_bck}" "${_bcp}" ;;
+        esac
+    done < <(printf '%s' "${b64[${_bck}]}")
 done < <(printf '%s\n' "${!b64[@]}" | LC_ALL=C sort)
+echo '# <@@@@@< _BASE64_END_ >@@@@@> #'
 # Preserve the file tail verbatim (post-A5 the payload is followed by
 # the nounset save/restore + bootstrap invocation — the old shape
 # dropped everything after the payload and re-appended --force,
@@ -52,11 +59,13 @@ _past_payload=false
 while IFS= read -r line || [[ -n $line ]]; do
     if ! $_past_payload; then
         # Skip the old payload region: blanks, the single declare,
-        # chunked appends, and this block's own comment lines.
+        # chunked appends, this block's comment lines, and any prior
+        # END marker (re-emitted fresh above).
         [[ -z ${line} ]] && continue
         [[ "${line}" == 'declare -A b64='* ]] && continue
         [[ "${line}" == 'b64['*']+='* ]] && continue
         [[ "${line}" == '# W-BASHCOMPAT-BC1'* ]] && continue
+        [[ "${line}" == '# <@@@@@<'* ]] && continue
         _past_payload=true
         # Re-add the single blank separator the skip consumed.
         echo

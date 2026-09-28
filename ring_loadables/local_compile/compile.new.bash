@@ -125,16 +125,23 @@ done
     echo 'declare -A b64=()'
     while IFS= read -r _bck; do
         [[ -n ${_bck} ]] || continue
-        _bcv=${b64[${_bck}]}
-        if [[ -z ${_bcv} ]]; then
+        if [[ -z ${b64[${_bck}]} ]]; then
             printf 'b64[%q]+=%q\n' "${_bck}" ""
             continue
         fi
-        while [[ -n ${_bcv} ]]; do
-            printf 'b64[%q]+=%q\n' "${_bck}" "${_bcv:0:32768}"
-            _bcv=${_bcv:32768}
-        done
+        # NOTE: no herestring (<<< appends \n); printf %s adds nothing.
+        # Plain read (not fold — read strips newline delimiters, so
+        # folded output cannot reassemble exactly).
+        while IFS= read -r -N 32768 _bcp || [[ -n ${_bcp} ]]; do
+            case ${_bcp} in
+                *[!A-Za-z0-9+,/=]*)
+                    printf 'b64[%q]+=%q\n' "${_bck}" "${_bcp}" ;;
+                *)
+                    printf 'b64[%s]+=%s\n' "${_bck}" "${_bcp}" ;;
+            esac
+        done < <(printf '%s' "${b64[${_bck}]}")
     done < <(printf '%s\n' "${!b64[@]}" | LC_ALL=C sort)
+    echo '# <@@@@@< _BASE64_END_ >@@@@@> #'
     _past_payload=false
     while IFS= read -r a || [[ -n $a ]]; do
         if ! $_past_payload; then
@@ -142,6 +149,7 @@ done
             [[ "${a}" == 'declare -A b64='* ]] && continue
             [[ "${a}" == 'b64['*']+='* ]] && continue
             [[ "${a}" == '# W-BASHCOMPAT-BC1'* ]] && continue
+            [[ "${a}" == '# <@@@@@<'* ]] && continue
             _past_payload=true
             echo
         fi
