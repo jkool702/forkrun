@@ -181,10 +181,18 @@ jobs:
 
               # 4. Logic Branch based on Architecture
               if [ "$TARGET_ARCH" == "x86_64" ]; then
-                  # The Triple Build
-                  build_variant "x86-64-v2" "-march=x86-64-v2"
-                  build_variant "x86-64-v3" "-march=x86-64-v3"
-                  build_variant "x86-64-v4" "-march=x86-64-v4"
+                  # The Triple Build.
+                  # W-REL5-D D-TLS: -mtls-dialect=gnu drops the
+                  # GLIBC_ABI_GNU2_TLS requirement (gcc-16 TLSDESC
+                  # codegen; absent on glibc <=2.39, blocking Ubuntu
+                  # <=24.04/Debian 12/RHEL <=9 at load). Proven locally:
+                  # requirement present without the flag, absent with
+                  # it; source-identical, small TLS-codegen delta only.
+                  # Non-x86 blobs never carried the requirement --
+                  # their builds are untouched.
+                  build_variant "x86-64-v2" "-march=x86-64-v2 -mtls-dialect=gnu"
+                  build_variant "x86-64-v3" "-march=x86-64-v3 -mtls-dialect=gnu"
+                  build_variant "x86-64-v4" "-march=x86-64-v4 -mtls-dialect=gnu"
               else
                   # Single Build
                   build_variant "$TARGET_ARCH" "$EXTRA_FLAGS"
