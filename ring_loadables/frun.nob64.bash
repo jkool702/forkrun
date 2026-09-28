@@ -2759,19 +2759,10 @@ while True: time.sleep(60)'
 
                 # CRITICAL TEST: Try to Enable loadable
                 # This verifies the filesystem allows execution (noexec check)
-                # TEMP-CI-DEBUG (revert): stderr to a file (NOT $()
-                # — enable in a subshell loads builtins into the
-                # subshell, discarding them; that fallacy killed
-                # every leg last cycle).
-                _enable_diag=/tmp/enable_diag_$$.log
-                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe 2>"${_enable_diag}"; then
+                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe 2>/dev/null; then
                     # SUCCESS! The builtin is loaded.
                     need_memfd_create_flag=false
-                else
-                    # TEMP-CI-DEBUG (revert): name the failure.
-                    printf 'ENABLE-DIAG tmp=%s rc=%d err=%s\n' "$tmp_so" "$?" "$(cat "${_enable_diag}" 2>/dev/null)" >&2
                 fi
-                rm -f "${_enable_diag}"
             fi
 
             # Clean up
