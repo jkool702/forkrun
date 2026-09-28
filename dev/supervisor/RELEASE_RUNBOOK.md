@@ -56,7 +56,13 @@ For each of `TESTING/TSAN` and `TESTING/ASAN+UBSAN`:
    **plus `META`**. Copying the C without its headers reproduces this
    incident exactly (`gcc: forkrun_substrate.h: No such file`, green job,
    empty artifacts, stale re-embed — see GATE §20).
-2. Verify **before running anything** (post-pull E1/E3):
+2. Verify **before running anything** — automated (W-REL5-F F4),
+   replacing the manual E1/E3 eyeballing below:
+   `./ring_loadables/verify_blob_freshness.bash <freshly-built.so> ./frun.bash <key>`
+   (decode-and-cmp embed gate; mismatch fails loudly), or the reusable
+   `.github/workflows/sanitizer-freshness.yml` caller from the leg's
+   workflow (pass the leg's own build flags so the rebuild matches).
+   Manual equivalent (kept for forensics, not gating):
    - E1: `diff` of the three synced files against frozen mainline is empty.
    - E3: `strings ring_loadables/forkrun-libs/forkrun_ring.x86-64-v4.so`
      shows `INDEXER_DEATH` count ≥1 and the instrumented `v3.5.1_*` label.

@@ -1,0 +1,70 @@
+name: sanitizer-freshness
+on:
+  # W-REL5-F (F4): reusable stale-blob gate for legs that embed
+  # loadables built with non-release flags (sanitizer branches).
+  # Callable from any branch workflow AFTER promotion carries this
+  # file (uses: jkool702/forkrun/.github/workflows/
+  # sanitizer-freshness.yml@main with the caller branch checked out
+  # below); workflow_dispatch covers one-off manual runs.
+  workflow_call:
+    inputs:
+      build-flags:
+        description: "Extra gcc flags for the rebuild (must match the leg's own build)"
+        required: false
+        default: ""
+        type: string
+      arch-key:
+        description: "Embedded-map key, e.g. x86_64_v4"
+        required: false
+        default: "x86-64-v4"
+        type: string
+      march-flag:
+        description: "Target arch flag for the rebuild"
+        required: false
+        default: "-march=x86-64-v4"
+        type: string
+  workflow_dispatch:
+    inputs:
+      build-flags:
+        description: "Extra gcc flags for the rebuild"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v3
+      - name: Rebuild + decode-and-cmp (fails loudly on stale embed)
+        run: |
+          # Same-toolchain rebuild of one arch variant, then the
+          # shared decode-and-cmp gate (ring_loadables/
+          # verify_blob_freshness.bash). A silently failed embed step
+          # can no longer sail through: bytes must match exactly.
+          # (The timestamped-gzip encoder means regen-and-compare
+          # would false-fail; decode-and-cmp is deterministic.)
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            fedora:latest \
+            bash -c 'set -euo pipefail
+              dnf install -y bash-devel gcc make file gzip coreutils diffutils
+              FR_VERSION=$(grep -E "^VERSION:" META | sed -E "s/^VERSION:[ \t]*//")
+              KEY="${{ inputs.arch-key }}"
+              MM="${KEY//-/_}"
+              gcc forkrun_ring.c \
+                -O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fomit-frame-pointer -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC -Wl,-O1 -Wl,--as-needed -Wl,-Bsymbolic -ldl \
+                ${{ inputs.build-flags }} \
+                -DNDEBUG -Wall -Wextra \
+                -I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins \
+                -DSHELL -DHAVE_CONFIG_H "-DBUILD_OS=\"Linux\"" "-DFORKRUN_RING_VERSION=\"$FR_VERSION\"" \
+                "-D__DATE__=\"Sep  1 2026\"" "-D__TIME__=\"00:00:00\"" "-DBUILD_ARCH=\"$KEY\"" \
+                -shared ${{ inputs.march-flag }} \
+                -o /tmp/fresh_check.so
+              strip --strip-unneeded /tmp/fresh_check.so
+              ./ring_loadables/verify_blob_freshness.bash /tmp/fresh_check.so ./frun.bash "$MM"
+            '
