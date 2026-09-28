@@ -1,0 +1,41 @@
+name: static-analysis
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "python/**"
+      - ".github/workflows/static-analysis.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "python/**"
+      - ".github/workflows/static-analysis.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    # W-REL5-F (F3): ruff + coverage BASELINE — explicitly
+    # non-gating for v3.6.0 (continue-on-error). Informational output
+    # only: the counts below are the reference the 3.6.1 gating
+    # decision gets made against. Do not fix the tree to satisfy
+    # this job; record findings as issues instead.
+    # Baseline at introduction (v3.6.0 wave): ruff 554 findings on
+    # python/forkrun/ (top: UP031 printf-formatting 211, BLE001
+    # blind-except 142, S110 try-except-pass 78 — sampled: dead-store
+    # snapshots and intentional payload-code paths, no live bug).
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v3
+      - name: Ruff + coverage baseline (advisory, never fails)
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            fedora:latest \
+            bash -c 'set -euo pipefail; dnf install -y bash-devel gcc make file python3 python3-pip && python3 -m pip install -q ruff coverage && make -f Makefile.substrate python-substrate && echo "=== ruff baseline ===" && (python3 -m ruff check python/forkrun/ --statistics || true) && echo "=== coverage ===" && (python3 -m coverage run --source=forkrun -m unittest discover -s python/tests && python3 -m coverage report --include="python/forkrun/*" || true)'
