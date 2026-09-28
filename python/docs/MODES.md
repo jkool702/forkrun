@@ -64,10 +64,18 @@ throughput when you can write C.
 forkrun.map("./myplugin.so:process", "data.txt", mode="plugin")
 ```
 
-- Frozen ABI (`struct forkrun_ctx`, 128B): the plugin reads
-  the input window zero-copy and writes stdout, which the
-  shim stages and frames. A bash `-C` plugin works from
-  Python unchanged and vice versa.
+- Two conventions, not one: the default v0 Python path calls
+  a one-arg entry point, `int process(struct fr_py_plugin_ctx
+  *ctx)` (72B Python-side buffers, return code captured —
+  NOT the frozen engine ABI). Only dialect-tagged plugins
+  (`forkrun_use_ctx` 1/2) dispatch through the C-level v1 path
+  on the frozen ABI (`struct forkrun_ctx`, 128B: the plugin
+  reads the input window zero-copy and writes stdout, which
+  the shim stages and frames) — and only those work from both
+  bash `-C` and Python unchanged. An untagged legacy two-arg
+  bash plugin called through v0 would receive the ctx pointer
+  as `argc` and garbage as `argv`; the parent probes the tag
+  and never guesses. See [PLUGINS.md](PLUGINS.md).
 - Throughput (28 workers, 5M): 5.5M/s light, 2.3M/s medium
   (yyjson single-pass), 710k/s heavy — 2–7× the Python loop.
 - `c_worker_loop=True` (opt-in, `map()` only, dialect-1/2

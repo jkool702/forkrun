@@ -134,6 +134,19 @@ DOC_CLAIMS = [
         "assertion_summary": "signal deaths map to causes, crash stays "
                              "plain RuntimeError",
     },
+    {
+        "claim": "Plugin conventions: v0 Python plugins are one-arg "
+                 "ctx callbacks; only dialect-tagged plugins "
+                 "interchange with bash -C",
+        "doc_source": "python/docs/PLUGINS.md",
+        "key_phrase": "one-arg 72B",
+        "covering_tests": [
+            "test_plugin.TestPluginLoading.test_load_valid_plugin",
+            "test_plugin.TestPluginLayout.test_exact_layout",
+        ],
+        "assertion_summary": "loader binds the int(*)(ctx*) signature; "
+                             "layout pins the 72B v0 struct both sides",
+    },
 ]
 
 
@@ -215,6 +228,9 @@ class TestDocAccuracy(unittest.TestCase):
 
     def test_claim_taxonomy(self):
         self.assertEqual(_check_entry(DOC_CLAIMS[8]), [])
+
+    def test_claim_plugin_conventions(self):
+        self.assertEqual(_check_entry(DOC_CLAIMS[9]), [])
 
 
 if __name__ == "__main__":
