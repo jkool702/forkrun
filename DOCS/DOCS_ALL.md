@@ -931,6 +931,81 @@ item bite-then-green (pre-fix failing demonstration first).
   drift mechanism); it directs a scratch copy plus states the
   single-source rule.
 
+### Docs, dead code, hygiene (W-REL5-E)
+
+Zero product behavior changes (docs + deletions + help text +
+output-identical bash single-sourcing only). Excluded by design:
+E5, E6, E7, E15 (Python-file overlap, sequenced post-merge) and
+E16 (LEGACY/history, registered-not-executed).
+
+- **E1:** plugin ABI docs corrected (`MODES.md`, `MIGRATION.md`,
+  `PLUGINS.md`). The default v0 path is a one-arg 72B ctx
+  convention (`int process(struct fr_py_plugin_ctx *ctx)`),
+  not the frozen 128B engine ABI and not the bash legacy
+  two-arg form (which would take the ctx pointer as `argc`
+  and garbage as `argv`). Only dialect-tagged plugins
+  (`forkrun_use_ctx` 1/2) interchange with bash `-C` via the
+  v1 `ring_call` path. Doc-accuracy row added (loader +
+  layout covering tests, engine-free).
+- **E2:** Python floor reconciled to 3.10 (honest per the
+  PEP-604 `str | None` at `_bindings.py:365`, read-only
+  cited, not edited). `setup.py` `>=3.8` → `>=3.10`, 3.8/3.9
+  classifiers dropped; `release_check.py` metadata check now
+  asserts the `Requires-Python: >=3.10` value inside the
+  existing check (check count unchanged); the pinning
+  packaging test moved with it. `INSTALLATION.md` already
+  said 3.10+, verified.
+- **E3:** `sink=` documented at-least-once (one sentence each
+  in `API.md`, `FAULT_TOLERANCE.md` — the old stdout-warning
+  bullet described a pattern that does not exist in Python).
+  Sink runs before commit: engine output exactly-once, sink
+  side effects re-run on death-between-sink-and-ack — keep
+  sinks idempotent. Doc-accuracy row added (sink-under-
+  crash-recovery covering test).
+- **E4:** import side effects documented (`INSTALLATION.md`
+  troubleshooting: import dlopens and swallows a bad
+  `$FORKRUN_LIB` to `"unknown"`; `API.md`: `forkrun.run`
+  is the function, not a module — documented, not renamed).
+- **E8:** deleted `ring_loadables/local_compile/compile.sh`
+  (wrong flags vs CI, no `-`→`_` key normalization so an
+  `x86-64-v2`-style key dies as a bad array subscript at
+  bootstrap, writes `./frun.new.bash` without applying it;
+  `update_frun_base64.bash` is the fixed successor).
+- **E9:** deleted ungated drifted twins
+  `ring_loadables/forkrun_ring.c.txt` and
+  `ring_loadables/frun.nob64.bash.txt` (no CI gate references
+  either; the gated twins — `frun.bash`↔`frun.nob64.bash`
+  pre-b64 region, `UNIT_TESTS/test_frun_comprehensive.sh`↔
+  `.txt` — are untouched).
+- **E10:** supported-arch list single-sourced in
+  `_forkrun_get_arch` (`_supported_arches`; the error string
+  prints the variable, output byte-identical, probed). The
+  b64 keys from CI must name the same set (comment cites the
+  workflow matrix + normalizer). Twins kept byte-identical.
+- **E11:** nine honored-but-unlisted env vars added to the
+  `### ENVIRONMENT VARS` help block (`frun.bash` + twin) and
+  `DOCS/FLAGS.md`: `FORKRUN_DEBUG`, `FORKRUN_TRUST_RESUME`,
+  `FORKRUN_C_STDIN`, `FORKRUN_SWEEP_ARGS`, `FORKRUN_TMPDIR`,
+  `FORKRUN_NUM_NODES`, three `FORKRUN_TEST_*_PIDFILE` hooks
+  (internal/test-only status marked where applicable).
+- **E12:** help-text corrections, `frun.bash` + twin + docs
+  only, no logic: completion drops nonexistent `--debug`
+  and internal-only `--fast`; `-X` note drops `-I` from the
+  fast-path exclusion (`-I` stays fast — the gate never
+  excluded `insert_id_flag`); `-v` narrowed to what it does
+  (spawn summary, plugin-compile notes, NUMA stats;
+  `toc()` timing is dead code). Twins byte-identical.
+- **E13:** portability floor corrected (`README.md` via
+  symlink `DOCS/README.md`, `DOCS/FORKRUN_OVERVIEW.md`, and
+  both `DOCS_ALL.md` embeds): Bash ≥ 4.4 (`mapfile -d`),
+  GNU-only `sed -z` / `base64 -w 0` / `truncate --size=`,
+  no busybox support.
+- **E14:** deleted `python/stage0_harness.py` (TBD/
+  UNMEASURED skeleton, `check_surface()` passes on
+  `NotImplementedError`/`OSError`/`FileNotFoundError`/
+  `RuntimeError`; no tests, not in the gate) and its
+  `python/README.md` bullet.
+
 ## v3.5.14 (unreleased)
 
 ### Python frontend: C drain process, opt-in (W-PY21-A)
