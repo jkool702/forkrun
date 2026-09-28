@@ -215,7 +215,8 @@ def check_metadata():
             assert meta_names, "no METADATA in wheel"
             meta = zf.read(meta_names[0]).decode("utf-8")
         for field in ("Name: forkrun", "Version: " + PY_VERSION,
-                      "Summary:", "Home-page:", "Requires-Python:",
+                      "Summary:", "Home-page:",
+                      "Requires-Python: >=3.10",
                       "License:", "Classifier:"):
             assert field in meta, "METADATA missing %r" % field
         assert "Development Status :: 4 - Beta" in meta

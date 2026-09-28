@@ -115,7 +115,7 @@ class TestWheelPlatform(unittest.TestCase):
             for field in ("Name: forkrun",
                           "Version: " + forkrun.__version__,
                           "Summary:", "Home-page:",
-                          "Requires-Python: >=3.8",
+                          "Requires-Python: >=3.10",
                           "License:", "Classifier:",
                           "Project-URL:"):
                 self.assertIn(field, meta,
