@@ -6608,7 +6608,9 @@ static int ring_ack_main(int argc, char **argv) {
       ack_cached_target_fd = fd_target;
       /* W-REL5-D (D2): the offset belongs to the previous file. Without
        * this reset, curr - last_ack_offset below can go negative across
-       * an fd change and wrap to a ~16-exabyte sendfile length. */
+       * an fd change and wrap to a ~16-exabyte sendfile length. Paired
+       * with ring_ack_init_main adopting the trio on init-sync, so a
+       * proper init never trips this (respawn coherence). */
       last_ack_offset = 0;
       struct stat st;
       ack_cached_mode =
@@ -8371,6 +8373,16 @@ static int ring_ack_init_main(int argc, char **argv) {
     int fd = atoi(argv[1]);
     if (fd >= 0) {
         last_ack_offset = lseek(fd, 0, SEEK_CUR);
+        /* W-REL5-D (D2 coherence): the ack path resets last_ack_offset
+         * on fd change, so an init-sync must also adopt the fd (and its
+         * mode) -- otherwise the first post-init ack sees a spurious
+         * "change" and zeroes the just-synced offset, duplicating a
+         * respawned generation's pre-existing output downstream
+         * (caught by test_invariant_gate §6/§9). */
+        ack_cached_target_fd = fd;
+        struct stat st;
+        ack_cached_mode =
+            (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
     }
     /* W-PY29: one cursor lseek per worker startup (fresh or respawned).
      * Respawned generations append to a reused fd, so the cursor must

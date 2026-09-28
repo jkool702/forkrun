@@ -75,13 +75,21 @@ int fr_py_set_output_fd(int fd) {
  * file (TLS starts 0), duplicating everything downstream. Fresh
  * workers are a no-op (fresh memfd offset is already 0). Assigns
  * only on lseek success (a pipe fd must never install -1).
- * W-PY29: also initializes the output cursor (one lseek per worker,
- * shared with the offset sync above — no extra syscall). */
+ * W-REL5-D (D2 coherence): adopt the fd + mode too -- the ack core
+ * resets the offset on fd change, so an init-sync that leaves the
+ * cached fd behind manufactures a spurious change and zeroes the
+ * just-synced offset (test_invariant_gate §6/§9 caught it).
+  * W-PY29: also initializes the output cursor (one lseek per worker,
+  * shared with the offset sync above — no extra syscall). */
 int fr_py_ack_init(int fd) {
     if (fd >= 0) {
         off_t pos = lseek(fd, 0, SEEK_CUR);
         if (pos != (off_t)-1)
             last_ack_offset = pos;
+        ack_cached_target_fd = fd;
+        struct stat st;
+        ack_cached_mode =
+            (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) ? 1 : 2;
     }
     worker_txn_init_output_cursor(fd);
     return 0;
@@ -206,15 +214,6 @@ int fr_py_worker_init(int wid, int node_id, int wincarn, int retry_limit,
  * *out. Returns 0 success, 2 EOF, 1 failure/abort. Never touches bash
  * variables. */
 
-/* W-REL5-D (D11) fault-injection master state (see DIE_AT_CLAIM note). */
-static int fr_test_hooks_state = -1; /* -1 unprobed, 0 off, 1 on */
-static inline int fr_test_hooks_armed(void) {
-    if (fr_test_hooks_state < 0)
-        fr_test_hooks_state =
-            (getenv("FORKRUN_ENABLE_TEST_HOOKS") != NULL) ? 1 : 0;
-    return fr_test_hooks_state;
-}
-
 int fr_py_claim(fr_py_batch_t *out) {
     struct WorkerBatchState batch;
     int rc;
@@ -229,20 +228,15 @@ int fr_py_claim(fr_py_batch_t *out) {
     /* W-PY29: IDLE → CLAIMING before the ticket is issued
      * (do_lockfree_claim is untouched — the hook only brackets it). */
     worker_txn_begin_claim(g_fr_config.ring_wid);
-    /* W-REL5-D (D11): fault-injection master switch. The DIE_AT_* hooks
-     * below cost a getenv per claim/commit on the hot path; gate them
-     * behind FORKRUN_ENABLE_TEST_HOOKS, cached per-process at first
-     * evaluation. Cache timing is load-bearing: suites set the master
-     * pre-fork (inherited) or post-fork-pre-first-claim (unit pattern),
-     * both observed because the cache populates lazily at first use,
-     * never at init/import. The SPECIFIC vars stay uncached (read fresh
-     * whenever the master is armed), so set/del cycles across tests keep
-     * working. Mid-life toggles of the MASTER within one worker go
-     * stale -- no suite does this (workers are per-run; set/del happens
-     * between runs with fresh workers). Production (master unset): one
-     * getenv per process, then zero. */
-    if (fr_test_hooks_armed() &&
-        getenv("FORKRUN_TEST_DIE_AT_CLAIM") != NULL)
+    /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_CLAIM=1 makes
+     * the worker SIGKILL itself inside the claim-without-publish
+     * window (deterministic race injection). Inert unless the env var
+     * is set. Deliberately uncached: the value is read fresh so
+     * forked children observe the post-fork environment (a cached
+     * "unset" inherited across fork would disarm the hook) and
+     * set/del cycles across tests behave. Cost is one getenv per
+     * claim (~tens of ns, invisible next to batch work). */
+    if (getenv("FORKRUN_TEST_DIE_AT_CLAIM") != NULL)
         raise(SIGKILL);
     rc = do_lockfree_claim(&batch, true);
     if (rc != 0) {
@@ -2061,10 +2055,9 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
     worker_txn_begin_commit(g_fr_config.ring_wid);
     /* W-PY29 adversarial test hook: FORKRUN_TEST_DIE_AT_COMMIT=1 makes
      * the worker SIGKILL itself inside the ack→clear window
-     * (deterministic race injection). Read fresh per ack whenever the
-     * D11 master is armed (see DIE_AT_CLAIM note on caching). */
-    if (fr_test_hooks_armed() &&
-        getenv("FORKRUN_TEST_DIE_AT_COMMIT") != NULL)
+     * (deterministic race injection). Inert unless set; read fresh
+     * per ack (see DIE_AT_CLAIM note on fork inheritance). */
+    if (getenv("FORKRUN_TEST_DIE_AT_COMMIT") != NULL)
         raise(SIGKILL);
     sa_ign.sa_handler = SIG_IGN;
     sigemptyset(&sa_ign.sa_mask);
@@ -2147,7 +2140,8 @@ static int fr_py_ack_core(int fallow_fd, int target_fd) {
             ack_cached_target_fd = target_fd;
             /* W-REL5-D (D2 twin): reset the offset with the mode (see
              * forkrun_ring.c) -- otherwise a cross-file curr can wrap
-             * the sendfile length. */
+             * the sendfile length. Coherent with fr_py_ack_init
+             * adopting the trio: a proper init-sync never trips this. */
             last_ack_offset = 0;
             struct stat st;
             ack_cached_mode =
