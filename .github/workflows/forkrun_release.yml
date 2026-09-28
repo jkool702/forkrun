@@ -77,6 +77,7 @@ jobs:
             --platform=${{ matrix.platform }} \
             -e TARGET_ARCH="${{ matrix.arch }}" \
             -e EXTRA_FLAGS="${{ matrix.extra_flags }}" \
+            -e GITHUB_SHA="${{ github.sha }}" \
             ${{ matrix.docker_image }} \
             bash -c '
               set -euo pipefail   # W-REL1/R5: ANY failure below fails
@@ -112,6 +113,7 @@ jobs:
                   "-DBUILD_OS=\"Linux\""
                   "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
                   "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
+                  "-DGIT_HASH=\"${GITHUB_SHA:0:12}\""
                   # W-REL1/R5: pin the wall-clock macros (same values
                   # as Makefile.substrate) so builds are
                   # byte-reproducible — the freshness gate below
