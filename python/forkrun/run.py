@@ -263,6 +263,39 @@ def _validate_orchestrator(orchestrator):
         % (orchestrator,))
 
 
+# W-REL5-B1: the shared kwargs whitelist for the **kwargs frontends
+# (map/stream/sweep). run() already rejects unknown keywords by
+# construction (explicit keyword-only signature); these three read
+# kwargs.get(...) with no whitelist, so a typo (wokers=) silently
+# ran a different pipeline. sink= is NOT in the set: only run()
+# owns a worker-side sink; the collecting frontends reject it with
+# a dedicated ValueError (same wording as sweep's pre-existing
+# gate) before this whitelist runs.
+_MAP_STREAM_KWARGS = frozenset((
+    "mode", "nodes", "order", "lines", "bytes", "workers",
+    "on_error", "streaming", "orchestrator", "c_drain", "resume",
+    "checkpoint_file", "strict_poison", "signal_policy",
+    "c_worker_loop", "c_spawn_loop",
+))
+
+
+def _reject_unknown_kwargs(who, kwargs, allowed=_MAP_STREAM_KWARGS):
+    """Fail-closed unknown-keyword rejection (W-REL5-B1).
+
+    who names the frontend for the message (e.g. "map()").
+    Raises TypeError (Python's own unexpected-keyword error type)
+    naming every unknown key plus the allowed set — never silently
+    runs.
+    """
+    unknown = sorted(k for k in kwargs if k not in allowed)
+    if unknown:
+        raise TypeError(
+            "%s got unexpected keyword argument(s): %s "
+            "(allowed: %s)" % (
+                who, ", ".join(repr(k) for k in unknown),
+                ", ".join(sorted(allowed))))
+
+
 def _validate_c_worker_loop(c_worker_loop):
     """Normalize the W-PY26 C worker-loop flag (None → False default).
 
@@ -939,7 +972,18 @@ def map(payload, source, **kwargs):
       returns partial output (Bash -E continuation semantics).
       True = raise ForkrunPoisonSkip (Bash exit 3) carrying the
       engine's poisoned count instead.
+
+    sink= is rejected (W-REL5-B1): map() collects results — the
+      payload return value IS the result. A worker-side sink lives
+      only on run(). Unknown keyword arguments are likewise
+      rejected (TypeError) instead of silently running.
     """
+    if kwargs.get("sink") is not None:
+        raise ValueError(
+            "map() collects results — sink= is not accepted (the "
+            "payload return value is the result; use run() for a "
+            "worker-side sink)")
+    _reject_unknown_kwargs("map()", kwargs)
     mode = kwargs.get("mode", "python")
     nodes = kwargs.get("nodes", "auto")
     _validate(payload, source, mode=mode, sink=None,
@@ -1178,7 +1222,18 @@ def stream(payload, source, **kwargs):
       stream yields partial output (Bash -E continuation semantics).
       True = raise ForkrunPoisonSkip (Bash exit 3) at exhaustion
       instead of returning normally.
+
+    sink= is rejected (W-REL5-B1): stream() yields results — the
+      payload return value IS the result. A worker-side sink lives
+      only on run(). Unknown keyword arguments are likewise
+      rejected (TypeError) instead of silently running.
     """
+    if kwargs.get("sink") is not None:
+        raise ValueError(
+            "stream() yields results — sink= is not accepted (the "
+            "payload return value is the result; use run() for a "
+            "worker-side sink)")
+    _reject_unknown_kwargs("stream()", kwargs)
     _validate(payload, source, mode=kwargs.get("mode", "python"),
               sink=None, order=kwargs.get("order", "none"),
               lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
@@ -5702,6 +5757,7 @@ def sweep(payload, source=None, *, args=None, args_from=None,
             "sweep() with mode='splice' is rejected: no payload "
             "exists to receive batch.metadata (passthrough has no "
             "per-combination hook)")
+    _reject_unknown_kwargs("sweep()", kwargs)
     combos = list(generate_combinations(args=args, args_from=args_from,
                                         link=link))
     if not combos:
