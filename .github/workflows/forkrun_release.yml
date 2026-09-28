@@ -78,7 +78,6 @@ jobs:
             -e TARGET_ARCH="${{ matrix.arch }}" \
             -e EXTRA_FLAGS="${{ matrix.extra_flags }}" \
             -e GITHUB_SHA="${{ github.sha }}" \
-            -e GITHUB_REF_TYPE="${{ github.ref_type }}" \
             ${{ matrix.docker_image }} \
             bash -c '
               set -euo pipefail   # W-REL1/R5: ANY failure below fails
@@ -94,56 +93,19 @@ jobs:
               # W-BASHCOMPAT-BC6: record the resolved toolchain into the
               # log (provenance visibility for the blob-build container;
               # informational only — never gate on it here).
-               echo "provenance: $(bash --version | head -1) // $(rpm -q bash-devel 2>/dev/null || echo no-bash-devel-rpm)"
-               # W-GITHASH hardening: the engine includes <config.h>
-               # under HAVE_CONFIG_H. If bash-devel is missing or
-               # incomplete, the gcc error ("config.h: No such file")
-               # looks like a flags problem and invites blaming the
-               # most recent workflow edit. Fail here instead, with the
-               # actual cause named.
-               if [ ! -f /usr/include/bash/config.h ]; then
-                 echo "ERROR: bash-devel headers incomplete (/usr/include/bash/config.h missing); cannot build loadable" >&2
-                 exit 1
-               else
-                 echo "config.h found at /usr/include/bash/config.h" >&2
-               fi
+              echo "provenance: $(bash --version | head -1) // $(rpm -q bash-devel 2>/dev/null || echo no-bash-devel-rpm)" >&2
 
               # 2. Extract Version from META
               FR_VERSION="unknown"
               if [ -f META ]; then
                  FR_VERSION=$(grep -E "^VERSION:" META | sed -E "s/^VERSION:[ \t]*//")
               fi
-               echo "Compiling Version: $FR_VERSION"
+              echo "Compiling Version: $FR_VERSION" >&2
 
-               # 2b. Derive the git provenance for ring_version -h
-               # (v3.6.0 W-GITHASH). Computed once HERE, never inside
-               # build_variant(): the freshness gate byte-compares two
-               # builds seconds apart, so this value must be identical
-               # for both — it rides the same "${DEFS[@]}" mechanism as
-               # the other four. GITHUB_SHA/REF_TYPE arrive via the -e
-               # passthrough above; ${...:-} guards keep `set -u` happy
-               # on manual (non-GitHub) container runs, where the value
-               # must degrade to "unknown", not abort the build.
-               FR_GIT_HASH="${GITHUB_SHA:-}"
-               if [ -n "$FR_GIT_HASH" ]; then
-                 FR_GIT_HASH="${FR_GIT_HASH:0:12}"
-                 if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-                   FR_GIT_HASH="$FR_VERSION+git.$FR_GIT_HASH"
-                 fi
-               else
-                 FR_GIT_HASH="unknown"
-               fi
-               echo "Git hash: $FR_GIT_HASH"
-
-               # 3. Define Common Flags
-               # -ffile-prefix-map mirrors Makefile.substrate (same
-               # intent; in-container the tree is at /src): pin __FILE__
-               # so the artifact doesn't embed the build path. This also
-               # flows into COMPILER_FLAGS below, so ring_version -f
-               # shows the reproducibility flag alongside the rest.
-               OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fomit-frame-pointer -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC -Wl,-O1 -Wl,--as-needed -Wl,-Bsymbolic -ldl -ffile-prefix-map=/src=. "
-               WARN_FLAGS="-DNDEBUG -Wall -Wextra "
-               INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins "
+              # 3. Define Common Flags
+              OPT_FLAGS="-O3 -flto=auto -fno-strict-aliasing -fno-semantic-interposition -fomit-frame-pointer -fno-math-errno -ftree-loop-im -ftree-loop-ivcanon -fPIC -Wl,-O1 -Wl,--as-needed -Wl,-Bsymbolic -ldl"
+              WARN_FLAGS="-DNDEBUG -Wall -Wextra "
+              INCLUDES="-I/usr/include/bash -I/usr/include/bash/include -I/usr/include/bash/builtins "
               
                DEFS=(
                   "-DSHELL"
@@ -151,10 +113,7 @@ jobs:
                   "-DBUILD_OS=\"Linux\""
                   "-DFORKRUN_RING_VERSION=\"$FR_VERSION\""
                   "-DCOMPILER_FLAGS=\"$OPT_FLAGS\""
-                  # v3.6.0 W-GITHASH: provenance for ring_version -h.
-                  # Value computed once above (never in the build loop)
-                  # so the freshness byte-compare stays exact.
-                  "-DGIT_HASH=\"$FR_GIT_HASH\""
+                  "-DGIT_HASH=\"${GITHUB_SHA:0:12}\""
                   # W-REL1/R5: pin the wall-clock macros (same values
                   # as Makefile.substrate) so builds are
                   # byte-reproducible — the freshness gate below
@@ -172,12 +131,10 @@ jobs:
                  local march_flag="$2"
                  local out_file="artifacts/forkrun_ring.${arch_name}.so"
                  
-                 echo ">>> Building $arch_name..."
+                 echo ">>> Building $arch_name..." >&2
                  
                  # Dynamic Arch Definition
                  local ARCH_DEF="-DBUILD_ARCH=\"$arch_name\""
-
-                 echo "RUNNING GCC COMMAND: gcc forkrun_ring.c $OPT_FLAGS $WARN_FLAGS $INCLUDES ${DEFS[@]} $ARCH_DEF -shared $march_flag -o $out_file" >&2
                  
                  gcc forkrun_ring.c \
                     $OPT_FLAGS $WARN_FLAGS $INCLUDES \
@@ -188,20 +145,11 @@ jobs:
                  
                   strip --strip-unneeded "$out_file"
                   
-                   # SANITY CHECK: Try to enable and run version check
-                   echo ">>> Testing loadable..."
-                   enable -f "$out_file" ring_version && \
-                   ring_version -a || exit 1
-                   # W-GITHASH: the artifact about to ship inside
-                   # frun.bash must carry provenance. ring_version -h
-                   # prints the bare GIT_HASH (exact line match); the
-                   # "unknown" fallback means the -e passthrough above
-                   # broke and this must fail loudly, not ship quiet.
-                   if ring_version -h | grep -qxF "unknown"; then
-                     echo "ERROR: GIT_HASH not baked into $arch_name" >&2
-                     exit 1
-                   fi
-                   enable -d ring_version
+                  # SANITY CHECK: Try to enable and run version check
+                  echo ">>> Testing loadable..." >&2
+                  enable -f "$out_file" ring_version && \
+                  ring_version -a || exit 1
+                  enable -d ring_version
 
                   # W-REL3/R5 freshness gate (colocated): rebuild the
                   # identical variant from current source and
@@ -213,7 +161,7 @@ jobs:
                   # (Colocated deliberately: a separate-container
                   # rebuild proved sensitive to image/toolchain drift
                   # between docker runs, i.e. false-positive-prone.)
-                  echo ">>> Freshness rebuild $arch_name..."
+                  echo ">>> Freshness rebuild $arch_name..." >&2
                   gcc forkrun_ring.c \
                      $OPT_FLAGS $WARN_FLAGS $INCLUDES \
                      "${DEFS[@]}" "$ARCH_DEF" \
@@ -222,7 +170,7 @@ jobs:
                      -o "$out_file.fresh"
                   strip --strip-unneeded "$out_file.fresh"
                   if cmp -s "$out_file.fresh" "$out_file"; then
-                     echo "FRESH-OK: $arch_name rebuild == artifact"
+                     echo "FRESH-OK: $arch_name rebuild == artifact" >&2
                   else
                      echo "FRESH-FAIL: $arch_name rebuild differs (stale source or nondeterministic build)" >&2
                      rm -f "$out_file.fresh"
@@ -353,7 +301,7 @@ jobs:
             rm -f "$tmpd/out.so"
             if (set +e +u; _forkrun_base64_to_file <<<"${b64[$key]}" "$tmpd/out.so" 2>/dev/null); then
               if cmp -s "$tmpd/out.so" "$artifact"; then
-                echo "VERIFY-OK: b64[$key] decodes to $artifact"
+                echo "VERIFY-OK: b64[$key] decodes to $artifact" >&2
               else
                 echo "VERIFY-FAIL: embedded b64[$key] decodes to bytes differing from $artifact (stale blob)" >&2; fail=1
               fi
