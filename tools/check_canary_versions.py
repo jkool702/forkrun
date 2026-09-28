@@ -10,7 +10,8 @@ undefined symbols (``nm -u``):
 - no annotation exceeds the floor (single FLOOR constant below);
 - every undefined symbol matching a stub name is floor-clean
   (``unexported`` markers are explicit opt-ins for lazy-never-bound
-  symbols like add_builtin — reviewable, grep-able).
+  symbols like array_cell — reviewable, grep-able; W-REL5-D D-STRICT
+  retired the add_builtin stub outright).
 
 Non-stub undefined symbols (libc etc.) are out of scope: the canary's
 ``-Wl,--no-undefined`` link already forces every bash reference to

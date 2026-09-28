@@ -506,7 +506,6 @@ fast_count_delim(const char *p, const char *end, char delim) {
 
 extern void dispose_command(COMMAND *);
 extern int execute_command(COMMAND *);
-extern int add_builtin(struct builtin *bp, int keep);
 
 static int g_debug = 0;
 
@@ -10096,11 +10095,4 @@ static int ring_tui_main(int argc, char **argv) {
     sigaction(SIGTERM, &old_term, NULL);
     free(node_cpu_map);
     return EXECUTION_SUCCESS;
-}
-
-int setup_builtin_forkrun_ring(void) {
-#define REGISTER_X(name, func, usage, doc) add_builtin(&name##_struct, 1);
-  FORKRUN_LOADABLES(REGISTER_X)
-#undef REGISTER_X
-  return 0;
 }

@@ -34,7 +34,6 @@ char *get_string_value(const char *n) /* since 4.4 */ { (void)n; return 0; }
 void builtin_error(const char *fmt, ...) /* since 4.4 */ { (void)fmt; }
 void builtin_usage(void) /* since 4.4 */ {}
 int make_builtin_argv(void *list, int *argc) /* since 4.4 */ { (void)list; /* signature fidelity: mirrors bash's make_builtin_argv(WORD_LIST *); the stub ignores the list. */ if (argc) *argc = 0; return 0; }
-int add_builtin(void *bp, int keep) /* unexported: canary boundary marker (never resolved at runtime) */ { (void)bp; (void)keep; return 0; }
 void xfree(void *p) /* since 4.4 */ { free(p); }
 char *xmalloc_dup(const char *s) /* unexported: canary boundary marker (never resolved at runtime) */ { return s ? strdup(s) : 0; }
 
