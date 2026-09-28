@@ -196,7 +196,13 @@ def _waitpid_bounded(pid, timeout):
             return True, status
         if time.monotonic() >= deadline:
             break
-        time.sleep(0.02)
+        # W-REL5-B4/coord-fix: 2ms quantum (was 20ms). The old 20ms
+        # overshot every still-running helper join by up to a full
+        # quantum — on 15ms-scale completion paths (scanner + drain
+        # joins) that added up to +40ms systematic, tripping
+        # test_c_drain_not_slower deterministically (0.05→0.14s).
+        # Deadline + SIGKILL + named-alarm semantics unchanged.
+        time.sleep(0.002)
     try:
         os.kill(pid, 9)
     except OSError:
