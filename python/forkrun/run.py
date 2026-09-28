@@ -1855,37 +1855,16 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         # at default) — workers run further ahead of a slow consumer.
         # Best-effort: falls back to 64KB where F_SETPIPE_SZ is capped.
         signal_r, signal_w, _ = make_pipe()
-        for i in range(workers):
-            if splice:
-                # W-PY18: C-loop passthrough worker (signal live).
-                pids.append(_fork_splice_worker(
-                    lib, i, memfd, out_fds[i], signal_w, None,
-                    engine_fds))
-                continue
-            pid = os.fork()
-            if pid == 0:
-                # Child — never returns. Drops the ends it doesn't use so
-                # the parent's EOF detection is exact.
-                try:
-                    os.close(signal_r)
-                except OSError:
-                    pass
-                try:
-                    if must_close:
-                        os.close(src_fd)
-                except OSError:
-                    pass
-                # W-PY16 addendum: scrub host event-loop fds.
-                try:
-                    scrub_fds(engine_fds | {memfd, out_fds[i],
-                                            signal_w})
-                except Exception:
-                    pass
-                worker_main(i, payload, None, memfd, size, out_fds[i],
-                            signal_w, on_error)
-                os._exit(127)  # unreachable; worker_main exits
-            else:
-                pids.append(pid)
+        # W-DEDUP: single fork dispatch (generator shape closes the
+        # parent's signal-read end in the child for exact EOF).
+        from ._executor_core import fork_workers as _core_fork
+        pids.extend(_core_fork(
+            lib, workers=workers, memfd=memfd, size=size,
+            out_fds=out_fds, signal_w=signal_w, fallow_w=None,
+            engine_fds=engine_fds, payload=payload, sink=None,
+            mode="python", on_error=on_error, splice=splice,
+            src_fd=src_fd, must_close=must_close,
+            signal_r_to_close=signal_r))
         # Parent drops its write copy: EOF on signal_r then means every
         # worker has exited (or abandoned teardown closed it).
         try:
@@ -2245,25 +2224,16 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             # Single fork event (also closes the parent's signal +
             # fallow write copies here: every child exists, so EOF on
             # both means every worker exited).
-            for i in range(workers):
-                if splice:
-                    # W-PY18: C-loop passthrough (signal live, fallow).
-                    pids.append(_fork_splice_worker(
-                        lib, i, memfd, out_fds[i], signal_w, fallow_w,
-                        engine_fds))
-                    continue
-                pid = os.fork()
-                if pid == 0:
-                    try:
-                        scrub_fds(engine_fds | {memfd, out_fds[i],
-                                                signal_w, fallow_w})
-                    except Exception:
-                        pass
-                    worker_main(i, payload, None, memfd, -1, out_fds[i],
-                                signal_w, on_error, fallow_w)
-                    os._exit(127)  # unreachable; worker_main exits
-                else:
-                    pids.append(pid)
+            # W-DEDUP: single fork dispatch (streaming-ingest generator;
+            # fallow acks ride worker_main; signal_r stays open in the
+            # child by exact preservation of the pre-dedup behavior —
+            # EOF keys off write ends, so both shapes are correct).
+            from ._executor_core import fork_workers as _core_fork
+            pids.extend(_core_fork(
+                lib, workers=workers, memfd=memfd, size=-1,
+                out_fds=out_fds, signal_w=signal_w, fallow_w=fallow_w,
+                engine_fds=engine_fds, payload=payload, sink=None,
+                mode="python", on_error=on_error, splice=splice))
             _drop_parent_copies()
             state["workers"] = True
             state["fork_at"] = _time.monotonic()
@@ -2814,33 +2784,21 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
             nonlocal workers_forked, stall_forked
             nonlocal fork_at, signal_r, signal_w
             nonlocal drain_pid, results_fd
-            for i in range(workers):
-                if splice:
-                    # W-PY18: C-loop passthrough (fallow acks included;
-                    # file growth is irrelevant — the loop splices by
-                    # explicit offsets, never mmaps).
-                    pids.append(_fork_splice_worker(
-                        lib, i, memfd,
-                        out_fds[i] if collect else None,
-                        signal_w if use_drain else None, fallow_w,
-                        engine_fds))
-                    continue
-                pid = os.fork()
-                if pid == 0:
-                    try:
-                        scrub_fds(engine_fds | {memfd, fallow_w} |
-                                  ({out_fds[i]} if collect else set()) |
-                                  ({signal_w} if use_drain and
-                                   signal_w is not None else set()))
-                    except Exception:
-                        pass
-                    worker_main(i, payload, sink, memfd, -1,
-                                out_fds[i] if collect else None,
-                                signal_w if use_drain else None,
-                                on_error, fallow_w)
-                    os._exit(127)  # unreachable; worker_main exits
-                else:
-                    pids.append(pid)
+            from ._executor_core import fork_workers as _core_fork
+            if splice and not collect:
+                # Unreachable by dispatch (map splice always collects;
+                # run() rejects splice) but preserved for exactness:
+                # splice needs an out fd per worker.
+                raise RuntimeError(
+                    "splice without collect has no output transport")
+            # W-DEDUP: single fork dispatch (splice fail-loud / python
+            # with fallow acks). Pids return in worker-index order.
+            pids.extend(_core_fork(
+                lib, workers=workers, memfd=memfd, size=-1,
+                out_fds=out_fds if collect else [], signal_w=signal_w
+                if use_drain else None, fallow_w=fallow_w,
+                engine_fds=engine_fds, payload=payload, sink=sink,
+                mode="python", on_error=on_error, splice=splice))
             _drop_fallow_copies()
             workers_forked = True
             fork_at = _time.monotonic()
@@ -3073,35 +3031,14 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 except OSError:
                     pass
 
-        try:
-            npois = lib.fr_py_poisoned_count()
-        except Exception:
-            npois = 0
-        if npois:
-            try:
-                os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "
-                             "skipped (retry limit reached).\n" % npois
-                             ).encode())
-            except OSError:
-                pass
-            _raise_for_poisoned(npois, strict_poison)
+        from ._executor_core import collect_records as _core_collect
+        from ._executor_core import report_poison as _core_poison
+        _core_poison(lib, strict_poison=strict_poison)
 
         if not collect:
             return None
-        if use_drain:
-            # Dynamic-fork paths (ingest/NUMA) fork no drain on
-            # empty input (no workers ever existed) — vacuously
-            # no records. Materialized paths always fork workers,
-            # so their drain always exists here.
-            records = (_parse_records(_read_fd_all(results_fd))
-                       if results_fd is not None else [])
-        else:
-            records = []
-            for fd in out_fds:
-                records.extend(_parse_records(_read_fd_all(fd)))
-        if order == "index":
-            records.sort(key=lambda kv: kv[0])
-        return [blob for _, blob in records]
+        return _core_collect(use_drain=use_drain, results_fd=results_fd,
+                             out_fds=out_fds, order=order)
     finally:
         if drain_pid is not None:
             # Stray drain (exception path): SIGKILL + reap.
@@ -3284,61 +3221,17 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             # Workers signal the drain (not the parent): 1MB pipe.
             signal_r, signal_w, _ = make_pipe()
 
-        pids = []
-        for i in range(workers):
-            if splice:
-                # W-PY18: C-loop passthrough (no Python payload).
-                # out_fd always present here (splice requires
-                # collect; run() rejects the mode).
-                pids.append(_fork_splice_worker(
-                    lib, i, memfd, out_fds[i],
-                    signal_w if use_drain else None, None,
-                    engine_fds))
-                continue
-            if c_worker_loop:
-                # W-PY26: C-loop plugin worker (zero Python per
-                # batch). plugin_spec was dialect-gated in map();
-                # collect is always true here (map-only flag).
-                pids.append(_fork_c_plugin_worker(
-                    lib, i, plugin_spec[0], plugin_spec[1],
-                    memfd, out_fds[i],
-                    signal_w if use_drain else None, None,
-                    engine_fds, on_error))
-                continue
-            if c_spawn_loop:
-                # W-PY33: C-loop spawn worker (zero Python per
-                # batch). spawn_argv was tag-gated in map(); collect
-                # is always true here (map-only flag).
-                pids.append(_fork_c_spawn_worker(
-                    lib, i, spawn_argv,
-                    memfd, out_fds[i],
-                    signal_w if use_drain else None, None,
-                    engine_fds, on_error))
-                continue
-            pid = os.fork()
-            if pid == 0:
-                # Child — never returns.
-                try:
-                    if must_close:
-                        try:
-                            os.close(src_fd)
-                        except OSError:
-                            pass
-                except Exception:
-                    pass
-                try:
-                    scrub_fds(engine_fds | {memfd} |
-                              ({out_fds[i]} if collect else set()) |
-                              ({signal_w} if use_drain and
-                               signal_w is not None else set()))
-                except Exception:
-                    pass
-                worker_main(i, payload, sink, memfd, size,
-                            out_fds[i] if collect else None,
-                            signal_w if use_drain else None, on_error)
-                os._exit(127)  # unreachable; worker_main exits
-            else:
-                pids.append(pid)
+        from ._executor_core import collect_records as _core_collect
+        from ._executor_core import fork_workers as _core_fork
+        from ._executor_core import report_poison as _core_poison
+        pids = _core_fork(
+            lib, workers=workers, memfd=memfd, size=size,
+            out_fds=out_fds if collect else [], signal_w=signal_w
+            if use_drain else None, fallow_w=None, engine_fds=engine_fds,
+            payload=payload, sink=sink, mode="python", on_error=on_error,
+            plugin_spec=plugin_spec, spawn_argv=spawn_argv, splice=splice,
+            c_worker_loop=c_worker_loop, c_spawn_loop=c_spawn_loop,
+            src_fd=src_fd, must_close=must_close)
 
         if use_drain:
             # Parent never writes signals and (no respawns here)
@@ -3417,35 +3310,13 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
 
         # Parent-side poison summary (g_state is MAP_SHARED: the parent
         # observes worker increments without IPC). Read BEFORE destroy.
-        try:
-            npois = lib.fr_py_poisoned_count()
-        except Exception:
-            npois = 0
-        if npois:
-            try:
-                os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "
-                             "skipped (retry limit reached).\n" % npois
-                             ).encode())
-            except OSError:
-                pass
-            _raise_for_poisoned(npois, strict_poison)
+        # W-DEDUP: single implementation in _executor_core.
+        _core_poison(lib, strict_poison=strict_poison)
 
         if not collect:
             return None
-        if use_drain:
-            # Dynamic-fork paths (ingest/NUMA) fork no drain on
-            # empty input (no workers ever existed) — vacuously
-            # no records. Materialized paths always fork workers,
-            # so their drain always exists here.
-            records = (_parse_records(_read_fd_all(results_fd))
-                       if results_fd is not None else [])
-        else:
-            records = []
-            for fd in out_fds:
-                records.extend(_parse_records(_read_fd_all(fd)))
-        if order == "index":
-            records.sort(key=lambda kv: kv[0])
-        return [blob for _, blob in records]
+        return _core_collect(use_drain=use_drain, results_fd=results_fd,
+                             out_fds=out_fds, order=order)
     finally:
         if scan_pid is not None:
             # Stray scanner (exception path): SIGKILL + reap so no
