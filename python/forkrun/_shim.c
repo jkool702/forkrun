@@ -1682,7 +1682,7 @@ int fr_py_numa_ingest(int infd, int outfd, int num_nodes) {
     char a1[32], a2[32], a3[32];
     char *argv[5];
 
-    if (infd < 0 || outfd < 0 || num_nodes < 1)
+    if (infd < 0 || outfd < 0 || num_nodes < 1 || num_nodes > 512)
         return 1;
     argv[0] = a0;
     snprintf(a1, sizeof(a1), "%d", infd);
@@ -1703,7 +1703,10 @@ int fr_py_indexer_numa(int memfd, int node_id) {
     char a1[32], a2[32];
     char *argv[3];
 
-    if (memfd < 0 || node_id < 0)
+    /* W-REL5-D (D12): node_id indexes state[]/evfd (512 ceiling, like
+     * fr_py_init_numa's num_nodes bound) -- the old < 0-only check let
+     * huge ids through to engine-side indexing. */
+    if (memfd < 0 || node_id < 0 || node_id >= 512)
         return 1;
     argv[0] = a0;
     snprintf(a1, sizeof(a1), "%d", memfd);
@@ -1725,7 +1728,9 @@ int fr_py_numa_scanner(int memfd, int node_id, int fd_spawn,
     char a1[32], a2[32], a3[32], a4[32];
     char *argv[6];
 
-    if (memfd < 0 || node_id < 0 || num_nodes < 1)
+    /* W-REL5-D (D12): same 512 ceiling as the indexer/init sites. */
+    if (memfd < 0 || node_id < 0 || node_id >= 512 || num_nodes < 1 ||
+        num_nodes > 512)
         return 1;
     argv[0] = a0;
     snprintf(a1, sizeof(a1), "%d", memfd);
