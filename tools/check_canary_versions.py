@@ -18,10 +18,10 @@ have a stub, so any bash reference IS a stub name by construction.
 
 Usage:
   python3 tools/check_canary_versions.py [artifact ...]
-  (default artifacts: python/forkrun/libforkrun_python.so (if built)
-  + ring_loadables/forkrun-libs/*.so; skips missing files loudly
-  unless --strict is given... no: missing files FAIL (a gate that
-  silently passes on absent artifacts is worse than none).
+  (default artifacts: the shipped prebuilts in
+  ring_loadables/forkrun-libs/ (required — always in git) plus the
+  locally built substrate .so when present (opportunistic — fresh
+  checkouts without a build step stay green).
 """
 
 from __future__ import annotations
@@ -87,14 +87,26 @@ def undefined_symbols(artifact):
 
 
 def default_artifacts():
-    cands = [os.path.join(REPO_ROOT, "python", "forkrun",
-                          "libforkrun_python.so")]
+    # The shipped prebuilts are the floor surface that matters (in
+    # git, always present). A locally built substrate .so is checked
+    # opportunistically (noted, never fatal when absent — fresh
+    # checkouts and CI jobs without a build step must stay green).
+    cands = []
     libs = os.path.join(REPO_ROOT, "ring_loadables", "forkrun-libs")
     if os.path.isdir(libs):
         for fn in sorted(os.listdir(libs)):
             if fn.endswith(".so"):
                 cands.append(os.path.join(libs, fn))
     return cands
+
+
+def extra_artifacts():
+    extra = []
+    local = os.path.join(REPO_ROOT, "python", "forkrun",
+                         "libforkrun_python.so")
+    if os.path.exists(local):
+        extra.append(local)
+    return extra
 
 
 def check(artifacts):
@@ -150,6 +162,14 @@ def main(argv):
     arts = [a for a in argv if not a.startswith("-")]
     if not arts:
         arts = default_artifacts()
+        for extra in extra_artifacts():
+            if extra not in arts:
+                print("note: also checking local build %s" %
+                      os.path.relpath(extra, REPO_ROOT))
+                arts.append(extra)
+        if not arts:
+            print("CANARY-VERSIONS FAIL:\n  - no artifacts to check")
+            return 1
     return check(arts)
 
 

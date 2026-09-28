@@ -88,6 +88,13 @@ jobs:
               # Distro tooling for the bootstrap decode path.
               (command -v apt-get >/dev/null && (apt-get update && apt-get install -y gzip coreutils)) || true
               (command -v dnf >/dev/null && dnf install -y gzip coreutils diffutils) || true
+              # TEMP-CI-DEBUG (revert with the branch filter): trace the
+              # bootstrap so silent -e deaths name their line, and fail
+              # LOUD on missing tools (EOL images can lack gzip).
+              set -x
+              for t in gzip base64 truncate mktemp md5sum grep sed awk; do
+                command -v $t >/dev/null || { echo "CI-ENV missing tool: $t" >&2; exit 3; }
+              done
               # FULL bootstrap under -e (the v3.6.0 death shape), then
               # version probe + workload per leg (full round-trip
               # where workers run; bootstrap+version where the
