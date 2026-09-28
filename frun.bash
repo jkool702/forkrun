@@ -1,9 +1,14 @@
 #!/usr/bin/bash
 
+# W-REL5-A3: record source-time extglob state under a name frun()
+# does not shadow (its local extglob_was_set records entry state).
+# frun() restores this source-time state on RETURN so sourcing the
+# library never permanently mutates caller shell options.
 if shopt -q extglob; then
-   extglob_was_set=true;
+   _FORKRUN_SRC_EXTGLOB_WAS_SET=true;
 else
    shopt -s extglob;
+   _FORKRUN_SRC_EXTGLOB_WAS_SET=false;
 fi
 
 frun() {
@@ -21,7 +26,11 @@ frun() {
     # splits identically.
     local _fr_saved_ifs="${IFS-$' \t\n'}"
     IFS=$' \t\n'
-    trap 'IFS="$_fr_saved_ifs"' RETURN
+    # W-REL5-A3: the RETURN trap also restores the SOURCE-time extglob
+    # state, so one frun invocation undoes the shopt -s extglob that
+    # sourcing performed. Nested frun calls run in pipeline subshells
+    # or fresh exec-ed shells, so the restore cannot leak outward.
+    trap 'IFS="$_fr_saved_ifs"; ${_FORKRUN_SRC_EXTGLOB_WAS_SET:-true} || shopt -u extglob' RETURN
 
     # --- MULTI-INPUT PARAMETER SWEEP (::: / ::::) INTERCEPT ---
     local _fr_has_sweep=false
@@ -146,6 +155,13 @@ frun() {
 (
     # 1. WRAPPER LOGIC (Current Shell)
     [[ "${1}" == '__exec__' ]] || {
+
+        # W-REL5-A3: undo the source-time shopt -s extglob in THIS
+        # shell before exec replaces it. The cleanroom enables its
+        # own extglob, and nested frun calls run in subshells, so
+        # this restore cannot leak inward. The RETURN trap repeats
+        # it for paths that return instead of exec.
+        ${_FORKRUN_SRC_EXTGLOB_WAS_SET:-true} || shopt -u extglob
 
         # Check if already setup (and FD is valid), otherwise bootstrap
         { ${FORKRUN_RING_ENABLED:-false} && (( ${FORKRUN_MEMFD_LOADABLES:-0} > 0 )); } || _forkrun_bootstrap_setup --fast
@@ -2660,7 +2676,9 @@ while True: time.sleep(60)'
 
         # open a memfd, write b64 to it, and seal it
         ring_memfd_create 'FORKRUN_MEMFD_LOADABLES_BASE64' 0
-        export FORKRUN_MEMFD_LOADABLES_BASE64="${FORKRUN_MEMFD_LOADABLES_BASE64}"
+        # W-REL5-A2: shell-local only, never exported. Child processes
+        # must not inherit a stale fd number via the environment.
+        FORKRUN_MEMFD_LOADABLES_BASE64="${FORKRUN_MEMFD_LOADABLES_BASE64}"
         declare -p b64 >&${FORKRUN_MEMFD_LOADABLES_BASE64}
         ring_seal "${FORKRUN_MEMFD_LOADABLES_BASE64}"
         need_memfd_b64_flag=false
@@ -2670,7 +2688,9 @@ while True: time.sleep(60)'
     ${force_flag} && ${have_memfd_loadables_flag} && exec {FORKRUN_MEMFD_LOADABLES}>&-
     unset "FORKRUN_MEMFD_LOADABLES"
     ring_memfd_create 'FORKRUN_MEMFD_LOADABLES' 0
-    export FORKRUN_MEMFD_LOADABLES="${FORKRUN_MEMFD_LOADABLES}"
+    # W-REL5-A2: shell-local only, never exported. The staleness
+    # re-guard below reads the shell variable in the parent only.
+    FORKRUN_MEMFD_LOADABLES="${FORKRUN_MEMFD_LOADABLES}"
     truncate -s "${b64[$ARCH]%% *}" "/proc/self/fd/${FORKRUN_MEMFD_LOADABLES}"
     _forkrun_base64_to_file <<<"${b64[$ARCH]}" "/proc/self/fd/${FORKRUN_MEMFD_LOADABLES}"
     ring_seal "${FORKRUN_MEMFD_LOADABLES}"
@@ -2690,7 +2710,10 @@ while True: time.sleep(60)'
 
     # clear massive b64 array
     unset "b64"
-    export FORKRUN_RING_ENABLED=true
+    # W-REL5-A2: shell-local readiness flag, never exported. The
+    # wrapper re-guard reads it in this shell only; exported copies
+    # would hand children a stale claim about fds they do not own.
+    FORKRUN_RING_ENABLED=true
 
     return 0
 }
