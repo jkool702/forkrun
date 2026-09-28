@@ -1192,6 +1192,56 @@ shaped by that finding).
   toolchain provenance recorded in build logs (no image change —
   no blob cycle).
 
+### C engine hardening, TLS rebuild, and the ≤5.1 segfault resolution (W-REL5-D)
+
+Final product wave (one blob cycle carries the engine sites, the TLS
+rebuild, the segfault fix, and the `add_builtin` retirement). Full
+record: `dev/supervisor/WREL5_D_REPORT.md`.
+
+- **D-SEGFIX (≤5.1 worker segfault: bisected, root-caused, fixed).**
+  W-MAPAPI exonerated the bind API + `struct builtin` + registration
+  (all correct, all insufficient): the hazard is `struct array` —
+  5.1→5.2 moved `head` 24→16, so the new-header engine misread old
+  bash as small-int-as-pointer and faulted at NULL+0x11
+  (SEGV_MAPERR, deterministic, first `ring_poll`, empty input
+  reproduces; `enable`-only green, toy green, Python green).
+  Fix: the frontend flattens fd watch-arrays to `"id:fd"` pair lists
+  (shell-side `"${!arr[@]}"`, ascending, version-proof) and
+  `ring_poll_main` parses pairs (malformed fail-safe, `max_poll`
+  drop-tail kept); the feeder-child scrub reads `FD_WORKER_W` from
+  environ (also removes bash API post-fork there). No ARRAY-struct
+  read remains in the engine (3 sites). Bite: pre-fix crash chain
+  (strace/core/disasm). Green: 200-line byte-exact round-trips on
+  4.4/5.0/5.1/5.2/5.3 (source + extracted), zero new cores. Floor
+  back to bash ≥4.4 (ships in this wave's blob cycle).
+- **D2 coherence (spec fix caught by bite-then-green).** Resetting
+  `last_ack_offset` on fd change broke respawn-onto-same-file flows:
+  `ack_init` synced the offset but left the cached fd behind, so the
+  first post-init ack zeroed it (invariant-gate §6/§9 + bash poison
+  suites caught duplicates). Fix: init adopts the full trio
+  (offset + fd + mode).
+- **D-STRICT:** dead `add_builtin` path retired (Exp-3-proven
+  vestigial); stub list shrinks 12→11 (U-set is exactly the 11
+  exported bash symbols). No `builtins[]` conversion.
+- **D-TLS:** x86-64 blobs rebuilt with `-mtls-dialect=gnu`
+  (drops `GLIBC_ABI_GNU2_TLS`). Floor stays glibc 2.38 via
+  gcc-16 `__isoc23_strto*` aliasing (unblocks ≥2.38; Debian
+  12/RHEL ≤9 need a `-std=gnu17` follow-up, not this wave).
+- **D1–D12, D14–D15:** hole-punch cap + `size_t` (D1); ack-offset
+  reset (D2); revert S_ISREG/size guards (D3); emit `niov = 0`
+  (D4 — a bare break would regress `b""`); descriptor subtraction
+  form (D5); format buffers 32 (D6); heap doubling guards (D7);
+  escrow fail-loud (D8); dup2 checked (D9); copy state guards (D10);
+  shim 512 ceilings (D12); SIGBUS comment truth (D14, mechanism
+  declined with analysis); post-fork fd hoist (D15).
+  **Deferred:** D13 (`%lu`→`PRIu64`, 3.6.1 with sanitizer legs);
+  D11 master switch (halt-and-report: no safe saving — caching OFF
+  poisons cross-module runs, caching ON/compile-out save nothing or
+  break suites; ~150ns/batch is negligible).
+- **D-LEGS:** compat legs run `frun -k` round-trips ×10 (fresh shell
+  each), not loads — 5.3 binds; UBI8/4.4/5.0/5.1/5.2 amber till the
+  blob cycle (causes cited); the 5.1 leg is the permanent guard.
+
 ## v3.5.14 (unreleased)
 
 ### Python frontend: C drain process, opt-in (W-PY21-A)
