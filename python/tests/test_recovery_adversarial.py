@@ -13,11 +13,10 @@ COMMITTING → IDLE) at its boundaries:
 
 Kill-injection mechanism: FORKRUN_TEST_DIE_AT_CLAIM /
 FORKRUN_TEST_DIE_AT_COMMIT make a worker SIGKILL itself inside the
-exact window (checked in fr_py_claim / fr_py_ack_core behind the
-FORKRUN_ENABLE_TEST_HOOKS master, set module-wide below; the specific
-vars stay set/del-cycled per test). Unit tests drive this in a forked
-child sharing the MAP_SHARED engine; integration tests set the env var
-around a real orchestrator run and expect abort/resume (RuntimeError).
+exact window (checked in fr_py_claim / fr_py_ack_core, inert unless
+the env var is set). Unit tests drive this in a forked child sharing
+the MAP_SHARED engine; integration tests set the env var around a
+real orchestrator run and expect abort/resume (RuntimeError).
 
 No threads. Forks only where noted; every forked child is reaped.
 """
@@ -46,22 +45,6 @@ try:
 except FileNotFoundError:
     HAVE_LIB = False
 
-
-# W-REL5-D (D11): the DIE_AT_* hooks sit behind the
-# FORKRUN_ENABLE_TEST_HOOKS master (cached per-process at first
-# evaluation). Set it module-wide -- pre-fork, so every forked child
-# (unit pattern included) inherits it; the SPECIFIC vars keep their
-# set/del cycles unchanged.
-_MASTER_WAS_SET = "FORKRUN_ENABLE_TEST_HOOKS" in os.environ
-
-
-def setUpModule():
-    os.environ["FORKRUN_ENABLE_TEST_HOOKS"] = "1"
-
-
-def tearDownModule():
-    if not _MASTER_WAS_SET:
-        del os.environ["FORKRUN_ENABLE_TEST_HOOKS"]
 
 
 def _has_symbols():
