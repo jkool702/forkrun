@@ -150,6 +150,46 @@ class TestB2StreamTaxonomy(unittest.TestCase):
         self._check_sigint(streaming=True, orchestrator=False)
 
 
+def _segv(batch):
+    import ctypes
+
+    ctypes.string_at(0)
+    return b"unreachable"
+
+
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestB8SignalFidelity(unittest.TestCase):
+    """B8: worker-failure raises carry .signo (SIGSEGV ⇒ 11) while
+    staying plain RuntimeError (Bash exit-1 contract)."""
+
+    def _path(self, n=200):
+        fh = tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False)
+        path = fh.name
+        fh.close()
+        write_lines(path, n)
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def _check_segv_signo(self, **kw):
+        from forkrun.exceptions import ForkrunSignalError
+
+        path = self._path()
+        with self.assertRaises(RuntimeError) as ctx:
+            forkrun.map(_segv, path, workers=2, nodes=1, **kw)
+        exc = ctx.exception
+        self.assertNotIsInstance(exc, ForkrunSignalError)
+        self.assertEqual(exc.signo, _signal.SIGSEGV,
+                         "worker SIGSEGV must ride along as .signo")
+        assert_no_zombies(self)
+
+    def test_segv_plain_path_carries_signo(self):
+        self._check_segv_signo(orchestrator=False)
+
+    def test_segv_reactor_path_carries_signo(self):
+        self._check_segv_signo()
+
+
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 class TestB5ReactorPollNonblocking(unittest.TestCase):
     """B5: reactor_poll_once never blocks on an unreaped child

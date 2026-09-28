@@ -2140,10 +2140,7 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         failed = [s for s in statuses
                   if not (os.WIFEXITED(s[1]) and os.WEXITSTATUS(s[1]) == 0)]
         if failed:
-            raise RuntimeError(
-                "forkrun: %d/%d workers failed%s" % (
-                    len(failed), len(pids),
-                    " (on_error=%s)" % on_error))
+            _raise_worker_failure(failed, len(pids), on_error)
 
         if use_drain and exhausted and drain_status is not None:
             # Drain rc is secondary to worker failures (checked
@@ -2597,10 +2594,7 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
         failed = [s for s in statuses
                   if not (os.WIFEXITED(s[1]) and os.WEXITSTATUS(s[1]) == 0)]
         if failed:
-            raise RuntimeError(
-                "forkrun: %d/%d workers failed%s" % (
-                    len(failed), len(pids),
-                    " (on_error=%s)" % on_error))
+            _raise_worker_failure(failed, len(pids), on_error)
 
         if use_drain and exhausted and drain_status is not None:
             # Secondary to worker failures (above); abandoned runs
@@ -3090,10 +3084,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     "forkrun: C drain failed (status %r)" % (_dst,))
 
         if failed:
-            raise RuntimeError(
-                "forkrun: %d/%d workers failed%s" % (
-                    len(failed), len(pids),
-                    " (on_error=%s)" % on_error))
+            _raise_worker_failure(failed, len(pids), on_error)
 
         # Join the scanner (strict) and the reaper (lenient warn).
         # helpers["scan_rc"] set means _watch_helpers observed the exit
@@ -3395,10 +3386,7 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
                     "forkrun: C drain failed (status %r)" % (_dst,))
 
         if failed:
-            raise RuntimeError(
-                "forkrun: %d/%d workers failed%s" % (
-                    len(failed), len(pids),
-                    " (on_error=%s)" % on_error))
+            _raise_worker_failure(failed, len(pids), on_error)
 
         # Parent-side poison summary (g_state is MAP_SHARED: the parent
         # observes worker increments without IPC). Read BEFORE destroy.
@@ -3584,10 +3572,48 @@ def _reactor_poison_summary(lib, state, strict_poison=False) -> None:
 def _reactor_failure_check(state, n_workers, on_error) -> None:
     """Raise when the reactor run lost work (cap-reached deaths)."""
     if getattr(state, "n_unrecovered", 0):
-        raise RuntimeError(
+        exc = RuntimeError(
             "forkrun: %d worker(s) failed without recovery "
             "(respawn cap reached) (on_error=%s)"
             % (state.n_unrecovered, on_error))
+        # W-REL5-B8: cause fidelity — the first signal death rides
+        # along as .signo (None for plain exits). Stays plain
+        # RuntimeError (Bash exit-1 contract for engine faults).
+        exc.signo = _failure_signo(getattr(state, "statuses", ()))
+        raise exc
+
+
+def _failure_signo(statuses):
+    """First death-signal number in (pid, status) pairs (W-REL5-B8).
+
+    None when no entry is a signal death (plain exits) or no
+    statuses are available — the caller still raises, just without
+    a signal cause.
+    """
+    for _pid, _st in statuses or ():
+        try:
+            if os.WIFSIGNALED(_st):
+                return os.WTERMSIG(_st)
+        except Exception:
+            continue
+    return None
+
+
+def _raise_worker_failure(failed, total, on_error, statuses=None):
+    """Common N/M-workers-failed raise (W-REL5-B8).
+
+    Message is identical to the historical raise; the exception
+    additionally carries .signo (first signal death, or None) for
+    cause fidelity (exceptions.py D-PORT3). Stays plain
+    RuntimeError — engine faults keep the Bash-exit-1 contract
+    (see test_taxonomy.TestCrashStaysRuntimeError).
+    """
+    exc = RuntimeError(
+        "forkrun: %d/%d workers failed%s" % (
+            len(failed), total, " (on_error=%s)" % on_error))
+    exc.signo = _failure_signo(
+        statuses if statuses is not None else failed)
+    raise exc
 
 
 def _teardown_reactor(lib, state, *, signal_r=None, out_fds=(),
