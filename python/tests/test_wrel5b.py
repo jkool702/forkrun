@@ -150,5 +150,131 @@ class TestB2StreamTaxonomy(unittest.TestCase):
         self._check_sigint(streaming=True, orchestrator=False)
 
 
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestB3IngestReactorLiveness(unittest.TestCase):
+    """B3: the ingest-reactor spill observes worker deaths while the
+    source is stalled (O_NONBLOCK + drain-to-EAGAIN + poll per
+    quantum), instead of blocking in os.read until data arrives."""
+
+    def _children(self):
+        me = os.getpid()
+        kids = set()
+        try:
+            names = os.listdir("/proc")
+        except OSError:
+            return kids
+        for name in names:
+            if not name.isdigit():
+                continue
+            try:
+                with open("/proc/%s/stat" % name) as fh:
+                    parts = fh.read().rsplit(")", 1)[1].split()
+                if int(parts[1]) == me:
+                    kids.add(int(name))
+            except (OSError, ValueError, IndexError):
+                continue
+        return kids
+
+    def test_reactor_alive_during_source_stall(self):
+        import forkrun._reactor as _reactor_mod
+
+        stall_s = 8.0
+        rfd, wfd = os.pipe()
+
+        # Small first chunk: fully claimed+processed within a
+        # second, so the stall-forked workers are blocked on
+        # claims (at rest, no in-flight batch) when one is
+        # killed mid-stall — a SIGKILL landing mid-claim is the
+        # honest claim-without-publish abort (rc==4), not a
+        # recovery case.
+        lines1 = "".join("line %d\n" % i for i in range(200))
+        lines2 = "".join("line %d\n" % i for i in range(200, 400))
+
+        def _writer():
+            try:
+                os.write(wfd, lines1.encode())
+                time.sleep(stall_s)
+                try:
+                    os.write(wfd, lines2.encode())
+                except OSError:
+                    pass  # run may have aborted mid-stall: reader gone
+            finally:
+                try:
+                    os.close(wfd)
+                except OSError:
+                    pass
+
+        real_wd = _reactor_mod.ReactorState.worker_died
+        observed = []
+
+        def _spy_wd(self, wid):
+            observed.append((wid, time.monotonic()))
+            return real_wd(self, wid)
+
+        _reactor_mod.ReactorState.worker_died = _spy_wd
+        wt = threading.Thread(target=_writer, daemon=True)
+        wt.start()
+        try:
+            result = {}
+
+            def _run():
+                try:
+                    result["out"] = forkrun.map(
+                        _up, rfd, workers=2, nodes=1,
+                        streaming=True, order="index")
+                except BaseException as exc:  # noqa: BLE001
+                    result["error"] = exc
+
+            rt = threading.Thread(target=_run, daemon=True)
+            rt.start()
+            time.sleep(1.0)
+            early_kids = self._children()
+            # Mid-stall (writer quiet until t=8): the spill loop
+            # must be alive — stall-forked workers present beyond
+            # the two helpers (fallow + scanner).
+            time.sleep(3.0)
+            mid_kids = self._children()
+            new_kids = mid_kids - early_kids
+            self.assertTrue(
+                len(mid_kids) > len(early_kids) and new_kids,
+                "spill loop dead during stall: children %s -> %s "
+                "(reactor blind while blocked in read)"
+                % (sorted(early_kids), sorted(mid_kids)))
+            # Kill a stall-forked worker; observation must be
+            # prompt (poll quantum), not at writer release.
+            # NOTE: a SIGKILL landing while pre-gate workers are
+            # claim-spinning is the honest claim-without-publish
+            # abort (rc==4, engine semantics — unattributable
+            # batch), not a respawn: the promise under test is
+            # prompt OBSERVATION/termination, not recovery.
+            victim = sorted(new_kids)[0]
+            t_kill = time.monotonic()
+            os.kill(victim, 9)
+            rt.join(30)
+            t_end = time.monotonic()
+            self.assertFalse(rt.is_alive(), "run hung")
+            err = result.get("error")
+            self.assertIsInstance(err, RuntimeError)
+            self.assertIn("signal 9", str(err))
+        finally:
+            _reactor_mod.ReactorState.worker_died = real_wd
+            try:
+                os.close(rfd)
+            except OSError:
+                pass
+            wt.join(30)
+        after = [t for _, t in observed if t >= t_kill]
+        self.assertTrue(after, "death never observed")
+        latency = min(after) - t_kill
+        self.assertLess(
+            latency, 4.0,
+            "worker death unobserved for %.1fs during source stall "
+            "(reactor blind while blocked in read)" % latency)
+        # Prompt termination: the abort surfaced from the stall
+        # (~0.5s), not at writer release (t=8s, i.e. ~4s later).
+        self.assertLess(t_end - t_kill, 3.0)
+        assert_no_zombies(self)
+
+
 if __name__ == "__main__":
     unittest.main()

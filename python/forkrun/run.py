@@ -4852,27 +4852,58 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
                 return True
             return False
 
+        # W-REL5-B3: nonblocking source for the spill (sibling
+        # pattern of _execute_ingest_stream / _spill_quantum: dup user
+        # fds — never mutate flags on a descriptor we don't own). A
+        # blocking 1MB read leaves worker deaths, helper deaths, and
+        # the stall-fork rule unobserved for the whole stall —
+        # seamless recovery unavailable exactly when the source is
+        # slow. Drain-to-EAGAIN per quantum keeps the reactor
+        # interleaved; the 20ms idle sleep paces empty quanta (the
+        # sibling pumps pace via their drain select).
+        if not must_close:
+            src_fd = os.dup(src_fd)
+            must_close = True
         try:
-            while True:
-                try:
-                    chunk = os.read(src_fd, _CHUNK)
-                except OSError as exc:
-                    raise RuntimeError(
-                        "failed reading source: %s" % (exc,))
-                if not chunk:
-                    break
-                view = memoryview(chunk)
-                while view:
+            fl = _fcntl.fcntl(src_fd, _fcntl.F_GETFL)
+            _fcntl.fcntl(src_fd, _fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        except OSError:
+            pass
+        try:
+            src_eof = False
+            while not src_eof:
+                drained = False
+                while True:
                     try:
-                        n = os.pwrite(memfd, view, total_written)
+                        chunk = os.read(src_fd, _CHUNK)
+                    except BlockingIOError:
+                        break  # EAGAIN: quantum done for now
                     except OSError as exc:
                         raise RuntimeError(
-                            "failed writing ingress: %s" % (exc,))
-                    view = view[n:]
-                    total_written += n
+                            "failed reading source: %s" % (exc,))
+                    if not chunk:
+                        src_eof = True
+                        break
+                    view = memoryview(chunk)
+                    while view:
+                        try:
+                            n = os.pwrite(memfd, view, total_written)
+                        except OSError as exc:
+                            raise RuntimeError(
+                                "failed writing ingress: %s" % (exc,))
+                        view = view[n:]
+                        total_written += n
+                    drained = True
+                    _watch_helpers()
+                    _maybe_fork_workers()
+                    reactor_poll_once(state)
+                if src_eof:
+                    break
                 _watch_helpers()
                 _maybe_fork_workers()
                 reactor_poll_once(state)
+                if not drained:
+                    _time.sleep(0.02)
         except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
             raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
