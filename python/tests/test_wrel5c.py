@@ -126,5 +126,64 @@ class TestC2OffMainThreadLoud(unittest.TestCase):
             pass
 
 
+def _framed(*pairs):
+    import struct  # noqa: PLC0415
+
+    out = []
+    for idx, blob in pairs:
+        out.append(struct.pack("<QQ", idx, len(blob)) + blob)
+    return b"".join(out)
+
+
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestC4DeliverThenUnlink(unittest.TestCase):
+    """C4 (M18): consume must not delete; publish GCs the superseded."""
+
+    def test_consume_keeps_merge_publish_gcs(self):
+        from forkrun._resume import (SIDECAR_SUFFIX, _publish_sidecar,  # noqa: PLC0415
+                                     consume_sidecar)
+        from forkrun.run import _parse_records  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_ckpt = os.path.join(tmp, "a.ckpt")
+            with open(old_ckpt, "w") as fh:
+                fh.write("FORKRUN_RESUME_HORIZON=0\n"
+                         "FORKRUN_RESUME_STDOUT_BYTES=0\n")
+            old_coll = old_ckpt + SIDECAR_SUFFIX
+            with open(old_coll, "wb") as fh:
+                fh.write(_framed((0, b"hello"), (1, b"world")))
+            cur = _parse_records(_framed((10, b"new")))
+            for _ in range(5):
+                # Re-create: consume must be non-destructive now.
+                if not os.path.exists(old_coll):
+                    with open(old_coll, "wb") as fh:
+                        fh.write(_framed((0, b"hello"), (1, b"world")))
+                merged = consume_sidecar(old_ckpt, cur)
+                self.assertEqual(
+                    [b for _, b in merged], [b"hello", b"world", b"new"])
+                self.assertTrue(os.path.exists(old_coll),
+                                "consume deleted the only durable copy")
+            # Publish folds old + current collection, then GCs the old.
+            with tempfile.NamedTemporaryFile(delete=False) as fh:
+                fh.write(_framed((2, b"more!")))
+                coll_path = fh.name
+            try:
+                with open(coll_path, "rb") as fh:
+                    coll_fd = fh.fileno()
+                    new_ckpt = os.path.join(tmp, "b.ckpt")
+                    self.assertTrue(_publish_sidecar(
+                        new_ckpt + SIDECAR_SUFFIX, old_ckpt, coll_fd))
+                with open(new_ckpt + SIDECAR_SUFFIX, "rb") as fh:
+                    new_blob = fh.read()
+                self.assertEqual(
+                    _parse_records(new_blob),
+                    _parse_records(_framed(
+                        (0, b"hello"), (1, b"world"), (2, b"more!"))))
+                self.assertFalse(os.path.exists(old_coll),
+                                 "superseded sidecar not collected")
+            finally:
+                os.unlink(coll_path)
+
+
 if __name__ == "__main__":
     unittest.main()

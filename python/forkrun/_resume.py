@@ -262,6 +262,7 @@ def _publish_sidecar(dest_coll, resume_src, coll_fd):
     under the cumulative checkpoint). Atomic on write.
     """
     parts = []
+    src_coll = None
     if resume_src:
         src_coll = resume_src + SIDECAR_SUFFIX
         if os.path.exists(src_coll):
@@ -276,6 +277,25 @@ def _publish_sidecar(dest_coll, resume_src, coll_fd):
     if not combined:
         return False
     _write_file_atomic(dest_coll, combined)
+    if src_coll is not None and os.path.abspath(src_coll) != \
+            os.path.abspath(dest_coll):
+        # W-REL5-C4: the new publication is a superset of the source
+        # sidecar (folded above), so and only so is the source safe
+        # to remove — deliver-then-unlink. A crash between the
+        # atomic publish and this removal leaves both files (the
+        # next resume reads the newer cumulative one; the stale
+        # source is re-read only on explicit re-resume from the old
+        # checkpoint). Same-path resume needs no removal (the
+        # atomic rename already superseded it).
+        try:
+            os.unlink(src_coll)
+        except OSError as exc:
+            try:
+                print("forkrun [WARN]: superseded checkpoint sidecar "
+                      "%r not removed (%s); harmless stale duplicate"
+                      % (src_coll, exc), file=sys.stderr)
+            except Exception:
+                pass
     return True
 
 
@@ -386,9 +406,17 @@ def consume_sidecar(resume_src, records):
     but not globally index-ordered — the documented resume contract:
     engine commit is exactly-once, cross-run index order is not).
 
-    Consumes (deletes) the sidecar: its bytes are now delivered
-    exactly once. No sidecar -> records unchanged. Never raises (a
-    corrupt sidecar warns and yields the current records).
+    Consumes (reads) the sidecar NON-destructively: the file stays
+    until a newer cumulative publication supersedes it (see
+    _publish_sidecar's deliver-then-unlink removal — W-REL5-C4).
+    Deleting on read would lose the prefix permanently if the
+    process died between the unlink and durable delivery of the
+    merged output (OOM during result assembly is exactly when
+    resume chains matter). A resumed run that completes leaves the
+    source sidecar stale on disk (harmless: re-read only on
+    explicit re-resume from the same spent checkpoint).
+    No sidecar -> records unchanged. Never raises (a corrupt
+    sidecar warns and yields the current records).
     """
     if not resume_src:
         return records
@@ -409,17 +437,7 @@ def consume_sidecar(resume_src, records):
         except Exception:
             pass
         return records
-    merged = list(side) + list(records)
-    try:
-        os.unlink(path)
-    except OSError as exc:
-        try:
-            print("forkrun [WARN]: could not consume checkpoint "
-                  "sidecar %r (%s); a later resume may re-deliver "
-                  "these bytes" % (path, exc), file=sys.stderr)
-        except Exception:
-            pass
-    return merged
+    return list(side) + list(records)
 
 
 __all__ = ["SIDECAR_SUFFIX", "WORKER_REAP_TIMEOUT",

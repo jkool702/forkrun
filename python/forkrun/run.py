@@ -4082,7 +4082,9 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
             # Already batch_idx-ordered by the C orderer; prepend any
             # sidecar output from previously aborted run(s), then sort
             # (committed ranges are jagged — the union of two ordered
-            # lists is not ordered). Consumes (deletes) the sidecar.
+            # lists is not ordered). Reads the sidecar (non-destructive;
+            # superseded files are removed at the next cumulative
+            # publish — W-REL5-C4).
             if resume is not None:
                 records = consume_sidecar(resume, records)
             # Already batch_idx-ordered by the C orderer; no sort.
@@ -5123,7 +5125,8 @@ def _execute_ingest_reactor_locked(payload, source, *, sink, lines,
             records = _parse_records(_read_fd_all(coll_fd))
             # Already batch_idx-ordered by the C orderer; prepend any
             # sidecar output from previously aborted run(s), then sort
-            # (committed ranges are jagged). Consumes the sidecar.
+            # (committed ranges are jagged). Reads the sidecar
+            # (non-destructive — W-REL5-C4).
             if resume is not None:
                 records = consume_sidecar(resume, records)
             return [blob for _, blob in records]
