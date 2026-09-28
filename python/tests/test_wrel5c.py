@@ -63,8 +63,9 @@ class TestC1NoCwdDlopen(unittest.TestCase):
             try:
                 with mock.patch.object(os.path, "exists",
                                        side_effect=_masked):
-                    with self.assertRaises(FileNotFoundError):
-                        _b.find_substrate()
+                    for _ in range(5):
+                        with self.assertRaises(FileNotFoundError):
+                            _b.find_substrate()
             finally:
                 os.chdir(old)
 

@@ -2344,3 +2344,54 @@ band are coordinator-executed post-merge).
   Class stays plain `RuntimeError` (Bash exit-1 contract —
   `test_taxonomy.TestCrashStaysRuntimeError` still passes).
   Bite: SIGSEGV'd worker ⇒ `.signo == 11` on both paths (×5).
+
+### Python robustness & security posture (W-REL5-C)
+
+Security-posture + robustness wave over the Python frontend (no C
+changes — C-diff empty; bites in `python/tests/test_wrel5c.py`).
+
+- **C1:** `find_substrate` no longer searches CWD (D10-class
+  library-load hijack: a planted `libforkrun_python.so` loaded
+  before any validation). Co-located candidates only, via
+  `_substrate_candidates()`; explicit `$FORKRUN_LIB` opt-in kept.
+  Bite (×5): hostile CWD `.so` refused with `FileNotFoundError`.
+- **C2:** `signal_policy="checkpoint"` off the main thread now
+  raises `RuntimeError` naming the thread and the remedy, instead
+  of running the whole job unguarded (every per-sig install raised
+  `ValueError` into the swallow). Bite (×5 threads + control).
+- **C3:** `sweep()` rejects `resume=`/`checkpoint_file=` outright
+  (one stateful resume replayed over N combinations silently
+  skips the committed prefix in combos 2..N). Per-combination
+  `map()` resume is the remedy. Bite (×5).
+- **C4:** sidecar lifecycle is deliver-then-unlink. `consume_sidecar`
+  no longer deletes on read (a crash between unlink and durable
+  delivery lost the prefix permanently — exactly when resume
+  chains matter); `_publish_sidecar` removes the source sidecar
+  only after durably publishing the cumulative superset
+  (same-path resume needs no removal — atomic rename supersedes).
+  Bite (×5): consume keeps, merge exact, publish folds, GC'd.
+- **C5:** three stream-reactor `finally` blocks now null
+  `spare_signal_w` after close (stale number reached teardown =
+  double-close). `order_w` audit: all 6 sites already nulled with
+  zero fd-creating calls between close and teardown (verified,
+  no change). Bite (×5, slow-payload abandon + teardown spy).
+- **C6:** signal handler is allocation-free and engine-only: record
+  goes to preallocated 32-slot array (saturate-and-drop,
+  documented), the handler calls only the pre-resolved
+  `fr_py_abort` (single `write()`), never arbitrary `abort_fn`
+  callables (honored at drain/`check()` time instead). Prompt
+  abort preserved (end-to-end HUP timing requires it). Bite +
+  `test_signals.py` 10/10 ×10.
+- **C7:** torn trailing signals (1-15 bytes at EOF, nobody left to
+  complete) are discarded loudly in both drain loops instead of
+  hanging forever. Bite: 3-byte signal + EOF (10s watchdog;
+  pre-fix hung, post-fix instant).
+- **C8:** `load_plugin` docstring states the parent-side dlopen
+  constraint (ELF initializers/threads pre-fork hazard; probe
+  rework deferred). No behavior change.
+- **C9:** jittered backoff (`uniform(0.05, 0.2)s`) before respawn
+  on SIGKILL/OOM-class deaths only (cap enforced first, so
+  persistent killers still terminate). Deterministic crashes keep
+  immediate respawn (escrow/poison converges fast). Bite (×10):
+  transient 2-kill payload completes byte-exact past a 0.09s
+  floor; persistent killer raises bounded with clean fds.
