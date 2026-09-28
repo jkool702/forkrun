@@ -35,7 +35,12 @@ if _sys.platform != "linux":
         % _sys.platform)
 del _sys
 
-from forkrun._api import RunConfig  # noqa: F401
+# W-REL5-E5: RunConfig is NOT re-exported (it was in __all__ but no
+# public entry point returns it — run/map/stream/sweep discard the
+# _validate product, and importing it documented a contract that
+# doesn't exist). Reachable as forkrun._api.RunConfig for the
+# _validate_config test seam below. Producing one is API design
+# (3.6.1 if wanted), not hygiene.
 # Private in _api (not part of the v0 surface); re-exported here only so the
 # Stage 0 harness and tests can assert validation without reaching into _api.
 from forkrun._api import _validate as _validate_config  # noqa: F401
@@ -63,7 +68,7 @@ except Exception:  # noqa: BLE001
     # Validation-only environments (no built .so): import must never fail.
     __engine_version__ = "unknown"
 
-__all__ = ["run", "map", "stream", "sweep", "Batch", "RunConfig",
-           "ForkrunSignalError", "ForkrunInterrupted", "ForkrunPreempted",
-           "ForkrunTerminated", "ForkrunPoisonSkip", "BASH_CODE_MAP",
-           "__version__", "__engine_version__"]
+__all__ = ["run", "map", "stream", "sweep", "Batch",
+            "ForkrunSignalError", "ForkrunInterrupted", "ForkrunPreempted",
+            "ForkrunTerminated", "ForkrunPoisonSkip", "BASH_CODE_MAP",
+            "__version__", "__engine_version__"]

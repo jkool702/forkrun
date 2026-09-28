@@ -106,6 +106,11 @@ class RunConfig:
     sink: Optional[Callable[..., Any]] = None
     order: Order = "none"
     lines: Optional[int] = None
+    # W-REL5-E5: field name shadows the builtin (kept — renaming to
+    # bytes_per_batch would churn _validate's constructor keyword
+    # and the test seam's cfg.bytes assertions for zero function;
+    # the shadowing is contained: _validate takes bytes_ and maps
+    # it here, so no caller ever writes bytes= at a call site).
     bytes: Optional[int] = None
     workers: Optional[int] = None
     nodes: Nodes = "auto"
@@ -120,7 +125,9 @@ class RunConfig:
     # installs nothing (library non-invasive); "checkpoint"
     # installs HUP/TERM (+USR1 under FORKRUN_PREEMPT_MODE=1)
     # handlers for the run, restoring afterwards.
-    signal_policy: Any = "default"
+    # W-REL5-E5: real type (was Any) — the D-PORT1 ratified str
+    # union; None rides validate_signal_policy to default.
+    signal_policy: Optional[str] = "default"
     # W-PY22 resume: checkpoint file to resume FROM (byte coordinates)
     # and/or checkpoint file to publish TO on abort. Path gating
     # (C-orderer executors only) happens in run.py — here only the
