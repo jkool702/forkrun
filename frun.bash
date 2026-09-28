@@ -2409,6 +2409,14 @@ _forkrun_get_arch() {
 
     local ARCH0="$1"
 
+    # W-REL5-E10: single source for the supported-arch list. The
+    # error string below prints this variable (never a retyped
+    # literal), and the b64[] keys populated by CI (matrix in
+    # .github/workflows/forkrun_release.yml, `-`→`_` normalized
+    # by ring_loadables/update_frun_base64.bash) must name the
+    # same set — edit here, not the copies.
+    local _supported_arches='x86_64 aarch64 riscv64 s390x ppc64le'
+
     : "${ARCH0:=$(uname -m)}"
 
     case "$ARCH0" in
@@ -2428,7 +2436,7 @@ _forkrun_get_arch() {
         ARCH="$ARCH0"
         ;;
     *)
-        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: x86_64 aarch64 riscv64 s390x ppc64le\n\n' >&2
+        printf '\nINVALID / UNSUPPORTED ARCH!\nSUPPORTED ARCH: %s\n\n' "$_supported_arches" >&2
         return 1
         ;;
     esac
