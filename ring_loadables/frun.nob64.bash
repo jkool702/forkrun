@@ -25,12 +25,17 @@ frun() {
     # anyway). Unset-IFS callers restore as default-set, which
     # splits identically.
     local _fr_saved_ifs="${IFS-$' \t\n'}"
+    # W-REL5-A5: scoped nounset guard. frun indexes caller positionals
+    # that are unbound under set -u, so relax for the call and restore
+    # on RETURN alongside the IFS and extglob restores.
+    local _fr_saved_u=$-
+    set +u
     IFS=$' \t\n'
     # W-REL5-A3: the RETURN trap also restores the SOURCE-time extglob
     # state, so one frun invocation undoes the shopt -s extglob that
     # sourcing performed. Nested frun calls run in pipeline subshells
     # or fresh exec-ed shells, so the restore cannot leak outward.
-    trap 'IFS="$_fr_saved_ifs"; ${_FORKRUN_SRC_EXTGLOB_WAS_SET:-true} || shopt -u extglob' RETURN
+    trap 'IFS="$_fr_saved_ifs"; if [[ "${_fr_saved_u}" == *u* ]]; then set -u; else set +u; fi; ${_FORKRUN_SRC_EXTGLOB_WAS_SET:-true} || shopt -u extglob' RETURN
 
     # --- MULTI-INPUT PARAMETER SWEEP (::: / ::::) INTERCEPT ---
     local _fr_has_sweep=false
@@ -2582,7 +2587,6 @@ _forkrun_base64_to_file() {
             "${TMPDIR:-}"                # Standard env var
             "/tmp"                       # Universal fallback
             "${HOME}/.cache"             # User disk fallback
-            "$PWD"                       # Last resort
             "python"                     # Fileless fallback via python
             "perl"                       # Fileless fallback via perl
         )
@@ -2633,8 +2637,12 @@ while True: time.sleep(60)'
                 # Skip empty, non-existent, or non-writable directories
                 { [[ $dir ]] && [[ -d "$dir" ]] && [[ -w "$dir" ]]; } || continue
 
-                # Generate path with high entropy (30-bit random hex)
-                printf -v tmp_so '%s/forkrun_boot_%s_%X%X.so' "$dir" "$BASHPID" "$RANDOM" "$RANDOM"
+                # W-REL5-A4: mktemp O_EXCL in the candidate dir. The old
+                # predictable forkrun_boot_PID_RANDOM name let a
+                # pre-planted symlink redirect the truncate below into
+                # an arbitrary file. mktemp owns the file, so no plant
+                # can be followed; failure moves to the next candidate.
+                tmp_so="$(mktemp "${dir}/forkrun_boot.XXXXXX" 2>/dev/null)" || continue
             fi
 
             # Try to extract loadable
@@ -2883,4 +2891,11 @@ unset "b64"
 
 declare -A b64=()   # removed base64
 
+# W-REL5-A5: source-time nounset guard. Sourcing inherits the caller
+# positional list and _forkrun_bootstrap_setup reads $1, so sourcing
+# under set -u aborted the sourcing shell before any frun call ran.
+_frun_saved_u_at_source=$-
+set +u
 _forkrun_bootstrap_setup --force
+if [[ "${_frun_saved_u_at_source}" == *u* ]]; then set -u; else set +u; fi
+unset _frun_saved_u_at_source
