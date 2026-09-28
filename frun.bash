@@ -2759,9 +2759,14 @@ while True: time.sleep(60)'
 
                 # CRITICAL TEST: Try to Enable loadable
                 # This verifies the filesystem allows execution (noexec check)
-                if enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe 2>/dev/null; then
+                # TEMP-CI-DEBUG (revert): capture enable stderr+rc.
+                _enable_err="$(enable -f "$tmp_so" ring_memfd_create ring_seal ring_list ring_pipe 2>&1)"; _enable_rc=$?
+                if (( _enable_rc == 0 )); then
                     # SUCCESS! The builtin is loaded.
                     need_memfd_create_flag=false
+                else
+                    # TEMP-CI-DEBUG (revert): name the failure.
+                    printf 'ENABLE-DIAG tmp=%s rc=%d err=%s\n' "$tmp_so" "$_enable_rc" "${_enable_err}" >&2
                 fi
             fi
 
