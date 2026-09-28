@@ -5843,6 +5843,19 @@ def sweep(payload, source=None, *, args=None, args_from=None,
             "sweep() with mode='splice' is rejected: no payload "
             "exists to receive batch.metadata (passthrough has no "
             "per-combination hook)")
+    # W-REL5-C3: resume=/checkpoint_file= replay one stateful resume
+    # over N combinations (sweep forces order="index"): combination 1
+    # consumes the committed prefix, 2..N silently skip it. Reject
+    # outright — resume each combination's map() call explicitly
+    # instead (one checkpoint per combination).
+    if kwargs.get("resume") is not None or \
+            kwargs.get("checkpoint_file") is not None:
+        raise ValueError(
+            "sweep() with resume=/checkpoint_file= is rejected: a "
+            "single stateful resume replayed over N combinations "
+            "silently skips the committed prefix in combinations "
+            "2..N (combination 1 consumes it). Resume each "
+            "combination's map() call explicitly instead.")
     _reject_unknown_kwargs("sweep()", kwargs)
     combos = list(generate_combinations(args=args, args_from=args_from,
                                         link=link))

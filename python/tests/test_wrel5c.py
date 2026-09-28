@@ -69,5 +69,32 @@ class TestC1NoCwdDlopen(unittest.TestCase):
                 os.chdir(old)
 
 
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestC3SweepResumeRejected(unittest.TestCase):
+    """C3 (M14): sweep() must reject resume=/checkpoint_file=."""
+
+    def _sweep_raises(self, **kw):
+        import forkrun  # noqa: PLC0415
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        try:
+            with open(path, "w") as fh:
+                fh.write("x\n")
+            for _ in range(5):
+                with self.assertRaises(ValueError):
+                    forkrun.sweep(lambda b: b"y", path,
+                                  args=[[1, 2]], **kw)
+        finally:
+            os.unlink(path)
+
+    def test_resume_rejected(self):
+        self._sweep_raises(resume="/tmp/does-not-matter.ckpt")
+
+    def test_checkpoint_file_rejected(self):
+        self._sweep_raises(checkpoint_file="/tmp/x.ckpt")
+
+
 if __name__ == "__main__":
     unittest.main()
