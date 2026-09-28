@@ -245,5 +245,44 @@ class TestC5SpareNulled(unittest.TestCase):
             os.unlink(path)
 
 
+@unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
+class TestC7TornSignalGuard(unittest.TestCase):
+    """C7 (M9): a torn trailing signal must not hang the drain."""
+
+    def _drain_torn(self):
+        import sys as _sys  # noqa: PLC0415
+
+        _run_mod = _sys.modules["forkrun.run"]
+        sig_r, sig_w = os.pipe()
+        try:
+            os.write(sig_w, b"abc")  # 3 bytes: never a full signal
+        finally:
+            os.close(sig_w)  # EOF with 1-15 residual, no workers
+        statuses = []
+        try:
+            return list(_run_mod._drain_records(
+                None, sig_r, [], [], statuses))
+        finally:
+            try:
+                os.close(sig_r)
+            except OSError:
+                pass
+
+    def test_torn_returns_promptly(self):
+        import threading as _threading  # noqa: PLC0415
+
+        box = {}
+        th = _threading.Thread(target=lambda: box.setdefault(
+            "out", self._drain_torn()))
+        th.daemon = True
+        th.start()
+        th.join(10)
+        self.assertFalse(th.is_alive(),
+                         "drain hung on torn trailing signal")
+        self.assertEqual(box.get("out"), [])
+        for _ in range(4):
+            self.assertEqual(self._drain_torn(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

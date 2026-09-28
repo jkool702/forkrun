@@ -1522,8 +1522,9 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
       streaming source interleave spill and drain in one thread. Raising
       inside pump propagates (caller teardown handles children).
     Terminates when every worker is reaped AND the signal pipe hits EOF
-    (all write ends closed) with no unframed signal bytes left AND the
-    pump (if any) is done.
+    (all write ends closed) AND the pump (if any) is done; a torn
+    trailing signal (1-15 bytes at EOF) is discarded loudly instead
+    of hanging (W-REL5-C7).
     """
     import select as _select
     import struct as _struct
@@ -1580,7 +1581,20 @@ def _drain_records(lib, signal_r, out_fds, pids, statuses,
                 statuses.append((pid, status))
         if pump is not None and not pump_done:
             pump_done = bool(pump())
-        if not alive and sig_eof and not sig_buf and pump_done:
+        if not alive and sig_eof and pump_done:
+            if sig_buf:
+                # W-REL5-C7: torn trailing signal (1-15 bytes at EOF
+                # with nobody left to complete it — pipe writes are
+                # atomic, so a short tail means a torn writer, not a
+                # slow one). The old `not sig_buf` conjunct turned
+                # this into a silent infinite hang; discard loudly.
+                try:
+                    os.write(2, ("forkrun [WARN]: torn trailing "
+                                 "signal (%d byte(s)) discarded at "
+                                 "EOF.\n" % len(sig_buf)).encode())
+                except OSError:
+                    pass
+                sig_buf = b""
             break
     # Safety sweep: every record arrived with its signal before EOF, so
     # this should find nothing — but a short final write must never be
@@ -4417,11 +4431,22 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             if _pending:
                 return _pending.pop(0)
             # Exhausted for now: StopIteration only when the reactor
-            # has no live workers AND the signal pipe hit EOF AND no
-            # unframed signal bytes remain (same EOF-anchored rule as
-            # _drain_records). Otherwise None (not EOF — keep polling).
+            # has no live workers AND the signal pipe hit EOF (same
+            # EOF-anchored rule as _drain_records). A torn trailing
+            # signal (1-15 bytes, nobody left to complete it) is
+            # discarded loudly instead of polling forever (W-REL5-C7).
+            # Otherwise None (not EOF — keep polling).
             if (not any(s.alive for s in state.workers.values())
-                    and sig_eof and not sig_buf):
+                    and sig_eof):
+                if sig_buf:
+                    try:
+                        os.write(2, ("forkrun [WARN]: torn trailing "
+                                     "signal (%d byte(s)) discarded "
+                                     "at EOF.\n" % len(sig_buf)
+                                     ).encode())
+                    except OSError:
+                        pass
+                    sig_buf = b""
                 if reassembly is not None:
                     for _, ordered in reassembly.final_drain():
                         _pending.append(ordered)
