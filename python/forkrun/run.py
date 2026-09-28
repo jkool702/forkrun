@@ -2139,6 +2139,15 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
             except OSError:
                 pass
             _raise_for_poisoned(npois, strict_poison)
+    except KeyboardInterrupt as _ki:
+        # W-REL5-B2: stream taxonomy matches the six blocking
+        # executors — abort, then ForkrunInterrupted (still a
+        # KeyboardInterrupt), never bare KeyboardInterrupt.
+        try:
+            lib.fr_py_abort()
+        except Exception:
+            pass
+        raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
         # Idempotent second layer: teardown already ran inside; these are
         # no-ops when it did (Nones/empties) and save abandon paths where
@@ -2618,6 +2627,15 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
             except OSError:
                 pass
             _raise_for_poisoned(npois, strict_poison)
+    except KeyboardInterrupt as _ki:
+        # W-REL5-B2: stream taxonomy matches the six blocking
+        # executors — abort, then ForkrunInterrupted (still a
+        # KeyboardInterrupt), never bare KeyboardInterrupt.
+        try:
+            lib.fr_py_abort()
+        except Exception:
+            pass
+        raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
         _teardown_stream(lib, pids, signal_r, out_fds, out_hold, memfd,
                          src_fd, must_close,
@@ -4466,7 +4484,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                     service=_watch_scanner)
             finally:
                 pass
-        except BaseException:
+        except BaseException as _exc:
             # W-PY22 abort choreography on abnormal generator exit
             # (consumer abandon/GeneratorExit, worker-crash
             # propagation, KeyboardInterrupt): quiesce -> reap ->
@@ -4483,6 +4501,12 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                              engine_live=engine_live)
                 except Exception:
                     pass
+            if isinstance(_exc, KeyboardInterrupt) and not isinstance(
+                    _exc, ForkrunInterrupted):
+                # W-REL5-B2: stream taxonomy matches the blocking
+                # executors (abort already issued by the choreography
+                # above) — never bare KeyboardInterrupt.
+                raise ForkrunInterrupted(_INTERRUPTED_MSG) from _exc
             raise
 
         # W-PY39 scanner join: strict when observed, proof-based
@@ -5583,7 +5607,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         try:
             yield from reactor_loop(state, drain_gen=_pump_drain)
-        except BaseException:
+        except BaseException as _exc:
             # W-PY22 abort choreography on abnormal generator exit
             # (consumer abandon/GeneratorExit, worker-crash
             # propagation, KeyboardInterrupt): quiesce -> reap ->
@@ -5600,6 +5624,12 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                                     engine_live=engine_live)
             except Exception:
                 pass
+            if isinstance(_exc, KeyboardInterrupt) and not isinstance(
+                    _exc, ForkrunInterrupted):
+                # W-REL5-B2: stream taxonomy matches the blocking
+                # executors (abort already issued by the choreography
+                # above) — never bare KeyboardInterrupt.
+                raise ForkrunInterrupted(_INTERRUPTED_MSG) from _exc
             raise
         finally:
             pass
@@ -7233,6 +7263,16 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             stats["reassembly_max"] = drain["reassembly"].max_size
 
         _reactor_poison_summary(lib, state, strict_poison)
+    except KeyboardInterrupt as _ki:
+        # W-REL5-B2: stream taxonomy matches the blocking
+        # executors — abort, then ForkrunInterrupted (still a
+        # KeyboardInterrupt), never bare KeyboardInterrupt. NUMA
+        # twin of the four UMA stream executors (lockstep).
+        try:
+            lib.fr_py_abort()
+        except Exception:
+            pass
+        raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
         if spare_signal_w is not None and spare_signal_w >= 0:
             try:
