@@ -3256,43 +3256,92 @@ def _execute_locked(payload, source, *, sink, lines, bytes_, workers,
             signal_r = None
 
         failed = []
-        # W-PY39: join the scanner first — workers ran concurrently
-        # with it (this ordering is also crash-safe: a dead scanner
-        # reaps here instead of stranding workers in claim). A
-        # failed scan aborts the workers and fails the run (the
-        # synchronous fr_py_scan contract, preserved).
-        # W-REL5-B4: bounded (None ⇒ reaped elsewhere, read as
-        # clean like the old ChildProcessError branch).
-        scan_st = _join_helper_bounded(scan_pid, "scanner")
-        if scan_st is None:
-            scan_st = 0
-        scan_pid = None
-        if not (os.WIFEXITED(scan_st) and
-                os.WEXITSTATUS(scan_st) == 0):
-            try:
-                lib.fr_py_abort()
-            except Exception:
-                pass
-            for pid in pids:
-                # W-REL5-B4: bounded post-abort reap.
-                _join_helper_bounded(pid, "worker",
-                                     WORKER_REAP_TIMEOUT)
-            raise RuntimeError(
-                "forkrun: scan failed (status %r)" % (scan_st,))
+        # P0LEGACY: reap workers first while watching the scanner
+        # (reactor pattern). The materialized scanner parks under
+        # backpressure (uma_max_ahead) for ~the full run on slow-UDF
+        # workloads, so joining it first with the bounded W-REL5-B4
+        # deadline kills healthy runs past ~10s wall. Joining workers
+        # first is safe by the engine invariant the reactor relies on
+        # ("workers cannot EOF without a clean scanner finish" — by
+        # the time workers are gone the scanner has necessarily
+        # exited, and the backstop join below never fires). Scanner
+        # death stays fail-fast here (the crash-safety the old
+        # scanner-first order cited: a dead scanner aborts instead
+        # of stranding workers in claim).
+        scan_st = None
+        alive = set(pids)
         try:
-            for pid in pids:
-                _, status = os.waitpid(pid, 0)
-                if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
-                    failed.append((pid, status))
+            while alive:
+                for pid in list(alive):
+                    try:
+                        wpid, status = os.waitpid(pid, os.WNOHANG)
+                    except ChildProcessError:
+                        alive.discard(pid)
+                        continue
+                    except OSError:
+                        continue
+                    if wpid == pid:
+                        alive.discard(pid)
+                        if not (os.WIFEXITED(status) and
+                                os.WEXITSTATUS(status) == 0):
+                            failed.append((pid, status))
+                if scan_pid is not None:
+                    try:
+                        wpid, scan_st = os.waitpid(
+                            scan_pid, os.WNOHANG)
+                    except ChildProcessError:
+                        scan_pid = None
+                        scan_st = 0
+                    except OSError:
+                        pass
+                    else:
+                        if wpid == scan_pid:
+                            scan_pid = None
+                            if not (os.WIFEXITED(scan_st) and
+                                    os.WEXITSTATUS(scan_st) == 0):
+                                try:
+                                    lib.fr_py_abort()
+                                except Exception:
+                                    pass
+                                for pid in alive:
+                                    # W-REL5-B4: bounded post-abort reap.
+                                    _join_helper_bounded(
+                                        pid, "worker",
+                                        WORKER_REAP_TIMEOUT)
+                                raise RuntimeError(
+                                    "forkrun: scan failed (status %r)"
+                                    % (scan_st,))
+                if alive:
+                    _time.sleep(0.005)
         except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
-            for pid in pids:
+            for pid in alive:
                 # W-REL5-B4: bounded post-abort reap.
                 _join_helper_bounded(pid, "worker",
                                      WORKER_REAP_TIMEOUT)
             raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
         finally:
             pass
+        # Backstop: workers are gone, so the scanner has necessarily
+        # finished (invariant above) — this join retires an
+        # already-exited helper and never trips the bound. A nonzero
+        # status here (scanner died with the last worker) still fails
+        # the run (the synchronous fr_py_scan contract, preserved).
+        # W-REL5-B4: bounded (None ⇒ reaped elsewhere, read as
+        # clean like the old ChildProcessError branch).
+        if scan_pid is not None:
+            scan_st = _join_helper_bounded(scan_pid, "scanner")
+            if scan_st is None:
+                scan_st = 0
+            scan_pid = None
+            if not (os.WIFEXITED(scan_st) and
+                    os.WEXITSTATUS(scan_st) == 0):
+                try:
+                    lib.fr_py_abort()
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    "forkrun: scan failed (status %r)" % (scan_st,))
 
         if use_drain and drain_pid is not None:
             # Workers are gone so the signal pipe hit EOF; the drain
