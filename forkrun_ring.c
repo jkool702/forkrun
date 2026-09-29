@@ -803,7 +803,12 @@ static int ring_exec_main(int argc, char **argv) {
     sigprocmask(SIG_BLOCK, &set, &oset);
 
     posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
+    /* W-REL6-4.14: init can fail (ENOMEM) -- spawning on a garbage
+     * actions object is UB. Mask already blocked above: restore it. */
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        sigprocmask(SIG_SETMASK, &oset, NULL);
+        return 254;
+    }
     if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd);
     posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
     // NOTE: Ingress & output memfds are created with MFD_CLOEXEC/O_CLOEXEC,
@@ -880,7 +885,13 @@ static int ring_exec_splice_main(int argc, char **argv) {
 
     // 3. Map pfd[0] to the child's STDIN
     posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
+    /* W-REL6-4.14: init can fail (ENOMEM) -- close the just-made pipe
+     * and fail rather than spawning on garbage. */
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        return 254;
+    }
     posix_spawn_file_actions_adddup2(&actions, pfd[0], STDIN_FILENO);
     posix_spawn_file_actions_addclose(&actions, pfd[1]); // Child doesn't need write end
     if (fd > 2) posix_spawn_file_actions_addclose(&actions, fd); // Shield memfd
@@ -3745,7 +3756,11 @@ static int ring_indexer_numa_main(int argc, char **argv) {
             struct ChunkMeta *prev_meta =
                 &g_state->meta_ring[(major_id - 1) & META_RING_MASK];
             uint64_t prev_act_end;
-            uint32_t tnode = prev_meta->target_node;
+            /* W-REL6-4.15: predecessor descriptor snapshot (INVARIANTS
+             * §17) -- acquire, once. tnode indexes state[]/evfd arrays
+             * in the wait below; a plain re-read risks a stale slot. */
+            uint32_t tnode =
+                __atomic_load_n(&prev_meta->target_node, __ATOMIC_ACQUIRE);
             WAIT_FOR_META_READY(prev_act_end, prev_meta, tnode,
                                  return EXECUTION_FAILURE);
             actual_end = prev_act_end & ~FLAG_META_READY;
@@ -4734,7 +4749,11 @@ uint64_t chunk_bounds[16] = {0};
         if (!past_cutoff && current_major > 0) {
           struct ChunkMeta *pm =
               &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
-          uint32_t pnode = pm->target_node;
+          /* W-REL6-4.15: predecessor descriptor snapshot (INVARIANTS
+           * §17) -- acquire, once; pnode indexes waiter/evfd arrays
+           * in the gate loop below. */
+          uint32_t pnode =
+              __atomic_load_n(&pm->target_node, __ATOMIC_ACQUIRE);
           int gate_spin = 0;
           int gate_budget = (global_num_nodes > (uint32_t)get_logical_cores()) ? 1000 : 10000;
           while (1) {
@@ -5075,7 +5094,10 @@ uint64_t chunk_bounds[16] = {0};
         struct ChunkMeta *prev_meta =
             &g_state->meta_ring[(current_major - 1) & META_RING_MASK];
         uint64_t prev_act_end;
-        uint32_t tnode = prev_meta->target_node;
+        /* W-REL6-4.15: predecessor descriptor snapshot (INVARIANTS
+         * §17) -- acquire, once; shared by both wait macros below. */
+        uint32_t tnode =
+            __atomic_load_n(&prev_meta->target_node, __ATOMIC_ACQUIRE);
         WAIT_FOR_META_READY(prev_act_end, prev_meta, tnode,
                              goto unified_scanner_eof);
         actual_start = prev_act_end & ~FLAG_META_READY;
@@ -8637,7 +8659,11 @@ static int ring_dump_resume_main(int argc, char **argv) {
     printf("FORKRUN_RESUME_STDOUT_BYTES=%llu\n", (unsigned long long)snap_bytes);
 
     // Sort the jagged edge
-    int n = snap_count;
+    /* W-REL6-4.12: clamp to the copied window. snap_count comes from
+     * the shared ledger (torn/corrupt reads possible); the copy loop
+     * above stops at 1024, but an unclamped n would qsort/copy past
+     * snap_jagged into stack garbage and overflow collapsed[]. */
+    int n = snap_count > 1024 ? 1024 : (int)snap_count;
     struct IntervalNode sorted[1024];
     for (int i = 0; i < n; i++) sorted[i] = snap_jagged[i];
     qsort(sorted, n, sizeof(struct IntervalNode), cmp_interval);
@@ -9367,6 +9393,25 @@ static int ring_call_stdin_setup(int fd, size_t length, int *saved_stdin,
     fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
     fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
 #endif
+
+    /* W-REL6-4.13: fd-0 edge -- stdin (or stdout/stderr) closed on
+     * entry lets pipe() hand out 0/1/2, and the dup2(pfd[0], 0) +
+     * close(pfd[0]) choreography below then corrupts stdio (dup2(0,0)
+     * no-op followed by close(0) destroying the pipe read end; a
+     * pfd[1] of 1 splices into stdout). Move any stdio-colliding end
+     * above 2, preserving CLOEXEC. */
+    for (int _pi = 0; _pi < 2; _pi++) {
+        if (pfd[_pi] <= 2) {
+            int _nf = fcntl(pfd[_pi], F_DUPFD_CLOEXEC, 3);
+            if (_nf < 0) {
+                close(pfd[0]);
+                close(pfd[1]);
+                return 254;
+            }
+            close(pfd[_pi]);
+            pfd[_pi] = _nf;
+        }
+    }
 
     /* Maximize the pipe buffer, then read back what the kernel granted. */
     fcntl(pfd[1], F_SETPIPE_SZ, 1048576);
