@@ -71,3 +71,15 @@ python/benchmarks/stage0/results/stage0_error.txt
 # Editor session/swap files (never commit; W-V352-COMPLETE guardrail)
 *.swp
 *.kate-swp
+
+# epyc/ real-NUMA rental harness: per-machine state and results, not repo
+# content. epyc/ itself IS tracked (it is the harness); these are its outputs.
+epyc-rental-out/
+epyc/env/epyc.env
+epyc/state/
+epyc/__pycache__/
+epyc/blockmods/__pycache__/
+# Generated C plugins from epyc/headline.py (-march=native, machine-specific)
+epyc/**/ml_plugin_*.so
+epyc/**/tokenize_plugin.so
+epyc/**/headline_plugins/
