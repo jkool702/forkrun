@@ -48,7 +48,7 @@ jobs:
             -v $PWD:/src \
             -w /src \
             fedora:latest \
-            bash -c 'dnf install -y bash-devel gcc make file diffutils python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'
+            bash -c 'dnf install -y git bash-devel gcc make file diffutils python3 python3-pip python3-setuptools python3-wheel && make -f Makefile.substrate python-substrate && python3 -m unittest discover -s python/tests -v'
 
   sanitizer-asan-ubsan:    # W-REL1/R6: ASan+UBSan legs — ADVISORY for v3.6.0
     # (continue-on-error: red here never blocks the tag) flipping to
