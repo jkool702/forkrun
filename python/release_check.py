@@ -143,6 +143,30 @@ def check_changelog_final():
     return True
 
 
+@check("Docs: no (unreleased) heading on a tagged version")
+def check_unreleased_untagged():
+    # W-REL6-2.2: the v3.6.0-finality guard above is scoped to the release
+    # heading by design (it stays red until tag time). THIS guard catches
+    # the wider class: any older heading still marked (unreleased) after
+    # its version was tagged (v3.5.2 shipped tagged while its heading said
+    # unreleased -- a bug in the changelog itself, fixed alongside this
+    # guard). Markers on untagged versions (v3.5.4-v3.5.14: cut but never
+    # released) are legitimate and pass.
+    with open(os.path.join(REPO_ROOT, "DOCS", "CHANGELOG.md")) as fh:
+        content = fh.read()
+    marked = re.findall(r"^##\s+(v\S+)\s+\(unreleased\)", content, re.M)
+    if not marked:
+        return True
+    proc = _run(["git", "tag", "--list"], timeout=60)
+    assert proc.returncode == 0, proc.stderr[-500:]
+    tagged = set(proc.stdout.split())
+    bad = [v for v in marked if v in tagged]
+    assert not bad, \
+        "heading(s) still marked (unreleased) for tagged version(s) %s " \
+        "-- drop the marker (the version shipped) or delete the tag" % bad
+    return True
+
+
 @check("Tag: %s not already taken" % PROJECT_VERSION)
 def check_tag_free():
     # W-REL5-F (F6.1): tagging over an existing tag would move/fail

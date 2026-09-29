@@ -1640,7 +1640,7 @@ E16 (LEGACY/history, registered-not-executed).
 - Python `0.2.0` → `0.3.0`. 121 tests green; engine frozen (zero C
   changes since v3.5.2). Tag message ready (owner creates the tag).
 
-## v3.5.2 (unreleased)
+## v3.5.2
 
 - **W-RAW: C-plugin raw window delivery (`FORKRUN_CTX_FLAG_RAW` live):**
   `ENGINE_KNOWN_FLAGS` is now `FORKRUN_CTX_FLAG_RAW` (was `0u`); the
