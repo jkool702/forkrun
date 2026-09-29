@@ -1,0 +1,1307 @@
+.../mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:6283: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  fallow_pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:6300: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:6324: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:6346: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  ingest_pid = os.fork()
+.....................................forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 31 (killed 3 times).
+forkrun [WARN]: 5 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 4 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 31 (killed 3 times).
+forkrun [WARN]: 5 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 5 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+  - Batch Index 31 (failed 3 times)
+=================================================================
+...............forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: 3 worker death(s) recovered via respawn (wid(s) 0,0,0).
+................forkrun [WARN]: FORKRUN_TRUST_RESUME=1: ownership/permission checks bypassed for /tmp/tmpxek5674m.ckpt
+......................../mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+...............forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
+/mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+forkrun: checkpoint written to /tmp/tmplozswfuz.ckpt (engine committed frontier: 8890 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmplozswfuz.ckpt'
+...forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+..forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.forkrun: checkpoint written to /tmp/tmpmyyx7cbi.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpmyyx7cbi.txt.ckpt'
+..forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+..F........................forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+.forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+..forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 15 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: 24 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 24 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 15 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+=================================================================
+..forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+..forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.......................forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.........forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: 6 worker death(s) recovered via respawn (wid(s) 0,2,2,0,0,2).
+........................................forkrun [WARN]: NUMA partial completion (map/run): 2/4 node(s) unclaimed (node 2 (write_idx=66 != read_idx=0), node 3 (write_idx=54 != read_idx=0)) — pool covers 1/4 node(s); size workers >= nodes or pass nodes=1 for single-node work
+..sssssss.......forkrun [WARN]: Skipping poisoned batch 50 (killed 3 times).
+forkrun [WARN]: order="index" reassembly buffering 355085 bytes in 65 batch(es) behind batch 14 (limit: dynamic 2x-largest-batch rule (largest 5509 bytes)) -- a poisoned/skipped head buffers the whole tail by design (see STREAMING.md); set FORKRUN_REASSEMBLY_LIMIT=0 to silence.
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+.............F............................forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 15 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: 19 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 19 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 15 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+=================================================================
+.......................forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 15 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 25 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 26 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 27 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 28 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 29 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 30 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 31 (killed 3 times).
+forkrun [WARN]: 32 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 32 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 15 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+  - Batch Index 25 (failed 3 times)
+  - Batch Index 26 (failed 3 times)
+  - Batch Index 27 (failed 3 times)
+  - Batch Index 28 (failed 3 times)
+  - Batch Index 29 (failed 3 times)
+  - Batch Index 30 (failed 3 times)
+  - Batch Index 31 (failed 3 times)
+=================================================================
+..forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+..forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+forkrun [WARN]: 3 worker death(s) recovered via respawn (wid(s) 0,0,0).
+.forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+.......................forkrun [WARN]: 3 worker death(s) recovered via respawn (wid(s) 0,1,2).
+.forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,1).
+.forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,1).
+..forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+..forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+................................forkrun: checkpoint written to /tmp/tmpzmb_ftpg.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpzmb_ftpg.txt.ckpt'
+.forkrun: checkpoint written to /tmp/tmpwc3j8v9v.txt.ckpt (engine committed frontier: 28160 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpwc3j8v9v.txt.ckpt'
+forkrun: checkpoint written to /tmp/tmpwc3j8v9v.txt.ckpt (engine committed frontier: 90112 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpwc3j8v9v.txt.ckpt'
+...forkrun: checkpoint written to /tmp/tmpsphmsib3.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpsphmsib3.txt.ckpt'
+.forkrun: checkpoint written to /tmp/tmp6wl_tjoc.txt.ckpt (engine committed frontier: 22528 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp6wl_tjoc.txt.ckpt'
+.forkrun: checkpoint written to /tmp/tmp83guxqs9.txt.ckpt (engine committed frontier: 56320 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp83guxqs9.txt.ckpt'
+.forkrun: checkpoint written to /tmp/tmpkrwkunzn.txt.ckpt (engine committed frontier: 39424 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpkrwkunzn.txt.ckpt'
+.............forkrun: checkpoint written to /tmp/tmpr7o0p11h.txt.ckpt (engine committed frontier: 152064 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpr7o0p11h.txt.ckpt'
+........forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 2 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+=================================================================
+.forkrun [WARN]: Skipping poisoned batch 0 (killed 1 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 1 times).
+forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 2 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 1 times)
+  - Batch Index 1 (failed 1 times)
+=================================================================
+........forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 15 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: 25 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 25 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 15 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 15 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: 25 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 25 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 15 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+=================================================================
+.............../mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+forkrun: checkpoint written to /tmp/tmp5wkhj5y8.ckpt (engine committed frontier: 8890 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmp5wkhj5y8.ckpt'
+.forkrun: checkpoint written to /tmp/tmpshd0n8_d.ckpt (engine committed frontier: 8890 bytes)
+forkrun: to resume: re-run with resume='/tmp/tmpshd0n8_d.ckpt'
+...............forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 25 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 26 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 27 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 28 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 29 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 30 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 31 (killed 3 times).
+forkrun [WARN]: 31 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 31 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+  - Batch Index 25 (failed 3 times)
+  - Batch Index 26 (failed 3 times)
+  - Batch Index 27 (failed 3 times)
+  - Batch Index 28 (failed 3 times)
+  - Batch Index 29 (failed 3 times)
+  - Batch Index 30 (failed 3 times)
+  - Batch Index 31 (failed 3 times)
+=================================================================
+..forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 15 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: 25 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 25 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 15 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+=================================================================
+..noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+noise
+......forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: 15 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 15 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+=================================================================
+forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: 15 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 15 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+=================================================================
+..forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+......................../mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+..................forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,1).
+.forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.forkrun [WARN]: 1 worker death(s) recovered via respawn (wid(s) 0).
+.....forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: 1 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 1 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+=================================================================
+..................forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+../mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+.forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 2 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+=================================================================
+.forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
+.forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: 2 poisoned batch(es) skipped (retry limit reached).
+.F............forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 15 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: 25 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 25 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 15 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+=================================================================
+..forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 25 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 26 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 27 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 28 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 29 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 30 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 31 (killed 3 times).
+forkrun [WARN]: 19 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 19 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+  - Batch Index 25 (failed 3 times)
+  - Batch Index 26 (failed 3 times)
+  - Batch Index 27 (failed 3 times)
+  - Batch Index 28 (failed 3 times)
+  - Batch Index 29 (failed 3 times)
+  - Batch Index 30 (failed 3 times)
+  - Batch Index 31 (failed 3 times)
+=================================================================
+........................forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: 13 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 13 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+=================================================================
+...........forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 15 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: 25 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 25 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 15 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+=================================================================
+........forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 25 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 26 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 27 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 28 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 29 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 30 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 31 (killed 3 times).
+forkrun [WARN]: 31 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 31 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+  - Batch Index 25 (failed 3 times)
+  - Batch Index 26 (failed 3 times)
+  - Batch Index 27 (failed 3 times)
+  - Batch Index 28 (failed 3 times)
+  - Batch Index 29 (failed 3 times)
+  - Batch Index 30 (failed 3 times)
+  - Batch Index 31 (failed 3 times)
+=================================================================
+...forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 2 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 3 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 4 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 5 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 6 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 7 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 8 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 9 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 10 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 11 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 12 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 13 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 14 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 15 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 16 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 17 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 18 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 19 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 20 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 21 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 22 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 23 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 24 (killed 3 times).
+forkrun [WARN]: 25 poisoned batch(es) skipped (retry limit reached).
+
+=================================================================
+forkrun [ERROR]: POISONED BATCH SUMMARY
+=================================================================
+The pipeline completed, but 25 batch(es) failed repeatedly
+and were permanently skipped:
+  - Batch Index 0 (failed 3 times)
+  - Batch Index 1 (failed 3 times)
+  - Batch Index 2 (failed 3 times)
+  - Batch Index 3 (failed 3 times)
+  - Batch Index 4 (failed 3 times)
+  - Batch Index 5 (failed 3 times)
+  - Batch Index 6 (failed 3 times)
+  - Batch Index 7 (failed 3 times)
+  - Batch Index 8 (failed 3 times)
+  - Batch Index 9 (failed 3 times)
+  - Batch Index 10 (failed 3 times)
+  - Batch Index 11 (failed 3 times)
+  - Batch Index 12 (failed 3 times)
+  - Batch Index 13 (failed 3 times)
+  - Batch Index 14 (failed 3 times)
+  - Batch Index 15 (failed 3 times)
+  - Batch Index 16 (failed 3 times)
+  - Batch Index 17 (failed 3 times)
+  - Batch Index 18 (failed 3 times)
+  - Batch Index 19 (failed 3 times)
+  - Batch Index 20 (failed 3 times)
+  - Batch Index 21 (failed 3 times)
+  - Batch Index 22 (failed 3 times)
+  - Batch Index 23 (failed 3 times)
+  - Batch Index 24 (failed 3 times)
+=================================================================
+............./mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:2707: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  fallow_pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:2715: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  scan_pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_executor_core.py:162: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+./mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:5561: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  fallow_pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:1261: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:286: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+./mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:2684: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+../mnt/ramdisk/forkrun/python/tests/../forkrun/_reactor.py:1230: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  pid = os.fork()
+/mnt/ramdisk/forkrun/python/tests/../forkrun/run.py:5009: DeprecationWarning: This process (pid=1915928) is multi-threaded, use of fork() may lead to deadlocks in the child.
+  fallow_pid = os.fork()
+....forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+forkrun [WARN]: Skipping poisoned batch 1 (killed 3 times).
+.........forkrun [WARN]: torn trailing signal (3 byte(s)) discarded at EOF.
+forkrun [WARN]: torn trailing signal (3 byte(s)) discarded at EOF.
+forkrun [WARN]: torn trailing signal (3 byte(s)) discarded at EOF.
+forkrun [WARN]: torn trailing signal (3 byte(s)) discarded at EOF.
+forkrun [WARN]: torn trailing signal (3 byte(s)) discarded at EOF.
+.forkrun [WARN]: Skipping poisoned batch 0 (killed 3 times).
+.forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+forkrun [WARN]: 2 worker death(s) recovered via respawn (wid(s) 0,0).
+......................
+======================================================================
+FAIL: test_claim_taxonomy (test_doc_accuracy.TestDocAccuracy.test_claim_taxonomy)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/ramdisk/forkrun/python/tests/test_doc_accuracy.py", line 292, in test_claim_taxonomy
+    self.assertEqual(_check_entry(DOC_CLAIMS[8]), [])
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Lists differ: ['DOC CLAIM STALE: \'Exception taxonomy: B[482 chars][])'] != []
+
+First list contains 1 additional elements.
+First extra element 0:
+'DOC CLAIM STALE: \'Exception taxonomy: Bash signal codes map to Python exception causes (130/143/138/3)\' (covering test test_taxonomy.TestTaxonomyShape.test_death_cause_mapping failed: [(<test_taxonomy.TestTaxonomyShape testMethod=test_death_cause_mapping>, \'Traceback (most recent call last):\\n  File "/mnt/ramdisk/forkrun/python/tests/test_taxonomy.py", line 79, in test_death_cause_mapping\\n    self.assertTrue(os.WIFSIGNALED(st))\\n    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\\nAssertionError: False is not true\\n\')][])'
+
++ []
+- ["DOC CLAIM STALE: 'Exception taxonomy: Bash signal codes map to Python "
+-  "exception causes (130/143/138/3)' (covering test "
+-  'test_taxonomy.TestTaxonomyShape.test_death_cause_mapping failed: '
+-  '[(<test_taxonomy.TestTaxonomyShape testMethod=test_death_cause_mapping>, '
+-  "'Traceback (most recent call last):\\n  File "
+-  '"/mnt/ramdisk/forkrun/python/tests/test_taxonomy.py", line 79, in '
+-  'test_death_cause_mapping\\n    self.assertTrue(os.WIFSIGNALED(st))\\n    '
+-  '~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\\nAssertionError: False is not '
+-  "true\\n')][])"]
+
+======================================================================
+FAIL: test_release_check_passes (test_packaging_v2.TestReleaseChecklist.test_release_check_passes)
+release_check.py gate -- only on committed trees.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/ramdisk/forkrun/python/tests/test_packaging_v2.py", line 267, in test_release_check_passes
+    self.fail(
+    ~~~~~~~~~^
+        "release checklist requires a committed tree (it asserts "
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        "a clean tree plus HEAD-anchored checks) -- commit or "
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        "stash first, then re-run. Dirty paths:\n%s"
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        % proc.stdout.strip())
+        ^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: release checklist requires a committed tree (it asserts a clean tree plus HEAD-anchored checks) -- commit or stash first, then re-run. Dirty paths:
+M DOCS/CHANGELOG.md
+ M DOCS/DOCS_ALL.md
+ M python/benchmarks/results/RELEASE_v3.6.0.md
+?? python/benchmarks/results/headline_2026-09-29.csv
+?? python/benchmarks/results/spotcheck_post_wrel6.csv
+?? python/benchmarks/results/spotcheck_post_wrel6.md
+
+======================================================================
+FAIL: test_death_cause_mapping (test_taxonomy.TestTaxonomyShape.test_death_cause_mapping)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/mnt/ramdisk/forkrun/python/tests/test_taxonomy.py", line 79, in test_death_cause_mapping
+    self.assertTrue(os.WIFSIGNALED(st))
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true
+
+----------------------------------------------------------------------
+Ran 644 tests in 207.645s
+
+FAILED (failures=3, skipped=7)

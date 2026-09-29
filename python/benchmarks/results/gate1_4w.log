@@ -1,0 +1,4 @@
+trial0: 187.57s
+trial1: 188.59s
+trial2: 194.67s
+GATE1-4w: med=188.59s rate=26.5k total=5000000 valid=4997982 times=['187.57', '188.59', '194.67']
