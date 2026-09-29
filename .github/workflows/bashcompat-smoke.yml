@@ -52,11 +52,15 @@ jobs:
   #   D-TLS removed GLIBC_ABI_GNU2_TLS, but gcc-16's __isoc23_strto*
   #   aliasing keeps max GLIBC at 2.38 (Ubuntu 24.04 ok, Debian
   #   12/RHEL<=9 still blocked). Expected red at load till then.
-  # - 4.4/5.0/5.1 distro legs + 24.04: amber until this wave's blob
-  #   cycle (the tree blob still carries the pre-D-SEGFIX engine, so
-  #   <=5.1 legs segfault and 24.04 fails enable on GNU2_TLS). Green
-  #   after the cycle; then bind them (TODO).
+  # - 4.4/5.0/5.1 distro legs: amber until this wave's blob cycle
+  #   (the tree blob still carries the pre-D-SEGFIX engine, so <=5.1
+  #   legs segfault). Green after the cycle; then bind them (TODO).
   # - fedora 5.3 binds now (new glibc + new bash run any engine).
+  # - 24.04/5.2 BINDS as of W-REL6-1.6: the stated amber reasons are
+  #   stale — readelf over every shipped blob shows max GLIBC_2.38
+  #   with zero GLIBC_ABI_GNU2_TLS references (embedded md5s match
+  #   ring_loadables/forkrun-libs/*.so), and Ubuntu 24.04 ships
+  #   glibc 2.39, which satisfies the 2.38 requirement.
   version-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -72,7 +76,7 @@ jobs:
           - bash: "5.2"
             image: ubuntu:24.04
             kind: distro
-            allow-fail: true
+            allow-fail: false
           - bash: "5.0"
             image: ubuntu:20.04
             kind: distro
