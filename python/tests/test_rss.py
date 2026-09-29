@@ -58,6 +58,30 @@ _IDENTITY_DRIVER = "\n".join([
     "print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)",
 ])
 
+# W-REL6-3.2: poisoned-head order="index" path. Batch 0 always fails
+# (poison after retries); every other batch is identity. The hole at
+# the head forces the reassembly buffer to hold the whole tail until
+# EOF -- full-stream buffering by design. lines=100 pins batch 0 to
+# exactly the first 100 input lines, so exactness is assertable.
+# NOTE: exactness is verified without split()-lists (a 700k-element
+# list of an 8MB input would dominate ru_maxrss and measure the test,
+# not the product).
+_POISON_HEAD_DRIVER = "\n".join([
+    "import os, resource, sys",
+    "sys.path.insert(0, 'python')",
+    "import forkrun",
+    "def ph(batch):",
+    "    if batch.batch_index == 0: raise ValueError('head poison')",
+    "    return bytes(batch.data)",
+    "out = forkrun.map(ph, sys.argv[1], workers=4, order='index',",
+    "                  lines=100, nodes=1)",
+    "raw = open(sys.argv[1], 'rb').read()",
+    "off = -1",
+    "for _ in range(100): off = raw.index(b'\\n', off + 1)",
+    "assert b''.join(out) == raw[off + 1:], 'inexact poison-head output'",
+    "print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)",
+])
+
 
 def _peak_kb(driver, path):
     proc = subprocess.run(
@@ -106,6 +130,28 @@ class TestRSSBoundedness(unittest.TestCase):
         # 12MB bound documents output-sized (v1 PIPE drain makes it flat).
         self.assertLess(peaks[1] - peaks[0], 12 * 1024,
                         "peaks KB: %r" % (peaks,))
+
+    def test_poison_head_buffers_tail_only(self):
+        """W-REL6-3.2: order="index" behind a poisoned head.
+
+        The hole at batch 0 forces full-tail buffering until EOF (by
+        design -- see STREAMING.md). The buffer must hold ~1x the
+        output, not multiples: same input through the identity driver
+        (no holes) vs the poison-head driver; the peak DELTA must stay
+        under 2x the input size (exactness is asserted inside both
+        drivers, so these peaks always describe correct runs).
+        """
+        path = _sized_input(8)
+        try:
+            nbytes = os.path.getsize(path)
+            p_ident = _peak_kb(_IDENTITY_DRIVER, path)
+            p_poison = _peak_kb(_POISON_HEAD_DRIVER, path)
+        finally:
+            os.unlink(path)
+        self.assertLess(p_poison - p_ident, 2 * nbytes / 1024,
+                        "poison-head peak %dKB vs identity %dKB "
+                        "(input %dKB)" % (p_poison, p_ident,
+                                          nbytes / 1024))
 
 
 if __name__ == "__main__":
