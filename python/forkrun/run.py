@@ -5708,9 +5708,6 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                     spill["off"] += n
                 _maybe_fork_workers()
 
-        def _parse_quantum():
-            return _parse_drain_quantum(drain, coll_fd, use_orderer,
-                                         out_fds, per_worker, _sig)
         def _pump_drain_c():
             # W-PY21-A quantum: spill interleave (drives forks) +
             # results-pipe consumer. Same StopIteration contract as
@@ -5777,7 +5774,8 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
                         drain["sig_eof"] = True
                     else:
                         drain["sig_buf"] += chunk
-            _parse_quantum()
+            _parse_drain_quantum(drain, coll_fd, use_orderer,
+                                 out_fds, per_worker, _sig)
             if drain["pending"]:
                 return drain["pending"].pop(0)
             if (fstate["pump_done"]
@@ -6575,8 +6573,6 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
             except Exception:
                 return [0] * num_nodes
 
-        def _poll_ingest():
-            return _poll_ingest_once(lib, helpers, pipe)
         def _watch_pipeline():
             # Fallow death (WNOHANG) is fatal; indexer/scanner/ingest
             # deaths classify via their death pipes. Error kinds
@@ -6601,7 +6597,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                     raise RuntimeError(
                         "forkrun: NUMA reaper failed (status %r)"
                         % (st,))
-            _poll_ingest()
+            _poll_ingest_once(lib, helpers, pipe)
             try:
                 eof_posted = lib.fr_py_ingest_eof_posted()
             except Exception:
@@ -6644,8 +6640,6 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                     state.spawn_worker(wid=wid, node=node)
             forked.add(node)
 
-        def _all_helpers_done():
-            return _pipeline_quiescent(helpers, num_nodes)
         # Fork-timing loop: per-node publish gating + global stall
         # fallback. Ends when every node forked, or when the whole
         # pipeline is done (ingest + all indexers + all scanners
@@ -6662,7 +6656,7 @@ def _execute_numa_locked(payload, source, *, sink, lines, bytes_,
                     _fork_node(node)
             if len(forked) >= num_nodes:
                 break
-            if _all_helpers_done():
+            if _pipeline_quiescent(helpers, num_nodes):
                 break
             if not stalled and (
                     _time.monotonic() - t_start) >= STALL_FORK_AFTER:
@@ -7044,8 +7038,6 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             _drop_parent_signal()
             forked.add(node)
 
-        def _poll_ingest():
-            return _poll_ingest_once(lib, helpers, pipe)
         def _watch_pipeline():
             # Same classification contract as the locked NUMA path:
             # clean helper exits key on ingest EOF POSTED (not on
@@ -7062,7 +7054,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                     raise RuntimeError(
                         "forkrun: NUMA reaper failed (status %r)"
                         % (st,))
-            _poll_ingest()
+            _poll_ingest_once(lib, helpers, pipe)
             try:
                 eof_posted = lib.fr_py_ingest_eof_posted()
             except Exception:
@@ -7118,8 +7110,6 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                     if node not in forked:
                         _fork_node(node)
 
-        def _all_helpers_done():
-            return _pipeline_quiescent(helpers, num_nodes)
         # W-PY21-A drain delegation state (pipe mode; forked lazily
         # once some node forked — signals queue until the drain
         # starts; empty inputs never need one).
@@ -7170,9 +7160,6 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             drain["reassembly"] = ReassemblyBuffer()
         per_worker = [[0, b""] for _ in range(workers)]
 
-        def _parse_quantum():
-            return _parse_drain_quantum(drain, coll_fd, use_orderer,
-                                         out_fds, per_worker, _sig)
         def _sweep_memfds():
             # Safety sweep before EOF (short final writes).
             if use_orderer:
@@ -7239,7 +7226,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             _watch_pipeline()
             _fork_timing()
             if helpers["ingest_kind"] == "clean" and not forked \
-                    and _all_helpers_done():
+                    and _pipeline_quiescent(helpers, num_nodes):
                 try:
                     landed = os.fstat(memfd).st_size
                 except OSError:
@@ -7250,7 +7237,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                         "published batches" % landed)
                 pump_state["done"] = True
             elif helpers["ingest_kind"] == "clean" and (
-                    forked or _all_helpers_done()):
+                    forked or _pipeline_quiescent(helpers, num_nodes)):
                 pump_state["done"] = True
             if use_drain:
                 # W-PY21-A: results-pipe consumer (the drain owns
@@ -7270,7 +7257,8 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
                         drain["sig_eof"] = True
                     else:
                         drain["sig_buf"] += chunk
-            _parse_quantum()
+            _parse_drain_quantum(drain, coll_fd, use_orderer,
+                                 out_fds, per_worker, _sig)
             if drain["pending"]:
                 return drain["pending"].pop(0)
             if (pump_state["done"]
