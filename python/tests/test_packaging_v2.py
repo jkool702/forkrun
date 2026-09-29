@@ -12,6 +12,7 @@ skips there and runs on CI release branches).
 import glob
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -237,7 +238,7 @@ class TestVersionCoherence(unittest.TestCase):
 
 class TestReleaseChecklist(unittest.TestCase):
     def test_release_check_passes(self):
-        """release_check.py all-pass — only on committed trees.
+        """release_check.py gate -- only on committed trees.
 
         The checklist asserts a clean tree, which a working tree
         cannot satisfy by construction; it skips there and runs
@@ -246,6 +247,12 @@ class TestReleaseChecklist(unittest.TestCase):
         (FORKRUN_UNDER_RELEASE_CHECK — otherwise the checklist's
         own suite run would re-invoke the checklist without
         bound).
+        W-REL5-F (F6.2): the changelog-finality guard is DESIGNED
+        RED pre-tag (the heading still says unreleased until the
+        owner finalizes it at tag time). This test pins whichever
+        state is current: pre-finalization it asserts exactly one
+        failure (the changelog guard) with everything else green;
+        post-finalization it asserts the full green.
         """
         if os.environ.get("FORKRUN_UNDER_RELEASE_CHECK"):
             self.skipTest("running under release_check — no recursion")
@@ -256,13 +263,27 @@ class TestReleaseChecklist(unittest.TestCase):
         if proc.stdout.strip():
             self.skipTest("tree dirty — checklist runs pre-tag only")
             return
+        with open(os.path.join(REPO_ROOT, "DOCS", "CHANGELOG.md")) as fh:
+            unreleased = re.search(
+                r"^##\s+v3\.6\.0\s+\(unreleased\)",
+                fh.read(), re.M) is not None
         proc = subprocess.run(
             [sys.executable, "python/release_check.py"],
             capture_output=True, text=True, timeout=1500, cwd=REPO_ROOT)
-        self.assertEqual(proc.returncode, 0,
-                         "release checklist failed:\n%s\n%s"
-                         % (proc.stdout[-3000:], proc.stderr[-1000:]))
-        self.assertIn("ALL CHECKS PASSED", proc.stdout)
+        if unreleased:
+            self.assertEqual(proc.returncode, 1,
+                             "expected designed-red checklist:\n%s\n%s"
+                             % (proc.stdout[-3000:], proc.stderr[-1000:]))
+            self.assertIn("SOME CHECKS FAILED (1)", proc.stdout)
+            self.assertIn(
+                "Docs: CHANGELOG v3.6.0 heading is final", proc.stdout)
+            self.assertIn("[FAIL] Docs: CHANGELOG v3.6.0 heading is "
+                          "final", proc.stdout)
+        else:
+            self.assertEqual(proc.returncode, 0,
+                             "release checklist failed:\n%s\n%s"
+                             % (proc.stdout[-3000:], proc.stderr[-1000:]))
+            self.assertIn("ALL CHECKS PASSED", proc.stdout)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""forkrun v3.6.0 release checklist (W-PY23).
+"""forkrun v3.6.0 release checklist (W-PY23, W-REL5-F F6).
 
 Run from the repo root BEFORE tagging v3.6.0. Every check must pass:
 
     python3 python/release_check.py
 
-Checks: version coherence, full test suite, canary link check, IDL
-schema check, reproducible builds, wheel platform tag + metadata,
-sdist completeness, doc twins, clean tree, frozen engine.
+Checks: version coherence, tag freedom (F6.1), changelog finality
+(F6.2, DESIGNED RED until the owner finalizes the heading at tag
+time), full test suite, canary link check, IDL schema + freshness
+(F6.3) checks, reproducible builds, single-artifact wheel/sdist
+build with recorded checksums (F6.4), doc twins, clean tree, frozen
+engine.
 
 Exit 0 + "ALL CHECKS PASSED" means ready to tag. Anything else means
 DO NOT TAG. (The tree-clean and frozen-engine checks require a
@@ -44,6 +47,57 @@ def _run(cmd, timeout=600, cwd=None):
         cwd=cwd or REPO_ROOT)
 
 
+_BUILT = {}
+
+
+def _ensure_artifacts():
+    """Build the wheel + sdist ONCE per release_check run (W-REL5-F F6.4).
+
+    Returns (wheel_path, sdist_path). Records sha256 of both (+ HEAD
+    + versions) into dist/checksums.txt for the tag bundle. Drops OUR
+    OWN stale outputs first, so a leftover tarball can never satisfy
+    the checks (the old check_sdist globbed whatever dist/ held).
+    dist/ is gitignored build space; the checksums file travels with
+    the artifacts it describes.
+    """
+    if "wheel" in _BUILT:
+        return _BUILT["wheel"], _BUILT["sdist"]
+    import hashlib
+    dist_dir = os.path.join(REPO_ROOT, "dist")
+    os.makedirs(dist_dir, exist_ok=True)
+    for pat in ("forkrun-%s*.whl" % PY_VERSION,
+                "forkrun-%s*.tar.gz" % PY_VERSION):
+        for stale in glob.glob(os.path.join(dist_dir, pat)):
+            os.remove(stale)
+    proc = _run([sys.executable, "-m", "pip", "wheel", ".", "--no-deps",
+                 "-w", dist_dir], timeout=900)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    wheels = sorted(glob.glob(
+        os.path.join(dist_dir, "forkrun-%s*.whl" % PY_VERSION)))
+    assert len(wheels) == 1, \
+        "expected exactly one fresh wheel, found %r" % (wheels,)
+    proc = _run([sys.executable, "setup.py", "-q", "sdist"], timeout=600)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    sdists = sorted(glob.glob(
+        os.path.join(dist_dir, "forkrun-%s*.tar.gz" % PY_VERSION)))
+    assert len(sdists) == 1, \
+        "expected exactly one fresh sdist, found %r" % (sdists,)
+    head = _run(["git", "rev-parse", "HEAD"], timeout=60)
+    lines = []
+    for path in wheels + sdists:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1048576), b""):
+                h.update(chunk)
+        lines.append("%s  %s" % (h.hexdigest(), os.path.basename(path)))
+    lines.append("# forkrun %s / py %s / HEAD %s" % (
+        PROJECT_VERSION, PY_VERSION, head.stdout.strip()))
+    with open(os.path.join(dist_dir, "checksums.txt"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    _BUILT["wheel"], _BUILT["sdist"] = wheels[0], sdists[0]
+    return wheels[0], sdists[0]
+
+
 @check("Version: __version__ is %s" % PY_VERSION)
 def check_version():
     sys.path.insert(0, os.path.join(REPO_ROOT, "python"))
@@ -68,6 +122,37 @@ def check_changelog_version():
         content = fh.read()
     assert PROJECT_VERSION in content, "no %s entry" % PROJECT_VERSION
     assert PY_VERSION in content, "no %s entry" % PY_VERSION
+    return True
+
+
+@check("Docs: CHANGELOG %s heading is final (no (unreleased))" % PROJECT_VERSION)
+def check_changelog_final():
+    # W-REL5-F (F6.2): the release is not final while its own heading
+    # says unreleased. Scoped to the release heading (older entries
+    # keep their historical markers). DESIGNED RED until the owner
+    # finalizes the heading at tag time -- do NOT "fix" this by
+    # editing early; the red is the gate working.
+    with open(os.path.join(REPO_ROOT, "DOCS", "CHANGELOG.md")) as fh:
+        content = fh.read()
+    marked = re.search(r"^##\s+%s\s+\(unreleased\)" % re.escape(PROJECT_VERSION),
+                       content, re.M)
+    assert marked is None, \
+        "CHANGELOG.md still heads %s as (unreleased) -- finalize the " \
+        "heading at tag time (TAG_PREP_v3.6.0.md step: this red is " \
+        "designed, not a bug)" % PROJECT_VERSION
+    return True
+
+
+@check("Tag: %s not already taken" % PROJECT_VERSION)
+def check_tag_free():
+    # W-REL5-F (F6.1): tagging over an existing tag would move/fail
+    # it. Local tags only (offline-safe); pushing the tag is the
+    # owner's step in TAG_PREP_v3.6.0.md.
+    proc = _run(["git", "tag", "--list", PROJECT_VERSION], timeout=60)
+    assert proc.returncode == 0, proc.stderr[-500:]
+    assert proc.stdout.strip() == "", \
+        "tag %s already exists locally -- delete it or pick a new " \
+        "version (refusing to tag over it)" % PROJECT_VERSION
     return True
 
 
@@ -170,6 +255,17 @@ def check_idl():
     return True
 
 
+@check("IDL: generated artifacts match (gen_idl.py --check)")
+def check_idl_fresh():
+    # W-REL5-F (F6.3): the freshness gate used to be CI-only; a stale
+    # regen committed without running it would sail through tagging.
+    proc = _run([sys.executable, "tools/gen_idl.py", "--check"],
+                timeout=300)
+    assert proc.returncode == 0, \
+        (proc.stdout + proc.stderr)[-2000:]
+    return True
+
+
 @check("Reproducible: two substrate builds are byte-identical")
 def check_reproducible():
     proc = _run(["make", "-f", "Makefile.substrate",
@@ -180,62 +276,44 @@ def check_reproducible():
 
 @check("Wheel: builds with a platform tag (not py3-none-any)")
 def check_wheel():
-    workdir = tempfile.mkdtemp(prefix="forkrun_release_wheel_")
-    try:
-        proc = _run([sys.executable, "-m", "pip", "wheel", ".",
-                     "--no-deps", "-w", workdir], timeout=900)
-        assert proc.returncode == 0, proc.stderr[-2000:]
-        wheels = glob.glob(os.path.join(workdir, "*.whl"))
-        assert wheels, "no wheel built"
-        name = os.path.basename(wheels[0])
-        assert "linux_" in name, "wheel lacks platform tag: %s" % name
-        assert "none-any" not in name, \
-            "wheel wrongly tagged py3-none-any: %s" % name
-        assert PY_VERSION in name, \
-            "wheel version mismatch: %s" % name
-        return True
-    finally:
-        import shutil
-        shutil.rmtree(workdir, ignore_errors=True)
+    # W-REL5-F (F6.4): reads the single shared build (see
+    # _ensure_artifacts), not a private pip invocation.
+    wheel, _ = _ensure_artifacts()
+    name = os.path.basename(wheel)
+    assert "linux_" in name, "wheel lacks platform tag: %s" % name
+    assert "none-any" not in name, \
+        "wheel wrongly tagged py3-none-any: %s" % name
+    assert PY_VERSION in name, \
+        "wheel version mismatch: %s" % name
+    return True
 
 
 @check("Wheel: METADATA is complete")
 def check_metadata():
     import zipfile
-    workdir = tempfile.mkdtemp(prefix="forkrun_release_meta_")
-    try:
-        proc = _run([sys.executable, "-m", "pip", "wheel", ".",
-                     "--no-deps", "-w", workdir], timeout=900)
-        assert proc.returncode == 0, proc.stderr[-2000:]
-        wheels = glob.glob(os.path.join(workdir, "*.whl"))
-        assert wheels, "no wheel built"
-        with zipfile.ZipFile(wheels[0]) as zf:
-            meta_names = [n for n in zf.namelist()
-                          if n.endswith(".dist-info/METADATA")]
-            assert meta_names, "no METADATA in wheel"
-            meta = zf.read(meta_names[0]).decode("utf-8")
-        for field in ("Name: forkrun", "Version: " + PY_VERSION,
-                      "Summary:", "Home-page:",
-                      "Requires-Python: >=3.10",
-                      "License:", "Classifier:"):
-            assert field in meta, "METADATA missing %r" % field
-        assert "Development Status :: 4 - Beta" in meta
-        return True
-    finally:
-        import shutil
-        shutil.rmtree(workdir, ignore_errors=True)
+    wheel, _ = _ensure_artifacts()
+    with zipfile.ZipFile(wheel) as zf:
+        meta_names = [n for n in zf.namelist()
+                      if n.endswith(".dist-info/METADATA")]
+        assert meta_names, "no METADATA in wheel"
+        meta = zf.read(meta_names[0]).decode("utf-8")
+    for field in ("Name: forkrun", "Version: " + PY_VERSION,
+                  "Summary:", "Home-page:",
+                  "Requires-Python: >=3.10",
+                  "License:", "Classifier:"):
+        assert field in meta, "METADATA missing %r" % field
+    assert "Development Status :: 4 - Beta" in meta
+    return True
 
 
 @check("sdist: builds and contains all C sources")
 def check_sdist():
-    proc = _run([sys.executable, "setup.py", "-q", "sdist"],
-                timeout=600)
-    assert proc.returncode == 0, proc.stderr[-2000:]
+    # W-REL5-F (F6.4): uses the exact fresh sdist from the shared
+    # build (stale tarballs are removed first -- the old glob could
+    # pass on leftovers).
     import tarfile
-    dist_dir = os.path.join(REPO_ROOT, "dist")
-    sdists = glob.glob(os.path.join(dist_dir, "*.tar.gz"))
-    assert sdists, "no sdist built"
-    with tarfile.open(sdists[0]) as tf:
+    _, sdist = _ensure_artifacts()
+    with tarfile.open(sdist) as tf:
         names = tf.getnames()
     top = "forkrun-%s/" % PY_VERSION
     needed = ["forkrun_ring.c", "forkrun_substrate.h",
@@ -260,20 +338,17 @@ def check_readme_version():
 def check_wheel_so_version():
     # F-PORT5: the wheel must SHIP the release engine, not a stale
     # local build. Extract the packaged .so and read its version by
-    # the same helper as the tree-built substrate.
+    # the same helper as the tree-built substrate. W-REL5-F (F6.4):
+    # reads the single shared build.
     import zipfile
+    wheel, _ = _ensure_artifacts()
+    with zipfile.ZipFile(wheel) as zf:
+        so_names = [n for n in zf.namelist()
+                    if n.endswith("libforkrun_python.so")]
+        assert so_names, "no substrate .so in wheel"
+        so_data = zf.read(so_names[0])
     workdir = tempfile.mkdtemp(prefix="forkrun_release_sovers_")
     try:
-        proc = _run([sys.executable, "-m", "pip", "wheel", ".",
-                     "--no-deps", "-w", workdir], timeout=900)
-        assert proc.returncode == 0, proc.stderr[-2000:]
-        wheels = glob.glob(os.path.join(workdir, "*.whl"))
-        assert wheels, "no wheel built"
-        with zipfile.ZipFile(wheels[0]) as zf:
-            so_names = [n for n in zf.namelist()
-                        if n.endswith("libforkrun_python.so")]
-            assert so_names, "no substrate .so in wheel"
-            so_data = zf.read(so_names[0])
         so_path = os.path.join(workdir, "libforkrun_python.so")
         with open(so_path, "wb") as fh:
             fh.write(so_data)
