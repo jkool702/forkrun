@@ -7,3 +7,4 @@ cat /sys/kernel/mm/transparent_hugepage/shmem_enabled | grep -F '[always]' >/dev
 ./test_c_plugins_rigorous.sh
 ./test_frun.sh
 ./test_frun_comprehensive.sh
+./test_frun_security.sh
