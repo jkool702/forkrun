@@ -4212,6 +4212,31 @@ def _execute_reactor_locked(payload, source, *, sink, lines, bytes_,
                           spare_signal_w=signal_w)
 
 
+def _close_spare_fd(state, fd):
+    """Drop a spare signal write end (W-REL6-5: single implementation).
+
+    The spare is dup'd for future respawns but must close for signal
+    EOF; idempotent (invalid/None fds pass through). Resets
+    state.ctx["signal_w"] on close (respawns re-dup from the live
+    end; a stale ctx fd would starve the drain). Unifying the seven
+    inline copies: the no-reset copies all sat post-use
+    (finally/teardown with state discarded), so the reset is
+    unobservable there. Returns None when closed, else the input fd
+    (callers rebind: ``spare_signal_w = _close_spare_fd(...)``).
+    """
+    if fd is not None and fd >= 0:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            state.ctx["signal_w"] = -1
+        except (AttributeError, TypeError):
+            pass
+        return None
+    return fd
+
+
 def _execute_streaming_reactor(payload, source, *, lines, bytes_,
                                workers, on_error, strict_poison=False, mode="python",
                                nodes="auto", order="none", stats=None,
@@ -4388,24 +4413,13 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             results_pump = _make_results_pump(
                 results_r, order=order, stats=stats)
 
-        def _close_spare():
-            # Drop the parent's spare signal write end (kept for
-            # future respawns) so signal EOF can arrive. Idempotent.
-            nonlocal spare_signal_w
-            if spare_signal_w is not None and spare_signal_w >= 0:
-                try:
-                    os.close(spare_signal_w)
-                except OSError:
-                    pass
-                spare_signal_w = None
-                state.ctx["signal_w"] = -1
-
         def _pump_drain_c():
             # W-PY21-A results-pipe consumer: spare management +
             # drain reap + incremental parse. Same StopIteration
             # contract as _pump_drain below.
+            nonlocal spare_signal_w
             if not any(s.alive for s in state.workers.values()):
-                _close_spare()
+                spare_signal_w = _close_spare_fd(state, spare_signal_w)
             if drain_st["alive"]:
                 try:
                     wpid, _dst = os.waitpid(drain_pid, os.WNOHANG)
@@ -4448,13 +4462,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
             # write end (kept for future respawns) so the signal
             # pipe hits EOF and the drain can terminate. Idempotent.
             if not any(s.alive for s in state.workers.values()):
-                if spare_signal_w is not None and spare_signal_w >= 0:
-                    try:
-                        os.close(spare_signal_w)
-                    except OSError:
-                        pass
-                    spare_signal_w = None
-                    state.ctx["signal_w"] = -1
+                spare_signal_w = _close_spare_fd(state, spare_signal_w)
             if not sig_eof:
                 try:
                     ready, _, _ = _select.select([signal_r], [], [], 0)
@@ -4726,12 +4734,7 @@ def _execute_streaming_reactor(payload, source, *, lines, bytes_,
         # abort handler above must not fire on the way out.
         _stream_ok = True
     finally:
-        if spare_signal_w is not None and spare_signal_w >= 0:
-            try:
-                os.close(spare_signal_w)
-            except OSError:
-                pass
-            spare_signal_w = None
+        spare_signal_w = _close_spare_fd(state, spare_signal_w)
         _teardown_reactor(lib, state, signal_r=signal_r,
                           out_fds=out_fds, out_hold=out_hold,
                           memfd=memfd, src_fd=src_fd,
@@ -5729,13 +5732,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
             # its end-of-stream safety sweep).
             if fstate["workers"] and not any(
                     s.alive for s in state.workers.values()):
-                if spare_signal_w is not None and spare_signal_w >= 0:
-                    try:
-                        os.close(spare_signal_w)
-                    except OSError:
-                        pass
-                    spare_signal_w = None
-                    state.ctx["signal_w"] = -1
+                spare_signal_w = _close_spare_fd(state, spare_signal_w)
             if use_drain:
                 return _pump_drain_c()
             try:
@@ -5917,12 +5914,7 @@ def _execute_ingest_stream_reactor(payload, source, *, lines, bytes_,
 
         _reactor_poison_summary(lib, state, strict_poison)
     finally:
-        if spare_signal_w is not None and spare_signal_w >= 0:
-            try:
-                os.close(spare_signal_w)
-            except OSError:
-                pass
-            spare_signal_w = None
+        spare_signal_w = _close_spare_fd(state, spare_signal_w)
         _teardown_reactor(lib, state, signal_r=signal_r,
                           out_fds=out_fds, out_hold=out_hold,
                           memfd=memfd, mem_hold=mem_hold,
@@ -7284,13 +7276,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             # future forks (signal_w=-1 ⇒ no signals ⇒ starvation).
             if forked and not any(
                     s.alive for s in state.workers.values()):
-                if spare_signal_w is not None and spare_signal_w >= 0:
-                    try:
-                        os.close(spare_signal_w)
-                    except OSError:
-                        pass
-                    spare_signal_w = None
-                    state.ctx["signal_w"] = -1
+                spare_signal_w = _close_spare_fd(state, spare_signal_w)
             if _pump_debug_tick():
                 _pump_debug_log(
                     "forked=%s live=%s ingest=%s idx=%s scan=%s "
@@ -7485,12 +7471,7 @@ def _execute_numa_stream(payload, source, *, lines, bytes_, workers,
             pass
         raise ForkrunInterrupted(_INTERRUPTED_MSG) from _ki
     finally:
-        if spare_signal_w is not None and spare_signal_w >= 0:
-            try:
-                os.close(spare_signal_w)
-            except OSError:
-                pass
-            spare_signal_w = None
+        spare_signal_w = _close_spare_fd(state, spare_signal_w)
         extra = []
         if pipe is not None:
             extra = ([pipe["fallow_pid"], pipe["ingest_pid"]]
