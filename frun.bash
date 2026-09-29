@@ -1275,14 +1275,8 @@ EOF
 
     ${extglob_was_set} || shopt -u extglob
 
-    if ${verbose_flag}; then
-        tStart="${EPOCHREALTIME//./}"
-toc() {
-    printf '\n%s finished at +%s us\n' "$*" "$(( ${EPOCHREALTIME//./} - tStart ))" >&$fd2
-}
-    else
-toc() { :; }
-    fi
+    # W-REL6-5.2: the verbose toc()/tStart timing pair was dead code
+    # (defined in both branches, never called) -- removed.
 
     : "${nWorkersMax:=0}"
 

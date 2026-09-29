@@ -2384,42 +2384,14 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
         except OSError:
             pass
 
-        def _watch_live():
-            # Same helper-liveness rule as the locked path (abort +
-            # raise on death / premature clean scanner exit).
-            for pid, name in ((scan_pid, "scanner"),
-                              (fallow_pid, "fallow")):
-                if pid is None:
-                    continue
-                try:
-                    wpid, st = os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    continue
-                if wpid != pid:
-                    continue
-                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
-                if name == "scanner":
-                    helpers["scan_rc"] = st
-                    if not ok or not gate["issued"]:
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: ingest scanner failed "
-                            "(status %r)" % (st,))
-                else:
-                    helpers["fallow_rc"] = st
-                    if not ok:
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: ingest reaper failed "
-                            "(status %r)" % (st,))
-
         def _pump():
             # One drain-loop quantum. Returns True when ingest is fully
             # done: gate issued AND (workers forked OR input was empty).
             # Side effects: forks workers per the timing rule, spills
             # source quanta via pwrite, issues the gate (with the
             # post-stall-fork grace). Raises on helper death / anomaly.
-            _watch_live()
+            _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers,
+                                 gate["issued"])
             if not state["workers"]:
                 if gate["issued"]:
                     # Post-gate wait: fork on first publish (CASE-A
@@ -2892,40 +2864,6 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     signal_r, out_fds, workers, mode="memfd")
                 signal_r = None
 
-        def _watch_helpers():
-            # Reap helper deaths (nonblocking). Scanner death is fatal
-            # (unpublished tail would be silently lost); reaper death
-            # aborts too (acks would EPIPE and fail workers — fail fast
-            # instead of spilling pointlessly). Scanner exit 0 before
-            # the gate is equally fatal: it can only exit 0 via the EOF
-            # gate, so an early 0 means the tail it never saw is lost.
-            nonlocal gate_issued
-            for pid, name in ((scan_pid, "scanner"),
-                              (fallow_pid, "fallow")):
-                if pid is None:
-                    continue
-                try:
-                    wpid, st = os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    continue
-                if wpid != pid:
-                    continue
-                ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
-                if name == "scanner":
-                    helpers["scan_rc"] = st
-                    if not ok or not gate_issued:
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: ingest scanner failed "
-                            "(status %r)" % (st,))
-                else:
-                    helpers["fallow_rc"] = st
-                    if not ok:
-                        lib.fr_py_abort()
-                        raise RuntimeError(
-                            "forkrun: ingest reaper failed "
-                            "(status %r)" % (st,))
-
         def _maybe_fork_workers():
             # The fork-timing rule (see module constants): data publish
             # always forks; the stall timeout only fires pre-gate (slow
@@ -2972,7 +2910,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                             "failed writing ingress: %s" % (exc,))
                     view = view[n:]
                     total_written += n
-                _watch_helpers()
+                _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers, gate_issued)
                 _maybe_fork_workers()
         except KeyboardInterrupt as _ki:
             lib.fr_py_abort()
@@ -2992,7 +2930,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                     break
                 if (_time.monotonic() - fork_at) >= POST_FORK_GATE_GRACE:
                     break
-                _watch_helpers()
+                _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers, gate_issued)
                 _time.sleep(0.05)
         if lib.fr_py_ingest_done() != RC_OK:
             raise RuntimeError("ingest signal failed")
@@ -3010,7 +2948,7 @@ def _execute_ingest_locked(payload, source, *, sink, lines, bytes_,
                 if ready > 0:
                     _fork_workers()
                     break
-                _watch_helpers()
+                _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers, gate_issued)
                 if helpers["scan_rc"] is not None:
                     if total_written == 0:
                         # Empty input: drop the fallow copies (reaper
@@ -4235,6 +4173,45 @@ def _close_spare_fd(state, fd):
             pass
         return None
     return fd
+
+
+def _watch_helper_deaths(lib, scan_pid, fallow_pid, helpers, gate_issued):
+    """Reap helper deaths, nonblocking (W-REL6-5: single implementation).
+
+    Unifies the _watch_live / _watch_helpers twins (plain ingest
+    paths): scanner death is fatal (unpublished tail would be
+    silently lost); reaper death aborts too (acks would EPIPE);
+    scanner exit 0 before the gate is equally fatal (early 0 means
+    the tail it never saw is lost). ``gate_issued`` is the caller's
+    gate flag (dict entry or plain bool -- same rule); ``helpers``
+    receives scan_rc/fallow_rc. Reactor variants keep their own
+    death-pipe watchers (different mechanism, not merged).
+    """
+    for pid, name in ((scan_pid, "scanner"),
+                      (fallow_pid, "fallow")):
+        if pid is None:
+            continue
+        try:
+            wpid, st = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            continue
+        if wpid != pid:
+            continue
+        ok = os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
+        if name == "scanner":
+            helpers["scan_rc"] = st
+            if not ok or not gate_issued:
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: ingest scanner failed "
+                    "(status %r)" % (st,))
+        else:
+            helpers["fallow_rc"] = st
+            if not ok:
+                lib.fr_py_abort()
+                raise RuntimeError(
+                    "forkrun: ingest reaper failed "
+                    "(status %r)" % (st,))
 
 
 def _execute_streaming_reactor(payload, source, *, lines, bytes_,
