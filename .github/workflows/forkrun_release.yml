@@ -17,6 +17,7 @@ jobs:
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     continue-on-error: ${{ matrix.arch == 'riscv64' }} 
     strategy:
       fail-fast: false
@@ -211,6 +212,7 @@ jobs:
     name: Embed Base64 into frun.bash
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
       pull-requests: write

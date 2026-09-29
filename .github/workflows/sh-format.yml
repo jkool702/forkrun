@@ -30,6 +30,7 @@ jobs:
     # pre-b64-marker region is compared; the comprehensive-suite twins are
     # byte-identical with no exceptions.
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v3
       - name: File twins in lockstep

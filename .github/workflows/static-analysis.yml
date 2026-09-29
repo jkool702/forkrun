@@ -26,7 +26,13 @@ jobs:
     # Baseline at introduction (v3.6.0 wave): ruff 554 findings on
     # python/forkrun/ (top: UP031 printf-formatting 211, BLE001
     # blind-except 142, S110 try-except-pass 78 — sampled: dead-store
-    # snapshots and intentional payload-code paths, no live bug).
+    # snapshots and intentional payload-code paths, no live bug);
+    # coverage 62% TOTAL over python/forkrun/ (621-test suite).
+    # Known measurement artifact, not a gap: _worker.py reads 9% and
+    # _reactor.py 48% because forked children die via os._exit()
+    # without flushing coverage data — the worker paths ARE exercised,
+    # their hits just never land in the data file. Do not chase this
+    # number without fixing the flush first.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
