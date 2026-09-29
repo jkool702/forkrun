@@ -173,6 +173,42 @@ DOC_CLAIMS = [
                              "12 total invocations, batch 0 runs 3x "
                              "(default limit)",
     },
+    {
+        "claim": "order=index behind a poisoned head buffers the "
+                 "whole tail (high-water warning, reassembly limit)",
+        "doc_source": "python/docs/STREAMING.md",
+        "key_phrase": "buffers the whole tail",
+        "covering_tests": [
+            "test_rss.TestRSSBoundedness."
+            "test_poison_head_buffers_tail_only",
+        ],
+        "assertion_summary": "poisoned head: exact output minus head "
+                             "batch, peak delta under 2x input",
+    },
+    {
+        "claim": "Resume provenance gate fires bare and with an "
+                 "explicit command (extra args never skip it)",
+        "doc_source": "DOCS/SECURITY.md",
+        "key_phrase": "extra arguments never skip",
+        "covering_tests": [
+            "test_bash_gates.TestResumeGateBothForms."
+            "test_reject_bare_and_with_args",
+        ],
+        "assertion_summary": "world-writable checkpoint rejected "
+                             "rc=1 SECURITY in both forms (x5)",
+    },
+    {
+        "claim": "-I substitution works in separate-argv form "
+                 "(unique output names)",
+        "doc_source": "README.md",
+        "key_phrase": "unique output names",
+        "covering_tests": [
+            "test_bash_gates.TestInsertIdSeparateArgv."
+            "test_separate_argv_substitutes",
+        ],
+        "assertion_summary": "-I echo pre-{ID}-post substitutes per "
+                             "batch (x5)",
+    },
 ]
 
 
@@ -263,6 +299,15 @@ class TestDocAccuracy(unittest.TestCase):
 
     def test_claim_payload_at_least_once(self):
         self.assertEqual(_check_entry(DOC_CLAIMS[11]), [])
+
+    def test_claim_order_index_buffering(self):
+        self.assertEqual(_check_entry(DOC_CLAIMS[12]), [])
+
+    def test_claim_resume_gate_both_forms(self):
+        self.assertEqual(_check_entry(DOC_CLAIMS[13]), [])
+
+    def test_claim_insert_id_argv_form(self):
+        self.assertEqual(_check_entry(DOC_CLAIMS[14]), [])
 
 
 if __name__ == "__main__":

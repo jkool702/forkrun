@@ -2,6 +2,94 @@
 
 ## v3.6.0 (unreleased)
 
+### Second-review remediation, six waves (W-REL6)
+
+Full remediation of the second blind adversarial review (~28 items:
+bash 5.5, release-readiness 4.5 blockers first). CPU-utilization,
+cross-socket and throughput headline numbers re-verified correct
+and untouched (R6.2); engine changes enumerated-sites-only (R6.1)
+with one blob cycle at the end (R6.3).
+
+- **Wave 1 — Bash tag blockers.** Security gate hoisted out of the
+  `$# == 1` branch (any extra argument skipped all three layers
+  while coordinates were honored — world-writable truncation,
+  rc 0). Leading-zero numerics fail closed in `_expand_unit`
+  (`-j 00` dropped every record silently; `-j 08` aborted
+  mid-pipeline). Crash message emits `--resume` BEFORE the command
+  (trailing flag reached user argv). RETURN trap
+  restore-and-untraps (leaked trap killed sourcing shells under
+  `set -u`). README `-I` shows the working separate-argv form
+  (docs-only, owner-decided). New `bash-suite.yml` CI (binding
+  basic + security suites); 5.2 compat leg bound (blobs verified
+  max GLIBC_2.38, zero GNU2_TLS). Lock-in
+  `UNIT_TESTS/test_frun_security.sh` (101 tests: gate x10 both
+  forms + TRUST, octal x5, trap hygiene x5, verbatim crash-hint
+  resume byte-exact).
+- **Wave 2 — Release process.** Dirty-tree checklist self-skip is a
+  fail (was skip); `BENCHMARKS/benchmark.out` ignored. Changelog
+  finality guard widened to any `(unreleased)` heading on a tagged
+  version (caught v3.5.2 shipped-tagged-but-marked — heading fixed
+  here, no date added: ship date unknown). Fedora container gains
+  `git` (release_check shells out to it). release_check 20/21
+  (single designed-red: v3.6.0 heading until tag time).
+- **Wave 3 — Python correctness.** String payloads resolve in the
+  parent pre-fork (post-fork import deadlocks a threaded host);
+  reactor children signal READY_BYTE with a per-worker startup
+  deadline (SIGKILL into recovery instead of a silent select
+  wait); payload imports are fresh per call (stale sys.modules
+  caused total output loss across same-named rewrites — found by
+  the full suite). `order="index"` buffering documented (full-tail
+  behind a poisoned head, by design) + warn-once high-water
+  warning (explicit limit or dynamic 2x-largest x32; literal 2x
+  false-positives healthy runs — documented) + poison-head RSS
+  lock-in (~1.2x input delta). Payload at-least-once documented
+  (measured 12 invocations / batch-0 x3; idempotency guidance).
+  Checkpoint cross-field semantics (horizon/intervals vs source;
+  no STDOUT rule by design — None-payloads legitimately report 0)
+  + destroy-on-resume-failure (a leaked live engine corrupted the
+  next run — found by the full suite). `ForkrunWorkerFailure`
+  (typed `.signo`, still a RuntimeError); mypy 16 errors -> 0
+  (`py.typed` stays). `map(return_stats=True)` + `last_run_stats`
+  (`total`/`completed`/`poisoned`/`poisoned_batches`). Stream
+  forwards `signal_policy` to validation (was ModuleNotFound
+  before ValueError).
+- **Wave 4 — C engine (16 enumerated sites) + blob cycle.** Bounded
+  `poll(...,100)` (5 cross-process waits); pin-failure once-logs;
+  checked `fallocate` punch (warn + no-advance on failure);
+  `abort_reason` published before the gating CAS (election rides
+  the reason word); acquire slot-identity reads; escrow
+  anti-recycle window guard; FULL-index comment corrected to low
+  32 bits; `ring_ack` cnt==0 guard; fallow NULL-state guard;
+  aligned(8) packet buffers; `snap_count` 1024 clamp; fd-0 dup
+  edge; spawn file-actions init checks; predecessor node
+  snapshots (acquire). 4.11/4.16 verified already-fixed (D4/D5 +
+  probes), no change. Blob cycle: x86-64 v2/v3/v4 rebuilt with
+  release-identical flags, re-embedded surgically (decode-and-cmp
+  7/7, rebuild byte-identical); non-x86 deferred to the CI auto-PR
+  (established pattern). Matrix: Python suite x3 (638), bash
+  96+101+264 foreground, referees 31/31, 20M-line @4x4+n1x2 exact
+  with 16/16 write==read, forensic loops x10/x10, release_check
+  20/21, perf parity (OLD~3060 vs NEW~3000 MB/s).
+- **Wave 5 — Python deduplication (seam USED).** ExecutorSpec +
+  init_engine wired (all ten executors construct specs; core fns
+  take `spec=`); legacy poison scalars + 7 spare-managers + watch
+  twins + NUMA quantum/ingest/quiescence twins unified; toc dead
+  code deleted. Metrics: run.py 7470 -> 7431 lines, dup names
+  13 -> 10, 30-line clone groups 45 -> 21, core call sites 16 ->
+  ~60. Costume STOP (reported, not forced): a shared driver for
+  the ten executors needs 5+ mode branches (setup/fork/join/
+  teardown/spill); remaining dupes are shape-bound (nonlocal
+  rebinding, different machinery, behavioral deltas). C-side
+  5.2/5.3 items deferred (R6.3 single blob cycle; unreachable
+  code, zero behavior impact).
+- **Wave 6 — Documentation integrity.** README: Python 0.16.0,
+  cross-socket as median, 200,000 dispatches bullet dropped
+  (measured ~38.6k at max pressure), glibc floor rewritten
+  post-D-TLS (no GNU2_TLS, max 2.38), suite counts 96+264.
+  Doc-accuracy registry +4 rows (payload at-least-once, order
+  buffering, gate both forms, -I argv form; 15/15 green).
+  v3.5.2 `(unreleased)` marker removed (was tagged).
+
 ### Engine + Bash surgical fixes, one blob cycle (W-REL3)
 
 Error-propagation and bounds-checking only; zero contact with

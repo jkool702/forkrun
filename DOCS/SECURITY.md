@@ -29,6 +29,10 @@ fail closed before any parent-side eval.
 - Own file with group/world-writable bits → soft reject: fix with `chmod go-w`,
   confirm interactively, or `FORKRUN_TRUST_RESUME=1`.
 - Un-stat-able file (broken symlink, race) → fail closed.
+- The gate fires whenever `--resume` is present, bare or with an explicit
+  command: extra arguments never skip the ownership/permission decision
+  (the stream coordinates are honored in both forms, so the provenance
+  boundary holds in both forms).
 
 ### Layer 2 — The restricted sandbox (secondary boundary)
 

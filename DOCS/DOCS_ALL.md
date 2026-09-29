@@ -233,6 +233,94 @@ When a batch of $N$ lines straddles a 2 MB NUMA chunk boundary, the worker execu
 
 ## v3.6.0 (unreleased)
 
+### Second-review remediation, six waves (W-REL6)
+
+Full remediation of the second blind adversarial review (~28 items:
+bash 5.5, release-readiness 4.5 blockers first). CPU-utilization,
+cross-socket and throughput headline numbers re-verified correct
+and untouched (R6.2); engine changes enumerated-sites-only (R6.1)
+with one blob cycle at the end (R6.3).
+
+- **Wave 1 — Bash tag blockers.** Security gate hoisted out of the
+  `$# == 1` branch (any extra argument skipped all three layers
+  while coordinates were honored — world-writable truncation,
+  rc 0). Leading-zero numerics fail closed in `_expand_unit`
+  (`-j 00` dropped every record silently; `-j 08` aborted
+  mid-pipeline). Crash message emits `--resume` BEFORE the command
+  (trailing flag reached user argv). RETURN trap
+  restore-and-untraps (leaked trap killed sourcing shells under
+  `set -u`). README `-I` shows the working separate-argv form
+  (docs-only, owner-decided). New `bash-suite.yml` CI (binding
+  basic + security suites); 5.2 compat leg bound (blobs verified
+  max GLIBC_2.38, zero GNU2_TLS). Lock-in
+  `UNIT_TESTS/test_frun_security.sh` (101 tests: gate x10 both
+  forms + TRUST, octal x5, trap hygiene x5, verbatim crash-hint
+  resume byte-exact).
+- **Wave 2 — Release process.** Dirty-tree checklist self-skip is a
+  fail (was skip); `BENCHMARKS/benchmark.out` ignored. Changelog
+  finality guard widened to any `(unreleased)` heading on a tagged
+  version (caught v3.5.2 shipped-tagged-but-marked — heading fixed
+  here, no date added: ship date unknown). Fedora container gains
+  `git` (release_check shells out to it). release_check 20/21
+  (single designed-red: v3.6.0 heading until tag time).
+- **Wave 3 — Python correctness.** String payloads resolve in the
+  parent pre-fork (post-fork import deadlocks a threaded host);
+  reactor children signal READY_BYTE with a per-worker startup
+  deadline (SIGKILL into recovery instead of a silent select
+  wait); payload imports are fresh per call (stale sys.modules
+  caused total output loss across same-named rewrites — found by
+  the full suite). `order="index"` buffering documented (full-tail
+  behind a poisoned head, by design) + warn-once high-water
+  warning (explicit limit or dynamic 2x-largest x32; literal 2x
+  false-positives healthy runs — documented) + poison-head RSS
+  lock-in (~1.2x input delta). Payload at-least-once documented
+  (measured 12 invocations / batch-0 x3; idempotency guidance).
+  Checkpoint cross-field semantics (horizon/intervals vs source;
+  no STDOUT rule by design — None-payloads legitimately report 0)
+  + destroy-on-resume-failure (a leaked live engine corrupted the
+  next run — found by the full suite). `ForkrunWorkerFailure`
+  (typed `.signo`, still a RuntimeError); mypy 16 errors -> 0
+  (`py.typed` stays). `map(return_stats=True)` + `last_run_stats`
+  (`total`/`completed`/`poisoned`/`poisoned_batches`). Stream
+  forwards `signal_policy` to validation (was ModuleNotFound
+  before ValueError).
+- **Wave 4 — C engine (16 enumerated sites) + blob cycle.** Bounded
+  `poll(...,100)` (5 cross-process waits); pin-failure once-logs;
+  checked `fallocate` punch (warn + no-advance on failure);
+  `abort_reason` published before the gating CAS (election rides
+  the reason word); acquire slot-identity reads; escrow
+  anti-recycle window guard; FULL-index comment corrected to low
+  32 bits; `ring_ack` cnt==0 guard; fallow NULL-state guard;
+  aligned(8) packet buffers; `snap_count` 1024 clamp; fd-0 dup
+  edge; spawn file-actions init checks; predecessor node
+  snapshots (acquire). 4.11/4.16 verified already-fixed (D4/D5 +
+  probes), no change. Blob cycle: x86-64 v2/v3/v4 rebuilt with
+  release-identical flags, re-embedded surgically (decode-and-cmp
+  7/7, rebuild byte-identical); non-x86 deferred to the CI auto-PR
+  (established pattern). Matrix: Python suite x3 (638), bash
+  96+101+264 foreground, referees 31/31, 20M-line @4x4+n1x2 exact
+  with 16/16 write==read, forensic loops x10/x10, release_check
+  20/21, perf parity (OLD~3060 vs NEW~3000 MB/s).
+- **Wave 5 — Python deduplication (seam USED).** ExecutorSpec +
+  init_engine wired (all ten executors construct specs; core fns
+  take `spec=`); legacy poison scalars + 7 spare-managers + watch
+  twins + NUMA quantum/ingest/quiescence twins unified; toc dead
+  code deleted. Metrics: run.py 7470 -> 7431 lines, dup names
+  13 -> 10, 30-line clone groups 45 -> 21, core call sites 16 ->
+  ~60. Costume STOP (reported, not forced): a shared driver for
+  the ten executors needs 5+ mode branches (setup/fork/join/
+  teardown/spill); remaining dupes are shape-bound (nonlocal
+  rebinding, different machinery, behavioral deltas). C-side
+  5.2/5.3 items deferred (R6.3 single blob cycle; unreachable
+  code, zero behavior impact).
+- **Wave 6 — Documentation integrity.** README: Python 0.16.0,
+  cross-socket as median, 200,000 dispatches bullet dropped
+  (measured ~38.6k at max pressure), glibc floor rewritten
+  post-D-TLS (no GNU2_TLS, max 2.38), suite counts 96+264.
+  Doc-accuracy registry +4 rows (payload at-least-once, order
+  buffering, gate both forms, -I argv form; 15/15 green).
+  v3.5.2 `(unreleased)` marker removed (was tagged).
+
 ### Engine + Bash surgical fixes, one blob cycle (W-REL3)
 
 Error-propagation and bounds-checking only; zero contact with
@@ -3477,9 +3565,8 @@ machinery (§§1–5) and the F-NUMA1 meta-lifetime bound
 
 **forkrun achieves:**
 
-- **200,000+ batch dispatches/sec** (vs ~500 for GNU Parallel)
 - **87–99% CPU utilization** across all cores depending on mode and input size (vs ~6% for GNU Parallel) — ~95–99% for sustained default/external modes, ~90% aggregate across mixed benchmarks
-- **Born-local NUMA placement**: file ingest measures 0.0–0.2% cross-socket chunks. Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
+- **Born-local NUMA placement**: file ingest measures a median of 0.0% cross-socket chunks (tail up to ~20% on small-chunk and byte-mode runs). Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **Automatic recovery and retry** when a worker unexpectedly dies processing a batch
 
 forkrun is built for high-frequency, low-latency workloads on NUMA hardware - a regime where existing tools leave most cores idle.
@@ -3499,7 +3586,7 @@ forkrun, in its fastest mode, can distribute **200 000+ batches/sec** on a singl
 frun my_bash_func < inputs.txt             # parallelize custom bash functions!
 cat file_list | frun -k sed 's/old/new/'   # pipe-based input, ordered output
 frun -k -s sort < records.tsv              # stdin-passthrough, ordered output
-frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
+frun -s -I bash -c 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
 ```
 
 Under the hood, forkrun is a **contention-free *(no userspace locks or CAS retry loops on the fast path — two amortized atomic RMWs per batch (`read_idx` + `total_lines_consumed`), sharded per NUMA node)*, NUMA-aware, dynamically self-tuning parallelization engine** implemented as a set of C loadable bash builtins. It coordinates workers through shared memory and atomic operations — no locks on the fast path, no cross-socket data migration, no per-item fork overhead.
@@ -3552,7 +3639,7 @@ Utilization also scales *down* correctly: `-b 512k` on a 100 MB input sustains ~
 - **`-k` mode (Ordered output)**: has no measurable overhead in our benchmarks. Tests indicate that ordering adds under 2% to the runtime, whereas strict ordering brutally penalizes traditional tools.
 - **`-u` mode (Realtime output)**: **WARNING: AVOID UNLESS ABSOLUTELY NECESSARY.** Yields ~0 performance gain over `--buffered` while risking severe I/O slowdowns, hopelessly scrambled output (byte-level interleaving), and duplicate lines on crash recovery. Use *only* for commands with guaranteed atomic writes where immediate terminal feedback is mandatory.
 - **CPU utilization**: avg 27.1 / 28 cores (95.2%) sustained across all modes for 396 tests. "Default" mode tests saturate on avg 27.6 / 28 cores (98.6%).
-- **Born-local NUMA placement**: file ingest measures 0.0–0.2% cross-socket chunks. Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
+- **Born-local NUMA placement**: file ingest measures a median of 0.0% cross-socket chunks (tail up to ~20% on small-chunk and byte-mode runs). Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **File vs pipe input**: zero measurable difference — the ingest pipeline handles both identically.
 
 - **`-L` mode (Exact batch sizing)**: Guarantees exactly $N$ lines per batch. In NUMA mode (v3.5.0+), this uses the **Scanner-Handoff Chain**: scanning is serialized across node scanners via cumulative line tracking, and batches that straddle a 2 MB chunk boundary pull their initial lines across the socket. Throughput is single-scanner bound ($\approx$ UMA scan speeds), but exactness is preserved without demoting the entire pipeline.
@@ -3562,7 +3649,7 @@ Utilization also scales *down* correctly: `-b 512k` on a 100 MB input sustains ~
 - **Deterministic Stream Prefixes (`-n`)**: Setting `-n N` mathematically guarantees that strictly the first $N$ records of the input stream are processed in exact linear order across all NUMA nodes, with zero spatial races, zero overshoot, and clean skip propagation for remaining chunks.
 
 - **Contention-free**: The fast path is intentionally boring and excessively fast (two amortized atomic RMWs (`read_idx` + `total_lines_consumed`) with no locks or CAS retry loops). All algorithmic complexity is shifted to the slow path to ensure graceful degradation, meaning contention is structurally eliminated rather than reactively avoided.
-- **Born-local NUMA**: Data is placed on the correct socket at ingest time via `set_mempolicy` using real-time backpressure (self load-balancing). Scanners and workers are pinned. Cross-socket traffic is a measured 0.0–0.2%. Stealing is permitted only when local work is exhausted.
+- **Born-local NUMA**: Data is placed on the correct socket at ingest time via `set_mempolicy` using real-time backpressure (self load-balancing). Scanners and workers are pinned. Cross-socket traffic is a measured median of 0.0% (tail up to ~20% on small-chunk and byte-mode runs). Stealing is permitted only when local work is exhausted.
 - **Zero-copy data path**: `splice()`, `copy_file_range()`, and `sendfile()` move data without userspace copies. Scanner publishes byte-offsets and line counts. Workers read directly from the backing memfd.
 - **Self-tuning**: Automatic worker scaling, adaptive batch sizing, and early partial flush for low-latency trickle inputs. No manual `-n` or `-j` tuning required.
 - **Fault-tolerant & Self-healing**: Built-in automatic recovery for unexpectedly killed workers (e.g., OOM kills, segfaults). `forkrun` automatically traps the failure, isolates and discards corrupted partial output, safely respawns the worker, and re-dispatches the poisoned batch without deadlocking the pipeline.
@@ -4505,9 +4592,8 @@ Welcome to the physics department. The CS department is across the hall — they
 **forkrun is a self-tuning, drop-in replacement for GNU Parallel and `xargs -P` that accelerates shell-based data preparation by 50×–400× for typical shell builtins (up to ~3300× for external-binary no-op microbenchmarks) on modern CPUs and scales linearly on NUMA architectures.**
 
 **forkrun achieves:**
-- **200,000+ batch dispatches/sec** (vs ~500 for GNU Parallel)
 - **87–99% CPU utilization** across all cores depending on mode and input size (vs ~6% for GNU Parallel) — ~95–99% for sustained default/external modes, ~90% aggregate across 396 mixed benchmarks, lower for sub-second or byte-mode jobs by design
-- **Born-local NUMA placement**: file ingest measures 0.0–0.2% cross-socket chunks. Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
+- **Born-local NUMA placement**: file ingest measures a median of 0.0% cross-socket chunks (tail up to ~20% on small-chunk and byte-mode runs). Under fast-draining *pipe* input, 2–13% of chunks may be stolen — by design (an idle node costs more than a remote chunk). Real multi-socket topologies raise the steal threshold with distance (`1 + distance/10`), so these figures — measured on `numa=fake=4`, where all distances are 10 — are a **worst case**. (The end-of-stream drain collapses the threshold to 1 regardless of distance; this is bounded to EOF.)
 - **Automatic recovery and retry** when a worker unexpectedly dies processing a batch (v3.1.0+)
 
 forkrun is built for high-frequency, low-latency workloads on deep NUMA hardware — a regime where existing tools leave most cores idle due to IPC overhead and cross-socket data migration.
@@ -4534,7 +4620,7 @@ Once sourced, `frun` acts as a drop-in parallelizer:
 frun my_bash_func < inputs.txt             # parallelize custom bash functions natively!
 cat file_list | frun -k sed 's/old/new/'   # pipe-based input, ordered output
 frun -k -s sort < records.tsv              # stdin-passthrough, ordered output
-frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
+frun -s -I bash -c 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
 ```
 
 **Auditable Builds**: the embedded C extension is compiled and injected by a public GitHub Actions workflow; the git history of the base64 blob traces every byte to a specific CI run of `forkrun_ring.c`. (Reproducible builds with published checksums are on the roadmap and would upgrade this to cryptographic attestation.)
@@ -4580,29 +4666,27 @@ Traditional tools like GNU Parallel use heavy regex parsing and IPC dispatch loo
 forkrun is designed to run anywhere with zero friction:
 *   **Required:** Bash ≥ 4.4 (`mapfile -d` needs 4.4; Bash 5.1+ highly recommended for array performance), Linux Kernel ≥ 3.17 (for `memfd`), GNU coreutils (`sed -z`, `base64 -w 0`, `truncate --size=` are GNU-only — no busybox support). Kernels ≥ 4.5 additionally enable the `copy_file_range` fast path; older kernels automatically fall back to `sendfile`/read-write with no functional difference.
 
-**Supported bash versions** (v3.6.0 verification status — bootstrap = source + load + `ring_version`; suites = 92 + 264):
+**Supported bash versions** (v3.6.0 verification status — bootstrap = source + load + `ring_version`; suites = 96 + 264):
 
 > **Two-axis reality (read both):** the *bash* axis below was verified on
-> new-glibc iron. Independently, the shipped x86-64 loadables require
-> `GLIBC_ABI_GNU2_TLS` (gcc-16 TLSDESC codegen; absent on glibc ≤2.39 —
-> Ubuntu ≤24.04, Debian 12, RHEL ≤9), so on those distros even the
-> bootloader `enable` fails regardless of bash version (proven by CI
-> `ENABLE-DIAG` capture; non-x86 blobs don't carry the requirement).
-> A D-wave toolchain item (rebuild with `-mtls-dialect=gnu`, proven
-> locally to drop the requirement with zero payload change) will lift
-> that wall. Until then: **new glibc → table below applies; old glibc
-> → nothing loads yet** (pure-shell parsing works everywhere, but that
-> is not a usable state).
+> new-glibc iron. Independently, the shipped x86-64 loadables carry **no**
+> `GLIBC_ABI_GNU2_TLS` requirement (D-TLS: rebuilt with
+> `-mtls-dialect=gnu`, dropping the gcc-16 TLSDESC codegen; verified
+> zero references, max `GLIBC_2.38` across all shipped blobs). So glibc
+> ≥2.38 loads (Ubuntu 24.04's 2.39 OK); Debian 12 (2.36) and RHEL ≤9
+> remain below the floor. Non-x86 blobs never carried the requirement.
+> Pure-shell parsing works everywhere regardless, but that is not a
+> usable state without the engine.
 
 | Bash | Bootstrap + smoke ×10 | Full suites | Status (on new glibc) |
 |------|----------------------|-------------|----------------------|
-| 4.4 (RHEL 8) | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable; RHEL8 additionally gated on D-TLS glibc fix |
+| 4.4 (RHEL 8) | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable; RHEL8 glibc (2.28) still below the 2.38 floor |
 | 5.0 | ✅ 10/10 incl. round-trips (D-SEGFIX, extracted binary) | — (suites run on 5.2/5.3 only) | ✅ usable |
 | 5.1 | ✅ 10/10 incl. round-trips (D-SEGFIX, source-built 5.1.0 + extracted 5.1.16, byte-exact) | — (suites run on 5.2/5.3 only) | ✅ usable |
-| 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
-| 5.3 | ✅ 10/10 incl. round-trips | ✅ 92 + 264, zero failures | **fully verified** |
+| 5.2 (Ubuntu 24.04, Debian 12) | ✅ 10/10 incl. round-trips | ✅ 96 + 264, zero failures | **fully verified** |
+| 5.3 | ✅ 10/10 incl. round-trips | ✅ 96 + 264, zero failures | **fully verified** |
 
-> **Effective floor (W-REL5-D): bash ≥4.4.** D-SEGFIX landed (worker segfault root-caused to the engine's `ARRAY`-struct walk + fixed via pair-list flattening; round-trips byte-exact on 4.4/5.0/5.1) and ships in this wave's blob cycle — until the cycle, shipped blobs still carry the old engine. glibc ≥2.28 likewise waits on D-TLS.
+> **Effective floor (W-REL5-D): bash ≥4.4.** D-SEGFIX landed (worker segfault root-caused to the engine's `ARRAY`-struct walk + fixed via pair-list flattening; round-trips byte-exact on 4.4/5.0/5.1) and ships in the v3.6.0 blob cycle. glibc ≥2.38 (D-TLS rebuild, this cycle).
 
 ---
 
@@ -4850,6 +4934,10 @@ fail closed before any parent-side eval.
 - Own file with group/world-writable bits → soft reject: fix with `chmod go-w`,
   confirm interactively, or `FORKRUN_TRUST_RESUME=1`.
 - Un-stat-able file (broken symlink, race) → fail closed.
+- The gate fires whenever `--resume` is present, bare or with an explicit
+  command: extra arguments never skip the ownership/permission decision
+  (the stream coordinates are honored in both forms, so the provenance
+  boundary holds in both forms).
 
 ### Layer 2 — The restricted sandbox (secondary boundary)
 
