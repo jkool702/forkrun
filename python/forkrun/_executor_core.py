@@ -251,15 +251,23 @@ def collect_records(*, use_drain=None, results_fd, out_fds, order=None,
 # Single poison summary (I6 rollback lives in emit paths; this is reporting)
 # ---------------------------------------------------------------------------
 
-def report_poison(lib, *, strict_poison=False):
-    """Emit the engine poison WARN + map strict_poison → raise. Single site."""
+def report_poison(lib, *, strict_poison=False, npois=None):
+    """Emit the engine poison WARN + map strict_poison → raise. Single site.
+
+    W-REL6-5: ``npois`` override for callers whose engine is already
+    destroyed (streaming branch finallys): they pass max(live, stash).
+    None (default) reads live. WARN text + raise funnel here from all
+    scalar paths (legacy streaming/ingest twins collapsed here; the
+    reactor summary keeps its batches-carrying twin for state lists).
+    """
     import sys as _sys
     _run_mod = _sys.modules["forkrun.run"]
 
-    try:
-        npois = lib.fr_py_poisoned_count()
-    except Exception:
-        npois = 0
+    if npois is None:
+        try:
+            npois = lib.fr_py_poisoned_count()
+        except Exception:
+            npois = 0
     if npois:
         try:
             os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "

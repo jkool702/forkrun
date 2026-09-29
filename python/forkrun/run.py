@@ -2178,15 +2178,10 @@ def _execute_streaming(payload, source, *, lines, bytes_, workers,
         # the engine: prefer the pre-teardown stash when the live
         # read comes back zero (npois_stashed is always defined in
         # this function — initialized beside statuses above).
-        npois = max(npois, npois_stashed)
-        if npois:
-            try:
-                os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "
-                             "skipped (retry limit reached).\n" % npois
-                             ).encode())
-            except OSError:
-                pass
-            _raise_for_poisoned(npois, strict_poison)
+        # W-REL6-5: WARN + raise funnel through the core twin.
+        from ._executor_core import report_poison as _core_poison
+        _core_poison(lib, strict_poison=strict_poison,
+                     npois=max(npois, npois_stashed))
     except KeyboardInterrupt as _ki:
         # W-REL5-B2: stream taxonomy matches the six blocking
         # executors — abort, then ForkrunInterrupted (still a
@@ -2632,18 +2627,10 @@ def _execute_ingest_stream(payload, source, *, lines, bytes_, workers,
                 except OSError:
                     pass
 
-        try:
-            npois = lib.fr_py_poisoned_count()
-        except Exception:
-            npois = 0
-        if npois:
-            try:
-                os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "
-                             "skipped (retry limit reached).\n" % npois
-                             ).encode())
-            except OSError:
-                pass
-            _raise_for_poisoned(npois, strict_poison)
+        # W-REL6-5: WARN + raise funnel through the core twin
+        # (identical text; _raise_for_poisoned stash preserved).
+        from ._executor_core import report_poison as _core_poison
+        _core_poison(lib, strict_poison=strict_poison)
     except KeyboardInterrupt as _ki:
         # W-REL5-B2: stream taxonomy matches the six blocking
         # executors — abort, then ForkrunInterrupted (still a
