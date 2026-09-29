@@ -35,7 +35,15 @@ frun() {
     # state, so one frun invocation undoes the shopt -s extglob that
     # sourcing performed. Nested frun calls run in pipeline subshells
     # or fresh exec-ed shells, so the restore cannot leak outward.
-    trap 'IFS="$_fr_saved_ifs"; if [[ "${_fr_saved_u}" == *u* ]]; then set -u; else set +u; fi; ${_FORKRUN_SRC_EXTGLOB_WAS_SET:-true} || shopt -u extglob' RETURN
+    # W-REL6-1.4: restore-and-untrap. The trap used to persist in the
+    # caller after frun returned; its body reads frun-locals that no
+    # longer exist, so the next sourced library died under set -u
+    # (_fr_saved_ifs: unbound variable). The trap fires once, on
+    # frun() return itself (verified: nested helper returns do not
+    # fire it), so removing it here is exactly "on frun exit". The
+    # FUNCNAME guard keeps the restore unconditional (today's
+    # semantics) while the untrap happens only for frun's own return.
+    trap 'IFS="$_fr_saved_ifs"; if [[ "${_fr_saved_u}" == *u* ]]; then set -u; else set +u; fi; ${_FORKRUN_SRC_EXTGLOB_WAS_SET:-true} || shopt -u extglob; [[ "${FUNCNAME[0]:-}" == "frun" ]] && trap - RETURN' RETURN
 
     # --- MULTI-INPUT PARAMETER SWEEP (::: / ::::) INTERCEPT ---
     local _fr_has_sweep=false
