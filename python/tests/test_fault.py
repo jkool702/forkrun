@@ -250,6 +250,44 @@ class TestWorkerException(unittest.TestCase):
             if os.path.exists(flag):
                 os.unlink(flag)
 
+    def test_payload_retry_count_at_least_once(self):
+        """W-REL6-3.3: payload side effects are at-least-once (x5).
+
+        Deterministic: 10 batches, batch 0 always fails. Default
+        retry limit (3) executes the failing batch exactly 3 times;
+        every healthy batch runs once. File-append counting (fork
+        children cannot report to parent memory).
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        log = path + ".calls"
+        try:
+            write_lines(path, 100)
+            for _ in range(5):
+                if os.path.exists(log):
+                    os.unlink(log)
+
+                def counting(batch, _log=log):
+                    with open(_log, "a") as _fh:
+                        _fh.write("%d\n" % batch.batch_index)
+                    if batch.batch_index == 0:
+                        raise ValueError("always fails")
+                    return bytes(batch.data)
+
+                out = forkrun.map(counting, path, workers=2, lines=10,
+                                  nodes=1)
+                self.assertEqual(len(out), 9)
+                with open(log) as _fh:
+                    calls = [int(x) for x in _fh.read().split()]
+                self.assertEqual(len(calls), 12)
+                self.assertEqual(calls.count(0), 3)
+            assert_no_zombies(self)
+        finally:
+            os.unlink(path)
+            if os.path.exists(log):
+                os.unlink(log)
+
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 class TestEmitRollback(unittest.TestCase):

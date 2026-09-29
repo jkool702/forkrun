@@ -12,6 +12,7 @@ claim and clears at ack, and the **parent** recovers any death
 | Python exception in payload | Batch retried (escrow, kills+1), then poison-skipped after the limit | Nothing |
 | Worker SIGSEGV / SIGKILL / OOM | Output reverted, batch re-queued, worker respawned, stream continues | Nothing |
 | Spawn command exits non-zero | Same retry path as a Python error | Nothing |
+| Payload with side effects (`db.insert`, file writes) | **At-least-once**: the payload may run up to `FORKRUN_RETRY_LIMIT` times per batch (default 3), plus one re-execution per worker-death recovery of its batch | Make payloads idempotent |
 | Batch fails every attempt | Poisoned: skipped with a stderr warning, pipeline completes | Inspect the warning |
 | `on_error="skip"` | Failed batches skipped immediately | Nothing |
 | `on_error="fail-fast"` | First failure aborts the run | Fix the payload |
@@ -21,6 +22,14 @@ cache-local stores per batch).
 
 ## What is NOT covered
 
+- **Payload side effects are at-least-once, not exactly-once.**
+  A batch whose payload raises is retried up to `FORKRUN_RETRY_LIMIT`
+  times (default 3 — measured: 10 batches with one always-failing
+  batch invoke the payload 12 times, the failing batch 3 times), and
+  a batch orphaned by a worker death re-executes once on the recovery
+  worker. `map(lambda b: db.insert(...))` triple-inserts on a
+  transient. For exactly-once side effects, use idempotency keys or
+  checkpoint-anchored deduplication.
 - **In-worker `sink=` side effects** (the Python realtime
   path): at-least-once — the sink runs before commit, so a
   crash between sink and ack re-runs it. Use the default

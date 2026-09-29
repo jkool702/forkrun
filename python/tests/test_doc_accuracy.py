@@ -159,6 +159,20 @@ DOC_CLAIMS = [
         "assertion_summary": "sink delivers payload-side under the "
                              "worker-death recovery path",
     },
+    {
+        "claim": "Payload side effects are at-least-once: a failing "
+                 "batch runs up to FORKRUN_RETRY_LIMIT times "
+                 "(idempotency keys for exactly-once)",
+        "doc_source": "python/docs/FAULT_TOLERANCE.md",
+        "key_phrase": "idempotency keys",
+        "covering_tests": [
+            "test_fault.TestWorkerException."
+            "test_payload_retry_count_at_least_once",
+        ],
+        "assertion_summary": "10 batches, batch 0 always fails: "
+                             "12 total invocations, batch 0 runs 3x "
+                             "(default limit)",
+    },
 ]
 
 
@@ -246,6 +260,9 @@ class TestDocAccuracy(unittest.TestCase):
 
     def test_claim_sink_at_least_once(self):
         self.assertEqual(_check_entry(DOC_CLAIMS[10]), [])
+
+    def test_claim_payload_at_least_once(self):
+        self.assertEqual(_check_entry(DOC_CLAIMS[11]), [])
 
 
 if __name__ == "__main__":
