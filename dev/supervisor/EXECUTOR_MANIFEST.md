@@ -222,3 +222,43 @@ Consolidation landed per `DEDUP_DESIGN.md` (costume-detection PASS):
 | Checker probe | New assertions | Linked (not duplicated) |
 |---|---|---|
 | ABI (R-D8) | exports == table == bindings; arity; order | `test_shim_abi.py` (signatures only) |
+
+## W-REL6 addendum (Wave 5: seam USED + measured consolidation)
+
+ExecutorSpec/init_engine/teardown_union no longer exist-but-unused:
+every core function accepts `spec=` (explicit overrides), all ten
+executors construct one spec (lattice + call flags) and thread it
+through init/fork/collect; init bodies (10 sites) route via
+init_engine (NUMA message + NULL-map convention preserved
+call-site-exact).
+
+Consolidated this wave (zero behavior change, gated per step):
+- 2 legacy poison scalar sites -> core report_poison (npois override
+  preserves the streaming pre-teardown stash; WARN text identical).
+- 7 spare-managers -> _close_spare_fd (no-reset copies proven
+  post-use; guards stay at call sites; one nonlocal added).
+- _watch_live + waitpid _watch_helpers -> _watch_helper_deaths.
+- NUMA twins _parse_quantum/_poll_ingest/_all_helpers_done ->
+  _parse_drain_quantum/_poll_ingest_once/_pipeline_quiescent
+  (shells inlined at call sites).
+- frun.bash verbose toc()/tStart block deleted (never called).
+
+Metrics (c2edb53 -> wave end): run.py 7470 -> 7431 lines;
+duplicate def names 13 -> 10; 30-line clone groups 45 -> 21;
+core call sites 16 -> ~60.
+
+Costume verdict (STOP with evidence — driver-merge NOT attempted):
+merging the ten executors into shared drivers fails the <=3
+mode-conditional budget on inspection. A UMA-plain pair driver
+(#1+#2) alone needs setup-ingest, fork-timing, join, teardown and
+spill-pump branches (5); full coverage adds supervision, shape/
+lifetime, NUMA topology and orderer/c-loop envelopes. The remaining
+dup names are all shape-bound: per-executor nonlocal rebinding
+(_watch_scanner x2, identical bodies), different machinery per
+shape (_pump_drain 130/82/72 lines; reactor death-pipe watchers),
+or behavioral deltas (_drop_parent_signal spare arm, _fork_node
+drop call). The checker probes the ten entry points by name
+(test_executor_consistency.py) and executor_manifest.json enumerates
+ten — a driver-merge would redesign checker+manifest+probes, i.e.
+W-REL4 #2 scope, not this order. The executors share everything
+shareable through the core; their sequencing is the executor.
