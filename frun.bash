@@ -216,6 +216,16 @@ frun __exec__ "$@"
         FORKRUN_ORIG_ARGS=("$@")
     fi
 
+    # W-REL6-1.3: pre-render the %q-quoted entry argv for the crash-message
+    # resume hint. Built here under normal quoting rules so the
+    # single-quoted EXIT trap below only interpolates, never quotes or
+    # loops. Nested frun calls (sweep restart) rebuild it on entry,
+    # matching the trap-time ORIG_ARGS read it replaces.
+    FORKRUN_RESUME_CMDLINE=""
+    for _fr_hint_arg in ${FORKRUN_ORIG_ARGS[@]+"${FORKRUN_ORIG_ARGS[@]}"}; do
+        FORKRUN_RESUME_CMDLINE+=" $(printf '%q' "$_fr_hint_arg")"
+    done
+
     # # # # # SETUP # # # # #
     local cmdline_str ring_ack_str done_str delimiter_val pCode extglob_was_set worker_func_src nn N nWorkers0 arg fd0 fd1 fd2 numa_map_str parsed_numa_nodes_arg have_taskset_flag last_conflict numa_map_str exact_lines_val array_var resume_file order_mode unsafe_flag stdin_flag byte_mode_flag dry_run_flag checkpoint_file safe_checkpoint_file prefer_external_flag NORMAL_EXIT_FLAG c_plugin_arg tui_flag TUI_PID preempt_mode is_sweep status trap_status
     local -g fd_spawn_r fd_spawn_w fd_fallow_r fd_fallow_w fd_order_r fd_order_w ingress_memfd fd_write fd_scan nWorkers nWorkersMax tStart
@@ -1545,24 +1555,35 @@ toc() { :; }
                 fi
                 [[ "$_publish_ok" == 0 && -n "$_target_tmp" ]] && rm -f "$_target_tmp" 2>/dev/null
 
+                # W-REL6-1.3: resume hint with --resume BEFORE the command.
+                # The parse loop breaks at the first non-flag word (*), so
+                # a trailing flag would reach the user command as literal
+                # argv and corrupt output. FORKRUN_RESUME_CMDLINE is the
+                # entry argv pre-rendered %q-quoted above; only the
+                # checkpoint path is joined here, inline at each echo so
+                # no trap-body temporary is introduced.
+                # NOTE: single-quoted trap body — no single quotes below,
+                # not even in comments.
                 if [[ "${order_mode}" != "realtime" ]]; then
                     local safe_bytes="$(grep -E '^FORKRUN_RESUME_STDOUT_BYTES=' "$_target_chk" 2>/dev/null)"
                     safe_bytes="${safe_bytes#*=}"
                     if [[ -n "$safe_bytes" && "$_publish_ok" == 1 ]]; then
                         echo "forkrun: To resume safely, truncate your output file to exactly ${safe_bytes} bytes," >&2
-                        echo "         then re-run your exact command with: --resume $_target_chk" >&2
+                        echo "         then re-run (with --resume BEFORE your command):" >&2
+                        echo "             frun --resume $(printf %q "$_target_chk")${FORKRUN_RESUME_CMDLINE:-}" >&2
                     else
                         echo "forkrun: Checkpoint generation FAILED; previous checkpoint (if any) left untouched." >&2
-                        echo "         Re-run with --resume $_target_chk to retry from the last good state." >&2
+                        echo "         Re-run with --resume ${_target_chk} BEFORE your command to retry from the last good state." >&2
                     fi
                 else
                     if [[ "$_publish_ok" == 1 ]]; then
                         echo "forkrun: Warning - Realtime mode (-u) checkpoint generated." >&2
                         echo "         Resuming will result in some duplicate lines at the failure boundary (At-Least-Once semantics)." >&2
-                        echo "         Re-run your exact command with: --resume $_target_chk" >&2
+                        echo "         Re-run (with --resume BEFORE your command):" >&2
+                        echo "             frun --resume $(printf %q "$_target_chk")${FORKRUN_RESUME_CMDLINE:-}" >&2
                     else
                         echo "forkrun: Checkpoint generation FAILED; previous checkpoint (if any) left untouched." >&2
-                        echo "         Re-run with --resume $_target_chk to retry from the last good state." >&2
+                        echo "         Re-run with --resume ${_target_chk} BEFORE your command to retry from the last good state." >&2
                     fi
                 fi
             fi
