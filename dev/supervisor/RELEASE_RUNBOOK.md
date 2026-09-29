@@ -154,3 +154,23 @@ Blob provenance for the tag message: release run 35173548966
 closed. Post-pull smoke: `ring_version -a` v3.5.1, `frun -V` v3.5.1,
 `test_frun.sh` 89/89, 10k-line sanity pipeline exact, local canary OK,
 python unittests 14 OK.
+
+## 6. Signal-mask hygiene for background gates (W-REL5-D rule, R5.5)
+
+Background launches via `nohup(1)` bequeath `SigIgn=0x7`
+(HUP/INT/QUIT) to the whole subtree. That invalidates signal-sensitive
+gates: bash T12 HUP waits hang (trap-deaf pipeline) and taxonomy
+self-kill tests fail (TERM/INT ignored) — proven on both trees, not a
+product bug. **All signal-sensitive gates run through the
+mask-cleaning launcher** (Python resets HUP/INT/QUIT/TERM to
+`SIG_DFL` pre-exec; verified `SigIgn` clear even under `nohup`),
+never bare background. Pure-compute legs (benchmarks) are unaffected.
+
+## 7. v3.6.0 tag sequence (W-REL5-F F7)
+
+The v3.5.1 steps above are historical. The v3.6.0 keypress kit —
+ordered sequence, release-notes contents, final compatibility
+matrix, known-open ledger, verification receipts — is
+`dev/supervisor/TAG_PREP_v3.6.0.md`. The release_check gate is 20
+checks (F6: +tag-freedom, +changelog-finality designed-red pre-tag,
++IDL freshness; wheel/sdist via a single recorded build).
