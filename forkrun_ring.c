@@ -1468,6 +1468,21 @@ struct EscrowPacket {
   uint32_t _pad;
 };
 
+/* W-REL6-4.6: escrow anti-recycle guard. An escrowed idx must name a
+ * live batch: published (idx < write snapshot) and not slot-recycled
+ * (idx + RING_SIZE > read snapshot). A stale/duplicate packet (batch
+ * already claimed+acked through the normal path, or a
+ * double-deposited idx) fails here and is rejected by the caller
+ * instead of executing a live batch twice. */
+static inline bool escrow_idx_live(uint64_t idx, uint64_t w_snap,
+                                   uint64_t r_curr) {
+  if (idx >= w_snap)
+    return false; /* unpublished/future -- never a live batch */
+  if (idx + RING_SIZE <= r_curr)
+    return false; /* slot recycled under this ticket */
+  return true;
+}
+
 // IndexPacket: Legacy flat-mode packet for passing physical offsets.
 struct IndexPacket {
   uint64_t idx;
@@ -3925,7 +3940,11 @@ static int ring_indexer_numa_main(int argc, char **argv) {
       local_state->offset_ring[local_scan_idx & RING_MASK] = pk;               \
       local_state->end_ring[local_scan_idx & RING_MASK] = _eff_end;            \
       local_state->major_ring[local_scan_idx & RING_MASK] = 0;                 \
-      /* C2-fix: stamp the FULL global slot index into minor_ring on UMA. */   \
+      /* C2-fix: stamp the global slot index into minor_ring on UMA --
+       * W-REL6-4.7: LOW 32 BITS only (minor_ring is uint32_t; the old
+       * "FULL" wording was wrong). Sufficient for the slot-identity
+       * check below: identity compares (major, minor) jointly and a
+       * 32-bit wrap needs 4G batches past a dead ticket. */                \
       local_state->minor_ring[local_scan_idx & RING_MASK] =                    \
           (uint32_t)(local_scan_idx & 0xFFFFFFFFu);                            \
       local_state->lines_ring[local_scan_idx & RING_MASK] = (uint32_t)(_lines);\
@@ -5985,10 +6004,23 @@ dlc_restart_loop:
       er = read(fd_escrow_r[my_numa_node], &ep, sizeof(ep));
     } while (er < 0 && errno == EINTR);
     if (er == sizeof(ep)) {
-      my_read_idx   = ep.idx;
-      current_kills = ep.num_kills;
-      // Do NOT clear tl_drain_escrow here — keep draining until pipe is empty.
-      goto dlc_evaluate_claim;
+      /* W-REL6-4.6: anti-recycle -- reject idx outside the live
+       * window (stale/duplicate packet); fall through to the normal
+       * claim loop below instead of executing it twice. */
+      uint64_t _w = atomic_load_acquire(&local_state->write_idx);
+      uint64_t _r = atomic_load_relaxed(&local_state->read_idx);
+      if (!escrow_idx_live(ep.idx, _w, _r)) {
+        fprintf(stderr,
+                "forkrun [WARN]: stale escrow packet (idx=%llu, "
+                "write=%llu, read=%llu) rejected\n",
+                (unsigned long long)ep.idx,
+                (unsigned long long)_w, (unsigned long long)_r);
+      } else {
+        my_read_idx   = ep.idx;
+        current_kills = ep.num_kills;
+        // Do NOT clear tl_drain_escrow here — keep draining until pipe is empty.
+        goto dlc_evaluate_claim;
+      }
     } else if (er < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       // Pipe fully drained. Snap back to zero-overhead fast path.
       tl_drain_escrow = false;
@@ -6022,6 +6054,19 @@ dlc_restart_loop:
         er = read(fd_escrow_r[my_numa_node], &ep, sizeof(ep));
       } while (er < 0 && errno == EINTR);
       if (er == sizeof(ep)) {
+        /* W-REL6-4.6: anti-recycle -- same live-window rule as the
+         * fast path above; a rejected packet continues the loop
+         * (normal claim / next packet / EOF) instead of breaking
+         * with a recycled idx. */
+        if (!escrow_idx_live(ep.idx, w_snap, r_curr)) {
+          fprintf(stderr,
+                  "forkrun [WARN]: stale escrow packet (idx=%llu, "
+                  "write=%llu, read=%llu) rejected\n",
+                  (unsigned long long)ep.idx,
+                  (unsigned long long)w_snap,
+                  (unsigned long long)r_curr);
+          continue;
+        }
         my_read_idx   = ep.idx;
         current_kills = ep.num_kills;
         break;
@@ -6631,6 +6676,15 @@ static int ring_ack_main(int argc, char **argv) {
     }
   }
 
+  /* W-REL6-4.8: op.cnt == 0 underflow guard (mirrors escrow_put's).
+   * Without it (my_idx + 0 - 1) wraps below and the end-start range
+   * underflows into a huge fallow length. Zero means nothing in
+   * flight: restore SIGPIPE handling and report success. */
+  if (op.cnt == 0) {
+    sigaction(SIGPIPE, &sa_old, NULL);
+    return EXECUTION_SUCCESS;
+  }
+
   /* W-PY30: batch execution is over — disarm a final-attempt
    * coredump before any ack side effect (no-op unless armed: one TLS
    * branch, no syscall on the common path). */
@@ -6889,8 +6943,15 @@ static int ring_recover_worker_core(int wid, int incarnation,
      * publish race documented above). */
     {
         uint64_t slot = txn->batch_idx & RING_MASK;
-        uint64_t cur_major = st->major_ring[slot];
-        uint32_t cur_minor = st->minor_ring[slot];
+        /* W-REL6-4.5: acquire (was plain/relaxed) on the slot-freeing
+         * decision -- a stale slot read here stands down recovery on
+         * live output (loss) or orphans a committed batch (dupe).
+         * Load-side only (enumerated site; publisher stores
+         * untouched per R6.1). */
+        uint64_t cur_major =
+            __atomic_load_n(&st->major_ring[slot], __ATOMIC_ACQUIRE);
+        uint32_t cur_minor =
+            __atomic_load_n(&st->minor_ring[slot], __ATOMIC_ACQUIRE);
         if (cur_major != txn->major || cur_minor != txn->minor) {
             __atomic_store_n(&txn->state, TXN_IDLE, __ATOMIC_RELEASE);
             return 3;  /* ALREADY_DONE (recycled) */
@@ -7288,7 +7349,10 @@ static int ring_order_main(int argc, char **argv) {
   /* F-NUMA1 diagnostic counters (read at the EOF summary below). */
   uint64_t diag_recv = 0, diag_emit = 0;
 
-  char pkt_buf[4096];
+  /* W-REL6-4.10: 8-aligned base -- cast to struct OrderPacket below.
+   * All packet sizes are multiples of 8, so memmove shifts preserve
+   * the alignment. */
+  char pkt_buf[4096] __attribute__((aligned(8)));
   size_t buffered = 0;
   size_t pkt_sz = sizeof(struct OrderPacket);
 
@@ -7612,7 +7676,8 @@ static int ring_fallow_phys_main(int argc, char **argv) {
   uint64_t limit = 0;
   off_t last_punched = 0;
 
-  char pkt_buf[4096];
+  /* W-REL6-4.10: 8-aligned base -- cast to struct PhysPacket below. */
+  char pkt_buf[4096] __attribute__((aligned(8)));
   size_t buffered = 0;
   size_t pkt_sz = sizeof(struct PhysPacket);
   ssize_t n_read = 0;
@@ -8376,7 +8441,8 @@ static int ring_fallow_main(int argc, char **argv) {
   uint64_t next_idx = 0;
   off_t last_punched = 0;
 
-  char pkt_buf[4096];
+  /* W-REL6-4.10: 8-aligned base -- cast to struct IndexPacket below. */
+  char pkt_buf[4096] __attribute__((aligned(8)));
   size_t buffered = 0;
   size_t pkt_sz = sizeof(struct IndexPacket);
   ssize_t n_read = 0;
@@ -8402,7 +8468,9 @@ static int ring_fallow_main(int argc, char **argv) {
         }
 
         if (state) atomic_store_release(&state[0].min_idx, next_idx);
-        if (!dry_run && next_idx > 0) {
+        /* W-REL6-4.9: NULL-state guard (D10's class, missed here) --
+         * without the ring there is no byte_limit to punch to. */
+        if (state && !dry_run && next_idx > 0) {
           uint64_t byte_limit = state[0].end_ring[(next_idx - 1) & RING_MASK];
           if (g_state) g_state->fallow_horizon_bytes = byte_limit;
           off_t aligned = (off_t)((byte_limit / 4096ULL) * 4096ULL);
