@@ -50,6 +50,7 @@ from forkrun.exceptions import (BASH_CODE_MAP, ForkrunInterrupted,  # noqa: F401
                                 ForkrunSignalError, ForkrunTerminated,
                                 ForkrunWorkerFailure)
 from forkrun.run import map, run, stream, sweep  # noqa: F401
+from forkrun.run import last_run_stats  # noqa: F401
 
 __version__ = "0.16.0"
 
@@ -70,6 +71,7 @@ except Exception:  # noqa: BLE001
     __engine_version__ = "unknown"
 
 __all__ = ["run", "map", "stream", "sweep", "Batch",
+            "last_run_stats",
             "ForkrunSignalError", "ForkrunInterrupted", "ForkrunPreempted",
             "ForkrunTerminated", "ForkrunPoisonSkip", "ForkrunWorkerFailure",
             "BASH_CODE_MAP", "__version__", "__engine_version__"]

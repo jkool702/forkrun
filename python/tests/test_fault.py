@@ -288,6 +288,58 @@ class TestWorkerException(unittest.TestCase):
             if os.path.exists(log):
                 os.unlink(log)
 
+    def test_map_return_stats(self):
+        """W-REL6-3.6: map batch accounting (x5, deterministic).
+
+        return_stats=True returns (list, stats) with exact
+        total/completed/poisoned/poisoned_batches; default returns
+        the bare list; forkrun.last_run_stats() matches the last
+        call; non-bool return_stats is a TypeError.
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
+                                         delete=False) as fh:
+            path = fh.name
+        try:
+            write_lines(path, 100)
+            for _ in range(5):
+                def ident(batch):
+                    return bytes(batch.data)
+
+                out = forkrun.map(ident, path, workers=2, lines=10,
+                                  nodes=1)
+                self.assertIsInstance(out, list)
+                self.assertEqual(len(out), 10)
+
+                out2, stats = forkrun.map(
+                    ident, path, workers=2, lines=10, nodes=1,
+                    return_stats=True)
+                self.assertIsInstance(out2, list)
+                self.assertEqual(len(out2), 10)
+                self.assertEqual(stats, {"total": 10, "completed": 10,
+                                         "poisoned": 0,
+                                         "poisoned_batches": []})
+                self.assertEqual(forkrun.last_run_stats(), stats)
+
+                def poison_head(batch):
+                    if batch.batch_index == 0:
+                        raise ValueError("head poison")
+                    return bytes(batch.data)
+
+                out3, stats3 = forkrun.map(
+                    poison_head, path, workers=2, lines=10, nodes=1,
+                    return_stats=True)
+                self.assertEqual(len(out3), 9)
+                self.assertEqual(stats3, {"total": 10, "completed": 9,
+                                          "poisoned": 1,
+                                          "poisoned_batches": [0]})
+                self.assertEqual(forkrun.last_run_stats(), stats3)
+
+                with self.assertRaises(TypeError):
+                    forkrun.map(ident, path, return_stats="yes")
+            assert_no_zombies(self)
+        finally:
+            os.unlink(path)
+
 
 @unittest.skipUnless(HAVE_LIB, "libforkrun_python.so not built")
 class TestEmitRollback(unittest.TestCase):

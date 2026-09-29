@@ -963,12 +963,26 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
       payload return value IS the result. A worker-side sink lives
       only on run(). Unknown keyword arguments are likewise
       rejected (TypeError) instead of silently running.
+
+    return_stats=False (default) returns the bare list[bytes].
+      True returns (list[bytes], stats) where stats is
+      {"total", "completed", "poisoned", "poisoned_batches"} --
+      total = completed + poisoned, poisoned_batches sorted batch
+      indices (see forkrun.last_run_stats for the caveats).
     """
     if kwargs.get("sink") is not None:
         raise ValueError(
             "map() collects results — sink= is not accepted (the "
             "payload return value is the result; use run() for a "
             "worker-side sink)")
+    # W-REL6-3.6: popped before the whitelist (map-only option;
+    # stream()/sweep() still reject it as unknown).
+    return_stats = kwargs.pop("return_stats", False)
+    if not isinstance(return_stats, bool):
+        raise TypeError(
+            "return_stats must be True or False, got %r"
+            % (return_stats,))
+    _reset_stats()  # W-REL6-3.6: fresh accounting for this call
     _reject_unknown_kwargs("map()", kwargs)
     mode = kwargs.get("mode", "python")
     nodes = kwargs.get("nodes", "auto")
@@ -1029,7 +1043,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     node_cpus=node_cpus,
                     splice=(mode == "splice"), c_drain=c_drain)
             _sg.check()
-            return out
+            return _map_return(out, return_stats)
     nodes = 1
     payload, mode = _coerce_payload(payload, mode)
     order = kwargs.get("order", "none")
@@ -1048,7 +1062,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                             collect=True, order=order, mode=mode,
                             nodes=nodes, splice=True, c_drain=c_drain)
                     _sg.check()
-                    return out
+                    return _map_return(out, return_stats)
             with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
                 out = _execute_ingest(
                     None, source, sink=None, lines=None, bytes_=b,
@@ -1058,7 +1072,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     collect=True, order=order, mode=mode, nodes=nodes,
                     splice=True, c_drain=c_drain)
                 _sg.check()
-                return out
+                return _map_return(out, return_stats)
         if orchestrator:
             with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
                 with _RUN_LOCK:
@@ -1070,7 +1084,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                         collect=True, order=order, mode=mode, nodes=nodes,
                         splice=True, c_drain=c_drain)
                 _sg.check()
-                return out
+                return _map_return(out, return_stats)
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
             out = _execute(
                 None, source, sink=None, lines=None, bytes_=b,
@@ -1080,7 +1094,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 collect=True, order=order, mode=mode, nodes=nodes,
                 splice=True, c_drain=c_drain)
             _sg.check()
-            return out
+            return _map_return(out, return_stats)
     if _detect_streaming(source, kwargs.get("streaming")):
         if c_worker_loop:
             raise RuntimeError(
@@ -1107,7 +1121,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     resume=kwargs.get("resume"),
                     checkpoint_file=kwargs.get("checkpoint_file"))
                 _sg.check()
-                return out
+                return _map_return(out, return_stats)
         with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
             out = _execute_ingest(
                 payload, source, sink=None, lines=kwargs.get("lines"),
@@ -1118,7 +1132,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                 collect=True, order=order, mode=mode, nodes=nodes,
                 c_drain=c_drain)
             _sg.check()
-            return out
+            return _map_return(out, return_stats)
     plugin_spec = None
     if c_worker_loop:
         # Coerced plugin payloads carry the (path, func) marker plus
@@ -1158,7 +1172,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                     c_spawn_loop=c_spawn_loop,
                     spawn_argv=spawn_argv)
             _sg.check()
-            return out
+            return _map_return(out, return_stats)
     with _signal_guard(kwargs.get("signal_policy", "default")) as _sg:
         results = _execute(payload, source, sink=None,
                            lines=kwargs.get("lines"), bytes_=kwargs.get("bytes"),
@@ -1172,7 +1186,7 @@ def map(payload: Any, source: Any, **kwargs: Any) -> List[bytes]:
                            c_spawn_loop=c_spawn_loop,
                            spawn_argv=spawn_argv)
         _sg.check()
-    return results
+    return _map_return(results, return_stats)
 
 
 def stream(payload: Any, source: Any, **kwargs: Any) -> Iterator[bytes]:
@@ -3443,6 +3457,75 @@ def _poisoned_now(lib) -> int:
         return 0
 
 
+# W-REL6-3.6: last-run batch accounting. Poison-summary choke points
+# record here synchronously (same thread, inside the executor);
+# map() resets at entry, completes with completed/total on success,
+# and snapshots for return_stats / last_run_stats. Reactor paths run
+# under _RUN_LOCK (exact); concurrent legacy maps already share
+# process-global engine state, so the stash is no less safe than
+# the engine. completed/total are None until a map() succeeds;
+# poisoned/poisoned_batches reflect the last poison summary of any
+# frontend (map-focused; a stream()/run() leaves its own poisoned
+# count with the previous completed/total).
+_LAST_STATS: dict = {"total": None, "completed": None,
+                     "poisoned": 0, "poisoned_batches": []}
+
+
+def _reset_stats() -> None:
+    """Fresh accounting for one map() call (stale runs never leak)."""
+    _LAST_STATS["total"] = None
+    _LAST_STATS["completed"] = None
+    _LAST_STATS["poisoned"] = 0
+    _LAST_STATS["poisoned_batches"] = []
+
+
+def _poison_indices(entries):
+    """Parse reactor poison-batch strings to sorted batch indices.
+
+    Entries look like "Index 7 (failed 3 times)" (handle_trap_ack_bytes
+    format); unparseable entries are skipped best-effort (scalar
+    poisoned count stays authoritative).
+    """
+    import re as _re
+    out = []
+    for entry in entries or ():
+        match = _re.match(r"^Index (\d+)", str(entry))
+        if match:
+            out.append(int(match.group(1)))
+    return sorted(set(out))
+
+
+def _finish_map_stats(out):
+    """Complete accounting for a successful map() and snapshot it."""
+    completed = len(out) if out is not None else 0
+    poisoned = _LAST_STATS.get("poisoned", 0) or 0
+    _LAST_STATS["completed"] = completed
+    _LAST_STATS["total"] = completed + poisoned
+    return dict(_LAST_STATS)
+
+
+def _map_return(out, return_stats):
+    """map() return path (W-REL6-3.6): plain list by default, or
+    (list, stats) with return_stats=True. Default behavior unchanged."""
+    stats = _finish_map_stats(out)
+    if return_stats:
+        return out, stats
+    return out
+
+
+def last_run_stats():
+    """Batch accounting for the last map() call (W-REL6-3.6).
+
+    Returns a snapshot dict {"total", "completed", "poisoned",
+    "poisoned_batches"} (batch indices, sorted). total =
+    completed + poisoned: on_error="skip" immediate skips appear in
+    neither (documented lower bound in that mode). completed/total
+    are None until a map() succeeds; use map(return_stats=True)
+    for per-call exactness under threads.
+    """
+    return dict(_LAST_STATS)
+
+
 def _abort_reason_now(lib):
     """Abort reason without touching abort state (D-PORT2/D6 mirror).
 
@@ -3490,7 +3573,10 @@ def _raise_for_poisoned(npois, strict_poison) -> None:
     Default (False) preserves warn-and-return-partial (Bash -E
     continuation semantics). strict_poison=True maps Bash exit 3 to
     a caller-visible exception carrying the engine's poisoned count.
+    Records the count in the last-run stats (W-REL6-3.6) first, so
+    it survives the raise for last_run_stats().
     """
+    _LAST_STATS["poisoned"] = npois
     if strict_poison and npois:
         raise ForkrunPoisonSkip(
             "forkrun: %d batch(es) poisoned (retry limit reached) "
@@ -3505,6 +3591,12 @@ def _reactor_poison_summary(lib, state, strict_poison=False) -> None:
         npois = lib.fr_py_poisoned_count()
     except Exception:
         npois = 0
+    # W-REL6-3.6: batch-index accounting FIRST (scalar stays
+    # authoritative; the list is empty on poison-free runs and on
+    # paths without a reactor batch list) -- so a strict_poison
+    # raise below still leaves the batches for last_run_stats().
+    _LAST_STATS["poisoned_batches"] = _poison_indices(
+        getattr(state, "poisoned_batches", None))
     if npois:
         try:
             os.write(2, ("forkrun [WARN]: %d poisoned batch(es) "
