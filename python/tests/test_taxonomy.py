@@ -62,6 +62,19 @@ class TestTaxonomyShape(unittest.TestCase):
         self.assertEqual(perr.count, 7)
 
     def test_death_cause_mapping(self):
+        # W-FLAKEFIX self-isolation: this test self-kills children and
+        # therefore needs default dispositions for the catchable signals
+        # it uses. A backgrounded launcher (nohup SigIgn=0x7) bequeaths
+        # ignored HUP/INT/QUIT, which Python honors by NOT installing its
+        # handlers — the kill then becomes exit-42 and WIFSIGNALED fails
+        # (M1a family; see dev/supervisor/FLAKEFIX_DIAGNOSIS.md). Pin DFL
+        # for exactly the signals under test; restore afterwards.
+        _fl_pins = (_signal.SIGTERM, _signal.SIGINT, _signal.SIGSEGV)
+        _fl_saved = {s: _signal.getsignal(s) for s in _fl_pins}
+        self.addCleanup(lambda: [_signal.signal(s, _fl_saved[s])
+                                 for s in _fl_pins])
+        for s in _fl_pins:
+            _signal.signal(s, _signal.SIG_DFL)
         # Exited statuses pass through with no signal.
         code, sig = _death_cause(0)
         self.assertEqual((code, sig), (0, None))
