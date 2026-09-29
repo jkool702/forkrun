@@ -34,7 +34,7 @@ Once sourced, `frun` acts as a drop-in parallelizer:
 frun my_bash_func < inputs.txt             # parallelize custom bash functions natively!
 cat file_list | frun -k sed 's/old/new/'   # pipe-based input, ordered output
 frun -k -s sort < records.tsv              # stdin-passthrough, ordered output
-frun -s -I 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
+frun -s -I bash -c 'gzip -c >{ID}.gz' < raw_logs   # stdin-passthrough, unique output names
 ```
 
 **Auditable Builds**: the embedded C extension is compiled and injected by a public GitHub Actions workflow; the git history of the base64 blob traces every byte to a specific CI run of `forkrun_ring.c`. (Reproducible builds with published checksums are on the roadmap and would upgrade this to cryptographic attestation.)
