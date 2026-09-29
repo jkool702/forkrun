@@ -270,6 +270,20 @@ frun __exec__ "$@"
         [[ "${val}" == +* ]] && { iec=true; val="${val#+}"; }
         num="${val//[^0-9]/}"
         [[ $num ]] || if [[ ${val} ]]; then return 1; else REPLY=''; return 0; fi
+        # W-REL6-1.2: fail closed on leading zeros. Every consumer parses
+        # with bash (( )), which reads a leading 0 as OCTAL: -j 00 used to
+        # silently drop every record (rc 0), -j 08 aborted mid-pipeline
+        # with a checkpoint claiming "truncate to 0 bytes". A multi-digit
+        # digit-run starting with 0 is refused outright here — catching
+        # the class, not the instances. Single "0" and the engine
+        # sentinels pass through above; unit-suffixed forms share this
+        # same num check.
+        if [[ "${#num}" -gt 1 && "$num" == 0* ]]; then
+            local _lz_stripped="${num#"${num%%[!0]*}"}"
+            [[ -z "$_lz_stripped" ]] && _lz_stripped=0
+            printf 'forkrun [ERROR]: invalid size or count value %q: leading zeros are refused (bash would parse them as octal; write %s instead).\n' "$1" "$_lz_stripped" >&2
+            return 1
+        fi
         { [[ "${num}" == "${val}" ]] || [[ -z ${num} ]]; } && { REPLY="${num}"; return 0; }
         [[ "${val}" == *i* ]] && iec=true
         p=0
